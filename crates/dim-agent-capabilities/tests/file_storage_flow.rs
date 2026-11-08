@@ -9,6 +9,7 @@ use rutis::{Ctx, Plugin};
 use std::os::unix::fs::{PermissionsExt, chown, symlink};
 use std::{
     fs::{self, FileTimes, Permissions},
+    io::Read,
     path::PathBuf,
     process::{Command, Stdio},
     sync::{Arc, OnceLock},
@@ -80,6 +81,64 @@ async fn mount(path: PathBuf) -> (Ctx, FiberView, Arc<FileStorage>) {
     }
     let storage = captured.get().unwrap().clone();
     (root, plugin, storage)
+}
+
+#[tokio::test]
+async fn streaming_reads_pin_files_and_end_with_storage() {
+    let directory = Directory::new();
+    let authorized = directory.0.join("authorized");
+    let source = authorized.join("media.bin");
+    let bytes: Vec<_> = (0..200_000).map(|i| (i % 251) as u8).collect();
+    fs::write(&source, &bytes).unwrap();
+    let (root, _, storage) = mount(authorized.clone()).await;
+    let cancel = CancellationToken::new();
+    let path = storage.resolve(&source).unwrap();
+    let reader = storage.open_read(&path, &cancel).await.unwrap();
+    assert_eq!(reader.len(), bytes.len() as u64);
+    assert!(!reader.is_empty());
+    let (first, second) = tokio::join!(
+        reader.read_at(100, usize::MAX, &cancel),
+        reader.read_at(199_995, 30, &cancel),
+    );
+    assert_eq!(first.unwrap(), bytes[100..100 + 64 * 1024]);
+    assert_eq!(second.unwrap(), bytes[199_995..]);
+    storage
+        .replace(&path, b"new".to_vec(), None, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(reader.read_at(0, 10, &cancel).await.unwrap(), bytes[..10]);
+    assert_eq!(storage.read(&path, &cancel).await.unwrap(), b"new");
+    assert!(
+        storage
+            .resolve(&directory.0.join("outside/secret"))
+            .is_err()
+    );
+    assert!(
+        storage
+            .resolve(&authorized.join("../outside/secret"))
+            .is_err()
+    );
+    #[cfg(unix)]
+    {
+        symlink(&source, authorized.join("link")).unwrap();
+        assert!(
+            storage
+                .open_read(&storage.path(0, "link").unwrap(), &cancel)
+                .await
+                .is_err()
+        );
+    }
+    let stopped = CancellationToken::new();
+    stopped.cancel();
+    assert!(matches!(
+        reader.read_at(0, 1, &stopped).await,
+        Err(FileStorageError::Cancelled)
+    ));
+    root.shutdown().await.unwrap();
+    assert!(matches!(
+        reader.read_at(0, 1, &cancel).await,
+        Err(FileStorageError::Closed)
+    ));
 }
 
 #[tokio::test]
@@ -626,6 +685,117 @@ async fn directory_creation_stays_inside_the_authorized_root() {
 
     storage.remove(&path("files"), &cancel).await.unwrap();
     assert!(!root_path.join("files").exists());
+    root.shutdown().await.unwrap();
+}
+
+/// Replacement from a reader commits like replacement from bytes, a cancelled
+/// source leaves the old contents and no temporary file, and nested directory
+/// creation walks levels without following a link.
+#[tokio::test]
+async fn streaming_replacement_and_nested_directories_stay_inside_the_authorized_root() {
+    let directory = Directory::new();
+    let root_path = directory.0.join("authorized");
+    let outside = directory.0.join("outside");
+    let (root, _, storage) = mount(root_path.clone()).await;
+    let cancel = CancellationToken::new();
+    let path = |relative: &str| storage.path(0, relative).unwrap();
+
+    assert_eq!(
+        storage
+            .create_directories(&path("media/one"), &cancel)
+            .await
+            .unwrap(),
+        root_path.join("media/one")
+    );
+    storage
+        .create_directories(&path("media/one"), &cancel)
+        .await
+        .unwrap();
+    #[cfg(unix)]
+    for created in ["media", "media/one"] {
+        assert_eq!(
+            fs::metadata(root_path.join(created))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "{created}"
+        );
+    }
+    fs::write(root_path.join("media/plain"), b"plain").unwrap();
+    symlink(&outside, root_path.join("linked")).unwrap();
+    for nested in ["media/plain/deep", "linked/work"] {
+        assert!(
+            matches!(
+                storage.create_directories(&path(nested), &cancel).await,
+                Err(FileStorageError::InvalidPath(_))
+            ),
+            "{nested}"
+        );
+    }
+    assert_eq!(fs::read(root_path.join("media/plain")).unwrap(), b"plain");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+
+    let bytes: Vec<u8> = (0..200_003u32).map(|i| (i % 251) as u8).collect();
+    let target = path("media/one/blob.bin");
+    let mut lease = storage.lock(&target, &cancel).await.unwrap();
+    lease
+        .replace_from(std::io::Cursor::new(bytes.clone()), None, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(root_path.join("media/one/blob.bin")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        storage.list(&path("media/one"), &cancel).await.unwrap(),
+        [entry("blob.bin", EntryKind::File)]
+    );
+
+    struct CancelAfter<R> {
+        source: R,
+        cancel: CancellationToken,
+        reads: usize,
+    }
+    impl<R: Read> Read for CancelAfter<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.source.read(buffer)?;
+            self.reads += 1;
+            if self.reads == 1 {
+                self.cancel.cancel();
+            }
+            Ok(count)
+        }
+    }
+    let cancelled = CancellationToken::new();
+    let source = CancelAfter {
+        source: std::io::Cursor::new(vec![7; 150_000]),
+        cancel: cancelled.clone(),
+        reads: 0,
+    };
+    assert!(matches!(
+        lease.replace_from(source, None, &cancelled).await,
+        Err(FileStorageError::Cancelled)
+    ));
+    assert_eq!(
+        fs::read(root_path.join("media/one/blob.bin")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        storage.list(&path("media/one"), &cancel).await.unwrap(),
+        [entry("blob.bin", EntryKind::File)]
+    );
+
+    assert!(matches!(
+        lease.read_limited(1024, &cancel).await,
+        Err(FileStorageError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+    assert_eq!(
+        lease.read_limited(bytes.len(), &cancel).await.unwrap(),
+        bytes
+    );
+
     root.shutdown().await.unwrap();
 }
 

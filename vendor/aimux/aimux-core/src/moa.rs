@@ -13,18 +13,21 @@ use async_trait::async_trait;
 use futures::{StreamExt, future::join_all};
 use serde::Deserialize;
 
-use crate::composite::{ChildModel, add_usage, build_aggregator_prompt, extract_text};
+use crate::composite::{
+    ChildModel, add_usage, build_aggregator_prompt, child_max_retries, extract_text, step_context,
+};
 use crate::error::AiMuxError;
 use crate::language_model::LanguageModel;
-use crate::options::{CallOptions, ToolChoice};
+use crate::options::CallOptions;
+use crate::recording::RecordingContext;
 use crate::result::{GenerateResult, StreamResult};
 use crate::retry;
 use crate::stream_part::StreamPart;
 use crate::types::{Usage, Warning};
 
 /// Reference-failure policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
 pub enum MoaFailMode {
     /// Drop a failed reference + emit a `Warning::Other`; keep going (default).
     #[default]
@@ -33,7 +36,11 @@ pub enum MoaFailMode {
     FailFast,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// MoA configuration, camelCase JSON with every field optional. Unknown keys
+/// are rejected, so aimux 0.5's `fail_mode` is an error naming it rather than
+/// the default policy.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoaConfig {
     /// `provider()` value (default `"moa"`).
     #[serde(default = "default_moa_provider")]
@@ -98,14 +105,23 @@ impl MoaModel {
 
     /// Build reference call options from the user's options. When
     /// `strip_reference_tools` is set, `tools` is cleared and `tool_choice` is
-    /// reset to `Auto` so references don't carry tool schemas.
+    /// cleared so references don't carry tool schemas.
     fn reference_options(&self, options: &CallOptions) -> CallOptions {
         let mut o = options.clone();
         if self.config.strip_reference_tools {
             o.tools = None;
-            o.tool_choice = ToolChoice::Auto;
+            o.tool_choice = None;
         }
         o
+    }
+
+    /// The recording context of the aggregator step.
+    fn aggregator_context(&self) -> Option<RecordingContext> {
+        step_context(format!(
+            "moa.aggregator:{}/{}",
+            self.aggregator.provider(),
+            self.aggregator.model_id()
+        ))
     }
 
     /// Fan out references in parallel (non-streaming), accumulate usage, and
@@ -122,22 +138,21 @@ impl MoaModel {
         }
         let ref_opts = self.reference_options(options);
         let results = join_all(self.references.iter().enumerate().map(|(i, m)| {
-            let child_opts =
-                ref_opts.for_step(format!("moa.ref[{i}]:{}/{}", m.provider(), m.model_id()));
+            let context = step_context(format!("moa.ref[{i}]:{}/{}", m.provider(), m.model_id()));
+            let ref_opts = &ref_opts;
+            let retries =
+                retry::prepare_retries(child_max_retries(), ref_opts.abort_signal.clone());
             async move {
-                let retries = retry::prepare_retries(
-                    child_opts.max_retries,
-                    m.retry_config(),
-                    child_opts.abort_signal.clone(),
-                );
-                retries
-                    .retry(|| {
-                        if let Some(context) = &child_opts.recording_context {
+                RecordingContext::scope(
+                    context.clone(),
+                    retries.retry(|| {
+                        if let Some(context) = &context {
                             let _ = context.start_attempt();
                         }
-                        m.do_generate(&child_opts)
-                    })
-                    .await
+                        m.do_generate(ref_opts)
+                    }),
+                )
+                .await
             }
         }))
         .await;
@@ -151,8 +166,8 @@ impl MoaModel {
                     usage = add_usage(usage, &res.usage);
                     let mid = res
                         .response
-                        .model_id
-                        .clone()
+                        .as_ref()
+                        .and_then(|response| response.model_id.clone())
                         .unwrap_or_else(|| format!("ref-{i}"));
                     texts.push((mid, extract_text(&res.content)));
                 }
@@ -167,7 +182,7 @@ impl MoaModel {
             }
         }
         if texts.is_empty() {
-            return Err(AiMuxError::Other("moa: all reference models failed".into()));
+            return Err(AiMuxError::other("moa: all reference models failed"));
         }
         Ok((texts, usage, warnings))
     }
@@ -181,15 +196,6 @@ impl LanguageModel for MoaModel {
 
     fn model_id(&self) -> &str {
         &self.config.model_id
-    }
-
-    fn retry_config(&self) -> retry::RetryConfig {
-        // Retrying the composite would rerun the entire reference fanout;
-        // references and aggregator are retried independently instead.
-        retry::RetryConfig {
-            max_retries: 0,
-            ..retry::RetryConfig::default()
-        }
     }
 
     async fn do_generate(&self, options: &CallOptions) -> Result<GenerateResult, AiMuxError> {
@@ -206,24 +212,18 @@ impl LanguageModel for MoaModel {
         agg_opts.prompt = agg_prompt;
 
         // 3. Run the aggregator.
-        let retries = retry::prepare_retries(
-            agg_opts.max_retries,
-            self.aggregator.retry_config(),
-            agg_opts.abort_signal.clone(),
-        );
-        let agg_opts = agg_opts.for_step(format!(
-            "moa.aggregator:{}/{}",
-            self.aggregator.provider(),
-            self.aggregator.model_id()
-        ));
-        let mut agg = retries
-            .retry(|| {
-                if let Some(context) = &agg_opts.recording_context {
+        let retries = retry::prepare_retries(child_max_retries(), agg_opts.abort_signal.clone());
+        let context = self.aggregator_context();
+        let mut agg = RecordingContext::scope(
+            context.clone(),
+            retries.retry(|| {
+                if let Some(context) = &context {
                     let _ = context.start_attempt();
                 }
                 self.aggregator.do_generate(&agg_opts)
-            })
-            .await?;
+            }),
+        )
+        .await?;
 
         // 4. Fold reference usage + drop warnings into the aggregator result.
         agg.usage = add_usage(agg.usage, &ref_usage);
@@ -248,25 +248,19 @@ impl LanguageModel for MoaModel {
         // 3. Aggregator streams; we emit our own StreamStart and add reference
         //    usage onto its Finish. We swallow the aggregator's StreamStart
         //    (we've already emitted ours).
-        let retries = retry::prepare_retries(
-            agg_opts.max_retries,
-            self.aggregator.retry_config(),
-            agg_opts.abort_signal.clone(),
-        );
-        let agg_opts = agg_opts.for_step(format!(
-            "moa.aggregator:{}/{}",
-            self.aggregator.provider(),
-            self.aggregator.model_id()
-        ));
-        let agg = retries
-            .retry(|| {
-                if let Some(context) = &agg_opts.recording_context {
+        let retries = retry::prepare_retries(child_max_retries(), agg_opts.abort_signal.clone());
+        let context = self.aggregator_context();
+        let agg = RecordingContext::scope(
+            context.clone(),
+            retries.retry(|| {
+                if let Some(context) = &context {
                     let _ = context.start_attempt();
                 }
                 self.aggregator.do_stream(&agg_opts)
-            })
-            .await?;
-        let mut agg_stream = agg.stream;
+            }),
+        )
+        .await?;
+        let mut agg_stream = RecordingContext::scope_stream(context, agg.stream);
 
         let stream = async_stream::stream! {
             yield Ok(StreamPart::StreamStart { warnings: drop_warnings });
@@ -295,14 +289,14 @@ impl LanguageModel for MoaModel {
             }
         };
 
-        // RFC-0022 §3.4: return None for request_body/response_headers. The
+        // RFC-0022 §3.4: return None for request/response. The
         // aggregator's request body is a synthesized prompt (references
         // spliced in), not the user's original — exposing it would mislead
         // cache probing (RFC-0015 fingerprinting).
         Ok(StreamResult {
             stream: Box::pin(stream),
-            request_body: None,
-            response_headers: None,
+            request: None,
+            response: None,
         })
     }
 }
@@ -310,12 +304,14 @@ impl LanguageModel for MoaModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::ContentPart;
-    use crate::language_model_message::LanguageModelPromptMessage;
-    use crate::message::Role;
+    use crate::language_model_message::{LanguageModelMessage, TextPart, UserPart};
+    use crate::options::LanguageModelV4ToolChoice;
     use crate::result::GenerateContent;
+    use crate::result::Source;
+    use crate::shared::ResponseInfo;
     use crate::stream_part::StreamPart;
-    use crate::types::{FinishReason, FinishReasonUnified, TokenUsage};
+    use crate::tool::RawToolCall;
+    use crate::types::{FinishReason, FinishReasonUnified, InputTokenUsage, OutputTokenUsage};
     use async_trait::async_trait;
     use futures::stream;
     use std::sync::Arc;
@@ -343,7 +339,7 @@ mod tests {
         async fn do_generate(&self, _options: &CallOptions) -> Result<GenerateResult, AiMuxError> {
             let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail {
-                return Err(AiMuxError::Other(format!("{} failed", self.name)));
+                return Err(AiMuxError::other(format!("{} failed", self.name)));
             }
             if attempt <= self.retry_failures {
                 return Err(retryable_error(self.name));
@@ -360,18 +356,17 @@ mod tests {
                 usage: self.usage.clone(),
                 warnings: vec![],
                 provider_metadata: None,
-                response: crate::types::ResponseMetadata {
+                response: Some(ResponseInfo {
                     model_id: Some(self.name.into()),
                     ..Default::default()
-                },
-                request_body: None,
-                response_headers: None,
+                }),
+                request: None,
             })
         }
         async fn do_stream(&self, _options: &CallOptions) -> Result<StreamResult, AiMuxError> {
             let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail {
-                return Err(AiMuxError::Other(format!("{} failed", self.name)));
+                return Err(AiMuxError::other(format!("{} failed", self.name)));
             }
             if attempt <= self.retry_failures {
                 return Err(retryable_error(self.name));
@@ -394,8 +389,8 @@ mod tests {
             ];
             Ok(StreamResult {
                 stream: Box::pin(stream::iter(parts)),
-                request_body: None,
-                response_headers: None,
+                request: None,
+                response: None,
             })
         }
     }
@@ -412,7 +407,6 @@ mod tests {
                 format!("{name} retryable failure"),
                 "https://example.test",
                 serde_json::json!({}),
-                crate::ApiCallErrorOrigin::Local,
             )
         }))
     }
@@ -442,11 +436,11 @@ mod tests {
             text: text.into(),
             fail,
             usage: Usage {
-                input_tokens: TokenUsage {
+                input_tokens: InputTokenUsage {
                     total: Some(total),
                     ..Default::default()
                 },
-                output_tokens: TokenUsage {
+                output_tokens: OutputTokenUsage {
                     total: Some(total),
                     ..Default::default()
                 },
@@ -459,11 +453,7 @@ mod tests {
 
     fn opts_with_prompt() -> CallOptions {
         CallOptions {
-            prompt: vec![LanguageModelPromptMessage {
-                role: Role::User,
-                content: vec![ContentPart::text("What is Rust?")],
-                provider_options: None,
-            }],
+            prompt: vec![LanguageModelMessage::user_text("What is Rust?")],
             ..Default::default()
         }
     }
@@ -567,7 +557,6 @@ mod tests {
         let (ref_b, ref_b_calls) = retry_child("ref-b", "B", 0);
         let (aggregator, aggregator_calls) = retry_child("aggregator", "final", 1);
         let moa = MoaModel::new(vec![ref_a, ref_b], aggregator, MoaConfig::default());
-        assert_eq!(moa.retry_config().max_retries, 0);
 
         let result = crate::generate::generate_text(
             &moa,
@@ -580,7 +569,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.text, "final");
+        assert_eq!(result.text(), "final");
         assert_eq!(ref_a_calls.load(Ordering::SeqCst), 2);
         assert_eq!(ref_b_calls.load(Ordering::SeqCst), 1);
         assert_eq!(aggregator_calls.load(Ordering::SeqCst), 2);
@@ -634,32 +623,31 @@ mod tests {
         let opts = CallOptions {
             prompt: vec![],
             tools: Some(vec![]),
-            tool_choice: ToolChoice::Required,
+            tool_choice: Some(LanguageModelV4ToolChoice::Required),
             ..Default::default()
         };
         let ref_opts = moa.reference_options(&opts);
         assert!(ref_opts.tools.is_none());
-        assert_eq!(ref_opts.tool_choice, ToolChoice::Auto);
+        assert_eq!(ref_opts.tool_choice, None);
         // The original options are untouched (clone, not mutate).
-        assert_eq!(opts.tool_choice, ToolChoice::Required);
+        assert_eq!(opts.tool_choice, Some(LanguageModelV4ToolChoice::Required));
     }
 
     #[tokio::test]
     async fn no_references_does_not_inject_empty_heading() {
         // S4 regression guard: with 0 references the aggregator prompt is the
         // original prompt verbatim — no "# Reference model responses" heading.
-        let prompt = vec![LanguageModelPromptMessage {
-            role: Role::User,
-            content: vec![ContentPart::text("hello")],
-            provider_options: None,
-        }];
+        let prompt = vec![LanguageModelMessage::user_text("hello")];
         let built = build_aggregator_prompt(&prompt, None, &[]);
         // Still just the single original message; nothing appended.
         assert_eq!(built.len(), 1);
         // Heading must NOT appear.
-        assert!(!built[0].content.iter().any(|p| matches!(
+        let LanguageModelMessage::User { content, .. } = &built[0] else {
+            panic!("expected the original user message");
+        };
+        assert!(!content.iter().any(|p| matches!(
             p,
-            ContentPart::Text { text, .. } if text.contains("Reference model responses")
+            UserPart::Text(TextPart { text, .. }) if text.contains("Reference model responses")
         )));
     }
 
@@ -687,7 +675,7 @@ mod tests {
                     provider_metadata: None,
                 }),
                 // A transport error mid-stream.
-                Err(AiMuxError::Other("aggregator transport blew up".into())),
+                Err(AiMuxError::other("aggregator transport blew up")),
                 // A misbehaving aggregator that keeps going after the Err.
                 Ok(StreamPart::TextDelta {
                     id: "t2".into(),
@@ -697,8 +685,8 @@ mod tests {
             ];
             Ok(StreamResult {
                 stream: Box::pin(stream::iter(parts)),
-                request_body: None,
-                response_headers: None,
+                request: None,
+                response: None,
             })
         }
     }
@@ -755,7 +743,7 @@ mod tests {
             Ok(StreamResult {
                 stream: Box::pin(stream::iter([
                     Ok(StreamPart::StreamStart { warnings: vec![] }),
-                    Err(AiMuxError::JsonParse("malformed SSE data".into())),
+                    Err(AiMuxError::json_parse("malformed SSE data")),
                     Ok(StreamPart::TextDelta {
                         id: "t1".into(),
                         delta: "after-error".into(),
@@ -770,8 +758,8 @@ mod tests {
                         provider_metadata: None,
                     }),
                 ])),
-                request_body: None,
-                response_headers: None,
+                request: None,
+                response: None,
             })
         }
     }
@@ -788,7 +776,7 @@ mod tests {
         let outcomes: Vec<_> = result.stream.collect().await;
         let error_index = outcomes
             .iter()
-            .position(|outcome| matches!(outcome, Err(AiMuxError::JsonParse(_))))
+            .position(|outcome| matches!(outcome, Err(AiMuxError::JsonParse { .. })))
             .expect("parse error should be relayed");
 
         assert!(outcomes[error_index + 1..].iter().any(|outcome| matches!(
@@ -817,17 +805,16 @@ mod tests {
             text: text.into(),
             fail: false,
             usage: Usage {
-                input_tokens: TokenUsage {
+                input_tokens: InputTokenUsage {
                     total: Some(total),
                     cache_read: Some(cache_read),
                     cache_write: Some(cache_write),
                     ..Default::default()
                 },
-                output_tokens: TokenUsage {
+                output_tokens: OutputTokenUsage {
                     total: Some(total),
                     text: Some(text_tokens),
                     reasoning: Some(reasoning_tokens),
-                    ..Default::default()
                 },
                 raw: None,
             },
@@ -871,12 +858,15 @@ mod tests {
         let opts = CallOptions {
             prompt: vec![],
             tools: Some(vec![]),
-            tool_choice: ToolChoice::Required,
+            tool_choice: Some(LanguageModelV4ToolChoice::Required),
             ..Default::default()
         };
         let ref_opts = moa.reference_options(&opts);
         assert_eq!(ref_opts.tools.as_ref().map(std::vec::Vec::len), Some(0));
-        assert_eq!(ref_opts.tool_choice, ToolChoice::Required);
+        assert_eq!(
+            ref_opts.tool_choice,
+            Some(LanguageModelV4ToolChoice::Required)
+        );
     }
 
     #[tokio::test]
@@ -913,24 +903,20 @@ mod tests {
                     delta: "answer".into(),
                     provider_metadata: None,
                 }),
-                Ok(StreamPart::ToolCall {
+                Ok(StreamPart::ToolCall(RawToolCall {
                     tool_call_id: "tc1".into(),
                     tool_name: "search".into(),
-                    input: serde_json::json!({"q": "rust"}),
+                    input: r#"{"q":"rust"}"#.into(),
                     provider_executed: None,
                     dynamic: None,
-                    thought_signature: None,
-                    invalid: None,
-                    error: None,
                     provider_metadata: None,
-                }),
-                Ok(StreamPart::Source {
+                })),
+                Ok(StreamPart::Source(Source::Url {
                     id: "s1".into(),
-                    source_type: "url".into(),
-                    url: Some("https://example.com".into()),
+                    url: "https://example.com".into(),
                     title: Some("Ex".into()),
                     provider_metadata: None,
-                }),
+                })),
                 Ok(StreamPart::Finish {
                     finish_reason: FinishReason {
                         unified: FinishReasonUnified::Stop,
@@ -942,8 +928,8 @@ mod tests {
             ];
             Ok(StreamResult {
                 stream: Box::pin(stream::iter(parts)),
-                request_body: None,
-                response_headers: None,
+                request: None,
+                response: None,
             })
         }
     }
@@ -961,11 +947,12 @@ mod tests {
         let mut saw_source = false;
         for part in parts {
             match part.unwrap() {
-                StreamPart::ToolCall { tool_name, .. } => {
+                StreamPart::ToolCall(call) => {
                     saw_tool_call = true;
-                    assert_eq!(tool_name, "search");
+                    assert_eq!(call.tool_name, "search");
+                    assert_eq!(call.input, r#"{"q":"rust"}"#);
                 }
-                StreamPart::Source { id, .. } => {
+                StreamPart::Source(Source::Url { id, .. }) => {
                     saw_source = true;
                     assert_eq!(id, "s1");
                 }

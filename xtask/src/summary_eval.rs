@@ -25,7 +25,7 @@ use crate::rule::{self, Comparison, Counts, Worse};
 use crate::scenario_eval::text_tokens;
 use dim_agent_capabilities::{
     context_block,
-    context_model::ProductContextModel,
+    context_model::{ProductContextModel, output_allowance},
     history::{HistoryEntry, summary_message},
     host::{
         CompactionCheckpoint, CompactionCut, CompactionInput, CompactionStrategy, ContextModel,
@@ -61,10 +61,6 @@ const CASES: &str = "summary-eval/cases";
 /// The target rules evaluated once a reasoning value is chosen: no
 /// instruction, and the four `(α, β)` candidates of §13.3.
 const TARGETS: [(f64, f64); 4] = [(0.25, 0.05), (0.25, 0.10), (0.5, 0.05), (0.5, 0.10)];
-
-/// A narrowed window also bounds the output allowance, so the case keeps a
-/// positive input budget on a model whose own allowance is large (§13.4).
-const NARROWED_OUTPUT_SHARE: f64 = 0.25;
 
 const JUDGE_SYSTEM: &str = "You check the statements below against a summary that was written for a coding session. For each statement answer \"present\" when the summary states it, \"absent\" when the summary does not mention it, and \"contradicted\" when the summary states the opposite. Add the summary text that supports the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent|contradicted\", \"quote\": \"<summary text>\"}.";
 
@@ -733,22 +729,19 @@ impl PreparedStep {
         request.capability_snapshot = selection.capability_snapshot.clone();
         request.config = selection.config.clone();
         if let Some(window) = window {
-            let declared_output = {
+            let allowed = {
                 let snapshot = request
                     .capability_snapshot
                     .as_mut()
                     .ok_or("the selected model has no capability snapshot")?;
                 snapshot.capabilities.context_window =
                     snapshot.capabilities.context_window.min(window);
-                snapshot.capabilities.max_output_tokens as f64
+                output_allowance(
+                    snapshot.capabilities.context_window,
+                    snapshot.capabilities.max_output_tokens,
+                )
             };
-            let declared = request
-                .config
-                .as_ref()
-                .and_then(|config| config.max_tokens)
-                .unwrap_or(declared_output);
-            request.config.get_or_insert_default().max_tokens =
-                Some(declared.min(window as f64 * NARROWED_OUTPUT_SHARE));
+            request.config.get_or_insert_default().max_tokens = Some(allowed as f64);
         }
         let request = Arc::new(request);
         let model = ProductContextModel
@@ -1307,6 +1300,7 @@ pub(crate) async fn complete_detailed(
     let reply = invoke_with_recovery(
         host,
         request,
+        None,
         resolved,
         cancel,
         &mut (),
@@ -2726,8 +2720,6 @@ mod tests {
         }
     }
 
-    /// The model the strategy tests run on: one target, its capabilities
-    /// known, and no configuration of its own.
     fn fake_selection() -> ModelSelection {
         let snapshot: ModelCapabilitySnapshot = serde_json::from_value(json!({
             "target": {"providerId": "fake", "modelId": "fake"},
@@ -2736,11 +2728,12 @@ mod tests {
                 "contextWindow": 128_000, "maxOutputTokens": 16_384}
         }))
         .unwrap();
+        let config = dim_agent_capabilities::context_model::adopted_config(Some(&snapshot), None);
         ModelSelection {
             provider_id: "fake".into(),
             model_id: "fake".into(),
             capability_snapshot: Some(snapshot),
-            config: None,
+            config,
             metadata: None,
         }
     }

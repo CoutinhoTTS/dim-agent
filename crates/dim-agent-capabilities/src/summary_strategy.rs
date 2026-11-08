@@ -431,6 +431,7 @@ impl SummaryStrategy {
         let (text, complete) = invoke_with_recovery(
             &host,
             &request,
+            None,
             resolved,
             cancel,
             stats,
@@ -447,6 +448,10 @@ impl SummaryStrategy {
         Ok(Some(text))
     }
 }
+
+/// The summarizer runs without a display, so a retry it waits through
+/// reports nowhere.
+impl crate::model_provider::RetryObserver for Stats {}
 
 /// One compaction's counters and the summarizer settings it ran with; they
 /// become its diagnostics object.
@@ -591,6 +596,19 @@ fn summary_request(
     request.capability_snapshot = input.request.capability_snapshot.clone();
     request.system = Some(Arc::new(SystemPrompt::Text(system_prompt.to_owned())));
     request.config = Some(config);
+    request.metadata = input
+        .request
+        .metadata
+        .as_ref()
+        .map(|metadata| RequestMetadata {
+            startup: metadata.startup.clone(),
+            extensions: {
+                let mut extensions = metadata.extensions.clone();
+                extensions.remove("requestId");
+                extensions
+            },
+            ..Default::default()
+        });
     request
 }
 

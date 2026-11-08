@@ -4,23 +4,24 @@
 //! [`ViewSnapshot`]s built here. Only the rows the screen needs are kept; the
 //! durable history stays with the App Server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dim_agent_types::{
     BranchCreateAt, BranchCreateFailedData, BranchSource, CollaborationDelivery,
     CollaborationOutcome, CollaborationTarget, ContentBlock, ContextCompactionResult, ExecStatus,
     InputMode, InsufficientSpacePartName, JsonObject, Message, MessageContent, MessagePart,
-    ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult, TurnOutcome, UserInput,
+    ModelFailure, ModelFailureKind, ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult,
+    TurnOutcome, UserInput,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, CompactionPart, CompactionPartSize, CompactionState, CompactionView, LineCut,
-    LineState, LineView, MemberCard, MemberConversationState, MemberTarget, QueuedInput, RowKind,
-    RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd, ViewRow, ViewSnapshot,
-    WorkflowView,
+    ApprovalView, CompactionPart, CompactionPartSize, CompactionState, CompactionView,
+    FailureDetail, LineCut, LineState, LineView, MemberCard, MemberConversationState, MemberTarget,
+    QueuedInput, RetryView, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd,
+    ViewRow, ViewSnapshot, WorkflowView,
 };
 use crate::wire::{Event, EventContent, Progress, WorkflowRun, WorkflowState};
 
@@ -74,7 +75,13 @@ pub struct Projection {
     background: HashMap<TaskTarget, String>,
     /// The newest turn end: its sequence and how the turn ended.
     ended: Option<(u64, TurnEnd)>,
-    presented_failure: Option<String>,
+    /// Requests whose text, thinking or tool row already showed.
+    showed: HashSet<String>,
+    /// The `error` of a model failure already shown this turn: the turn's
+    /// repeat of it prints nothing.
+    shown_failure: Option<String>,
+    /// The retry the running request waits for, while it sleeps.
+    retry: Option<RetryView>,
     /// The call row carrying each delegation's card, by request event id.
     cards: HashMap<String, usize>,
     /// Native Agent names from `agent.list`, by Agent id.
@@ -491,6 +498,7 @@ impl Projection {
                     .insert(data.request_id.clone(), event.create_at);
             }
             EventContent::Thinking(data) => {
+                self.showed.insert(data.request_id.clone());
                 let index = self.open_thinking(&data.request_id);
                 let elapsed = self
                     .request_starts
@@ -507,6 +515,7 @@ impl Projection {
                 row.elapsed_ms = elapsed;
             }
             EventContent::Text(data) => {
+                self.showed.insert(data.request_id.clone());
                 self.close_thinking(&data.request_id);
                 let index = match self.assistant_rows.get(&data.request_id) {
                     Some(index) => *index,
@@ -524,6 +533,7 @@ impl Projection {
                 self.row(index).text.push_str(&data.delta);
             }
             EventContent::ToolUse(data) => {
+                self.showed.insert(data.request_id.clone());
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
@@ -576,28 +586,34 @@ impl Projection {
                 self.row(index).compaction = Some(compaction_view(&data.outcome));
             }
             EventContent::ModelEnd(data) => {
+                let incomplete = self.showed.remove(&data.request_id);
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
+                self.retry = None;
                 if let ModelOutputOutcome::Failed {
                     error,
                     presentation,
+                    failure,
                     budget,
                 } = &data.outcome
-                    && (budget.is_none() || presentation.is_some())
                 {
-                    let message = presentation
-                        .as_ref()
-                        .and_then(|value| value.server_message.as_deref())
-                        .unwrap_or(error);
-                    let action = presentation
-                        .as_ref()
-                        .and_then(|value| value.action.as_deref())
-                        .map(|action| format!(". {action}"))
-                        .unwrap_or_default();
-                    self.push_error(format!("model failed: {message}{action}"));
-                    if presentation.is_some() {
-                        self.presented_failure = Some(error.clone());
+                    let line = match (presentation, failure) {
+                        (Some(presentation), _) => {
+                            Some((presentation_line(presentation, error), None))
+                        }
+                        (None, Some(failure)) => Some((
+                            failure_line(failure, incomplete),
+                            Some(failure_detail(failure)),
+                        )),
+                        (None, None) if budget.is_none() => {
+                            Some((format!("model failed: {error}"), None))
+                        }
+                        (None, None) => None,
+                    };
+                    if let Some((text, detail)) = line {
+                        self.push_error(text, detail);
+                        self.shown_failure = Some(error.clone());
                     }
                 }
             }
@@ -641,11 +657,11 @@ impl Projection {
     }
 
     fn turn_end(&mut self, sequence: u64, outcome: &TurnOutcome) {
-        let presented = self.presented_failure.take();
+        let shown = self.shown_failure.take();
         let end = match outcome {
             TurnOutcome::Failed { error } => {
-                if presented.as_deref() != Some(error.as_str()) {
-                    self.push_error(format!("turn failed: {error}"));
+                if shown.as_deref() != Some(error.as_str()) {
+                    self.push_error(format!("turn failed: {error}"), None);
                 }
                 TurnEnd::Failed
             }
@@ -688,9 +704,11 @@ impl Projection {
         let index = self.push(format!("user-{sequence}"), kind, text);
         let row = self.row(index);
         row.cut = Some(submitted.saturating_sub(1));
-        row.display = image_text(&user.content);
+        row.display = user_display(&user.content);
         row.pending = kind == RowKind::UserMessage;
-        self.input_rows.insert(input_id.to_owned(), index);
+        if row.pending {
+            self.input_rows.insert(input_id.to_owned(), index);
+        }
     }
 
     /// The content of a held message, to re-submit it as Steer.
@@ -764,26 +782,38 @@ impl Projection {
     }
 
     pub fn snapshot(&self) -> ViewSnapshot {
+        let mut pending: Vec<_> = self.input_rows.iter().collect();
+        pending.sort_by_key(|(_, index)| **index);
+        let queued = pending
+            .into_iter()
+            .map(|(id, index)| {
+                let row = &self.rows[*index];
+                QueuedInput {
+                    id: id.clone(),
+                    text: row.text.clone(),
+                    display: row.display.clone(),
+                    held: false,
+                    recallable: false,
+                }
+            })
+            .chain(self.held.iter().map(|(id, _, user)| QueuedInput {
+                id: id.clone(),
+                text: text_of(&user.content),
+                display: user_display(&user.content),
+                held: true,
+                recallable: matches!(user.content.as_slice(), [ContentBlock::Text { .. }]),
+            }))
+            .collect();
         ViewSnapshot {
             rows: self.rows.clone(),
             running: self.running,
             approvals: self.approvals.clone(),
             questions: self.questions.calls().cloned().collect(),
-            queued: if self.running {
-                self.held
-                    .iter()
-                    .map(|(id, _, user)| QueuedInput {
-                        id: id.clone(),
-                        text: text_of(&user.content),
-                        display: image_text(&user.content),
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            },
+            queued,
             tasks: self.tasks.clone(),
             ended: self.ended,
             goal: self.goal.goal(),
+            retry: self.retry.clone(),
             ..ViewSnapshot::default()
         }
     }
@@ -1078,22 +1108,35 @@ impl Projection {
             cut: None,
             line: None,
             compaction: None,
+            failure: None,
         }));
         self.rows.len() - 1
     }
 
-    fn push_error(&mut self, text: String) {
+    fn push_error(&mut self, text: String, failure: Option<FailureDetail>) {
         let index = self.push(format!("error-{}", self.rows.len()), RowKind::Error, text);
-        self.row(index).tone = Some(RowTone::Danger);
+        let row = self.row(index);
+        row.tone = Some(RowTone::Danger);
+        row.failure = failure;
     }
 
     /// Shows a model request's reasoning that is not written yet. Progress
     /// that the written deltas overtook, or that runs ahead of them, waits
     /// for the next notice.
     pub fn progress(&mut self, progress: &Progress) {
+        self.retry = progress.retry.as_ref().map(|retry| RetryView {
+            attempt: retry.attempt,
+            max_attempts: retry.max_attempts,
+            retry_at_ms: retry.retry_at_ms,
+            kind: retry.kind,
+            reason: retry.reason.clone(),
+        });
         let Some(request_id) = &progress.request_id else {
             return;
         };
+        if !progress.thinking.is_empty() || !progress.text.is_empty() {
+            self.showed.insert(request_id.clone());
+        }
         if progress.thinking.is_empty() {
             return;
         }
@@ -1302,10 +1345,15 @@ fn element_body(text: &str, close: &str) -> String {
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+/// The marker a loaded Skill block starts with (Skills §9).
+const SKILL_BLOCK: &str = "<dim-skill name=\"";
+
 fn text_of(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
-        .filter_map(|block| match block {
+        .enumerate()
+        .filter(|(index, block)| loaded_skill(*index, block).is_none())
+        .filter_map(|(_, block)| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
             ContentBlock::Image { .. } => None,
         })
@@ -1313,26 +1361,136 @@ fn text_of(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-fn image_text(blocks: &[ContentBlock]) -> Option<String> {
-    if !blocks
-        .iter()
-        .any(|block| matches!(block, ContentBlock::Image { .. }))
-    {
+/// The Skill a loaded block names: a text block after the first that starts
+/// with the marker carries a Skill's instructions, which are shown as one
+/// line instead.
+fn loaded_skill(index: usize, block: &ContentBlock) -> Option<String> {
+    if index == 0 {
         return None;
     }
+    let ContentBlock::Text { text } = block else {
+        return None;
+    };
+    let rest = text.strip_prefix(SKILL_BLOCK)?;
+    let name = rest.split('"').next()?;
+    (!name.is_empty()).then(|| {
+        name.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&")
+    })
+}
+
+/// The presentation of an operator message: its text with an image marker per
+/// image and one line per loaded Skill; `None` when its text is the message.
+fn user_display(blocks: &[ContentBlock]) -> Option<String> {
     let mut images = 0;
-    let text = blocks
-        .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.clone(),
+    let mut skills = Vec::new();
+    let mut lines = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        match block {
+            ContentBlock::Text { text } => match loaded_skill(index, block) {
+                Some(name) => skills.push(name),
+                None => lines.push(text.clone()),
+            },
             ContentBlock::Image { .. } => {
                 images += 1;
-                crate::images::marker(images, "")
+                lines.push(crate::images::marker(images, ""));
             }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(text)
+        }
+    }
+    if images == 0 && skills.is_empty() {
+        return None;
+    }
+    let mut display = lines.join("\n");
+    for skill in skills {
+        let line = crate::ui::i18n::tf("Skill loaded: {name}", &[("name", &skill)]);
+        if !display.is_empty() {
+            display.push('\n');
+        }
+        display.push_str(&line);
+    }
+    Some(display)
+}
+
+/// A provider presentation's line, as today: its own words, prefixed.
+fn presentation_line(presentation: &dim_agent_types::ProviderPresentation, error: &str) -> String {
+    let message = presentation.server_message.as_deref().unwrap_or(error);
+    let action = presentation
+        .action
+        .as_deref()
+        .map(|action| format!(". {action}"))
+        .unwrap_or_default();
+    format!("model failed: {message}{action}")
+}
+
+/// `<meaning>: <reason>`, worded from the kind through the interface
+/// language; the reason is trimmed and loses its trailing period. Just the
+/// meaning when the failure carries no reason.
+pub(crate) fn failure_phrase(kind: ModelFailureKind, reason: Option<&str>) -> String {
+    let reason = reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .map(|reason| reason.strip_suffix('.').unwrap_or(reason));
+    let meaning = crate::ui::i18n::t(kind.meaning());
+    match reason {
+        Some(reason) => format!("{meaning}: {reason}"),
+        None => meaning.to_owned(),
+    }
+}
+
+/// The one line a model failure shows; `incomplete` prefixes it when the
+/// request had output.
+pub(crate) fn failure_line(failure: &ModelFailure, incomplete: bool) -> String {
+    let prefix = if incomplete {
+        format!(
+            "{} ",
+            crate::ui::i18n::t("The response above is incomplete.")
+        )
+    } else {
+        String::new()
+    };
+    let attempts = if failure.attempts > 1 {
+        let seconds = failure.waited_ms.saturating_add(500) / 1000;
+        format!(
+            " {}",
+            crate::ui::i18n::tf(
+                "Tried {count} times over {seconds} s.",
+                &[
+                    ("count", &failure.attempts.to_string()),
+                    ("seconds", &seconds.to_string()),
+                ]
+            )
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{prefix}{}. {}{attempts}",
+        failure_phrase(failure.kind, failure.reason.as_deref()),
+        crate::ui::i18n::t(failure.kind.action())
+    )
+}
+
+/// Whole seconds until a retry starts, never below zero.
+pub(crate) fn retry_seconds(retry_at_ms: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64);
+    retry_at_ms.saturating_sub(now).div_ceil(1000)
+}
+
+fn failure_detail(failure: &ModelFailure) -> FailureDetail {
+    FailureDetail {
+        kind: failure.kind,
+        status: failure.status,
+        provider_code: failure.provider_code.clone(),
+        request_id: failure.request_id.clone(),
+        attempts: failure.attempts,
+        waited_ms: failure.waited_ms,
+        retry_after_ms: failure.retry_after_ms,
+        cause: failure.cause.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -1793,7 +1951,7 @@ mod tests {
             "display markers preserve the original queued image blocks"
         );
         apply(&mut live, std::slice::from_ref(&applied));
-        assert!(live.snapshot().queued.is_empty());
+        assert!(!live.snapshot().queued[0].held);
         assert_eq!(live.snapshot().rows[1].text, "Compare\nwith");
         assert_eq!(live.snapshot().rows[1].display.as_deref(), Some(expected));
         let previous = crate::ui::i18n::active();
@@ -1810,6 +1968,105 @@ mod tests {
         );
         assert_eq!(replay.snapshot().rows[1].text, "Compare\nwith");
         assert_eq!(replay.snapshot().rows[1].display.as_deref(), Some(expected));
+        crate::ui::i18n::set(previous);
+    }
+
+    /// A loaded Skill block (Skills §9) is one line under the operator's
+    /// message, never its instructions; the editable text stays the
+    /// operator's own words.
+    #[test]
+    fn a_loaded_skill_shows_as_one_line_under_the_message() {
+        let previous = crate::ui::i18n::active();
+        crate::ui::i18n::set(crate::ui::i18n::Locale::En);
+        let image = serde_json::json!({
+            "type": "image",
+            "source": {"type": "url", "mediaType": "image/png", "url": "https://invalid.example/image.png"},
+        });
+        let block = |name: &str| {
+            serde_json::json!({
+                "type": "text",
+                "text": format!(
+                    "<dim-skill name=\"{name}\">\nSkill: {name}\nDescription: D\nFile: /tmp/{name}/SKILL.md\n\nInstructions:\nBODY-{name}\n</dim-skill>"
+                ),
+            })
+        };
+        let input = |sequence: u64, id: &str, content: serde_json::Value| {
+            serde_json::json!({
+                "id": id, "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": content}, "mode": "queue"},
+            })
+        };
+        let applied = |sequence: u64, id: &str| {
+            serde_json::json!({
+                "id": format!("applied-{id}"), "sequence": sequence, "create_at": sequence,
+                "type": "input", "name": "applied", "data": {"input_id": id},
+            })
+        };
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                input(
+                    1,
+                    "one",
+                    serde_json::json!([
+                        {"type": "text", "text": "one $skill: checkin please"},
+                        block("checkin"),
+                    ]),
+                ),
+                applied(2, "one"),
+                input(
+                    3,
+                    "two",
+                    serde_json::json!([
+                        {"type": "text", "text": "two"},
+                        block("alpha"),
+                        block("beta"),
+                    ]),
+                ),
+                applied(4, "two"),
+                input(
+                    5,
+                    "typed",
+                    serde_json::json!([
+                        {"type": "text", "text": "<dim-skill name=\"mine\">as typed"},
+                    ]),
+                ),
+                applied(6, "typed"),
+                input(
+                    7,
+                    "images",
+                    serde_json::json!([
+                        {"type": "text", "text": "look"},
+                        image,
+                        block("checkin"),
+                    ]),
+                ),
+                applied(8, "images"),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(rows[0].text, "one $skill: checkin please");
+        assert_eq!(
+            rows[0].display.as_deref(),
+            Some("one $skill: checkin please\nSkill loaded: checkin")
+        );
+        assert_eq!(rows[1].text, "two");
+        assert_eq!(
+            rows[1].display.as_deref(),
+            Some("two\nSkill loaded: alpha\nSkill loaded: beta")
+        );
+        assert_eq!(
+            rows[2].text, "<dim-skill name=\"mine\">as typed",
+            "a first block is the operator's own text, shown as typed"
+        );
+        assert_eq!(rows[2].display, None);
+        assert_eq!(rows[3].text, "look");
+        assert_eq!(
+            rows[3].display.as_deref(),
+            Some("look\n[Image #1]\nSkill loaded: checkin")
+        );
         crate::ui::i18n::set(previous);
     }
 
@@ -1888,10 +2145,7 @@ mod tests {
             main.snapshot().rows.is_empty(),
             "a message enters the transcript when the queue applies it"
         );
-        assert!(
-            main.snapshot().queued.is_empty(),
-            "the queue strip belongs to a running turn"
-        );
+        assert!(main.snapshot().queued[0].held);
         apply(&mut main, &[control(2, "applied", "in-1")]);
         let rows = main.snapshot().rows;
         assert!(
@@ -1922,10 +2176,7 @@ mod tests {
             rows[1].pending,
             "a message applied but not consumed is pending"
         );
-        assert!(
-            main.snapshot().queued.is_empty(),
-            "an applied message leaves the queue strip"
-        );
+        assert!(!main.snapshot().queued[0].held);
         // A cancelled turn settles its own row after the applied message
         // (timeline UI §4.8): the message has to be committed first.
         apply(
@@ -1977,10 +2228,8 @@ mod tests {
             replay.snapshot().rows.is_empty(),
             "replay draws nothing before its input/applied"
         );
-        assert!(
-            replay.snapshot().queued.is_empty(),
-            "replay does not guess that a turn runs"
-        );
+        assert_eq!(replay.snapshot().queued[0].id, "in-6");
+        assert!(replay.snapshot().queued[0].held);
     }
 
     #[test]
@@ -2190,5 +2439,250 @@ mod tests {
                 insufficient: Vec::new(),
             })
         );
+    }
+
+    fn model_end(sequence: u64, data: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "sequence": sequence,
+            "create_at": sequence * 1000,
+            "type": "step",
+            "name": "model-output-end",
+            "data": data,
+        })
+    }
+
+    fn failure_data(extra: serde_json::Value) -> serde_json::Value {
+        let mut data = serde_json::json!({
+            "turn_id": "t1",
+            "request_id": "r1",
+            "status": "failed",
+            "error": "fixture error",
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            data[key] = value.clone();
+        }
+        data
+    }
+
+    fn failure_fact() -> serde_json::Value {
+        serde_json::json!({
+            "kind": "server_error",
+            "status": 503,
+            "providerCode": "overloaded",
+            "requestId": "req-provider",
+            "reason": "The server is overloaded",
+            "cause": ["upstream 503"],
+            "attempts": 3,
+            "waitedMs": 4200,
+        })
+    }
+
+    #[test]
+    fn a_failure_fact_is_one_line_with_its_details_and_no_prefix() {
+        use dim_agent_types::ModelFailureKind;
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[model_end(
+                1,
+                failure_data(serde_json::json!({"failure": failure_fact()})),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert_eq!(
+            row.text,
+            "The provider reported a server error: The server is overloaded. Try again later or choose another model. Tried 3 times over 4 s."
+        );
+        let details = row.failure.as_ref().expect("details");
+        assert_eq!(details.kind, ModelFailureKind::ServerError);
+        assert_eq!(details.status, Some(503));
+        assert_eq!(details.provider_code.as_deref(), Some("overloaded"));
+        assert_eq!(details.request_id.as_deref(), Some("req-provider"));
+        assert_eq!((details.attempts, details.waited_ms), (3, 4200));
+        assert_eq!(details.cause, ["upstream 503"]);
+    }
+
+    #[test]
+    fn a_presentation_still_wins_over_the_failure_line() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[model_end(
+                1,
+                failure_data(serde_json::json!({
+                    "failure": failure_fact(),
+                    "presentation": {
+                        "source": "fixture_provider",
+                        "reason": "unknown_error",
+                        "serverMessage": "provider words",
+                        "action": "Try later.",
+                    },
+                })),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert_eq!(row.text, "model failed: provider words. Try later.");
+        assert!(row.failure.is_none());
+    }
+
+    #[test]
+    fn an_old_event_shows_the_error_with_its_prefix() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[model_end(1, failure_data(serde_json::json!({})))],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert_eq!(row.text, "model failed: fixture error");
+    }
+
+    #[test]
+    fn a_failure_after_output_starts_with_the_incomplete_sentence() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                step(1, "text", "half an answer"),
+                model_end(
+                    2,
+                    failure_data(serde_json::json!({"failure": failure_fact()})),
+                ),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert!(
+            row.text
+                .starts_with("The response above is incomplete. The provider reported"),
+            "{}",
+            row.text
+        );
+    }
+
+    #[test]
+    fn a_single_attempt_has_no_tried_suffix() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[model_end(
+                1,
+                failure_data(serde_json::json!({"failure": {
+                    "kind": "server_error",
+                    "reason": "The server is overloaded",
+                    "attempts": 1,
+                    "waitedMs": 0,
+                }})),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert_eq!(
+            row.text,
+            "The provider reported a server error: The server is overloaded. Try again later or choose another model."
+        );
+    }
+
+    #[test]
+    fn a_tool_row_alone_starts_the_incomplete_sentence() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                serde_json::json!({
+                    "sequence": 1, "create_at": 1000, "type": "step", "name": "tool-use",
+                    "data": {
+                        "turn_id": "t1", "request_id": "r1",
+                        "call": {"id": "c1", "name": "read", "input": {}},
+                    },
+                }),
+                model_end(
+                    2,
+                    failure_data(serde_json::json!({"failure": failure_fact()})),
+                ),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert!(
+            row.text.starts_with("The response above is incomplete."),
+            "{}",
+            row.text
+        );
+    }
+
+    #[test]
+    fn the_turn_repeat_is_dropped_for_a_failure_without_presentation() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                model_end(
+                    1,
+                    failure_data(serde_json::json!({"failure": failure_fact()})),
+                ),
+                serde_json::json!({
+                    "sequence": 2, "create_at": 2000, "type": "turn", "name": "end",
+                    "data": {"turn_id": "t1", "status": "failed", "error": "fixture error"},
+                }),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        let errors: Vec<_> = rows
+            .iter()
+            .filter(|row| row.kind == RowKind::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0]
+                .text
+                .starts_with("The provider reported a server error")
+        );
+    }
+
+    #[test]
+    fn a_turn_failure_that_is_not_a_model_failure_still_prints() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "sequence": 1, "create_at": 1000, "type": "turn", "name": "end",
+                "data": {"turn_id": "t1", "status": "failed", "error": "context preparation failed"},
+            })],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
+        assert_eq!(row.text, "turn failed: context preparation failed");
+    }
+
+    #[test]
+    fn a_retry_progress_reaches_the_snapshot_and_clears() {
+        let mut projection = Projection::default();
+        let retrying: Progress = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0, "thinking": "", "thinkingOffset": 0,
+            "retry": {
+                "attempt": 3, "maxAttempts": 8, "retryAtMs": 1_700_000_000_000u64,
+                "kind": "server_error", "reason": "The server is overloaded",
+            },
+        }))
+        .unwrap();
+        projection.progress(&retrying);
+        let retry = projection.snapshot().retry.expect("a retry");
+        assert_eq!((retry.attempt, retry.max_attempts), (3, 8));
+        assert_eq!(retry.kind, dim_agent_types::ModelFailureKind::ServerError);
+        assert_eq!(retry.reason.as_deref(), Some("The server is overloaded"));
+        let done: Progress = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0, "thinking": "", "thinkingOffset": 0,
+        }))
+        .unwrap();
+        projection.progress(&done);
+        assert!(projection.snapshot().retry.is_none());
     }
 }

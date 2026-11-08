@@ -14,9 +14,12 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `agentIndex` | process | Agents | Rust-only | — |
 | `auxiliaryModel` | process | Provider | yes | `complete` async |
 | `auxiliaryModelHost` | process | Provider | Rust-only | — |
+| `callChannel` | process | CallChannel | yes | `closed` async, `notify` async |
+| `callers` | process | CallChannel | Rust-only | — |
 | `collaboration` | process | Collaboration | Rust-only | — |
 | `collaborationDirectory` | process | CollaborationDirectory | Rust-only | — |
 | `connectionHub` | process | Connection | Rust-only | — |
+| `credentialVariablesHost` | process | root | Rust-only | — |
 | `executionSettingsHost` | process | ExecutionSettings | Rust-only | — |
 | `fileStorage` | process | FileStorage | Rust-only | — |
 | `grokOAuthService` | process | GrokOAuth | Rust-only | — |
@@ -30,10 +33,13 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `managementMethods` | process | ManagementMethods | Rust-only | — |
 | `mcpAuth` | process | Mcp | Rust-only | — |
 | `mcpService` | process | Mcp | Rust-only | — |
+| `mentionIndex` | process | WorkspaceToolsOwner | Rust-only | — |
+| `modalityConnectionHost` | process | Provider | Rust-only | — |
 | `modelHost` | process | Aimux | Rust-only | — |
 | `modelSelectionHost` | process | Provider | Rust-only | — |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | Rust-only | — |
 | `partRegistry` | process | PartRegistry | yes | `registerDefinition` async |
+| `pluginFileTransactions` | process | PluginFiles | Rust-only | — |
 | `pluginFiles` | process | PluginFiles | yes | `open` async |
 | `pluginMounter` | process | rutis-loader | yes | — |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | Rust-only | — |
@@ -44,6 +50,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `rutis/loader` | process | rutis-loader | yes | `create` async, `reload` async, `remove` async, `status` async |
 | `selectableModelsHost` | process | Provider | Rust-only | — |
 | `serverControl` | process | ServerControl | Rust-only | — |
+| `sessionClientsHost` | process | Connection | Rust-only | — |
 | `sessionFilesHost` | process | SessionStore | Rust-only | — |
 | `sessionMetadata` | process | SessionStore | yes | `read` async, `setTitle` async |
 | `sessionPermissions` | process | AgentDirectory | yes | `permission` async, `permissionDefaults` async |
@@ -53,6 +60,8 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `settingsService` | process | Settings | Rust-only | — |
 | `skillsCatalog` | process | SkillsCatalog | Rust-only | — |
 | `sqliteStorage` | process | SqliteStorage | Rust-only | — |
+| `toolchainSourceHost` | process | ToolchainSource | Rust-only | — |
+| `uiExtensions` | process | UiExtensions | Rust-only | — |
 | `uiHost` | process | UiHost | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
 | `worktreeAssociations` | process | SessionStore | Rust-only | — |
@@ -86,7 +95,8 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `toolHost` | session | WorkspaceTools | Rust-only | — |
 | `toolRegistry` | session | ToolRegistry | yes | `register` async |
 | `toolSourcesView` | session | ToolRegistry | Rust-only | — |
-| `treeCommands` | session | TimelineTree | yes | `create` async, `end` async, `info` async, `input` async, `list` async, `page` async |
+| `treeCommands` | session | TimelineTree | yes | `create` async, `end` async, `info` async, `input` async, `list` async, `page` async, `query` async |
+| `uiResources` | session | UiResources | yes | `publishFile` async, `withdraw` async |
 | `agentLoop` | branch | Loop | Rust-only | — |
 | `approval` | branch | Approval | Rust-only | — |
 | `backgroundExec` | branch | BackgroundExec | Rust-only | — |
@@ -96,7 +106,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `configurationPublisher` | branch | ContextPreparation | Rust-only | — |
 | `configureControl` | branch | Prompt | Rust-only | — |
 | `contextPreparation` | branch | ContextPreparation | Rust-only | — |
-| `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `consume` async, `history` async, `listen` async, `local` async, `notify` async, `sequence` async |
+| `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `consume` async, `listen` async, `notify` async, `sequence` async |
 | `fileReads` | branch | FileReads | Rust-only | — |
 | `inputQueue` | branch | InputQueue | Rust-only | — |
 | `loopState` | branch | Loop | Rust-only | — |
@@ -104,7 +114,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `permission` | branch | Permission | Rust-only | — |
 | `prompt` | branch | Prompt | Rust-only | — |
 | `skillsBranch` | branch | SkillsBranch | Rust-only | — |
-| `timeline` | branch | BranchScope | yes | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `history` async, `query` async, `sequence` async, `storedContextPage` async, `trace` async |
+| `timeline` | branch | BranchScope | yes | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `query` async, `sequence` async |
 | `timelineIdentity` | branch | BranchScope | yes | `get` async |
 | `toolBinding` | branch | ToolBinding | Rust-only | — |
 | `toolExecutor` | branch | ToolExecutor | Rust-only | — |
@@ -118,17 +128,20 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | --- | --- | --- |
 | Approval | branch | `dispatcher`, `timeline` |
 | BackgroundExec | branch | `dispatcher`, `timeline` |
-| BranchLine | branch | `dispatcher` |
+| BranchLine | branch | `dispatcher`, `timeline` |
 | CollaborationTimeline | branch | `dispatcher`, `timeline` |
 | ContextPreparation | branch | `dispatcher`, `timeline` |
+| EnvironmentClientsBranch | branch | `timeline` |
 | FileReads | branch | `timeline` |
+| GoalBranch | branch | `dispatcher`, `timeline` |
 | InputQueue | branch | `dispatcher`, `timeline` |
 | Loop | branch | `dispatcher`, `timeline` |
 | ModelProvider | branch | `dispatcher`, `timeline` |
 | Permission | branch | `dispatcher`, `timeline` |
 | Prompt | branch | `dispatcher`, `timeline` |
 | SessionBroadcast | branch | `dispatcher` |
+| SettingsSnapshotBranch | branch | `timeline` |
 | ToolBinding | branch | `dispatcher`, `timeline` |
 | ToolExecutor | branch | `dispatcher`, `timeline` |
 | TreeTimeline | branch | `dispatcher`, `timeline` |
-| WaitBranch | branch | `dispatcher` |
+| WaitBranch | branch | `dispatcher`, `timeline` |

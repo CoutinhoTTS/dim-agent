@@ -106,6 +106,7 @@ pub enum Call {
     Submit(Submit),
     InputLookup(InputLookup),
     History(History),
+    Keys(Keys),
     Stop(Stop),
     Idle(Idle),
     Close(SessionId),
@@ -114,6 +115,7 @@ pub enum Call {
     ApprovalRespond(ApprovalRespond),
     BranchCreate(BranchCreate),
     BranchEnd(BranchEnd),
+    Branches(Branches),
     AgentCreate(AgentCreate),
     AgentList,
     AgentClose(AgentClose),
@@ -190,6 +192,7 @@ pub const UI_HOST_METHODS: [&str; 6] = [
 /// Management methods available to authenticated loopback Web clients.
 /// Replies contain account metadata and credential presence, never credentials.
 pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
+    "ui.extensions.list",
     "provider.management",
     "provider.create",
     "provider.update",
@@ -261,6 +264,9 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "mcp.remove",
     "mcp.set_enabled",
     "mcp.move",
+    "mcp.import.sources",
+    "mcp.import.preview",
+    "mcp.import.apply",
     "mcp.disconnect",
     "mcp.auth.start",
     "mcp.auth.complete",
@@ -273,6 +279,12 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "plugin.reload",
     "plugin.update",
     "plugin.remove",
+    "schedule.list",
+    "schedule.save",
+    "schedule.delete",
+    "schedule.set_enabled",
+    "schedule.run_now",
+    "schedule.history",
 ];
 
 pub const WEB_SETTINGS_SOURCES: &[&str] = &["model-log", "execution"];
@@ -365,6 +377,8 @@ pub struct UpdateModel {
     pub model_id: Option<String>,
     #[serde(default)]
     pub model_preferences: ModelPreferenceUpdate,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub startup: Option<crate::provider::StartupInput>,
 }
 
 /// One field of a Session preference update: a value sets it and
@@ -494,10 +508,15 @@ pub enum ClientKind {
     Other,
 }
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Shutdown {
     #[serde(default)]
     pub force: bool,
+    /// Refuse (`daemon_busy`) instead of stopping while another client
+    /// connection is open or a Session has an attached client or a running
+    /// turn. Advertised as `daemon.shutdown.ifIdle`.
+    #[serde(default)]
+    pub if_idle: bool,
 }
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -513,8 +532,12 @@ pub struct Create {
     pub cwd: String,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub model: Option<ModelSelection>,
-    #[serde(default)]
-    pub model_preferences: crate::provider::ModelPreferences,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub model_from_session: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub model_preferences: Option<crate::provider::ModelPreferences>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub startup: Option<crate::provider::StartupInput>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub system_prompt: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
@@ -575,6 +598,10 @@ pub struct Catalog {
     /// Whether Sessions whose origin is `acp` are listed (#557).
     #[serde(default)]
     pub with_acp_sessions: bool,
+    /// Whether the catalog also lists Sessions this daemon closed, which
+    /// keep their stored rows. The flag is part of the cursor's filter set.
+    #[serde(default)]
+    pub include_closed: bool,
 }
 
 /// The workspaces a catalog read selects: one workspace, or any of a set.
@@ -698,6 +725,17 @@ pub struct History {
     #[serde(default, deserialize_with = "optional_cursor")]
     pub before: Option<u64>,
 }
+/// `session.keys`: the live keyed blocks of one branch segment at a fixed
+/// position (keyed-blocks §2.1).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Keys {
+    pub session_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub branch_id: Option<String>,
+    #[serde(default, deserialize_with = "optional_cursor")]
+    pub through: Option<u64>,
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Stop {
@@ -735,6 +773,12 @@ pub struct BranchEnd {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Branches {
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BranchCreate {
     pub session_id: String,
     pub parent_branch_id: String,
@@ -746,7 +790,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 34] = [
+const BUILTIN_METHODS: [&str; 36] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -769,6 +813,7 @@ const BUILTIN_METHODS: [&str; 34] = [
     "session.submit",
     "session.input_lookup",
     "session.history",
+    "session.keys",
     "session.stop",
     "session.idle",
     "session.close",
@@ -777,6 +822,7 @@ const BUILTIN_METHODS: [&str; 34] = [
     "approval.respond",
     "session.branch_create",
     "session.branch_end",
+    "session.branches",
     "agent.create",
     "agent.list",
     "agent.close",
@@ -790,6 +836,14 @@ pub(crate) fn builtin_methods() -> impl Iterator<Item = &'static str> {
 
 pub(crate) fn is_builtin_method(method: &str) -> bool {
     builtin_methods().any(|builtin| builtin == method)
+}
+
+/// Whether `name` is one of [`Notification`]'s wire names, the built-ins a
+/// contributed notification may not take (methods contract A.1, "Reserved
+/// names"): a provider cannot impersonate a notification its connection
+/// already reads.
+pub(crate) fn is_builtin_notification(name: &str) -> bool {
+    BUILTIN_NOTIFICATIONS.contains(&name)
 }
 
 /// Validates the envelope and built-in calls. Runtime contributions retain raw
@@ -834,6 +888,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.submit" => Call::Submit(params(raw_params)?),
             "session.input_lookup" => Call::InputLookup(params(raw_params)?),
             "session.history" => Call::History(params(raw_params)?),
+            "session.keys" => Call::Keys(params(raw_params)?),
             "session.stop" => Call::Stop(params(raw_params)?),
             "session.idle" => Call::Idle(params(raw_params)?),
             "session.close" => Call::Close(params(raw_params)?),
@@ -842,6 +897,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "approval.respond" => Call::ApprovalRespond(params(raw_params)?),
             "session.branch_create" => Call::BranchCreate(params(raw_params)?),
             "session.branch_end" => Call::BranchEnd(params(raw_params)?),
+            "session.branches" => Call::Branches(params(raw_params)?),
             "agent.create" => Call::AgentCreate(params(raw_params)?),
             "agent.list" => {
                 let _: Empty = params(raw_params)?;
@@ -1150,6 +1206,8 @@ pub struct SessionInfo {
 pub struct AttachResult {
     #[serde(flatten)]
     pub session: SessionInfo,
+    #[serde(rename = "capabilitySnapshot", skip_serializing_if = "Option::is_none")]
+    pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     #[serde(rename = "modelPreferences", skip_serializing_if = "Option::is_none")]
     pub model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
@@ -1209,6 +1267,8 @@ pub enum Reply {
     Submit(SubmitResult),
     InputLookup(InputLookupResult),
     History(crate::tree_protocol::HistoryResult),
+    Branches(crate::tree_protocol::BranchesResult),
+    Keys(crate::tree_protocol::KeysResult),
     BranchCreate(crate::tree_protocol::CreateResult),
     Barrier(crate::tree_protocol::BarrierResult),
     AgentCreated(AgentCreated),
@@ -1284,39 +1344,47 @@ pub struct ProgressNotice {
     pub method: String,
     pub data: Value,
 }
-#[derive(Debug, Serialize)]
-#[serde(tag = "method", content = "params")]
-pub enum Notification {
-    #[serde(rename = "session.mcp.state")]
-    McpState(McpStateResult),
-    #[serde(rename = "ui.shutdown")]
-    UiShutdown(UiShutdownNotice),
-    #[serde(rename = "session.event")]
-    Event(EventNotice),
-    #[serde(rename = "session.state")]
-    State(StateNotice),
-    #[serde(rename = "approval.request")]
-    ApprovalRequest(ApprovalRequest),
-    #[serde(rename = "approval.cancelled")]
-    ApprovalCancelled(ApprovalCancelled),
-    #[serde(rename = "session.closed")]
-    Closed(ClosedNotice),
-    #[serde(rename = "session.event")]
-    TreeEvent(crate::tree_protocol::EventNotice),
-    #[serde(rename = "session.state")]
-    BranchState(crate::tree_protocol::StateNotice),
-    #[serde(rename = "approval.request")]
-    TreeApprovalRequest(crate::tree_protocol::ApprovalRequest),
-    #[serde(rename = "approval.cancelled")]
-    TreeApprovalCancelled(crate::tree_protocol::ApprovalCancelled),
-    #[serde(rename = "approval.resolved")]
-    TreeApprovalResolved(crate::tree_protocol::ApprovalResolved),
-    #[serde(rename = "session.model.progress")]
-    ModelProgress(crate::tree_protocol::ModelProgressNotice),
-    #[serde(rename = "session.notice")]
-    Notice(crate::tree_protocol::ForwardedNotice),
-    #[serde(rename = "management.progress")]
-    Progress(ProgressNotice),
+/// One built-in notification: its variant, payload and wire name in one
+/// entry. The [`Notification`] enum and [`BUILTIN_NOTIFICATIONS`] are both
+/// derived from this table, so a variant cannot be added without naming its
+/// wire name, and the name a provider may not take is the name it serializes
+/// under.
+macro_rules! notifications {
+    ($(
+        $(#[$doc:meta])*
+        $variant:ident $( { $($field:ident : $ty:ty),* } )? $( ( $payload:ty ) )? = $wire:literal
+    ),+ $(,)?) => {
+        #[derive(Debug, Serialize)]
+        #[serde(tag = "method", content = "params")]
+        pub enum Notification {
+            $(
+                $(#[$doc])*
+                #[serde(rename = $wire)]
+                $variant $( { $($field : $ty),* } )? $( ( $payload ) )?,
+            )+
+        }
+        /// The wire name of every [`Notification`] variant, in the same order:
+        /// a contributed notification name may not collide with one.
+        pub(crate) const BUILTIN_NOTIFICATIONS: &[&str] = &[$($wire),+];
+    };
+}
+notifications! {
+    UiExtensionsChanged { revision: u64 } = "ui.extensions.changed",
+    McpState(McpStateResult) = "session.mcp.state",
+    UiShutdown(UiShutdownNotice) = "ui.shutdown",
+    Event(EventNotice) = "session.event",
+    State(StateNotice) = "session.state",
+    ApprovalRequest(ApprovalRequest) = "approval.request",
+    ApprovalCancelled(ApprovalCancelled) = "approval.cancelled",
+    Closed(ClosedNotice) = "session.closed",
+    TreeEvent(crate::tree_protocol::EventNotice) = "session.event",
+    BranchState(crate::tree_protocol::StateNotice) = "session.state",
+    TreeApprovalRequest(crate::tree_protocol::ApprovalRequest) = "approval.request",
+    TreeApprovalCancelled(crate::tree_protocol::ApprovalCancelled) = "approval.cancelled",
+    TreeApprovalResolved(crate::tree_protocol::ApprovalResolved) = "approval.resolved",
+    ModelProgress(crate::tree_protocol::ModelProgressNotice) = "session.model.progress",
+    Notice(crate::tree_protocol::ForwardedNotice) = "session.notice",
+    Progress(ProgressNotice) = "management.progress",
 }
 
 #[derive(Debug, Serialize)]
@@ -1336,6 +1404,14 @@ pub enum Outbound {
         jsonrpc: &'static str,
         #[serde(flatten)]
         notification: Notification,
+    },
+    /// A notification a provider contributed through `callChannel.notify`
+    /// (methods contract A.2): its declared name, written to the calling
+    /// connection only.
+    Message {
+        jsonrpc: &'static str,
+        method: String,
+        params: serde_json::Map<String, Value>,
     },
 }
 impl Outbound {
@@ -1357,6 +1433,14 @@ impl Outbound {
         Self::Notice {
             jsonrpc: "2.0",
             notification,
+        }
+    }
+    /// A contributed notification, `{"jsonrpc":"2.0","method","params"}`.
+    pub fn message(method: String, params: serde_json::Map<String, Value>) -> Self {
+        Self::Message {
+            jsonrpc: "2.0",
+            method,
+            params,
         }
     }
 }

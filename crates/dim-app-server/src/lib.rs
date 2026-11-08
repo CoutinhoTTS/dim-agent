@@ -15,7 +15,6 @@ mod managed_oauth;
 pub mod managed_provider;
 pub mod mcp;
 pub mod methods;
-pub mod modality;
 pub mod model_catalog;
 pub mod model_log;
 mod outbound;
@@ -34,14 +33,18 @@ pub mod settings;
 pub mod settings_methods;
 mod skills_management;
 pub mod storage;
+mod storage_methods;
 mod transport;
 mod tree_protocol;
+pub mod ui_extensions;
 mod ui_host;
 mod ui_leaf;
 pub mod web;
 mod web_entry;
+mod workspace_files;
 
 use agents::{AgentIndex, AgentsPlugin};
+pub use agents::{SessionPermissions, SessionRef, SessionsError};
 use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
 use control::{ServerControl, ServerControlPlugin};
@@ -54,7 +57,7 @@ use rutis::host::{CtxHost, FiberView, Key};
 use rutis_loader::runtime::SessionRows;
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -150,7 +153,7 @@ impl ServerConfig {
 pub enum ServerError {
     #[error("server I/O: {0}")]
     Io(#[from] std::io::Error),
-    #[error("session cleanup: {0}")]
+    #[error("App Server runtime: {0}")]
     Runtime(#[from] dim_agent_runtime::AgentError),
     #[error("server task: {0}")]
     Join(#[from] tokio::task::JoinError),
@@ -168,6 +171,17 @@ pub type Result<T> = std::result::Result<T, ServerError>;
 pub enum ShutdownReason {
     Graceful,
     Forced,
+}
+
+/// Feature `testing`: a hold on one subscription's `follow` task. It notifies
+/// `waiting` once it is held, `cancelled` once retirement cancels it, and
+/// returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct FollowHold {
+    pub waiting: tokio::sync::Notify,
+    pub cancelled: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
 }
 
 pub struct RunningServer {
@@ -258,6 +272,31 @@ impl RunningServer {
         self.root
             .get::<AgentIndex>()
             .map(|index| index.idle_admitted())
+    }
+    /// Holds the next subscription's `follow` task open until `release`, so a
+    /// test can keep an attach or detach in flight at a known point. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_follow(&self) -> Option<Arc<FollowHold>> {
+        self.root
+            .get::<ConnectionHub>()
+            .map(|hub| hub.hold_next_follow())
+    }
+    /// Makes the next attach fail before it registers its listener. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn fail_next_attach_before_registration(&self) {
+        if let Some(hub) = self.root.get::<ConnectionHub>() {
+            hub.fail_next_attach_before_registration();
+        }
+    }
+    /// How many uses Session `session_id` has right now. Feature `testing`
+    /// only.
+    #[cfg(feature = "testing")]
+    pub fn uses(&self, session_id: &str) -> usize {
+        self.root
+            .get::<AgentIndex>()
+            .map_or(0, |index| index.uses(session_id))
     }
     pub async fn join(mut self) -> Result<ShutdownReason> {
         self.task.take().expect("server task").await?
@@ -385,6 +424,15 @@ impl Drop for Startup {
     }
 }
 
+/// The credential variable names the assembly root publishes for this
+/// process. The model catalog is immutable after startup.
+struct CredentialVariableNames(BTreeSet<String>);
+impl dim_agent_capabilities::host::CredentialVariables for CredentialVariableNames {
+    fn credential_variables(&self) -> BTreeSet<String> {
+        self.0.clone()
+    }
+}
+
 /// Builds the process tree, opens admission once required host rows are Active
 /// and the runtimes have released their rows, and returns the listener addresses.
 pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Result<RunningServer> {
@@ -480,25 +528,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     } else {
         None
     };
-    let plugin_root = match &config.plugin_files {
-        Some(root) => {
-            create_private_directory(root)?;
-            let root = std::fs::canonicalize(root)?;
-            let index = match config
-                .file_roots
-                .iter()
-                .position(|candidate| candidate == &root)
-            {
-                Some(index) => index,
-                None => {
-                    config.file_roots.push(root);
-                    config.file_roots.len() - 1
-                }
-            };
-            Some(index)
-        }
-        None => product_root,
-    };
     let execution_root = if config.local_execution() {
         let cwd = std::env::current_dir()?;
         let home = config
@@ -534,6 +563,41 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             );
         }
     }
+    // The plugin files root is `plugin_files` when an embedding host names it,
+    // else the product home, else the execution home the host was started with
+    // (`--home`); it never comes from `--database` or the working directory.
+    // PluginManager's home is the product home, else `--home`, so a host
+    // started with only a database file has no plugin files root and runs no
+    // PluginManager (PluginManager §2.1, process TypeScript §5.2).
+    let plugin_home = config
+        .product_home
+        .clone()
+        .or_else(|| config.target_home.clone());
+    let plugin_root = match &config.plugin_files {
+        Some(root) => {
+            create_private_directory(root)?;
+            let root = std::fs::canonicalize(root)?;
+            let index = match config
+                .file_roots
+                .iter()
+                .position(|candidate| candidate == &root)
+            {
+                Some(index) => index,
+                None => {
+                    config.file_roots.push(root);
+                    config.file_roots.len() - 1
+                }
+            };
+            Some(index)
+        }
+        None => plugin_home.as_ref().and_then(|home| {
+            config
+                .file_roots
+                .iter()
+                .position(|candidate| candidate == home)
+        }),
+    };
+    let plugin_files = plugin_root.map(|index| config.file_roots[index].clone());
     // SessionStore keeps Session files next to the native database, below
     // the database directory as a FileStorage root (session-files §3.1).
     let session_files_root = match &config.database_path {
@@ -562,6 +626,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         tokio::runtime::Handle::current(),
         Arc::new(|error| tracing::error!(%error, "App Server runtime error")),
     );
+    root.provide(dim_agent_capabilities::host::CredentialVariablesHost(
+        Arc::new(CredentialVariableNames(
+            config
+                .model_catalog
+                .as_ref()
+                .map(|models| models.api_key_envs())
+                .unwrap_or_default(),
+        )),
+    ))
+    .map_err(|error| ServerError::Runtime(error.into()))?;
     let control = ServerControlPlugin::new();
     let handle = control.0.clone();
     let mut startup = Startup {
@@ -621,6 +695,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             builder.catalog(),
             move |_| Ok(Box::new(storage::SqliteStoragePlugin::new(path.clone()))),
         )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(storage_methods::StorageMethodsPlugin::new(names)?))
+        })?);
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
@@ -633,6 +710,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(methods::ManagementMethodsPlugin::new(names)?))
+    })?);
+    // The sessionless workspace file search reads the index the WorkspaceTools
+    // owner provides, so the row is assembled only where that part is.
+    if builder.requires_part("WorkspaceTools") {
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(workspace_files::WorkspaceFilesPlugin::new(names)?))
+        })?);
+    }
+    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+        Ok(Box::new(connection::CallChannelPlugin::new(names)?))
     })?);
     rows.push(register_part(&mut builtins, builder.catalog(), |_| {
         Ok(Box::new(managed_provider::ManagedProvidersPlugin))
@@ -681,10 +768,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             },
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(provider::ProviderPlugin::new(names)?))
-        })?);
-        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(modality::ModalityPlugin::new(names)?))
+            Ok(Box::new(provider::ProviderPlugin::with_session_lifecycle(
+                names,
+            )?))
         })?);
     }
     if let Some(home_root) = execution_root.or(product_root) {
@@ -737,6 +823,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 names,
             )?))
         })?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(runtime_manager::ToolchainSourcePlugin::new(
+                names,
+            )?))
+        })?);
         dim_agent_runtime::names::register::<
             dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost,
         >(builder.catalog_mut(), None);
@@ -754,6 +845,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                         names,
                         dim_agent_capabilities::host_platform::HostPlatformConfig {
                             execution: names.key()?,
+                            toolchain: names.key()?,
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
                             home: platform_home.clone(),
                         },
@@ -798,20 +890,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             ))
         })?);
     }
-    let plugin_home = config
-        .product_home
-        .clone()
-        .or_else(|| config.target_home.clone());
     let plugins = match &plugin_home {
         Some(home) => Some(
             plugin_manager::State::read(
                 home,
-                plugin_root.and(
-                    config
-                        .plugin_files
-                        .as_deref()
-                        .or(config.product_home.as_deref()),
-                ),
+                plugin_files.as_deref(),
                 config.plugin_defaults.as_deref(),
                 &config.plugin_configs,
                 builder.catalog_mut(),
@@ -825,6 +908,19 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }
         None => None,
     };
+    if let Some(home) = plugin_home {
+        let configuration = ui_extensions::Configuration::new(home.join("ui-cache"));
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                Ok(Box::new(ui_extensions::UiExtensionsPlugin::new(
+                    names,
+                    configuration.clone(),
+                )?))
+            },
+        )?);
+    }
     let plugin_content = match &plugins {
         Some(state) => {
             let build = rutis_loader::resolve::Build::default();
@@ -964,12 +1060,16 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             move |names| Ok(Box::new(TransportPlugin::new(names, config.clone())?)),
         )?);
     }
-    match builder.plugin_rows(&mut builtins).await {
-        Ok(plugins) => rows.extend(
-            plugins
-                .iter()
-                .map(|row| row["id"].as_str().expect("plugin row id").to_owned()),
-        ),
+    let optional_plugins = match builder.plugin_rows(&mut builtins).await {
+        Ok(plugins) => {
+            rows.extend(
+                plugins
+                    .rows
+                    .iter()
+                    .map(|row| row["id"].as_str().expect("plugin row id").to_owned()),
+            );
+            plugins.optional
+        }
         Err(error) => {
             startup.armed = false;
             handle.shutdown().cancel();
@@ -979,7 +1079,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             }
             .into());
         }
-    }
+    };
     let reserved_names = session_parts
         .iter()
         .flat_map(|parts| &parts.rows)
@@ -1005,7 +1105,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut required: Vec<String> = rows
         .iter()
         .map(|row| row["id"].as_str().expect("host row id").to_owned())
-        .filter(|id| !optional.contains(&id.as_str()))
+        .filter(|id| !optional.contains(&id.as_str()) && !optional_plugins.contains(id))
         .collect();
     if let Some(parts) = &session_parts {
         for row in &parts.rows {
@@ -1032,7 +1132,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 .iter()
                 .filter(|row| row.get("group").is_none())
                 .map(|row| row["id"].as_str().expect("host row id").to_owned())
-                .filter(|id| required.contains(id))
+                .filter(|id| required.contains(id) || optional_plugins.contains(id))
                 .collect();
             let layer = state
                 .layer(builtins, builder.catalog().clone())
@@ -1160,7 +1260,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
 /// does nothing, so each installer applies them.
 pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     use dim_agent_capabilities::host::{
-        AuxiliaryModelHost, ModelSelectionHost, SelectableModelsHost,
+        AuxiliaryModelHost, ModalityConnectionHost, ModelSelectionHost, SelectableModelsHost,
     };
     use dim_agent_runtime::{SESSION_GROUP, names::register};
     register::<ServerControl>(catalog, None);
@@ -1171,9 +1271,12 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<rutis_loader::Loader>(catalog, None);
     register::<collaboration::CollaborationDirectory>(catalog, None);
     register::<collaboration::Collaboration>(catalog, None);
+    register::<plugin_files::PluginFileTransactions>(catalog, None);
     register::<ConnectionHub>(catalog, None);
     register::<ListenAddresses>(catalog, None);
     register::<ui_host::UiHost>(catalog, None);
+    register::<ui_extensions::UiExtensions>(catalog, None);
+    register::<ui_extensions::UiResources>(catalog, Some(SESSION_GROUP));
     register::<settings::SettingsService>(catalog, None);
     register::<managed_provider::ManagedProviders>(catalog, None);
     register::<dyn managed_provider::ManagedProvider>(catalog, None);
@@ -1184,21 +1287,24 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ModelSelectionHost>(catalog, None);
     register::<AuxiliaryModelHost>(catalog, None);
     register::<SelectableModelsHost>(catalog, None);
+    register::<ModalityConnectionHost>(catalog, None);
     register::<mcp::McpService>(catalog, None);
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
     register::<hooks_settings::HooksService>(catalog, None);
     register::<methods::ManagementMethods>(catalog, None);
-    register::<modality::ModalityAdapterService>(catalog, None);
+    register::<dim_agent_capabilities::methods::Callers>(catalog, None);
     register::<runtime_manager::RuntimeService>(catalog, None);
     register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
     for name in [
+        "callChannel",
         "pluginFiles",
         "sessions",
         "sessionMetadata",
         "auxiliaryModel",
         "settings",
+        "ocrHelper",
     ] {
         catalog.register_shared(name);
     }

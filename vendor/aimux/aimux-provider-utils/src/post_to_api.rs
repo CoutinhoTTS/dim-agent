@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use aimux_core::{AiMuxError, ApiCallError, ApiCallErrorOrigin};
+use aimux_core::{AiMuxError, ApiCallError};
 
 use crate::handle_fetch_error::handle_fetch_error;
 use crate::http::{HttpBody, HttpMethod, HttpRequest, PreparedRequest};
@@ -129,6 +129,7 @@ pub(crate) async fn call_to_api_with_deadline<T>(
         Ok(result) => result,
         Err(_) => Err(AiMuxError::ApiCall(Box::new(ApiCallError {
             is_retryable: true,
+            origin: aimux_core::ApiCallErrorOrigin::Local,
             ..ApiCallError::new(
                 format!(
                     "Request exceeded the {}s exchange response timeout",
@@ -136,7 +137,6 @@ pub(crate) async fn call_to_api_with_deadline<T>(
                 ),
                 url,
                 request_body_values,
-                ApiCallErrorOrigin::Transport,
             )
         }))),
     }
@@ -166,10 +166,10 @@ async fn execute_exchange<T>(
 
     if !(200..300).contains(&status) {
         return match failed_response_handler.handle(input).await {
-            Ok(output) => Err(output.value),
+            Ok(output) => Err(from_response(output.value)),
             Err(
                 error @ (AiMuxError::ApiCall(_) | AiMuxError::Aborted(_) | AiMuxError::Timeout(_)),
-            ) => Err(error),
+            ) => Err(from_response(error)),
             Err(error) => Err(AiMuxError::ApiCall(Box::new(ApiCallError {
                 status_code: Some(status),
                 response_headers: Some(response_headers),
@@ -177,12 +177,13 @@ async fn execute_exchange<T>(
                 // the status's retryability — retry classification comes from
                 // the HTTP status, not from the parse outcome.
                 is_retryable: aimux_core::error::is_retryable_status(status),
+                origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
                 ..ApiCallError::new(
                     format!("Failed to process error response: {error}"),
                     url,
                     request_body_values,
-                    ApiCallErrorOrigin::HttpResponse,
                 )
+                .caused_by(error)
             }))),
         };
     }
@@ -190,18 +191,34 @@ async fn execute_exchange<T>(
     match successful_response_handler.handle(input).await {
         Ok(output) => Ok(output),
         Err(error @ (AiMuxError::ApiCall(_) | AiMuxError::Aborted(_) | AiMuxError::Timeout(_))) => {
-            Err(error)
+            Err(from_response(error))
         }
         Err(error) => Err(AiMuxError::ApiCall(Box::new(ApiCallError {
             status_code: Some(status),
             response_headers: Some(response_headers),
+            origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
             ..ApiCallError::new(
                 format!("Failed to process successful response: {error}"),
                 url,
                 request_body_values,
-                ApiCallErrorOrigin::HttpResponse,
             )
+            .caused_by(error)
         }))),
+    }
+}
+
+/// An `ApiCall` error a response handler returned without recording where it
+/// was built comes from the HTTP response the handler was given: a
+/// provider's own error handler, or a success handler rejecting the body.
+/// Errors that recorded an origin (a body read that broke is `Transport`)
+/// keep it.
+fn from_response(error: AiMuxError) -> AiMuxError {
+    match error {
+        AiMuxError::ApiCall(mut detail) if detail.origin.is_unknown() => {
+            detail.origin = aimux_core::ApiCallErrorOrigin::HttpResponse;
+            AiMuxError::ApiCall(detail)
+        }
+        other => other,
     }
 }
 
@@ -258,6 +275,45 @@ mod tests {
             }
             other => panic!("expected retryable ApiCall, got {other:?}"),
         }
+    }
+
+    /// A handler error on a 2xx response stays whole as the `ApiCallError`
+    /// cause: a nested aimux error, as `contract-tests/dto/AiMuxError/005.json`.
+    #[tokio::test]
+    async fn a_failed_success_handler_keeps_its_error_as_the_cause() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{"))
+            .mount(&server)
+            .await;
+        let request = HttpRequest {
+            url: server.uri(),
+            ..Default::default()
+        };
+        let handler = ResponseHandler::<serde_json::Value>::new(|_| async {
+            Err(AiMuxError::json_parse("Unexpected end of JSON input"))
+        });
+        let error = call_to_api_with_deadline(
+            request.prepare(HttpMethod::Post, HttpBody::Json(serde_json::json!({}))),
+            serde_json::json!({}),
+            handler,
+            create_status_code_error_response_handler(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap_err();
+
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../contract-tests/dto/AiMuxError/005.json"))
+                .unwrap();
+        let json = serde_json::to_value(&error).unwrap();
+        assert_eq!(json["message"], vector["message"]);
+        assert_eq!(json["cause"], vector["cause"]);
+        assert!(matches!(
+            &error,
+            AiMuxError::ApiCall(detail)
+                if matches!(&detail.cause, Some(aimux_core::ErrorCause::AiMux(_)))
+        ));
     }
 
     /// Streaming handlers are exempt from the exchange response timeout.

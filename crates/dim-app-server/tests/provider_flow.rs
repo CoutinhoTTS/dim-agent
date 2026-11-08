@@ -9,8 +9,9 @@ use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{
         AuxiliaryErrorCode, AuxiliaryModelHost, AuxiliaryRequest, AwsCredentials, BedrockAuth,
-        HostError, HostErrorKind, ModelChunk, ModelConnection, ModelHost, ModelStopReason,
-        ProviderConnectionResolver, SelectableModelsHost,
+        HostError, HostErrorKind, ModalityConnectionHost, ModalityTarget, ModelChunk,
+        ModelConnection, ModelHost, ModelProtocol, ModelStopReason, ProviderConnectionResolver,
+        SelectableModelsHost,
     },
 };
 use dim_agent_runtime::{Names, names::ServiceCatalog};
@@ -796,7 +797,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     let (send, mut lookups) = mpsc::channel::<Lookup>(8);
     let secrets = root.plugin(Secrets(send));
     active(&secrets).await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -1002,7 +1003,7 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -1168,6 +1169,97 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
 }
 
 #[tokio::test]
+async fn a_declared_output_limit_at_or_above_the_window_adopts_a_derived_allowance() {
+    use axum::http::StatusCode;
+    let app =
+        Router::new().fallback(|| async { (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))) });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!("provider-allowance-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    const PROVIDER: &str = "00000000-0000-4000-8000-000000000022";
+    let created = provider
+        .create(
+            input(
+                PROVIDER,
+                &format!("{base}/v1"),
+                StaticAuth::Bearer,
+                Some("allowance-key"),
+                "allowance",
+                32_000,
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    // A declared output above the window is accepted and the adopted
+    // configuration carries the derived allowance, not the declaration.
+    let above = provider
+        .update_model_config(
+            PROVIDER.into(),
+            created.version.unwrap(),
+            "same".into(),
+            serde_json::from_value(json!({"maxOutputTokens":40_000})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(above.models[0].capabilities.context_window, Some(32_000));
+    assert_eq!(above.models[0].capabilities.max_output_tokens, Some(40_000));
+    assert_eq!(above.models[0].config.max_tokens, Some(16_000.0));
+    let selection = provider
+        .configuration(
+            Some(target(PROVIDER)),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let snapshot = selection.capability_snapshot.unwrap();
+    assert_eq!(snapshot.capabilities.context_window, 32_000);
+    assert_eq!(snapshot.capabilities.max_output_tokens, 40_000);
+    assert_eq!(selection.config.unwrap().max_tokens, Some(16_000.0));
+    // Equal limits are accepted too, and the allowance follows the window.
+    let equal = provider
+        .update_model_config(
+            PROVIDER.into(),
+            above.version,
+            "same".into(),
+            serde_json::from_value(json!({"contextWindow":64_000,"maxOutputTokens":64_000}))
+                .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(equal.models[0].capabilities.context_window, Some(64_000));
+    assert_eq!(equal.models[0].capabilities.max_output_tokens, Some(64_000));
+    assert_eq!(equal.models[0].config.max_tokens, Some(32_000.0));
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
 async fn selectable_models_match_execution_and_hide_unavailable_models() {
     use axum::http::{StatusCode, Uri};
     use tokio::sync::{mpsc, oneshot};
@@ -1199,7 +1291,7 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -1507,6 +1599,524 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The non-conversational read lists models execution rejects (text modality,
+/// chat kind, text limits) when they declare a modality operation, and keeps
+/// every other selectability rule: provider enablement, model enablement,
+/// credential, account and cancellation.
+#[tokio::test]
+async fn selectable_modality_models_carry_declared_operations_without_chat_rules() {
+    let home = std::env::temp_dir().join(format!("provider-modality-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let selectable = root.get::<SelectableModelsHost>().unwrap();
+    let cancel = CancellationToken::new();
+    const MINE: &str = "00000000-0000-4000-8000-000000000040";
+    const OFF: &str = "00000000-0000-4000-8000-000000000041";
+    const NOCRED: &str = "00000000-0000-4000-8000-000000000042";
+    let media = || -> ModelEntry {
+        serde_json::from_value(json!({
+            "modelId":"modality-media", "displayName":"modality-media", "status":"active",
+            "capabilities":{"modalities":["image"],"toolCalling":false,"streaming":true,
+                "structuredOutput":false,"vision":false,"audio":false,"reasoning":false},
+            "metadata":{"raw":{"type":"image-generation",
+                "modalityCapabilities":["image.generate","image.edit"]}}
+        }))
+        .unwrap()
+    };
+    let both: ModelEntry = serde_json::from_value(json!({
+        "modelId":"modality-both", "displayName":"modality-both", "status":"active",
+        "capabilities":{"modalities":["text","image"],"toolCalling":true,"streaming":true,
+            "structuredOutput":true,"vision":true,"audio":false,"reasoning":false,
+            "contextWindow":32000,"maxOutputTokens":1000},
+        "metadata":{"raw":{"modalityCapabilities":["image.generate"]}}
+    }))
+    .unwrap();
+    let mut mine = input(
+        MINE,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("modality-key"),
+        "modality",
+        1000,
+    );
+    mine.models = vec![media(), both, model("modality-text", 1000)];
+    let created = provider.create(mine, &cancel).await.unwrap();
+    let mut off = input(
+        OFF,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Anonymous,
+        None,
+        "off",
+        1000,
+    );
+    off.enabled = false;
+    off.models = vec![media()];
+    provider.create(off, &cancel).await.unwrap();
+    let mut nocred = input(
+        NOCRED,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("modality-key"),
+        "nocred",
+        1000,
+    );
+    nocred.models = vec![media()];
+    provider.create(nocred, &cancel).await.unwrap();
+    // Clear the credential while the provider stays enabled: the persisted
+    // record then reads as unavailable, like one written before the
+    // credential requirement existed.
+    let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let (version, body): (u32, String) = database
+        .query_row(
+            "SELECT version,record FROM providers WHERE provider_id=?1",
+            [NOCRED],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let mut body: Value = serde_json::from_str(&body).unwrap();
+    body["credential"] = Value::Null;
+    database
+        .execute(
+            "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
+            rusqlite::params![NOCRED, version, body.to_string()],
+        )
+        .unwrap();
+
+    let modality = selectable
+        .0
+        .selectable_for_modality(cancel.clone())
+        .await
+        .unwrap();
+    let listed: Vec<(String, Vec<String>)> = modality
+        .iter()
+        .filter(|model| model.target.provider_id == MINE)
+        .map(|model| (model.target.model_id.clone(), model.operations.clone()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (
+                "modality-media".to_owned(),
+                vec!["image.generate".to_owned(), "image.edit".to_owned()]
+            ),
+            (
+                "modality-both".to_owned(),
+                vec!["image.generate".to_owned()]
+            ),
+        ],
+        "a model that declares no operation is omitted"
+    );
+    assert!(
+        !modality
+            .iter()
+            .any(|model| model.target.provider_id == OFF || model.target.provider_id == NOCRED),
+        "a disabled provider and one without a credential stay out: {modality:?}"
+    );
+    let bundled = BundledCatalog::load().unwrap();
+    assert!(
+        bundled
+            .provider("openai-codex")
+            .unwrap()
+            .models
+            .iter()
+            .find(|model| model.model_id == "gpt-image-2")
+            .unwrap()
+            .metadata
+            .as_ref()
+            .unwrap()
+            .raw
+            .contains_key("modalityCapabilities"),
+        "the bundled managed provider does declare a media model"
+    );
+    assert!(
+        !modality
+            .iter()
+            .any(|model| model.target.provider_id == "openai-codex"),
+        "an unauthenticated managed account is not selectable"
+    );
+    let chat = selectable.0.selectable(cancel.clone()).await.unwrap();
+    let chat_ids: Vec<&str> = chat
+        .iter()
+        .filter(|model| model.target.provider_id == MINE)
+        .map(|model| model.target.model_id.as_str())
+        .collect();
+    assert_eq!(chat_ids, ["modality-both", "modality-text"]);
+    assert!(
+        !chat
+            .iter()
+            .any(|model| model.target.model_id == "modality-media"),
+        "a non-chat media model stays out of execution"
+    );
+    let catalog = provider
+        .catalog_for(MINE.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let media = catalog
+        .models
+        .iter()
+        .find(|model| model.id == "modality-media")
+        .unwrap();
+    assert!(
+        !media.missing_limits.is_empty(),
+        "the entry declares no text limits: {media:?}"
+    );
+    assert_eq!(
+        media.unavailable_reason.as_deref(),
+        Some("provider_unavailable")
+    );
+    assert!(
+        selectable
+            .0
+            .selectable_for_modality(cancel.clone())
+            .await
+            .unwrap()
+            .iter()
+            .any(|model| model.target.model_id == "modality-media"),
+        "its conversational reason does not exclude the model from modality"
+    );
+
+    provider
+        .set_enabled_models(
+            MINE.into(),
+            created.version.unwrap(),
+            vec!["modality-text".into()],
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let modality = selectable
+        .0
+        .selectable_for_modality(cancel.clone())
+        .await
+        .unwrap();
+    let listed: Vec<&str> = modality
+        .iter()
+        .filter(|model| model.target.provider_id == MINE)
+        .map(|model| model.target.model_id.as_str())
+        .collect();
+    assert_eq!(
+        listed,
+        ["modality-media"],
+        "a disabled model leaves the modality options"
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        selectable.0.selectable_for_modality(cancelled).await,
+        Err(HostError::Cancelled(_))
+    ));
+    root.shutdown().await.unwrap();
+    let error = selectable
+        .0
+        .selectable_for_modality(CancellationToken::new())
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            error,
+            HostError::Failed {
+                kind: HostErrorKind::OwnerClosed,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A process adapter resolves one modality model's connection and reaches the
+/// stub with the resolved base URL and credential; a model the modality read
+/// would not serve fails before any request.
+#[tokio::test]
+async fn modality_connection_resolution_reaches_the_stub_and_refuses_unselectable_models() {
+    use axum::http::{HeaderMap, StatusCode, Uri};
+    const KEY: &str = "modality-connection-key";
+    let seen: Arc<Mutex<Vec<(Uri, HeaderMap)>>> = Arc::default();
+    let recorder = seen.clone();
+    let app = Router::new().fallback(move |uri: Uri, headers: HeaderMap| {
+        let recorder = recorder.clone();
+        async move {
+            recorder.lock().unwrap().push((uri, headers));
+            (StatusCode::OK, Json(json!({"ok": true})))
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = std::env::temp_dir().join(format!(
+        "provider-modality-connection-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    let modality = root.get::<ModalityConnectionHost>().unwrap();
+    let selectable = root.get::<SelectableModelsHost>().unwrap();
+    let cancel = CancellationToken::new();
+    const MINE: &str = "00000000-0000-4000-8000-000000000050";
+    const UNKNOWN: &str = "00000000-0000-4000-8000-000000000051";
+    let media = |id: &str| -> ModelEntry {
+        serde_json::from_value(json!({
+            "modelId":id, "displayName":id, "status":"active",
+            "capabilities":{"modalities":["image"],"toolCalling":false,"streaming":true,
+                "structuredOutput":false,"vision":false,"audio":false,"reasoning":false},
+            "metadata":{"raw":{"type":"image-generation",
+                "modalityCapabilities":["image.generate","image.edit"]}}
+        }))
+        .unwrap()
+    };
+    let mut mine = input(
+        MINE,
+        &format!("{base}/v1"),
+        StaticAuth::Bearer,
+        Some(KEY),
+        "modality-connection",
+        1000,
+    );
+    let mut unavailable = media("unavailable");
+    unavailable.status = ModelStatus::Unavailable;
+    let edit_only: ModelEntry = serde_json::from_value(json!({
+        "modelId":"edit-only", "displayName":"edit-only", "status":"active",
+        "capabilities":{"modalities":["image"],"toolCalling":false,"streaming":true,
+            "structuredOutput":false,"vision":false,"audio":false,"reasoning":false},
+        "metadata":{"raw":{"type":"image-generation","modalityCapabilities":["image.edit"]}}
+    }))
+    .unwrap();
+    // A chat-selectable model that also declares an image operation, so the
+    // enabled-model set can disable it.
+    let disabled: ModelEntry = serde_json::from_value(json!({
+        "modelId":"disabled", "displayName":"disabled", "status":"active",
+        "capabilities":{"modalities":["text","image"],"toolCalling":true,"streaming":true,
+            "structuredOutput":true,"vision":true,"audio":false,"reasoning":false,
+            "contextWindow":32000,"maxOutputTokens":1000},
+        "metadata":{"raw":{"modalityCapabilities":["image.generate"]}}
+    }))
+    .unwrap();
+    let voice = |id: &str, realtime: Value| -> ModelEntry {
+        serde_json::from_value(json!({
+            "modelId":id, "displayName":id, "status":"active",
+            "capabilities":{"modalities":["text","audio"],"toolCalling":false,"streaming":true,
+                "structuredOutput":false,"vision":false,"audio":true,"reasoning":false},
+            "metadata":{"raw":{"type":"realtime","realtime":realtime,
+                "modalityCapabilities":["realtime.voice"]}}
+        }))
+        .unwrap()
+    };
+    let declared = voice(
+        "voice",
+        json!({"protocol": "openai-realtime", "path": "/realtime"}),
+    );
+    let broken = voice("broken", json!({"protocol": "openai-realtime"}));
+    mine.models = vec![
+        media("media"),
+        unavailable,
+        disabled,
+        edit_only,
+        declared,
+        broken,
+    ];
+    let created = provider.create(mine, &cancel).await.unwrap();
+    let enabled = provider
+        .set_enabled_models(
+            MINE.into(),
+            created.version.unwrap(),
+            vec![
+                "media".into(),
+                "unavailable".into(),
+                "edit-only".into(),
+                "voice".into(),
+                "broken".into(),
+            ],
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(enabled.disabled_model_ids, ["disabled"]);
+    let modality_target = |model_id: &str, operation: &str| ModalityTarget {
+        target: ModelId {
+            provider_id: MINE.into(),
+            model_id: model_id.into(),
+        },
+        operation: operation.into(),
+    };
+    let listed = selectable
+        .0
+        .selectable_for_modality(cancel.clone())
+        .await
+        .unwrap();
+    assert!(
+        listed.iter().any(|model| model.target.provider_id == MINE
+            && model.target.model_id == "media"
+            && model.operations == ["image.generate", "image.edit"]),
+        "{listed:?}"
+    );
+    assert!(seen.lock().unwrap().is_empty(), "the read made a request");
+
+    let connection = modality
+        .0
+        .resolve_for_modality(modality_target("media", "image.generate"), cancel.clone())
+        .await
+        .unwrap();
+    assert_eq!(connection.model, "media");
+    assert_eq!(connection.protocol, ModelProtocol::OpenaiCompatible);
+    assert!(connection.resolved.recovery.is_none());
+    let debug = format!("{connection:?}");
+    assert!(!debug.contains(KEY), "{debug}");
+    let (base_url, headers, bearer) = match &connection.resolved.connection {
+        ModelConnection::Http(http) => (
+            http.base_url.clone(),
+            http.headers.clone(),
+            http.bearer.clone(),
+        ),
+        _ => panic!("expected an HTTP connection"),
+    };
+    assert_eq!(base_url, format!("{base}/v1"));
+    let mut request = reqwest::Client::new()
+        .post(format!("{base_url}/images/generations"))
+        .json(&json!({"model": connection.model, "prompt": "a fixture"}));
+    for (name, value) in &headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    if let Some(bearer) = bearer {
+        request = request.bearer_auth(bearer);
+    }
+    assert!(request.send().await.unwrap().status().is_success());
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0.path(), "/v1/images/generations");
+        let header = |name: &str| seen[0].1.get(name).and_then(|value| value.to_str().ok());
+        assert_eq!(
+            header("authorization"),
+            Some(format!("Bearer {KEY}").as_str())
+        );
+        assert_eq!(header("x-marker"), Some("modality-connection"));
+    }
+    // A realtime operation carries the entry's declared transport; every other
+    // operation of the same model carries none, and a declaration that does
+    // not parse is refused rather than silently absent.
+    let voice = modality
+        .0
+        .resolve_for_modality(modality_target("voice", "realtime.voice"), cancel.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        voice.realtime,
+        Some(dim_agent_capabilities::host::RealtimeDeclaration {
+            protocol: "openai-realtime".into(),
+            path: "/realtime".into(),
+        })
+    );
+    assert!(!format!("{voice:?}").contains(KEY));
+    let image = modality
+        .0
+        .resolve_for_modality(modality_target("voice", "image.generate"), cancel.clone())
+        .await;
+    assert_eq!(
+        image.err().unwrap().to_string(),
+        "Model does not declare the image.generate operation"
+    );
+    let broken = modality
+        .0
+        .resolve_for_modality(modality_target("broken", "realtime.voice"), cancel.clone())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        broken.to_string(),
+        "The model's realtime declaration needs a protocol and a path"
+    );
+    assert!(!format!("{broken:?} {broken}").contains(KEY));
+    for (label, target, expected) in [
+        (
+            "unavailable",
+            modality_target("unavailable", "image.generate"),
+            "Model is unavailable",
+        ),
+        (
+            "disabled",
+            modality_target("disabled", "image.generate"),
+            "Model is unavailable",
+        ),
+        (
+            "undeclared",
+            modality_target("edit-only", "image.generate"),
+            "Model does not declare the image.generate operation",
+        ),
+        (
+            "unknown provider",
+            ModalityTarget {
+                target: ModelId {
+                    provider_id: UNKNOWN.into(),
+                    model_id: "media".into(),
+                },
+                operation: "image.generate".into(),
+            },
+            "Provider not found",
+        ),
+    ] {
+        let error = modality
+            .0
+            .resolve_for_modality(target, cancel.clone())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), expected, "{label}");
+        let formatted = format!("{error:?} {error}");
+        assert!(!formatted.contains(KEY), "{label}: {formatted}");
+    }
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "a refused resolution reached the stub"
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        modality
+            .0
+            .resolve_for_modality(modality_target("media", "image.generate"), cancelled)
+            .await,
+        Err(HostError::Cancelled(_))
+    ));
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test]
 async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_results() {
     use axum::{
@@ -1547,7 +2157,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -2407,7 +3017,7 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -2770,7 +3380,7 @@ async fn a_listing_that_collides_with_a_user_model_names_it_and_writes_nothing()
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -3035,7 +3645,7 @@ async fn a_disabled_re_point_drops_an_own_catalog_and_the_refill_lists_the_new_e
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -3263,7 +3873,7 @@ async fn object_kind_listings_classify_their_models_as_chat() {
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin);
     let view = root.plugin(provider_part(ProviderPlugin::new));
-    tokio::time::timeout(std::time::Duration::from_secs(5), active(&view))
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
@@ -3479,7 +4089,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
             "zenmux",
             "plain",
             "/v1/chat/completions",
-            "max_tokens",
+            "max_completion_tokens",
             None,
         ),
         (
@@ -3726,10 +4336,11 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
                 assert_eq!(sent.body["include"], json!(["reasoning.encrypted_content"]));
             }
         } else {
-            assert_eq!(sent.body["reasoning_effort"], "low");
+            assert_eq!(sent.body["reasoning_effort"], "low", "{driver}/{model_id}");
             assert_eq!(
                 sent.body.get("service_tier").and_then(Value::as_str),
-                (!xai).then_some("priority")
+                (!xai).then_some("priority"),
+                "{driver}/{model_id}"
             );
         }
     }

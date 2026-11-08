@@ -3,7 +3,7 @@
 //! Provides [`get_model_specs`] — a thin function that fetches the community
 //! model catalogue (anya2a `dist/all.json`) and returns a [`Catalogue`] of
 //! [`ModelSpec`] entries. This is **deliberately decoupled** from
-//! `Provider::list_models`: the host calls both independently and merges them
+//! `ProviderDiscovery::list_models`: the host calls both independently and merges them
 //! as needed.
 //!
 //! `get_model_specs` does **no caching, no FS writes, no TTL** — it is a pure
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use aimux_core::AiMuxError;
-use aimux_core::ApiCallError;
+use aimux_core::ErrorCause;
 use aimux_core::model_catalogue::{
     CatalogueSource, Modality, ModelCapabilities, ModelCost, ModelLimits, ModelModalities,
     ModelSpec, ModelType, ReasoningMode, ReasoningSpec, ReasoningVisibility,
@@ -25,59 +25,88 @@ use serde_json::Value;
 pub const DEFAULT_ANYA2A_URL: &str = "https://raw.githubusercontent.com/ThinkInAIXYZ/PublicProviderConf/refs/heads/dev/dist/all.json";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Provider name normalization
+// Provider name mapping
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// anya2a provider ids whose aimux provider has another name. Each target is
+/// a name [`crate::create_provider`] accepts for the same vendor, checked by
+/// hand. The endpoint can differ (`minimax-cn` lists the Anthropic-format
+/// host, `minimax_cn` uses the OpenAI-format one). No two ids share a
+/// target, and a target that the catalogue also lists under its own id keeps
+/// that entry ([`parse_anya2a_all`]), so one id's models never overwrite
+/// another's.
 const PROVIDER_ALIASES: &[(&str, &str)] = &[
-    ("fireworks-ai", "fireworks"),
-    ("google-vertex", "vertex"),
-    ("google-vertex-anthropic", "vertex"),
-    ("amazon-bedrock", "bedrock"),
-    ("azure-cognitive-services", "azure_ai"),
-    ("moonshot-ai", "moonshot"),
-    ("moonshot", "moonshot"),
-    ("stepfun-ai", "stepfun"),
-    ("siliconflow-com", "siliconflow"),
-    ("tencent-tokenhub", "tencent_tokenhub"),
-    ("alibaba-cn", "alibaba"),
-    ("minimax-cn", "minimax"),
-    ("xiaomi-token-plan-ams", "xiaomi"),
-    ("xiaomi-token-plan-cn", "xiaomi"),
-    ("xiaomi-token-plan-sgp", "xiaomi"),
-    ("zhipuai", "zhipu"),
-    ("zhipuai-coding-plan", "zhipu_coding_plan"),
-    ("zai-coding-plan", "zai_coding_plan"),
-    ("opencode-go", "opencode"),
-    ("tencent-coding-plan", "tencent_coding_plan"),
-    ("umans-ai-coding-plan", "umans_ai_coding_plan"),
-    ("alibaba-coding-plan-cn", "alibaba_coding_plan_cn"),
+    ("302ai", "ai302"),
+    ("abliteration-ai", "abliteration_ai"),
+    ("ai-router", "ai_router"),
+    ("aimlapi", "aiml"),
+    ("aki-io", "aki_io"),
     ("alibaba-coding-plan", "alibaba_coding_plan"),
-    ("alibaba-token-plan-cn", "alibaba_token_plan_cn"),
+    ("alibaba-coding-plan-cn", "alibaba_coding_plan_cn"),
     ("alibaba-token-plan", "alibaba_token_plan"),
-    ("stepfun-ai-step-plan", "stepfun"),
-    ("stepfun-step-plan", "stepfun"),
-    ("minimax-cn-coding-plan", "minimax_coding_plan"),
-    ("minimax-coding-plan", "minimax_coding_plan"),
-    ("kimi-for-coding", "kimi"),
-    ("cloudflare-ai-gateway", "cloudflare_ai_gateway"),
+    ("alibaba-token-plan-cn", "alibaba_token_plan_cn"),
+    ("amazon-bedrock", "amazon_bedrock"),
+    ("atomic-chat", "atomic_chat"),
+    ("cline-pass", "cline_pass"),
+    ("cloudferro-sherlock", "cloudferro_sherlock"),
     ("cloudflare-workers-ai", "cloudflare_workers_ai"),
-    ("google-pse", "google_pse"),
+    ("fireworks-ai", "fireworks"),
+    ("friendli", "friendliai"),
+    ("github-copilot", "copilot"),
+    ("google-vertex", "google_vertex"),
+    ("google-vertex-anthropic", "vertex_ai_anthropic_models"),
+    ("hpc-ai", "hpc_ai"),
+    ("inference", "inference_net"),
+    ("io-net", "io_net"),
+    ("kimi-for-coding", "kimi_for_coding"),
+    ("kuae-cloud-coding-plan", "kuae_cloud_coding_plan"),
+    ("merge-gateway", "merge_gateway"),
+    ("minimax-cn", "minimax_cn"),
+    ("minimax-cn-coding-plan", "minimax_cn_coding_plan"),
+    ("minimax-coding-plan", "minimax_coding_plan"),
     ("model-oracle-ai", "model_oracle_ai"),
+    ("moonshot", "moonshotai"),
+    ("moonshot-ai", "kimi"),
+    ("nano-gpt", "nanogpt"),
+    ("novita-ai", "novita"),
+    ("nvidia", "nvidia_nim"),
+    ("opencode-go", "opencode_go"),
+    ("perplexity-agent", "perplexity_agent"),
+    ("privatemode-ai", "privatemode_ai"),
+    ("qihang-ai", "qihang_ai"),
+    ("qiniu-ai", "qiniu_ai"),
     ("regolo-ai", "regolo_ai"),
-    ("sapphire-ai", "sapphire"),
+    ("routing-run", "routing_run"),
+    ("scx-ai", "scx_ai"),
+    ("snowflake-cortex", "snowflake_cortex"),
+    ("stepfun-ai-step-plan", "stepfun_ai_step_plan"),
+    ("stepfun-step-plan", "stepfun_step_plan"),
+    ("tencent-coding-plan", "tencent_coding_plan"),
+    ("tencent-token-plan", "tencent_token_plan"),
+    ("tencent-tokenhub", "tencent_tokenhub"),
+    ("the-grid-ai", "the_grid_ai"),
     ("umans-ai", "umans_ai"),
-    ("thinkingmachines", "thinkingmachines"),
+    ("volcengine", "volc_engine"),
+    ("wafer.ai", "wafer"),
+    ("xiaomi", "mimo"),
+    ("xiaomi-token-plan-ams", "xiaomi_token_plan_ams"),
+    ("xiaomi-token-plan-cn", "xiaomi_token_plan_cn"),
+    ("xiaomi-token-plan-sgp", "xiaomi_token_plan_sgp"),
+    ("zai-coding-plan", "zai_coding_plan"),
+    ("zhipuai", "bigmodel"),
+    ("zhipuai-coding-plan", "zhipuai_coding_plan"),
 ];
 
-/// Map an anya2a provider id to an aimux registry name.
+/// The aimux provider name for an anya2a provider id: its alias, or the id
+/// itself when [`crate::create_provider`] accepts it. `None` for any other
+/// id; the name is never derived from the spelling.
 #[must_use]
-pub fn normalize_provider_name(anya2a_id: &str) -> String {
-    for (from, to) in PROVIDER_ALIASES {
-        if *from == anya2a_id {
-            return (*to).to_string();
-        }
-    }
-    anya2a_id.replace('-', "_")
+pub fn normalize_provider_name(anya2a_id: &str) -> Option<&'static str> {
+    PROVIDER_ALIASES
+        .iter()
+        .find(|(from, _)| *from == anya2a_id)
+        .map(|(_, to)| *to)
+        .or_else(|| crate::default_providers::provider_name(anya2a_id))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -86,12 +115,18 @@ pub fn normalize_provider_name(anya2a_id: &str) -> String {
 
 /// In-memory catalogue: per-provider model specs, keyed by aimux provider
 /// name then model id.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct Catalogue {
     #[serde(default)]
     pub updated_at: u64,
     #[serde(default)]
     pub specs: HashMap<String, HashMap<String, ModelSpec>>,
+    /// Specs of source providers with no aimux provider, keyed by the
+    /// source's own provider id then model id. The host maps them, if it
+    /// wants them.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub unmapped: HashMap<String, HashMap<String, ModelSpec>>,
 }
 
 impl Catalogue {
@@ -132,48 +167,120 @@ impl Catalogue {
 /// JSON does not deserialize into a [`Catalogue`].
 pub async fn get_model_specs(source_url: Option<&str>) -> Result<Catalogue, AiMuxError> {
     let url = source_url.unwrap_or(DEFAULT_ANYA2A_URL);
-    let body = fetch_text(url).await?;
-    let raw: Value = serde_json::from_str(&body)
-        .map_err(|e| AiMuxError::JsonParse(format!("get_model_specs: invalid source JSON: {e}")))?;
-    parse_anya2a_all(&raw)
+    let body = fetch_bytes(url).await?;
+    let raw: Value = serde_json::from_slice(&body).map_err(|e| AiMuxError::JsonParse {
+        message: format!("get_model_specs: invalid source JSON: {e}"),
+        cause: Some(ErrorCause::source(&e)),
+    })?;
+    drop(body);
+    parse_anya2a_all_owned(raw)
+}
+
+/// Parse anya2a `dist/all.json` into a [`Catalogue`], consuming `json` in place
+/// so each model's `raw` `Value` is moved without cloning the JSON AST.
+///
+/// # Errors
+///
+/// Returns `AiMuxError::json_parse` when the JSON lacks the expected
+/// `providers` object.
+pub fn parse_anya2a_all_owned(mut json: Value) -> Result<Catalogue, AiMuxError> {
+    let updated_at = json
+        .get("updated_at")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let Some(Value::Object(providers)) = json.as_object_mut().and_then(|o| o.remove("providers"))
+    else {
+        return Err(AiMuxError::json_parse(
+            "anya2a all.json missing 'providers' object",
+        ));
+    };
+
+    let mut catalogue = Catalogue {
+        updated_at,
+        ..Catalogue::default()
+    };
+    let listed: std::collections::HashSet<&'static str> = providers
+        .keys()
+        .filter_map(|id| crate::default_providers::provider_name(id))
+        .collect();
+    for (anya2a_id, mut provider_val) in providers {
+        let aimux_name = normalize_provider_name(&anya2a_id)
+            .filter(|name| *name == anya2a_id || !listed.contains(name));
+        let Some(Value::Array(models)) = provider_val
+            .as_object_mut()
+            .and_then(|o| o.remove("models"))
+        else {
+            continue;
+        };
+        let bucket = match aimux_name {
+            Some(name) => catalogue.specs.entry(name.to_string()),
+            None => catalogue.unmapped.entry(anya2a_id),
+        }
+        .or_default();
+        bucket.reserve(models.len());
+        for m in models {
+            let Some(id) = m.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+                continue;
+            };
+            let mut spec = convert_anya2a_model_without_raw(&m);
+            spec.provider = aimux_name.map(str::to_string);
+            spec.raw = Some(m);
+            bucket.insert(id, spec);
+        }
+    }
+    Ok(catalogue)
 }
 
 /// Parse anya2a `dist/all.json` into a [`Catalogue`].
 ///
 /// # Errors
 ///
-/// Returns `AiMuxError::JsonParse` when the JSON lacks the expected
+/// Returns `AiMuxError::json_parse` when the JSON lacks the expected
 /// `providers` object.
 pub fn parse_anya2a_all(json: &Value) -> Result<Catalogue, AiMuxError> {
     let providers = json
         .get("providers")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| {
-            AiMuxError::JsonParse("anya2a all.json missing 'providers' object".into())
-        })?;
+        .ok_or_else(|| AiMuxError::json_parse("anya2a all.json missing 'providers' object"))?;
     let updated_at = json
         .get("updated_at")
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let mut specs: HashMap<String, HashMap<String, ModelSpec>> = HashMap::new();
+    let mut catalogue = Catalogue {
+        updated_at,
+        ..Catalogue::default()
+    };
+    // Names the catalogue lists under their own id; an alias to one of them
+    // goes to `unmapped` instead of overwriting it.
+    let listed: std::collections::HashSet<&str> = providers
+        .keys()
+        .filter_map(|id| crate::default_providers::provider_name(id))
+        .collect();
     for (anya2a_id, provider_val) in providers {
-        let aimux_name = normalize_provider_name(anya2a_id);
+        let aimux_name = normalize_provider_name(anya2a_id)
+            .filter(|name| name == anya2a_id || !listed.contains(name));
         let models = provider_val.get("models").and_then(|v| v.as_array());
         let Some(models) = models else {
             continue;
         };
-        let bucket = specs.entry(aimux_name).or_default();
+        let bucket = match aimux_name {
+            Some(name) => catalogue.specs.entry(name.to_string()),
+            None => catalogue.unmapped.entry(anya2a_id.clone()),
+        }
+        .or_default();
         for m in models {
             let Some(id) = m.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let spec = convert_anya2a_model(m);
+            let mut spec = convert_anya2a_model(m);
+            spec.provider = aimux_name.map(str::to_string);
             bucket.insert(id.to_string(), spec);
         }
     }
-    Ok(Catalogue { updated_at, specs })
+    Ok(catalogue)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +288,12 @@ pub fn parse_anya2a_all(json: &Value) -> Result<Catalogue, AiMuxError> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn convert_anya2a_model(m: &Value) -> ModelSpec {
+    let mut spec = convert_anya2a_model_without_raw(m);
+    spec.raw = Some(m.clone());
+    spec
+}
+
+fn convert_anya2a_model_without_raw(m: &Value) -> ModelSpec {
     let display_name = m
         .get("display_name")
         .and_then(|v| v.as_str())
@@ -222,7 +335,7 @@ fn convert_anya2a_model(m: &Value) -> ModelSpec {
         cost,
         source: CatalogueSource::Anya2a,
         provider: None,
-        raw: Some(m.clone()),
+        raw: None,
     }
 }
 
@@ -407,57 +520,22 @@ fn build_cost(m: &Value) -> Option<ModelCost> {
     })
 }
 
-async fn fetch_text(url: &str) -> Result<String, AiMuxError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| {
-            AiMuxError::ApiCall(Box::new(ApiCallError {
-                is_retryable: true,
-                ..ApiCallError::new(
-                    format!("get_model_specs: build client: {e}"),
-                    url,
-                    serde_json::json!({}),
-                    aimux_core::ApiCallErrorOrigin::Local,
-                )
-            }))
-        })?;
-    let resp = client.get(url).send().await.map_err(|e| {
-        AiMuxError::ApiCall(Box::new(ApiCallError {
-            is_retryable: true,
-            ..ApiCallError::new(
-                format!("get_model_specs: fetch {url}: {e}"),
-                url,
-                serde_json::json!({}),
-                aimux_core::ApiCallErrorOrigin::Transport,
-            )
-        }))
-    })?;
-    if !resp.status().is_success() {
-        let status = resp.status().as_u16();
-        return Err(AiMuxError::ApiCall(Box::new(ApiCallError {
-            status_code: Some(status),
-            response_body: resp.text().await.ok().filter(|b| !b.is_empty()),
-            is_retryable: status == 429 || status >= 500,
-            ..ApiCallError::new(
-                format!("get_model_specs: fetch {url}"),
-                url,
-                serde_json::json!({}),
-                aimux_core::ApiCallErrorOrigin::HttpResponse,
-            )
-        })));
-    }
-    resp.text().await.map_err(|e| {
-        AiMuxError::ApiCall(Box::new(ApiCallError {
-            is_retryable: true,
-            ..ApiCallError::new(
-                format!("get_model_specs: read body: {e}"),
-                url,
-                serde_json::json!({}),
-                aimux_core::ApiCallErrorOrigin::Transport,
-            )
-        }))
-    })
+/// Whole-exchange bound for the catalogue download (the aggregate file is a
+/// few MiB; the helper default is tuned for API calls).
+const FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn fetch_bytes(url: &str) -> Result<bytes::Bytes, AiMuxError> {
+    let output = aimux_provider_utils::get_from_api(
+        aimux_provider_utils::HttpRequest {
+            url: url.to_string(),
+            response_timeout: Some(FETCH_TIMEOUT),
+            ..Default::default()
+        },
+        aimux_provider_utils::create_binary_response_handler(),
+        aimux_provider_utils::create_status_code_error_response_handler(),
+    )
+    .await?;
+    Ok(output.value)
 }
 
 #[cfg(test)]
@@ -466,28 +544,80 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn normalize_known_aliases() {
-        assert_eq!(normalize_provider_name("fireworks-ai"), "fireworks");
-        assert_eq!(normalize_provider_name("google-vertex"), "vertex");
-        assert_eq!(normalize_provider_name("amazon-bedrock"), "bedrock");
-        assert_eq!(normalize_provider_name("zhipuai"), "zhipu");
-    }
-
-    #[test]
-    fn normalize_fallback_kebab_to_snake() {
-        assert_eq!(normalize_provider_name("some-provider"), "some_provider");
-        assert_eq!(normalize_provider_name("deepseek"), "deepseek");
-    }
-
-    #[test]
-    fn normalize_multi_target_aliases() {
-        assert_eq!(normalize_provider_name("google-vertex-anthropic"), "vertex");
-        assert_eq!(normalize_provider_name("xiaomi-token-plan-ams"), "xiaomi");
+    fn aliases_name_the_provider_serving_the_same_endpoint() {
+        assert_eq!(normalize_provider_name("fireworks-ai"), Some("fireworks"));
+        assert_eq!(
+            normalize_provider_name("google-vertex"),
+            Some("google_vertex")
+        );
+        assert_eq!(
+            normalize_provider_name("amazon-bedrock"),
+            Some("amazon_bedrock")
+        );
+        assert_eq!(
+            normalize_provider_name("xiaomi-token-plan-ams"),
+            Some("xiaomi_token_plan_ams")
+        );
         assert_eq!(
             normalize_provider_name("zhipuai-coding-plan"),
-            "zhipu_coding_plan"
+            Some("zhipuai_coding_plan")
         );
-        assert_eq!(normalize_provider_name("siliconflow-com"), "siliconflow");
+    }
+
+    #[test]
+    fn an_id_without_alias_maps_only_when_it_is_a_provider_name() {
+        assert_eq!(normalize_provider_name("deepseek"), Some("deepseek"));
+        assert_eq!(normalize_provider_name("some-provider"), None);
+        assert_eq!(normalize_provider_name("siliconflow-com"), None);
+    }
+
+    #[test]
+    fn every_alias_names_a_distinct_provider() {
+        let mut targets = std::collections::HashSet::new();
+        for (from, to) in PROVIDER_ALIASES {
+            assert!(
+                crate::default_providers::provider_name(to).is_some(),
+                "{from} -> {to}: not a provider name"
+            );
+            assert!(
+                crate::default_providers::provider_name(from).is_none(),
+                "{from} is itself a provider name"
+            );
+            assert!(targets.insert(to), "{to} is the target of two aliases");
+        }
+    }
+
+    #[test]
+    fn an_alias_to_a_name_listed_under_its_own_id_stays_unmapped() {
+        let raw = json!({
+            "updated_at": "0",
+            "providers": {
+                "fireworks-ai": { "models": [{ "id": "alias", "type": "chat" }] },
+                "fireworks": { "models": [{ "id": "own", "type": "chat" }] }
+            }
+        });
+        let cat = parse_anya2a_all(&raw).unwrap();
+        assert!(cat.lookup("fireworks", "own").is_some());
+        assert!(cat.lookup("fireworks", "alias").is_none());
+        assert_eq!(cat.unmapped["fireworks-ai"]["alias"].provider, None);
+    }
+
+    #[test]
+    fn unknown_providers_keep_their_source_id() {
+        let raw = json!({
+            "updated_at": "0",
+            "providers": {
+                "fireworks-ai": { "models": [{ "id": "f1", "type": "chat" }] },
+                "siliconflow-com": { "models": [{ "id": "s1", "type": "chat" }] }
+            }
+        });
+        let cat = parse_anya2a_all(&raw).unwrap();
+        let mapped = cat.lookup("fireworks", "f1").unwrap();
+        assert_eq!(mapped.provider.as_deref(), Some("fireworks"));
+        assert!(!cat.specs.contains_key("siliconflow_com"));
+        assert!(cat.lookup("siliconflow", "s1").is_none());
+        let unmapped = &cat.unmapped["siliconflow-com"]["s1"];
+        assert_eq!(unmapped.provider, None);
     }
 
     #[test]
@@ -576,21 +706,21 @@ mod tests {
     fn missing_providers_key_is_error() {
         let raw = json!({"updated_at": "0"});
         let err = parse_anya2a_all(&raw).unwrap_err();
-        assert!(matches!(err, AiMuxError::JsonParse(_)));
+        assert!(matches!(err, AiMuxError::JsonParse { .. }));
     }
 
     #[test]
     fn budget_min_via_reasoning_options_fallback() {
         let raw = json!({
             "updated_at": "0",
-            "providers": { "test": { "models": [{
+            "providers": { "deepseek": { "models": [{
                 "id": "m1", "type": "chat",
                 "reasoning": { "supported": true },
                 "reasoning_options": [{ "type": "budget_tokens", "min": 2048 }]
             }]}}
         });
         let cat = parse_anya2a_all(&raw).unwrap();
-        let r = cat.lookup("test", "m1").unwrap().reasoning.unwrap();
+        let r = cat.lookup("deepseek", "m1").unwrap().reasoning.unwrap();
         assert_eq!(r.budget_min, Some(2048));
     }
 
@@ -598,7 +728,7 @@ mod tests {
     fn budget_min_extra_capabilities_takes_precedence() {
         let raw = json!({
             "updated_at": "0",
-            "providers": { "test": { "models": [{
+            "providers": { "deepseek": { "models": [{
                 "id": "m1", "type": "chat",
                 "reasoning": { "supported": true },
                 "reasoning_options": [{ "type": "budget_tokens", "min": 999 }],
@@ -606,7 +736,7 @@ mod tests {
             }]}}
         });
         let cat = parse_anya2a_all(&raw).unwrap();
-        let r = cat.lookup("test", "m1").unwrap().reasoning.unwrap();
+        let r = cat.lookup("deepseek", "m1").unwrap().reasoning.unwrap();
         assert_eq!(r.budget_min, Some(1024));
     }
 }

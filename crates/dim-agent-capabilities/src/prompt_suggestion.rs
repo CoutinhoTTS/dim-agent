@@ -16,7 +16,9 @@ use crate::host::{
     HostError, ModelChunk, ModelConnection, ModelHost, ModelStream, ProviderConnectionResolver,
     ResolvedModelConnection,
 };
-use crate::methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply};
+use crate::methods::{
+    Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply,
+};
 use crate::session_broadcast::{
     SessionBroadcast, SessionBroadcastEvent, SessionNotice, notify, session_channel,
 };
@@ -277,9 +279,9 @@ pub fn part_text(parts: &[MessagePart]) -> Option<String> {
     (!text.trim().is_empty()).then_some(text)
 }
 
-/// The text of `request`'s last user message, the message a suggestion must
-/// not echo. The evaluation passes the recorded turn's value here the way the
-/// part does.
+/// The text of `request`'s last conversational user message, skipping runtime
+/// state and rules. A suggestion must not echo it. The evaluation uses the
+/// recorded turn's request, just as the part does.
 pub fn last_user_text(request: &ModelRequest) -> Option<String> {
     request.messages.iter().rev().find_map(|message| {
         if message.role != Role::User {
@@ -289,6 +291,7 @@ pub fn last_user_text(request: &ModelRequest) -> Option<String> {
             MessageContent::Text(text) => Some(text.clone()),
             MessageContent::Parts(parts) => part_text(parts),
         }
+        .filter(|text| !crate::context_block::is_state_or_rule(text))
     })
 }
 
@@ -575,7 +578,12 @@ impl DynPlugin for PromptSuggestionPlugin {
                     MethodDecl::new("session.suggestion.request", false, Interruption::Report),
                     MethodDecl::new("session.suggestion.respond", true, Interruption::Report),
                 ],
-                Arc::new(move |method, value, cancel, _| {
+                Arc::new(move |call, cancel, _| {
+                    let MethodCall {
+                        method,
+                        params: value,
+                        ..
+                    } = call;
                     let part = part.clone();
                     Box::pin(async move {
                         match method.as_str() {

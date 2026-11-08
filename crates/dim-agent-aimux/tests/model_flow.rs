@@ -8,6 +8,7 @@ use axum::{
 };
 use dim_agent_aimux::{AimuxModels, AimuxPlugin, ConfiguredModelsPlugin, config::ModelConfigFile};
 use dim_agent_capabilities::{adapters::MockTools, defaults, history::HistoryRenderer, host::*};
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use futures_util::StreamExt;
@@ -128,6 +129,14 @@ async fn respond(
         (data, false)
     } else if prompt == "wait" {
         (frame(json!({"content":"started"}), Value::Null), true)
+    } else if prompt == "usage-nodetails" {
+        let mut data = frame(json!({"content":"hello"}), json!("stop"));
+        data += &format!(
+            "data: {}\n\n",
+            json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3}})
+        );
+        data += "data: [DONE]\n\n";
+        (data, false)
     } else if prompt == "truncated" {
         (frame(json!({"content":"partial"}), Value::Null), false)
     } else {
@@ -172,6 +181,72 @@ async fn model_agent(models: Arc<AimuxModels>, custom: Option<AgentBuilder>) -> 
         .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
     MinimalHost::start(&builder).await.unwrap()
 }
+
+/// The configured model profile declares no modality operation, so its
+/// connection port refuses every target before building one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_configured_profile_resolves_no_modality_connection() {
+    let server = TestServer::start().await;
+    let host = model_agent(server.models(), None).await;
+    let selectable = host.root().get::<SelectableModelsHost>().unwrap();
+    assert!(
+        selectable
+            .0
+            .selectable_for_modality(CancellationToken::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let modality = host.root().get::<ModalityConnectionHost>().unwrap();
+    let refused = modality
+        .0
+        .resolve_for_modality(
+            ModalityTarget {
+                target: ModelId {
+                    provider_id: "local".into(),
+                    model_id: "test-model".into(),
+                },
+                operation: "image.generate".into(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(
+        refused,
+        HostError::Failed {
+            kind: HostErrorKind::InvalidRequest,
+            ..
+        }
+    ));
+    assert_eq!(
+        refused.to_string(),
+        "Model does not declare the image.generate operation"
+    );
+    let unknown = modality
+        .0
+        .resolve_for_modality(
+            ModalityTarget {
+                target: ModelId {
+                    provider_id: "local".into(),
+                    model_id: "missing".into(),
+                },
+                operation: "image.generate".into(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        unknown.to_string().starts_with("Model is not configured"),
+        "{unknown}"
+    );
+    host.close().await.unwrap();
+    server.close().await;
+}
+
 fn session_config() -> SessionConfig {
     SessionConfig {
         model: ModelSelection {
@@ -258,7 +333,7 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         let session = agent.create_session(session_config()).await.unwrap();
         session.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Thinking(data) if data.delta == "thinking")));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "hello")));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ModelUsage(data) if data.usage.prompt_tokens == 10. && data.usage.total_tokens == 13. && data.usage.cache_read_tokens == Some(2.))));
@@ -270,7 +345,7 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         assert!(metadata.run_id.is_none());
         session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("result text".into()))));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "tool completed")));
         assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
@@ -303,7 +378,7 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         let selected = agent.create_session(explicit).await.unwrap();
         selected.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         selected.idle("main").await.unwrap();
-        let events = selected.history("main", None).await.unwrap();
+        let events = chain_events(&selected, "main", ..).await.unwrap();
         let call = events.iter().find_map(|e| if let EventKind::ModelCall(call) = &e.kind { Some(call) } else { None }).unwrap();
         assert_eq!(call.request.config.as_ref().unwrap().temperature, Some(0.375));
         assert_eq!(call.request.config.as_ref().unwrap().max_tokens, None, "An explicit model configuration must not inherit catalog fields");
@@ -323,6 +398,35 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_usage_without_details_records_cache_read_as_unknown() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let server = TestServer::start().await;
+        let agent = model_agent(server.models(), None).await;
+        let session = agent.create_session(session_config()).await.unwrap();
+        session
+            .submit("usage-nodetails".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        // The provider reported no prompt_tokens_details, so the cache read
+        // count is unknown; reporting 0 would claim a 0% cache hit rate.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::ModelUsage(data)
+            if data.usage.prompt_tokens == 10.
+                && data.usage.total_tokens == 13.
+                && data.usage.cache_read_tokens.is_none()))
+        );
+        agent.close().await.unwrap();
+        server.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let server = TestServer::start().await; let agent = model_agent(server.models(), None).await;
@@ -335,8 +439,8 @@ async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
         let branch = session.branch("main".into(), 0, BranchOptions { prompt: "text".into(), source: BranchSource::Host { operation_id: "branch".into() } }).await.unwrap();
         session.stop("main", "user stop".into()).await.unwrap();
         session.idle(&branch).await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|e| matches!(&e.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Cancelled { .. }))));
-        assert!(session.history(&branch, None).await.unwrap().iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "hello")));
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|e| matches!(&e.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Cancelled { .. }))));
+        assert!(chain_events(&session, &branch, ..).await.unwrap().iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "hello")));
         session.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
         agent.close().await.unwrap(); server.close().await;
@@ -351,7 +455,7 @@ async fn failed_native_outputs_do_not_execute_tools_or_invent_usage() {
             let session = agent.create_session(session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ModelOutputEnd(data) if matches!(data.outcome, ModelOutputOutcome::Failed { .. }))), "{prompt}: {events:?}");
             // Calls a failed output started are closed, never dispatched (agent-029).
             assert!(!events.iter().any(|e| matches!(&e.kind, EventKind::ToolCall(_) | EventKind::ModelUsage(_)) || matches!(&e.kind, EventKind::ToolResult(data) if data.call_event_id.is_some())), "{prompt}: {events:?}");
@@ -401,6 +505,36 @@ fn a_model_entry_without_window_facts_fails_loading_and_names_the_model() {
                 .contains(&format!("local.test-model.{field}")),
             "{error}"
         );
+    }
+}
+
+#[test]
+fn a_compatible_preset_is_one_the_adapter_builds() {
+    let configuration = |preset: &str| {
+        serde_json::from_value::<ModelConfigFile>(json!({
+            "defaultModel": {"providerId": "local", "modelId": "test-model"},
+            "providers": [{"id": "local", "kind": "openai-compatible",
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "compatible": {"preset": preset},
+                "models": [{"id": "test-model", "contextWindow": 128_000,
+                    "maxOutputTokens": 4096, "config": {"maxTokens": 4096}}]}]
+        }))
+        .unwrap()
+    };
+    // A vendor package the adapter does not handle would be built as a generic
+    // Chat endpoint with none of its own request rules.
+    let error = AimuxModels::from_config(configuration("anthropic"))
+        .expect_err("anthropic is not a compatible preset");
+    assert!(
+        error
+            .to_string()
+            .contains("Unknown compatible preset: anthropic"),
+        "{error}"
+    );
+    // The registry rows and the packages the adapter maps by name load.
+    for preset in ["deepseek", "xai", "moonshotai", "aihubmix", "zenmux"] {
+        AimuxModels::from_config(configuration(preset))
+            .unwrap_or_else(|error| panic!("{preset}: {error}"));
     }
 }
 
@@ -462,7 +596,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
             let agent = model_agent(models.clone(), Some(builder)).await; let session = agent.create_session(session_config()).await.unwrap();
             session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if remove_tools {
                 assert!(!events.iter().any(|event| matches!(event.kind, EventKind::ToolCall(_) | EventKind::ToolResult(_))));
                 assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(end) if matches!(end.outcome, ModelOutputOutcome::Failed { .. }))));
@@ -574,7 +708,9 @@ fn overlapping_recorders_append_complete_jsonl_lines() {
         aimux_core::language_model_message::convert_to_language_model_prompt(
             &[aimux_core::message::ModelMessage::user("x".repeat(16_384))],
             None,
-        ),
+            None,
+        )
+        .unwrap(),
     );
     for index in 0..128 {
         for (writer, recorder) in recorders.iter().enumerate() {
@@ -603,13 +739,52 @@ fn overlapping_recorders_append_complete_jsonl_lines() {
     assert_eq!(records.len(), 256);
     let ids: std::collections::HashSet<_> = records
         .iter()
-        .map(|record| record["call_id"].as_str().unwrap())
+        .map(|record| record["callId"].as_str().unwrap())
         .collect();
     assert_eq!(ids.len(), 256);
     for record in records {
         assert_eq!(record["outcome"]["status"], "success");
         assert_eq!(record["complete"], true);
     }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn a_repeated_transport_close_does_not_append_an_incomplete_line() {
+    use aimux_core::recording::{JsonlRecorder, OutcomeRecord, OutcomeStatus, Recorder};
+
+    let directory =
+        std::env::temp_dir().join(format!("dim-recording-close-{}", uuid::Uuid::new_v4()));
+    let recorder = JsonlRecorder::try_new(&directory).unwrap();
+    let options = aimux_core::options::CallOptions::new(
+        aimux_core::language_model_message::convert_to_language_model_prompt(
+            &[aimux_core::message::ModelMessage::user("hi")],
+            None,
+            None,
+        )
+        .unwrap(),
+    );
+    recorder.record_input("call-1", &options, "openai", "test-model");
+    recorder.record_outcome(
+        "call-1",
+        &OutcomeRecord {
+            status: OutcomeStatus::Success,
+            ..OutcomeRecord::default()
+        },
+    );
+    recorder.record_transport_closed("call-1");
+    // The outcome wrapper and the HTTP layer both declare closure.
+    recorder.record_transport_closed("call-1");
+    recorder.try_flush().unwrap();
+    drop(recorder);
+    let content = std::fs::read_to_string(directory.join("recordings.jsonl")).unwrap();
+    let records: Vec<Value> = content
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1, "{content}");
+    assert_eq!(records[0]["callId"], "call-1");
+    assert_eq!(records[0]["complete"], true);
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -633,12 +808,12 @@ async fn recorded_requests_write_their_wire_exchange() {
             })
             .await;
         let recorded = &lines[0];
-        let call_id = recorded["call_id"].as_str().unwrap();
+        let call_id = recorded["callId"].as_str().unwrap();
         assert_eq!(
             recording
                 .lines()
                 .iter()
-                .filter(|line| line["call_id"] == call_id)
+                .filter(|line| line["callId"] == call_id)
                 .count(),
             1,
             "one line per call, including the transport close"
@@ -651,9 +826,9 @@ async fn recorded_requests_write_their_wire_exchange() {
                 .unwrap()
                 .contains("\"messages\"")
         );
-        assert!(exchange["timing"]["latency_ms"].is_number());
-        assert_eq!(recorded["provider"]["provider"], "openai");
-        assert_eq!(recorded["provider"]["model_id"], "test-model");
+        assert!(exchange["timing"]["latencyMs"].is_number());
+        assert_eq!(recorded["provider"]["provider"], "openai.chat");
+        assert_eq!(recorded["provider"]["modelId"], "test-model");
         assert_eq!(recorded["outcome"]["status"], "success");
         assert!(recorded["complete"].as_bool().unwrap());
         assert!(recorded["input"]["prompt"].is_array());
@@ -672,7 +847,7 @@ async fn recorded_requests_write_their_wire_exchange() {
         assert_eq!(recorded.len(), 2, "the enable/disable cycle records again");
         let calls: std::collections::HashSet<_> = recorded
             .iter()
-            .map(|line| line["call_id"].as_str())
+            .map(|line| line["callId"].as_str())
             .collect();
         assert_eq!(calls.len(), 2);
         for call in &recorded {
@@ -683,6 +858,71 @@ async fn recorded_requests_write_their_wire_exchange() {
         recording.assert_private();
 
         agent.close().await.unwrap();
+        server.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+/// Connection headers with credential names are redacted in the recorded
+/// call options; an ordinary header stays readable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_connection_headers_redact_sensitive_names() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let recording = Recording::start().await;
+        let server = TestServer::start().await;
+        let url = format!("{}/chat/completions", server.url);
+        let root = rutis::Ctx::root().unwrap();
+        root.plugin(AimuxPlugin).await.unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        let connection = ModelConnection::Http(HttpModelConnection {
+            api_key: None,
+            network: Default::default(),
+            protocol: ModelProtocol::OpenaiCompatible,
+            base_url: server.url.clone(),
+            bearer: None,
+            headers: std::collections::HashMap::from([
+                (
+                    "x-portkey-virtual-key".to_owned(),
+                    "pk-virtual-secret".to_owned(),
+                ),
+                ("helicone-auth".to_owned(), "helicone-secret".to_owned()),
+                ("x-team-secret".to_owned(), "zz-team-credential".to_owned()),
+                ("x-trace-id".to_owned(), "trace-visible".to_owned()),
+            ]),
+            preset: None,
+        });
+        let mut stream = host
+            .0
+            .invoke(
+                Arc::new(ModelRequest::new(
+                    "logical-provider",
+                    "test-model",
+                    vec![Message::text(Role::User, "recorded headers")],
+                )),
+                connection,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        while let Some(chunk) = stream.next().await {
+            chunk.unwrap();
+        }
+        let lines = recording
+            .wait(1, |line| {
+                line["exchanges"][0]["request"]["url"].as_str() == Some(url.as_str())
+            })
+            .await;
+        let headers = lines[0]["input"]["options"]["headers"].as_object().unwrap();
+        assert_eq!(headers["x-portkey-virtual-key"], "[REDACTED]");
+        assert_eq!(headers["helicone-auth"], "[REDACTED]");
+        assert_eq!(headers["x-team-secret"], "[REDACTED]");
+        assert_eq!(headers["x-trace-id"], "trace-visible");
+        let recorded = lines[0].to_string();
+        for secret in ["pk-virtual-secret", "helicone-secret", "zz-team-credential"] {
+            assert!(!recorded.contains(secret), "{secret} was recorded");
+        }
+        root.shutdown().await.unwrap();
         server.close().await;
     })
     .await
@@ -930,7 +1170,7 @@ async fn a_same_origin_307_or_308_redirect_completes_the_turn_at_its_target() {
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             assert_eq!(output_failure(&events), None, "{status}: the turn failed");
             assert!(
                 events.iter().any(
@@ -971,8 +1211,14 @@ async fn a_same_origin_301_redirect_is_not_followed_and_names_its_target() {
         let error = redirect_failure(&server.url, "301-secret").await;
         let message = error.to_string();
         assert!(message.contains(&moved), "{message}");
-        assert!(message.contains("HTTP 301"), "{message}");
         assert!(message.contains("GET without its body"), "{message}");
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(model.status, Some(301));
         assert!(!message.contains("301-secret"), "{message}");
         let hits = server.hits();
         assert_eq!(hits.len(), 1, "the target was contacted: {hits:?}");
@@ -988,13 +1234,35 @@ async fn a_cross_origin_redirect_is_not_followed_and_names_its_target() {
     tokio::time::timeout(Duration::from_secs(15), async {
         let other = RedirectServer::serving().await;
         let moved = format!("{}/chat/completions", other.url);
+        // A 301 or 302 to another origin says the origin is the reason, not
+        // the method change; a 307 says it too.
         let server = RedirectServer::start(StatusCode::TEMPORARY_REDIRECT, &moved).await;
         let error = redirect_failure(&server.url, "cross-origin-secret").await;
         let message = error.to_string();
         assert!(message.contains(&moved), "{message}");
-        assert!(message.contains("HTTP 307"), "{message}");
         assert!(message.contains("different origin"), "{message}");
         assert!(!message.contains("cross-origin-secret"), "{message}");
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(model.status, Some(307));
+        assert!(other.hits().is_empty(), "the other origin was contacted");
+        server.close().await;
+        let server = RedirectServer::start(StatusCode::FOUND, &moved).await;
+        let error = redirect_failure(&server.url, "cross-origin-secret").await;
+        let message = error.to_string();
+        assert!(message.contains(&moved), "{message}");
+        assert!(message.contains("different origin"), "{message}");
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(model.status, Some(302));
         assert!(other.hits().is_empty(), "the other origin was contacted");
         server.close().await;
         other.close().await;
@@ -1011,7 +1279,13 @@ async fn a_same_origin_redirect_chain_stops_at_the_limit() {
         let error = redirect_failure(&server.url, "chain-secret").await;
         let message = error.to_string();
         assert!(message.contains("redirect limit"), "{message}");
-        assert!(message.contains("HTTP 307"), "{message}");
+        let HostError::Failed {
+            model: Some(model), ..
+        } = &error
+        else {
+            panic!("{error:?}");
+        };
+        assert_eq!(model.status, Some(307));
         assert_eq!(server.hits().len(), 11, "ten hops were followed, no more");
         server.close().await;
     })

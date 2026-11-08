@@ -67,7 +67,7 @@ enum Reply {
 
 /// Folds the events `main` holds that `display` has not applied yet.
 async fn catch_up(client: &mut Client, session_id: &str, display: &mut Display) -> Result<u64> {
-    read_history(client, session_id, display.cursor, |value| {
+    read_history(client, session_id, display.cursor, &mut |value| {
         display.event(serde_json::from_value(value)?, true)
     })
     .await

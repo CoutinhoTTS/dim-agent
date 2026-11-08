@@ -3,6 +3,7 @@ use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin, defaults, host::*, tool_registry::definition,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::CtxHost;
@@ -152,7 +153,7 @@ async fn one_tool_panic_does_not_abandon_other_native_cleanup_or_reorder_actual_
     let _ = soon(idle).await.unwrap();
     let _ = soon(session.close()).await;
     assert_eq!(finished.load(Ordering::SeqCst), 1);
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let results = events
         .iter()
         .find_map(|event| match &event.kind {

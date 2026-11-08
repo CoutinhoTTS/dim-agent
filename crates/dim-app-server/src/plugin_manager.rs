@@ -9,11 +9,12 @@ mod record;
 mod tools;
 
 use crate::hooks_settings::HooksService;
-use crate::mcp::McpService;
+use crate::mcp::{McpError, McpService};
 use crate::methods::ManagementMethods;
-use crate::settings::{SettingsService, SourceDeclaration};
+use crate::settings::{SettingsError, SettingsService, SourceDeclaration};
+use crate::ui_extensions::UiExtensions;
 use acquire::PluginsDir;
-use dim_agent_capabilities::methods::{Interruption, MethodDecl, Progress, RpcError};
+use dim_agent_capabilities::methods::{Interruption, MethodCall, MethodDecl, Progress, RpcError};
 use dim_agent_capabilities::skills::{SkillIssue, SkillsCatalog};
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
 pub use record::Defaults;
@@ -135,7 +136,7 @@ pub(crate) struct State {
     record: Mutex<Record>,
     /// Content refusals PluginManager made itself, shared by the startup
     /// owners and every generation of its row (§3.7). In memory only.
-    pub(crate) refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
+    pub(crate) refusals: Arc<Mutex<BTreeMap<(String, Kind), OwnRefusal>>>,
     /// The built-in rows of the assembly.
     builtins: OnceLock<BTreeSet<String>>,
     /// The catalog the runtime started with (§4 `instanceNames`).
@@ -156,9 +157,9 @@ pub(crate) struct StartupLayer {
 
 impl State {
     /// Startup (§3.1), first part: reads `plugins.json` and the default
-    /// configuration file, and registers the `instanceNames` and process
-    /// names of the plugins that may be used with the catalog. `home` is
-    /// canonical.
+    /// configuration file, deletes the copies no entry names (§7), and
+    /// registers the `instanceNames` and process names of the plugins that
+    /// may be used with the catalog. `home` is canonical.
     pub fn read(
         home: &Path,
         files: Option<&Path>,
@@ -176,6 +177,20 @@ impl State {
             *dir = std::fs::canonicalize(&*dir)
                 .map_err(|error| format!("default plugin {name} at {}: {error}", dir.display()))?;
         }
+        let dirs = PluginsDir::new(home);
+        // The one cleanup of a process (§7): the directories of installed
+        // entries are kept and every other copy under `<home>/plugins/<id>/`
+        // is deleted here and nowhere else, so a task that read a
+        // description keeps a directory that exists until the process
+        // exits. Nothing acquires before this runs: no client is admitted
+        // until startup finishes, and a reload of this row acquires
+        // nothing.
+        let keep: Vec<PathBuf> = record
+            .installed
+            .iter()
+            .map(|entry| entry.dir.clone())
+            .collect();
+        dirs.clean(&keep);
         let none = BTreeSet::new();
         for name in names(&record, &defaults, &none) {
             let dir = using(&record, &defaults, &none, &name)
@@ -189,7 +204,7 @@ impl State {
         }
         Ok(Arc::new(Self {
             record_path,
-            dirs: PluginsDir::new(home),
+            dirs,
             files: files.map(Path::to_owned),
             defaults,
             configs: configs.clone(),
@@ -554,7 +569,7 @@ struct Change {
 /// Logs each content refusal of a reconcile at `warn` (§3.7), with the
 /// plugin id, the kind and the error.
 fn log_refused(plugin: &str, outcome: &Outcome) {
-    for (kind, error) in &outcome.refused {
+    for (kind, error, _) in &outcome.refused {
         // The kind's name as the replies show it: its `Serialize`, the one
         // place the names are written.
         let name = serde_json::to_value(kind).unwrap_or_default();
@@ -586,40 +601,83 @@ pub(crate) struct Owners {
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
     hooks: Key<HooksService>,
+    ui: Key<UiExtensions>,
     /// Content refusals PluginManager made itself, by plugin id and kind
     /// (§3.7). In memory only.
-    refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
+    refusals: Arc<Mutex<BTreeMap<(String, Kind), OwnRefusal>>>,
 }
 
 /// The row names of the content owners and the kind each takes.
-const OWNERS: [(&str, Kind); 3] = [
+const OWNERS: [(&str, Kind); 4] = [
     ("SkillsCatalog", Kind::Skills),
     ("Mcp", Kind::Mcp),
     ("HooksSettings", Kind::Hooks),
+    ("UiExtensions", Kind::Ui),
 ];
 
-/// A content refusal: the kind and the error it came with (§3.7).
-type Refusal = (Kind, String);
+/// A content refusal: the kind, the error text its owner reported (§3.7),
+/// and the owner's static reason when the cause has one (A.2). The client
+/// projection reports the reason, or the generic message; the raw text is
+/// kept for logs and the `plugin` tool.
+type Refusal = (Kind, String, Option<&'static str>);
 
-/// What a reply's or `plugin.list`'s `refused` holds (A.1): `{kind, error}`.
+/// PluginManager's own content refusal (§3.7): the raw detail, which names
+/// the path, kept for logs and the `plugin` tool, and the static reason a
+/// client may see (A.2).
+type OwnRefusal = (String, &'static str);
+
+/// Why PluginManager could not read a plugin's content file (§3.7): the
+/// raw detail for logs and the `plugin` tool, and the static reason a
+/// client may see (A.2).
+struct ContentError {
+    detail: String,
+    reason: &'static str,
+}
+
+/// What a reply's or `plugin.list`'s `refused` holds (A.1): `{kind, error}`,
+/// plus the owner's `reason` when the cause has one (A.2). The `reason`
+/// member is internal: the client projection turns it into the error, and
+/// the `plugin` tool drops it.
 fn refused_entries(refusals: &[Refusal]) -> Vec<Value> {
     refusals
         .iter()
-        .map(|(kind, error)| json!({"kind": kind, "error": error}))
+        .map(|(kind, error, reason)| match reason {
+            Some(reason) => json!({"kind": kind, "error": error, "reason": reason}),
+            None => json!({"kind": kind, "error": error}),
+        })
         .collect()
 }
 
 fn refused(kind: Kind, error: impl std::fmt::Display) -> Refusal {
-    (kind, error.to_string())
+    (kind, error.to_string(), None)
+}
+
+/// A refusal an owner reported as a `SettingsError`: it carries the static
+/// reason of its cause when that cause has one (A.2).
+fn refused_settings(kind: Kind, error: &SettingsError) -> Refusal {
+    (kind, error.to_string(), error.reason())
+}
+
+/// A content refusal PluginManager made itself: it carries the static reason
+/// its cause has (A.2).
+fn refused_content(kind: Kind, error: &ContentError) -> Refusal {
+    (kind, error.detail.clone(), Some(error.reason))
 }
 
 /// A plugin's JSON content document at `path` (§3.7): the one read and parse
-/// for every kind whose owner takes one. The error names the path.
-fn read_content(path: &Path) -> Result<Value, String> {
-    std::fs::read(path)
-        .map_err(|error| error.to_string())
-        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
-        .map_err(|error| format!("{}: {error}", path.display()))
+/// for every kind whose owner takes one. The detail names the path; the
+/// reason is PluginManager's own wording and reaches a client (A.2). A
+/// missing file never gets here: `Manifest::read` resolves every content
+/// path and refuses it as `invalid_manifest` first.
+fn read_content(path: &Path) -> Result<Value, ContentError> {
+    let bytes = std::fs::read(path).map_err(|error| ContentError {
+        detail: format!("{}: {error}", path.display()),
+        reason: "the file could not be read",
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| ContentError {
+        detail: format!("{}: {error}", path.display()),
+        reason: "the file is not valid JSON",
+    })
 }
 
 fn skill_issues(issues: Vec<SkillIssue>) -> Option<String> {
@@ -645,13 +703,14 @@ impl Owners {
     pub fn new(
         ctx: Ctx,
         names: &Names<'_>,
-        refusals: Arc<Mutex<BTreeMap<(String, Kind), String>>>,
+        refusals: Arc<Mutex<BTreeMap<(String, Kind), OwnRefusal>>>,
     ) -> rutis::Result<Self> {
         Ok(Self {
             ctx,
             skills: names.key()?,
             mcp: names.key()?,
             hooks: names.key()?,
+            ui: names.key()?,
             refusals,
         })
     }
@@ -683,6 +742,11 @@ impl Owners {
                 Err(error) => tracing::warn!(%error, "Hooks plugin documents unreadable"),
             }
         }
+        if kinds.contains(&Kind::Ui)
+            && let Some(ui) = self.ctx.get_at(&self.ui)
+        {
+            held.extend(ui.plugins());
+        }
         held
     }
 
@@ -698,6 +762,20 @@ impl Owners {
         outcome: &mut Outcome,
     ) {
         let cancel = self.ctx.cancellation_token();
+        if kinds.contains(&Kind::Ui) {
+            match self.ctx.get_at(&self.ui) {
+                Some(ui) => {
+                    if let Err(error) = ui
+                        .register(plugin, &manifest.name, manifest.ui.as_ref())
+                        .await
+                    {
+                        outcome.refused.push(refused(Kind::Ui, error));
+                    }
+                }
+                None if manifest.ui.is_some() => outcome.skipped.push(Kind::Ui),
+                None => {}
+            }
+        }
         if kinds.contains(&Kind::Skills) {
             match (self.ctx.get_at(&self.skills), &manifest.skills) {
                 (None, Some(_)) => outcome.skipped.push(Kind::Skills),
@@ -735,13 +813,16 @@ impl Owners {
                             .register_plugin(plugin.into(), dir.into(), document, &cancel)
                             .await
                         {
-                            outcome.refused.push(refused(Kind::Mcp, error.to_string()));
+                            outcome.refused.push(match &error {
+                                McpError::Settings(error) => refused_settings(Kind::Mcp, error),
+                                _ => refused(Kind::Mcp, &error),
+                            });
                         }
                     }
                     Err(error) => {
                         let _ = mcp.withdraw_plugin(plugin.into(), &cancel).await;
                         self.keep_refusal(plugin, Kind::Mcp, &error);
-                        outcome.refused.push(refused(Kind::Mcp, error));
+                        outcome.refused.push(refused_content(Kind::Mcp, &error));
                     }
                 },
                 (Some(mcp), None) => {
@@ -767,15 +848,13 @@ impl Owners {
                             .register_plugin(plugin.into(), dir.into(), document, &cancel)
                             .await
                         {
-                            outcome
-                                .refused
-                                .push(refused(Kind::Hooks, error.to_string()));
+                            outcome.refused.push(refused_settings(Kind::Hooks, &error));
                         }
                     }
                     Err(error) => {
                         let _ = hooks.withdraw_plugin(plugin.into(), &cancel).await;
                         self.keep_refusal(plugin, Kind::Hooks, &error);
-                        outcome.refused.push(refused(Kind::Hooks, error));
+                        outcome.refused.push(refused_content(Kind::Hooks, &error));
                     }
                 },
                 (Some(hooks), None) => {
@@ -790,6 +869,11 @@ impl Owners {
     /// Withdraws `plugin`'s content of `kinds` from each present owner, and
     /// the refusals that go with it.
     async fn withdraw(&self, plugin: &str, kinds: &[Kind]) {
+        if kinds.contains(&Kind::Ui)
+            && let Some(ui) = self.ctx.get_at(&self.ui)
+        {
+            ui.withdraw(plugin).await;
+        }
         for kind in kinds {
             self.clear_refusal(plugin, *kind);
         }
@@ -814,12 +898,13 @@ impl Owners {
         }
     }
 
-    /// PluginManager's own refusal of `kind` for `plugin` (§3.7).
-    fn keep_refusal(&self, plugin: &str, kind: Kind, error: &str) {
-        self.refusals
-            .lock()
-            .unwrap()
-            .insert((plugin.to_owned(), kind), error.to_owned());
+    /// PluginManager's own refusal of `kind` for `plugin` (§3.7): the raw
+    /// detail and its static reason.
+    fn keep_refusal(&self, plugin: &str, kind: Kind, error: &ContentError) {
+        self.refusals.lock().unwrap().insert(
+            (plugin.to_owned(), kind),
+            (error.detail.clone(), error.reason),
+        );
     }
 
     /// Drops PluginManager's refusal of `kind` for `plugin`: its document
@@ -837,6 +922,11 @@ impl Owners {
     /// `register`: its content is not there to be refused.
     async fn refused(&self, plugin: &str, manifest: &Manifest) -> Vec<Refusal> {
         let mut found = Vec::new();
+        if let Some(ui) = self.ctx.get_at(&self.ui)
+            && let Some(error) = ui.plugin_refusal(plugin)
+        {
+            found.push(refused(Kind::Ui, error));
+        }
         if manifest.skills.is_some()
             && let Some(catalog) = self.ctx.get_at(&self.skills)
         {
@@ -848,29 +938,37 @@ impl Owners {
         if manifest.mcp.is_some()
             && let Some(mcp) = self.ctx.get_at(&self.mcp)
         {
-            let error = self
+            let own = self
                 .refusals
                 .lock()
                 .unwrap()
                 .get(&(plugin.to_owned(), Kind::Mcp))
-                .cloned()
-                .or_else(|| mcp.plugin_refusal(plugin));
-            if let Some(error) = error {
-                found.push(refused(Kind::Mcp, error));
+                .cloned();
+            match own {
+                Some((detail, reason)) => found.push((Kind::Mcp, detail, Some(reason))),
+                None => {
+                    if let Some((error, reason)) = mcp.plugin_refusal(plugin) {
+                        found.push((Kind::Mcp, error, reason));
+                    }
+                }
             }
         }
         if manifest.hooks.is_some()
             && let Some(hooks) = self.ctx.get_at(&self.hooks)
         {
-            let error = self
+            let own = self
                 .refusals
                 .lock()
                 .unwrap()
                 .get(&(plugin.to_owned(), Kind::Hooks))
-                .cloned()
-                .or_else(|| hooks.plugin_refusal(plugin));
-            if let Some(error) = error {
-                found.push(refused(Kind::Hooks, error));
+                .cloned();
+            match own {
+                Some((detail, reason)) => found.push((Kind::Hooks, detail, Some(reason))),
+                None => {
+                    if let Some((error, reason)) = hooks.plugin_refusal(plugin) {
+                        found.push((Kind::Hooks, error, reason));
+                    }
+                }
             }
         }
         found
@@ -1053,7 +1151,7 @@ impl Manager {
                     phase("check");
                     let manifest = acquire::manifest_of(&staging)?;
                     let id = self.new_id(params.id.as_deref(), &manifest)?;
-                    let target = self.state.dirs.clone_dir(&id, &commit)?;
+                    let target = self.state.dirs.acquisition_dir(&id, &commit)?;
                     let dir = staging.place(&self.state.dirs, &target)?;
                     placed = Some(dir.clone());
                     let manifest = Manifest::read(&dir)?;
@@ -1253,11 +1351,6 @@ impl Manager {
         self.state
             .dirs
             .remove_python_link(&python_package(&entry.id));
-        if let Source::Git { .. } = entry.source {
-            self.state
-                .dirs
-                .delete(&self.state.dirs.id_dir(&entry.id)?)?;
-        }
         Ok(json!({}))
     }
 
@@ -1289,8 +1382,17 @@ impl Manager {
                     .expect("a used plugin has a directory")
             }
         };
-        let manifest = Manifest::read(&dir)?;
+        let manifest = match Manifest::read(&dir) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                let plugin = own_id(name, used.as_ref().expect("in use")).expect("not built in");
+                self.owners.withdraw(plugin, &[Kind::Ui]).await;
+                return Err(error);
+            }
+        };
         if manifest.name != name {
+            let plugin = own_id(name, used.as_ref().expect("in use")).expect("not built in");
+            self.owners.withdraw(plugin, &[Kind::Ui]).await;
             return Err(PluginError::new(
                 "name_changed",
                 format!(
@@ -1352,7 +1454,9 @@ impl Manager {
                 }
             }
         }
-        outcome.status = Some(self.status(&row));
+        if manifest.code.is_some() {
+            outcome.status = Some(self.status(&row));
+        }
         Ok(Value::Object(outcome.into_map()))
     }
 
@@ -1415,7 +1519,7 @@ impl Manager {
                 format!("the new commit names {:?}; install it again", manifest.name),
             ));
         }
-        let target = self.state.dirs.clone_dir(&id, &commit)?;
+        let target = self.state.dirs.acquisition_dir(&id, &commit)?;
         let dir = staging.place(&self.state.dirs, &target)?;
         let manifest = match Manifest::read(&dir) {
             Ok(manifest) => manifest,
@@ -1454,7 +1558,6 @@ impl Manager {
         if change.after == Some(Use::Installed(id.clone())) {
             reply = self.switch(&entry.name, change).await.into_map();
         }
-        let _ = self.state.dirs.delete(&entry.dir);
         reply.insert("commit".into(), json!(commit));
         Ok(Value::Object(reply))
     }
@@ -1666,7 +1769,7 @@ fn object(value: Value) -> Map<String, Value> {
 }
 
 /// The content kinds PluginManager registers with owners.
-const CONTENT: [Kind; 3] = [Kind::Skills, Kind::Mcp, Kind::Hooks];
+const CONTENT: [Kind; 4] = [Kind::Skills, Kind::Mcp, Kind::Hooks, Kind::Ui];
 
 fn status_value(loader: &Loader, entry: &EntryInfo) -> Value {
     let pending = || {
@@ -1704,6 +1807,7 @@ pub(crate) struct PluginManagerPlugin {
     skills: Key<SkillsCatalog>,
     mcp: Key<McpService>,
     hooks: Key<HooksService>,
+    ui: Key<UiExtensions>,
     runtimes: Key<crate::runtime_manager::RuntimeService>,
     settings: Key<SettingsService>,
 }
@@ -1718,6 +1822,7 @@ impl PluginManagerPlugin {
             skills: names.key()?,
             mcp: names.key()?,
             hooks: names.key()?,
+            ui: names.key()?,
             runtimes: names.key()?,
             settings: names.key()?,
         })
@@ -1745,22 +1850,13 @@ impl DynPlugin for PluginManagerPlugin {
                     skills: self.skills.clone(),
                     mcp: self.mcp.clone(),
                     hooks: self.hooks.clone(),
+                    ui: self.ui.clone(),
                     refusals: self.state.refusals.clone(),
                 },
                 ctx: ctx.clone(),
                 runtimes: self.runtimes.clone(),
                 settings: self.settings.clone(),
             };
-            let keep: Vec<PathBuf> = manager
-                .state
-                .record
-                .lock()
-                .unwrap()
-                .installed
-                .iter()
-                .map(|entry| entry.dir.clone())
-                .collect();
-            manager.state.dirs.clean(&keep);
             let methods = ctx.require_at(&self.methods)?;
             let handler = manager.clone();
             methods.register(
@@ -1773,7 +1869,8 @@ impl DynPlugin for PluginManagerPlugin {
                         ..MethodDecl::new(name, *name != "plugin.list", Interruption::Report)
                     })
                     .collect(),
-                Arc::new(move |method, params, _stopping, progress| {
+                Arc::new(move |call, _stopping, progress| {
+                    let MethodCall { method, params, .. } = call;
                     let manager = handler.clone();
                     Box::pin(async move {
                         manager

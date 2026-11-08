@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 
 /// The execution switches are user settings read at each process start: with
 /// the sandbox on, a write outside the workspace fails, and the same write
@@ -19,6 +20,8 @@ async fn execution_settings_decide_the_next_process_boundary() {
         .mode(0o700)
         .create(&home)
         .unwrap();
+    let unreadable = home.join("execution.json");
+    std::fs::create_dir(&unreadable).unwrap();
     let native = home.join("rust");
     let work = home.join("work");
     std::fs::create_dir_all(work.join(".dimcode")).unwrap();
@@ -103,8 +106,7 @@ async fn execution_settings_decide_the_next_process_boundary() {
                     .await,
             );
             assert_ok(&client.rpc("session.idle", branch.clone()).await);
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -117,8 +119,6 @@ async fn execution_settings_decide_the_next_process_boundary() {
         }};
     }
 
-    let unreadable = home.join("execution.json");
-    std::fs::create_dir(&unreadable).unwrap();
     let unconfigured = run!(json!({"command":"printf x"}));
     assert_eq!(unconfigured.is_error, Some(true));
     assert_eq!(

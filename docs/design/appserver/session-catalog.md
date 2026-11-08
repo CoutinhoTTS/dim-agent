@@ -18,14 +18,15 @@ complete `context/compaction`, so a listing decodes the whole catalog's history,
 of it before it can draw a row.
 
 The catalog read becomes bounded work. SessionStore keeps a projection of what a listing needs — per Session its last
-activity time, its first user input as the preview, and its workspace — written by the creating transaction and then
-by the transaction that commits each `main` batch. A new built-in, `session.catalog`, pages that projection: 50 rows
+activity time (the time of the newest `main` event that is the Session's own activity, §3.2), its first user input as
+the preview, and its workspace — written by the creating transaction and then by the transaction that commits each
+`main` batch that carries activity. A new built-in, `session.catalog`, pages that projection: 50 rows
 by default, an opaque keyset cursor, and `query`, `cwd` and `withPreview` applied in the query before the page
 boundary. `session.summaries` keeps its contract and reads the same projection, so neither method reads history.
 
 - **Projection.** SessionStore's, written with its batches and from creation; this page owns only how the catalog is
   read (§4).
-- **Method.** `session.catalog {limit?, cursor?, query?, cwd?, withPreview?} -> {sessions, nextCursor?}` (§3.1).
+- **Method.** `session.catalog` with `limit`, `cursor`, `query`, `cwd`, `withPreview` and `includeClosed` (§3.1).
 - **Lease-free.** A listing loads no Session, restores none, and starts no model, tool or MCP server (§3.4).
 - **Clients.** The picker pages, searches on the server and drops a pending read (§6).
 
@@ -46,26 +47,28 @@ It does not own:
 
 ### 3.1 `session.catalog`
 
-`session.catalog {limit?, cursor?, query?, cwd?, withPreview?} -> {sessions: SessionSummary[], nextCursor?: string}`
+`session.catalog {limit?, cursor?, query?, cwd?, withPreview?, includeClosed?} -> {sessions: SessionSummary[], nextCursor?: string}`
 
 | Item | Rule |
 | --- | --- |
 | Kind | Rpc built-in. Agents answers it from the catalog projection, joined with the `agent_sessions` rows and the title metadata; Rpc validates the envelope |
 | Protocol | v3. v1 and v2 reply `unknown_method` ("Method requires protocol v3"), as they do for `session.summaries` |
-| Discovery | `hello.features` lists it only while a native store is open, the condition `session.fork` uses, so a client that does not see it keeps using `session.summaries`. Without a store there is no projection to page, and `session.summaries` answers from the loaded Sessions as today (§3.3). `session.catalog.workspaces` is listed beside it, under the same condition, and tells a client that `cwd` accepts a set |
+| Discovery | `hello.features` lists it only while a native store is open, the condition `session.fork` uses, so a client that does not see it keeps using `session.summaries`. Without a store there is no projection to page, and `session.summaries` answers from the loaded Sessions as today (§3.3). `session.catalog.workspaces` and `session.catalog.includeClosed` are listed beside it, under the same condition: the first tells a client that `cwd` accepts a set, and the second that it accepts `includeClosed` |
 | `limit` | 1 to 200, default 50. A larger one is rejected, not clamped, as `history`'s `limit` is |
-| `cursor` | Opaque. It encodes the last returned row's `(updatedAt, sessionId)` and a digest of the request's `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions`; it pages by keyset, and a client echoes it back unchanged. `cwd` enters the digest as its canonical set: `"a"` and `["a"]` are one filter, and so are `["a","b"]` and `["b","a"]`. It is not a Session id |
+| `cursor` | Opaque. It encodes the last returned row's `(updatedAt, sessionId)` and a digest of the request's `query`, `cwd`, `withPreview`, `withInternal`, `withAcpSessions` and `includeClosed`; it pages by keyset, and a client echoes it back unchanged. `cwd` enters the digest as its canonical set: `"a"` and `["a"]` are one filter, and so are `["a","b"]` and `["b","a"]`. It is not a Session id |
 | Order | `updatedAt` descending, then `sessionId` ascending |
 | `query` | Case-insensitive, literal substring match over the four fields the picker searches today — the Session id, the workspace, the model id and the preview — plus the title and the provider id, which its search text never holds. At query time a SQL function the store registers on its connection lowercases the query and each field with `str::to_lowercase`, the picker's fold; the match is `instr(fold(field), fold(query)) > 0` field by field, so it is literal and `%` and `_` match only themselves. It is applied in the catalog query before the page boundary. The model is read from the stored Session config, the value `session.summaries` reports, so the query decodes no event |
 | `cwd` | Exact match on the workspace, applied before the page boundary. A string selects one workspace; a non-empty array of strings selects any of them, deduplicated and held in path order. An empty array, or an element that is not a string, is refused `invalid_params` |
 | `withPreview` | Boolean, default `false`. `true` keeps only rows whose preview is not NULL, applied before the page boundary, so a client that hides preview-less rows receives a full page of rows it shows; the projection's partial index over previews keeps that read bounded ([native storage format](native-storage-format.md#556-v23-格式决定)) |
 | `withInternal` | Boolean, default `false`. `true` lists the Sessions whose origin is `internal`; `false` drops them, applied before the page boundary. What the class means and who writes it: [Session classification](session-classification.md#35-catalog-visibility) |
 | `withAcpSessions` | Boolean, default `false`. `true` lists the Sessions whose origin is `acp`; `false` drops them, applied before the page boundary. A Session of an unknown origin (`unknown`) is always listed |
-| Reply | `SessionSummary` entries, the shape `session.summaries` returns: a `SessionInfo` record — `origin` and `parentSessionId` among its fields ([Session classification](session-classification.md#33-reported-fields)) — with `preview`, `updatedAt` and `closed`, false here because this query leaves closed Sessions out (§3.3). `nextCursor` is absent on the last page |
+| `includeClosed` | Boolean, default `false`, with the meaning `session.summaries` gives it (§3.3): `true` removes the process-local closed filter and marks a closed Session's row `closed: true`. It is part of the cursor's filter set |
+| Reply | `SessionSummary` entries, the shape `session.summaries` returns: a `SessionInfo` record — `origin` and `parentSessionId` among its fields ([Session classification](session-classification.md#33-reported-fields)) — with `preview`, `updatedAt` and `closed`, false for a Session this daemon did not close (§3.3). `nextCursor` is absent on the last page |
 
 A `cursor` that does not decode, or whose digest does not match the request's `query`, `cwd`, `withPreview`,
-`withInternal` and `withAcpSessions`, is rejected as `invalid_params` rather than treated as the first page, so a client
-cannot silently read the catalog from the start again, or continue one filter set by the key of another. `cwd`
+`withInternal`, `withAcpSessions` and `includeClosed`, is rejected as `invalid_params` rather than treated as the
+first page, so a client cannot silently read the catalog from the start again, or continue one filter set by the key
+of another. `cwd`
 compares there as its canonical set: a one-element list and a single workspace are the same filter, and so are two
 orders of one set. A cursor is not
 tagged with a store: one taken from another store's catalog cannot be told apart, and needs no check, because it only
@@ -87,9 +90,18 @@ The order is the projection's activity time, newest first, with the Session id b
 contiguous run of one total order and the same store always pages the same way. The cursor is the last row's key, not
 a position: a Session that becomes active between two pages moves to the first page, and the later pages neither
 repeat nor skip any other Session. It also carries the filters it was taken under (§3.1), so a page boundary can be
-continued only by the same `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions`. A set of workspaces
-pages across its Sessions in that one order; its cursor continues under the same set in any order, and under no other
-set or single workspace. A single workspace's cursor continues under that workspace written as a one-element list.
+continued only by the same `query`, `cwd`, `withPreview`, `withInternal`, `withAcpSessions` and `includeClosed`. A set
+of workspaces pages across its Sessions in that one order; its cursor continues under the same set in any order, and
+under no other set or single workspace. A single workspace's cursor continues under that workspace written as a one-element list.
+
+**The activity time is the Session's own activity on `main`.** It is the `create_at` of the newest `main` event that
+is the Session's own activity: a user `input/message`, a `turn/end`, a `branch/create` (it records the branch prompt
+on the parent) or a `session/forked`. Everything else is housekeeping — a host-injected `input/message` (no user
+part), `branch/resume`, `branch/start`, `branch/ended`, `branch/end`, `branch/create-failed`, every
+`context`/`prompt`/`model`/`step`/`tool`/`approval`/`stop`/`exec`/`permission`/`collaboration` event, and extension
+events — and does not move the row. A Session with no activity event sits at its creation time. The judgement lives
+once, beside the projection code, and every writer of the projection uses it; a daemon without a store applies the
+same selection in `session.summaries` (§3.3), so the two listings cannot disagree.
 
 ### 3.3 `session.summaries`
 
@@ -106,13 +118,24 @@ clients on a daemon older than this change list; both stay working because the m
 `session/close`, keeps its stored rows but stays out of every catalog read: the admission slot's closed flag
 ([idle unload §6.4](idle-unload.md#64-admission-slots)) filters the same catalog query, so a resume picker never
 offers a Session this daemon refuses to attach. Cleanup reads stored data, which such a Session still has, so
-`session.summaries` takes `includeClosed?: boolean`, default `false`. When it is `true`, the same query runs without
-the closed filter and each summary of a closed Session carries `closed: true`; every summary carries `closed`, false
-for a Session this daemon did not close. One read answers either way: the flag removes a condition of the query
-rather than adding a second one. An App Server before this parameter refuses it `invalid_params`
-(`deny_unknown_fields`), so a client that needs the closed rows re-reads once without it. A daemon without a store
-answers from its loaded Sessions as before, with the same `closed` fact from the slot.
+`session.summaries` and `session.catalog` take `includeClosed?: boolean`, default `false`, with the same meaning.
+When it is `true`, the same query runs without the closed filter and each row of a closed Session carries
+`closed: true`; every row carries `closed`, false for a Session this daemon did not close. One read answers either
+way: the flag removes a condition of the query rather than adding a second one. An App Server before this parameter
+refuses it `invalid_params` (`deny_unknown_fields`), so a client that needs the closed rows re-reads once without it.
+A daemon without a store answers `session.summaries` from its loaded Sessions as before, with the same `closed` fact
+from the slot; it lists no catalog (§3.1). `session.catalog` advertises `session.catalog.includeClosed` once it
+accepts the member.
 
+The closed fact is process-local ([idle unload §6.4](idle-unload.md#64-admission-slots); [session deletion and fork
+D5](session-deletion-and-fork.md#16-design-changes-in-implementation)): a restart begins with no closed flags, so the
+default read lists every Session again and no row carries `closed: true`. A client cannot read back a close that a
+previous process made, and the catalog does not make the flag durable.
+
+The flag is part of the cursor's filter set: a cursor continues only under the filters it was taken under, so one
+taken with `includeClosed` is refused by a read without it, and the reverse. Adding the flag to the digest also
+refuses, once, every cursor an earlier daemon issued, including one taken with the default: cursors are opaque and
+do not outlive the daemon's filter set, so a client reads the first page again.
 
 **The preview keeps today's rule, its batch-complete window included.** The window is the batches that start within
 the first 256 `main` events, and it is batch-complete as today's read is: the batch that holds sequence 256 is read
@@ -166,7 +189,7 @@ Timeline: the catalog is display data for a picker, which
 
 | Dependency | What this part requires |
 | --- | --- |
-| SessionStore catalog projection | One row per Session with the last activity time, the preview and the workspace, written by the creation transaction with the creation time and no preview, kept by the transaction of every later `main` batch, and absent for a Session that does not exist: the row is 1:1 with `agent_sessions` from creation, so a new Session lists as `session.summaries` lists it today |
+| SessionStore catalog projection | One row per Session with the last activity time, the preview and the workspace, written by the creation transaction with the creation time and no preview, kept by the transaction of every later `main` batch that carries activity (§3.2), and absent for a Session that does not exist: the row is 1:1 with `agent_sessions` from creation, so a new Session lists as `session.summaries` lists it today |
 | Stored Session record (`agent_sessions`) | The creation origin and the leader link of every listed Session, read from the row the query joins, and the filter of §3.5 ([Session classification](session-classification.md#31-the-origin)) |
 | [Title metadata](session-title-metadata.md) | The stored title of a Session, joined for display and for `query`, never read from a Session |
 | `hello.features` (App Server) | The method list a client discovers the catalog through: the catalog is listed under the conditions that list `session.summaries`, plus the native-store condition `session.fork` also requires |
@@ -216,7 +239,7 @@ page boundary. The CLI's `/resume` owns its scopes and the key that cycles them
 | --- | --- | --- | --- |
 | C1 | The cursor is opaque and pages by keyset on `(updatedAt, sessionId)` | Offset paging with `offset` or `skip` | An insert shifts every later row, so an offset page repeats or skips Sessions the client already showed |
 | C2 | A new built-in, `session.catalog` | Adding `limit` and `cursor` to `session.summaries` in place | Its reply is an array; changing it breaks every protocol v3 client of that method, and an array has no page boundary to keep |
-| C3 | The preview and the activity time are read from the projection | Computing them per request from history | That is the cost this design removes: it reads every Session's history, and an imported Session's last event is a complete compaction replacement |
+| C3 | The preview and the activity time are read from the projection, the activity time as the newest `main` event of the Session's own activity (§3.2) | Computing them per request from history | That is the cost this design removes: it reads every Session's history, and an imported Session's last event is a complete compaction replacement |
 | C4 | `query` and `cwd` are applied in the catalog query | Filtering the rows the client already loaded | It hides matches on pages the client has not fetched |
 | C5 | `session.summaries` keeps its contract and reads the same projection | Leaving it on the history read; removing it | It is how a client lists without the new method, and once the projection answers both, keeping its contract costs nothing |
 | C6 | Neither method takes a Session lease | One lease per listed Session | A lease restores and pins every listed Session; the projection, and the process's live state for `running` and `attachedClients`, answer without one |
@@ -267,15 +290,18 @@ page boundary. The CLI's `/resume` owns its scopes and the key that cycles them
   preview; all apply before the page boundary.
 - A `%` or `_` in `query` matches only that character.
 - A page with `withPreview` returns `limit` rows even when many preview-less Sessions precede them in the order.
-- A cursor returned for one combination of `query`, `cwd`, `withPreview`, `withInternal` and `withAcpSessions` is
-  rejected as `invalid_params` when replayed with another.
+- A cursor returned for one combination of `query`, `cwd`, `withPreview`, `withInternal`, `withAcpSessions` and
+  `includeClosed` is rejected as `invalid_params` when replayed with another.
 - A page with a two-workspace `cwd` lists both workspaces' Sessions in the stated order, and paging with a small
   `limit` crosses from one workspace into the other.
 - A cursor taken under a `cwd` set is accepted under the same set in another order, and refused under any other set or
   single workspace; a cursor taken under a single workspace is accepted under that workspace written as a one-element
   list.
 - An empty `cwd` array, and an array with an element that is not a string, are refused `invalid_params`.
-- A daemon with a native store advertises `session.catalog.workspaces` beside `session.catalog`.
+- A daemon with a native store advertises `session.catalog.workspaces` and `session.catalog.includeClosed` beside
+  `session.catalog`.
+- `includeClosed` lists a Session this daemon closed with `closed: true`, and the default read leaves it out; a read
+  after a restart on the same store lists it again with no closed mark.
 - A page holds rows of the classes it asked for: with 60 internal Sessions newer than 50 conversations, a 50-row page
   with `withInternal` off holds 50 conversations, and paging returns the rest exactly once; `withAcpSessions` behaves
   the same for ACP rows, and `unknown` rows are always listed.

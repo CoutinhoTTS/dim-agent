@@ -9,7 +9,9 @@ pub(crate) const SERVER_REQUIREMENT: &str = "--server must name a standalone dim
 pub const HELP: &str = "dimcode [OPTIONS]\n\n\
 Pure Rust scrollback client. With redirected stdin, run one prompt and exit.\n\n\
 Commands:\n\
-  tui                              Open the interactive scrollback client\n\
+  tui [-p TEXT] [--image PATH ...]\n\
+                                   Open the interactive scrollback client;\n\
+                                   -p sends TEXT as its first message\n\
   acp [--agent ID]                  Serve ACP over stdin/stdout\n\
   exec [-p TEXT] [--image PATH ...] [--json] [--permission PRESET]\n\
                                    Run text and/or local images and exit\n\
@@ -51,6 +53,16 @@ Commands:\n\
   mcp disable ID                   Disable it; an unlisted ID withdraws only\n\
                                    this workspace's stored enablement\n\
   mcp add PATH                     Create an entry from PATH, or from stdin for -\n\
+  mcp import PATH [--yes]          Preview a standard mcpServers document; with\n\
+                                   --yes, import the entries the flags select:\n\
+                                   --replace ID, --rename OLD=NEW and --only ID.\n\
+                                   --source user|project picks the writable\n\
+                                   source (default: user)\n\
+  mcp import --from ID [--yes]     The same preview and import from one known\n\
+                                   store of another local client\n\
+  mcp import --discover [--cwd DIR]\n\
+                                   List those stores with their states; no\n\
+                                   value is printed\n\
   mcp edit ID                      Edit an entry's patch in the editor\n\
   mcp set ID PATH                  Write an entry's patch from PATH,\n\
                                    or from stdin for -\n\
@@ -58,6 +70,10 @@ Commands:\n\
   mcp test ID                      Probe a stored entry and list its tools\n\
   mcp inspect ID                   Show an entry's effective configuration\n\
   mcp disconnect ID                Close an entry's live connections\n\
+  mcp ... ID [--source SOURCE]     Every mcp command that names one stored\n\
+                                   entry takes it: user, project or plugin, as\n\
+                                   mcp list prints it; an ID more than one\n\
+                                   source lists needs it\n\
   skills list                      List Skills, their sources and states\n\
   skills enable|disable ID         Turn one Skill on or off\n\
   skills reload                    Rescan this workspace's Skills\n\
@@ -91,9 +107,45 @@ Commands:\n\
                                    or from stdin for -\n\
   workflow start NAME [PATH]       Start a definition with parameters from PATH\n\
   workflow history NAME            List a definition's recent runs\n\
+  modality                         List every Modality category and\n\
+                                   operation with its availability, its\n\
+                                   reasons and its default and effective\n\
+                                   model; --json prints the snapshot\n\
+  modality set-default <category>[.<operation>] <provider>/<model>\n\
+                                   Set one operation's default model\n\
+  modality set-default <category>[.<operation>] --clear\n\
+                                   Clear it, restoring automatic resolution\n\
+  modality task list [--state S] [--category C] [--limit N] [--after ID]\n\
+                                   List Modality tasks, newest first\n\
+  modality task status ID          Print a task's state, progress and files\n\
+  modality task wait ID [--out DIR]\n\
+                                   Wait for a task; write its results with --out\n\
+  modality task cancel ID          Cancel a task\n\
+  image generate|edit PROMPT [FILE...] [--mask PATH]\n\
+  image enhance MODE [FILE...]     Submit an image task\n\
+  video generate|edit|enhance PROMPT [FILE...]\n\
+  speech synthesize TEXT\n\
+  speech transcribe FILE\n\
+  music|audio|motion generate PROMPT\n\
+  asset generate PROMPT [FILE...]\n\
+                                   Submit a task and write its results to\n\
+                                   --out (the current directory by default);\n\
+                                   --no-wait prints the task id only\n\
+  ocr FILE [--output-mode text|layout] [--out DIR]\n\
+                                   Recognize the text of an image or PDF;\n\
+                                   a short text prints inline and writes\n\
+                                   nothing, a longer one is written\n\
+                                   --param KEY=VALUE passes one adapter\n\
+                                   parameter: JSON when it parses as JSON,\n\
+                                   a string otherwise, so a string that\n\
+                                   would parse as JSON is written quoted\n\
+                                   (--param 'label=\"true\"')\n\
   recording [on|off]               Record model requests to the home's\n\
                                    model-log/recordings.jsonl; prompts, code\n\
                                    and tool output are written there\n\
+  realtime [--operation voice] [--model PROVIDER/MODEL]\n\
+                                   Open a realtime session; stdin lines are\n\
+                                   text frames and events print as JSON lines\n\
   plugin list                      List plugins by name, the one in use and its status\n\
   plugin install PATH|GIT_URL [--ref R] [--id ID] [--no-enable]\n\
                                    Install a plugin and turn it on\n\
@@ -103,7 +155,7 @@ Commands:\n\
   plugin update ID                 Load the latest commit of a Git plugin\n\
   plugin remove ID\n\
   runtime list                     List the plugin runtimes and their state\n\
-  runtime install node|python      Turn a plugin runtime on and acquire it\n\
+  runtime install node|python|uv   Turn a plugin runtime on and acquire it\n\
   runtime config NAME              Set a runtime's --source or --auto and apply it\n\
   daemon stop                      Gracefully stop an existing daemon\n\
   daemon vacuum [--database PATH]  Rewrite an offline database to reclaim\n\
@@ -121,8 +173,11 @@ Commands:\n\
 web --off                        Turn off the daemon-owned Web switch
 web install                      Install this version's Web workspace\n\
 Options:\n\
-  -p, --prompt TEXT                Run one prompt and exit\n\
-  --image PATH                     Add a local image to exec (repeatable)\n\
+  -p, --prompt TEXT                The prompt: exec runs it and exits; tui\n\
+                                   sends it as the first message of an\n\
+                                   interactive session\n\
+  --image PATH                     Add a local image to exec, or to the tui\n\
+                                   first message (repeatable)\n\
   --resume SESSION_ID              Attach and continue a persisted session\n\
   --home PATH                      Product home (default: ~/.dimcode)\n\
   --cwd PATH                       Workspace (default: current directory)\n\
@@ -132,11 +187,61 @@ Options:\n\
                                    the default runs this executable's\n\
                                    app-server subcommand\n\
   --model-config PATH              Explicit API-key model configuration\n\
-  --provider ID --model ID         Model selection for a new session\n\
+  --model ID [--provider ID]        Temporary model selection (also on resume)\n\
+  --effort LEVEL                   Temporary reasoning effort (also on resume)\n\
+  --autocompact auto|TOKENS         Temporary compaction window (k/m suffixes)\n\
   --permission PRESET              read-only, workspace-write or full-access for a\n\
                                    new session, or for the resumed main branch\n\
   -h, --help                       Show this help without starting a daemon\n\
   -V, --version                    Show version without starting a daemon\n\n\
+Model startup:\n\
+  --model ID overrides DIM_MODEL; --provider optionally names a configured\n\
+    Provider. A bare ID uses the effective Provider or an unambiguous match.\n\
+  --effort LEVEL overrides DIM_EFFORT_LEVEL, then the model's saved effort.\n\
+    LEVEL must be supported by the selected Provider model; service tier is\n\
+    preserved and the override is not saved as a model preference.\n\
+  DIM_BASE_URL + DIM_API_FORMAT select a Session-local direct connection.\n\
+    Both are required; they conflict with --provider and --model-config.\n\
+    A new Session also requires --model or DIM_MODEL; resume can retain its ID.\n\
+    DIM_API_FORMAT: anthropic, openai-chat, openai-responses, openai-compatible,\n\
+      gemini, xai or xai-responses. DIM_BASE_URL may include a gateway prefix.\n\
+  DIM_API_KEY uses x-api-key (anthropic), x-goog-api-key (gemini), or Bearer\n\
+    (other formats). DIM_AUTH_TOKEN uses Bearer for any format. Set at most one.\n\
+  DIM_CUSTOM_HEADERS is newline-separated Name: Value, split at the first colon.\n\
+    Names are case-insensitive; duplicates and generated auth conflicts fail.\n\
+    Credentials and headers require direct mode; anonymous gateways are allowed.\n\
+  DIM_MAX_CONTEXT_TOKENS and DIM_MAX_OUTPUT_TOKENS declare positive capacities\n\
+    up to 9007199254740991; the request output allowance is derived from them.\n\
+  --autocompact overrides DIM_AUTO_COMPACT_WINDOW: auto or a positive count,\n\
+    optionally suffixed k/m (1000/1000000). This is not the model capacity.\n\
+  Effort, autocompact and capacity startup controls require the product Provider\n\
+    and cannot be used with --model-config; set API-key generation settings\n\
+    in that configuration file instead.\n\
+  Model overrides with --model-config require --provider, including on resume.\n\
+  Startup overrides apply before the first input, including on resume, without\n\
+    changing saved Providers, preferences, defaults or the daemon environment.\n\
+    Explicit overrides force complete configuration inheritance for new work.\n\
+    DIM_* startup inputs are ignored by help, version and management commands.\n\
+  Examples (keep secrets in the environment, not command arguments):\n\
+    dimcode exec --model model-id --effort high --autocompact 128k -p 'Hello'\n\
+    DIM_BASE_URL=https://gateway.example/prefix DIM_API_FORMAT=openai-chat \\\n\
+      DIM_MODEL=model-id dimcode exec -p 'Hello'\n\
+    dimcode exec resume SESSION_ID --effort low --autocompact auto -p 'Continue'\n\
+  To supply an API connection, use --model-config PATH with a JSON file:\n\
+    defaultModel: {providerId, modelId}; providers: [{id, kind, baseUrl,\n\
+      apiKeyEnv, headers, models: [{id, contextWindow, maxOutputTokens, config}]}].\n\
+  kind selects the API format, not the model name: anthropic, openai-responses,\n\
+    openai-chat, openai-compatible, gemini, xai or xai-responses.\n\
+  baseUrl is the API base URL; the selected format supplies the request path.\n\
+  apiKeyEnv names an environment variable, not the key itself. Keys use\n\
+    x-api-key for anthropic, x-goog-api-key for gemini, or Bearer otherwise.\n\
+  headers is a JSON object for additional request headers, including gateway\n\
+    authentication when needed. Keep credentials out of command arguments.\n\
+  Each model requires contextWindow, maxOutputTokens and config.maxTokens:\n\
+    the total context capacity, output capacity and request output budget.\n\
+  The daemon inherits its launch environment; a later client's environment\n\
+    does not update it. Use a separate --home for a different model config.\n\
+  Example: dimcode --home /path/to/isolated-home --model-config model.json\n\n\
 Ctrl+C stops a running turn and waits for settlement; idle Ctrl+C or EOF exits.\n\
 Without -p, exec reads redirected stdin through EOF, including with --image.\n\
 Idle commands: /export <markdown|json> PATH, /rename TITLE|--clear, /exit.\n\
@@ -160,13 +265,43 @@ Account commands sign in to every Provider the daemon describes with a login\n\
   method. A build without the Dim account provider says so and offers API-key\n\
   Providers instead.\n\
 Exit codes: 0 success, 1 configuration/transport error, a delete that removed\n\
-            nothing or a cleanup in which a delete failed, 2 model/turn\n\
-            failure, 3 interactive approval or answer required, 130\n\
-            interrupted.\n";
+            nothing, a cleanup in which a delete failed or a result file that\n\
+            already exists, 2 model/turn failure or a failed Modality task,\n\
+            3 interactive approval or answer required, 130 interrupted.\n";
+
+/// What `dimcode modality task` names.
+const USAGE_TASK: &str = "Use modality task list | status ID | wait ID [--out DIR] | cancel ID";
+
+/// What `dimcode modality` names.
+const USAGE_MODALITY: &str = "Use modality, modality set-default \
+<category>[.<operation>] <provider>/<model> | --clear, or modality task";
 
 /// What `dimcode session` names besides `export`.
 const USAGE_SESSION: &str =
     "Use session export, session rename, session delete or session cleanup; see --help";
+
+/// `mcp import PATH`, `mcp import --from ID` or `mcp import --discover`:
+/// preview a standard `mcpServers` document and, with `--yes`, apply the
+/// entries the flags select. With `--from`, the owner reads one known store of
+/// another local client and its text never reaches the client. Every status
+/// and refusal comes from the owner.
+#[derive(Clone, Debug)]
+pub struct McpImport {
+    /// The document, or `-` for stdin; absent with `--from` and `--discover`.
+    pub path: Option<String>,
+    /// List the known stores instead of previewing one.
+    pub discover: bool,
+    /// One known store id instead of a file.
+    pub from: Option<String>,
+    /// Apply the selected entries after the preview.
+    pub yes: bool,
+    /// Entries whose resolution replaces the target source's entry.
+    pub replace: Vec<String>,
+    /// `OLD=NEW` resolutions that write the entry under a new id.
+    pub rename: Vec<(String, String)>,
+    /// The only ids the import accepts; every other entry is skipped.
+    pub only: Vec<String>,
+}
 
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -225,6 +360,7 @@ pub enum Action {
         enabled: bool,
     },
     McpDisconnect(String),
+    McpImport(McpImport),
     /// `<area> ...`: one request to a management area's owner.
     Management(crate::model::session::ManagementRequest),
     /// `<area> edit [ID]`: the area's document in the external editor, or one
@@ -261,6 +397,12 @@ pub enum Action {
         method: String,
         params: serde_json::Value,
     },
+    /// `modality ...`: one Modality command (Modality A.5).
+    Modality(crate::modality::Command),
+    /// `realtime`: one realtime session, with the operation to open.
+    Realtime {
+        operation: Option<String>,
+    },
     /// `runtime list`: the plugin runtimes and their state.
     RuntimeList,
     /// `runtime install NAME`: turn a plugin runtime on and acquire it.
@@ -289,13 +431,6 @@ pub enum Action {
     },
     Help,
     Version,
-}
-
-/// The registration a hosted leaf `Tui` is (Tui design §3.6).
-#[derive(Clone, Debug)]
-pub struct UiIdentity {
-    pub ui_id: String,
-    pub token: String,
 }
 
 /// The workspace every request names: the launch directory, resolved once as
@@ -327,6 +462,26 @@ impl Workspace {
     }
 }
 
+/// The flags a Modality command takes (Modality A.5).
+#[derive(Clone, Debug, Default)]
+pub struct ModalityFlags {
+    /// `--out DIR`: where results are written; the current directory when
+    /// absent.
+    pub out: Option<PathBuf>,
+    /// `--no-wait`: stop after the submission and print the id.
+    pub no_wait: bool,
+    /// `task list --state STATE`: one task state.
+    pub state: Option<String>,
+    /// `task list --category CATEGORY`: one category.
+    pub category: Option<String>,
+    /// `task list --limit N`: at most N tasks; the daemon's default otherwise.
+    pub limit: Option<u64>,
+    /// `task list --after ID`: the page after this task.
+    pub after: Option<String>,
+    /// `ocr --output-mode text|layout`: what `ocr.recognize` returns.
+    pub output_mode: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Options {
     pub action: Action,
@@ -336,6 +491,8 @@ pub struct Options {
     pub resume: Option<String>,
     pub home: PathBuf,
     pub home_explicit: bool,
+    /// The flags of a Modality command (A.5).
+    pub modality: ModalityFlags,
     /// The launch directory: where the daemon starts and what the client's
     /// own file system work resolves against. Requests carry [`Self::workspace`]
     /// instead.
@@ -347,14 +504,11 @@ pub struct Options {
     pub model_config: Option<PathBuf>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
+    pub startup: Option<serde_json::Value>,
     pub permission: Option<PermissionPreset>,
     pub directory: Option<String>,
     pub device: bool,
-    /// Set only for a hosted leaf `Tui`.
-    pub ui_identity: Option<UiIdentity>,
-    /// The hosted leaf's Session was created by this invocation, so `resume`
-    /// names a new Session rather than one the user chose to resume.
-    pub created_session: bool,
     /// Use the scrollback client instead of the full terminal UI.
     pub no_tui: bool,
     /// Terminal UI mode for this run; `None` uses the saved default.
@@ -370,6 +524,10 @@ pub struct Options {
     pub redirect_uri: String,
     pub no_browser: bool,
     pub client_secret: bool,
+    /// The source an `mcp` command that names one stored entry settles:
+    /// `user`, `project` or `plugin`, as `mcp list` prints it. Without it the
+    /// id is that entry only when one source lists it.
+    pub mcp_source: Option<String>,
 }
 
 impl Options {
@@ -382,17 +540,18 @@ impl Options {
             resume: None,
             home: default_home(),
             home_explicit: false,
+            modality: ModalityFlags::default(),
             cwd: std::env::current_dir()?,
             workspace: None,
             server: None,
             model_config: None,
             provider: None,
             model: None,
+            effort: None,
+            startup: None,
             permission: None,
             directory: None,
             device: false,
-            ui_identity: None,
-            created_session: false,
             no_tui: false,
             fullscreen: None,
             refresh: false,
@@ -404,9 +563,12 @@ impl Options {
             redirect_uri: "http://localhost:54321/auth/callback".into(),
             no_browser: false,
             client_secret: false,
+            mcp_source: None,
         };
         let mut args = args.peekable();
         let mut export_format = false;
+        let mut autocompact = None;
+        let mut source = None;
         while let Some(arg) = args.next() {
             let value = |args: &mut dyn Iterator<Item = String>| -> Result<String> {
                 args.next()
@@ -433,14 +595,11 @@ impl Options {
                 }
                 "--json" => options.json = true,
                 "--source" => {
-                    let Action::Migration(command) = &mut options.action else {
-                        return Err("--source requires migration".into());
-                    };
-                    if command
-                        .source
-                        .replace(PathBuf::from(value(&mut args)?))
-                        .is_some()
-                    {
+                    // What the value names is decided once the command is
+                    // known: a migration's old home, or the source an `mcp`
+                    // command's entry is in. The flag may stand on either
+                    // side of the command's own words.
+                    if source.replace(value(&mut args)?).is_some() {
                         return Err("Supply --source only once".into());
                     }
                 }
@@ -481,11 +640,79 @@ impl Options {
                         return Err("Supply the database path only once".into());
                     }
                 }
-                "--clear" => {
-                    let Action::SessionRename { clear, .. } = &mut options.action else {
-                        return Err("--clear requires session rename".into());
+                "--clear" => match &mut options.action {
+                    Action::SessionRename { clear, .. } => *clear = true,
+                    Action::Modality(crate::modality::Command::SetDefault { clear, .. }) => {
+                        *clear = true;
+                    }
+                    _ => {
+                        return Err(
+                            "--clear requires session rename or modality set-default".into()
+                        );
+                    }
+                },
+                "--out" => {
+                    let Action::Modality(command) = &options.action else {
+                        return Err("--out requires a submission, modality task wait or ocr".into());
                     };
-                    *clear = true;
+                    if !matches!(
+                        command,
+                        crate::modality::Command::TaskWait { .. }
+                            | crate::modality::Command::Ocr { .. }
+                    ) {
+                        return Err("--out requires a submission, modality task wait or ocr".into());
+                    }
+                    options.modality.out = Some(PathBuf::from(value(&mut args)?));
+                }
+                "--no-wait" => {
+                    let Action::Modality(crate::modality::Command::Ocr { .. }) = &options.action
+                    else {
+                        return Err("--no-wait requires a submission or ocr".into());
+                    };
+                    options.modality.no_wait = true;
+                }
+                "--output-mode" => {
+                    let Action::Modality(crate::modality::Command::Ocr { .. }) = &options.action
+                    else {
+                        return Err("--output-mode requires ocr".into());
+                    };
+                    let mode = value(&mut args)?;
+                    if mode != "text" && mode != "layout" {
+                        return Err(format!("--output-mode is text or layout, not {mode}").into());
+                    }
+                    options.modality.output_mode = Some(mode);
+                }
+                "--state" => {
+                    let Action::Modality(crate::modality::Command::TaskList) = &options.action
+                    else {
+                        return Err("--state requires modality task list".into());
+                    };
+                    options.modality.state = Some(value(&mut args)?);
+                }
+                "--category" => {
+                    let Action::Modality(crate::modality::Command::TaskList) = &options.action
+                    else {
+                        return Err("--category requires modality task list".into());
+                    };
+                    options.modality.category = Some(value(&mut args)?);
+                }
+                "--limit" => {
+                    let Action::Modality(crate::modality::Command::TaskList) = &options.action
+                    else {
+                        return Err("--limit requires modality task list".into());
+                    };
+                    let limit = value(&mut args)?;
+                    options.modality.limit =
+                        Some(limit.parse().map_err(|_| {
+                            format!("--limit takes a number of tasks, not {limit}")
+                        })?);
+                }
+                "--after" => {
+                    let Action::Modality(crate::modality::Command::TaskList) = &options.action
+                    else {
+                        return Err("--after requires modality task list".into());
+                    };
+                    options.modality.after = Some(value(&mut args)?);
                 }
                 "--older-than" => {
                     let value = parse_age(&value(&mut args)?)?;
@@ -505,11 +732,49 @@ impl Options {
                         return Err("Supply --keep only once".into());
                     }
                 }
-                "--yes" => {
-                    let Action::SessionCleanup { yes, .. } = &mut options.action else {
-                        return Err("--yes requires session cleanup".into());
+                "--yes" => match &mut options.action {
+                    Action::SessionCleanup { yes, .. } => *yes = true,
+                    Action::McpImport(import) => import.yes = true,
+                    _ => return Err("--yes requires session cleanup or mcp import".into()),
+                },
+                "--discover" => {
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--discover requires mcp import".into());
                     };
-                    *yes = true;
+                    import.discover = true;
+                }
+                "--from" => {
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--from requires mcp import".into());
+                    };
+                    if import.from.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --from only once".into());
+                    }
+                }
+                "--replace" => {
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--replace requires mcp import".into());
+                    };
+                    import.replace.push(value(&mut args)?);
+                }
+                "--rename" => {
+                    let given = value(&mut args)?;
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--rename requires mcp import".into());
+                    };
+                    let Some((old, new)) = given.split_once('=') else {
+                        return Err("--rename takes OLD=NEW".into());
+                    };
+                    if old.trim().is_empty() || new.trim().is_empty() {
+                        return Err("--rename takes OLD=NEW with both ids nonempty".into());
+                    }
+                    import.rename.push((old.to_owned(), new.to_owned()));
+                }
+                "--only" => {
+                    let Action::McpImport(import) = &mut options.action else {
+                        return Err("--only requires mcp import".into());
+                    };
+                    import.only.push(value(&mut args)?);
                 }
                 "--home" => {
                     options.home = PathBuf::from(value(&mut args)?);
@@ -520,6 +785,16 @@ impl Options {
                 "--model-config" => options.model_config = Some(PathBuf::from(value(&mut args)?)),
                 "--provider" => options.provider = Some(value(&mut args)?),
                 "--model" => options.model = Some(value(&mut args)?),
+                "--effort" => {
+                    if options.effort.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --effort only once".into());
+                    }
+                }
+                "--autocompact" => {
+                    if autocompact.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --autocompact only once".into());
+                    }
+                }
                 "--permission" => {
                     let preset = permission::parse_preset(&value(&mut args)?)?;
                     if options.permission.replace(preset).is_some() {
@@ -655,6 +930,72 @@ impl Options {
                     let (method, params) = crate::plugin_command::parse(&mut args)?;
                     options.action = Action::Plugin { method, params };
                 }
+                "modality" if matches!(options.action, Action::Chat) => {
+                    use crate::modality::Command;
+                    let verb = match args.peek().map(String::as_str) {
+                        Some(next) if !next.starts_with("--") => Some(value(&mut args)?),
+                        _ => None,
+                    };
+                    options.action = Action::Modality(match verb.as_deref() {
+                        None => Command::List,
+                        Some("set-default") => {
+                            let operation = value(&mut args)?;
+                            // The model is the next word unless the default is
+                            // being cleared by the flag the loop reads.
+                            let model = match args.peek().map(String::as_str) {
+                                Some(next) if !next.starts_with("--") => Some(value(&mut args)?),
+                                _ => None,
+                            };
+                            Command::SetDefault {
+                                operation,
+                                model,
+                                clear: false,
+                            }
+                        }
+                        Some("task") => match value(&mut args)?.as_str() {
+                            "list" => Command::TaskList,
+                            "status" => Command::TaskStatus {
+                                task_id: value(&mut args)?,
+                            },
+                            "wait" => Command::TaskWait {
+                                task_id: value(&mut args)?,
+                            },
+                            "cancel" => Command::TaskCancel {
+                                task_id: value(&mut args)?,
+                            },
+                            _ => return Err(USAGE_TASK.into()),
+                        },
+                        Some(_) => return Err(USAGE_MODALITY.into()),
+                    });
+                }
+                "image" | "video" | "speech" | "music" | "audio" | "asset" | "motion"
+                    if matches!(options.action, Action::Chat) =>
+                {
+                    let category = arg.clone();
+                    let submit = crate::modality::media::parse(
+                        &category,
+                        &mut args,
+                        &mut options.json,
+                        &mut options.modality,
+                    )?;
+                    options.action = Action::Modality(crate::modality::Command::Submit(submit));
+                }
+                "ocr" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Modality(crate::modality::Command::Ocr {
+                        file: PathBuf::from(value(&mut args)?),
+                    });
+                }
+                "realtime" if matches!(options.action, Action::Chat) => {
+                    options.action = Action::Realtime { operation: None };
+                }
+                "--operation" => {
+                    let Action::Realtime { operation } = &mut options.action else {
+                        return Err("--operation requires realtime".into());
+                    };
+                    if operation.replace(value(&mut args)?).is_some() {
+                        return Err("Supply --operation only once".into());
+                    }
+                }
                 "migration" if matches!(options.action, Action::Chat) => {
                     options.action = crate::migration_command::parse(&mut args)?;
                     if matches!(options.action, Action::Help) {
@@ -740,6 +1081,23 @@ impl Options {
                             area: Area::Mcp,
                             path: value(&mut args)?.into(),
                         },
+                        "import" => {
+                            // `--discover` and `--from` stand in place of the
+                            // path, so only a value that is not a flag is one.
+                            let path = match args.peek().map(|next| next.starts_with("--")) {
+                                Some(false) => Some(value(&mut args)?),
+                                _ => None,
+                            };
+                            Action::McpImport(McpImport {
+                                path,
+                                discover: false,
+                                from: None,
+                                yes: false,
+                                replace: Vec::new(),
+                                rename: Vec::new(),
+                                only: Vec::new(),
+                            })
+                        }
                         "edit" => Action::ManagementEdit {
                             area: Area::Mcp,
                             id: Some(value(&mut args)?),
@@ -753,12 +1111,14 @@ impl Options {
                             area: Area::Mcp,
                             action: ManagementAction::Remove {
                                 id: value(&mut args)?,
+                                source: None,
                             },
                         }),
                         "test" => Action::Management(ManagementRequest {
                             area: Area::Mcp,
                             action: ManagementAction::Run {
                                 id: value(&mut args)?,
+                                source: None,
                                 document: None,
                                 seed: None,
                             },
@@ -767,10 +1127,11 @@ impl Options {
                             area: Area::Mcp,
                             action: ManagementAction::Inspect {
                                 id: value(&mut args)?,
+                                source: None,
                             },
                         }),
                         _ => {
-                            return Err("Use mcp list, mcp add PATH, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp disconnect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
+                            return Err("Use mcp list, mcp add PATH, mcp import PATH [--yes] | --from ID [--yes] | --discover, mcp edit ID, mcp set ID PATH, mcp remove ID, mcp test ID, mcp inspect ID, mcp disconnect ID, mcp login ID, mcp logout ID, mcp enable ID or mcp disable ID".into());
                         }
                     };
                 }
@@ -782,6 +1143,7 @@ impl Options {
                         "reload" => ManagementAction::Reload,
                         command @ ("enable" | "disable") => ManagementAction::Toggle {
                             id: value(&mut args)?,
+                            source: None,
                             enabled: command == "enable",
                         },
                         _ => {
@@ -808,6 +1170,7 @@ impl Options {
                             area: Area::Hooks,
                             action: ManagementAction::Toggle {
                                 id: crate::management::hooks::PROJECT.to_owned(),
+                                source: None,
                                 enabled: command == "enable",
                             },
                         }),
@@ -840,6 +1203,7 @@ impl Options {
                             area: Area::Scheduled,
                             action: ManagementAction::Toggle {
                                 id: value(&mut args)?,
+                                source: None,
                                 enabled: command == "enable",
                             },
                         }),
@@ -859,13 +1223,14 @@ impl Options {
                         command @ ("remove" | "run" | "history") => {
                             let id = value(&mut args)?;
                             let action = match command {
-                                "remove" => ManagementAction::Remove { id },
+                                "remove" => ManagementAction::Remove { id, source: None },
                                 "run" => ManagementAction::Run {
                                     id,
+                                    source: None,
                                     document: None,
                                     seed: None,
                                 },
-                                _ => ManagementAction::Inspect { id },
+                                _ => ManagementAction::Inspect { id, source: None },
                             };
                             Action::Management(ManagementRequest {
                                 area: Area::Scheduled,
@@ -889,6 +1254,7 @@ impl Options {
                             area: Area::Workflow,
                             action: ManagementAction::Toggle {
                                 id: value(&mut args)?,
+                                source: None,
                                 enabled: command == "enable",
                             },
                         }),
@@ -914,6 +1280,7 @@ impl Options {
                             area: Area::Workflow,
                             action: ManagementAction::Inspect {
                                 id: value(&mut args)?,
+                                source: None,
                             },
                         }),
                         _ => {
@@ -940,6 +1307,7 @@ impl Options {
                             area: Area::Permissions,
                             action: ManagementAction::Remove {
                                 id: value(&mut args)?,
+                                source: None,
                             },
                         }),
                         _ => {
@@ -1044,6 +1412,7 @@ impl Options {
                                         },
                                         action: ManagementAction::Toggle {
                                             id: value(&mut args)?,
+                                            source: None,
                                             enabled,
                                         },
                                     });
@@ -1080,9 +1449,9 @@ impl Options {
                                     args.next();
                                     let id = value(&mut args)?;
                                     let action = if verb == "remove" {
-                                        ManagementAction::Remove { id }
+                                        ManagementAction::Remove { id, source: None }
                                     } else {
-                                        ManagementAction::Inspect { id }
+                                        ManagementAction::Inspect { id, source: None }
                                     };
                                     options.action = Action::Management(ManagementRequest {
                                         area: Area::Models {
@@ -1105,6 +1474,58 @@ impl Options {
                 _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
             }
         }
+        // `--source` names a migration's old home, or the source an `mcp`
+        // command's entry is in; the flag may stand on either side of the
+        // command's own words, so it is settled now that both are known.
+        if let Some(source) = source {
+            if let Action::Migration(command) = &mut options.action {
+                command.source = Some(PathBuf::from(source));
+            } else if matches!(options.action, Action::McpImport(_)) {
+                // An import writes one writable source; a plugin entry is
+                // owned by its plugin.
+                match source.as_str() {
+                    "user" | "project" => options.mcp_source = Some(source),
+                    other => {
+                        return Err(format!(
+                            "--source is user or project for mcp import, not {other}"
+                        )
+                        .into());
+                    }
+                }
+            } else if names_one_mcp_entry(&options.action) {
+                if crate::mcp::source(&source).is_none() {
+                    return Err(format!("--source is user, project or plugin, not {source}").into());
+                }
+                options.mcp_source = Some(source);
+            } else {
+                return Err(
+                    "--source requires migration, mcp import or an mcp command that names one entry"
+                        .into(),
+                );
+            }
+        }
+        if let Action::McpImport(import) = &options.action {
+            let selection =
+                !(import.replace.is_empty() && import.rename.is_empty() && import.only.is_empty());
+            if import.discover {
+                if import.path.is_some() || import.from.is_some() {
+                    return Err("Use one of PATH, --from ID and --discover".into());
+                }
+                if import.yes || selection {
+                    return Err("--discover takes no --yes, --replace, --rename or --only".into());
+                }
+                if options.mcp_source.is_some() {
+                    return Err("--source is for mcp import PATH or --from".into());
+                }
+            } else {
+                if import.path.is_some() == import.from.is_some() {
+                    return Err("Use one of PATH, --from ID or --discover".into());
+                }
+                if !import.yes && selection {
+                    return Err("--replace, --rename and --only require mcp import --yes".into());
+                }
+            }
+        }
         if options
             .prompt
             .as_ref()
@@ -1116,28 +1537,45 @@ impl Options {
         if options.home.as_os_str().is_empty() {
             return Err("Set --home PATH when the user home environment variable is absent".into());
         }
-        if options.provider.is_some() != options.model.is_some() {
-            return Err("Use --provider and --model together".into());
+        if matches!(options.action, Action::Chat | Action::Tui | Action::Exec) {
+            options.read_startup(autocompact.take())?;
         }
-        if options.resume.is_some() && options.model.is_some() {
-            return Err("A resumed session retains its model; omit --provider and --model".into());
+        if options
+            .effort
+            .as_ref()
+            .is_some_and(|effort| effort.is_empty() || effort.trim() != effort)
+        {
+            return Err("--effort / DIM_EFFORT_LEVEL must be a nonempty effort name without surrounding whitespace".into());
         }
+        if options.provider.is_some() && options.model.is_none() {
+            return Err("--provider requires --model or DIM_MODEL".into());
+        }
+        // `--model` names the realtime session's model, and is a chat option
+        // for every other command.
+        let model_is_chat_option =
+            options.model.is_some() && !matches!(options.action, Action::Realtime { .. });
         if !matches!(options.action, Action::Chat | Action::Tui | Action::Exec)
             && (options.prompt.is_some()
                 || options.resume.is_some()
-                || options.model.is_some()
+                || model_is_chat_option
+                || options.effort.is_some()
+                || autocompact.is_some()
                 || options.permission.is_some())
         {
             return Err("Commands cannot be combined with chat options".into());
         }
-        if matches!(options.action, Action::Tui) && options.prompt.is_some() {
-            return Err("tui does not accept --prompt; use exec".into());
+        if options.json
+            && !matches!(
+                options.action,
+                Action::Exec | Action::Migration(_) | Action::Modality(_)
+            )
+        {
+            return Err("--json requires exec, migration or a modality command".into());
         }
-        if options.json && !matches!(options.action, Action::Exec | Action::Migration(_)) {
-            return Err("--json requires exec or migration".into());
-        }
-        if !options.images.is_empty() && !matches!(options.action, Action::Exec) {
-            return Err("--image requires exec".into());
+        let images_for_tui = matches!(options.action, Action::Tui) && options.prompt.is_some();
+        if !options.images.is_empty() && !matches!(options.action, Action::Exec) && !images_for_tui
+        {
+            return Err("--image requires exec or tui -p".into());
         }
         if options.images.len() > crate::attachments::MAX_IMAGES {
             return Err("At most 20 images may be submitted".into());
@@ -1235,6 +1673,204 @@ impl Options {
         Ok(options)
     }
 
+    fn read_startup(&mut self, mut autocompact: Option<String>) -> Result<()> {
+        if self.model.is_none() {
+            self.model = startup_env("DIM_MODEL")?;
+        }
+        if self.effort.is_none() {
+            self.effort = startup_env("DIM_EFFORT_LEVEL")?;
+        }
+        if autocompact.is_none() {
+            autocompact = startup_env("DIM_AUTO_COMPACT_WINDOW")?;
+        }
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.is_empty() || model.trim() != model)
+        {
+            return Err(
+                "--model / DIM_MODEL must be a nonempty model ID without surrounding whitespace"
+                    .into(),
+            );
+        }
+        let base_url = startup_env("DIM_BASE_URL")?;
+        let api_format = startup_env("DIM_API_FORMAT")?;
+        let api_key = startup_env("DIM_API_KEY")?;
+        let auth_token = startup_env("DIM_AUTH_TOKEN")?;
+        let headers = startup_env("DIM_CUSTOM_HEADERS")?;
+        let mut startup = serde_json::json!({});
+        match (base_url, api_format) {
+            (Some(base_url), Some(api_format)) => {
+                if self.provider.is_some() || self.model_config.is_some() {
+                    return Err(
+                        "Direct startup conflicts with --provider and --model-config".into(),
+                    );
+                }
+                if self.model.is_none() && self.resume.is_none() {
+                    return Err(
+                        "Direct startup requires --model or DIM_MODEL for a new Session".into(),
+                    );
+                }
+                let url = url::Url::parse(&base_url)
+                    .map_err(|_| "DIM_BASE_URL must be an HTTP(S) base URL")?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || base_url.trim() != base_url
+                    || base_url.bytes().any(|byte| byte.is_ascii_control())
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    return Err("DIM_BASE_URL must be an HTTP(S) base URL without credentials, query or fragment".into());
+                }
+                if !matches!(
+                    api_format.as_str(),
+                    "anthropic"
+                        | "openai-chat"
+                        | "openai-responses"
+                        | "openai-compatible"
+                        | "gemini"
+                        | "xai"
+                        | "xai-responses"
+                ) {
+                    return Err("DIM_API_FORMAT must be anthropic, openai-chat, openai-responses, openai-compatible, gemini, xai or xai-responses".into());
+                }
+                if api_key.is_some() && auth_token.is_some() {
+                    return Err("DIM_API_KEY and DIM_AUTH_TOKEN are mutually exclusive".into());
+                }
+                let generated_auth = if auth_token.is_some() {
+                    Some("authorization")
+                } else if api_key.is_some() {
+                    Some(match api_format.as_str() {
+                        "anthropic" => "x-api-key",
+                        "gemini" => "x-goog-api-key",
+                        _ => "authorization",
+                    })
+                } else {
+                    None
+                };
+                let mut connection = serde_json::json!({"baseUrl":base_url,"apiFormat":api_format});
+                for (name, value) in [("apiKey", api_key), ("authToken", auth_token)] {
+                    if let Some(value) = value {
+                        reqwest::header::HeaderValue::from_str(&value)
+                            .map_err(|_| "Invalid startup credential header value")?;
+                        connection[name] = serde_json::json!(value);
+                    }
+                }
+                if let Some(headers) = headers {
+                    let mut parsed = serde_json::Map::new();
+                    for line in headers.lines() {
+                        let (name, value) = line
+                            .split_once(':')
+                            .ok_or("DIM_CUSTOM_HEADERS requires one Name: Value per line")?;
+                        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                            .map_err(|_| "Invalid DIM_CUSTOM_HEADERS name")?;
+                        let value = value.trim_matches([' ', '\t']);
+                        reqwest::header::HeaderValue::from_str(value)
+                            .map_err(|_| "Invalid DIM_CUSTOM_HEADERS value")?;
+                        if generated_auth == Some(name.as_str()) {
+                            return Err(
+                                "DIM_CUSTOM_HEADERS conflicts with generated authentication".into(),
+                            );
+                        }
+                        if parsed
+                            .insert(name.to_string(), serde_json::json!(value))
+                            .is_some()
+                        {
+                            return Err("DIM_CUSTOM_HEADERS contains a repeated header name".into());
+                        }
+                    }
+                    connection["headers"] = serde_json::Value::Object(parsed);
+                }
+                startup["connection"] = connection;
+            }
+            (None, None) => {
+                if api_key.is_some() || auth_token.is_some() || headers.is_some() {
+                    return Err("DIM_API_KEY, DIM_AUTH_TOKEN and DIM_CUSTOM_HEADERS require DIM_BASE_URL and DIM_API_FORMAT".into());
+                }
+            }
+            _ => return Err("Direct startup requires both DIM_BASE_URL and DIM_API_FORMAT".into()),
+        }
+        for (env, field) in [
+            ("DIM_MAX_CONTEXT_TOKENS", "contextWindow"),
+            ("DIM_MAX_OUTPUT_TOKENS", "maxOutputTokens"),
+        ] {
+            if let Some(value) = startup_env(env)? {
+                startup[field] = serde_json::json!(parse_limit(env, &value)?);
+            }
+        }
+        if let Some(value) = &autocompact {
+            startup["autoCompactWindow"] = if value == "auto" {
+                serde_json::json!("auto")
+            } else {
+                let (digits, multiplier) = match value.as_bytes().last() {
+                    Some(b'k' | b'K') => (&value[..value.len() - 1], 1_000),
+                    Some(b'm' | b'M') => (&value[..value.len() - 1], 1_000_000),
+                    _ => (value.as_str(), 1),
+                };
+                let tokens = parse_limit("--autocompact / DIM_AUTO_COMPACT_WINDOW", digits)?
+                    .checked_mul(multiplier)
+                    .filter(|n| *n <= dim_agent_types::JS_MAX_SAFE_INTEGER)
+                    .ok_or("--autocompact / DIM_AUTO_COMPACT_WINDOW is too large")?;
+                serde_json::json!(tokens)
+            };
+        }
+        if self.model_config.is_some() {
+            if self.model.is_some() && self.provider.is_none() {
+                return Err("--model / DIM_MODEL requires --provider when used with --model-config; select the configured Provider explicitly or omit the model override".into());
+            }
+            if self.effort.is_some() {
+                return Err("--effort / DIM_EFFORT_LEVEL require a product Provider catalog with capability declarations and cannot be used with --model-config; configure the API-key model's generation settings in --model-config instead".into());
+            }
+            if startup.as_object().is_some_and(|o| !o.is_empty()) {
+                return Err("--autocompact / DIM_AUTO_COMPACT_WINDOW, DIM_MAX_CONTEXT_TOKENS and DIM_MAX_OUTPUT_TOKENS require the product Provider and cannot be used with --model-config; omit these startup controls or use a product Provider".into());
+            }
+        } else if self.model.is_some()
+            || self.effort.is_some()
+            || startup.as_object().is_some_and(|o| !o.is_empty())
+        {
+            self.startup = Some(startup);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn creation_startup(&self, params: &mut serde_json::Value) {
+        if let Some(model) = &self.model {
+            params["model"] = serde_json::json!({"modelId":model});
+            if let Some(provider) = &self.provider {
+                params["model"]["provider"] = serde_json::json!(provider);
+            }
+        }
+        if let Some(startup) = &self.startup {
+            params["startup"] = startup.clone();
+        }
+    }
+
+    pub(crate) fn creation_preferences(
+        &self,
+        mut saved: Option<serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        if let Some(effort) = &self.effort {
+            saved.get_or_insert_with(|| serde_json::json!({}))["reasoningEffort"] =
+                serde_json::json!(effort);
+        }
+        saved
+    }
+}
+
+fn startup_env(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) if value.is_empty() => Err(format!("{name} must not be empty").into()),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err(format!("{name} must be valid Unicode").into())
+        }
+    }
+}
+
+impl Options {
     /// The launch directory, for the client's own file system work.
     pub fn launch_dir(&self) -> &Path {
         &self.cwd
@@ -1284,13 +1920,16 @@ impl Options {
             | Action::McpLogin(_)
             | Action::McpLogout(_)
             | Action::McpEnable { .. }
-            | Action::McpDisconnect(_) => true,
+            | Action::McpDisconnect(_)
+            | Action::McpImport(_) => true,
             Action::Management(request) => request.area.names_workspace(),
             Action::ManagementEdit { area, .. }
             | Action::ManagementSet { area, .. }
             | Action::ManagementAdd { area, .. }
             | Action::ManagementStart { area, .. } => area.names_workspace(),
-            Action::Migration(_)
+            Action::Modality(_)
+            | Action::Realtime { .. }
+            | Action::Migration(_)
             | Action::Acp { .. }
             | Action::Export { .. }
             | Action::SessionRename { .. }
@@ -1314,6 +1953,32 @@ impl Options {
             | Action::Help
             | Action::Version => false,
         }
+    }
+}
+
+/// Whether `action` is an `mcp` command that names one stored entry, which is
+/// what `--source` settles: remove, edit, set, test, inspect, disconnect,
+/// login, logout, enable and disable.
+fn names_one_mcp_entry(action: &Action) -> bool {
+    use crate::model::session::{Area, ManagementAction};
+    match action {
+        Action::McpLogin(_)
+        | Action::McpLogout(_)
+        | Action::McpDisconnect(_)
+        | Action::McpEnable { .. } => true,
+        Action::ManagementEdit { area, .. } | Action::ManagementSet { area, .. } => {
+            area == &Area::Mcp
+        }
+        Action::Management(request) => {
+            request.area == Area::Mcp
+                && matches!(
+                    request.action,
+                    ManagementAction::Remove { .. }
+                        | ManagementAction::Run { .. }
+                        | ManagementAction::Inspect { .. }
+                )
+        }
+        _ => false,
     }
 }
 
@@ -1421,12 +2086,20 @@ mod workspace_tests {
             (vec!["mcp", "logout", "docs"], None, true),
             (vec!["mcp", "enable", "docs"], None, true),
             (vec!["mcp", "disconnect", "docs"], None, true),
+            (vec!["mcp", "import", "document.json"], None, true),
             (vec!["mcp", "edit", "docs"], None, true),
             (vec!["skills", "list"], None, true),
             (vec!["hooks", "list"], None, true),
             (vec!["hooks", "set", document], None, true),
             (vec!["workflow", "list"], None, true),
             (vec!["workflow", "start", "job"], None, true),
+            (vec!["realtime"], None, false),
+            (vec!["realtime", "--operation", "transcribe"], None, false),
+            (
+                vec!["realtime", "--model", "step-plan/stepaudio-2.5-realtime"],
+                None,
+                false,
+            ),
         ];
         for (arguments, piped, names_workspace) in cases {
             let args = ["--home", directory, "--cwd", directory]
@@ -1453,6 +2126,43 @@ mod workspace_tests {
         }
     }
 
+    /// `realtime [--operation voice] [--model PROVIDER/MODEL]`: the operation
+    /// is optional (the dispatcher opens `voice`), the model is the CLI's
+    /// usual reference, and `--operation` belongs to no other command.
+    #[test]
+    fn realtime_takes_one_operation_and_one_model() {
+        let parse = |arguments: &[&str]| {
+            Options::parse(arguments.iter().map(|argument| (*argument).to_owned()))
+        };
+        let options = parse(&["realtime"]).unwrap();
+        assert!(
+            matches!(options.action, Action::Realtime { operation: None }),
+            "{:?}",
+            options.action
+        );
+        let options = parse(&["realtime", "--operation", "transcribe"]).unwrap();
+        let Action::Realtime { operation } = &options.action else {
+            panic!("{:?}", options.action);
+        };
+        assert_eq!(operation.as_deref(), Some("transcribe"));
+        let options = parse(&["realtime", "--model", "step-plan/stepaudio-2.5-realtime"]).unwrap();
+        assert!(
+            matches!(options.action, Action::Realtime { operation: None }),
+            "{:?}",
+            options.action
+        );
+        assert_eq!(
+            options.model.as_deref(),
+            Some("step-plan/stepaudio-2.5-realtime")
+        );
+        let error = parse(&["--operation", "transcribe"]).err().unwrap();
+        assert_eq!(error.to_string(), "--operation requires realtime");
+        let error = parse(&["realtime", "--operation", "voice", "--operation", "voice"])
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "Supply --operation only once");
+    }
+
     #[cfg(any(unix, windows))]
     #[test]
     fn a_workspace_that_is_not_utf8_is_refused() {
@@ -1471,5 +2181,227 @@ mod workspace_tests {
             error.to_string().ends_with("must be valid UTF-8"),
             "{error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    /// Every `mcp` command that names one stored entry takes `--source`; a
+    /// command that names none refuses it, and so does a value `mcp list`
+    /// never prints. A migration's `--source` still names its old home.
+    #[test]
+    fn every_mcp_command_that_names_one_entry_takes_a_source() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let patch = home.path().join("patch.json");
+        std::fs::write(&patch, "{}").unwrap();
+        let patch = patch.to_str().unwrap();
+        let parse = |arguments: &[&str]| {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            Options::parse(args)
+        };
+        for arguments in [
+            vec!["mcp", "remove", "docs", "--source", "project"],
+            vec!["mcp", "edit", "docs", "--source", "project"],
+            vec!["mcp", "set", "docs", patch, "--source", "project"],
+            vec!["mcp", "test", "docs", "--source", "project"],
+            vec!["mcp", "inspect", "docs", "--source", "project"],
+            vec!["mcp", "disconnect", "docs", "--source", "project"],
+            vec!["mcp", "login", "docs", "--source", "project"],
+            vec!["mcp", "logout", "docs", "--source", "project"],
+            vec!["mcp", "enable", "docs", "--source", "project"],
+            vec!["mcp", "disable", "docs", "--source", "project"],
+            // The flag may stand before the command's own words.
+            vec!["--source", "user", "mcp", "remove", "docs"],
+        ] {
+            let options =
+                parse(&arguments).unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+            assert!(
+                matches!(options.mcp_source.as_deref(), Some("project" | "user")),
+                "{arguments:?}"
+            );
+        }
+        // The flag names one stored entry: a command that names none has
+        // nothing for it to settle.
+        for arguments in [
+            vec!["mcp", "list", "--source", "user"],
+            vec!["mcp", "add", patch, "--source", "user"],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
+        }
+        // An import takes the one writable source it writes.
+        for arguments in [
+            vec!["mcp", "import", patch, "--source", "user"],
+            vec!["mcp", "import", patch, "--source", "project", "--yes"],
+        ] {
+            let options =
+                parse(&arguments).unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+            assert!(
+                matches!(options.mcp_source.as_deref(), Some("project" | "user")),
+                "{arguments:?}"
+            );
+        }
+        assert!(parse(&["mcp", "import", patch, "--source", "plugin"]).is_err());
+        // Its values are the sources `mcp list` prints.
+        assert!(parse(&["mcp", "remove", "docs", "--source", "workspace"]).is_err());
+        // A migration's `--source` still names the old home.
+        let options = parse(&["migration", "run", "--source", directory]).unwrap();
+        match options.action {
+            Action::Migration(command) => {
+                assert_eq!(command.source, Some(PathBuf::from(directory)));
+            }
+            other => panic!("expected a migration, not {other:?}"),
+        }
+    }
+
+    /// `mcp import` takes its selection flags only with `--yes`: they decide
+    /// what an apply writes, and a preview writes nothing. `--rename` is one
+    /// `OLD=NEW` pair per flag.
+    #[test]
+    fn mcp_import_takes_its_selection_flags_with_yes() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let parse = |arguments: &[&str]| {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            Options::parse(args)
+        };
+        let options = parse(&[
+            "mcp",
+            "import",
+            "document.json",
+            "--yes",
+            "--source",
+            "project",
+            "--replace",
+            "docs",
+            "--rename",
+            "notes=notes2",
+            "--only",
+            "docs",
+        ])
+        .unwrap();
+        assert_eq!(options.mcp_source.as_deref(), Some("project"));
+        match options.action {
+            Action::McpImport(import) => {
+                assert_eq!(import.path.as_deref(), Some("document.json"));
+                assert!(!import.discover);
+                assert!(import.from.is_none());
+                assert!(import.yes);
+                assert_eq!(import.replace, ["docs"]);
+                assert_eq!(import.rename, [("notes".to_owned(), "notes2".to_owned())]);
+                assert_eq!(import.only, ["docs"]);
+            }
+            other => panic!("expected an import, not {other:?}"),
+        }
+        for arguments in [
+            vec!["mcp", "import", "document.json", "--replace", "docs"],
+            vec!["mcp", "import", "document.json", "--rename", "notes=notes2"],
+            vec!["mcp", "import", "document.json", "--only", "docs"],
+            vec!["mcp", "import", "document.json", "--rename", "notes"],
+            vec![
+                "mcp",
+                "import",
+                "document.json",
+                "--yes",
+                "--rename",
+                "=notes2",
+            ],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
+        }
+    }
+
+    /// `mcp import` reads one document: a path, a known store id or the list
+    /// of stores. A discovery prints no value, so it takes no selection.
+    #[test]
+    fn mcp_import_takes_exactly_one_source() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let parse = |arguments: &[&str]| {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            Options::parse(args)
+        };
+        let options = parse(&["mcp", "import", "--discover"]).unwrap();
+        match options.action {
+            Action::McpImport(import) => {
+                assert!(import.discover);
+                assert!(import.path.is_none());
+                assert!(import.from.is_none());
+                assert!(!import.yes);
+            }
+            other => panic!("expected an import, not {other:?}"),
+        }
+        let options = parse(&["mcp", "import", "--from", "codex:user", "--yes"]).unwrap();
+        match options.action {
+            Action::McpImport(import) => {
+                assert!(!import.discover);
+                assert!(import.path.is_none());
+                assert_eq!(import.from.as_deref(), Some("codex:user"));
+                assert!(import.yes);
+            }
+            other => panic!("expected an import, not {other:?}"),
+        }
+        for arguments in [
+            vec!["mcp", "import"],
+            vec!["mcp", "import", "document.json", "--from", "codex:user"],
+            vec!["mcp", "import", "document.json", "--discover"],
+            vec!["mcp", "import", "--from", "codex:user", "--discover"],
+            vec!["mcp", "import", "--discover", "--yes"],
+            vec!["mcp", "import", "--discover", "--only", "docs"],
+            vec!["mcp", "import", "--discover", "--source", "user"],
+        ] {
+            assert!(parse(&arguments).is_err(), "{arguments:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    /// `tui` takes the first prompt `-p` names, with images only for it;
+    /// `exec` and the bare chat keep their one-shot prompt.
+    #[test]
+    fn a_tui_invocation_takes_a_first_prompt_and_images_only_with_it() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().canonicalize().unwrap();
+        let directory = directory.to_str().unwrap();
+        let parse = |arguments: &[&str]| {
+            let args = ["--home", directory, "--cwd", directory]
+                .into_iter()
+                .chain(arguments.iter().copied())
+                .map(str::to_owned);
+            Options::parse(args)
+        };
+        let options = parse(&["tui", "-p", "hello"]).unwrap();
+        assert!(matches!(options.action, Action::Tui));
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
+        let options = parse(&["tui", "--resume", "session", "-p", "hello"]).unwrap();
+        assert_eq!(options.resume.as_deref(), Some("session"));
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
+        let options = parse(&["tui", "-p", "hello", "--image", "one.png"]).unwrap();
+        assert_eq!(options.images, [PathBuf::from("one.png")]);
+        assert!(parse(&["tui", "--image", "one.png"]).is_err());
+        assert!(parse(&["tui", "-p", "hello", "--json"]).is_err());
+        let options = parse(&["-p", "hello"]).unwrap();
+        assert!(matches!(options.action, Action::Chat));
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
+        let options = parse(&["exec", "-p", "hello"]).unwrap();
+        assert!(matches!(options.action, Action::Exec));
+        assert_eq!(options.prompt.as_deref(), Some("hello"));
     }
 }

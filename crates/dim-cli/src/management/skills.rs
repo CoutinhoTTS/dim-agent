@@ -15,7 +15,7 @@ use crate::model::session::{
 use crate::ui::i18n::t;
 
 /// One entry of `skills.catalog`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
     pub id: String,
@@ -72,7 +72,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &str) ->
             }
             true
         }
-        ManagementAction::Toggle { id, enabled } => {
+        ManagementAction::Toggle { id, enabled, .. } => {
             let mut params = params;
             params["id"] = json!(id);
             params["enabled"] = json!(enabled);
@@ -90,17 +90,14 @@ pub async fn apply(client: &mut Client, action: &ManagementAction, cwd: &str) ->
     };
     match catalog(client, cwd).await {
         Ok(catalog) => Outcome::Catalog(catalog),
-        Err(error) if applied => Outcome::ReadFailed(error),
-        Err(error) => Outcome::Refused(error),
+        Err(error) if applied => Outcome::ReadFailed(error.to_string()),
+        Err(error) => Outcome::Refused(error.to_string()),
     }
 }
 
 /// The catalog as its owner reports it.
-pub async fn catalog(client: &mut Client, cwd: &str) -> Result<Catalog, String> {
-    client
-        .typed("skills.catalog", json!({"cwd": cwd}))
-        .await
-        .map_err(|error| error.to_string())
+pub async fn catalog(client: &mut Client, cwd: &str) -> crate::Result<Catalog> {
+    client.typed("skills.catalog", json!({"cwd": cwd})).await
 }
 
 /// One source's entries under its heading, in the order the owner reports
@@ -117,6 +114,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
             entry.source.as_deref().unwrap_or(t("skills")),
             ManagementEntry {
                 id: entry.id.clone(),
+                source: None,
                 label: entry.name.clone(),
                 detail: [entry.description.clone(), entry.file_path.clone()].to_vec(),
                 enabled: Some(entry.enabled),

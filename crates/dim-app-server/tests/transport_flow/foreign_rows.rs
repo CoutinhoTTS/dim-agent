@@ -78,10 +78,7 @@ async fn node_python_plugin_is_one_row_and_its_parts_mount_in_session_and_branch
     }
     for session in &sessions {
         submit(&mut client, session, r#"tool:py_echo {"text":"hello"}"#).await;
-        let history = agent
-            .get_session(session)
-            .unwrap()
-            .history("main", None)
+        let history = chain_events(&agent.get_session(session).unwrap(), "main", ..)
             .await
             .unwrap();
         let content = history

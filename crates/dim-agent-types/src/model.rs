@@ -2,6 +2,57 @@ use crate::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelProtocol {
+    #[serde(rename = "openai-chat")]
+    OpenaiChat,
+    #[serde(rename = "openai-compatible")]
+    OpenaiCompatible,
+    #[serde(rename = "openai-responses")]
+    OpenaiResponses,
+    #[serde(rename = "xai")]
+    Xai,
+    #[serde(rename = "xai-responses")]
+    XaiResponses,
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    #[serde(rename = "gemini")]
+    Gemini,
+    #[serde(rename = "bedrock")]
+    Bedrock,
+}
+
+/// Non-secret connection declaration. Credentials are rebound in Provider
+/// memory; this identity remains valid across Session unload and restore.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartupConnectionSource {
+    pub id: String,
+    pub api_format: ModelProtocol,
+    pub base_url: String,
+    pub auth: StartupAuth,
+    pub header_names: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StartupAuth {
+    Anonymous,
+    ApiKey,
+    Bearer,
+}
+
+/// Adopted startup policy, copied with the model at a branch cut and into
+/// newly created native members and summary requests. Contains no secrets.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelStartup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<StartupConnectionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_compact_window: Option<u64>,
+}
+
 /// The adopted capabilities of a model: an exact value a Session carries and
 /// ContextCompaction reads. Both limits are required and positive; absence is
 /// a property of the catalog, which carries [`CatalogCapabilities`] and
@@ -223,6 +274,17 @@ impl ModelCapabilitySnapshot {
         }
         Ok(())
     }
+}
+
+/// One model Provider would select for a non-conversational use, with the
+/// `<category>.<operation>` ids its catalog entry declares (Modality §9.2).
+/// It carries no limits: such a use does not run a chat request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModalityModelSnapshot {
+    pub target: ModelId,
+    /// The declared operation ids, in the catalog's order.
+    pub operations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -779,6 +841,18 @@ pub struct RequestMetadata {
         deserialize_with = "crate::optional_non_null"
     )]
     pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup: Option<ModelStartup>,
+    /// The Agent profile whose prompt the branch runs: the profile it last
+    /// adopted. An adoption from a profile records it; a model selection and a
+    /// preference update carry it into the new configuration, and only
+    /// another adoption replaces it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub agent_id: Option<String>,
     #[serde(flatten)]
     pub extensions: JsonObject,
 }

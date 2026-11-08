@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::branch_events as read_branch_events;
 use dim_agent_types::{InputBlock, InputMessageData};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -94,15 +95,16 @@ async fn summaries_are_v3_filtered_and_bounded() {
         .iter()
         .find(|row| row["sessionId"] == empty_id)
         .unwrap();
-    let initial = empty_session
-        .local("main", ..=empty_row["sequence"].as_u64().unwrap())
-        .await
-        .unwrap();
+    let initial = read_branch_events(
+        &empty_session,
+        "main",
+        ..=empty_row["sequence"].as_u64().unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         empty_row["updatedAt"],
-        initial
-            .last()
-            .map_or(empty_session.created_at(), |event| event.create_at)
+        activity_time(&initial).unwrap_or(empty_session.created_at())
     );
     assert!(empty_row.get("preview").is_none());
     let row = rows
@@ -113,8 +115,13 @@ async fn summaries_are_v3_filtered_and_bounded() {
     assert_eq!(preview.chars().count(), 120);
     assert!(preview.ends_with('…'));
     let through = row["sequence"].as_u64().unwrap();
-    let last = session.local("main", through..=through).await.unwrap();
-    assert_eq!(row["updatedAt"], last[0].create_at);
+    let all = read_branch_events(&session, "main", ..=through)
+        .await
+        .unwrap();
+    assert_eq!(
+        row["updatedAt"],
+        activity_time(&all).unwrap_or(session.created_at())
+    );
     assert!(
         rows.iter()
             .find(|row| row["sessionId"] == image_id)

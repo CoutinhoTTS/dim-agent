@@ -614,7 +614,6 @@ fn tui_questions_keep_structured_answers_and_the_leader_draft() {
         let (proceed, control) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -641,14 +640,13 @@ fn tui_questions_keep_structured_answers_and_the_leader_draft() {
             assert_eq!(submit["params"]["text"], "kept leader draft and continue");
             wire.reply(&submit, json!({"event":{}}));
             step(wire, "main", 11, "text", json!({"turn_id":"turn","request_id":"followup","delta":"continued after question"}));
-            let mut line = String::new();
-            assert_eq!(wire.0.read_line(&mut line).unwrap(), 0, "unexpected action: {line}");
+            assert_eq!(wire.trailing_request(), None, "unexpected action");
         });
         let mut command = home.command();
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         terminal.write(b"kept leader draft");
         proceed.send(()).unwrap();
@@ -664,7 +662,7 @@ fn tui_questions_keep_structured_answers_and_the_leader_draft() {
         terminal.write(b" and continue\r");
         terminal.until("continued after question");
         assert!(!terminal.transcript.contains("question-must-not-copy"));
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -676,7 +674,6 @@ fn tui_questions_retry_and_keep_call_identity_across_late_replies() {
     let (proceed, control) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -708,10 +705,9 @@ fn tui_questions_retry_and_keep_call_identity_across_late_replies() {
             {"call_id":"c1","result":{"content":"declined"}}, {"call_id":"c2","result":{"content":"answered"}},
         ]}));
         step(wire,"main",13,"text",json!({"turn_id":"turn","request_id":"after","delta":"all three calls settled"}));
-        let mut line = String::new();
-        assert_eq!(wire.0.read_line(&mut line).unwrap(),0,"unexpected retry: {line}");
+        assert_eq!(wire.trailing_request(), None, "unexpected retry");
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("Where to deploy?");
     terminal.write(b"1\r");
     terminal.until("Question not ready");
@@ -725,7 +721,7 @@ fn tui_questions_retry_and_keep_call_identity_across_late_replies() {
     terminal.write(b"2\r");
     terminal.until("all three calls settled");
     assert!(!terminal.transcript.contains("late-old-response"));
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -736,7 +732,6 @@ fn tui_questions_restore_a_child_and_interrupt_its_branch() {
     let (continue_shell, shell_completion) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&["shell.run", "shell.stop"]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -788,7 +783,7 @@ fn tui_questions_restore_a_child_and_interrupt_its_branch() {
             "unexpected answer: {line}"
         );
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"!!inspect\r");
     terminal.until("Question on branch child");
@@ -797,7 +792,7 @@ fn tui_questions_restore_a_child_and_interrupt_its_branch() {
     terminal.until("child question interrupted");
     continue_shell.send(()).unwrap();
     terminal.until("separate shell completed normally");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -808,7 +803,6 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
     let (proceed, control) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -860,10 +854,9 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
         }
         step(wire,"main",5,"tool-result",answered("main-4","leader-request","c1",false));
         step(wire,"main",6,"text",json!({"turn_id":"leader-turn","request_id":"after","delta":"leader answer preserved readonly boundary"}));
-        let mut line=String::new();
-        assert_eq!(wire.0.read_line(&mut line).unwrap(),0,"unexpected peer action: {line}");
+        assert_eq!(wire.trailing_request(), None, "unexpected peer action");
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/tasks\r");
     terminal.until("Inspect readonly member question");
@@ -879,7 +872,7 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
             .transcript
             .contains("Member question must not be answered here")
     );
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -896,9 +889,8 @@ fn tui_commands_run_over_a_pending_question() {
         let (proceed, control) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(
                 &history,
@@ -956,7 +948,7 @@ fn tui_commands_run_over_a_pending_question() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         proceed.send(()).unwrap();
         terminal.until("Where to deploy?");
@@ -982,7 +974,7 @@ fn tui_commands_run_over_a_pending_question() {
         terminal.until("production");
         terminal.write(b"\r");
         terminal.until("question answered after commands");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -998,9 +990,8 @@ fn tui_command_arguments_run_over_a_pending_question() {
         let (proceed, control) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
-            wire.reply(&attach, json!({}));
+            wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
             wire.reply(
                 &history,
@@ -1063,7 +1054,7 @@ fn tui_command_arguments_run_over_a_pending_question() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         proceed.send(()).unwrap();
         terminal.until("Where to deploy?");
@@ -1075,7 +1066,7 @@ fn tui_command_arguments_run_over_a_pending_question() {
 
         terminal.write(b"\r");
         terminal.until("question answered after the argument");
-        terminal.signal(libc::SIGKILL);
+        home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
     }
@@ -1091,9 +1082,8 @@ fn tui_free_text_answers_keep_their_slashes_and_the_palette_survives_a_dropped_q
     let (typed, palette_typed) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
-        wire.reply(&attach, json!({}));
+        wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -1167,7 +1157,7 @@ fn tui_free_text_answers_keep_their_slashes_and_the_palette_survives_a_dropped_q
             "unexpected request: {line}"
         );
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     proceed.send(()).unwrap();
     terminal.until("Where to deploy?");
@@ -1184,7 +1174,7 @@ fn tui_free_text_answers_keep_their_slashes_and_the_palette_survives_a_dropped_q
     terminal.until("Application keys");
     terminal.write(b"done\r");
     terminal.until("submitted after the drop");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -1290,12 +1280,12 @@ fn native_tui_question_answer_reaches_the_next_model_request() {
         "full-access",
     ]);
     let mut terminal = Terminal::launch_tui(command);
-    terminal.until("fixture / fixture-model");
+    terminal.until("Ask anything...");
     terminal.write(b"ask me a question\r");
     terminal.until("Native question reaches this TUI?");
     terminal.write(b"1\r");
     terminal.until("native answer reached the model");
     model.join().unwrap();
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
 }

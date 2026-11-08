@@ -7,9 +7,10 @@ use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
 use serde::de::DeserializeOwned;
 
-use aimux_core::{AiMuxError, ApiCallError, ApiCallErrorOrigin};
+use aimux_core::{AiMuxError, ApiCallError, ErrorCause};
 
 use crate::extract_response_headers::extract_response_headers;
+use crate::fetch::FetchResponse;
 use crate::read_response_with_size_limit::{
     DEFAULT_MAX_DOWNLOAD_SIZE, DEFAULT_MAX_JSON_RESPONSE_SIZE, read_response_with_size_limit,
 };
@@ -18,7 +19,7 @@ use crate::read_response_with_size_limit::{
 pub struct ResponseHandlerInput {
     pub url: String,
     pub request_body_values: serde_json::Value,
-    pub response: reqwest::Response,
+    pub response: FetchResponse,
     pub abort_signal: Option<aimux_core::AbortSignal>,
     /// Per-request override of the successful-JSON-body size cap, forwarded
     /// from `HttpRequest::max_json_response_bytes`. Only
@@ -96,7 +97,7 @@ impl<T> ResponseHandler<T> {
 
 /// Parse a successful JSON response using the endpoint's response type.
 ///
-/// The body is size-limited to [`DEFAULT_MAX_JSON_RESPONSE_SIZE`] (or
+/// The body is size-limited to 64 MiB (or
 /// `HttpRequest::max_json_response_bytes`, when the caller overrides it) —
 /// deliberately smaller than the binary-download bound, since a JSON success
 /// body is deserialized straight into `T` and held alongside the raw bytes.
@@ -131,11 +132,12 @@ where
                 status_code: Some(status),
                 response_body: Some(String::from_utf8_lossy(&body).into_owned()),
                 response_headers: Some(headers.clone()),
+                cause: Some(ErrorCause::source(&error)),
+                origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
                 ..ApiCallError::new(
                     format!("Invalid JSON response: {error}"),
                     input.url.clone(),
                     input.request_body_values.clone(),
-                    ApiCallErrorOrigin::HttpResponse,
                 )
             }))
         })?;
@@ -185,26 +187,38 @@ fn error_body_string(body: &[u8], read_truncated: bool) -> String {
     value
 }
 
-/// Handler for the `{ "error": { "message", "type" | "code" } }` error shape,
-/// which several providers share verbatim. Providers whose error JSON differs
-/// keep their own mapping via [`create_json_error_response_handler`].
+/// A successful JSON response failed provider-specific validation.
+///
+/// Callers may hold the original request after the transport has returned.
+/// Apply the same URL sanitization and structured-context bounds as transport
+/// errors; keep bounded raw response evidence and the observed HTTP status.
+/// `error` is the validation failure: its text is the message and the error
+/// itself the `cause`.
 #[must_use]
-pub fn create_standard_json_error_response_handler() -> ResponseHandler<AiMuxError> {
-    create_json_error_response_handler(|data| {
-        let error = data.get("error").unwrap_or(data);
-        ProviderErrorParts {
-            message: error
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            provider_code: error
-                .get("type")
-                .or_else(|| error.get("code"))
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-        }
-    })
+pub fn invalid_response_api_call(
+    error: &(dyn std::error::Error + 'static),
+    status_code: u16,
+    url: &str,
+    request_body_values: serde_json::Value,
+    response_body: serde_json::Value,
+    response_headers: std::collections::HashMap<String, String>,
+) -> AiMuxError {
+    AiMuxError::ApiCall(Box::new(ApiCallError {
+        status_code: Some(status_code),
+        response_body: Some(error_body_string(
+            response_body.to_string().as_bytes(),
+            false,
+        )),
+        response_headers: Some(response_headers),
+        data: Some(crate::logging::redact_error_context(response_body)),
+        cause: Some(ErrorCause::source(error)),
+        origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
+        ..ApiCallError::new(
+            error.to_string(),
+            crate::http::sanitized_request_url(url),
+            crate::logging::redact_error_context(request_body_values),
+        )
+    }))
 }
 
 /// Parse an error JSON and map its data to a provider message and code.
@@ -253,12 +267,8 @@ where
             response_headers: Some(headers.clone()),
             data: parsed_data.map(crate::logging::redact_error_context),
             is_retryable: aimux_core::error::is_retryable_status(status),
-            ..ApiCallError::new(
-                message,
-                input.url,
-                input.request_body_values,
-                ApiCallErrorOrigin::HttpResponse,
-            )
+            origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
+            ..ApiCallError::new(message, input.url, input.request_body_values)
         }));
         Ok(ResponseHandlerOutput {
             value: error,
@@ -266,63 +276,6 @@ where
             response_headers: headers,
         })
     })
-}
-
-/// Build the `ApiCallError` for an error event delivered *inside* a stream.
-///
-/// The event rides on an already-successful response, so no HTTP status is
-/// fabricated: `status_code` is set only when the payload itself
-/// carried a numeric HTTP status, and retryability derives from that status
-/// alone. A `retry_after_ms` / `retry_after` field in the payload is
-/// surfaced through the response-headers channel so
-/// `AiMuxError::retry_after_hint()` observes it.
-///
-/// Callers reach this from inside a live stream holding the *raw* request
-/// body and URL they built — unlike the exchange path, where `post_*_to_api`
-/// redacts before any handler runs. Redaction and URL sanitization therefore
-/// happen here, so credentials and data URLs never leak into the public
-/// error (or the recordings that persist it).
-#[must_use]
-pub fn stream_error_api_call(
-    message: impl Into<String>,
-    provider_code: Option<String>,
-    status_code: Option<u16>,
-    error_payload: &serde_json::Value,
-    url: impl Into<String>,
-    request_body_values: serde_json::Value,
-    mut response_headers: std::collections::HashMap<String, String>,
-) -> AiMuxError {
-    // Real headers win; the payload hint fills in only when absent (an
-    // in-stream rate-limit error rides on a 200 whose headers carry none).
-    if !response_headers.contains_key("retry-after-ms")
-        && !response_headers.contains_key("retry-after")
-    {
-        if let Some(ms) = error_payload
-            .get("retry_after_ms")
-            .and_then(serde_json::Value::as_f64)
-        {
-            response_headers.insert("retry-after-ms".into(), ms.to_string());
-        } else if let Some(seconds) = error_payload
-            .get("retry_after")
-            .and_then(serde_json::Value::as_f64)
-        {
-            response_headers.insert("retry-after".into(), seconds.to_string());
-        }
-    }
-    AiMuxError::ApiCall(Box::new(ApiCallError {
-        status_code,
-        provider_code,
-        response_body: Some(error_payload.to_string()),
-        response_headers: Some(response_headers),
-        data: Some(crate::logging::redact_error_context(error_payload.clone())),
-        is_retryable: status_code.is_some_and(aimux_core::error::is_retryable_status),
-        ..ApiCallError::new(
-            message,
-            crate::http::sanitized_request_url(&url.into()),
-            crate::logging::redact_error_context(request_body_values),
-            ApiCallErrorOrigin::StreamEvent,
-        )
-    }))
 }
 
 /// Read a successful response as bytes.
@@ -346,7 +299,25 @@ pub fn create_binary_response_handler() -> ResponseHandler<Bytes> {
     })
 }
 
+/// One SSE `data:` field, as the AI SDK's `parseJsonEventStream` reads it
+/// (`safeParseJSON`): text that is not JSON is a JSON parse error naming the
+/// text, in the AI SDK's `JSONParseError` message
+/// (`@ai-sdk/provider` `src/errors/json-parse-error.ts:16-19`).
+fn parse_event<T: DeserializeOwned>(data: &str) -> Result<T, AiMuxError> {
+    serde_json::from_str(data).map_err(|error| match AiMuxError::from(error) {
+        AiMuxError::JsonParse { message, cause } => AiMuxError::JsonParse {
+            message: format!("JSON parsing failed: Text: {data}.\nError message: {message}"),
+            cause,
+        },
+        other => other,
+    })
+}
+
 /// Parse an SSE response and deserialize each `data:` field as `T`.
+///
+/// A `data: [DONE]` event ends the stream; nothing after it is read.
+/// Invalid JSON in a complete event remains a recoverable frame error. SSE
+/// decoding failures terminate the byte stream and are non-retryable API errors.
 #[must_use]
 pub fn create_event_source_response_handler<T>()
 -> ResponseHandler<BoxStream<'static, Result<T, AiMuxError>>>
@@ -366,11 +337,12 @@ where
                 AiMuxError::ApiCall(Box::new(ApiCallError {
                     response_headers: Some(headers.clone()),
                     is_retryable: true,
+                    cause: Some(ErrorCause::source(&error)),
+                    origin: aimux_core::ApiCallErrorOrigin::Transport,
                     ..ApiCallError::new(
                         error.to_string(),
                         body_url.clone(),
                         body_request_body_values.clone(),
-                        ApiCallErrorOrigin::Transport,
                     )
                 }))
             })
@@ -398,24 +370,48 @@ where
                     break;
                 };
                 match item {
+                    // `data: [DONE]` is OpenAI's terminal frame ("the stream
+                    // terminated by a `data: [DONE]` message", openai-openapi
+                    // `CreateChatCompletionRequest.stream`). End here rather
+                    // than wait for the body to close: a server that keeps
+                    // the connection open after it would otherwise hold the
+                    // caller's last `next()` forever. The AI SDK skips the
+                    // frame and waits for EOF (`parse-json-event-stream.ts`).
                     Ok(event) if event.data == "[DONE]" => break,
-                    Ok(event) => yield serde_json::from_str::<T>(&event.data).map_err(AiMuxError::from),
-                    Err(aimux_stream::SseError::Stream(message)) => {
+                    Ok(event) => yield parse_event::<T>(&event.data),
+                    Err(aimux_stream::SseError::Stream(error)) => {
                         // Preserve response transport failures as ApiCallError
-                        // items. Framing/parser failures remain JsonParse below.
+                        // items, eligible for retry before output is emitted.
                         yield Err(AiMuxError::ApiCall(Box::new(ApiCallError {
                             response_headers: Some(stream_headers.clone()),
                             is_retryable: true,
+                            cause: Some(ErrorCause::source(error.as_ref())),
+                            origin: aimux_core::ApiCallErrorOrigin::Transport,
                             ..ApiCallError::new(
-                                message,
+                                error.to_string(),
                                 stream_url.clone(),
                                 stream_request_body_values.clone(),
-                                ApiCallErrorOrigin::Transport,
                             )
                         })));
                         break;
                     }
-                    Err(error) => yield Err(AiMuxError::JsonParse(error.to_string())),
+                    Err(error) => {
+                        // The SSE decoder ends after this error. Reporting a
+                        // recoverable JsonParse would let providers treat that
+                        // EOF as success and flush incomplete output/tool calls.
+                        yield Err(AiMuxError::ApiCall(Box::new(ApiCallError {
+                            response_headers: Some(stream_headers.clone()),
+                            is_retryable: false,
+                            cause: Some(ErrorCause::source(&error)),
+                            origin: aimux_core::ApiCallErrorOrigin::StreamEvent,
+                            ..ApiCallError::new(
+                                error.to_string(),
+                                stream_url.clone(),
+                                stream_request_body_values.clone(),
+                            )
+                        })));
+                        break;
+                    }
                 }
             }
         });
@@ -454,12 +450,8 @@ pub fn create_status_code_error_response_handler() -> ResponseHandler<AiMuxError
             response_body: Some(error_body_string(&body, truncated)),
             response_headers: Some(headers.clone()),
             is_retryable: aimux_core::error::is_retryable_status(status),
-            ..ApiCallError::new(
-                message,
-                input.url,
-                input.request_body_values,
-                ApiCallErrorOrigin::HttpResponse,
-            )
+            origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
+            ..ApiCallError::new(message, input.url, input.request_body_values)
         }));
         Ok(ResponseHandlerOutput {
             value: error,

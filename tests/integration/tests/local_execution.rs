@@ -5,6 +5,7 @@
 mod compaction_support;
 #[path = "local_support/process.rs"]
 mod process_support;
+use dim_agent_capabilities::toolchain::ToolchainSourceHost;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
     execution_settings::{ExecutionSettings, ExecutionSettingsHost},
@@ -25,6 +26,7 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, timeline_events};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use process_support::{alive, gone, pid_in};
@@ -34,6 +36,7 @@ use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     ffi::OsString,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -157,6 +160,7 @@ fn configured_platform(home: PathBuf) -> impl FnOnce(&mut AgentBuilder) {
                 names,
                 HostPlatformConfig {
                     execution: names.key()?,
+                    toolchain: names.key()?,
                     exec_shell_file: Some((0, "exec-shell.json".into())),
                     home: None,
                 },
@@ -385,6 +389,7 @@ impl Harness {
             root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
                 ExecutionSettings::default(),
             )))?;
+            root.provide_as::<ToolchainSourceHost>(Arc::new(ToolchainSourceHost::fixed(vec![])))?;
             Ok(())
         })
         .await
@@ -442,7 +447,7 @@ impl Harness {
 }
 
 async fn local_events(session: &Session) -> Vec<Arc<AgentEvent>> {
-    session.local("main", ..).await.unwrap()
+    branch_events(session, "main", ..).await.unwrap()
 }
 
 async fn until(
@@ -1170,12 +1175,61 @@ async fn background_completion_is_recorded_once_and_wakes_with_a_bounded_notice(
     assert!(notice.contains("[Preview truncated at 16 KiB.]"));
     assert!(notice.len() < 16 * 1024 + 1024);
     assert!(text(&end.result).contains(&format!("Output saved to: {}", data.output_path)));
+    let structured = end
+        .result
+        .structured_content
+        .as_ref()
+        .expect("a finished result");
+    let preview = structured["preview"].as_str().expect("the final preview");
+    assert!(preview.ends_with("tail-marker\n"), "{preview:?}");
+    assert_eq!(structured["previewTruncated"], true);
+    let shown = text(&end.result)
+        .split_once("\nPreview:\n")
+        .expect("the result shows its preview")
+        .1;
+    assert_eq!(preview, shown, "the field and the content show one preview");
     let full = std::fs::read_to_string(&data.output_path).unwrap();
     assert_eq!(full.len(), 200_000 + "tail-marker\n".len());
     until(&session, "woken turn", |events| {
         count(events, "turn/end") == 2
     })
     .await;
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// A short command's final `preview` is its whole output, untruncated; a
+/// command that printed nothing carries an empty preview.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_background_result_carries_its_whole_short_preview_or_an_empty_one() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({"command": "printf 'short output\\n'", "runInBackground": true}),
+            )],
+        )
+        .await;
+    let events = until(&session, "short end", |events| ended(events).len() == 1).await;
+    let (_, end) = &ended(&events)[0];
+    let structured = end.result.structured_content.as_ref().unwrap();
+    assert_eq!(structured["preview"], "short output\n");
+    assert_eq!(structured["previewTruncated"], false);
+
+    harness
+        .run(
+            &session,
+            &[("exec", json!({"command": "true", "runInBackground": true}))],
+        )
+        .await;
+    let events = until(&session, "empty end", |events| ended(events).len() == 2).await;
+    let (_, end) = &ended(&events)[1];
+    let structured = end.result.structured_content.as_ref().unwrap();
+    assert_eq!(structured["preview"], "");
+    assert_eq!(structured["previewTruncated"], false);
     session.close().await.unwrap();
     harness.shutdown().await;
 }
@@ -1419,7 +1473,9 @@ async fn closing_a_branch_cancels_only_its_tasks_without_a_wake() {
         .await
         .unwrap();
     assert!(gone(&pid).await);
-    let child_events = timeline.local(..).await.unwrap();
+    let child_events = timeline_events(&timeline, TimelineQueryScope::Branch, ..)
+        .await
+        .unwrap();
     let ends = ended(&child_events);
     assert_eq!(ends.len(), 1);
     assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
@@ -1428,7 +1484,15 @@ async fn closing_a_branch_cancels_only_its_tasks_without_a_wake() {
     assert!(ended(&local_events(&session).await).is_empty());
     session.close().await.unwrap();
     assert!(gone(&main).await);
-    let ends = ended(&harness.seen.timeline("main").local(..).await.unwrap());
+    let ends = ended(
+        &timeline_events(
+            &harness.seen.timeline("main"),
+            TimelineQueryScope::Branch,
+            ..,
+        )
+        .await
+        .unwrap(),
+    );
     assert_eq!(ends.len(), 1);
     assert_eq!(ends[0].1.status, ExecStatus::Cancelled);
     harness.shutdown().await;
@@ -1538,22 +1602,27 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     session.idle("main").await.unwrap();
     unload_once_released(&session).await;
     let id = session.id().to_owned();
-    let started = |task_id: &str| {
+    let orphan_path = harness.output_root.join("exec-orphan.log");
+    std::fs::write(&orphan_path, "partial\n").unwrap();
+    let started = |task_id: &str, output_path: &str| {
         EventKind::ExecStarted(ExecStartedData {
             turn_id: "t".into(),
             request_id: "r".into(),
             call_id: "c".into(),
             task_id: task_id.into(),
             description: task_id.into(),
-            output_path: format!("/tmp/{task_id}.log"),
+            output_path: output_path.into(),
         })
     };
     let lost = stored(
         &harness,
         &id,
         vec![
-            started("exec-orphan"),
-            started("exec-lost"),
+            started("exec-orphan", &orphan_path.to_string_lossy()),
+            started(
+                "exec-lost",
+                &harness.output_root.join("exec-lost.log").to_string_lossy(),
+            ),
             EventKind::ExecEnded(ExecEndedData {
                 task_id: "exec-lost".into(),
                 status: ExecStatus::Completed,
@@ -1584,8 +1653,49 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
     let (orphan_event, orphan) = &ends[2];
     assert_eq!(orphan.task_id, "exec-orphan");
     assert_eq!(orphan.status, ExecStatus::Failed);
-    assert!(text(&orphan.result).contains(
-        "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: /tmp/exec-orphan.log."
+    assert!(text(&orphan.result).contains(&format!(
+        "Background task exec-orphan did not survive a restart of its owner; its final result is unknown. Output so far: {}.",
+        orphan_path.display()
+    )));
+    let recovered = orphan.result.structured_content.as_ref().unwrap();
+    assert!(
+        !recovered.contains_key("preview") && !recovered.contains_key("previewTruncated"),
+        "a recovered end has no final output to preview"
+    );
+    // A rebuilt task pages the file its own `exec/started` registered. Its
+    // recovery terminal has no `outputTruncated` flag, so truncation comes
+    // from the file's size there: this file is small.
+    let page = restored
+        .service::<BackgroundExec>("main")
+        .unwrap()
+        .output_page("exec-orphan", 0, 64)
+        .await
+        .unwrap();
+    assert_eq!(page.text, "partial\n");
+    assert_eq!(page.bytes, 8);
+    assert!(page.next_cursor.is_none());
+    assert!(!page.truncated);
+    // A read can land inside one write and see the file end inside a
+    // character; with no whole character to serve the page is empty and
+    // carries no `nextCursor` rather than indexing past the read.
+    std::fs::write(&orphan_path, [0xe2, 0x82]).unwrap();
+    let partial = restored
+        .service::<BackgroundExec>("main")
+        .unwrap()
+        .output_page("exec-orphan", 0, 64)
+        .await
+        .unwrap();
+    assert_eq!(partial.text, "");
+    assert_eq!(partial.bytes, 0);
+    assert!(partial.next_cursor.is_none());
+    // A task whose registered file is gone answers the read's own error.
+    assert!(matches!(
+        restored
+            .service::<BackgroundExec>("main")
+            .unwrap()
+            .output_page("exec-lost", 0, 64)
+            .await,
+        Err(workspace_tools::background::OutputPageError::Unavailable)
     ));
     restored.idle("main").await.unwrap();
     let mut woken: Vec<_> = notifications(&local_events(&restored).await)
@@ -1604,6 +1714,105 @@ async fn idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_en
         .unwrap();
     assert_eq!(settled.status, ExecStatus::Failed);
     restored.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+/// The page read's cursor rule on a running task, without a product Session:
+/// a short page that ends inside a character being written serves the
+/// complete characters before it, the next offset is always `cursor + bytes`,
+/// a page that fills its budget names that same offset, and `bytes == 0`
+/// ends the file walk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn output_page_advances_by_served_bytes_past_a_partial_character() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[(
+                "exec",
+                json!({
+                    "command": "while [ ! -f go ]; do sleep 0.01; done; printf 'alpha\\n'; sleep 100",
+                    "runInBackground": true, "timeoutMs": -1,
+                }),
+            )],
+        )
+        .await;
+    let events = until(&session, "exec/started", |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ExecStarted(_)))
+    })
+    .await;
+    let (task_id, output_path) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ExecStarted(data) => Some((data.task_id.clone(), data.output_path.clone())),
+            _ => None,
+        })
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let background = session.service::<BackgroundExec>("main").unwrap();
+    std::fs::write(harness.cwd.join("go"), b"go").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let page = background.output_page(&task_id, 0, 64).await.unwrap();
+            if page.text == "alpha\n" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A read can meet the file ending inside a character in progress: the
+    // page serves the complete characters before it with no `nextCursor`.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&output_path)
+        .unwrap();
+    file.write_all(&[0xc3]).unwrap();
+    drop(file);
+    let partial = background.output_page(&task_id, 0, 64).await.unwrap();
+    assert_eq!(partial.text, "alpha\n");
+    assert_eq!(partial.bytes, 6);
+    assert_eq!(partial.next_cursor, None);
+    let full = background.output_page(&task_id, 0, 4).await.unwrap();
+    assert_eq!(full.text, "alph");
+    assert_eq!(full.bytes, 4);
+    assert_eq!(full.next_cursor, Some(4));
+    // The rest of `é` arrives; the page that fills the budget while the cut
+    // splits the character names `cursor + bytes`, not the read length and
+    // not the budget.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&output_path)
+        .unwrap();
+    file.write_all(&[0xa9]).unwrap();
+    drop(file);
+    let split = background.output_page(&task_id, 0, 7).await.unwrap();
+    assert_eq!(split.text, "alpha\n");
+    assert_eq!(split.bytes, 6);
+    assert_eq!(split.next_cursor, Some(split.bytes));
+    let completed = background
+        .output_page(&task_id, split.bytes, 64)
+        .await
+        .unwrap();
+    assert_eq!(completed.text, "é");
+    assert_eq!(completed.bytes, 2);
+    assert_eq!(completed.next_cursor, None);
+    let end = background
+        .output_page(&task_id, split.bytes + completed.bytes, 64)
+        .await
+        .unwrap();
+    assert_eq!(end.text, "");
+    assert_eq!(end.bytes, 0);
+    assert_eq!(end.next_cursor, None);
+    assert_eq!(
+        background.stop(&task_id).await.unwrap().status,
+        ExecStatus::Cancelled
+    );
+    session.close().await.unwrap();
     harness.shutdown().await;
 }
 
@@ -1704,7 +1913,13 @@ async fn a_reload_or_a_closing_session_refuses_a_start_and_leaves_no_hold() {
     drop(held);
     closing.await.unwrap();
     assert!(gone(&pid).await);
-    let events = harness.seen.timeline("main").local(..).await.unwrap();
+    let events = timeline_events(
+        &harness.seen.timeline("main"),
+        TimelineQueryScope::Branch,
+        ..,
+    )
+    .await
+    .unwrap();
     assert_eq!(count(&events, "exec/started"), 0);
     harness.shutdown().await;
 }
@@ -1892,9 +2107,10 @@ async fn wait_publishes_and_accepts_its_exact_timeout_boundaries() {
 async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_turn() {
     let harness = Harness::new(platform(&[]).await, Hook::None).await;
     let session = harness.session().await;
+    let first = harness.cwd.join("first-ready");
     harness.model.push(&[(
         "exec",
-        json!({"command": "sleep 1; echo one", "runInBackground": true}),
+        json!({"command": format!("while [ ! -f '{}' ]; do sleep 0.01; done; echo one", first.display()), "runInBackground": true}),
     )]);
     harness
         .run(
@@ -1902,6 +2118,11 @@ async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_
             &[("wait", json!({"taskId": "$TASK", "timeoutMs": 20000}))],
         )
         .await;
+    until(&session, "matching wait started", |events| {
+        count(events, "step/tool-call") == 2
+    })
+    .await;
+    std::fs::write(first, "").unwrap();
     let events = until(&session, "wait", |events| wait_texts(events).len() == 1).await;
     let task = task_of(&results(&events)[0]);
     assert_eq!(
@@ -1910,9 +2131,10 @@ async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_
     );
     session.idle("main").await.unwrap();
 
+    let second = harness.cwd.join("second-ready");
     harness.model.push(&[(
         "exec",
-        json!({"command": "echo two", "runInBackground": true}),
+        json!({"command": format!("while [ ! -f '{}' ]; do sleep 0.01; done; echo two", second.display()), "runInBackground": true}),
     )]);
     harness
         .run(
@@ -1920,6 +2142,11 @@ async fn wait_ends_on_the_matching_completion_not_on_the_input_that_started_the_
             &[("wait", json!({"taskId": "exec-other", "timeoutMs": 1500}))],
         )
         .await;
+    until(&session, "nonmatching wait started", |events| {
+        count(events, "step/tool-call") == 4
+    })
+    .await;
+    std::fs::write(second, "").unwrap();
     let events = until(&session, "timeout", |events| wait_texts(events).len() == 2).await;
     assert_eq!(wait_texts(&events)[1], "wait ended: timeout");
     session.close().await.unwrap();

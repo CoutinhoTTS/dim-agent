@@ -19,7 +19,8 @@ the source name, its files, a JSON Schema (with `default` values) and its user-o
 
 - the process service `settings`, which the owner uses: `register`, `read`, `update` (CAS on
   the revision) and `projects`;
-- the client management methods `settings.read` and `settings.update`;
+- the client management methods `settings.read`, `settings.update`, `settings.sources` and
+  `settings.projects`;
 - the same rutis events as S8a, `settings.changed` and `settings.project_authorized`. Their
   payloads become serializable. There is no `subscribe(source)`.
 
@@ -48,7 +49,8 @@ root indices. See the [native definition-file contract](../p6-p7-bindings.md#3-w
   event bus (issue comment). Settings keeps no watch channel of its own.
 - No generic client access to Rust sources (`mcp`, `mcp-projects`, `mcp-plugins`, `skills`, `permission`).
   Their validation is Rust code that Settings cannot run on client JSON.
-- No source discovery method and no settings UI. See §10.
+- Source discovery is `settings.sources` (§4.3): local connections can list the declared
+  sources and their schemas, never their documents. There is still no settings UI.
 - No secret store, credential service or field-name rule (§1.2). The one marker is the schema's
   `writeOnly` annotation.
 - MCP's inline tokens, `env` and `headers` stay where they are (ADR 004 D4).
@@ -103,6 +105,7 @@ depended on a store nobody owned. That service and the `*Ref` rule are withdrawn
  |         settings.project_authorized on settings/projects                |
  +------^-------------------------------^----------------------------------+
         | register/read/update/projects | settings.read / settings.update
+        |                               | settings.sources / settings.projects
         |                               |
   TypeScript owner (rutis runtime row)  Rpc  <--  local client
 ```
@@ -199,6 +202,7 @@ plugin unloads. Nothing else is new. Nothing enters the Timeline.
 | `Scope` | `"user"` or `{"project": <root>}`. `root` is the project root number Settings assigns in this process (`SettingsScope::Project`). It is not a durable identity and is never persisted |
 | `Snapshot` | `{revision: string, document: object}` |
 | `Error` | `{code, message}` |
+| `Sources` | The `settings.sources` reply (§4.3): `{dialect: string, sources: [{source, schema, scopes, userOnly, writeOnly}]}`. `dialect` is exactly `https://json-schema.org/draft/2020-12/schema`, the draft every `schema` is compiled in (§3.1). `schema` is the registered schema verbatim, `default` members included. `scopes` is `["user"]`, or `["user", "project"]` when the source declares a project file. `userOnly` is the registered pointer list. `writeOnly` hints that the schema root itself or a member reachable through `properties` is marked `writeOnly: true`. A root-level `writeOnly` counts for this hint but is not a hidden member: the redaction (§1.2) removes members reached through `properties` only, so such a source lists `writeOnly: true` and hides nothing. Neither rule scans `items`, `$defs` or `anyOf`, so a client reads `schema` itself for the rest. No item carries a document, a file name or an owner |
 
 ### 4.2 Service `settings` (owner path)
 
@@ -238,12 +242,41 @@ with `managementMethods` (§4.5). They are never served to paired devices (overv
 | --- | --- | --- | --- |
 | `settings.read` | `{source, scope}` | `{revision, document}` | invalid params (bad scope), `settings_unknown_source`, `settings_failed` |
 | `settings.update` | `{source, scope, expectedRevision, document}` | `{revision, document}` | invalid params (bad scope, schema violation), `settings_unknown_source`, `settings_conflict`, `settings_unsynced`, `settings_failed` |
+| `settings.sources` | `{}` | `{dialect, sources: [...]}` (`Sources`, §4.1) | invalid params |
+| `settings.projects` | `{}` | `{projects: [{root, cwd}]}`: the authorized project roots now, as the service's `projects` answers them (§4.2) | invalid params |
 
 - Only registered declared sources are served. A Rust source (for example `mcp`) is
   `settings_unknown_source`.
   Its owner's methods stay the way to change it.
 - A client write may change user-only fields. There is no other difference from the owner path.
 - `closed` maps to the existing retryable reloading error.
+- `settings.sources` lists every registered declared source in source-name order, and never a
+  Rust source; an empty registry is an empty `sources` array, not an error. An item is the
+  declaration without its file names or its owner (§4.1). The `schema` member round-trips what
+  the owner registered, and the schema's own `title`/`description` annotations are the display
+  metadata, if the owner added them.
+- A client reads the declarations here, through a public method, rather than from a plugin
+  package or manifest (§9, §4 rule 7: public interfaces only). The agent-side counterpart stays
+  the `plugin` tool's `config` command, which additionally returns the user document with
+  `writeOnly` members redacted and listed in `writeOnlySet` (PluginManager §6).
+- `schedule` is not a declared source. `ScheduleDocument` is a Rust `BusinessDocument`,
+  registered with `settings.register::<ScheduleDocument>`, validated by its own `validate()`,
+  served by `schedule.*`, and `settings_unknown_source` on every `settings.*` path. A Rust
+  source keeps its own typed methods and is out of a schema-driven surface; `settings.sources`
+  lists declared sources only and therefore never lists it.
+- `settings.sources` is never served to paired devices (§4.3 opening) and is absent from the
+  Web entry's allowlist, so the Web entry answers `unknown_method` (§11 items 7–8): discovery
+  is local-only like the rest of the namespace.
+- `settings.projects` is the read a client needs before it can pass `{project: root}`: it
+  answers the same `{projects: [{root, cwd}]}` as the owner-facing `projects` service (§4.2),
+  in cwd order, and the same Web-entry and paired-device rule applies (absent from the
+  allowlist, so `unknown_method`). **`root` is a process-local number** (§4.1): it holds for the
+  life of the daemon process, is not a durable identity, and a client re-reads
+  `settings.projects` after it reconnects to a restarted daemon rather than storing a root. The
+  list only grows while the process runs — authorizing the same cwd again adds no item and
+  emits nothing (§4.4) — so no event or push carries it; the client reads it when it opens a
+  project-scoped form. A `{project: root}` this process has not authorized is invalid params,
+  the same answer as for a source without project scope.
 
 ### 4.4 Events
 
@@ -302,6 +335,7 @@ impl SettingsService {
     /// Registers `D` (or a declaration) until the plugin owning `ctx` unloads.
     pub fn register<D: BusinessDocument>(&self, ctx: &Ctx) -> rutis::Result<()>;
     pub fn register_declared(&self, ctx: &Ctx, declaration: SourceDeclaration) -> rutis::Result<()>;
+    pub fn declarations(&self) -> Vec<SourceDeclaration>;
     pub async fn read_declared(&self, source: &str, scope: SettingsScope,
                                cancel: &CancellationToken) -> Result<SettingsSnapshot<Value>>;
     pub async fn update_declared(self: &Arc<Self>, source: &str, scope: SettingsScope,
@@ -310,6 +344,9 @@ impl SettingsService {
 }
 ```
 
+- `declarations()` is the registry-wide listing behind `settings.sources` (§4.3): every
+  registered declared source in name order, never a Rust source. Unlike `declared_by`, it does
+  not filter to one registering fiber.
 - Both registrations are effects of the plugin owning `ctx`, withdrawn when it unloads, and are
   checked under one registry state (§3.1). `register_declared` compiles the schema with
   `jsonschema`. The process owners register in their `apply`: Mcp (`mcp`, `mcp-projects`, `mcp-plugins`),
@@ -328,10 +365,20 @@ impl SettingsService {
   Permission presets and tool lists do not write this source.
 - The file and native paths are shared with `BusinessDocument`, keyed by source name instead of
   `D::NAMESPACE`. CAS, the gate, leases, the unsynced case and `publish` stay as they are.
-- `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope` and
-  `Document(message)`. A written document that breaks the schema or is not an object is `Document` with the validator's message (the instance path, never the value); the
-  client path maps it to invalid params. A persisted document that breaks the schema stays
-  `Invalid` (`invalid_document` / `settings_failed`).
+- `SettingsError` gains `UnknownSource`, `UserOnlyField(pointer)`, `InvalidScope`,
+  `Document(message)` and `DocumentShape { reason, position }`. A written document that
+  breaks the schema or is not an object is `Document` with the validator's message (the
+  instance path, never the value). `DocumentShape` is how `McpSettings` refuses an MCP
+  document as a whole — not an object, no `mcpServers` object, `mcpServers` not an object,
+  an empty server entry id, a file that is not JSON: the owner's static `reason`, which a
+  client may see, and `position` when the document was read from bytes. Its `Display` is
+  byte for byte what `Document` printed for the same text. No other owner has adopted it:
+  HooksSettings refuses a hook document as `Invalid("invalid hook document")`, and a
+  persisted file that the default `BusinessDocument` decode or a declared source cannot
+  parse is `Invalid("invalid settings document")`. `reason()` reports the static message of `Invalid` and of `DocumentShape`, and
+  `None` for every other variant, `Document` included, whose text is arbitrary. The
+  client path maps `Document` and `DocumentShape` to invalid params. A persisted document
+  that breaks the schema stays `Invalid` (`invalid_document` / `settings_failed`).
 - The `settings` service is a `HostDispatch` under `host_key("settings")`, and assembly registers
   `settings` in the `ServiceCatalog`, as `pluginFiles` is done today. Replies use
   the envelope of `sessions`: `{ok: true, value}` or `{ok: false, error: {code, message}}`.
@@ -436,7 +483,7 @@ a source needs it.
 | Timeline, Dispatcher, rutis, loader | Unchanged |
 
 Public additions: the `settings` service (with `register`), the `settings` management namespace
-(two methods), and the JSON shapes of the two existing events. Each one is needed
+(three methods), and the JSON shapes of the two existing events. Each one is needed
 for a non-Rust owner to read, write and be told about its source, and for a client to edit it.
 
 ### 8.1 Decision: keep `permission.rules`/`permission.set_rules`
@@ -463,7 +510,7 @@ F2 left open whether to fold its methods into `settings.read/update`. They stay:
 | §4 rule 4 (core has no business meaning) | Settings validates against declared schemas and names no owner |
 | §4 rule 5 (batches) | No Timeline writes |
 | §4 rule 6 (context) | Nothing enters model context. A tool's view of settings is its owner's business |
-| §4 rule 7 (public interfaces only) | Owners use the `settings` service; clients use management methods |
+| §4 rule 7 (public interfaces only) | Owners use the `settings` service; clients use management methods, and read the declarations through `settings.sources`, never from a plugin package |
 | §4 rule 8 (infrastructure unchanged) | No change to Timeline, Dispatcher, event envelope, rutis, loader, Agent assembly or Session facade. Existing `HostDispatch`, `ServiceCatalog`, `managementMethods` and rutis events are used as they are |
 | §4 rule 9 (only needed facts in Timeline) | No event is added; settings are not Timeline facts |
 | ADR 002 D1 (scope) | Settings is a process plugin; the sources outlive Sessions |
@@ -485,9 +532,12 @@ question 2); that is no new requirement on dim runtime or rutis.
    plugin itself (§3.1), so installing, replacing or removing a plugin does not reload Settings.
 4. ~~**Which plugin provides `credentials` in the product.**~~ Withdrawn with the service: each
    owner handles its own secrets (§1.2).
-5. **Source discovery for a settings UI.** A generic `/settings` page would need the declared
-   sources and their schemas (for example a `settings.sources` method). Nothing requires it for
-   S8b; it is decided with the CLI settings design.
+5. ~~**Source discovery for a settings UI.**~~ Settled 2026-11-05: discovery is
+   `settings.sources` (§4.3), a management method served to local connections only that lists
+   each declared source, its schema and its scopes, never a document. The question was whether
+   a generic `/settings` page would need the declared sources and their schemas (for example a
+   `settings.sources` method); nothing required it for S8b, so it stayed with the CLI settings
+   design until now.
 6. **User-only fields for Rust sources.** No Rust owner writes its source on behalf of a tool
    today. If one does (Scheduler, Workflow), it needs a user-only declaration on its
    `BusinessDocument`. That is decided with that owner's design.
@@ -513,7 +563,19 @@ through C4's path):
    appears when its owner registers it and is `unknown_source` once the owner unloads, while its
    document stays in the home.
 6. ~~Credential references through a shared `credentials` store.~~ Withdrawn (§1.2).
-7. A paired-device connection is not served `settings.read`.
+7. A paired-device connection is not served `settings.read` or `settings.sources`.
+8. An authenticated Web entry connection is answered `unknown_method` for `settings.sources`
+   and is served the allowlisted `settings.read` for `model-log`.
+9. `settings.sources` replies `{dialect, sources: []}` when nothing is registered, lists a
+   registered declared source with its schema verbatim, its scopes, its user-only pointers and
+   its `writeOnly` hint, never lists a Rust source, and drops a declared source's entry the
+   moment its owner unloads, when `settings.read` answers `settings_unknown_source` again.
+10. `settings.projects` replies `{projects: []}` before anything is authorized, then lists the
+    root `session.create` authorized with its canonical cwd, and that root serves
+    `settings.read` with `{project: root}`; a second authorization of the same cwd adds no item,
+    a root this process never authorized is invalid params, and a root a client authorized
+    through `hooks.catalog` for a cwd with no Session is listed too. The list starts empty again
+    after a daemon restart on the same home.
 
 ## 12. Implementation status
 
@@ -529,12 +591,16 @@ Corrections made against the code (reflected in §4.3 and §4.5):
   (methods contract §3.2; ADR 004 D4 boundary). This is the only new plugin row; the §2 diagram's
   `managementMethods settings` sits in that part, and §9's ADR 002 D2 answer holds for it as for
   PermissionRules: it is the client path of the Settings data, not a wiring module.
-- `SettingsError` has `InvalidScope` and `Document(message)` besides the two named variants, so
-  the client path can tell invalid params from a persisted failure.
+- `SettingsError` has `InvalidScope`, `Document(message)` and
+  `DocumentShape { reason, position }` besides the two named variants, so the client path
+  can tell invalid params from a persisted failure; `reason()` reports the static message
+  behind `Invalid` and `DocumentShape`, and `DocumentShape`'s `Display` stays byte for
+  byte what `Document` printed.
 - The service reply envelope is the one of `sessions`.
 
-Acceptance (§11) covered by Rust flow tests (`settings_flow.rs`, `provider_flow.rs`), with the
-owner calling the `settings` service through its `HostDispatch`: items 1–5 and 7.
+Acceptance (§11) covered by Rust flow tests, with the owner calling the `settings` service through
+its `HostDispatch`: items 1–5 and 9 in `settings_flow.rs`, and items 7–8 in
+`transport_flow/settings_methods.rs` on its paired-device and Web entry connections.
 
 **Part 2 (S8b-2).** Implemented on C4's path:
 

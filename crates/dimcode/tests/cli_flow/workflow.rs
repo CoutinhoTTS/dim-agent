@@ -87,7 +87,6 @@ fn listing(truncated: bool) -> Value {
 /// advertises besides the Session basics.
 fn opened_with(wire: &mut Wire, features: &[&str]) {
     wire.hello(features);
-    wire.created();
     let attach = wire.read("session.attach");
     wire.reply(&attach, attach_record(&attach));
     let history = wire.read("session.history");
@@ -1014,7 +1013,7 @@ fn tui_workflow_panel_lists_definitions() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1062,8 +1061,8 @@ fn tui_workflow_short_screen_keeps_the_composer_and_hints() {
             if fullscreen {
                 command.arg("--fullscreen");
             }
-            let mut terminal = Terminal::launch_tui(command);
-            terminal.until("Git branch");
+            let mut terminal = Terminal::resume_tui(command);
+            terminal.until("resumed session");
             // A draft proves the composer is on the short screen; Ctrl+C
             // clears it before the command.
             terminal.write(b"xyzzy");
@@ -1116,7 +1115,7 @@ fn tui_workflow_save_command_writes_a_definition() {
             wire.reply(&request, settings());
             drains(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow:save\r");
@@ -1211,7 +1210,7 @@ fn tui_workflow_panel_starts_a_run_with_parameters() {
             wire.reply(&request, json!([started_run()]));
             drains(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1365,7 +1364,7 @@ fn tui_workflow_panel_keeps_a_runs_parameters_for_its_own_definition() {
         });
         let mut command = edit_command(&home, &script, fullscreen);
         command.env("RUN_LOG", &log);
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1446,7 +1445,7 @@ fn tui_workflow_run_leaves_a_listed_default_unsent() {
         wire.reply(&request, settings());
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    let mut terminal = Terminal::resume_tui(edit_command(&home, &script, false));
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/workflow\r");
@@ -1498,6 +1497,15 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
                 "through":10,"nextAfter":10,"done":true}),
         );
         wait_shown.recv_timeout(PATIENCE).unwrap();
+        let transcript = wire.read("session.history");
+        assert_eq!(transcript["params"]["branchId"], "line-1");
+        assert_eq!(transcript["params"]["after"], 0);
+        wire.reply(
+            &transcript,
+            json!({"events":[{"id":"start-line-1","sequence":10,"create_at":1,
+                    "type":"branch","name":"start","data":{"parent":"main"}}],
+                "through":10,"nextAfter":10,"done":true}),
+        );
         let request = wire.read("workflow.list");
         wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
@@ -1524,7 +1532,7 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
         wire.reply(&request, settings());
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     // The branch row may be painted before the frame that `test / model`
@@ -1556,6 +1564,7 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
 #[test]
 fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
     let home = Home::new();
+    let launch_cwd = fs::canonicalize(&home.0).unwrap();
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         opened_with(
@@ -1571,6 +1580,7 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
         );
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("workflow.list");
+        assert_eq!(request["params"]["cwd"], json!(launch_cwd));
         wire.reply(&request, listing(false));
         let request = wire.read("settings.read");
         wire.reply(&request, settings());
@@ -1582,7 +1592,7 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
             json!({
                 "name": "release-notes",
                 "source": "plugin",
-                "cwd": "/workspace",
+                "cwd": launch_cwd,
                 "params": {},
             })
         );
@@ -1593,7 +1603,9 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
         wire.reply(&request, settings());
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut command = home.command();
+    command.args(["--cwd", home.0.to_str().unwrap()]);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/new\r");
@@ -1657,7 +1669,7 @@ fn tui_workflow_panel_reports_a_conflict_and_rereads() {
             wire.reply(&request, settings());
             drains(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1697,7 +1709,7 @@ fn tui_workflow_panel_refuses_a_rename_and_keeps_the_draft() {
             wire.reply(&request, settings());
             drains_without_saving(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow\r");
@@ -1737,7 +1749,7 @@ fn tui_workflow_save_is_refused_when_the_daemon_cannot_write() {
         wire.reply(&request, settings());
         drains_without_saving(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/workflow:save\r");
@@ -1778,7 +1790,7 @@ fn tui_workflow_save_reports_an_invalid_definition_and_keeps_the_draft() {
                 "code":-32000,"message":"Stage build: invalid reference {{params.branch}}","data":{"appError":"invalid_definition"}}}));
             drains_without_saving(wire);
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/workflow:save\r");
@@ -1809,7 +1821,7 @@ fn tui_workflow_panel_offers_no_write_without_the_settings_methods() {
         // No settings.read: the daemon does not advertise one.
         drains(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/workflow\r");
@@ -1845,12 +1857,13 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
     let project = home.0.join("work");
     fs::create_dir(&project).unwrap();
     let socket = home.0.join("rust/daemon.sock");
-    // The installed layout, from the checkout: the product home holds the
-    // plugin files, the defaults name the shipped plugins, and the runtimes
-    // are the system Node and the checkout's runtime packages
-    // (`crates/dim-app-server/README.md`, Plugins). `runtime/node_modules`
-    // holds the packages.
     let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
+    let defaults = home.0.join("workflow-defaults.json");
+    fs::write(
+        &defaults,
+        json!({"plugins":{"workflow":runtime.join("plugins/workflow")}}).to_string(),
+    )
+    .unwrap();
     let node = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|directory| directory.join("node"))
         .find(|path| path.is_file())
@@ -1865,7 +1878,7 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
         .arg("--product-home")
         .arg(&home.0)
         .arg("--defaults")
-        .arg(runtime.join("default-plugins.json"))
+        .arg(&defaults)
         .arg("--node")
         .arg(node)
         .arg("--js-runtime")
@@ -1886,8 +1899,6 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    // Default plugins start after the daemon does; Workflow's methods are
-    // advertised once it runs.
     let advertised = || -> Option<bool> {
         let stream = UnixStream::connect(&socket).ok()?;
         stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;

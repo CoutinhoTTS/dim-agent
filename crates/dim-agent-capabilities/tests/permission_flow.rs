@@ -15,6 +15,7 @@ use dim_agent_capabilities::{
     tool_registry::definition,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::*;
 use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
@@ -313,8 +314,7 @@ async fn exec(session: &Session, command: &str) -> ToolResult {
 /// Waits for the approval request of a call with `command` on main.
 async fn approval_request(session: &Session, command: &str) -> String {
     loop {
-        let found = session
-            .local("main", ..)
+        let found = branch_events(session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -338,8 +338,7 @@ async fn approval_request(session: &Session, command: &str) -> String {
     }
 }
 async fn approval_requests(session: &Session) -> usize {
-    session
-        .local("main", ..)
+    branch_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -353,8 +352,7 @@ fn text(result: &ToolResult) -> &str {
     }
 }
 async fn last_result(session: &Session, branch: &str) -> ToolResult {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -971,8 +969,7 @@ async fn updates_are_versioned_per_branch_take_effect_when_dispatched_and_surviv
             .unwrap();
         let permission = session.service::<Permission>("main").unwrap();
         let changes = async |session: &Session, branch: &str| {
-            session
-                .local(branch, ..)
+            branch_events(session, branch, ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1086,8 +1083,7 @@ async fn an_allowed_approval_is_rechecked_against_the_current_policy() {
             .await
             .unwrap();
         let approval_id = loop {
-            let found = session
-                .local("main", ..)
+            let found = branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1120,8 +1116,7 @@ async fn an_allowed_approval_is_rechecked_against_the_current_policy() {
         session.idle("main").await.unwrap();
         assert!(last_result(&session, "main").await.is_error == Some(true));
         assert!(
-            session
-                .local("main", ..)
+            branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1218,7 +1213,7 @@ async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
         }
         session.stop("main", "user stop".into()).await.unwrap();
         session.idle("main").await.unwrap();
-        let events = session.local("main", ..).await.unwrap();
+        let events = branch_events(&session, "main", ..).await.unwrap();
         let outcome = events
             .iter()
             .rev()
@@ -1384,8 +1379,7 @@ async fn a_deny_rule_written_while_approval_is_pending_cancels_the_allowed_call(
         let reason = "Command denied by command rule `git push` (exact)";
         assert_eq!(text(&last_result(&session, "main").await), reason);
         assert!(
-            session
-                .local("main", ..)
+            branch_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1520,8 +1514,7 @@ enum Advice {
     Deny(&'static str),
     None,
     Error,
-    /// Waits on the token it is handed, then records that it saw it
-    /// cancelled.
+    /// Waits for its cancellation token.
     Hold,
     /// Never answers and never looks at its token, so only Permission
     /// dropping the call ends it.
@@ -1538,8 +1531,7 @@ struct TestAdvisor {
     requests: Arc<Mutex<Vec<ToolAdviceRequest>>>,
     /// Released when the advisor runs, so a test can act on a pending advice.
     entered: Arc<tokio::sync::Semaphore>,
-    /// Whether the advisor saw its token cancelled.
-    cancelled: Arc<AtomicBool>,
+    cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 impl AdviseTool for TestAdvisor {
     fn advise(
@@ -1549,12 +1541,12 @@ impl AdviseTool for TestAdvisor {
     ) -> HostFuture<'_, ToolAdviceReply> {
         self.asked.lock().unwrap().push(self.label);
         self.requests.lock().unwrap().push(request);
+        *self.cancel.lock().unwrap() = Some(cancel.clone());
         self.entered.add_permits(1);
         Box::pin(async move {
             match self.answer {
                 Advice::Hold => {
                     cancel.cancelled().await;
-                    self.cancelled.store(true, Ordering::SeqCst);
                     Ok(ToolAdviceReply::None)
                 }
                 Advice::Hang => {
@@ -1729,7 +1721,7 @@ fn advisor(
         asked,
         requests: handles.requests.clone(),
         entered: handles.entered.clone(),
-        cancelled: handles.cancelled.clone(),
+        cancel: handles.cancel.clone(),
     };
     (Arc::new(advisor), handles)
 }
@@ -1738,7 +1730,7 @@ fn advisor(
 struct AdvisorHandles {
     requests: Arc<Mutex<Vec<ToolAdviceRequest>>>,
     entered: Arc<tokio::sync::Semaphore>,
-    cancelled: Arc<AtomicBool>,
+    cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 /// Waits for the advisor to run; a missing call fails the test instead of
 /// hanging it.
@@ -1754,7 +1746,7 @@ impl Default for AdvisorHandles {
         Self {
             requests: Arc::default(),
             entered: Arc::new(tokio::sync::Semaphore::new(0)),
-            cancelled: Arc::default(),
+            cancel: Arc::default(),
         }
     }
 }
@@ -1810,8 +1802,7 @@ async fn advisors_are_asked_in_name_order_and_an_ask_refines_an_allow() {
         }
     });
     let request = asked_approval(&session, "ls").await;
-    let reason = session
-        .local("main", ..)
+    let reason = branch_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -2184,8 +2175,9 @@ async fn cancelling_the_batch_fails_the_admission_and_the_advisor_sees_it() {
     });
     entered(&handles).await;
     cancel.cancel();
-    let error = admitted
+    let error = tokio::time::timeout(Duration::from_secs(10), admitted)
         .await
+        .expect("the cancelled admission settles")
         .unwrap()
         .expect_err("the admission was cancelled");
     assert!(
@@ -2193,8 +2185,14 @@ async fn cancelling_the_batch_fails_the_admission_and_the_advisor_sees_it() {
         "the admission did not fail as cancelled: {error}"
     );
     assert!(
-        handles.cancelled.load(Ordering::SeqCst),
-        "the advisor did not see its token cancelled"
+        handles
+            .cancel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .is_cancelled(),
+        "the advisor's token was not cancelled"
     );
     session.close().await.unwrap();
     agent.close().await.unwrap();
@@ -2283,8 +2281,14 @@ async fn an_advisor_withdrawn_while_its_advice_is_pending_counts_as_none() {
     assert!(admitted.await.unwrap().is_err());
     assert_eq!(*asked.lock().unwrap(), ["hooks"]);
     assert!(
-        !handles.cancelled.load(Ordering::SeqCst),
-        "the dropped advice was still running"
+        !handles
+            .cancel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .is_cancelled(),
+        "withdrawing an advisor must not cancel the batch token"
     );
     session.close().await.unwrap();
     agent.close().await.unwrap();

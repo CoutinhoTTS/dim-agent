@@ -23,20 +23,23 @@ use crate::ui::{
 /// The protocol v3 connection after `hello`, provided by [`DaemonLink`]. One
 /// owner at a time drives it: `take` hands it over. `None` when the link was
 /// made with `start: false` and no daemon runs, or once it was taken.
-pub struct Connection(Mutex<Option<Client>>);
+pub struct Connection {
+    client: Mutex<Option<Client>>,
+    /// The notice [`DaemonLink`] produced when it kept a busy daemon of
+    /// another build; its one reporter takes it.
+    notice: Mutex<Option<crate::client::DaemonNotice>>,
+}
 
 impl Connection {
-    /// Whether the connected daemon advertises `method` in `hello`.
-    pub fn offers(&self, method: &str) -> bool {
-        self.0
+    pub fn take(&self) -> Option<Client> {
+        self.client
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .is_some_and(|client| client.supports(&[method]))
+            .take()
     }
-
-    pub fn take(&self) -> Option<Client> {
-        self.0
+    /// The line the daemon decision produced, taken by its one reporter.
+    pub fn take_notice(&self) -> Option<crate::client::DaemonNotice> {
+        self.notice
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
@@ -55,6 +58,10 @@ pub struct DaemonLink {
     pub options: Options,
     /// Start a daemon when none runs; `daemon stop` only looks for one.
     pub start: bool,
+    /// The interface language to report startup progress in. `apply` is a
+    /// fiber task and may run on another thread, so the language travels as a
+    /// value rather than the interface thread's thread-local.
+    pub locale: crate::locale::Locale,
 }
 
 impl Plugin for DaemonLink {
@@ -65,10 +72,17 @@ impl Plugin for DaemonLink {
     }
 
     async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
-        let client = client::connect_inner(&self.options, self.start)
+        let linked = client::connect_inner(&self.options, self.start, self.locale)
             .await
             .map_err(ErrorKind::PluginFailed)?;
-        ctx.provide(Connection(Mutex::new(client)))?;
+        let (client, notice) = match linked {
+            Some(link) => (Some(link.client), link.notice),
+            None => (None, None),
+        };
+        ctx.provide(Connection {
+            client: Mutex::new(client),
+            notice: Mutex::new(notice),
+        })?;
         Ok(())
     }
 }
@@ -77,10 +91,12 @@ impl Plugin for DaemonLink {
 /// connection) and the render thread (`ui::tui::run`). How the interface
 /// ended goes to the composition root through `leave`.
 pub struct Tui {
+    pub root: Ctx,
     pub env: ui::Env,
     pub options: Options,
     /// Taken by the load; the render thread sends the result once.
     pub leave: Mutex<Option<oneshot::Sender<Leave>>>,
+    pub leaf_end: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 impl Plugin for Tui {
@@ -98,6 +114,9 @@ impl Plugin for Tui {
         let client = connection
             .take()
             .ok_or_else(|| rutis::Error::from(ErrorKind::PluginFailed(CONNECTION_TAKEN.into())))?;
+        let notice = connection
+            .take_notice()
+            .map(|notice| crate::daemon_notice(&notice));
         let leave = self
             .leave
             .lock()
@@ -107,7 +126,22 @@ impl Plugin for Tui {
                 rutis::Error::from(ErrorKind::PluginFailed("Tui was loaded twice".into()))
             })?;
         let language = ui::i18n::interface_locale(&self.options.home).code();
-        let host = SessionHost::start(self.options.clone(), client, language);
+        let leaf_end = self
+            .leaf_end
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed("Tui was loaded twice".into()))
+            })?;
+        let host = SessionHost::start(
+            self.options.clone(),
+            client,
+            language,
+            notice,
+            self.root.clone(),
+            leaf_end,
+        );
         let env = self.env.clone();
         let render = std::thread::Builder::new()
             .name("dim-tui".into())

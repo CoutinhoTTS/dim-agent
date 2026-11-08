@@ -4,21 +4,102 @@
 //! this owner depends on Settings, as PermissionRules does for `permission`.
 use crate::{
     methods::ManagementMethods,
-    settings::{Read, SettingsError, SettingsService, Update, Writer},
+    protocol::Empty,
+    settings::{
+        Read, SettingsError, SettingsService, SourceDeclaration, Update, Writer, holds_write_only,
+    },
 };
 use dim_agent_capabilities::{
     file_storage::FileStorageError,
-    methods::{Interruption, MethodDecl, RpcError, params, reply},
+    methods::{Interruption, MethodCall, MethodDecl, RpcError, params, reply},
 };
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
-use std::sync::Arc;
+use serde::Serialize;
+use serde_json::Value;
+use std::{path::PathBuf, sync::Arc};
+
+/// The JSON Schema dialect of every declared source's `schema`: the one
+/// `Declared::compile` validates with (`settings/declared.rs`).
+const DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
+
+/// The `settings.sources` reply (§4.3): the client-readable declarations.
+/// It lists declarations, never documents or file names.
+#[derive(Serialize)]
+struct SourcesReply {
+    /// [`DIALECT`], the dialect the `schema` members are written in.
+    dialect: &'static str,
+    /// One item per registered declared source, in source-name order.
+    sources: Vec<SourceListing>,
+}
+
+/// One declared source as a client reads it. A separate wire type, so a
+/// field added to [`SourceDeclaration`] cannot leak into the reply by
+/// accident.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceListing {
+    source: String,
+    /// The registered schema verbatim: no member is added, removed or
+    /// reordered. Display metadata is the schema's own `title` and
+    /// `description` annotations, if the owner added them.
+    schema: Value,
+    /// `["user"]`, or `["user", "project"]` when the source declares a
+    /// project file. Never a project root or a file name.
+    scopes: Vec<&'static str>,
+    /// The registered `userOnly` pointers, in registered order.
+    user_only: Vec<String>,
+    /// Whether the schema marks a member `writeOnly` through top-level
+    /// `properties` recursion only; a client may scan `schema` itself for a
+    /// `writeOnly` under `items`, `$defs` or `anyOf`.
+    write_only: bool,
+}
+
+/// The `settings.projects` reply (§4.3): the project roots this process has
+/// authorized, in cwd order. It is the same list the owner-facing `projects`
+/// service answers (§4.2); only the transport differs.
+#[derive(Serialize)]
+struct ProjectsReply {
+    /// One item per authorized root. The map only grows for the life of the
+    /// process, so the list only grows too.
+    projects: Vec<ProjectListing>,
+}
+
+/// One authorized project root as a client reads it. A separate wire type, so
+/// a field added to the authorization event cannot leak into the reply.
+#[derive(Serialize)]
+struct ProjectListing {
+    /// The number Settings assigned in this process, taken verbatim as
+    /// `{project: root}` (§4.1). It is not a durable identity.
+    root: usize,
+    /// The canonical working directory the root stands for.
+    cwd: PathBuf,
+}
+
+impl From<SourceDeclaration> for SourceListing {
+    fn from(declaration: SourceDeclaration) -> Self {
+        let write_only = holds_write_only(&declaration.schema);
+        let mut scopes = vec!["user"];
+        if declaration.project_file.is_some() {
+            scopes.push("project");
+        }
+        Self {
+            source: declaration.source,
+            schema: declaration.schema,
+            scopes,
+            user_only: declaration.user_only,
+            write_only,
+        }
+    }
+}
 
 /// The client path's wire errors (§4.3).
 fn wire(error: SettingsError) -> RpcError {
     let kind = match &error {
-        SettingsError::InvalidScope(_) | SettingsError::Document(_) => {
+        SettingsError::InvalidScope(_)
+        | SettingsError::Document(_)
+        | SettingsError::DocumentShape { .. } => {
             return RpcError::invalid(error.to_string());
         }
         SettingsError::Closed => return RpcError::reloading(),
@@ -62,8 +143,15 @@ impl DynPlugin for SettingsMethodsPlugin {
                 vec![
                     MethodDecl::new("settings.read", false, Interruption::Report),
                     MethodDecl::new("settings.update", true, Interruption::Report),
+                    MethodDecl::new("settings.sources", false, Interruption::Report),
+                    MethodDecl::new("settings.projects", false, Interruption::Report),
                 ],
-                Arc::new(move |method, value, stopping, _| {
+                Arc::new(move |call, stopping, _| {
+                    let MethodCall {
+                        method,
+                        params: value,
+                        ..
+                    } = call;
                     let service = service.clone();
                     Box::pin(async move {
                         match method.as_str() {
@@ -91,6 +179,27 @@ impl DynPlugin for SettingsMethodsPlugin {
                                         .await
                                         .map_err(wire)?,
                                 )
+                            }
+                            "settings.sources" => {
+                                let _: Empty = params(value)?;
+                                reply(SourcesReply {
+                                    dialect: DIALECT,
+                                    sources: service
+                                        .declarations()
+                                        .into_iter()
+                                        .map(SourceListing::from)
+                                        .collect(),
+                                })
+                            }
+                            "settings.projects" => {
+                                let _: Empty = params(value)?;
+                                reply(ProjectsReply {
+                                    projects: service
+                                        .project_sources()
+                                        .into_iter()
+                                        .map(|(root, cwd)| ProjectListing { root, cwd })
+                                        .collect(),
+                                })
                             }
                             _ => unreachable!("registered settings management method"),
                         }

@@ -1,7 +1,9 @@
 //! Version 2 product views of the Session broadcast; positions are branch sequences.
 use dim_agent_capabilities::session_broadcast::SessionNotice;
 use dim_agent_runtime::{BranchStatus, ModelProgress, TimelineInfo};
-use dim_agent_types::{AgentEvent, ApprovalCallData, ApprovalDecision, BranchSource, EventKind};
+use dim_agent_types::{
+    AgentEvent, ApprovalCallData, ApprovalDecision, BranchSource, EventKind, ModelFailureKind,
+};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -25,6 +27,27 @@ impl From<TimelineInfo> for BranchInfo {
             create_event: info.create_anchor,
         }
     }
+}
+
+/// One entry of `session.branches`: the directory record of one line.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchDirectoryView {
+    #[serde(flatten)]
+    pub branch: BranchInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<dim_agent_types::BranchSource>,
+    pub state: &'static str,
+    pub head: u64,
+    /// The line's `branch/end` sequence; absent while open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_event: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchesResult {
+    pub branches: Vec<BranchDirectoryView>,
 }
 
 #[derive(Debug)]
@@ -108,6 +131,10 @@ impl Serialize for ProductEvent {
                 view["data"]["model_preferences"] =
                     serde_json::to_value(preferences).map_err(serde::ser::Error::custom)?;
             }
+            if let Some(snapshot) = &configured.settings.capability_snapshot {
+                view["data"]["capability_snapshot"] =
+                    serde_json::to_value(snapshot).map_err(serde::ser::Error::custom)?;
+            }
             view.serialize(serializer)
         } else {
             self.0.serialize(serializer)
@@ -139,10 +166,13 @@ pub struct CreateResult {
 pub struct BarrierResult {
     pub sequence: u64,
 }
+/// `session.history`: a page of the branch's own facts. Each event is the
+/// encoded form the reply carries, so the byte budget in
+/// `connection::tree` counts the bytes the transport writes.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryResult {
-    pub events: Vec<ProductEvent>,
+    pub events: Vec<Box<serde_json::value::RawValue>>,
     pub through: u64,
     pub next_after: u64,
     pub done: bool,
@@ -150,6 +180,23 @@ pub struct HistoryResult {
     pub next_before: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_start: Option<u64>,
+}
+/// `session.keys`: the live keyed blocks of one branch segment at `through`,
+/// ascending by the carrying input's sequence and by block order inside one
+/// input (keyed-blocks §2.2).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeysResult {
+    pub through: u64,
+    pub entries: Vec<KeyEntry>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyEntry {
+    pub key: String,
+    pub sequence: u64,
+    pub input_id: String,
+    pub text: String,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,6 +243,23 @@ pub struct ModelProgressNotice {
     /// Unicode scalar values of this request's `step/thinking` deltas before `thinking`.
     pub thinking_offset: u64,
     pub tools: Vec<ToolProgress>,
+    /// The retry this request is waiting to make, while it sleeps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryProgress>,
+}
+/// A retry a request is waiting for, shown while it sleeps.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryProgress {
+    /// The attempt about to run, at least 2.
+    pub attempt: u8,
+    /// The total cap on attempts.
+    pub max_attempts: u8,
+    /// Unix milliseconds at which the attempt starts.
+    pub retry_at_ms: u64,
+    pub kind: ModelFailureKind,
+    /// The failure's bounded reason.
+    pub reason: Option<String>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -226,6 +290,13 @@ impl ModelProgressNotice {
                     arguments: tool.arguments,
                 })
                 .collect(),
+            retry: progress.retry.map(|retry| RetryProgress {
+                attempt: retry.attempt,
+                max_attempts: retry.max_attempts,
+                retry_at_ms: retry.retry_at_ms,
+                kind: retry.kind,
+                reason: retry.reason,
+            }),
         }
     }
 }

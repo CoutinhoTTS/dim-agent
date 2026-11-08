@@ -969,7 +969,7 @@ impl DynPlugin for PromptPlugin {
                     })
                 },
             )?;
-            let projected_through = timeline.committed();
+            let projected_through = timeline.sequence();
             let context = crate::history::read_context(&timeline, projected_through).await?;
             state.set(PromptSnapshot::from_context(&context));
             *projecting = projected_through;

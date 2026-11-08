@@ -4,6 +4,9 @@ This index is navigation. Delivery status lives in issues, not here.
 
 - [CLI feature list](feature-list.md)
 - [Model preferences and Agent configuration](design/model-configuration.md)
+- [Model startup](design/model-startup.md): temporary model, effort and multi-protocol connections with branch/member/compaction inheritance
+- [Model failures](design/model-failures.md)（[中文](zh/design/model-failures.md)）: the failure kind, the fact on the terminal event, who words the line, and retry (#1197)
+- [模型请求重试与任务续接方案](design/research/model-retry-recovery.md)（中文，#1210）：请求重试的可见性、独立恢复能力的边界及所有者合同需求
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
 - [AcpGateway implementation contract](design/acp-gateway-implementation.md)（中文，#436）：protocol mapping, client-host plugin wiring, lifecycle and unsupported features
@@ -49,6 +52,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Local development and managed provider boundary](architecture/development.md)
 - [内存快速增长与不释放：分析方案](architecture/memory-investigation.md)（中文）：同版本隔离复现、进程内存与存活分配分析
 - [Clients](design/clients.md): which clients exist, what they share, capability coverage per client, gaps and open decisions（[中文](zh/design/clients.md)）
+- [客户端 UI 扩展](design/client-ui-extensions.md)：框架无关的面板挂载、公开服务、内容生命周期与展示资源（#1136）
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
@@ -87,6 +91,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Session classification: creation origin and catalog visibility](design/appserver/session-classification.md) (#557)
 - [Session broadcast notices](design/appserver/session-notices.md)（[中文](zh/design/appserver/session-notices.md)）
 - [Bounded latest-turn history window](design/appserver/session-history-window.md) (#712)
+- [Keyed blocks: the session.keys read](design/appserver/keyed-blocks.md) (#958)（[中文](zh/design/appserver/keyed-blocks.md)）
 - [SessionStore title metadata](design/appserver/session-title-metadata.md)（[中文](zh/design/appserver/session-title-metadata.md)）
 - [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (#193)（[中文](zh/design/appserver/restore-shared-read.md)）
 - [Restore validation reuse](design/appserver/restore-validation.md) (#601)

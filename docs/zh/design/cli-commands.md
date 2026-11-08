@@ -10,31 +10,42 @@ CLI 接口；当前可执行文件由[原生 CLI 合同](../../../crates/dim-cli
 
 ## 命令菜单
 
-scrollback 与 fullscreen TUI 都按固定的任务顺序分组：会话、模型与权限、扩展与自动化、界面、应用。
-分类内也使用以下固定顺序，不按字母或最近使用顺序排列：
+scrollback 与 fullscreen TUI 都按同一个固定的、经过整理的顺序列出 slash 命令，不按字母或最近使用顺序排列。
+菜单不画分类列：
 
-| 分类 | 命令顺序 |
-| --- | --- |
-| `session` | `/new`、`/resume`、`/timeline`、`/goal`、`/tasks`、`/lines`、`/branch`、`/fork`、`/compact`、`/usage`、`/rename`、`/web` |
-| `model` | `/models`、`/agent`、`/effort`、`/fast`、`/permissions`、`/connect`、`/login` |
-| `extensions` | `/skills`、`/mcp`、`/plugins`、`/hooks`、`/scheduled`、`/workflow`、`/workflow:save`、`/reload-skills`、`/runtime` |
-| `view` | `/theme`、`/language`、`/tools`、`/tui` |
-| `app` | `/settings`、`/keys`、`/exit` |
+```text
+/new /resume /models /compact /usage
+/effort /fast /agent /permissions /settings
+/branch /fork /lines /timeline /goal
+/tasks /rename /web /connect /login
+/skills /reload-skills /mcp /plugins /runtime
+/hooks /scheduled /workflow /workflow:save
+/tools /tui /theme /language /keys /exit
+```
 
-`/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述任务顺序。
+`/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述顺序。
 排序不受界面语言影响；打开 `/` 默认选中 `/new`，Enter 会新建会话。未筛选列表中的 `/exit` 始终在最后。
 退出必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
 菜单选择即使完整匹配命令名，也可能只补全：带行内参数的命令和 `/goal` 会填入输入框，等待另一次提交。
+`Tab` 只补全选中行，从不执行也不发送：命令补全为其名称，带参数的命令同时补全名称后的空格，
+Skill 行补全 `$skill: <name> ` 标记。没有匹配项时草稿保持不变。
+不带参数的命令只在 `Enter` 时执行。
 菜单中的权限入口为 `/permissions`；`/approvals` 和 `/approval` 是完整输入时仍可使用的兼容别名。
-菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单只列出斜杠命令：选择较早消息、滚动到顶部或底部等视图操作也不列出；
-`Tab`、`Home`、`End` 保留各自的绑定。
+菜单不列出运行、排队和 steer 的按键，它们只由按键触发。菜单列出斜杠命令与 Skill：选择较早消息、滚动到顶部或底部等视图操作也不列出；
+`Tab`、`Home`、`End` 在菜单之外保留各自的 fullscreen 消息选择和滚动绑定。
 
-两种模式下，菜单都适应终端可用的列数和行数。命令名优先于分类标签、描述和快捷键标签；必要时缩短
-分类标签以保留完整命令名。快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
+Skill 行读作 `$name`，带其描述。只列出已启用且没有被其他来源遮蔽的 Skill；名称含空白的 Skill 无法被引用，因此也不列出。列表跟随会话的目录：
+客户端在挂载、切换会话、`/reload-skills` 之后以及 `/skills` 中的改动之后重新读取。不提供 `skills.catalog` 的守护进程只显示命令，不报错。
+用 `Enter` 或 `Tab` 选择 Skill 行只填入 `$skill: <name> `，绝不发送；该标记随消息文本一起提交。Skill 排在命令之后；
+只有当查询是某个 Skill 名称的前缀、且不是任何命令名或别名的前缀时，Skill 才排在前面；因此与命令同名的 Skill 两行都保留，命令在前。
+`/` 是唯一的触发器：`@` 仍是文件选择器。
+
+两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签。
+快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
 短屏幕少显示一些命令，可见窗口跟随选择。
 Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
-命令面板查询行和选中项。分类分组和排序不随终端尺寸变化。
+命令面板查询行和选中项。顺序不随终端尺寸变化。
 
 当通常的历史保留空间使实时区域不足八行时，实时控件优先：两种渲染器都可为实时区域使用最多八行，
 但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
@@ -63,12 +74,13 @@ Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页
 
 ```text
 Commands
-  session /new         start a new session
-  session /resume      resume a previous session
-  session /timeline    jump to a message of the shown line
-  session /goal        follow or change the shown line's goal
-  session /tasks       view command output or interrupt a member
-  session /lines       follow, talk to and end this session's lines
+  /new         start a new session
+  /resume      resume a previous session
+  /models      select a model
+  /compact     compact the context of the shown line
+  /usage       show the context window usage
+  /effort      show or set the reasoning effort
+  $commit      write a commit message for the staged changes
 
 / + Enter          -> start a new session
 /ex + Enter        -> /exit (completion only)
@@ -80,10 +92,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| session /new            |   | > /                     |
+| /new                    |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | session /new            |
++- input -----------------+   | /new                    |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -155,7 +167,7 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 `/goal` 读取当前显示线的目标，并通过 Goal 注册的方法写入它。方法、标记块和读取目标的规则属于
 [Goal](plugins/Goal.md#a2-session-方法)（A.2、A.3）和 [Pursuit](plugins/Pursuit.md#3-对-goal-的修改)；
-本节规定原生客户端用它们做什么。该命令作为 `session` 分类列在命令菜单里，与 `/compact` 相同。
+本节规定原生客户端用它们做什么。该命令与 `/compact` 一样列在命令菜单里。
 
 两种 TUI 模式中，用 Enter 或 Tab 选择 `/goal` 只会把 `/goal ` 填入输入框并关闭命令面板，
 不会执行。用户再次提交空参数草稿时，先打印 Dim 支持的用法，再显示当前目标及状态，或该线没有目标的提示。
@@ -194,10 +206,11 @@ No goal on main.
 不属于本契约。
 
 **读取目标。** 客户端按 Goal A.3 的规则，从它本来就在读的分支事件中折叠目标：最新存活的
-`goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
+`goal:state` 记录就是目标；在记录出现之前写成的历史上，最新存活的 `goal:objective` 块是目标文本，最新存活的 `goal:status` 块是状态，`clear` 退役两者，`edit` 保留裁判，
 被 InputQueue 删除的输入会使折叠跳过它的块。它不新增查询方法，也不向 Goal 询问任何东西。不带参数的 `/goal`
-先打印用法，再打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部，写入之后再读一次才打印：
-显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
+先打印用法，再打印这个折叠结果。在 `set` 与 `edit` 之间选择之前，客户端先把该线读到已发布的头部。写入之后，客户端先折叠该次写入产生的事件再打印：
+行模式提示符会再读一次，终端界面则等待该线的实时事件。报告在方法返回的 `sequence` 处释放，对所有守护进程一致：由 main 构建的守护进程返回同样的序号但发布旧 key，
+命令不能停在原地等待这种守护进程永远不会写出的记录。显示的状态与选择的方法都来自事件，而不是从回复猜出来的状态。折叠在该线自己的开场事件处重新开始——它的 `branch/start`，
 或分叉在复制完事实之后写入的 `session/forked`——所以新开的线没有目标，分叉 Session 的 `main` 也从不显示
 复制来的目标（Goal §2、A11）。v3 客户端会收到这个开场事件，因此分叉在客户端与 Goal 里的读法一致。
 
@@ -312,20 +325,21 @@ fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
 
 ## 插件运行时
 
-RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeManager](plugins/RuntimeManager.md)）。
+RuntimeManager 提供插件代码运行的 Node 与 Python 运行时，以及启动 Python MCP 服务器的 uv 工具（[RuntimeManager](plugins/RuntimeManager.md)）。
 守护进程在动作应用配置的那一刻才读配置（RuntimeManager §3.3），所以客户端可以让用户打开运行时、
 选择它的来源、看它在做什么，而不必手改 `<home>/runtimes/config.json`，也不必重启任何东西。
 `/runtime` 在两种终端模式下打开同一个面板；行客户端与 CLI 里对应的区域是 `dimcode runtime`。
 
 ### 面板
 
-行是两个运行时，固定 node 在前、python 在后。每行显示名字、配置的来源（`download` 或 `system`）、
+行是两个运行时和 uv 工具，固定 node 在前、python 其次、uv 最后。每行显示名字、配置的来源（`download` 或 `system`）、
 正在生效的版本（`download` 是固定版本，`system` 是检查过的解释器版本，`off` 且从未检查时为空）、
 打开时的 `auto`，以及 `runtime.list` 给出的状态：`off`、`acquiring`、`starting`、`ready`、带原因的 `down`，或带
-原因（列出每个来源和它的错误）的 `failed`。
+原因（列出每个来源和它的错误）的 `failed`。uv 不启动运行时，所以它从不显示 `starting` 或 `down`：
+按正在生效的 plan 装好后就是 `ready`。
 
 行下方列出在等这个运行时的插件行——因为它是 `off` 或 `down` 而处于 Pending 的那些
-（[PluginManager §2.5](plugins/PluginManager.md#25-runtimes)）——这样"goal 为什么不工作"和它的
+（[PluginManager §2.5](plugins/PluginManager.md#25-runtimes)）——这样"workflow 为什么不工作"和它的
 解决办法在同一个地方。失败时每个来源一行，与 `runtime.list` 报的一致。
 
 ```text
@@ -333,8 +347,9 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ╭─ 插件运行时 ──────────────────────────────────────────────────────────────╮
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      未安装                          │
+│   uv        download  0.13.7     off                                      │
 │                                                                           │
-│   3 个插件在等 node：goal、scheduler、workflow                            │
+│   1 个插件在等 node：workflow                                             │
 ╰─ Enter 安装或应用 · s 来源 · a 自动 · r 重试 · Esc 关闭 ──────────────────╯
 ```
 
@@ -352,7 +367,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 │               https://npmmirror.com/mirrors/node/v24.21.0/…：404          │
 │   python    system    3.12.15    off      未安装                          │
 │                                                                           │
-│   3 个插件在等 node：goal、scheduler、workflow                            │
+│   1 个插件在等 node：workflow                                             │
 ╰─ Enter 重试 · s 把 node 换成 system · Esc 关闭 ───────────────────────────╯
 ```
 
@@ -361,7 +376,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 
 ### 菜单项
 
-`/runtime` 是 `extensions` 类的 slash 命令，位置遵循[命令菜单顺序](#命令菜单)；它不需要 Session
+`/runtime` 是 slash 命令，位置遵循[命令菜单顺序](#命令菜单)；它不需要 Session
 （`Needs::Nothing`），也不接受内联参数，因为动作都在面板里。下面打字的子形态只在输入时接受，不作为
 菜单补全列出。
 
@@ -399,9 +414,9 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ```text
 /plugins
 ╭─ 插件 ────────────────────────────────────────────────────────────────────╮
-│ › goal           on     pending · 等待 node 运行时                        │
+│ › goal           on     ready · 内置                                      │
 │   session-title  on     ready · 内置                                     │
-│   scheduler      on     pending · 等待 node 运行时                        │
+│   scheduler      on     ready · 内置                                      │
 │   workflow       on     pending · 等待 node 运行时                        │
 ╰─ Enter 打开 /runtime · o 开/关 · r 重载 · Esc 关闭 ───────────────────────╯
 ```
@@ -413,6 +428,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 ```text
 /runtime                              在 scrollback 客户端里打印同样的行
 /runtime install node                 应用 node 的配置
+/runtime install uv                   安装 uv 工具
 /runtime source node system           把 node 换成系统解释器并应用
 /runtime auto python on               用配置打开 python 并应用
 ```
@@ -421,6 +437,7 @@ RuntimeManager 提供插件代码运行的 Node 与 Python 运行时（[RuntimeM
 $ dimcode runtime list
 node    download  24.21.0   ready
 python  system    3.12.15   off       未安装
+uv      download  0.13.7    off
 $ dimcode runtime install node
 node    download  24.21.0   acquiring
 $ dimcode runtime config python --source system --auto on
@@ -510,6 +527,8 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 ### 动作
 
 客户端有一组封闭的动作种类。每种在每个面板里都只有一个键，键提示按表格顺序列出该领域提供的种类，加上所选条目提供的种类。
+
+针对单个条目的动作同时携带条目 id 和其所在行报告的来源。同一个 id 出现在不同来源时是两行，各自可以被选中和操作；适配器按动作携带的来源执行，不在目录里按 id 找来源。所有者不报告来源的领域不带来源，其 id 本身唯一。
 
 | 种类 | 键 | 做什么 |
 | --- | --- | --- |
@@ -704,9 +723,11 @@ inspect 读取 `workflow.status {}`，把保留的运行过滤到该条目的名
 
 MCP 不新增种类。它的条目就是生效目录——各服务器按 id 合并，project 最后——按 `user`、`project`、`plugin` 的顺序分组，组内按 id 排列；条目的标签和 id 都是服务器的 id。面板与 `dimcode mcp` 用 toggle、edit、reload、add、remove、run 与 inspect，经 `mcp.catalog`、`mcp.configuration`、`mcp.update`、`mcp.save`、`mcp.remove`、`mcp.set_enabled`、`mcp.test` 与 `mcp.inspect`（[MCP 管理](appserver/mcp-management.md)）。
 
+每个按 `ID` 点名一个已存条目的 `dimcode mcp` 命令都接受可选的 `--source SOURCE`，取值就是 `mcp list` 打印的来源名：`user`、`project`、`plugin`。同一个解析函数把 `(catalog, id, source)` 解析成唯一一个条目，有效或损坏的都算。给了来源时就是该来源的条目，没有则拒绝并指出该来源；不给来源时，只有一个来源列出该 id 才是那个条目，多个来源列出则拒绝，并指出这些来源和该选项。客户端从不自己挑一个。面板用同一个解析函数，来源取动作所在行的来源；`mcp list` 本就打印每个 id 所在的来源。
+
 toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用状态，所以比较并交换只覆盖这段窗口；它只作用于一个 id，不会覆盖来源中别处的改动。用户条目的启用状态是本地记录；项目条目一开始是停用的，只有 toggle 或 `dimcode mcp enable|disable` 会启用它。edit 先读 `mcp.configuration` 取得条目的 revision 与文档，再写 `mcp.update`，绝不用 `mcp.save`：save 接收完整配置，而读取会隐藏机密，往返一次就会把它们抹掉。
 
-编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
+编辑文档就是 patch：省略的字段保留已存值，给出的值替换它，`env` 或 `headers` 只改动它点名的键。它还可以给出 `timeout`——该条目的工具调用时限，毫秒，1000 到 86400000；给 `null` 清除它，按十分钟默认值执行（[MCP 管理 §D20](appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)）。种子文档给出命令与工作目录、空的 `env` 与 `headers`，以及已配置 OAuth 的已报告字段；它从不给出已存参数、环境变量值、请求头值、Bearer 令牌或 URL，因为这些要么被隐藏，要么整体替换。文档不带 transport，因为已存条目的 transport 是固定的。stdio 的 patch 点名命令、工作目录与要改动的环境变量键：
 
 ```json
 {"command": "npx", "cwd": "/work", "env": {"TOKEN": "value"}}
@@ -717,6 +738,8 @@ toggle 以 `mcp.catalog` 紧接写入前报告的 revision 写该来源的启用
 ```json
 {"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
 ```
+
+新建的定义同样可以给出 `timeout`，查看时会显示给出的值。
 
 add 用目录的来源 revision——`userRevision`，来源为 `project` 时用 `projectRevision`——写 `mcp.save`，并拒绝目录中已列出的 id，因为一次 save 会替换该条目。新建文档就是一个条目，带它的来源与 `mcp.save` 接收的定义：
 
@@ -807,16 +830,17 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 
 | 入口 | 行为 |
 | --- | --- |
-| `dimcode tui` | 打开现有的交互式滚动回显客户端。 |
+| `dimcode tui [-p TEXT] [--image PATH ...]` | 打开现有的交互式滚动回显客户端；`-p` 把 TEXT 作为首条消息发送（[带首条消息启动](#带首条消息启动)）。 |
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | 运行文本和/或本地图片后退出；没有 `-p` 时读取重定向的 stdin。 |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | 用文本和/或图片继续指定的已持久化 Session。 |
+| `dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` | 打开一个实时会话并按 JSON 行流式输出（[实时会话](#realtime-会话)）：stdin 行是 text 帧，事件与结束打印到 stdout，EOF 或 Ctrl+C 关闭会话。 |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | 导出主分支；未给输出路径时写到 stdout。 |
 | `dimcode session rename SESSION TITLE` | 经 `session.rename` 设置该 Session 的手动标题，并打印服务端返回的标题。 |
 | `dimcode session rename SESSION --clear` | 清除手动标题，Session 回到无标题状态。 |
 | `dimcode session delete SESSION` | 永久删除该 Session 及存储为它保留的一切；不弹出确认。 |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | 列出某个选择器命中的 Session，确认后删除。 |
 | `/rename TITLE` 或 `/rename --clear` | 设置或清除所显示 Session 的手动标题；该文本是命令，永不成为模型输入。 |
-| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 依次循环当前工作区、提供时的当前仓库与所有工作区。 |
+| `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 在本地范围（启动工作区，或 git 回答后的当前仓库）与所有工作区之间切换。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
@@ -850,15 +874,21 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `/workflow:save` | 在新建编辑器中打开 Workflow 面板。 |
 | `dimcode mcp list` | 经 `mcp.catalog` 列出生效目录（[MCP 领域](#mcp-领域)）：每个条目的 id、来源、transport、启用状态与授权，然后是各来源 application 的错误。 |
 | `dimcode mcp add PATH` | 以面板的新建文档（`-` 表示 stdin）经 `mcp.save` 创建条目，带 `mcp.catalog` 报告的来源 revision；目录已列出的 id 会被拒绝。 |
-| `dimcode mcp edit ID` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开条目的 `mcp.update` patch，并以 `mcp.configuration` 报告的 revision 写回；内容没有变化时不写入。 |
-| `dimcode mcp set ID PATH` | 从 `PATH`（`-` 表示 stdin）读取 patch 并写入，用写入前紧邻读到的 revision。 |
-| `dimcode mcp remove ID` | 不经确认，经 `mcp.remove` 以来源 revision 删除单个条目：命令行上的 id 就是意图。 |
-| `dimcode mcp test ID` | 经 `mcp.test` 运行已存条目一次，并打印临时连接发现的工具；不保存任何内容。 |
-| `dimcode mcp inspect ID` | 经 `mcp.inspect` 打印生效配置与会话连接，不联系服务器。 |
-| `dimcode mcp disconnect ID` | 经 `mcp.disconnect` 关闭条目的活动连接；它不写配置，条目下次使用时重新连接。 |
-| `dimcode mcp login\|logout\|enable\|disable ID` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
+| `dimcode mcp edit ID [--source SOURCE]` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开条目的 `mcp.update` patch，并以 `mcp.configuration` 报告的 revision 写回；内容没有变化时不写入。 |
+| `dimcode mcp set ID [--source SOURCE] PATH` | 从 `PATH`（`-` 表示 stdin）读取 patch 并写入，用写入前紧邻读到的 revision。 |
+| `dimcode mcp remove ID [--source SOURCE]` | 不经确认，经 `mcp.remove` 以来源 revision 删除单个条目：命令行上的 id 就是意图。 |
+| `dimcode mcp test ID [--source SOURCE]` | 经 `mcp.test` 运行已存条目一次，并打印临时连接发现的工具；不保存任何内容。 |
+| `dimcode mcp inspect ID [--source SOURCE]` | 经 `mcp.inspect` 打印生效配置与会话连接，不联系服务器。 |
+| `dimcode mcp disconnect ID [--source SOURCE]` | 经 `mcp.disconnect` 关闭条目的活动连接；它不写配置，条目下次使用时重新连接。 |
+| `dimcode mcp login\|logout\|enable\|disable ID [--source SOURCE]` | 行为保持不变：浏览器或设备签到、退出，以及两个 `/mcp` 客户端共用的启用/停用。 |
 | `/mcp` | 打开会话所在工作区的 MCP 面板（[管理界面](#管理界面)）：每个服务器一个条目，按 `user`、`project`、`plugin` 分组，带 toggle、edit、add、remove、test 与 inspect 种类。 |
-| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令，行为不变：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。 |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | 行命令：`list` 打印目录与会话的服务器状态，`disconnect` 关闭一个条目的活动连接，其余用于签到、完成回调、退出或切换启用状态。凡是按 ID 指名一个已存条目的命令（`login`、`logout`、`disconnect`、`enable`、`disable`）都接受可选的 `--source SOURCE`，与 `dimcode mcp` 相同；多个 source 列出同一 id 时必须指定。 |
+| `dimcode modality [--json]` | 经 `modality.capabilities` 列出每个 Modality 类别与操作的表格（[Modality](plugins/Modality.md#a5-cli)）：可用性、owner 的 `dimension: detail` 原因行、默认与生效模型；`--json` 原样打印回复。守护进程不公布该方法时提示它不提供 Modality 并以 1 退出。 |
+| `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | 经 `modality.configure` 写入一个操作默认值：revision 取紧邻写入前读到的，`modality_conflict` 后重读并重试一次；`--clear` 发送 `model: null`；打印该操作的行，`--json` 下打印回复。 |
+| `dimcode image generate\|edit PROMPT [FILE...]`、`image enhance MODE [FILE...]`、`video generate\|edit\|enhance PROMPT [FILE...]`、`speech synthesize TEXT`、`speech transcribe FILE`、`music\|audio\|motion generate PROMPT`、`asset generate PROMPT [FILE...]` | 经 `modality.task.submit` 提交一个任务（[Modality](plugins/Modality.md#a5-cli)）：`--mask` 把 mask 作为名为 `params.mask` 的输入文件发送，`--param KEY=VALUE` 添加一个适配器参数（能解析为 JSON 时按 JSON，否则按字符串），输入整体不超过 8 MiB 时内联发送，超过则用 `node_path`。等待并把结果文件写到 `--out`（目录，默认 `.`），已有的文件绝不覆盖；`--no-wait` 打印 id，`--json` 打印记录。 |
+| `dimcode modality task list [--state S] [--category C] [--limit N] [--after ID]` | 经 `modality.task.list` 列出一页 Modality 任务（[Modality](plugins/Modality.md#a5-cli)），最新的在前，格式为 `ID STATE OPERATION MODEL CREATED`；还有下一页时在 stderr 打印 `More: --after <id>`；`--json` 原样打印回复。 |
+| `dimcode modality task status\|wait\|cancel ID` | 经 `modality.task.status` 打印一个任务的行、进度、错误和结果文件；经 `modality.task.wait` 等待它，只在 `--out DIR` 时写结果；或经 `modality.task.cancel` 取消它，报告 owner 返回的状态。 |
+| `dimcode ocr FILE [--output-mode text\|layout] [--out DIR]` | 经 `modality.task.submit` 提交 `ocr.recognize`（[Modality](plugins/Modality.md#a5-cli)）并等待：不超过 64 KiB 且不超过 30,000 个 UTF-16 单元的文本内联打印且什么都不写；更长的文本被写入并打印 2,000 字符预览和它的路径，`--output-mode layout` 写入页面图片，`--out` 表示在打印文本之外还要结果集。 |
 
 | `dimcode permissions list` | 经 `permission.rules` 列出用户的命令规则：每条规则的决定、匹配方式与命令，然后是列说明以及 deny 的含义。 |
 | `dimcode permissions add PATH` | 从 `PATH`（`-` 表示 stdin）添加一条规则，经 `permission.rules` 与 `permission.set_rules` 写入：规则已存在时不写入；冲突时重新读取并重试，最多三次。 |
@@ -885,9 +915,31 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 指向独立的 `dim-app-server` 二进制，CLI 按它自己的名字直接运行；默认则运行本可执行文件的
 `app-server` 子命令，因此指向本可执行文件是参数错误。指向不存在的路径、程序在开始服务前
 退出，或未及时开始服务时，也按同一要求报错，除非它留下了[启动说明](#守护进程启动失败)。现有的
-login/account/logout、models、MCP 和 daemon 命令仍然可用。现有的 `--prompt`、管道 stdin 和
-`--resume` 调用行为不变；`exec resume` 也接受同样的全局选项。重复给出 Session 或提示词是参数错误。
-`--json` 是 `exec` 的选项，`tui` 需要终端。help/version 与参数错误不会启动守护进程。
+login/account/logout、models、MCP 和 daemon 命令仍然可用。管道 stdin 与
+`--resume` 调用行为不变，`--prompt` 在 `exec` 与裸 chat 上仍是一次性提示词；`tui -p`
+发送首条消息（[带首条消息启动](#带首条消息启动)）。`exec resume` 也接受同样的全局选项。
+重复给出 Session 或提示词是参数错误。`--json` 适用于 `exec`、`migration` 以及 Modality 命令（`modality`、类别命令和 `ocr`），`tui` 需要终端。
+help/version 与参数错误不会启动守护进程。
+
+### 带首条消息启动
+
+`dimcode tui -p TEXT` 打开交互式终端 UI，并把 TEXT 作为首条消息发送；生命周期由命令决定，
+`exec -p` 与裸 chat 的 `-p` 仍然运行一次后退出。`--resume SESSION_ID -p TEXT` 先附加到该
+Session，再把消息发送到那里。`--image PATH` 只有在与 `-p` 同时给出时才被 `tui` 接受；图片
+在 CLI 边界按 `exec` 的规则读取和缩放，并按参数顺序附到首条消息上（文本在前）。没有 `-p`
+时该选项保持 `--image requires exec or tui -p` 的拒绝。`--json` 对 `tui` 仍然拒绝，`--no-tui` 保持
+一次性行客户端行为。
+
+消息只提交一次：第一帧画出之后，走用户键入消息所用的同一个 composer，两种终端模式一致。
+文本成为草稿、图片成为它的 token，然后 composer 的提交套用命令面板规则（精确的 `/name`
+或别名会运行该命令，未匹配的 `/` 文本是普通输入）、`!`/`!!` shell 模式、行草稿以及
+queue/steer 规则；启动之后不再有任何一层重新解析命令行。
+
+没有 Session 能接收这条消息时——没有模型、未登录，或 Session 启动失败——文本和它的
+图片 token 作为未发送的草稿留在 composer 里，旁边是 Home/登录提示或启动错误，而不是被
+丢弃。若用户在此期间已经开始了新的草稿，则保留较新的草稿，并提示首条消息未发送，而不
+覆盖它。这种情况界面不会退出。没有 `-p` 时沿用现有的启动规则：恢复的 Session 无法启动时
+显示错误并以非零码退出，而 Home 上的创建失败后 Home 仍然可用。
 
 ### 守护进程启动失败
 
@@ -912,7 +964,18 @@ stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不
 没有匹配的说明时，内嵌守护进程保留现有的 `App Server exited (<status>); see ...`，
 `--server` 指定的程序则报出该选项必须指向独立的 `dim-app-server` 二进制。失败的启动读完后
 删除说明；连接成功也删除任何说明。CLI 从不打印 `daemon.log`，从不删除、重建、降级或
-改写库，并以 1 退出。开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
+改写库，并以 1 退出。
+
+格式升级运行期间，守护进程把同一份说明写成进度类型：首行
+`dimcode-startup-progress v1 pid=<pid>`，正文
+`store-upgrade from=<from> to=<to> progress=<n>`，最多每秒一次，并在每个升级步骤结束时
+再写一次；库新建或已是最新格式时不写。两个启动等待都读它：spawn 等待只认自己子进程的
+pid，start 锁等待认任意 pid；计数每增加一次，等待上限就向后推一个上限本身（spawn 10 秒，
+start 锁为一次验证过的 shutdown 加一次启动再加一段余量）。格式升级是会上报进展并推进上限的
+长阶段；启动的其他阶段都受客户端固定上限约束。第一次见到时在所有模式下向
+stderr 打印一次 `正在把本地库从格式 v<from> 升级到 v<to>；大库可能需要一段时间。`；
+stdout 和 JSON 输出不变。只认识失败类型的客户端忽略进度类型，退回上面的通用错误文本。
+开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
 构建或 `--home PATH` 两条路。
 
 ```text
@@ -936,9 +999,12 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 不是合法 UTF-8 的路径在连接守护进程之前就被拒绝。恢复 Session 并在提示词上运行的对话
 （`--resume ID -p TEXT`，或从标准输入读入的提示词）不指名工作区：它只连接、读历史并提交，
 输入框不会运行，因此在路径不是合法 UTF-8 的目录里照常工作。交互式恢复、新建 Session 与
-TUI 仍然指名工作区。列表只含恰好属于该工作区的已存 Session，
-最新在前，每次打开都从这里开始。`Ctrl+S` 依次循环当前工作区、当前仓库与所有工作区，标题写明
-当前范围。过滤框保留输入框的 `Ctrl+A` 与 `Ctrl+W`，`Tab` 向下移动选择。
+TUI 仍然指名工作区。本地范围包含启动工作区的已存 Session，以及 git 检出中其它 worktree 里同一个
+相对目录的 Session，最新在前，每次打开都从这里开始。`Ctrl+S` 在本地范围与所有工作区之间切换：
+无论 git、worktree 数量或守护进程如何，都只有两个状态，绝不出现第三个。标题写明当前范围：
+git 回答前是 `Sessions · This workspace`，回答后是 `Sessions · This repository`——即使仓库只有
+一个 worktree——另一个状态是 `Sessions · All workspaces`。过滤框保留输入框的 `Ctrl+A` 与
+`Ctrl+W`，`Tab` 向下移动选择。
 
 ```text
 ╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
@@ -971,15 +1037,20 @@ TUI 仍然指名工作区。列表只含恰好属于该工作区的已存 Sessio
 ```
 
 - 切换范围像一次新的查询：取消尚未完成的读取、丢掉游标、重新读第一页；查询保留，并在新范围内生效。
-- 当前仓库包含启动工作区，以及它所在 git 仓库每个 worktree 中同一个相对目录；选择面板打开时在后台用
-  `git rev-parse` 与 `git worktree list --porcelain` 读取。第一页不等 git，两次读取共用一个两秒的时限；
-  git 失败或不回答时该范围不出现，也不提示。只有当集合多于一个条目，并且守护进程读取一组工作区
-  （`session.catalog.workspaces`）或经 `session.summaries` 列目录时，才提供这个范围。bare worktree 不加入。
-- 在当前工作区范围之外，每行先写更新于多久之前，再写它所属的工作区，主目录写作 `~`。标签最多占一半
-  宽度，时间在最前，因此被截断的是长路径。
-- 当前工作区范围、没有 Session 且没有查询时，列表显示 `No saved sessions in this workspace. Ctrl+S shows more.`；
-  其余空列表与无匹配文案不变。
-- 没有 `session.catalog` 的守护进程经 `session.summaries` 列目录，客户端用同样的精确匹配把范围应用到收到的行上。
+- 本地范围是启动工作区，以及它所在 git 仓库每个 worktree 中同一个相对目录；选择面板打开时在后台用
+  `git rev-parse` 与 `git worktree list --porcelain` 读取。第一页不等 git，两次读取共用一个两秒的时限。
+  git 成功时该范围名为 `This repository`；当面板正显示本地范围且集合多于一个条目时，标题改变并重新读
+  第一页；单条目集合只改变标题，因为目录的规范化 `cwd` 把这一个工作区当作同一个过滤条件。git 失败或
+  不回答、守护进程既不读一组工作区（`session.catalog.workspaces`）也不经 `session.summaries` 列目录时，
+  本地范围保持名为 `This workspace`，只列启动工作区，也不提示。bare worktree 不加入。
+- 在本地范围中，只有当它包含多于一个工作区时，每行才写明所属工作区，因此单 worktree 仓库不会给每行加
+  一个多余的路径；在所有工作区范围中，每行先写更新于多久之前，再写它所属的工作区，主目录写作 `~`。
+  标签最多占一半宽度，时间在最前，因此被截断的是长路径。
+- 本地范围没有 Session 且没有查询时，只要它恰好只列启动工作区——git 回答前、不在 git 仓库中、以及单
+  worktree 仓库——就显示 `No saved sessions in this workspace. Ctrl+S shows more.`；包含更多 worktree
+  的本地范围、所有工作区范围以及无匹配行都显示 `No saved sessions yet.`。
+- 没有 `session.catalog` 的守护进程经 `session.summaries` 列目录，客户端把范围应用到收到的行上：
+  恰好是启动工作区、属于 git 集合，或不过滤。
 - `dimcode --resume ID` 仍可恢复任何工作区的 Session，清理也在所有工作区范围内选择。
 
 ### 会话标题
@@ -1028,7 +1099,9 @@ TITLE 视为缺失，也按同样方式拒绝。
 停下，打印 `This App Server is too old to clean up Sessions safely; nothing was deleted.` 并以 1
 退出。它在每次删除时带的 `requireInactive` 与 `includeClosed` 一同落地，所以拒绝其一的服务器两者
 都拒绝；某次删除在尚未删除任何东西之前回答 `invalid_params` 时，也按同一方式停下。它用两个选择器之一，
-两者都读 `session.summaries` 的 `updatedAt`，即 Session 的最后活跃时间：
+两者都读 `session.summaries` 的 `updatedAt`，即 Session 的活动时间
+（[Session 目录](appserver/session-catalog.md#32-顺序游标与分页)），而不是它最后一个存储事件的时间：
+附着、恢复以及其他家事事件都不移动它，因此只是被附着或恢复过的 Session 保持早先的时间，可能被选中删除：
 
 | 选择器 | 选择范围 |
 | --- | --- |
@@ -1165,6 +1238,15 @@ Exported Markdown: /tmp/Session notes.md
 Exported JSON: /tmp/events.json
 
 > /exit
++--------------------------------------------------------+
+| Bye!                                                   |
+|                                                        |
+| Feedback or ideas? Join us on Discord:                  |
+| https://discord.gg/ds35K3TadP                           |
+|                                                        |
+| To resume this session:                                |
+|   dimcode --resume <session-id>                         |
++--------------------------------------------------------+
 $
 
 $ dimcode session export <session-id> --format markdown > notes.md
@@ -1173,6 +1255,8 @@ $ dimcode exec -p 'Explain this project' --json > run.jsonl
 
 提示符保持键盘焦点，终端保留滚动回显。没有新的对话框、浮层或固定宽度的列。路径和错误信息使用
 现有的终端文本过滤；窄终端正常换行。空 Session 导出空事件列表或只有标题的 Markdown，不编造消息。
+
+两种 TUI 模式退出时都会显示反馈邀请；只有存在可恢复的活动 Session 时，才显示恢复命令。
 
 ## 执行与 JSONL 输出
 
@@ -1204,6 +1288,24 @@ JSON 模式下，stdout 每行一条紧凑的 JSON-RPC 通知，使用守护进�
 CLI 不添加合成的生命周期事件或第二套事件模式。通知投递保持守护进程现有的尽力而为语义；需要
 固定完整记录的使用方应使用导出。
 
+## Realtime 会话
+
+`dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` 经 `modality.realtime.open` 打开一个会话，
+`params` 为 `{}`（[Modality A.3](plugins/Modality.md#a3-方法)）。操作默认 `voice`；`--model` 与 CLI 其他模型引用
+一样写 `PROVIDER/MODEL`。该命令不命名工作区。
+
+provider 会话由客户端配置，而非命令本身：stdin 每行是一个 JSON 值，经 `modality.realtime.send` 作为 text 帧
+发出，因此管道的第一行可以是 provider 自己的 `session.update`。空行跳过；不是 JSON 的行以退出码 1 结束
+命令。
+
+每个 `modality.realtime.event` 通知把其 `event` 打印为 stdout 上的一行紧凑 JSON，`modality.realtime.ended`
+打印其 params，因此消费者每行读到一个 JSON 值，并能在结束时读到 `reason`。错误不进 stdout：错误回复把
+消息打到 stderr，命令退出 1。
+
+stdin EOF 经 `modality.realtime.close` 关闭会话并退出 0；会话打开后按 Ctrl+C 同样如此。打开回复之前按
+Ctrl+C 退出 130，且不打开任何会话。`direct` 会话把 `connection` 对象打印为第一行后保持：调用方直接与
+provider 自己的传输交互，stdin 行被忽略，EOF 或 Ctrl+C 仍经 `modality.realtime.close` 关闭会话。
+
 ## 对话导出
 
 两个入口都调用现有的 `session.history` RPC。第一次响应固定 `through`；后续分页使用该水位和服务器的
@@ -1221,9 +1323,9 @@ JSON 输出包含 `{sessionId, branchId, through, events}`。每个事件都是�
 清楚标注推理、工具调用/结果和非文本附件。它不执行内容、不解析附件 URL、不重放工具。它保留代码围栏，
 同时不允许一条消息闭合外层的工具结果围栏。
 
-CLI 先成功读取固定前缀，再打开输出文件。文件使用"新建"语义：已存在的路径失败，不被替换。在 Unix 上
+CLI 先打开输出文件，再读取固定前缀；读取或写入失败时删除该文件，所以成功的运行留下文件、失败的运行不留。文件使用"新建"语义：已存在的路径失败，不被替换。在 Unix 上
 通过标准 OpenOptions 扩展以 0600 权限创建；Windows 使用原生继承的 ACL。从不为修改权限而打开已有文件。
-历史读取出错后不创建输出文件。写入失败会被报告，可能留下部分新建的文件；不打印成功信息。导出到
+历史读取出错会删除本次运行创建的文件，不留下部分导出；进程在运行中被杀时没有清理，可能留下部分文件。写入失败会被报告并删除文件；不打印成功信息。导出到
 stdout 失败时返回非零码。交互式导出错误回到输入提示符，从不成为模型输入。交互式导出已被接纳期间，
 Ctrl+C 提示 CLI 正在等待结果，并持续消费后续中断直到操作收尾。这些中断不会在下一个提示符处变成退出
 或清空草稿的动作。

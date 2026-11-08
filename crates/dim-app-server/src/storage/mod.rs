@@ -7,7 +7,7 @@ mod sqlite;
 mod timeline;
 
 pub use catalog::initialize_session_catalog;
-pub(crate) use catalog::truncate_preview;
+pub(crate) use catalog::{ACTIVITY_KINDS, activity, truncate_preview};
 #[cfg(feature = "testing")]
 pub use codec::NodeLoads;
 pub use dim_agent_capabilities::file_access::WorktreeDirectory;
@@ -15,6 +15,8 @@ pub use export::export_timeline;
 #[cfg(feature = "testing")]
 pub use metadata::testing;
 pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};
+#[cfg(feature = "testing")]
+pub use sqlite::set_upgrade_report_delay;
 pub use sqlite::{
     FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, Vacuumed, vacuum_store,
 };

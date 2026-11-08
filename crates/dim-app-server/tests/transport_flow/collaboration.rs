@@ -1,10 +1,11 @@
 use super::deletion::Store;
 use super::*;
 use dim_agent_capabilities::prompt_state::PromptSnapshot;
-use dim_agent_runtime::{Agent, CollaborationRole, Session};
+use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
+use dim_agent_runtime::{Agent, CollaborationRole, Session, TimelineQueryScope};
 use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
-    InputMessageData, MessageContent, ToolContent,
+    InputMessageData, MessageContent, ToolContent, ToolEffect,
 };
 use rutis::host::{BoxFuture, CtxHost};
 use std::ops::RangeInclusive;
@@ -100,6 +101,13 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
     ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
         self.memory.head(key)
     }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
     fn append(
         &self,
         key: dim_agent_runtime::TimelineKey,
@@ -164,8 +172,375 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
     }
 }
 
+/// What an armed [`InputHoldStore`] waits for.
+#[derive(Clone, Default)]
+enum HoldKind {
+    /// The first request input's `input/message`: the span between a request
+    /// joining `state.requests` and its `input` returning.
+    #[default]
+    RequestInput,
+    /// The first `input/applied` on this Session's branch: the span between
+    /// InputQueue handing an input to Loop and the turn that consumes it.
+    Applied(String),
+    /// The read of this Session's `input/consumed` after the cancel's own: the
+    /// (S) wait's check, which decides when the stop is written.
+    Consumed(String),
+    /// The next read of this Session's `input/consumed` after the arm: the
+    /// cancel's own check, held before the stop is decided.
+    ConsumedNow(String),
+}
+
+/// Delegates to the in-memory store and holds the next armed append or read of
+/// the configured kind, so a test decides the window by facts.
+struct InputHoldStore {
+    memory: dim_agent_runtime::MemoryTimelineStore,
+    hold: std::sync::Mutex<HoldKind>,
+    /// Whether a matching read or append holds now.
+    armed: std::sync::atomic::AtomicBool,
+    /// Whether the window waits for the cancel's withdrawal to arm it: a
+    /// `Consumed` window holds only reads made after the withdrawal, whose
+    /// own check must pass.
+    pending: std::sync::atomic::AtomicBool,
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    read_release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Tells the test that the matching read a `Consumed` window lets pass
+    /// (the cancel's own check) has happened, so the append that check must
+    /// follow can be released after it.
+    check: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+/// Releases a held window: an append blocks its thread, a read awaits.
+enum Release {
+    Append(std::sync::mpsc::Sender<()>),
+    Read(tokio::sync::oneshot::Sender<()>),
+}
+impl Release {
+    fn release(self) {
+        match self {
+            Release::Append(release) => {
+                let _ = release.send(());
+            }
+            Release::Read(release) => {
+                let _ = release.send(());
+            }
+        }
+    }
+}
+
+impl InputHoldStore {
+    /// Installs the first window's signal and release, so a flow that arms by
+    /// setting `armed` keeps working; `arm` installs the next window's.
+    fn new() -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let store = Arc::new(Self {
+            memory: Default::default(),
+            hold: Default::default(),
+            armed: Default::default(),
+            pending: Default::default(),
+            entered: std::sync::Mutex::new(Some(entered)),
+            release: std::sync::Mutex::new(Some(release_rx)),
+            read_release: Default::default(),
+            check: Default::default(),
+        });
+        (store, entered_rx, release)
+    }
+    /// Holds the next matching append or read: answers `entered` when it is
+    /// held, then waits for the release.
+    fn arm(
+        &self,
+        hold: HoldKind,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        Release,
+        Option<tokio::sync::oneshot::Receiver<()>>,
+    ) {
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        *self.entered.lock().unwrap() = Some(entered);
+        let mut check = None;
+        let release = match hold {
+            HoldKind::Consumed(_) => {
+                let (release, release_rx) = tokio::sync::oneshot::channel();
+                *self.read_release.lock().unwrap() = Some(release_rx);
+                let (checked, checked_rx) = tokio::sync::oneshot::channel();
+                *self.check.lock().unwrap() = Some(checked);
+                check = Some(checked_rx);
+                Release::Read(release)
+            }
+            HoldKind::ConsumedNow(_) => {
+                let (release, release_rx) = tokio::sync::oneshot::channel();
+                *self.read_release.lock().unwrap() = Some(release_rx);
+                Release::Read(release)
+            }
+            _ => {
+                let (release, release_rx) = std::sync::mpsc::channel();
+                *self.release.lock().unwrap() = Some(release_rx);
+                Release::Append(release)
+            }
+        };
+        let consumed = matches!(hold, HoldKind::Consumed(_));
+        self.pending.store(consumed, Ordering::SeqCst);
+        self.armed.store(!consumed, Ordering::SeqCst);
+        *self.hold.lock().unwrap() = hold;
+        (entered_rx, release, check)
+    }
+    /// Whether this match holds now; the armed window is one shot. A window
+    /// still waiting for the withdrawal lets the cancel's own check pass and
+    /// tells the test it happened.
+    fn holds(&self, matching: bool) -> bool {
+        if !matching {
+            return false;
+        }
+        if self.pending.load(Ordering::SeqCst) {
+            if let Some(check) = self.check.lock().unwrap().take() {
+                let _ = check.send(());
+            }
+            return false;
+        }
+        if !self.armed.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.armed.store(false, Ordering::SeqCst);
+        true
+    }
+    /// Signals the caller the window is held, then blocks until it is
+    /// released, leaving the store ready for the next arm.
+    fn hold(&self) {
+        // Both slots are taken before the window is announced, so a test that
+        // arms the next window as it wakes cannot replace this one's.
+        let entered = self.entered.lock().unwrap().take();
+        let release = self.release.lock().unwrap().take();
+        if let Some(entered) = entered {
+            let _ = entered.send(());
+        }
+        if let Some(release) = release {
+            let _ = release.recv();
+        }
+    }
+    /// The read window's hold: awaited, so it never blocks an executor.
+    async fn read_hold(&self) {
+        let entered = self.entered.lock().unwrap().take();
+        let release = self.read_release.lock().unwrap().take();
+        if let Some(entered) = entered {
+            let _ = entered.send(());
+        }
+        if let Some(release) = release {
+            let _ = release.await;
+        }
+    }
+}
+impl dim_agent_runtime::TimelineStore for InputHoldStore {
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a dim_agent_runtime::SessionConfig,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_runtime::SessionConfig>>,
+    > {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Vec<dim_agent_runtime::StoredBranch>>,
+    > {
+        self.memory.branches(id)
+    }
+    fn head<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
+        self.memory.head(key)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn append(
+        &self,
+        key: dim_agent_runtime::TimelineKey,
+        events: Vec<dim_agent_runtime::StoredEvent>,
+        publish: dim_agent_runtime::PublishCallback,
+    ) -> dim_agent_runtime::Result<()> {
+        let (matching, arms) = match &*self.hold.lock().unwrap() {
+            HoldKind::RequestInput => (
+                events.iter().any(|stored| {
+                    matches!(&stored.event.kind, EventKind::InputMessage(data)
+                        if data.blocks.first().is_some_and(|block| matches!(
+                            block, InputBlock::Raw { text, .. }
+                                if text.starts_with("<dim-agent-message "))))
+                }),
+                false,
+            ),
+            HoldKind::Applied(session) => (
+                key.session_id == *session
+                    && events
+                        .iter()
+                        .any(|stored| matches!(&stored.event.kind, EventKind::InputApplied(_))),
+                false,
+            ),
+            HoldKind::Consumed(session) => (
+                false,
+                key.session_id == *session
+                    && events
+                        .iter()
+                        .any(|stored| matches!(&stored.event.kind, EventKind::InputWithdraw(_))),
+            ),
+            HoldKind::ConsumedNow(_) => (false, false),
+        };
+        // The withdrawal that carries the cancel arms the read window: every
+        // read after it belongs to the wait, the cancel's own check before it
+        // did not. The append itself never holds the read window.
+        if arms && self.pending.swap(false, Ordering::SeqCst) {
+            self.armed.store(true, Ordering::SeqCst);
+        }
+        if self.holds(matching) {
+            // The hold itself: blocking this worker leaves the held commit
+            // open until released, so the test decides the window.
+            self.hold();
+        }
+        self.memory.append(key, events, publish)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, RangeInclusive<u64>)>,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Vec<Vec<dim_agent_runtime::StoredEvent>>>,
+    > {
+        self.memory.read_segments(session_id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_runtime::TimelineTrace>>,
+    > {
+        self.memory.trace(key, sequence)
+    }
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        snapshot: dim_agent_types::RecoverySnapshot,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_types::RecoverySnapshot>>,
+    > {
+        self.memory.latest_snapshot(key, through, interpreter)
+    }
+    fn query<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        query: &'a dim_agent_runtime::TimelineQuery,
+        from: u64,
+        through: u64,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryPage>,
+    > {
+        Box::pin(async move {
+            let matching = match &*self.hold.lock().unwrap() {
+                HoldKind::Consumed(session) | HoldKind::ConsumedNow(session) => {
+                    key.session_id == *session
+                        && query.kinds.iter().any(|kind| kind == "input/consumed")
+                }
+                _ => false,
+            };
+            if self.holds(matching) {
+                self.read_hold().await;
+            }
+            self.memory.query(key, query, from, through).await
+        })
+    }
+}
+
 async fn launch_team() -> (RunningServer, Agent) {
     launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await
+}
+
+/// A server whose Timeline store is `store`, with a leader Session that may
+/// start members and run `hold`.
+async fn launch_held_team(
+    store: Arc<InputHoldStore>,
+) -> (
+    RunningServer,
+    Agent,
+    Client,
+    String,
+    Session,
+    String,
+    Arc<tokio::sync::Semaphore>,
+) {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut config = ServerConfig::default();
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
+    config.unix_path = Some(std::path::PathBuf::from("/tmp").join(format!(
+        "dim-server-test-{}/server.sock",
+        uuid::Uuid::new_v4()
+    )));
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(store);
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(GateTools(gate.clone())));
+    dim_app_server::collaboration::install(&mut builder);
+    let server = serve(builder, config).await.unwrap();
+    let agent = server.agent().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (server, agent, client, lead, lead_session, holder, gate)
 }
 
 struct CaptureMemberConfig {
@@ -325,6 +700,70 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
         assert!(last_error(&events(&lead_session).await).contains("member_create_failed"), "the failure detail is stored before collaboration/delivered so the waiting tool call observes it");
         assert_eq!(configs.lock().unwrap().len(), members);
         assert_eq!(client.rpc("agent.list", json!({})).await["result"].as_array().unwrap().len(), agents);
+
+        assert_ok(&client.rpc("session.model.update", json!({"sessionId":lead,"branchId":"main","modelId":"alpha",
+            "startup":{"connection":{"apiFormat":"openai-compatible","baseUrl":"http://127.0.0.1:9/gateway"},
+                "contextWindow":32000,"maxOutputTokens":128,"autoCompactWindow":16000}})).await);
+        let adopted = lead_session.get::<PromptSnapshot>("main").unwrap().unwrap().configuration.unwrap();
+        let mut startup = dim_agent_types::ModelSelection {
+            provider_id: adopted.provider_id,
+            model_id: adopted.model_id,
+            capability_snapshot: adopted.capability_snapshot,
+            config: adopted.config,
+            metadata: adopted.metadata,
+        };
+        startup.config = Some(serde_json::from_value(json!({"temperature":0.25,"maxTokens":64,
+            "providerOptions":{"openai-compatible":{"reasoningEffort":"high"}}})).unwrap());
+        let metadata = startup.metadata.get_or_insert_default();
+        assert!(metadata.startup.as_ref().unwrap().connection.is_some());
+        metadata.session_id = Some("old-session".into());
+        metadata.run_id = Some("old-run".into());
+        metadata.trace_id = Some("old-trace".into());
+        metadata.turn_id = Some("old-turn".into());
+        lead_session.service::<dim_agent_capabilities::prompt::Prompt>("main").unwrap()
+            .configure_loaded(Some(startup.clone()), Vec::new()).await.unwrap();
+        let cut = lead_session.sequence("main").unwrap();
+        let child = lead_session.branch("main".into(), cut, dim_agent_runtime::BranchOptions {
+            prompt: "Startup inheritance child".into(),
+            source: dim_agent_types::BranchSource::Host { operation_id: "startup-inheritance".into() },
+        }).await.unwrap();
+        assert_ok(&client.rpc("session.model.update", json!({"sessionId":lead,"branchId":"main","providerId":PROVIDER,"modelId":"beta"})).await);
+        let child_selection = lead_session.get::<PromptSnapshot>(&child).unwrap().unwrap().configuration.unwrap();
+        assert_eq!(child_selection.model_id, startup.model_id);
+        assert_eq!(child_selection.config, startup.config);
+        assert_eq!(child_selection.capability_snapshot, startup.capability_snapshot);
+        assert_eq!(child_selection.metadata, startup.metadata, "a child retains full parent-cut metadata after main changes");
+        for (branch, request, policy) in [
+            (child.as_str(), json!({"action":"request","agentId":reviewer,"prompt":"startup child"}), json!({"mode":"fixed","model":model("missing")})),
+            ("main", json!({"action":"request","profile":temporary,"prompt":"startup temporary"}), json!({"mode":"agent"})),
+        ] {
+            if branch == "main" {
+                let revision = client.rpc("collaboration.model_policy", json!({})).await["result"]["revision"].as_str().unwrap().to_owned();
+                set(&mut client, &revision, policy.clone()).await;
+                lead_session.service::<dim_agent_capabilities::prompt::Prompt>("main").unwrap()
+                    .configure_loaded(Some(startup.clone()), Vec::new()).await.unwrap();
+            }
+            let before = configs.lock().unwrap().len();
+            let through = lead_session.sequence(branch).unwrap();
+            lead_session.submit(tool(request), dim_agent_types::InputMode::Queue, branch).await.unwrap();
+            lead_session.idle(branch).await.unwrap();
+            poll("startup member delivered", async || {
+                branch_events(&lead_session, branch, ..).await.unwrap().iter().any(|event|
+                    event.sequence > through && matches!(&event.kind,
+                        EventKind::CollaborationDelivered(data) if matches!(&data.delivery, CollaborationDelivery::Ok { .. })))
+                    .then_some(())
+            }).await;
+            assert_eq!(configs.lock().unwrap().len(), before + 1);
+            let config = configs.lock().unwrap().last().unwrap().clone();
+            let mut expected = startup.clone();
+            let metadata = expected.metadata.as_mut().unwrap();
+            metadata.session_id = None;
+            metadata.run_id = None;
+            metadata.trace_id = None;
+            metadata.turn_id = None;
+            assert_eq!(config.model, expected, "startup wins over user and Agent policy");
+            assert_eq!(client.rpc("collaboration.model_policy", json!({})).await["result"]["policy"], policy);
+        }
         server.shutdown();
         server.join().await.unwrap();
         std::fs::remove_dir_all(home).unwrap();
@@ -341,7 +780,7 @@ impl dim_agent_capabilities::host::ModelDriver for LargeReportModel {
     ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
         use dim_agent_capabilities::host::{ModelChunk, ModelStopReason, ModelStream};
         use dim_agent_types::{MessageContent, Role};
-        let last = request.messages.last().unwrap();
+        let last = dim_agent_capabilities::adapters::EchoModel::last_message(&request).unwrap();
         let delegated = matches!(&last.content, MessageContent::Text(text) if text.starts_with("<dim-agent-message "));
         if delegated || last.role == Role::ToolResult {
             Box::pin(async move {
@@ -535,7 +974,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         session.idle(&child).await.unwrap();
-        let denied = last_error(&session.local(&child, ..).await.unwrap());
+        let denied = last_error(&branch_events(&session, &child, ..).await.unwrap());
         assert!(!denied.is_empty(), "a result from main must be denied on child");
 
         session
@@ -547,8 +986,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         poll("child result", async || {
-            session
-                .local(&child, ..)
+            branch_events(&session, &child, ..)
                 .await
                 .unwrap()
                 .iter()
@@ -561,7 +999,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
         })
         .await;
         session.idle(&child).await.unwrap();
-        let child_events = session.local(&child, ..).await.unwrap();
+        let child_events = branch_events(&session, &child, ..).await.unwrap();
         let (child_result_id, child_member) = child_events
             .iter()
             .find_map(|event| match &event.kind {
@@ -589,7 +1027,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
             .await
             .unwrap();
         session.idle(&child).await.unwrap();
-        let child_result = last_ok(&session.local(&child, ..).await.unwrap());
+        let child_result = last_ok(&branch_events(&session, &child, ..).await.unwrap());
         assert_eq!(child_result["resultId"], child_result_id);
         assert_eq!(
             child_result["result"]["text"],
@@ -657,7 +1095,7 @@ fn tool(input: Value) -> String {
 }
 
 async fn events(session: &Session) -> Vec<Arc<AgentEvent>> {
-    session.history("main", None).await.unwrap()
+    chain_events(session, "main", ..).await.unwrap()
 }
 
 /// Content of every agent tool result, in Timeline order.
@@ -2021,7 +2459,7 @@ async fn leader_stop_and_close_settle_requests() {
             .rpc("session.close", json!({"sessionId": lead}))
             .await,
     );
-    let closed = lead_session.local("main", ..).await.unwrap();
+    let closed = branch_events(&lead_session, "main", ..).await.unwrap();
     assert_eq!(
         result_of(&closed, &earlier).last(),
         Some(&CollaborationOutcome::Cancelled {
@@ -2075,13 +2513,69 @@ impl ToolDriver for GateTools {
     }
 }
 
+/// Mock tools plus `touch`, whose result declares the effects its input
+/// names, the way a workspace tool declares its own result (session
+/// boundary A.6).
+struct EffectTools;
+impl ToolDriver for EffectTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        let mut tools = MockTools.definitions();
+        tools.push(dim_agent_capabilities::tool_registry::definition(
+            "touch",
+            "Declare the file or the command the input names.",
+            json!({"type": "object", "additionalProperties": false, "properties": {
+                "path": {"type": "string"}, "command": {"type": "string"}}}),
+        ));
+        tools
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        if call.name != "touch" {
+            let mock: &'static MockTools = &MockTools;
+            return mock.execute(call, context, cancel);
+        }
+        Box::pin(async move {
+            let mut effects = Vec::new();
+            if let Some(path) = call.input.get("path").and_then(Value::as_str) {
+                effects.push(ToolEffect::FileWritten {
+                    path: path.to_owned(),
+                });
+            }
+            if let Some(command) = call.input.get("command").and_then(Value::as_str) {
+                effects.push(ToolEffect::CommandRun {
+                    command: command.to_owned(),
+                    exit_code: Some(0),
+                    signal: None,
+                });
+            }
+            let mut result = ToolResult::text("touched");
+            result.effects = (!effects.is_empty()).then_some(effects);
+            Ok(result)
+        })
+    }
+}
+
 /// Messages to a working member join its running turn at the next tool
 /// result; a request's work spans the member's turns until it is idle and
 /// returns the last turn's output. `read` pages through a Timeline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn member_work_absorbs_messages_and_spans_turns() {
+    member_work(ServerConfig::default()).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_member_work_absorbs_messages_and_spans_turns() {
+    let store = Store::new();
+    member_work(store.config()).await;
+}
+
+async fn member_work(mut config: ServerConfig) {
+    let native = config.database_path.is_some();
     let gate = Arc::new(tokio::sync::Semaphore::new(0));
-    let mut config = ServerConfig::default();
     config
         .session_defaults
         .tools
@@ -2394,7 +2888,24 @@ async fn member_work_absorbs_messages_and_spans_turns() {
     assert_eq!(after, end);
     assert_eq!(&paged, full["events"].as_array().unwrap());
 
+    if native {
+        unload(&agent, &member).await;
+        assert!(agent.get_session(&member).is_none());
+        say(&mut client, &lead, read(0, 200), "queue").await;
+        idle(&mut client, &lead).await;
+        let restored = agent
+            .get_session(&member)
+            .expect("the authorized read acquires its peer");
+        let read = last_ok(&events(&lead_session).await);
+        assert_eq!(read["events"], full["events"]);
+        assert!(
+            (full["nextCursor"].as_u64().unwrap()..=restored.sequence("main").unwrap())
+                .contains(&read["nextCursor"].as_u64().unwrap())
+        );
+    }
+
     assert_pairing(&events(&lead_session).await);
+    let member_session = agent.get_session(&member).unwrap();
     assert_no_collaboration_facts(&member_session).await;
     server.shutdown();
     server.join().await.unwrap();
@@ -2623,6 +3134,1153 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
     server.join().await.unwrap();
 }
 
+/// A client's `session.collaboration.cancel` interrupts the member's running
+/// turn when it names the branch that owns the request: the member records
+/// `stop/interrupt` and a cancelled `turn/end`, and the leader records the
+/// cancelled `collaboration/result` and its report. Called again once nothing
+/// runs, it answers `idle` and writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_stops_a_running_member_and_writes_nothing_when_idle() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut config = ServerConfig::default();
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
+    let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    let holds = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| {
+                matches!(&event.kind,
+                EventKind::ToolCall(data) if data.calls[0].name == "hold")
+            })
+            .count()
+    };
+    poll("the member's hold started", async || {
+        (holds(&member_session).await == 1).then_some(())
+    })
+    .await;
+
+    let cancelled = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+        )
+        .await;
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+    // The running turn is stopped before the call answers.
+    assert!(
+        events(&member_session)
+            .await
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::StopInterrupt(_))),
+        "the stop is committed before the call answers"
+    );
+    poll("the member's cancelled turn", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .any(|event| {
+                matches!(&event.kind, EventKind::TurnEnd(data)
+                    if matches!(data.outcome, dim_agent_types::TurnOutcome::Cancelled { .. }))
+            })
+            .then_some(())
+    })
+    .await;
+    let outcome = poll("the leader's cancelled result", async || {
+        result_of(&events(&lead_session).await, &member)
+            .into_iter()
+            .find(|outcome| matches!(outcome, CollaborationOutcome::Cancelled { .. }))
+    })
+    .await;
+    assert!(matches!(outcome, CollaborationOutcome::Cancelled { .. }));
+
+    let reported = events(&lead_session).await;
+    let result_id = reported
+        .iter()
+        .find(|event| {
+            matches!(&event.kind,
+                EventKind::CollaborationResult(data) if data.session_id == member
+                    && matches!(data.outcome, CollaborationOutcome::Cancelled { .. }))
+        })
+        .unwrap()
+        .id
+        .clone();
+    poll("the cancel's report reaches the leader", async || {
+        events(&lead_session)
+            .await
+            .iter()
+            .any(|event| {
+                matches!(&event.kind,
+                EventKind::InputMessage(data) if report(data) == Some(result_id.as_str()))
+            })
+            .then_some(())
+    })
+    .await;
+
+    let stops = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+            .count()
+    };
+    let before = stops(&member_session).await;
+    let idle = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": lead, "memberSessionId": member}),
+        )
+        .await;
+    assert_ok(&idle);
+    assert_eq!(idle["result"]["status"], "idle", "{idle}");
+    assert_eq!(
+        stops(&member_session).await,
+        before,
+        "an idle cancel writes no stop/interrupt"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A cancel from a branch whose own request to the member is still waiting
+/// for delivery stops nothing: that request is refused `busy`, and the
+/// member's running turn belongs to the branch that owns the open request.
+/// The flow commits the competing request and a barrier of its own as one
+/// batch: the request's `open` entry exists before the barrier's listener
+/// holds the branch's dispatch, and its refusal's `delivered` is published
+/// but not dispatched until the flow releases the gate. No sleep decides
+/// the timing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_from_another_branch_leaves_the_owning_branch_turn_running() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let dispatch = DispatchGate::new({
+        let entered = entered.clone();
+        let release = release.clone();
+        Arc::new(move |_, event| {
+            let hold = event.kind.key() == "collaborationtest/barrier";
+            let entered = entered.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                if hold {
+                    entered.notify_one();
+                    release.notified().await;
+                }
+            })
+        })
+    });
+    let mut config = ServerConfig::default();
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
+    let (server, agent) = launch_gated_tools(
+        dispatch.clone(),
+        Arc::new(GateTools(gate.clone())),
+        config,
+        |_| {},
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd": std::env::temp_dir(), "tools": ["echo", "wait", "agent", "branch"],
+                "permissionPolicy": {"allowedTools": ["echo", "wait", "agent", "hold"]}}),
+        )
+        .await;
+    assert_ok(&created);
+    let lead = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    dispatch.leader.set(lead.clone()).unwrap();
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    let holds = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| {
+                matches!(&event.kind,
+                EventKind::ToolCall(data) if data.calls[0].name == "hold")
+            })
+            .count()
+    };
+    let stops = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+            .count()
+    };
+    poll("the member's hold started", async || {
+        (holds(&member_session).await == 1).then_some(())
+    })
+    .await;
+
+    // A second branch of the same leader requests the same member. The
+    // request joins the branch's `open` and is refused `busy`; the barrier
+    // committed with it keeps the refusal's `delivered` from being
+    // dispatched, so `open` still holds the member when the client cancels.
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId": lead, "branchId": "main", "after": 0, "limit": 256}),
+        )
+        .await;
+    assert_ok(&history);
+    let at = history["result"]["through"].as_u64().unwrap();
+    let opened = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId": lead, "parentBranchId": "main", "at": at,
+                "prompt": "competing branch"}),
+        )
+        .await;
+    assert_ok(&opened);
+    let branch = opened["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    poll("the competing branch is idle", async || {
+        lead_session
+            .state(&branch)
+            .is_ok_and(|state| !state.running)
+            .then_some(())
+    })
+    .await;
+    let branch_timeline = dispatch
+        .branches
+        .lock()
+        .unwrap()
+        .get(&(lead.clone(), branch.clone()))
+        .cloned()
+        .expect("the competing branch's Timeline");
+    branch_timeline
+        .append_batch_registered(
+            vec![
+                EventKind::CollaborationRequest(dim_agent_types::CollaborationRequestData {
+                    turn_id: "competing-turn".into(),
+                    request_id: "competing-request".into(),
+                    call_id: "competing-call".into(),
+                    target: dim_agent_types::CollaborationTarget::Member {
+                        agent_id: holder.clone(),
+                        session_id: member.clone(),
+                    },
+                    prompt: "later".into(),
+                })
+                .into(),
+                EventKind::Extension(
+                    dim_agent_types::ExtensionEvent::new("collaborationtest", "barrier", json!({}))
+                        .unwrap(),
+                )
+                .into(),
+            ],
+            |_| Ok(()),
+        )
+        .unwrap();
+
+    entered.notified().await;
+    let cancelled = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": lead, "branchId": branch, "memberSessionId": member}),
+        )
+        .await;
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "idle", "{cancelled}");
+    assert_eq!(
+        stops(&member_session).await,
+        0,
+        "the cancel stopped nothing"
+    );
+    assert!(
+        member_session
+            .state("main")
+            .is_ok_and(|state| state.running),
+        "the owning branch's member turn is still running"
+    );
+
+    release.notify_one();
+    let delivery = poll("the competing request's refusal", async || {
+        branch_events(&lead_session, &branch, ..)
+            .await
+            .unwrap()
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::CollaborationDelivered(data) => Some(data.delivery.clone()),
+                _ => None,
+            })
+    })
+    .await;
+    assert_eq!(
+        delivery,
+        CollaborationDelivery::Error {
+            error: dim_agent_types::CollaborationErrorCode::Busy
+        }
+    );
+
+    // The owning request finishes with its own result once the member's hold
+    // ends: nothing cancelled it.
+    gate.add_permits(1);
+    let outcome = poll("the owning branch's result", async || {
+        result_of(&events(&lead_session).await, &member)
+            .into_iter()
+            .next()
+    })
+    .await;
+    assert_eq!(outcome, CollaborationOutcome::Completed, "{outcome:?}");
+    assert_eq!(stops(&member_session).await, 0);
+    returned(&mut client, &lead, &lead_session, 1).await;
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Creates the member with a first request that settles, so the client knows
+/// the member Session id before the request a hold is armed for.
+async fn settled_member(
+    client: &mut Client,
+    agent: &Agent,
+    lead: &str,
+    lead_session: &Session,
+    holder: &str,
+) -> (String, Session) {
+    say(
+        client,
+        lead,
+        tool(json!({"action": "request", "agentId": holder,
+            "prompt": "tool:echo {\"text\":\"ready\"}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    let outcome = poll("the first request completes", async || {
+        result_of(&events(lead_session).await, &member)
+            .into_iter()
+            .next()
+    })
+    .await;
+    assert_eq!(outcome, CollaborationOutcome::Completed, "{outcome:?}");
+    (member, member_session)
+}
+
+/// The turn the cancelled request started ended cancelled with the client's
+/// reason, and the leader's result names it.
+async fn cancel_settled(lead_session: &Session, member: &str, member_session: &Session) {
+    let turn = poll("the member's cancelled turn", async || {
+        events(member_session)
+            .await
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::TurnEnd(data) => Some(data.outcome.clone()),
+                _ => None,
+            })
+            .filter(|outcome| matches!(outcome, dim_agent_types::TurnOutcome::Cancelled { .. }))
+    })
+    .await;
+    assert!(
+        matches!(&turn, dim_agent_types::TurnOutcome::Cancelled { reason }
+            if reason == "cancelled by the client"),
+        "{turn:?}"
+    );
+    let outcome = poll("the leader's cancelled result", async || {
+        result_of(&events(lead_session).await, member)
+            .into_iter()
+            .find(|outcome| matches!(outcome, CollaborationOutcome::Cancelled { .. }))
+    })
+    .await;
+    assert_eq!(
+        outcome,
+        CollaborationOutcome::Cancelled {
+            reason: "cancelled by the client".into()
+        },
+        "{outcome:?}"
+    );
+}
+
+/// Reads the member's `stop/interrupt` reason once there is one.
+async fn stop_reason(session: &Session) -> String {
+    poll("the delivery's stop", async || {
+        events(session)
+            .await
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::StopInterrupt(data) => Some(data.reason.clone()),
+                _ => None,
+            })
+    })
+    .await
+}
+
+/// The member's input and its sequence for the request whose prompt contains
+/// `needle`, once its `input/message` is published.
+async fn request_input(session: &Session, needle: &str) -> (String, u64) {
+    poll("the request's input", async || {
+        events(session)
+            .await
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::InputMessage(data)
+                    if agent_message(data).is_some_and(|text| text.contains(needle)) =>
+                {
+                    Some((event.id.clone(), event.sequence))
+                }
+                _ => None,
+            })
+    })
+    .await
+}
+
+/// The sequences of the member's `input/consumed` facts for `input`.
+async fn consumed_at(session: &Session, input: &str) -> Vec<u64> {
+    events(session)
+        .await
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::InputConsumed(data) if data.input_id == input => Some(event.sequence),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The cancelled request's turn consumed its input before the stop, and the
+/// request after the settle consumes only its own input: the cancelled input
+/// is gone, not waiting in history for unrelated work.
+async fn cancel_consumed_before_the_stop(
+    client: &mut Client,
+    lead: &str,
+    holder: &str,
+    member: &str,
+    member_session: &Session,
+) {
+    let (input, _) = request_input(member_session, "tool:hold").await;
+    let stop = events(member_session)
+        .await
+        .iter()
+        .find(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+        .expect("the stop is committed")
+        .sequence;
+    let consumed = consumed_at(member_session, &input).await;
+    assert_eq!(
+        consumed.len(),
+        1,
+        "the cancelled turn consumed its input once: {consumed:?}"
+    );
+    assert!(
+        consumed[0] < stop,
+        "the input is consumed before the stop: {} < {stop}",
+        consumed[0]
+    );
+
+    say(
+        client,
+        lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:echo {\"text\":\"again\"}"}),
+        ),
+        "queue",
+    )
+    .await;
+    let (again, _) = request_input(member_session, "again").await;
+    poll("the next request's turn consumes its input", async || {
+        consumed_at(member_session, &again).await.first().copied()
+    })
+    .await;
+    let later: Vec<String> = events(member_session)
+        .await
+        .iter()
+        .filter(|event| event.sequence > stop)
+        .filter_map(|event| match &event.kind {
+            EventKind::InputConsumed(data) => Some(data.input_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        later,
+        vec![again],
+        "the next turn consumes only its own input, not the cancelled request's"
+    );
+    assert_eq!(
+        consumed_at(member_session, &input).await,
+        consumed,
+        "the cancelled request's input appears in no later `input/consumed`"
+    );
+}
+
+/// A client cancel that lands while the request's input is still being
+/// appended answers `cancelled` and writes no stop itself: the cancel is
+/// recorded on the request, and the delivery stops the turn the input starts.
+/// The store holds the append, so the window needs no sleep and no production
+/// hook, and the turn's cancelled end decides the leader's result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_before_the_member_input_is_queued_stops_the_turn_it_starts() {
+    let (store, _, _) = InputHoldStore::new();
+    let (server, agent, mut client, lead, lead_session, holder, _gate) =
+        launch_held_team(store.clone()).await;
+    let stops = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+            .count()
+    };
+    let (member, member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+    let (entered, release, _) = store.arm(HoldKind::RequestInput);
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:hold {}"}),
+        ),
+        "queue",
+    )
+    .await;
+    entered
+        .await
+        .expect("the request's input is being appended");
+    let cancelled = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+        )
+        .await;
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+    assert_eq!(
+        stops(&member_session).await,
+        0,
+        "the cancel alone stops nothing"
+    );
+    release.release();
+
+    assert_eq!(
+        stop_reason(&member_session).await,
+        "cancelled by the client"
+    );
+    assert_eq!(
+        stops(&member_session).await,
+        1,
+        "the delivery stops the member once"
+    );
+    cancel_settled(&lead_session, &member, &member_session).await;
+    cancel_consumed_before_the_stop(&mut client, &lead, &holder, &member, &member_session).await;
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A client cancel that lands after the member applied the request's input
+/// but before its turn started: the call carries the cancellation out before
+/// it answers, and the stop waits for the input's `input/consumed`, so it
+/// lands on the running turn. The store holds the `input/applied` append, so
+/// the window needs no sleep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_after_the_member_input_is_applied_stops_the_turn_it_starts() {
+    let (store, _, _) = InputHoldStore::new();
+    let (server, agent, mut client, lead, lead_session, holder, _gate) =
+        launch_held_team(store.clone()).await;
+    let stops = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+            .count()
+    };
+    let (member, member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+    let (entered, release, _) = store.arm(HoldKind::Applied(member.clone()));
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:hold {}"}),
+        ),
+        "queue",
+    )
+    .await;
+    entered
+        .await
+        .expect("the member applies the request's input");
+    // The call records the cancel and carries it out before it answers; the
+    // held `input/applied` commit keeps the withdrawal pending, and no stop
+    // is written while it does.
+    let cancelling = {
+        let lead = lead.clone();
+        let member = member.clone();
+        let mut other = Client::new_version(&server, false, 3).await;
+        tokio::spawn(async move {
+            other
+                .rpc(
+                    "session.collaboration.cancel",
+                    json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+                )
+                .await
+        })
+    };
+    assert_eq!(
+        stops(&member_session).await,
+        0,
+        "the cancel stops nothing before the turn starts"
+    );
+    release.release();
+    let cancelled = cancelling.await.expect("the cancel call");
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+
+    assert_eq!(
+        stop_reason(&member_session).await,
+        "cancelled by the client"
+    );
+    assert_eq!(
+        stops(&member_session).await,
+        1,
+        "the delivery stops the member once"
+    );
+    cancel_settled(&lead_session, &member, &member_session).await;
+    cancel_consumed_before_the_stop(&mut client, &lead, &holder, &member, &member_session).await;
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A client cancel holds the member's stopping mark until the effect returns:
+/// a request to that member decided while the stop is still pending is
+/// refused `busy`, and one sent after it returns is accepted. The store holds
+/// the (S) wait's own read of `input/consumed`, so the member's turn finishes
+/// and the request settles while the stop is still owed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_refuses_a_new_request_to_the_member_until_it_returns() {
+    let (store, _, _) = InputHoldStore::new();
+    let (server, agent, mut client, lead, lead_session, holder, gate) =
+        launch_held_team(store.clone()).await;
+    let (member, _member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+    let deliveries = async |session: &Session| {
+        events(session)
+            .await
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::CollaborationDelivered(data) => Some(data.delivery.clone()),
+                _ => None,
+            })
+            .collect::<Vec<CollaborationDelivery>>()
+    };
+    let count = async |session: &Session, refused: bool| {
+        deliveries(session)
+            .await
+            .iter()
+            .filter(|delivery| matches!(delivery, CollaborationDelivery::Error { .. }) == refused)
+            .count()
+    };
+
+    // The request is applied while its append is held, so the cancel lands in
+    // the (S) path: InputQueue already handed the input to Loop.
+    let (entered, release, _) = store.arm(HoldKind::Applied(member.clone()));
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:hold {}"}),
+        ),
+        "queue",
+    )
+    .await;
+    entered
+        .await
+        .expect("the member applies the request's input");
+    // The (S) wait's own read is the next window: it is held once the turn
+    // has consumed the input and before the stop is written. The cancel's own
+    // check passes first, while the applied append is still held, so it sees
+    // an unconsumed input and takes the (S) path.
+    let (entered_read, release_read, checked) = store.arm(HoldKind::Consumed(member.clone()));
+    let cancelling = {
+        let lead = lead.clone();
+        let member = member.clone();
+        let mut other = Client::new_version(&server, false, 3).await;
+        tokio::spawn(async move {
+            other
+                .rpc(
+                    "session.collaboration.cancel",
+                    json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+                )
+                .await
+        })
+    };
+    checked
+        .expect("the cancel checks the input")
+        .await
+        .expect("the cancel checks the input");
+    release.release();
+    entered_read
+        .await
+        .expect("the wait reads the member's consumed input");
+    let cancelled = cancelling.await.expect("the cancel call");
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+
+    // The member's turn finishes on its own while the stop is still owed: the
+    // request settles from that ending, not as a cancellation.
+    gate.add_permits(1);
+    poll("the second request settles", async || {
+        (result_of(&events(&lead_session).await, &member).len() >= 2).then_some(())
+    })
+    .await;
+    let outcomes = result_of(&events(&lead_session).await, &member);
+    assert_eq!(
+        outcomes.last(),
+        Some(&CollaborationOutcome::Completed),
+        "{outcomes:?}"
+    );
+
+    // A request decided now is refused `busy`: the stop it would race has not
+    // returned.
+    let refused = count(&lead_session, true).await;
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:echo {\"text\":\"during\"}"}),
+        ),
+        "queue",
+    )
+    .await;
+    poll("the request during the stop is refused", async || {
+        (count(&lead_session, true).await > refused).then_some(())
+    })
+    .await;
+    let last = deliveries(&lead_session)
+        .await
+        .into_iter()
+        .rfind(|delivery| matches!(delivery, CollaborationDelivery::Error { .. }))
+        .expect("the refusal");
+    assert_eq!(
+        last,
+        CollaborationDelivery::Error {
+            error: dim_agent_types::CollaborationErrorCode::Busy
+        }
+    );
+
+    // Once the held read returns, the wait ends one way or another — with the
+    // stop, or from the request's own ending when its turn got there first —
+    // and the mark clears, so the member takes new work.
+    release_read.release();
+    let accepted = count(&lead_session, false).await;
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:echo {\"text\":\"after\"}"}),
+        ),
+        "queue",
+    )
+    .await;
+    poll("the request after the cancel is accepted", async || {
+        (count(&lead_session, false).await > accepted).then_some(())
+    })
+    .await;
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A cancel stops the turn that consumed the request's input, nothing else:
+/// the turn ends, a client's own submit starts the replacing turn, and the
+/// stop decided for the old turn writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_stops_the_turn_it_named_not_the_one_that_replaced_it() {
+    let (store, _, _) = InputHoldStore::new();
+    let (server, agent, mut client, lead, lead_session, holder, gate) =
+        launch_held_team(store.clone()).await;
+    let (member, member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:hold {}"}),
+        ),
+        "queue",
+    )
+    .await;
+    let (input, _) = request_input(&member_session, "tool:hold").await;
+    let consumed = poll("the request's turn consumes its input", async || {
+        consumed_at(&member_session, &input).await.first().copied()
+    })
+    .await;
+
+    // The cancel's own check reads the member's facts; hold that read, so the
+    // turn can end and a client's submit start another before the stop is
+    // decided.
+    let (entered, release_read, _) = store.arm(HoldKind::ConsumedNow(member.clone()));
+    let cancelling = {
+        let lead = lead.clone();
+        let member = member.clone();
+        let mut other = Client::new_version(&server, false, 3).await;
+        tokio::spawn(async move {
+            other
+                .rpc(
+                    "session.collaboration.cancel",
+                    json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+                )
+                .await
+        })
+    };
+    entered.await.expect("the cancel checks the member's facts");
+
+    // The request's turn ends on its own, and a client's submit starts the
+    // replacing turn.
+    gate.add_permits(1);
+    let first_end = poll("the request's turn ends", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| event.sequence > consumed && matches!(&event.kind, EventKind::TurnEnd(_)))
+            .map(|event| event.sequence)
+    })
+    .await;
+    say(
+        &mut client,
+        &member,
+        "tool:echo {\"text\":\"after\"}".to_owned(),
+        "queue",
+    )
+    .await;
+    let second_start = poll("the replacing turn starts", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| {
+                event.sequence > first_end && matches!(&event.kind, EventKind::TurnStart(_))
+            })
+            .map(|event| event.sequence)
+    })
+    .await;
+    gate.add_permits(1);
+
+    release_read.release();
+    let cancelled = cancelling.await.expect("the cancel call");
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+
+    // The replacing turn runs to its own end, and no stop lands on it.
+    let second_end = poll("the replacing turn ends", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| {
+                event.sequence > second_start && matches!(&event.kind, EventKind::TurnEnd(_))
+            })
+            .map(|event| (event.sequence, event.kind.clone()))
+    })
+    .await;
+    assert!(
+        matches!(&second_end.1, EventKind::TurnEnd(data)
+            if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. })),
+        "the replacing turn ends on its own: {:?}",
+        second_end.1
+    );
+    let stops: Vec<u64> = events(&member_session)
+        .await
+        .iter()
+        .filter(|event| {
+            event.sequence > second_start && matches!(&event.kind, EventKind::StopInterrupt(_))
+        })
+        .map(|event| event.sequence)
+        .collect();
+    assert!(
+        stops.is_empty(),
+        "no stop lands on the replacing turn: {stops:?}"
+    );
+    let outcomes = result_of(&events(&lead_session).await, &member);
+    assert_eq!(
+        outcomes.last(),
+        Some(&CollaborationOutcome::Completed),
+        "{outcomes:?}"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The same interleaving for the detached (S) wait: the wait names the turn
+/// that consumed the request's input, so a turn that ended first writes
+/// nothing on the replacing turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_detached_cancel_wait_stops_the_turn_it_named_not_the_one_that_replaced_it() {
+    let (store, _, _) = InputHoldStore::new();
+    let (server, agent, mut client, lead, lead_session, holder, gate) =
+        launch_held_team(store.clone()).await;
+    let (member, member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+    // Hold the applied append, so the cancel's own check runs before the
+    // input is consumed and takes the (S) path.
+    let (entered, release, _) = store.arm(HoldKind::Applied(member.clone()));
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "agentId": holder, "sessionId": member,
+            "prompt": "tool:hold {}"}),
+        ),
+        "queue",
+    )
+    .await;
+    entered
+        .await
+        .expect("the member applies the request's input");
+    // The wait's own read is the next window: it arms after the withdrawal.
+    let (entered_read, release_read, checked) = store.arm(HoldKind::Consumed(member.clone()));
+    let cancelling = {
+        let lead = lead.clone();
+        let member = member.clone();
+        let mut other = Client::new_version(&server, false, 3).await;
+        tokio::spawn(async move {
+            other
+                .rpc(
+                    "session.collaboration.cancel",
+                    json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+                )
+                .await
+        })
+    };
+    checked
+        .expect("the cancel checks the input")
+        .await
+        .expect("the cancel checks the input");
+    release.release();
+    entered_read
+        .await
+        .expect("the wait reads the member's consumed input");
+    let (input, _) = request_input(&member_session, "tool:hold").await;
+    let consumed = poll("the request's turn consumes its input", async || {
+        consumed_at(&member_session, &input).await.first().copied()
+    })
+    .await;
+
+    // The request's turn ends on its own, and a client's submit starts the
+    // replacing turn.
+    gate.add_permits(1);
+    let first_end = poll("the request's turn ends", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| event.sequence > consumed && matches!(&event.kind, EventKind::TurnEnd(_)))
+            .map(|event| (event.sequence, event.kind.clone()))
+    })
+    .await;
+    assert!(
+        matches!(&first_end.1, EventKind::TurnEnd(data)
+            if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. })),
+        "the request's turn ends on its own: {:?}",
+        first_end.1
+    );
+    say(
+        &mut client,
+        &member,
+        "tool:echo {\"text\":\"after\"}".to_owned(),
+        "queue",
+    )
+    .await;
+    let second_start = poll("the replacing turn starts", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| {
+                event.sequence > first_end.0 && matches!(&event.kind, EventKind::TurnStart(_))
+            })
+            .map(|event| event.sequence)
+    })
+    .await;
+    gate.add_permits(1);
+
+    release_read.release();
+    let cancelled = cancelling.await.expect("the cancel call");
+    assert_ok(&cancelled);
+    assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+
+    // The replacing turn runs to its own end, and no stop lands on it.
+    let second_end = poll("the replacing turn ends", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .find(|event| {
+                event.sequence > second_start && matches!(&event.kind, EventKind::TurnEnd(_))
+            })
+            .map(|event| (event.sequence, event.kind.clone()))
+    })
+    .await;
+    assert!(
+        matches!(&second_end.1, EventKind::TurnEnd(data)
+            if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. })),
+        "the replacing turn ends on its own: {:?}",
+        second_end.1
+    );
+    let stops: Vec<u64> = events(&member_session)
+        .await
+        .iter()
+        .filter(|event| {
+            event.sequence > second_start && matches!(&event.kind, EventKind::StopInterrupt(_))
+        })
+        .map(|event| event.sequence)
+        .collect();
+    assert!(
+        stops.is_empty(),
+        "no stop lands on the replacing turn: {stops:?}"
+    );
+    let outcomes = result_of(&events(&lead_session).await, &member);
+    assert_eq!(
+        outcomes.last(),
+        Some(&CollaborationOutcome::Completed),
+        "{outcomes:?}"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The Team relation decides who may cancel: another leader's member and an
+/// unknown id are both `team_member_not_found`, and a member Session answers
+/// `invalid_params`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_refuses_another_teams_member_an_unknown_id_and_a_member() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let mut config = ServerConfig::default();
+    config
+        .session_defaults
+        .tools
+        .get_or_insert_default()
+        .push("hold".into());
+    let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "tool:hold {}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    let member_session = agent.get_session(&member).unwrap();
+    poll("the member's hold started", async || {
+        events(&member_session)
+            .await
+            .iter()
+            .any(|event| {
+                matches!(&event.kind,
+                EventKind::ToolCall(data) if data.calls[0].name == "hold")
+            })
+            .then_some(())
+    })
+    .await;
+
+    let other = leader(&mut client, allowed()).await;
+    let foreign = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": other, "memberSessionId": member}),
+        )
+        .await;
+    assert_eq!(
+        foreign["error"]["data"]["appError"], "team_member_not_found",
+        "{foreign}"
+    );
+
+    let unknown = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": lead, "memberSessionId": "no-such-member"}),
+        )
+        .await;
+    assert_eq!(
+        unknown["error"]["data"]["appError"], "team_member_not_found",
+        "{unknown}"
+    );
+
+    let by_member = client
+        .rpc(
+            "session.collaboration.cancel",
+            json!({"sessionId": member, "memberSessionId": member}),
+        )
+        .await;
+    assert_eq!(
+        by_member["error"]["data"]["appError"], "invalid_params",
+        "{by_member}"
+    );
+    assert_eq!(
+        by_member["error"]["message"], "members can only message, read and list",
+        "{by_member}"
+    );
+
+    gate.add_permits(1);
+    idle(&mut client, &member).await;
+    idle(&mut client, &lead).await;
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Echoes like the mock host, except that a request whose last message asks
 /// for `partial-call` or `many-calls` starts that many `echo` calls and
 /// streams nothing more until it is cancelled, leaving calls that only
@@ -2637,9 +4295,7 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
     ) -> dim_agent_capabilities::host::HostFuture<'_, dim_agent_capabilities::host::ModelStream>
     {
         use dim_agent_capabilities::host::{HostError, ModelChunk, ModelStream};
-        let calls = request
-            .messages
-            .last()
+        let calls = dim_agent_capabilities::adapters::EchoModel::last_message(&request)
             .filter(|message| message.role == dim_agent_types::Role::User)
             .map(|message| serde_json::to_string(message).unwrap())
             .filter(|text| text.contains("<dim-agent-message "))
@@ -2667,7 +4323,7 @@ impl dim_agent_capabilities::host::ModelDriver for PartialCallModel {
             started.extend((0..calls).map(|at| {
                 Ok(ModelChunk::ToolStart {
                     id: format!("unfinished-{at}"),
-                    name: "echo".into(),
+                    name: if calls == MANY_CALLS { "wait" } else { "echo" }.into(),
                 })
             }));
             let started = futures_util::stream::iter(started);
@@ -2848,11 +4504,12 @@ async fn undispatched_results_name_calls_from_their_starts() {
     say(
         &mut client,
         &lead,
-        tool(json!({"action": "request", "agentId": holder, "prompt": "many-calls"})),
+        tool(json!({"action": "request", "agentId": holder, "sessionId": member, "prompt": "many-calls"})),
         "queue",
     )
     .await;
     let many = next_member(&lead_session, 1).await;
+    assert_eq!(many, member);
     let many_session = agent.get_session(&many).unwrap();
     poll("every started call", async || {
         let events = events(&many_session).await;
@@ -2864,7 +4521,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .iter()
             .filter(|event| matches!(event.kind, EventKind::ModelUsage(_)))
             .count() as u64;
-        (started == MANY_CALLS && usage == PARTIAL_USAGE).then_some(())
+        (started == MANY_CALLS + UNFINISHED_CALLS && usage == PARTIAL_USAGE * 2).then_some(())
     })
     .await;
     assert_ok(
@@ -2880,7 +4537,9 @@ async fn undispatched_results_name_calls_from_their_starts() {
             .await
             .iter()
             .find_map(|event| match &event.kind {
-                EventKind::ToolResult(data) if data.call_event_id.is_none() => {
+                EventKind::ToolResult(data)
+                    if data.call_event_id.is_none() && data.results.len() == MANY_CALLS =>
+                {
                     Some((event.sequence, data.results.len()))
                 }
                 _ => None,
@@ -2915,13 +4574,131 @@ async fn undispatched_results_name_calls_from_their_starts() {
     assert_eq!(named.len(), MANY_CALLS, "{page}");
     for (at, item) in named.iter().enumerate() {
         assert_eq!(item["callId"], format!("unfinished-{at}"));
-        assert_eq!(item["name"], "echo", "{item}");
+        assert_eq!(item["name"], "wait", "{item}");
     }
     assert_eq!(
         collaboration.take_reads(),
         2,
         "one page and one read of the starts"
     );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action":"read","agentId":holder,
+        "sessionId":member,"after":after,"limit":200})),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    let earlier = last_ok(&events(&lead_session).await);
+    let earlier: Vec<_> = earlier["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "tool_result")
+        .collect();
+    assert_eq!(earlier.len(), UNFINISHED_CALLS);
+    assert!(
+        earlier.iter().all(|event| event["name"] == "echo"),
+        "reused call ids in a later request must not rename earlier results"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A member's page carries the effects its tool results declared: the path
+/// verbatim, a command cut at 200 characters with the cut marked, and no
+/// `effects` member when the result declared none; the `tool_call` items are
+/// unchanged (#1033).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_page_carries_the_effects_its_tool_results_declared() {
+    let (server, agent) = launch_with_agent(Arc::new(EffectTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent", "touch"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let path = "/work/src/parse.py";
+    let command = format!("cargo test --locked {}", "x".repeat(200));
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request",
+            "prompt": format!("tool:touch {{\"path\":\"{path}\"}}"),
+            "profile": {"name": "helper", "description": "", "systemPrompt": "", "tools": ["touch"]}}),
+        ),
+        "queue",
+    )
+    .await;
+    let started = poll("temporary request", async || {
+        let timeline = events(&lead_session).await;
+        (!results(&timeline).is_empty()).then(|| last_ok(&timeline))
+    })
+    .await;
+    let temporary = started["agentId"].as_str().unwrap().to_owned();
+    let member = started["sessionId"].as_str().unwrap().to_owned();
+    say(
+        &mut client,
+        &member,
+        format!("tool:touch {{\"command\":\"{command}\"}}"),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &member).await;
+    say(
+        &mut client,
+        &member,
+        r#"tool:touch {"note":"neither"}"#.to_string(),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &member).await;
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "read", "agentId": temporary, "sessionId": member,
+            "after": 0, "limit": 200}),
+        ),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    let page = last_ok(&events(&lead_session).await);
+    let items = page["events"].as_array().expect("page items");
+    let results: Vec<&Value> = items
+        .iter()
+        .filter(|item| item["type"] == "tool_result" && item["name"] == "touch")
+        .collect();
+    assert_eq!(results.len(), 3, "{page}");
+    assert_eq!(
+        results[0]["effects"],
+        json!([{"kind": "fileWritten", "path": path}]),
+        "{page}"
+    );
+    let command_effect = &results[1]["effects"][0];
+    assert_eq!(command_effect["kind"], "commandRun");
+    let shortened = command_effect["command"].as_str().expect("command");
+    assert_eq!(shortened.chars().count(), 201, "{page}");
+    assert_eq!(
+        shortened.strip_suffix('…').expect("the cut is marked"),
+        &command[..200],
+        "{page}"
+    );
+    assert_eq!(command_effect["exitCode"], 0);
+    assert!(results[2].get("effects").is_none(), "{page}");
+    let calls: Vec<&Value> = items
+        .iter()
+        .filter(|item| item["type"] == "tool_call")
+        .collect();
+    assert!(calls.len() >= 3, "{page}");
+    for call in calls {
+        let keys: Vec<&String> = call.as_object().expect("call item").keys().collect();
+        assert_eq!(keys, ["sequence", "type", "callId", "name"], "{call}");
+    }
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -2998,7 +4775,7 @@ async fn collaboration_facts_publish_to_tree_protocols_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
+async fn stored_member_read_acquires_it_and_it_can_unload_and_work_again() {
     let directory = std::env::temp_dir().join(format!("dim-team-store-{}", uuid::Uuid::new_v4()));
     let (server, agent) = launch_with_agent(
         Arc::new(MockTools),
@@ -3073,8 +4850,8 @@ async fn stored_member_can_unload_be_read_without_loading_and_work_again() {
     let read = last_ok(&events(&session).await);
     assert!(!read["events"].as_array().unwrap().is_empty());
     assert!(
-        agent.get_session(&member).is_none(),
-        "history reads do not load a member"
+        agent.get_session(&member).is_some(),
+        "history reads acquire the member"
     );
     say(
         &mut client,
@@ -3187,6 +4964,11 @@ struct DispatchGate {
     contexts: std::sync::Mutex<
         std::collections::BTreeMap<String, (rutis::Ctx, Arc<dim_agent_runtime::Timeline>)>,
     >,
+    /// Each branch's Timeline, keyed by Session and branch id, so a flow can
+    /// write a fact of its own on a branch it did not open through the model.
+    branches: std::sync::Mutex<
+        std::collections::BTreeMap<(String, String), Arc<dim_agent_runtime::Timeline>>,
+    >,
 }
 impl DispatchGate {
     fn new(hold: Hold) -> Arc<Self> {
@@ -3195,6 +4977,7 @@ impl DispatchGate {
             hold,
             timeline: Default::default(),
             contexts: Default::default(),
+            branches: Default::default(),
         })
     }
 }
@@ -3240,6 +5023,10 @@ impl rutis::host::DynPlugin for DispatchGatePlugin {
                 .lock()
                 .unwrap()
                 .insert(session.clone(), (ctx.clone(), timeline.clone()));
+            gate.branches
+                .lock()
+                .unwrap()
+                .insert((session.clone(), timeline.branch_id()), timeline.clone());
             if gate.leader.get() == Some(&session) {
                 *gate.timeline.lock().unwrap() = Some(timeline.clone());
             }
@@ -3321,6 +5108,16 @@ impl rutis::host::DynPlugin for MemberHoldPlugin {
 
 async fn launch_gated_with(
     gate: Arc<DispatchGate>,
+    config: ServerConfig,
+    extra: impl FnOnce(&mut AgentBuilder),
+) -> (RunningServer, Agent) {
+    launch_gated_tools(gate, Arc::new(MockTools), config, extra).await
+}
+
+/// [`launch_gated_with`] with the deployment's tool driver.
+async fn launch_gated_tools(
+    gate: Arc<DispatchGate>,
+    tools: Arc<dyn ToolDriver>,
     mut config: ServerConfig,
     extra: impl FnOnce(&mut AgentBuilder),
 ) -> (RunningServer, Agent) {
@@ -3332,7 +5129,7 @@ async fn launch_gated_with(
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
-    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     builder.require_feature(
         Feature::new("collaboration-test.dispatch-gate")
             .branch("collaboration-test.dispatch-gate", move |names| {
@@ -3349,8 +5146,7 @@ async fn launch_gated_with(
 /// Committed events of the gated branch hold one of `kind`.
 async fn committed_has(timeline: &dim_agent_runtime::Timeline, kind: &str) -> bool {
     let through = timeline.committed();
-    timeline
-        .local(..=through)
+    timeline_events(timeline, TimelineQueryScope::Branch, ..=through)
         .await
         .unwrap()
         .iter()
@@ -3852,8 +5648,8 @@ async fn passes(client: &mut Client, agent: &Agent) {
 /// grace; when the member ends its work the result is recorded as
 /// completed, the woken leader turn runs, and both Sessions unload. The
 /// relation outlives the unload: the leader's next request to the member
-/// restores both and reaches the same member. The leader's `read` of the
-/// member, repeated while the Sessions unload, never fails or omits an event.
+/// restores both and reaches the same member. Each peer read acquires the
+/// member; after reads stop it unloads, and the next read restores its facts.
 /// Nothing keeps a released instance of either alive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
@@ -3918,27 +5714,41 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
 
     let read = tool(json!({"action": "read", "agentId": holder, "sessionId": member}));
     let mut reads = vec![];
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let gone = agent.get_session(&member).is_none();
-            say(&mut client, &lead, read.clone(), "queue").await;
-            let lead_session = agent.get_session(&lead).unwrap();
-            idle(&mut client, &lead).await;
-            reads.push(last_ok(&events(&lead_session).await));
-            if gone {
-                break;
-            }
-        }
+    for _ in 0..3 {
+        say(&mut client, &lead, read.clone(), "queue").await;
+        let lead_session = agent.get_session(&lead).unwrap();
+        idle(&mut client, &lead).await;
+        reads.push(last_ok(&events(&lead_session).await));
+    }
+    super::deletion::eventually("the member unloads after peer reads", || {
+        agent.get_session(&member).is_none()
     })
-    .await
-    .expect("deadline: the member unloads");
+    .await;
+    let loaded_before_read = loads.of(&member).0;
+    say(&mut client, &lead, read, "queue").await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    idle(&mut client, &lead).await;
+    reads.push(last_ok(&events(&lead_session).await));
+    drop(lead_session);
+    assert_eq!(
+        loads.of(&member),
+        (loaded_before_read + 1, true),
+        "the read restores the member"
+    );
     let first = &reads[0];
     assert!(
         first.to_string().contains("Echo: again"),
         "the read holds the second request: {first}"
     );
     for read in &reads {
-        assert_eq!(read, first);
+        let initial = first["events"].as_array().unwrap();
+        let events = read["events"].as_array().unwrap();
+        assert!(events.len() >= initial.len());
+        assert_eq!(&events[..initial.len()], initial);
+        assert!(events[initial.len()..].iter().all(|event| {
+            event["type"] == "input" && event["mode"] == "append" && event["user"].is_null()
+        }));
+        assert!(read["nextCursor"].as_u64().unwrap() >= first["nextCursor"].as_u64().unwrap());
     }
     loads.released(&member).await;
     super::deletion::eventually("the leader unloads", || agent.get_session(&lead).is_none()).await;
@@ -4517,7 +6327,7 @@ async fn every_settlement_of_a_request_releases_its_leader() {
             .rpc("session.close", json!({"sessionId": lead}))
             .await,
     );
-    let closed_timeline = lead_session.local("main", ..).await.unwrap();
+    let closed_timeline = branch_events(&lead_session, "main", ..).await.unwrap();
     assert_eq!(
         result_of(&closed_timeline, &last),
         [CollaborationOutcome::Cancelled {
@@ -4605,7 +6415,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
     interrupt_release.notify_one();
     closing.await.unwrap().unwrap();
 
-    let closed = lead_session.local("main", ..).await.unwrap();
+    let closed = branch_events(&lead_session, "main", ..).await.unwrap();
     let delivery = closed
         .iter()
         .find_map(|event| match &event.kind {
@@ -4629,7 +6439,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
         !events(&member)
             .await
             .iter()
-            .any(|event| matches!(event.kind, EventKind::InputMessage(_)))
+            .any(|event| matches!(&event.kind, EventKind::InputMessage(data) if agent_message(data).is_some()))
     );
     server.shutdown();
     server.join().await.unwrap();
@@ -5154,7 +6964,7 @@ async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_
         assert_eq!(detail["result"]["descriptor"]["call"]["input"]["command"], "child action");
         assert_ok(&client.rpc("approval.respond", json!({"sessionId":lead,"branchId":child,"requestId":request_id,"decision":"allow"})).await);
         poll("child approval report", async || {
-            leader.local(&child, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
+            branch_events(&leader, &child, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
         }).await;
         leader.idle(&child).await.unwrap();
         assert_eq!(runs.load(Ordering::SeqCst), 2);
@@ -5213,16 +7023,17 @@ async fn new_members_sample_requesting_branch_policy_and_reused_members_keep_the
         lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(0, serde_json::from_value(policy.clone()).unwrap()).await.unwrap();
         let cut = events(&lead_session).await.last().unwrap().sequence;
         let branch = lead_session.branch("main".into(), cut, dim_agent_runtime::BranchOptions { prompt: "Permission inheritance child".into(), source: dim_agent_types::BranchSource::Host { operation_id: "permission-inheritance".into() } }).await.unwrap();
-        lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(cut, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
+        let state = lead_session.get::<dim_agent_capabilities::permission::PermissionState>("main").unwrap().unwrap();
+        lead_session.service::<dim_agent_capabilities::permission::Permission>("main").unwrap().update(state.version, serde_json::from_value(json!({"preset":"full-access"})).unwrap()).await.unwrap();
         let agent_id = client.rpc("agent.list", json!({})).await["result"][0]["agentId"].as_str().unwrap().to_owned();
         lead_session.submit(tool(json!({"action":"request","agentId":agent_id,"prompt":"hello"})), dim_agent_types::InputMode::Queue, &branch).await.unwrap();
         lead_session.idle(&branch).await.unwrap();
         let member_id = poll("child member delivered", async || {
-            lead_session.history(&branch, None).await.unwrap().iter().find_map(|event| match &event.kind { EventKind::CollaborationDelivered(data) => match &data.delivery { CollaborationDelivery::Ok { session_id, .. } => Some(session_id.clone()), _ => None }, _ => None })
+            chain_events(&lead_session, &branch, ..).await.unwrap().iter().find_map(|event| match &event.kind { EventKind::CollaborationDelivered(data) => match &data.delivery { CollaborationDelivery::Ok { session_id, .. } => Some(session_id.clone()), _ => None }, _ => None })
         }).await;
         let member = agent.get_session(&member_id).unwrap();
         poll("child delegation completed before member reuse", async || {
-            lead_session.local(&branch, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
+            branch_events(&lead_session, &branch, ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::InputMessage(data) if report(data).is_some())).then_some(())
         }).await;
         lead_session.idle(&branch).await.unwrap();
         assert_eq!(serde_json::to_value(&member.config().permission_policy).unwrap(), policy);
@@ -5273,7 +7084,7 @@ async fn member_approval_cancellation_and_policy_tightening_never_execute_a_late
                     if action == "cancel" {
                         leader.submit(format!("tool:member_approval_allow {}", json!({"approvalId":detail["result"]["approvalId"]})), dim_agent_types::InputMode::Queue, &control).await.unwrap();
                         leader.idle(&control).await.unwrap();
-                        let calls = results(&leader.local(&control, ..).await.unwrap());
+                        let calls = results(&branch_events(&leader, &control, ..).await.unwrap());
                         let (_, result) = calls.last().unwrap();
                         let result: Value = serde_json::from_str(result).unwrap();
                         assert_eq!(result["code"], "not_pending");
@@ -5462,7 +7273,13 @@ async fn member_routes_are_authorized_only_after_the_owning_branch_consumes_the_
         entered.notified().await;
         let timeline = gate.contexts.lock().unwrap().get(lead).unwrap().1.clone();
         let (input_event, input, route) = poll("member request is committed behind the dispatch gate", async || {
-            let events = timeline.local(..=timeline.committed()).await.unwrap();
+            let events = timeline_events(
+                &timeline,
+                TimelineQueryScope::Branch,
+                ..=timeline.committed(),
+            )
+            .await
+            .unwrap();
             events.into_iter().find_map(|event| {
                 let EventKind::InputMessage(input) = &event.kind else { return None; };
                 let Some(InputBlock::Raw { text, .. }) = input.blocks.first() else { return None; };

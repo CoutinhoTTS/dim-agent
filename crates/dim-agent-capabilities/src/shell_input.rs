@@ -12,11 +12,13 @@
 use crate::{
     context_block::{element, raw, text},
     host_platform::{HostPlatform, ProcessTree},
-    methods::{Interruption, MethodDecl, Progress, RpcError, SessionMethods, params, reply},
+    methods::{
+        Interruption, MethodCall, MethodDecl, Progress, RpcError, SessionMethods, params, reply,
+    },
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     timeline_tree::TreeCommands,
     workspace_tools::exec::{
-        OutputSink, capture_preview, pump, sanitize, signal_name, tail_bytes, truncate_preview,
+        OutputSink, bounded_preview, capture_preview, pump, sanitize, signal_name, tail_bytes,
     },
 };
 use dim_agent_runtime::{
@@ -531,10 +533,7 @@ impl RunOutput {
     /// left anything out.
     fn bounded(&self) -> (String, bool) {
         let captured = self.0.lock().unwrap();
-        let text = truncate_preview(&captured.preview);
-        let truncated = captured.decoded > captured.preview.len()
-            || text.len() < sanitize(&captured.preview).len();
-        (text, truncated)
+        bounded_preview(&captured.preview, captured.decoded)
     }
 }
 
@@ -628,7 +627,12 @@ impl DynPlugin for ShellInputPlugin {
                     MethodDecl::new("shell.stop", true, Interruption::Report),
                     MethodDecl::new("shell.list", false, Interruption::Report),
                 ],
-                Arc::new(move |method, value, cancel, progress| {
+                Arc::new(move |call, cancel, progress| {
+                    let MethodCall {
+                        method,
+                        params: value,
+                        ..
+                    } = call;
                     let shell = shell.clone();
                     Box::pin(async move {
                         match method.as_str() {

@@ -322,7 +322,6 @@ fn row(item: &PluginItem) -> Row {
     }
     Row {
         kind: Kind::Item,
-        category: String::new(),
         label: item.name.clone(),
         detail,
         key: None,

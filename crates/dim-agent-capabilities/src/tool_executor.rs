@@ -4,7 +4,7 @@ use crate::{
     tool_binding::ToolBinding,
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names, Timeline, TimelineIdentity,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -95,11 +95,39 @@ impl DynPlugin for ToolExecutorPlugin {
             let owner = service.clone();
             let faults = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
-            dispatcher.follow(
+            let read = owner.clone();
+            let read_timeline = timeline.clone();
+            dispatcher.consume(
                 ctx,
-                "ToolExecutor",
-                &["step/tool-call", "stop/interrupt", "turn/start", "turn/end"],
-                move |delivery| {
+                "ToolExecutor".into(),
+                [
+                    "step/tool-call",
+                    "stop/interrupt",
+                    "turn/start",
+                    "turn/end",
+                ]
+                .map(String::from)
+                .to_vec(),
+                Arc::new(move || {
+                    let read = read.clone();
+                    let timeline = read_timeline.clone();
+                    Box::pin(async move {
+                        let reply = rebuild_facts(
+                            &timeline,
+                            &[
+                                "step/tool-call",
+                                "step/tool-result",
+                                "stop/interrupt",
+                                "turn/start",
+                                "turn/end",
+                            ],
+                        )
+                        .await?;
+                        rebuild(&mut read.state.lock().unwrap(), &timeline, &reply.events)?;
+                        Ok(reply.through)
+                    })
+                }),
+                Arc::new(move |event| {
                     let owner = owner.clone();
                     let timeline = timeline.clone();
                     let faults = faults.clone();
@@ -108,12 +136,6 @@ impl DynPlugin for ToolExecutorPlugin {
                     let approval = approval.clone();
                     let identity = identity.clone();
                     Box::pin(async move {
-                    let event = match delivery {
-                        Delivery::Replay(events) => {
-                            return rebuild(&mut owner.state.lock().unwrap(), &timeline, &events);
-                        }
-                        Delivery::Live(event) => event,
-                    };
                     (|| {
                         let mut state = owner.state.lock().unwrap();
                         if let EventKind::StopInterrupt(data) = &event.kind {
@@ -322,7 +344,7 @@ impl DynPlugin for ToolExecutorPlugin {
                         Ok(())
                     })()
                     })
-                },
+                }),
             ).await?;
             ctx.provide_at(self.executor.clone(), service)?;
             Ok(Effect::Done)

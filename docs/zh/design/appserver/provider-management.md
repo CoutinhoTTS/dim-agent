@@ -41,7 +41,8 @@ Provider 拥有进程配置、目录、覆盖、偏好、校验、安全投影�
 | --- | --- |
 | `managementMethods`，process，命名空间 `provider` | 本地 v3 Desktop/CLI 和受信任进程调用者；§3 沿既有命名空间扩展 |
 | Provider 模块边界 `stored_selection`（Rust） | Migration 等原生数据边界消费方；§3.7 增加一个基于已准入记录的无副作用函数，不是 RPC、host 端口或管理方法 |
-| Provider host 端口 `SelectableModelsHost`（core `dim-agent-capabilities`），由 Provider 提供 | 按模型能力路由的进程内 owner（Modality）；§3.6 增加一次读取，不是管理方法或 RPC 方法 |
+| Provider host 端口 `SelectableModelsHost`（core `dim-agent-capabilities`），由该配置的模型拥有方提供（Provider，或配置式模型文件） | 按模型能力路由的进程内 owner（Modality）与 `agent` 工具的 `models` 动作；§3.6 增加两次读取，不是管理方法或 RPC 方法 |
+| Provider host 端口 `ModalityConnectionHost`（core `dim-agent-capabilities`），由该配置的模型拥有方提供 | Modality 的图像生成、编辑与增强进程适配器；§3.6 定义一次按调用的解析，不是管理方法或 RPC 方法 |
 | `account`、`account.codex`、`account.grok` | 复用账号调用，不新增账号方法、事件或 managed host capability |
 | `ProviderConnectionResolver`、`ModelSelectionHost` | Provider 沿现有类型处理目录和路由，不增加 core 端口 |
 | `auxiliaryModel.complete` | S4 由调用者显式选模型的合同不变 |
@@ -325,35 +326,56 @@ Session 保留已采用的能力快照。模型变为未声明的 Session 仍可
 
 ### 3.6 供进程 owner 读取的可选模型
 
-按模型能力路由工作的进程 owner 不能自留一份 Provider 可用性规则。Provider 只提供一次
-无副作用的读取，返回它会服务的模型，以及路由决策需要的标识和已声明能力。这次读取是进程
-host 端口，不是管理方法：不在 `provider` 命名空间上，不经 RPC 提供，也不改变 `provider.catalog`。
+按模型能力路由工作的进程 owner 不能自留一份它路由到的模型的可用性规则。下面的端口在每个
+配置里有一个提供方——产品配置是 Provider，配置式模型配置（`dim-agent-aimux`）是它的模型文件
+——各自提供无副作用的读取，返回它会服务的模型，以及路由决策需要的标识和已声明能力。本节
+定义端口与 Provider 的规则；配置式配置的规则归它自己的页面。这次读取是进程 host 端口，不是
+管理方法：不在 `provider` 命名空间上，不经 RPC 提供，也不改变 `provider.catalog`。
 
 **为什么是端口而不是 `ProviderService` 上的方法。** 消费方插件在自己的 crate 中，
 `xtask check` 拒绝依赖装配层 `dim-app-server`，因此消费方无法命名 `ProviderService`。
 端口及其数据类型放在 Provider 与消费方都依赖的 `dim-agent-capabilities`；注册为进程名后，
-消费方声明 `Keyed<SelectableModelsHost>`，由 catalog 解析。依赖从扩展指向 core，符合
-[ADR 002 D3](../../adr/002-plugin-scope.md)，实现、目录和规则仍留在 Provider。
+消费方可以命名该端口并由 catalog 解析。依赖从扩展指向 core，符合
+[ADR 002 D3](../../adr/002-plugin-scope.md)，实现、目录和规则仍留在各自的提供方。
 
-**合同（语言中立）。** 进程 host 端口，无实例键，由 Provider 提供：操作 `selectableModels`，
-异步，请求 `{}`，回复 `{models: ModelCapabilitySnapshot[]}`。元素就是既有
+**合同（语言中立）。** 进程 host 端口，无实例键：产品配置由 Provider 提供，配置式模型配置
+（`--model-config`）由它的模型文件提供。操作 `selectableModels`，异步，请求 `{}`，回复
+`{models: ModelCapabilitySnapshot[]}`。元素就是既有
 `ModelCapabilitySnapshot`——`{target: {providerId, modelId}, capabilities:
 ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：它已经携带 provider/model
 标识与已声明能力，就是执行时采用的那份描述。可选模型一定声明了两项上限（§3.5），因此既有
 `capability_snapshot` 转换不会失败。调用方传入自己的取消 token；取消它即取消本次读取并返回
 `Cancelled`。
 
-**应用的规则。** 候选 provider 与默认解析一致：托管包公布的每个账号 provider，以及
+**第二个操作：`selectableForModality`。** 同一端口还提供一次面向非对话用途的进程读取
+（Modality §9.2）：操作 `selectableForModality`，异步，请求 `{}`，回复
+`{models: ModalityModelSnapshot[]}`，元素为
+`{target: {providerId, modelId}, operations: string[]}`。`operations` 是该模型目录条目在
+`metadata.raw.modalityCapabilities` 中声明的 `<category>.<operation>` id，按条目中的顺序；
+未声明任何操作的模型被省略。本次读取应用与 `selectableModels` 相同的 provider、账号、模型、
+路由、凭据与状态规则，但去掉其 text modality、chat 类型与已声明文本上限三项要求：没有
+`text` modality 的模型、非 chat 模型与 `limits_undeclared` 的模型只要声明了 modality 操作
+仍是候选；不可用状态、停用的 Provider 或模型、缺少路由、已登出的账号与缺少静态凭据仍会排除
+它们。它不携带原因字段：消费方从选项推导可用性，并用自己的快照解释不再可选的持久默认值。
+
+**Provider 应用的规则。** 候选 provider 与默认解析一致：托管包公布的每个账号 provider，以及
 `provider.list` 返回的每个静态 provider。每个模型来自与 `provider.catalog` 相同的单 provider
 目录读取（`catalog_for`），所以捆绑替换、descriptor 覆盖、用户模型、路由、禁用和账号状态
 都是执行时看到的那一份。模型只有在既有 `ProviderCatalog::selectable` 接受时才出现：
 `unavailableReason` 缺失，且 ID 不在 `disabledModelIds` 中。该原因已覆盖全部排除项：
 `ModelStatus::Unavailable` 的模型、未声明 `text` modality 的模型、在 `new-api-router`
 之外的 driver 上的非 chat 模型、禁用的 Provider 记录、没有路由的模型、已登出的账号、
-缺凭据的静态记录，以及未声明上限（`limits_undeclared`）。读取不增加第二个谓词。模型出现，
-意味着同一快照下 `select`、`configuration`、`apply_preferences`、每请求检查和
-`auxiliaryModel` 都会接受它。执行仍是权威：之后的写入可使其不可选，消费方把 ID 交回
-Provider，由后者重新检查。
+缺凭据的静态记录，以及未声明上限（`limits_undeclared`）。读取不增加第二个谓词：它读的
+就是选择已经在用的那一个。modality 读取是上面同一条规则去掉三项要求后的样子，而两个目录
+构建点都从对条目的一次分类得出会话原因与 modality 原因，因此新增的排除原因只需在一处
+声明其类别，两条读取不会漂移。模型出现，意味着同一快照下 `select`、`configuration`、
+`apply_preferences`、每请求检查和 `auxiliaryModel` 都会接受它。执行仍是权威：之后的写入可
+使其不可选，消费方把 ID 交回 Provider，由后者重新检查。
+
+**配置式配置应用的规则。** 它的候选是模型文件里的每个 provider 与模型条目，按 provider、再按
+模型 id 排序。文件要求两个上限，因此每个条目都带这两项；文件不声明其它能力，条目按文本默认
+能力给出。这个配置没有账号、路由、停用或偏好输入，读取也不加这类测试：文件的校验与它的规则
+都归它自己的页面（[aimux](../../../crates/dim-agent-aimux/README.md)）。
 
 这次读取不是 [#560](https://github.com/arcships/dim/issues/560) 的校验合同。后者的合同在
 §3.7：它接收已准入的持久化静态记录和显式模型 ID，回答该选择能否执行；本次读取没有输入，
@@ -371,12 +393,17 @@ Provider，由后者重新检查。
 provider，读取也不返回逐项错误列表。需要该 provider 诊断的调用方使用 `provider.list` 或
 `provider.management`。
 
-**消费方。** Modality 用它计算每个操作的选项和自动默认值：把返回的 ID 与已收集 adapter
-声明支持的操作求交，并在配置的模型不在其中时报告 "no adapter for the configured model"。
-它不调用 `provider.catalog`，也不自留可用性谓词。回复只带 ID 和能力，不带显示名：渲染选项
+**消费方。** Modality 用这两次读取计算每个操作的选项和自动默认值。adapter 服务的类别，
+候选是两次读取去重后的结果：先是执行可选的模型，后是 modality 读取的模型，各按其读取的
+顺序；每个操作只保留已收集 adapter 为它服务的那些。因此被执行拒绝的媒体模型只要 adapter
+服务它，就仍在选项中，不声明任何操作的可选模型也一样。没有 adapter 服务的操作，候选是
+modality 读取中条目声明了该操作 id 的模型；`image.understand` 的候选是带 `vision` 的可选
+模型。配置的模型不在其中时报告 "no adapter for the configured model"。它不调用
+`provider.catalog`，也不自留可用性谓词。回复只带 ID 和能力，不带显示名：渲染选项
 的客户端用 `provider.catalog` 或 `provider.management` 的模型列表按 ID join，Modality 不复制
 名称。Provider 不增加逐消费方的键、配置或过滤器：读取没有输入，需要单个 provider 的调用方
-自行筛选回复。
+自行筛选回复。Collaboration 的 `agent` 工具用同一次读取实现 `models` 动作，把其中的 ID 交给
+leader 的模型，同样不自留规则（[Collaboration](../plugins/Collaboration.md#7-成员能运行的模型)）。
 
 **不变的部分。** `provider.catalog`、`provider.management`、`provider.select`、模型选择、
 采用、偏好及其错误；客户端协议与 `PROTOCOL_VERSION`；持久化及其格式；Timeline、
@@ -393,14 +420,69 @@ pub trait SelectableModels: Send + Sync + 'static {
         &self,
         cancel: CancellationToken,
     ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>>;
+    fn selectable_for_modality(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<ModalityModelSnapshot>>;
 }
 pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
 ```
 
-owner 实现是 `ProviderService::selectable_models`，`ProductResolver` 转调它。消费方在 `Deps`
-中声明 `Keyed<SelectableModelsHost>`；消费方不直接读取 `ProviderService`。非 Rust 消费方在
+owner 实现是 `ProviderService::selectable_models` 与
+`ProviderService::selectable_modality_models`，`ProductResolver` 转调两者；配置式模型配置
+（`dim-agent-aimux`）用模型文件中的条目提供这两个读取；该配置不声明任何 modality 操作，
+因此它的 `selectableForModality` 读取返回空
+（[aimux](../../../crates/dim-agent-aimux/README.md)）。需要这次读取的消费方在 `Deps` 中声明
+`Keyed<SelectableModelsHost>` 并以它作为加载门槛（Modality）；必须在没有该读取时也能加载的消费方
+在提供时按名读取、不设门槛（Collaboration 的 `models` 动作），并在加载时取得快照，因此提供方
+重载不会重载它。消费方不直接读取 `ProviderService`。非 Rust 消费方在
 运行时按名暴露服务的要求（[#4](https://github.com/arcships/dim/issues/4)）交付后按名访问；
 该要求已在 [Modality §9](../plugins/Modality.md#9-向机制所有者提出的需求) 提出，这里不重复提出。
+
+**连接合同：`resolveModalityConnection`。** 同一个 owner 解析一次非对话调用所用的连接，
+适配器因此不持有 Provider 凭据，也不读取 Provider 记录。它是 `ProviderConnectionResolver`
+旁边的第二个进程 host 端口，不是管理方法：操作 `resolveModalityConnection`，异步，请求
+`{target: {providerId, modelId}, operation: string}`，回复 `{connection, protocol,
+model, realtime}`。
+
+`connection` 是同一模型的对话调用会取得的既有 `ResolvedModelConnection`——连接事实、失败
+策略，以及托管账号上的凭据恢复——因此适配器执行与执行时相同的一次恢复规则。`protocol` 是
+目录为该模型携带的路由，`model` 是请求发送的 id。两个端口共用一次解析：静态或托管记录的
+读取、目录构建、选择与托管凭据租约都在同一处完成，只有可选性规则与请求事实不同。对话路径的
+临时启动连接与已采用能力快照不适用；调用者传入目录标识与操作。
+
+**规则。** 它应用 `selectableForModality` 读取的同一组规则——provider、账号、模型、路由、
+凭据与状态——并要求模型目录条目在其 `metadata.raw.modalityCapabilities` 中声明 `operation`。
+任何一条不满足的模型都在任何网络调用之前被拒绝：可用性类失败带执行对该模型报告的原因，
+未声明的操作作为指明它的 invalid request 拒绝。读取与连接不会给出不同结论，因为二者共用
+目录与其选择判定。托管账号的凭据租约读取同一条规则：只拒绝排除所有用途的原因，因此目录标记为
+非 chat 的媒体模型仍会为这次调用发放租约。该边界规则同时读取存储的原因与条目状态：
+`unavailable` 状态无论存储了何种原因都排除所有用途，因此旧投影为这类模型写下的记录不会被
+任一读取列出，也不会发放任何租约。
+
+**实时声明。** 提供实时操作的条目在 `metadata.raw.realtime: {protocol, path}` 中声明它所说的
+传输。Provider 将其解析为 `RealtimeDeclaration`，并作为 `realtime` 随连接回复携带；未声明的
+条目回复 `null`，配置式配置因为没有目录条目，对每个目标都回复 `null`。该操作仍与其余操作一样
+声明在 `metadata.raw.modalityCapabilities` 中，因此一个列出 `realtime.voice` 却没有传输声明的
+模型会解析出 `realtime` 为 `null` 的连接：Modality 在任何网络调用之前拒绝该模型的 `open`，
+而不是猜测 URL。`protocol` 是适配器为该线上协议使用的名字，`path` 由该适配器追加到路由的
+base URL 之后。
+
+**凭据规则与生命周期。** 连接只活在那一次调用中。Provider 从不持久化它，从不把它返回给
+客户端，也从不写进任务记录、结果、诊断或错误。它的 `Debug` 打印模型、路由、base URL、头名
+以及是否存在凭据，从不打印头的值、bearer 或 key；`ModelConnection` 当前未实现 `Debug`，
+因此没有其他连接会格式化凭据。托管账号的连接携带与对话调用相同的
+`RecoverModelConnection`。`recovery::invoke` 是基于 `ModelHost`、`ModelRequest` 与
+`ModelStream` 的对话执行路径，适配器不能原样复用；它自行执行该规则：把 provider 的拒绝
+映射为恢复逻辑可解释的 `HostError`，以当前阶段询问 `rejection`，可恢复时 `recover` 一次并
+重试，终止时 `finish_rejected`。
+
+**Rust binding。** 端口是 `dim-agent-capabilities` 中的 `ResolveModalityConnection` 与
+`ModalityConnectionHost`，`ModalityTarget` 携带模型标识与操作。Provider 在
+`ProviderPlugin::apply` 提供它，配置式模型配置从模型文件提供它，其条目未声明任何操作，
+因此对每个 target 都以声明拒绝作答。App Server catalog 以 Rust-only 名
+`modalityConnectionHost` 注册它。回复复用 `ResolvedModelConnection` 与 `ModelProtocol`，并新增
+`RealtimeDeclaration`（条目声明的传输）；不新增凭据类型。
 
 ### 3.7 已存选择的离线校验
 

@@ -12,7 +12,7 @@
 | 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow |
 | `SessionConfig` 字段 `interactive` | Agents | 从所属 Session 的 `SessionConfig` 读取它的插件（Questions、SessionTitle） |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 分支部分写入相同形式，Hooks 分支部分（待设计）也会如此 |
-| 固定前缀读取 | 运行时门面（现有的 `sequence`、`local_page` 与 `history`，A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
+| 固定前缀读取 | 运行时门面（`sequence` 与 `history`）与分页读 `AgentIndex::history_page`（A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
 | 撤回（带可选 `reason` 的指令 `input/withdraw`，`reason` 在[总览附录 B.1](../overview.md#b1-session-与分支-capability) 中提议；结果 `input/deleted`、经 InputQueue 的 `sessionMethods` 提供的 `session.input.withdraw`） | InputQueue | 客户端、AcpGateway、Scheduler、Workflow |
 
 Session 级与分支级插件不使用此接口访问自己的 Session。它们直接使用所属 Session 与分支的服务、分支 Dispatcher 和 Session 广播。
@@ -54,7 +54,7 @@ flowchart LR
 | Session 门面（[agent.rs](../../../../crates/dim-agent-runtime/src/agent.rs)、[branch.rs](../../../../crates/dim-agent-runtime/src/branch.rs)） | Session、分支 | 已存在 |
 | InputQueue | 分支 | 变更：消费 `input/withdraw`，写入 `input/deleted`；撤回服务 |
 
-本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`LookupReply`、`WithdrawRequest`、`WithdrawReply` 与 `SessionsError`；`SessionConfig` 字段 `interactive` 与 `session.create` 的 `interactive` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、以及 Session 输入路径。
+本文定义的合同：`sessions` 服务及 `LaunchRequest`、`InputWrite`、`RawBlock`、`HistoryRequest`、`HistoryPage`、`LookupReply`、`WithdrawRequest`、`WithdrawReply` 与 `SessionsError`；存活带 key 块投影 `session.keys`（Rpc 内建，`KeysRequest`、`KeysResult`、`KeyEntry`）；`SessionConfig` 字段 `interactive` 与 `session.create` 的 `interactive` 参数；来源标记、key 与 `submissionId` 约定；以及撤回合同。使用的合同：运行时门面、Agents 装载、`input/message` 数据与消费合同、现有的上下文块元素格式、以及 Session 输入路径。
 
 ## 2. 数据与状态
 
@@ -139,7 +139,7 @@ sequenceDiagram
 | 用户内容（文本、图像） | 一条用户消息 | 在同一输入的所有块之后 |
 | 带 key 的块（`Live`） | 作为 raw 块；每个 key 的最新块保持生效 | 消费位置 |
 | Retire 块 | 投递一次；该 key 失效 | 消费位置 |
-| 已删除的输入（从未应用） | 无：其用户内容与 raw 块从不进入上下文，其带 key 的块从不生效，压缩也从不看到它。客户端可依据 `input/deleted` 将其显示为已删除 | — |
+| 已删除的输入（从未应用） | 无：其用户内容与 raw 块从不进入上下文，其带 key 的块从不生效，压缩也从不看到它。客户端可依据 `input/deleted` 将其显示为已删除，且它不出现在 `session.keys` 中 | — |
 
 Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在运行中 turn 的下一个边界被消费，分支空闲时会启动一个 turn。Append 输入随下一次模型请求被消费，从不启动 turn。经过压缩后，已消费的输入只保留在摘要中，但每个生效 key 的最新块会原样重放。子分支看到截至其切点的祖先前缀，包括切点处生效的 key，且从不采纳父分支的待处理输入。模型从不看到 `submissionId`、模式、`SessionConfig` 字段或租约。
 
@@ -197,7 +197,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ### 9.2 固定前缀读取
 
-已撤回（[#50](https://github.com/arcships/dim/issues/50)）：现有的 Session 门面组合即可实现，不需要改运行时。`Session::sequence(branch)` 返回已发布的 head；若它低于 `atLeast`，读取以 `future_sequence` 失败，否则用 `Session::history(branch, Some(head))` 读到该 head。两者都只读已发布的事件，head 只会前移，因此前缀是固定的（A.5）。进程调用方用 `Session::local_page` 分页读取同一前缀（A.5）。
+已撤回（[#50](https://github.com/arcships/dim/issues/50)）：现有的 Session 门面组合即可实现，不需要改运行时。`Session::sequence(branch)` 返回已发布的 head；若它低于 `atLeast`，读取以 `future_sequence` 失败，否则用 `Session::query(branch, query)` 读到该 head 及以下。两者都只读已发布的事件，head 只会前移，因此前缀是固定的（A.5）。进程调用方用 `AgentIndex::history_page` 分页读取同一前缀（A.5）。
 
 ### 9.3 由插件身份确定调用方来源
 
@@ -258,6 +258,18 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 // HistoryPage：该分支自己在 (after, through] 内的事件，止于批次边界，
 // 为 AgentEvent 记录，形式与 session.history 返回的相同
 { "through": 0, "events": [ { "id": "string", "sequence": 0, "type": "turn/end", "data": {} } ] }
+// KeysRequest：固定位置上某分支自身段的存活带 key 块（appserver/keyed-blocks）
+{ "sessionId": "string",
+  "branchId": "string",               // v3 必填，与所有 v3 session 读一致；根线用 "main"
+  "through?": 0 }                     // 固定读取位置；缺省：发布头
+// KeysResult
+{ "through": 0,                       // 投影固定的位置
+  "entries": [ KeyEntry ] }           // 分支自身段上每个存活 key 恰一条；空数组，从不为 null
+// KeyEntry
+{ "key": "string",                    // RawBlock.key.name
+  "sequence": 0,                      // 携带该块的 input/message 事件序号
+  "inputId": "string",                // 该事件的 id
+  "text": "string" }                  // RawBlock.text 原字节
 // WithdrawRequest
 { "sessionId": "string", "branchId": "string", "inputId": "string",
   "reason?": "string" }                 // 复制到 input/withdraw，由客户端显示
@@ -327,7 +339,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 
 ### A.5 固定前缀读取
 
-带 `atLeast` 的 `sessions.history` 把 `through` 固定为调用时的已发布 head。若该 head 低于 `atLeast`，则以 `future_sequence` 失败，否则返回该分支自己截至该 head 的事件，按 `after` 与 `limit` 分页。它由现有门面组合实现：先用 `Session::sequence(branch)` 读 head，再用 `Session::local_page(branch, after, limit, head)` 分页读取。需要祖先前缀的分支部分读 `Session::history(branch, Some(head))`（§9.2）。分支 Dispatcher 或 Session 广播投递的每个事件都已发布，因此只要分支存在，`atLeast = event.sequence` 就会成功。
+`sessions.history` 取得并持有 Session；未装载时先恢复它。带 `atLeast` 时把 `through` 固定为调用时的已发布 head。若该 head 低于 `atLeast`，则以 `future_sequence` 失败，否则返回该分支自己截至该 head 的事件，按 `after` 与 `limit` 分页。它由现有门面组合实现：先用 `Session::sequence(branch)` 读 head，再用 `AgentIndex::history_page` 分页读取。活跃线经自身 query 分页；已结束的线经 `TimelineTree` 按固定 head 和批次边界分页。此入口不会为本进程未持有的 Session 回退到存储读取。需要祖先前缀的分支部分用同一个 query 读祖先链（§9.2）。分支 Dispatcher 或 Session 广播投递的每个事件都已发布，因此只要分支存在，`atLeast = event.sequence` 就会成功。
 
 ### A.6 错误
 
@@ -398,7 +410,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | 逐次调用的 acquire | `AgentIndex::acquire(id)`（已有，crate 内部使用），返回 `SessionUse` 租约 |
 | `input` | `Session::input(InputMessageData, branch)`（已有；对分支已持有的标识返回已提交的输入）；key 为 `InputBlock::Raw { key: Some(name), retire }` |
 | `lookup` | `Session::lookup(branch, submission_id)`，与 `session.input_lookup` 共用：读分支的提交标识索引，等待找到的输入发布 |
-| `history` | `Session::sequence(branch)`，低于 `at_least` 时以 `future_sequence` 失败，然后 `Session::local_page(branch, after, limit, through)` |
+| `history` | `Session::sequence(branch)`，低于 `at_least` 时以 `future_sequence` 失败，然后 `AgentIndex::history_page(id, branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)`，然后 `InputQueue::withdraw(InputWithdrawData { input_id, reason }, None) -> Result<(Withdrawal, Option<Arc<AgentEvent>>), AgentError>`（S1）：追加 `input/withdraw`，在 InputQueue 写下决定后回复；`Withdrawal::Deleted { sequence }` 或 `Withdrawal::NotHeld`。Agents 等该 `input/deleted` 发布后才回复 `deleted` |
 | `stop`、`idle` | `Session::stop`、`Session::idle`（已有） |
 | `delete` | `AgentIndex::delete(id)`（S5c，crate 内部使用）：准入闸门、关闭、`SessionStore::delete_session`、遗忘 |

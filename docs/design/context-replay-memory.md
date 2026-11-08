@@ -62,7 +62,7 @@ Linux x86_64，glibc 2.39，运行约 1.5 小时。只读观察，未改产品�
 ## 3. 现状：一次 prepare 实际造了几份
 
 ```text
-Timeline::context_from
+HistoryRenderer::read_context（折叠 Timeline::query 的页）
   └─ events: Vec<Arc<AgentEvent>>          整段历史物化              (1)
        └─ HistoryEntry { message: Message } 文本复制                  (2)
             ├─ context_messages()           整份克隆：前缀校验         (3)
@@ -75,7 +75,7 @@ Timeline::context_from
 
 | 位置 | 行为 |
 | --- | --- |
-| [timeline.rs:805](../../crates/dim-agent-runtime/src/core/timeline.rs#L805) `context_from` | 从 sequence 1 的整段历史装进 `ContextHistory.events` 和 `positions` |
+| [history.rs](../../crates/dim-agent-capabilities/src/history.rs) `HistoryRenderer::read_context` | 从祖先链起点（或检查点的 `resume`）的整段历史装进 `ContextHistory.events` 和 `positions` |
 | [history.rs:10](../../crates/dim-agent-capabilities/src/history.rs#L10) `HistoryEntry` | `message: Message`，文本由事件复制而来 |
 | [history.rs:555](../../crates/dim-agent-capabilities/src/history.rs#L555) `context_messages` | 对每条消息 `entry.message.clone()`；有压缩时还克隆 `replacement` 和 `context_baseline[].message`（两者仍是 `Message`） |
 | [context_preparation.rs:542](../../crates/dim-agent-capabilities/src/context_preparation.rs#L542) | 为校验前缀整份克隆 |
@@ -142,12 +142,12 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 不保留投影 cache，也不把整段历史装进 `ContextHistory.events`。每次 prepare 按批读取事件，
 边读边投影，投影之外的批立即释放。没有跨 prepare 的派生状态，也没有缓存失效规则。
 
-- **读取**：`Timeline::stored_context_page_in` 读取某个位置之后、带上下文开关的完整原子批次，
-  目标是一批的事件数、永不在原子批次中间结束；`HistoryRenderer::rendered_stream`
-  以 256 条为默认批大小，从快照的恢复位置或第一个有效段的段首顺序读取；不经过 hot cache，
+- **读取**：`HistoryRenderer::rendered_stream` 用事件查询按页读取链上带上下文开关的事件
+  （`Render` 与 `State` 的并集），从快照记录的恢复事件或第一个有效段的段首顺序读取，
+  默认每页 256 条；页按事件数截断，不与原子批次对齐，按序折叠即可；不经过 hot cache，
   不保留事件体。
 - **投影**：`project_batch` 接受上一批的 `ProjectionCheckpointState`，返回新的 entries/state；
-  `rendered_stream` 合并 entries，事件只活到当前批。
+  `rendered_stream` 合并 entries，事件只活到当前页。
 - **压缩**：批次内遇到 completed compaction 时按 `retain_from` 裁剪已累计的 history；
   cut 在更早批次时按 `PolicyOrder` 在累计 history 上裁剪；找不到 cut 或数据损坏时报错，
   不再回退全量。
@@ -156,22 +156,19 @@ compaction（[agent_loop.rs:359](../../crates/dim-agent-capabilities/src/agent_l
 
 #### policy 不再消费整份 ContextHistory
 
-policy 需要的事实和窗口单独查询，不经过 `ContextHistory.events`：
+`ContextPolicy` 的输入是 `PolicyContext`，不经过 `ContextHistory.events`：
 
-- `PolicyFacts`：`context/configured`、`context/compaction`、`model/usage` 及其 `model/call`、
-  当前 turn 的输入、预算；SQLite 直接选行，默认 store 用同一选择。
-- `PolicyOrder`：只含 id、branch、sequence、turn start、compaction start；合并 ancestry，
-  用于合法 cut 枚举和 `regrown`。
-- `PolicyWindow`：锚点、当前 turn 输入、`input/consumed`、上一次 cut 之后的 tool-result；
-  合并 ancestry，用于 pinning 和 digest。
-- `ContextPolicy` 的输入改为 `PolicyContext`，只持有 configuration、compaction、order、
-  streamed checkpoint 和可选的 full context；`full` 只用于显式的 `rendered_context` 读取，
-  准备路径总是用默认投影。
+- `PolicyContext` 持有有效 configuration、`context/compaction`、各段的顺序（root first）、
+  流式切分给出的 cut 位置，以及可选的整份 `ContextHistory`；`full` 只用于显式的
+  `rendered_context` 读取和压缩快照，准备路径用流式投影。
+- 上一次尝试写下的 `context/compaction`、`context/budget` 由一次事件查询按 `turn_id` 取出，
+  读取包含已写入但尚未发布的事实。
+- 合法 cut 枚举与 `regrown`、pinning 和 digest 都从这份流式上下文算出。
 - `compact_step` 的 snapshot 由 `stream_checkpoint` 从最近的有效快照折叠到 cut。
 
 #### 与快照的关系
 
-持久快照和 `context_with_checkpoint` 保持原样；流式读取不依赖快照。
+持久快照和 `Timeline::checkpoint` 保持原样；流式读取不依赖快照。
 `stream_checkpoint` 只在需要写新 snapshot 时重放到 cut，不把完整 history 留在内存。
 
 ### P4 冷重建分段（并入 P3）
@@ -215,7 +212,7 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 | P3 的内存 | 峰值 = 一批事件 + 投影；不保留历史；读取从快照的恢复位置或段首开始，只取参与投影的行，压缩之后的读取量随裁剪点而不是历史长度增长 |
 | policy facts | SQL 选择必须与默认 store 相同；按 ancestry 合并；`input/consumed` 引用的输入即使写在 turn 之前也要选中 |
 | policy 窗口 | cut 必须落在窗口内；跨 batch cut 在累计 history 上裁剪；找不到或损坏时报错 |
-| restore | `Dispatcher::follow` 仍为每个 consumer 读完整本地历史，restore peak 约 19.9MB；这是后续分页 replay 的工作，不影响 prepare |
+| restore | 重建按 `Dispatcher::consume` 给出的截点，用事件查询分页读取各自折叠的种类；restore peak 约 19.9MB 是分页前的测量 |
 | 代码页 | 产品二进制 `.text` 约 60MB；空 daemon RSS 29.7MB，单会话 50.8MB；代码页是 RSS 下限，不是 allocator 能解决 |
 | P1 的分配 | `HistoryEntry.message` 和 `ContextBaselineEntry.message` 共享 Arc；baseline 重复从 24.09 MB 降到共享 |
 | Provider body | aimux 实测 946 条消息/1.9 MB → 10.3 MB 峰值；不是 100 MB 大头。私有 provider 只提供租约/连接，执行走 aimux |

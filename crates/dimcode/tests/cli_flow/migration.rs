@@ -416,8 +416,8 @@ fn default_migration_follows_the_build_channel_and_keeps_distribution_data_separ
         json!({})
     );
     assert!(!unrelated.exists());
-    let global = Home(user.0.join(".dim"));
-    let cn = Home(
+    let global = Home::at(user.0.join(".dim"));
+    let cn = Home::at(
         user.0
             .join(if alpha { ".dimcode-alpha" } else { ".dimcode" }),
     );

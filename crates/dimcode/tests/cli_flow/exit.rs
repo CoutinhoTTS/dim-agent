@@ -11,7 +11,6 @@ fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_p
     let daemon = home.daemon(|wire| {
         // No `ui.leaf.2`: the client runs the interface itself.
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -27,7 +26,7 @@ fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_p
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     assert_eq!(
         terminal.local_mode() & (libc::ICANON | libc::ECHO),
@@ -56,7 +55,6 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -72,7 +70,7 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     assert_eq!(
         terminal.local_mode() & (libc::ICANON | libc::ECHO),
@@ -129,12 +127,14 @@ fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
 fn an_incompatible_store_reports_the_startup_note() {
     let home = Home::new();
     let database = home.0.join("rust/dimcode.sqlite");
+    let current = dim_app_server::storage::STORE_FORMAT;
+    let newer = current + 1;
     rusqlite::Connection::open(&database)
         .unwrap()
-        .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
-             INSERT INTO agent_store_format VALUES (34);",
-        )
+        .execute_batch(&format!(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {newer}));
+             INSERT INTO agent_store_format VALUES ({newer});"
+        ))
         .unwrap();
     let original = fs::read(&database).unwrap();
     let output = home
@@ -145,10 +145,19 @@ fn an_incompatible_store_reports_the_startup_note() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Cannot open native store"), "{stderr}");
-    assert!(stderr.contains("Store format: v34"), "{stderr}");
-    assert!(stderr.contains("Daemon format: v33"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("Store format: v{newer}")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("Daemon format: v{current}")),
+        "{stderr}"
+    );
     assert!(stderr.contains("Existing data was preserved"), "{stderr}");
-    assert!(stderr.contains("Run a build supporting v34"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("Run a build supporting v{newer}")),
+        "{stderr}"
+    );
     assert!(stderr.contains("Details:"), "{stderr}");
     assert!(!stderr.contains("App Server exited"), "{stderr}");
     assert_eq!(fs::read(&database).unwrap(), original);

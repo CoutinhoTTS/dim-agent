@@ -1,6 +1,74 @@
 # WorkspaceTools
 
-The WorkspaceTools plugin registers WorkspaceTools in every Session and FileReads and BackgroundExec in every branch, and holds the file-write coordinator its Session part uses.
+The WorkspaceTools package is one process owner, `WorkspaceToolsOwner`, which registers WorkspaceTools in every Session and FileReads and BackgroundExec in every branch, and holds the file-write coordinator its Session part uses.
+
+## WorkspaceToolsOwner
+
+Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/mod.rs).
+The process plugin registers the Session part WorkspaceTools and the branch
+parts FileReads and BackgroundExec with the part registry, holds the
+file-write coordinator — one lock domain shared by every Session it serves,
+across their generations and its own — and provides the one process
+[`MentionIndex`](#shared-file-index) its Session parts inject.
+
+### Dependencies
+
+| Service | Purpose |
+| --- | --- |
+| `P:PartRegistry` | Register the Session part WorkspaceTools and the branch parts FileReads and BackgroundExec, each mounted into every instance of its scope. |
+
+### Shared file index
+
+The owner provides one process `MentionIndex`, which every WorkspaceTools
+Session part injects. The App Server's `WorkspaceFiles` row injects the same
+service and registers the management namespace `workspace.files`
+([management methods](../../../design/appserver/management-methods.md)); the
+row is assembled only where the profile requires the WorkspaceTools part. Its
+one method takes no Session:
+
+```text
+workspace.files.search {cwd, query, limit?} -> {candidates: [{relativePath, absolutePath, dir}]}
+```
+
+The method follows `session.files.search` exactly: the same candidate shape and
+ranking over the workspace tree, `limit` defaulting to 20 and clamped to
+`1..=50` so `0` answers one candidate, a negative value refused with
+`invalid_params`, and a walk failure answered with `session_files_failed`.
+`cwd` is required, absolute, canonical and an existing directory, else
+`invalid_params`; it is the whole authorization, as a local connection is the
+user ([skills.catalog](../../../design/appserver/management-methods.md)
+precedent), and nothing is registered with Settings. The declaration is
+read-only (`mutating: false`) and declares `Interruption::Report`. Management
+namespaces are served on local v3 connections and listed in `hello.features`
+there; the Web entry does not serve them.
+
+One index serves every search: a walk made for one root is reused for ten
+seconds (`INDEX_TTL`), and each search first drops every root whose walk is past
+that TTL, before it reuses or adds the requested root, so an index that lives as
+long as the process keeps only the roots still being searched. A dropped root
+is walked again on its next search. The TTL is fixed; no setting or knob changes
+it.
+
+### Tests
+
+The flow
+[workspace_files.rs](../../../../crates/dim-app-server/tests/transport_flow/workspace_files.rs)
+compares `workspace.files.search` with `session.files.search` on one tree and
+proves they share one index (a file written after the Session's walk is not
+offered), and covers the limit rule, the `cwd` refusals with no Settings
+registration, and the local-only admission.
+[workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
+drives `the_mention_index_drops_roots_whose_walk_is_past_its_ttl` with a
+shortened test TTL.
+
+<!-- generated:plugin WorkspaceToolsOwner — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
+| 项 | 值 |
+| --- | --- |
+| 作用域 | 进程 |
+| 注入 | `P:PartRegistry` |
+| 提供 | `P:MentionIndex` |
+| 被注入于 | `WorkspaceTools` |
+<!-- /generated -->
 
 ## WorkspaceTools
 
@@ -9,16 +77,19 @@ Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/wo
 [exec.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/exec.rs).
 Provides ToolHost for read, write, edit, glob, grep, exec and exec_stop, and registers the
 leaf namespace `session.exec.output` with `sessionMethods` for the active
-command's bounded tail preview. It also registers the namespace `session.files`
+command's bounded tail preview and, beside it, `session.exec.output.page`,
+which pages the task's registered output file by byte cursor. It also registers
+the namespace `session.files`
 with `sessionMethods`: `session.files.search` returns the files of the Session's
 workspace an `@` mention offers, ranked as the TUI picker ranks them
 (`workspace_tools/mentions.rs`); a query that names a path outside the workspace
-finds nothing. The WorkspaceTools plugin registers this part
-and the branch parts FileReads and BackgroundExec, and holds the file-write
-coordinator: one per-path FIFO admission domain shared by write and edit across
-every Session it serves, which it hands to each Session's part. The plugin keeps
-the same coordinator across its generations and theirs, so old calls settle in
-the domain new ones enter.
+finds nothing. Its index is the owner's process `MentionIndex`, and the
+`limit` rule, the candidate shape and the eviction are the
+[shared file index's](#shared-file-index). The part receives the file-write
+coordinator from the owner: one per-path FIFO admission domain shared by write
+and edit across every Session it serves. The owner keeps the same coordinator
+across its generations and theirs, so old calls settle in the domain new ones
+enter.
 
 ### Dependencies
 
@@ -29,6 +100,7 @@ the domain new ones enter.
 | `S:SessionConfig` | cwd and collaboration role. |
 | `S:SessionIdentity` | Session-specific output directory. |
 | `S:SessionMethods` | Register the `session.exec.output` namespace, until this part unloads. |
+| `P:MentionIndex` | The owner's walked index, shared with `workspace.files.search`. |
 
 Exec looks up the optional `S:FileAccessFacts` service when preparing a process,
 to recognize its resolved cwd and obtain confirmed additional workspace roots
@@ -215,9 +287,14 @@ is written to.
 The read-only [`session.exec.output`](../../../design/background-task-output.md)
 method resolves the requested branch through TreeCommands and reads that branch's
 BackgroundExec capture. It accepts only `{sessionId, branchId, taskId}` and returns
-`{text}`. C1 owns admission and unload settlement on WorkspaceTools' original
-context. The method does not open a client-supplied or historical path, append
-events, acquire Session holds or start background work.
+`{text}`. It does not open a client-supplied or historical path, append events,
+acquire Session holds or start background work. Its sibling
+`session.exec.output.page` reads the task's registered output file by byte cursor
+with the same sanitization, as
+[the same design document](../../../design/background-task-output.md) describes;
+it opens the path the branch's own `exec/started` registers, never a
+caller-supplied one. C1 owns admission and unload settlement on WorkspaceTools'
+original context.
 
 - §1 and ADR 002 D1–D3: command construction belongs to HostPlatform; no new
   plugin, wiring layer, state owner or dependency is added.
@@ -333,7 +410,7 @@ empty live preview and unavailable historical captures.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionMethods`、`S:TreeCommands` |
+| 注入 | `P:HostPlatform`、`P:MentionIndex`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionMethods`、`S:TreeCommands` |
 | 提供 | `S:ToolHost` |
 | 被注入于 | `ToolRegistry` |
 <!-- /generated -->
@@ -417,9 +494,11 @@ that gets no hold (the Session is closing) is refused as in a closing branch,
 and a refused start stops its command. Tracked tasks are joined on unload.
 Replay reposts unreported non-cancelled ends but never restarts a historical
 process. The notice is not the full command output; output files carry large
-results. Its escaped result preview uses the existing context-block 16 KiB limit,
-with the command/status and full-result read hint around it. An end dispatched
-after branch-close interruption must not wake it.
+results. The `exec/ended` result carries the final `preview` and
+`previewTruncated` in its `structuredContent`, from the same settled capture
+as the live read. Its escaped result preview uses the existing context-block
+16 KiB limit, with the command/status and full-result read hint around it. An
+end dispatched after branch-close interruption must not wake it.
 
 Each live task retains its existing bounded output capture until the supervisor's
 terminal append attempt settles, including on failure. `output(task_id)` reads

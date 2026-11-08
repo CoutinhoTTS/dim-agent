@@ -16,7 +16,8 @@ use crate::protocol::SessionOrigin;
 use crate::settings::{SettingsScope, SettingsService};
 use dim_agent_capabilities::{
     context_block,
-    host::{HostError, HostFuture, ToolExecutionContext},
+    host::{HostError, HostFuture, SelectableModelsHost, ToolExecutionContext},
+    methods::RpcError,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::PromptSnapshot,
     timeline_tree::TreeCommands,
@@ -25,6 +26,7 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::{
     AgentBuilder, AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, Session,
     SessionConfig, SessionHold, SessionIdentity, SessionLifecycle, Timeline, TimelineIdentity,
+    TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::{
@@ -39,6 +41,7 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroU64,
     sync::{Arc, Mutex},
 };
 use tokio::sync::watch;
@@ -46,10 +49,17 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const AGENT_TOOL: &str = "agent";
 const READ_PAGE_LIMIT: usize = 200;
+const TOOL_USE_START_PAGE: u64 = 1024;
 const INTERRUPTED: &str = "interrupted by leader";
 const CANCELLED: &str = "cancelled by leader";
+const CANCELLED_BY_CLIENT: &str = "cancelled by the client";
+/// The client surface that stops a member's current turn (Collaboration §6.7).
+const CANCEL_MEMBER: &str = "session.collaboration.cancel";
 const LEADER_CLOSED: &str = "leader closed";
 const MEMBER_CLOSED: &str = "member closed";
+/// The outcome [`outcome`] derives for a request whose input the member
+/// never consumed: no turn ran for it.
+const NOT_STARTED: &str = "not started";
 const RELOADING: &str = dim_agent_runtime::CAPABILITY_RELOADING;
 
 type Refusal = CollaborationErrorCode;
@@ -77,7 +87,7 @@ fn member_create_failed(detail: String) -> Failure {
 /// a whole text in place of its built-in one (Collaboration §3).
 #[derive(Debug, Clone, Default)]
 pub struct CollaborationConfig {
-    /// The leader's `agent` description in place of [`LEADER_DESCRIPTION`].
+    /// The leader's `agent` description in place of the built-in leader text.
     pub leader_description: Option<Arc<str>>,
     /// The member's `agent` description in place of [`MEMBER_DESCRIPTION`].
     pub member_description: Option<Arc<str>>,
@@ -188,7 +198,12 @@ impl Collaboration {
         permission: PermissionPolicy,
     ) -> Result<Peer, Failure> {
         let (leader_host, leader) = self.index.session(leader_id).ok_or(Refusal::Closed)?;
+        let startup = adopted
+            .as_ref()
+            .and_then(|model| model.metadata.as_ref())
+            .is_some_and(|metadata| metadata.startup.is_some());
         let policy = match &self.settings {
+            _ if startup => ModelPolicy::Inherit {},
             Some(settings) => {
                 settings
                     .read::<ModelPolicy>(SettingsScope::User, &self.stop)
@@ -287,6 +302,33 @@ impl Collaboration {
                 return Err(member_create_failed(error.to_string()));
             }
         };
+        if session
+            .config()
+            .model
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.startup.as_ref())
+            .is_some_and(|startup| startup.connection.is_some())
+        {
+            let retained = host
+                .ctx
+                .get::<crate::provider::ProviderService>()
+                .ok_or_else(|| "startup connection provider is unavailable".to_owned())
+                .and_then(|provider| {
+                    provider
+                        .retain_startup(&session, &session.config().model)
+                        .map_err(|error| error.to_string())
+                });
+            if let Err(error) = retained {
+                if let Err(cleanup) = self.index.delete(session.id()).await {
+                    tracing::error!(%cleanup, "Member Session cleanup failed");
+                }
+                if owned {
+                    self.index.release_owned(&host.agent_id).await;
+                }
+                return Err(member_create_failed(error));
+            }
+        }
         self.directory.relations.lock().unwrap().insert(
             session.id().to_owned(),
             Relation {
@@ -450,20 +492,25 @@ impl Collaboration {
         self.authorize_peer(from, agent_id, session_id)?;
         self.lookup(agent_id, session_id).await
     }
+    /// The member agent the relation records for `member` when `leader`
+    /// leads it. The member Session id keys the relation, so a caller that
+    /// names only that id learns the agent from it.
+    fn member_agent(&self, leader: &str, member: &str) -> Option<String> {
+        self.directory
+            .relations
+            .lock()
+            .unwrap()
+            .get(member)
+            .filter(|relation| relation.leader == leader)
+            .map(|relation| relation.member_agent.clone())
+    }
     async fn member(
         self: &Arc<Self>,
         leader: &str,
         agent_id: &str,
         session_id: &str,
     ) -> Result<Peer, Refusal> {
-        if !self
-            .directory
-            .relations
-            .lock()
-            .unwrap()
-            .get(session_id)
-            .is_some_and(|relation| relation.leader == leader && relation.member_agent == agent_id)
-        {
+        if self.member_agent(leader, session_id).as_deref() != Some(agent_id) {
             return Err(Refusal::TeamMemberNotFound);
         }
         self.lookup(agent_id, session_id).await
@@ -708,8 +755,6 @@ struct BranchRecord {
     /// refused nor have a handled `result`. Updated only by handlers, in
     /// sequence order.
     open: BTreeMap<String, BTreeSet<String>>,
-    /// Positions only; full result bodies remain in the Timeline store.
-    results: BTreeMap<String, u64>,
     /// Delivery work per peer runs in operation event order.
     chains: BTreeMap<String, (u64, Shared<WorkFuture<'static, ()>>)>,
 }
@@ -725,6 +770,13 @@ struct Request {
     agent_id: String,
     session: Session,
     input_event_id: Option<String>,
+    /// A client cancel on this request: the settle names it when the member
+    /// never started the turn (`client_cancel`), and the queued input is
+    /// withdrawn or the turn stopped so the cancelled request runs no
+    /// further. The flag and `input_event_id` are written under the state
+    /// lock, so exactly one side carries the cancel out, the call when the
+    /// input is already queued and the delivery when it is not.
+    cancelled_by_client: bool,
     approvals_open: bool,
     /// Settlement decided by the leader side instead of the member's work.
     settle: Option<CollaborationOutcome>,
@@ -735,6 +787,45 @@ struct State {
     branches: BTreeMap<String, BranchRecord>,
     /// Keyed by member Session id: one request per member.
     requests: BTreeMap<String, Request>,
+    /// Member Session id -> the client cancels on that member that are still
+    /// being carried out. A request to that member is refused `Busy` while a
+    /// mark is held, so a stop reaches only the turn of the request it was
+    /// decided for; the mark lasts until the cancel is carried out or
+    /// abandoned: the stop lands, the withdrawal deletes the input, or the
+    /// wait ends on abort, settle or close.
+    stopping: BTreeMap<String, usize>,
+}
+
+/// Holds a member's stopping mark until the cancel is carried out or
+/// abandoned, however it ends: the stop lands, the withdrawal deletes the
+/// input, or the wait ends on abort, settle or close.
+struct Stopping {
+    owner: Arc<CollaborationSession>,
+    member: String,
+}
+impl Stopping {
+    /// Takes the member's stopping mark in the caller's `state` critical
+    /// section, so the mark and the decision it protects are one step: while
+    /// the guard lives, a new request to that member is refused `Busy`, and
+    /// the stop reaches only the turn it was decided for.
+    fn mark(owner: &Arc<CollaborationSession>, state: &mut State, member: &str) -> Self {
+        *state.stopping.entry(member.to_owned()).or_insert(0) += 1;
+        Stopping {
+            owner: owner.clone(),
+            member: member.to_owned(),
+        }
+    }
+}
+impl Drop for Stopping {
+    fn drop(&mut self) {
+        let mut state = self.owner.state.lock().unwrap();
+        if let Some(count) = state.stopping.get_mut(&self.member) {
+            *count -= 1;
+            if *count == 0 {
+                state.stopping.remove(&self.member);
+            }
+        }
+    }
 }
 
 /// Per-Session collaboration: operations this Session starts and the
@@ -746,6 +837,9 @@ pub struct CollaborationSession {
     tree: Arc<TreeCommands>,
     /// Gives each request its hold on this Session.
     lifecycle: Arc<SessionLifecycle>,
+    /// The deployment's selectable models, when it reads them: the `models`
+    /// action is offered exactly then.
+    selectable: Option<Arc<SelectableModelsHost>>,
     state: Mutex<State>,
     interactive: bool,
     approval_tools: bool,
@@ -862,6 +956,7 @@ impl CollaborationSession {
                 | Input::Close { .. }
                 | Input::Inspect { .. }
                 | Input::Result { .. }
+                | Input::Models { .. }
         );
         if leader_only && self.role == CollaborationRole::Member {
             return Ok(refusal(
@@ -881,6 +976,7 @@ impl CollaborationSession {
         };
         let (kind, action) = match input {
             Input::List {} => return Ok(self.list().await),
+            Input::Models {} => return self.models(&cancel).await,
             Input::Inspect { agent_id } => return Ok(self.inspect(&agent_id).await),
             Input::Result { result_id } => {
                 return Ok(self.result(&context.branch_id, &result_id).await);
@@ -1029,6 +1125,102 @@ impl CollaborationSession {
             None => refusal(Refusal::AgentNotFound, "no such agent is available to you"),
         }
     }
+    /// The models a new member can run, with their provider IDs. The
+    /// deployment's model owner answers the read; without one, no `models`
+    /// action is offered.
+    async fn models(&self, cancel: &CancellationToken) -> Result<ToolResult, HostError> {
+        let Some(selectable) = &self.selectable else {
+            return Ok(refusal(
+                Refusal::InvalidInput,
+                "this deployment does not describe selectable models",
+            ));
+        };
+        let models = match selectable.0.selectable(cancel.clone()).await {
+            Ok(models) => models,
+            Err(error @ HostError::Cancelled(_)) => return Err(error),
+            Err(error) => {
+                return Ok(ToolResult::error(format!(
+                    "Models are unavailable: {error}"
+                )));
+            }
+        };
+        Ok(success(json!({"models": models.iter().map(|model| json!({
+            "providerId": model.target.provider_id,
+            "modelId": model.target.model_id,
+            "contextWindow": model.capabilities.context_window,
+            "maxOutputTokens": model.capabilities.max_output_tokens,
+            "vision": model.capabilities.vision,
+            "reasoning": model.capabilities.reasoning,
+        })).collect::<Vec<_>>()})))
+    }
+    /// `session.collaboration.cancel`: interrupts the member's current turn
+    /// when the calling branch's own request to it is open, and says whether
+    /// anything was running. A client call has no turn, request or call id,
+    /// so no `collaboration/cancel` op is written; the effect is recorded by
+    /// the member's `stop/interrupt`, its `turn/end` and the leader's
+    /// `collaboration/result` and report (Collaboration §6.7).
+    async fn cancel_member(self: &Arc<Self>, p: CancelParams) -> Result<Value, RpcError> {
+        if p.session_id != self.session_id {
+            return Err(RpcError::invalid("sessionId must name this Session"));
+        }
+        if p.member_session_id.is_empty() {
+            return Err(RpcError::invalid("memberSessionId must not be empty"));
+        }
+        if self.role == CollaborationRole::Member {
+            return Err(RpcError::invalid("members can only message, read and list"));
+        }
+        self.collaboration
+            .member_agent(&self.session_id, &p.member_session_id)
+            .ok_or_else(|| refusal_rpc(Refusal::TeamMemberNotFound))?;
+        let branch_id = p.branch_id.as_deref().unwrap_or("main");
+        if branch_id.is_empty() {
+            return Err(RpcError::invalid("branchId must not be empty"));
+        }
+        // An ended or unknown branch answers its own error, never `idle`.
+        let _branch = self.tree.get(branch_id)?;
+        // The calling branch's own request is the only work this call may
+        // stop. `branch.open` also holds a request that is still waiting for
+        // its delivery or for a `Busy` refusal, which runs no turn of its
+        // own; and the request is read and marked under the same lock that
+        // inserts and removes it, so one that settles now cannot be replaced
+        // before the cancel is carried out.
+        //
+        // The cancel is recorded on the request before any effect, so the
+        // settle names it even when the member goes idle first. A request
+        // whose input is not queued yet has no turn to stop, and the delivery
+        // carries the cancel out once the input exists; otherwise this call
+        // does, the immediate part before its reply and the wait for
+        // `input/consumed` after it on the branch's task tracker, under the
+        // stopping mark. The mark and the input's own id are written under
+        // this one lock, so exactly one of the two carries it out.
+        let work = {
+            let mut state = self.state.lock().unwrap();
+            let Some(request) = state
+                .requests
+                .get_mut(&p.member_session_id)
+                .filter(|request| request.branch == branch_id)
+            else {
+                return Ok(json!({"status": "idle"}));
+            };
+            request.cancelled_by_client = true;
+            let session = request.session.clone();
+            let input = request.input_event_id.clone();
+            let done = request.done.subscribe();
+            // The mark guards only a cancel this call carries out; one whose
+            // input is not queued is left to the delivery, which takes its own.
+            input.map(|input| {
+                let stopping = Stopping::mark(self, &mut state, &p.member_session_id);
+                (session, input, done, stopping)
+            })
+        };
+        let Some((session, input, done, stopping)) = work else {
+            return Ok(json!({"status": "cancelled"}));
+        };
+        self.carry_out_cancel(branch_id, &session, &input, done, stopping)
+            .await
+            .map_err(cancel_rpc)?;
+        Ok(json!({"status": "cancelled"}))
+    }
     async fn list(&self) -> ToolResult {
         let participants: Vec<Value> = self
             .collaboration
@@ -1065,23 +1257,37 @@ impl CollaborationSession {
     }
 
     async fn result(&self, branch_id: &str, result_id: &str) -> ToolResult {
-        let position = {
-            let state = self.state.lock().unwrap();
-            state.branches.get(branch_id).and_then(|branch| {
-                branch
-                    .results
-                    .get(result_id)
-                    .map(|sequence| (branch.timeline.clone(), *sequence))
-            })
-        };
-        let Some((timeline, sequence)) = position else {
+        let timeline = self
+            .state
+            .lock()
+            .unwrap()
+            .branches
+            .get(branch_id)
+            .map(|branch| branch.timeline.clone());
+        let Some(timeline) = timeline else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
-        let local = match timeline.local(sequence..=sequence).await {
-            Ok(local) => local,
+        let reply = match timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                event_id: Some(result_id.to_owned()),
+                predicate: None,
+                limit: NonZeroU64::MIN,
+                offset: 0,
+            })
+            .await
+        {
+            Ok(reply) => reply,
             Err(error) => return ToolResult::error(error.to_string()),
         };
-        let Some(event) = local.iter().find(|event| event.id == result_id) else {
+        let Some(event) = reply.events.first() else {
             return ToolResult::error("No collaboration result with this resultId.");
         };
         match &event.kind {
@@ -1093,18 +1299,31 @@ impl CollaborationSession {
     }
 
     async fn read(&self, agent_id: &str, session_id: &str, after: u64, limit: usize) -> ToolResult {
-        if let Err(error) =
-            self.collaboration
-                .authorize_peer(&self.session_id, agent_id, session_id)
-        {
-            return refusal(error, explain(error));
-        }
-        self.collaboration.note_read();
-        let (_, events) = match self
+        let peer = match self
             .collaboration
-            .index
-            .read_page(session_id, after, limit, None)
+            .resolve(&self.session_id, agent_id, session_id)
             .await
+        {
+            Ok(peer) => peer,
+            Err(error) => return refusal(error, explain(error)),
+        };
+        let session = &peer.session;
+        self.collaboration.note_read();
+        let (next, events) = match read_page(
+            session,
+            after,
+            limit,
+            None,
+            &[
+                "input/message",
+                "step/text",
+                "step/tool-use-start",
+                "step/tool-call",
+                "step/tool-result",
+                "turn/end",
+            ],
+        )
+        .await
         {
             Ok(page) => page,
             Err(error) => return ToolResult::error(error.to_string()),
@@ -1148,19 +1367,14 @@ impl CollaborationSession {
         if !wanted_calls.is_empty() {
             self.collaboration.note_read();
             let ids = wanted_calls.into_iter().collect::<Vec<_>>();
-            match self.collaboration.index.read_events(session_id, &ids).await {
+            match read_events(session, &ids).await {
                 Ok(events) => calls = events,
                 Err(error) => return ToolResult::error(error.to_string()),
             }
         }
         if !wanted_starts.is_empty() {
             self.collaboration.note_read();
-            match self
-                .collaboration
-                .index
-                .read_tool_use_starts(session_id, &wanted_starts)
-                .await
-            {
+            match read_tool_use_starts(session, &wanted_starts).await {
                 Ok(starts) => {
                     for (key, event) in starts {
                         if let EventKind::ToolUseStart(start) = &event.kind {
@@ -1173,9 +1387,12 @@ impl CollaborationSession {
         }
         let mut items: Vec<Value> = vec![];
         let mut text: Option<(String, u64, String)> = None;
-        let mut next = after;
+        let mut previous = after;
         for event in &events {
-            next = event.sequence;
+            if event.sequence > previous + 1 {
+                flush_text(&mut items, &mut text);
+            }
+            previous = event.sequence;
             if let EventKind::Text(data) = &event.kind {
                 match text.as_mut() {
                     Some((request, _, merged)) if request == &data.request_id => {
@@ -1217,9 +1434,13 @@ impl CollaborationSession {
                                 .map(|call| &call.name),
                             None => started.get(&(data.request_id.clone(), result.call_id.clone())),
                         };
-                        items.push(json!({"sequence": event.sequence, "type": "tool_result",
+                        let mut item = json!({"sequence": event.sequence, "type": "tool_result",
                             "callId": result.call_id, "name": name,
-                            "status": if result.result.is_error == Some(true) { "error" } else { "ok" }}));
+                            "status": if result.result.is_error == Some(true) { "error" } else { "ok" }});
+                        if let Some(effects) = result.result.shortened_effects() {
+                            item["effects"] = json!(effects);
+                        }
+                        items.push(item);
                     }
                 }
                 EventKind::TurnEnd(data) => {
@@ -1269,7 +1490,6 @@ impl CollaborationSession {
             EventKind::CollaborationDelivered(data) => self.delivered(branch_id, data),
             EventKind::CollaborationResult(data) => {
                 self.with_branch(branch_id, |branch| {
-                    branch.results.insert(event.id.clone(), event.sequence);
                     close_request(&mut branch.open, &data.request_event_id);
                 });
                 let this = self.clone();
@@ -1298,7 +1518,9 @@ impl CollaborationSession {
     /// (branch close) covers every request of this branch.
     fn interrupt(self: &Arc<Self>, branch_id: &str, scope: InterruptScope) {
         let mut state = self.state.lock().unwrap();
-        let State { branches, requests } = &mut *state;
+        let State {
+            branches, requests, ..
+        } = &mut *state;
         let Some(branch) = branches.get_mut(branch_id) else {
             return;
         };
@@ -1384,7 +1606,7 @@ impl CollaborationSession {
             EventKind::CollaborationRequest(CollaborationRequestData {
                 target: CollaborationTarget::Agent { .. } | CollaborationTarget::Temporary { .. },
                 ..
-            }) if self.collaboration.settings.is_some() => self.adopted_model(branch_id),
+            }) => self.adopted_model(branch_id),
             _ => None,
         };
         let permission = match &event.kind {
@@ -1565,6 +1787,10 @@ impl CollaborationSession {
                 run_id: None,
                 trace_id: None,
                 turn_id: None,
+                startup: metadata.startup,
+                // The member adopts the model, not the profile the source
+                // Session adopted it from.
+                agent_id: None,
                 extensions: metadata.extensions,
             }),
         })
@@ -1735,6 +1961,7 @@ impl CollaborationSession {
             let mut state = self.state.lock().unwrap();
             if !new
                 && (state.requests.contains_key(&member)
+                    || state.stopping.contains_key(&member)
                     || peer.session.state("main").is_ok_and(|state| state.running))
             {
                 return Err(Refusal::Busy.into());
@@ -1750,6 +1977,7 @@ impl CollaborationSession {
                     agent_id: peer.agent_id.clone(),
                     session: peer.session.clone(),
                     input_event_id: None,
+                    cancelled_by_client: false,
                     approvals_open: true,
                     settle: None,
                     done: watch::channel(false).0,
@@ -1774,19 +2002,35 @@ impl CollaborationSession {
                 return Err(Refusal::MemberClosed.into());
             }
         };
-        let suppressed = {
+        let (suppressed, cancelled, done, stopping) = {
             let mut state = self.state.lock().unwrap();
+            let mut cancelled = false;
+            let mut done = None;
             if let Some(request) = state.requests.get_mut(&member) {
                 request.input_event_id = Some(input.id.clone());
+                cancelled = request.cancelled_by_client;
+                done = Some(request.done.subscribe());
             }
-            state
+            // The mark is taken with the flag it protects, in the critical
+            // section that publishes the input's id.
+            let stopping = cancelled.then(|| Stopping::mark(self, &mut state, &member));
+            let suppressed = state
                 .branches
                 .get(branch_id)
                 .and_then(|branch| branch.ops.get(&event.id))
-                .is_none_or(|op| op.suppressed)
+                .is_none_or(|op| op.suppressed);
+            (suppressed, cancelled, done, stopping)
         };
+        // A leader interrupt is the earlier, broader decision, so it wins when
+        // a client cancel also asked for the stop.
         if suppressed {
             let _ = peer.session.stop("main", INTERRUPTED.into()).await;
+        } else if let (true, Some(done), Some(stopping)) = (cancelled, done, stopping) {
+            // The call recorded the cancel and left it to the delivery: this
+            // is the first point the request's input exists.
+            let _ = self
+                .carry_out_cancel(branch_id, &peer.session, input.id.as_str(), done, stopping)
+                .await;
         }
         Ok(CollaborationDelivery::Ok {
             agent_id: peer.agent_id,
@@ -1800,7 +2044,9 @@ impl CollaborationSession {
     /// completion work.
     fn delivered(self: &Arc<Self>, branch_id: &str, data: &CollaborationDeliveredData) {
         let mut state = self.state.lock().unwrap();
-        let State { branches, requests } = &mut *state;
+        let State {
+            branches, requests, ..
+        } = &mut *state;
         let Some(branch) = branches.get_mut(branch_id) else {
             return;
         };
@@ -1873,6 +2119,7 @@ impl CollaborationSession {
                             request.agent_id.clone(),
                             request.session.clone(),
                             request.input_event_id.clone(),
+                            request.cancelled_by_client,
                         ),
                         timeline,
                     )
@@ -1881,18 +2128,12 @@ impl CollaborationSession {
             return;
         };
         self.retire_member_approvals(branch_id, member).await;
-        let (op, agent_id, session, input) = request;
+        let (op, agent_id, session, input, cancelled) = request;
         let through = match &idle {
             Some(Ok(cutoff)) => Some(*cutoff),
             _ => None,
         };
-        let (last_turn_id, text, derived) = outcome(
-            &self.collaboration.index,
-            &session,
-            input.as_deref(),
-            through,
-        )
-        .await;
+        let (last_turn_id, text, derived) = outcome(&session, input.as_deref(), through).await;
         let settle = self
             .state
             .lock()
@@ -1900,7 +2141,7 @@ impl CollaborationSession {
             .requests
             .get(member)
             .and_then(|request| request.settle.clone());
-        let outcome = settle.unwrap_or_else(|| match idle {
+        let derived = match idle {
             _ if session.is_closing() => CollaborationOutcome::Failed {
                 reason: MEMBER_CLOSED.into(),
             },
@@ -1908,7 +2149,8 @@ impl CollaborationSession {
                 reason: error.to_string(),
             },
             _ => derived,
-        });
+        };
+        let outcome = settle.unwrap_or_else(|| client_cancel(cancelled, derived));
         if let Some(timeline) = timeline {
             let _ = timeline.append(
                 EventKind::CollaborationResult(CollaborationResultData {
@@ -1924,6 +2166,93 @@ impl CollaborationSession {
         }
         if let Some(request) = self.state.lock().unwrap().requests.remove(member) {
             request.done.send_replace(true);
+        }
+    }
+
+    /// Carries out a client cancel already recorded on the request: the turn
+    /// that consumed the request's input is stopped now when it has, and the
+    /// input withdrawn while still unapplied. An input InputQueue already
+    /// handed to Loop is stopped once its `input/consumed` is published; that
+    /// wait is detached on the branch's task tracker, so the caller answers
+    /// first. The stop names that turn, so a turn that already ended writes
+    /// nothing.
+    ///
+    /// `stopping` holds the member's stopping mark across the effect and the
+    /// wait, and is dropped on every exit.
+    async fn carry_out_cancel(
+        self: &Arc<Self>,
+        branch_id: &str,
+        session: &Session,
+        input: &str,
+        mut done: watch::Receiver<bool>,
+        stopping: Stopping,
+    ) -> dim_agent_runtime::Result<()> {
+        let mut after = 0;
+        let mut open = None;
+        if let Some(turn) = consuming_turn(session, input, &mut after, &mut open).await? {
+            stop_member_turn(session, &turn)?;
+            return Ok(());
+        }
+        // Subscribed before the withdrawal, so no publication between the two
+        // is missed by the wait below.
+        let mut published = session.publication("main")?.watch();
+        match session
+            .service::<dim_agent_capabilities::input_queue::InputQueue>("main")?
+            .withdraw(
+                InputWithdrawData {
+                    input_id: input.to_owned(),
+                    reason: Some(CANCELLED_BY_CLIENT.into()),
+                },
+                None,
+            )
+            .await?
+            .0
+        {
+            // (W): no turn will run for the input; the settle names it.
+            dim_agent_capabilities::input_queue::Withdrawal::Deleted { .. } => return Ok(()),
+            dim_agent_capabilities::input_queue::Withdrawal::NotHeld => {}
+        }
+        // (S): InputQueue handed the input to Loop, so the turn that consumes
+        // it is the one to stop. Waiting for its `input/consumed` names that
+        // turn, the documented `consumed < interrupt` order, instead of
+        // racing its application.
+        let abort = self.with_abort(branch_id);
+        let tasks = self
+            .state
+            .lock()
+            .unwrap()
+            .branches
+            .get(branch_id)
+            .map(|branch| branch.tasks.clone());
+        let session = session.clone();
+        let input = input.to_owned();
+        let wait = async move {
+            let _stopping = stopping;
+            loop {
+                tokio::select! {
+                    _ = abort.cancelled() => return Ok(()),
+                    _ = done.wait_for(|done| *done) => return Ok(()),
+                    _ = session.closed() => {
+                        return Err(AgentError::Closed(session.id().into()));
+                    }
+                    result = published.changed() => {
+                        if result.is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+                if let Some(turn) = consuming_turn(&session, &input, &mut after, &mut open).await? {
+                    stop_member_turn(&session, &turn)?;
+                    return Ok(());
+                }
+            }
+        };
+        match tasks {
+            Some(tasks) => {
+                tasks.spawn(wait);
+                Ok(())
+            }
+            None => wait.await,
         }
     }
 
@@ -2202,10 +2531,189 @@ fn close_request(open: &mut BTreeMap<String, BTreeSet<String>>, request: &str) {
     });
 }
 
+/// Stops the member's turn that consumed the cancel's input, through Loop's
+/// turn-scoped stop: a turn that already ended writes nothing.
+fn stop_member_turn(session: &Session, turn: &str) -> dim_agent_runtime::Result<()> {
+    session
+        .service::<dim_agent_capabilities::agent_loop::AgentLoop>("main")?
+        .stop_turn(turn, CANCELLED_BY_CLIENT.into())?;
+    Ok(())
+}
+
+/// The turn that consumed `input`, from the member's own facts: the
+/// `turn/start` open at the input's `input/consumed`. The open turn is
+/// tracked across pages and checks, so a page that begins inside a turn
+/// still names it.
+async fn consuming_turn(
+    session: &Session,
+    input: &str,
+    after: &mut u64,
+    open: &mut Option<String>,
+) -> dim_agent_runtime::Result<Option<String>> {
+    // One published head for the whole check, so the answer cannot change
+    // under the reader while it pages: a check answers for the moment it
+    // starts, and the caller's next check sees whatever has been published
+    // since.
+    let through = Some(session.sequence("main")?);
+    loop {
+        let (next, events) = read_page(
+            session,
+            *after,
+            256,
+            through,
+            &["input/consumed", "turn/start", "turn/end"],
+        )
+        .await?;
+        for event in &events {
+            match &event.kind {
+                EventKind::TurnStart(data) => *open = Some(data.turn_id.clone()),
+                EventKind::TurnEnd(data) => {
+                    if open.as_deref() == Some(data.turn_id.as_str()) {
+                        *open = None;
+                    }
+                }
+                EventKind::InputConsumed(data) if data.input_id == input => {
+                    return Ok(open.clone());
+                }
+                _ => {}
+            }
+        }
+        if next <= *after {
+            return Ok(None);
+        }
+        *after = next;
+    }
+}
+
+async fn read_page(
+    session: &Session,
+    after: u64,
+    limit: usize,
+    through: Option<u64>,
+    kinds: &[&str],
+) -> dim_agent_runtime::Result<(u64, Vec<Arc<AgentEvent>>)> {
+    let head = session.sequence("main")?;
+    let through = through.unwrap_or(head);
+    if through > head || after > through {
+        return Err(AgentError::InvalidInput("future Timeline cursor".into()));
+    }
+    session.batch_end("main", after).await?;
+    session.batch_end("main", through).await?;
+    if after == through {
+        return Ok((after, Vec::new()));
+    }
+    let mut next = through.min(after.saturating_add(limit as u64));
+    while next < through {
+        match session.batch_end("main", next).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => next += 1,
+            Err(error) => return Err(error),
+        }
+    }
+    let mut events = session
+        .query(
+            "main",
+            TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: Some(next),
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: kinds.iter().map(|kind| (*kind).into()).collect(),
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: NonZeroU64::new(next - after).expect("a page keeps at least one fact"),
+                offset: 0,
+            },
+        )
+        .await?
+        .events;
+    events.retain(|event| event.sequence > after);
+    events.reverse();
+    Ok((next, events))
+}
+
+/// The public main-line facts named by their event ids.
+async fn read_events(
+    session: &Session,
+    event_ids: &[String],
+) -> dim_agent_runtime::Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
+    let mut found = HashMap::with_capacity(event_ids.len());
+    for event_id in event_ids {
+        let reply = session
+            .query(
+                "main",
+                TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    include_publishing: false,
+                    from_event: None,
+                    from_sequence: None,
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Ascending,
+                    kinds: vec!["step/tool-call".into()],
+                    flags: Vec::new(),
+                    event_id: Some(event_id.clone()),
+                    predicate: None,
+                    limit: NonZeroU64::MIN,
+                    offset: 0,
+                },
+            )
+            .await?;
+        if let Some(event) = reply.events.into_iter().next() {
+            found.insert(event.id.clone(), event);
+        }
+    }
+    Ok(found)
+}
+/// The public main-line starts of the requested request/call pairs.
+async fn read_tool_use_starts(
+    session: &Session,
+    keys: &[(String, String)],
+) -> dim_agent_runtime::Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>> {
+    let mut starts = HashMap::with_capacity(keys.len());
+    let mut query = TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        include_publishing: false,
+        from_event: None,
+        from_sequence: Some(1),
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        kinds: vec!["step/tool-use-start".into()],
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: NonZeroU64::new(TOOL_USE_START_PAGE).expect("a page keeps at least one tool use"),
+        offset: 0,
+    };
+    loop {
+        let reply = session.query("main", query.clone()).await?;
+        let short = (reply.events.len() as u64) < TOOL_USE_START_PAGE;
+        let last = reply.positions.last().map(|position| position.sequence);
+        for event in reply.events {
+            let EventKind::ToolUseStart(start) = &event.kind else {
+                continue;
+            };
+            let key = (start.request_id.clone(), start.call_id.clone());
+            if keys.contains(&key) {
+                starts.insert(key, event);
+            }
+        }
+        if short || starts.len() == keys.len() {
+            break;
+        }
+        match last {
+            Some(last) => query.from_sequence = Some(last + 1),
+            None => break,
+        }
+    }
+    Ok(starts)
+}
+
 /// Result of a request's work range: from the member's `input/consumed` of
 /// the request input to its idle point; the last `turn/end` decides.
 async fn outcome(
-    index: &crate::agents::AgentIndex,
     session: &Session,
     input: Option<&str>,
     cutoff: Option<u64>,
@@ -2228,11 +2736,21 @@ async fn outcome(
     let mut text = String::new();
     let mut last = None;
     while after < through {
-        let events = match index
-            .read_page(session.id(), after, 256, Some(through))
-            .await
+        let (next, events) = match read_page(
+            session,
+            after,
+            256,
+            Some(through),
+            &[
+                "input/consumed",
+                "step/model-start",
+                "step/text",
+                "turn/end",
+            ],
+        )
+        .await
         {
-            Ok((_, events)) => events,
+            Ok(page) => page,
             Err(error) => {
                 return (
                     None,
@@ -2243,11 +2761,8 @@ async fn outcome(
                 );
             }
         };
-        if events.is_empty() {
-            break;
-        }
+        after = next;
         for event in events {
-            after = event.sequence;
             if matches!(&event.kind, EventKind::InputConsumed(data) if Some(data.input_id.as_str()) == input)
             {
                 started = true;
@@ -2289,10 +2804,24 @@ async fn outcome(
             None,
             String::new(),
             CollaborationOutcome::Cancelled {
-                reason: "not started".into(),
+                reason: NOT_STARTED.into(),
             },
         )
     })
+}
+
+/// A client cancel names only a request the member never started: every
+/// other outcome is the member's own ending and stands as derived, so a turn
+/// that completed before the stop landed stays `Completed`.
+fn client_cancel(cancelled: bool, outcome: CollaborationOutcome) -> CollaborationOutcome {
+    match outcome {
+        CollaborationOutcome::Cancelled { reason } if cancelled && reason == NOT_STARTED => {
+            CollaborationOutcome::Cancelled {
+                reason: CANCELLED_BY_CLIENT.into(),
+            }
+        }
+        outcome => outcome,
+    }
 }
 
 fn success(result: Value) -> ToolResult {
@@ -2332,6 +2861,33 @@ fn explain(error: Refusal) -> &'static str {
         Refusal::Interrupted => "the operation came from a stopped turn and was not delivered",
         Refusal::Closed => "this Session is closing or its collaboration is reloading",
     }
+}
+
+/// The Rpc error a failed cancel answers: a closed member keeps the
+/// `member_closed` refusal, and any other failure — a storage fault, a
+/// reloading capability, a failed publication — is the Session's own runtime
+/// error, as every Session method reports one.
+fn cancel_rpc(error: AgentError) -> RpcError {
+    match error {
+        AgentError::Closed(_) => refusal_rpc(Refusal::MemberClosed),
+        error => RpcError::from(error),
+    }
+}
+
+/// The Rpc error a Collaboration refusal answers: its wire code and the text
+/// the tool gives the same refusal.
+fn refusal_rpc(error: Refusal) -> RpcError {
+    let code = serde_json::to_value(error).expect("error code serializes");
+    let code = code.as_str().expect("error code serializes to a string");
+    RpcError::service(code, explain(error))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CancelParams {
+    session_id: String,
+    branch_id: Option<String>,
+    member_session_id: String,
 }
 
 #[derive(Deserialize)]
@@ -2374,12 +2930,13 @@ enum Input {
         limit: Option<usize>,
     },
     List {},
+    Models {},
     Inspect {
         agent_id: String,
     },
 }
 
-const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
+const LEADER_DESCRIPTION_HEAD: &str = "Work with other agents as a team you lead.
 - request: give a task to a new member (agentId or profile) or to one of your members
   (agentId + sessionId). An agentId is copied exactly from list's agents[].agentId; an
   Agent's name, such as \"default\", is not an agentId. A profile creates a temporary
@@ -2391,7 +2948,13 @@ const LEADER_DESCRIPTION: &str = "Work with other agents as a team you lead.
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the
   receiver must change course now.
 - read: view a team member's recent activity. list: show your team and the agents you
-  can use. inspect: show one agent's full profile (instructions, tools, model).
+  can use. inspect: show one agent's full profile (instructions, tools, model).";
+/// The `models` bullet, between [`LEADER_DESCRIPTION_HEAD`] and
+/// [`LEADER_DESCRIPTION_TAIL`]: only a deployment that provides the selectable
+/// read offers the action.
+const LEADER_MODELS: &str = "
+- models: query the models this Session can start an agent with.";
+const LEADER_DESCRIPTION_TAIL: &str = "
 - result: read a complete result by resultId from a report, even after closing the member.
 Address members with agentId + sessionId from earlier results.";
 
@@ -2404,7 +2967,11 @@ const MEMBER_DESCRIPTION: &str = "You are a member of a team. You cannot delegat
 Your final answer to the task is returned to the leader automatically; do not send it
 as a message.";
 
-fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> ToolDefinition {
+fn agent_definition(
+    role: CollaborationRole,
+    factory: &CollaborationConfig,
+    models: bool,
+) -> ToolDefinition {
     let mut properties = json!({
         "agentId": {"type": "string",
             "description": "An Agent's opaque id, copied exactly from list's agents[].agentId, or from participants[].agentId for a team member. A name such as \"default\" is not an id."},
@@ -2434,22 +3001,28 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
                         "properties": {"providerId": {"type": "string"}, "modelId": {"type": "string"}}},
                 },
             });
-            (
-                vec![
-                    "request", "cancel", "close", "message", "read", "list", "inspect", "result",
-                ],
-                factory
-                    .leader_description
-                    .as_deref()
-                    .unwrap_or(LEADER_DESCRIPTION),
-            )
+            let mut actions = vec![
+                "request", "cancel", "close", "message", "read", "list", "inspect", "result",
+            ];
+            if models {
+                actions.push("models");
+            }
+            let description = match factory.leader_description.as_deref() {
+                Some(text) => text.to_owned(),
+                None => format!(
+                    "{LEADER_DESCRIPTION_HEAD}{}{LEADER_DESCRIPTION_TAIL}",
+                    if models { LEADER_MODELS } else { "" }
+                ),
+            };
+            (actions, description)
         }
         CollaborationRole::Member => (
             vec!["message", "read", "list"],
             factory
                 .member_description
                 .as_deref()
-                .unwrap_or(MEMBER_DESCRIPTION),
+                .unwrap_or(MEMBER_DESCRIPTION)
+                .to_owned(),
         ),
     };
     properties["action"] = json!({"type": "string", "enum": actions});
@@ -2464,7 +3037,7 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
             "message" => vec![vec!["action", "agentId", "sessionId", "content"]],
             "inspect" => vec![vec!["action", "agentId"]],
             "result" => vec![vec!["action", "resultId"]],
-            "list" => vec![vec!["action"]],
+            "list" | "models" => vec![vec!["action"]],
             _ => unreachable!("declared agent action"),
         };
         for required in choices {
@@ -2487,7 +3060,7 @@ fn agent_definition(role: CollaborationRole, factory: &CollaborationConfig) -> T
     }
     definition(
         AGENT_TOOL,
-        description,
+        &description,
         json!({"type": "object", "required": ["action"], "additionalProperties": false,
             "properties": properties, "anyOf": variants}),
     )
@@ -2606,6 +3179,7 @@ impl DynPlugin for CollaborationSessionPlugin {
                 role: config.collaboration_role,
                 tree,
                 lifecycle,
+                selectable: ctx.get::<SelectableModelsHost>(),
                 state: Mutex::new(State::default()),
                 interactive: config.interactive,
                 approval_tools: config.tools.as_ref().is_none_or(|tools| {
@@ -2616,7 +3190,11 @@ impl DynPlugin for CollaborationSessionPlugin {
             tools.register(
                 ctx,
                 ToolContribution {
-                    definition: agent_definition(config.collaboration_role, &factory),
+                    definition: agent_definition(
+                        config.collaboration_role,
+                        &factory,
+                        service.selectable.is_some(),
+                    ),
                     handler: Arc::new(AgentTool {
                         session: service.clone(),
                         stopping: ctx.cancellation_token(),
@@ -2682,126 +3260,205 @@ impl DynPlugin for CollaborationTimelinePlugin {
                 owner.unload(&unloading).await;
                 Ok(())
             })?;
-            let rebuilt = Arc::new(tokio::sync::Mutex::new(0u64));
-            let gate = rebuilt.clone();
-            let mut rebuilding = rebuilt.lock().await;
             let consumer = service.clone();
             let consumed = branch_id.clone();
-            dispatcher.subscribe(
-                ctx,
-                "CollaborationTimeline",
-                &[
-                    "turn/start",
-                    "turn/end",
-                    "stop/interrupt",
-                    "collaboration/request",
-                    "collaboration/cancel",
-                    "collaboration/close",
-                    "collaboration/message",
-                    "collaboration/delivered",
-                    "collaboration/result",
-                    "input/message",
-                    "input/consumed",
-                    "input/deleted",
-                    "step/tool-call",
-                    "step/tool-result",
-                    "approval/request",
-                    "approval/respond",
-                    "approval/cancelled",
-                ],
-                move |event| {
-                    let gate = gate.clone();
-                    let consumer = consumer.clone();
-                    let consumed = consumed.clone();
-                    Box::pin(async move {
-                        if event.sequence > *gate.lock().await {
-                            consumer.consume(&consumed, event).await
-                        } else {
-                            Ok(())
-                        }
-                    })
-                },
-            )?;
-            let through = timeline.committed();
-            let events = timeline.local(..=through).await?;
-            *rebuilding = events.last().map_or(0, |event| event.sequence);
-            let tasks = TaskTracker::new();
-            let cleanup_tasks = tasks.clone();
-            let mut stale_inputs = BTreeSet::new();
-            for event in &events {
-                match &event.kind {
-                    EventKind::InputMessage(data)
-                        if data
-                            .submission_id
-                            .as_ref()
-                            .is_some_and(|id| id.starts_with("collaboration-approval:"))
-                            && data.user.is_none()
-                            && matches!(data.blocks.first(), Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-agent-approval>\n")) =>
-                    {
-                        stale_inputs.insert(event.id.clone());
-                    }
-                    EventKind::InputApplied(InputAppliedData { input_id, .. })
-                    | EventKind::InputDeleted(InputDeletedData { input_id }) => {
-                        stale_inputs.remove(input_id);
-                    }
-                    _ => {}
-                }
-            }
-            let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
-            service.state.lock().unwrap().branches.insert(
-                branch_id.clone(),
-                BranchRecord {
-                    ctx: ctx.clone(),
-                    dispatcher: dispatcher.clone(),
-                    approvals: BTreeMap::new(),
-                    approval_calls: BTreeMap::new(),
-                    forwarded_approvals: BTreeMap::new(),
-                    timeline,
-                    tasks,
-                    abort: CancellationToken::new(),
-                    current_turn,
-                    interrupted,
-                    closing: false,
-                    ops: BTreeMap::new(),
-                    open: BTreeMap::new(),
-                    results: events
-                        .iter()
-                        .filter(|&event| matches!(event.kind, EventKind::CollaborationResult(_)))
-                        .map(|event| (event.id.clone(), event.sequence))
-                        .collect(),
-                    chains: BTreeMap::new(),
-                },
-            );
-            drop(rebuilding);
-            if !stale_inputs.is_empty() {
-                cleanup_tasks.spawn(async move {
-                    if !phase.activated().await {
-                        return;
-                    }
-                    let result = async {
-                        let branch = service.tree.get(&branch_id)?;
-                        let queue =
-                            branch.service::<dim_agent_capabilities::input_queue::InputQueue>()?;
-                        for input_id in stale_inputs {
-                            queue
-                                .withdraw(
-                                    InputWithdrawData {
-                                        input_id,
-                                        reason: Some(RELOADING.into()),
-                                    },
-                                    None,
-                                )
-                                .await?;
-                        }
-                        Ok::<_, AgentError>(())
-                    }
-                    .await;
-                    if let Err(error) = result {
-                        dispatcher.fail(error);
-                    }
-                });
-            }
+            let rebuilds = service.clone();
+            let phases = phase.clone();
+            let rebuilt_branch = branch_id.clone();
+            let rebuilt_timeline = timeline.clone();
+            let rebuilt_dispatcher = dispatcher.clone();
+            let rebuilt_ctx = ctx.clone();
+            dispatcher
+                .consume(
+                    ctx,
+                    "CollaborationTimeline".into(),
+                    [
+                        "turn/start",
+                        "turn/end",
+                        "stop/interrupt",
+                        "collaboration/request",
+                        "collaboration/cancel",
+                        "collaboration/close",
+                        "collaboration/message",
+                        "collaboration/delivered",
+                        "collaboration/result",
+                        "input/message",
+                        "input/consumed",
+                        "input/deleted",
+                        "step/tool-call",
+                        "step/tool-result",
+                        "approval/request",
+                        "approval/respond",
+                        "approval/cancelled",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let service = rebuilds.clone();
+                        let phase = phases.clone();
+                        let branch_id = rebuilt_branch.clone();
+                        let timeline = rebuilt_timeline.clone();
+                        let dispatcher = rebuilt_dispatcher.clone();
+                        let ctx = rebuilt_ctx.clone();
+                        Box::pin(async move {
+                            restore(service, phase, branch_id, timeline, dispatcher, ctx).await
+                        })
+                    }),
+                    Arc::new(move |event| {
+                        let consumer = consumer.clone();
+                        let consumed = consumed.clone();
+                        Box::pin(async move { consumer.consume(&consumed, Arc::new(event)).await })
+                    }),
+                )
+                .await?;
             Ok(Effect::Done)
         })
+    }
+}
+
+/// Rebuilds one branch's collaboration state from its own facts and returns
+/// the cutoff the read took: facts the previous generation wrote and had not
+/// published yet decide whether an operation was delivered or a request is
+/// still open, so the read adds the undispatched tail (ADR 020 D3). The
+/// refusals and failures it writes from that state are not taken back.
+async fn restore(
+    service: Arc<CollaborationSession>,
+    phase: Arc<BranchLifecycle>,
+    branch_id: String,
+    timeline: Arc<Timeline>,
+    dispatcher: Arc<Dispatcher>,
+    ctx: Ctx,
+) -> dim_agent_runtime::Result<u64> {
+    let reply = rebuild_facts(
+        &timeline,
+        &[
+            "turn/start",
+            "turn/end",
+            "stop/interrupt",
+            "collaboration/request",
+            "collaboration/cancel",
+            "collaboration/close",
+            "collaboration/message",
+            "collaboration/delivered",
+            "collaboration/result",
+            "input/message",
+            "input/applied",
+            "input/deleted",
+        ],
+    )
+    .await?;
+    let events = reply.events;
+    let tasks = TaskTracker::new();
+    let cleanup_tasks = tasks.clone();
+    let mut stale_inputs = BTreeSet::new();
+    for event in &events {
+        match &event.kind {
+            EventKind::InputMessage(data)
+                if data
+                    .submission_id
+                    .as_ref()
+                    .is_some_and(|id| id.starts_with("collaboration-approval:"))
+                    && data.user.is_none()
+                    && matches!(data.blocks.first(), Some(InputBlock::Raw { text, .. }) if text.starts_with("<dim-agent-approval>\n")) =>
+            {
+                stale_inputs.insert(event.id.clone());
+            }
+            EventKind::InputApplied(InputAppliedData { input_id, .. })
+            | EventKind::InputDeleted(InputDeletedData { input_id }) => {
+                stale_inputs.remove(input_id);
+            }
+            _ => {}
+        }
+    }
+    let (current_turn, interrupted) = service.rebuild(&timeline, &phase, &events, &tasks);
+    service.state.lock().unwrap().branches.insert(
+        branch_id.clone(),
+        BranchRecord {
+            ctx,
+            dispatcher: dispatcher.clone(),
+            approvals: BTreeMap::new(),
+            approval_calls: BTreeMap::new(),
+            forwarded_approvals: BTreeMap::new(),
+            timeline,
+            tasks,
+            abort: CancellationToken::new(),
+            current_turn,
+            interrupted,
+            closing: false,
+            ops: BTreeMap::new(),
+            open: BTreeMap::new(),
+            chains: BTreeMap::new(),
+        },
+    );
+    if !stale_inputs.is_empty() {
+        cleanup_tasks.spawn(async move {
+            if !phase.activated().await {
+                return;
+            }
+            let result = async {
+                let branch = service.tree.get(&branch_id)?;
+                let queue = branch.service::<dim_agent_capabilities::input_queue::InputQueue>()?;
+                for input_id in stale_inputs {
+                    queue
+                        .withdraw(
+                            InputWithdrawData {
+                                input_id,
+                                reason: Some(RELOADING.into()),
+                            },
+                            None,
+                        )
+                        .await?;
+                }
+                Ok::<_, AgentError>(())
+            }
+            .await;
+            if let Err(error) = result {
+                dispatcher.fail(error);
+            }
+        });
+    }
+    Ok(reply.through)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A client cancel names the cancellation only when no turn ran: every
+    /// other ending is the member's own.
+    #[test]
+    fn a_client_cancel_names_only_the_cancellation_that_never_started() {
+        let not_started = CollaborationOutcome::Cancelled {
+            reason: NOT_STARTED.into(),
+        };
+        assert_eq!(
+            client_cancel(true, not_started.clone()),
+            CollaborationOutcome::Cancelled {
+                reason: CANCELLED_BY_CLIENT.into(),
+            }
+        );
+        assert_eq!(client_cancel(false, not_started.clone()), not_started);
+        assert_eq!(
+            client_cancel(true, CollaborationOutcome::Completed),
+            CollaborationOutcome::Completed
+        );
+        let interrupted = CollaborationOutcome::Cancelled {
+            reason: INTERRUPTED.into(),
+        };
+        assert_eq!(client_cancel(true, interrupted.clone()), interrupted);
+    }
+
+    /// A failed cancel names `member_closed` only when the member is closed;
+    /// every other failure is the Session's runtime error.
+    #[test]
+    fn a_cancel_reports_a_runtime_failure_apart_from_a_closed_member() {
+        let closed = cancel_rpc(AgentError::Closed("member".into()));
+        assert_eq!(
+            closed.data.as_ref().map(|data| data.app_error.as_str()),
+            Some("member_closed")
+        );
+        let failed = cancel_rpc(AgentError::Storage("disk is full".into()));
+        assert_eq!(failed.code, -32603);
+        assert!(failed.data.is_none(), "{failed:?}");
     }
 }

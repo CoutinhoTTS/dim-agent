@@ -7,7 +7,7 @@ use rutis::Ctx;
 use rutis::host::{CtxHost, FiberView};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 use tokio::{
     sync::{Mutex as AsyncMutex, watch},
@@ -47,7 +47,8 @@ pub struct TimelineContext {
     failure: Mutex<Option<String>>,
     stop: CancellationToken,
     tasks: Mutex<Option<(JoinHandle<()>, JoinHandle<()>)>>,
-    ended: AtomicBool,
+    /// The sequence of the line's committed `branch/end`, 0 before it.
+    ended: AtomicU64,
     /// Serializes stop and close.
     control: AsyncMutex<()>,
     close: CloseOnce,
@@ -179,7 +180,7 @@ impl TimelineContext {
             opening,
             changed: watch::channel(()).0,
             failure: Mutex::new(None),
-            ended: AtomicBool::new(false),
+            ended: AtomicU64::new(0),
             stop: CancellationToken::new(),
             tasks: Mutex::new(None),
             control: AsyncMutex::new(()),
@@ -267,12 +268,21 @@ impl TimelineContext {
     pub fn is_closing(&self) -> bool {
         self.close.started()
     }
-    pub fn mark_ended(&self) {
-        self.ended.store(true, Ordering::Release);
+    /// Records the sequence of this line's committed `branch/end`: input is
+    /// refused from this call on.
+    pub fn mark_ended(&self, sequence: u64) {
+        self.ended.store(sequence, Ordering::Release);
     }
     /// Whether this line's `branch/end` has committed.
     pub fn ended(&self) -> bool {
-        self.ended.load(Ordering::Acquire)
+        self.end_event().is_some()
+    }
+    /// The sequence of this line's committed `branch/end`, `None` before it.
+    pub fn end_event(&self) -> Option<u64> {
+        match self.ended.load(Ordering::Acquire) {
+            0 => None,
+            sequence => Some(sequence),
+        }
     }
     /// True once the close has settled: its Timeline is closed, so nothing is
     /// committed to it any more, and its subtree is released.
@@ -388,29 +398,114 @@ impl TimelineContext {
             crate::core::Appended::Existing(sequence) => self.committed_input(sequence).await,
         }
     }
+    /// Validates a batch of input from outside the branch and appends it as
+    /// one atomic commit. Every input is checked as [`Self::input`] checks
+    /// one, and the whole batch is admitted once. A batch is never empty and
+    /// every input carries a submission id; the ids are distinct. When every
+    /// id is already committed the batch writes nothing and returns those
+    /// inputs in the given order; when only some are, it fails with
+    /// [`AgentError::PartialSubmission`] and writes nothing either.
+    pub(crate) async fn inputs(
+        &self,
+        inputs: Vec<InputMessageData>,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        if let Some(error) = self.dispatcher.failure() {
+            return Err(error);
+        }
+        if self.close.started() {
+            return Err(AgentError::Closed(self.id().into()));
+        }
+        if inputs.is_empty() {
+            return Err(AgentError::InvalidInput(
+                "an input batch must contain at least one input".into(),
+            ));
+        }
+        for input in &inputs {
+            input
+                .validate()
+                .map_err(|reason| AgentError::InvalidInput(reason.into()))?;
+        }
+        let result = self.timeline.inputs_checked(inputs, || {
+            if self.ended() {
+                return Err(AgentError::BranchEnded(self.id.clone()));
+            }
+            Ok(())
+        })?;
+        match result {
+            crate::core::AppendedBatch::Written(events) => Ok(events),
+            crate::core::AppendedBatch::Existing(sequences) => {
+                let mut events = Vec::with_capacity(sequences.len());
+                for sequence in sequences {
+                    events.push(self.committed_input(sequence).await?);
+                }
+                Ok(events)
+            }
+        }
+    }
     /// The committed input with submission id `id`, once it is published.
     pub(crate) async fn lookup(&self, id: &str) -> Result<Option<Arc<AgentEvent>>> {
-        let Some(sequence) = self.timeline.submission(id)? else {
+        let Some(input) = self.timeline.submission(id)? else {
             return Ok(None);
         };
         let _ = self
             .timeline
             .watch()
-            .wait_for(|&(published, closed)| published >= sequence || closed)
+            .wait_for(|&(published, closed)| published >= input.sequence || closed)
             .await;
-        if self.timeline.sequence() < sequence {
+        if self.timeline.sequence() < input.sequence {
             return Err(self
                 .timeline
                 .failure()
                 .unwrap_or_else(|| AgentError::Closed(self.id().into())));
         }
-        self.committed_input(sequence).await.map(Some)
+        self.timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence: None,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                event_id: Some(input.id),
+                predicate: None,
+                limit: std::num::NonZeroU64::MIN,
+                offset: 0,
+            })
+            .await?
+            .events
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                AgentError::Storage(format!("committed input {} is missing", input.sequence))
+            })
+            .map(Some)
     }
+    /// The input at `sequence`, a submission this branch already holds. The
+    /// duplicate may arrive while its first write is still in flight, so the
+    /// read asks for the facts still publishing and not only what the query
+    /// bounds by default ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md#d3-replay-is-removed)).
     async fn committed_input(&self, sequence: u64) -> Result<Arc<AgentEvent>> {
         self.timeline
-            .local(sequence..=sequence)
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: true,
+                from_event: None,
+                from_sequence: Some(sequence),
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Ascending,
+                kinds: Vec::new(),
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: std::num::NonZeroU64::MIN,
+                offset: 0,
+            })
             .await?
-            .pop()
+            .events
+            .into_iter()
+            .next()
             .ok_or_else(|| AgentError::Storage(format!("committed input {sequence} is missing")))
     }
     /// Waits until Loop has dispatched the Timeline tail and has no unclosed

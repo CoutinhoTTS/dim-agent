@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 
 fn v2_create() -> Value {
@@ -136,7 +137,7 @@ async fn failed_branch_build_keeps_private_details_off_both_transports() {
             "a failed candidate is not listed"
         );
         assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind,
             dim_agent_types::EventKind::BranchCreateFailed(
                 dim_agent_types::BranchCreateFailedData::Failed { branch, create_event, .. }
@@ -289,7 +290,7 @@ async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports()
         }
 
         assert_ok(&tree.rpc("session.close", json!({"sessionId":sid})).await);
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind,
             dim_agent_types::EventKind::BranchCreate(data) if data.branch == child_id
                 && matches!(&data.source,
@@ -391,8 +392,7 @@ async fn builtin_branch_is_a_session_tool_under_the_permission_policy() {
                     .iter()
                     .all(|notice| notice["method"] != "approval.request")
             );
-            let result = session
-                .history("main", None)
+            let result = chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .into_iter()

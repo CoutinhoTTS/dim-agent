@@ -13,7 +13,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::Result;
-use crate::args::Options;
+use crate::args::{McpImport, Options};
 use crate::client::Client;
 use crate::management::{
     self, editor, hooks, mcp, models, permissions, scheduler, skills, workflow,
@@ -24,7 +24,7 @@ use crate::model::session::{
 };
 use crate::permission;
 use crate::sanitize::{safe, safe_line};
-use crate::ui::i18n::t;
+use crate::ui::i18n::{t, tf};
 
 /// Runs `request` and prints its area's report.
 pub async fn run(
@@ -65,7 +65,7 @@ pub async fn edit(
     }
     // Refuse a write the daemon cannot serve before the user edits.
     management::supports_kind(client, &area, ActionKind::Edit)?;
-    let (revision, document) = read(client, options, &area, id.as_deref()).await?;
+    let (revision, document, source) = read(client, options, &area, id.as_deref()).await?;
     let text = serde_json::to_string_pretty(&document)
         .map(|text| format!("{text}\n"))
         .map_err(|error| error.to_string())?;
@@ -98,6 +98,7 @@ pub async fn edit(
         &Draft {
             area,
             id,
+            source,
             text,
             revision,
             stored: document,
@@ -126,7 +127,7 @@ pub async fn set(
     // The input first and the revision second, so the revision is read
     // immediately before the write however long the input takes.
     let text = read_text(path)?;
-    let (revision, stored) = read(client, options, &area, id.as_deref()).await?;
+    let (revision, stored, source) = read(client, options, &area, id.as_deref()).await?;
     if path == Path::new("-") {
         let draft = editor::Draft::open(&options.home, area.clone(), &text)?;
         let kept = draft.path().display().to_string();
@@ -136,6 +137,7 @@ pub async fn set(
             &Draft {
                 area,
                 id,
+                source,
                 text,
                 revision,
                 stored,
@@ -154,6 +156,7 @@ pub async fn set(
         &Draft {
             area,
             id,
+            source,
             text,
             revision,
             stored,
@@ -210,6 +213,7 @@ pub async fn start(
         area,
         action: ManagementAction::Run {
             id,
+            source: None,
             document,
             // A file or stdin document is the caller's own: it was never
             // opened in the panel's editor, so it has no seed.
@@ -217,6 +221,367 @@ pub async fn start(
         },
     };
     run(client, options, &request).await
+}
+
+/// `mcp import PATH`, `mcp import --from ID` or `mcp import --discover`:
+/// preview a standard `mcpServers` document, and with `--yes` apply the
+/// entries the flags select. A path's text goes to the owner as it is; with
+/// `--from`, the owner reads one known store of another local client and its
+/// text never reaches this process. The preview's statuses, the apply's
+/// refusals and the document's errors all come from there.
+pub async fn import(client: &mut Client, options: &Options, import: &McpImport) -> Result<i32> {
+    let McpImport {
+        path,
+        discover,
+        from,
+        yes,
+        replace,
+        rename,
+        only,
+    } = import;
+    let cwd = options.workspace().as_str();
+    if *discover {
+        if !client.supports(&["mcp.import.sources"]) {
+            return Err(t("This daemon cannot list other clients' MCP stores.")
+                .to_owned()
+                .into());
+        }
+        let sources = mcp::import_sources(client, cwd)
+            .await
+            .map_err(mcp::import_failure)?;
+        print_import_sources(&sources);
+        return Ok(0);
+    }
+    // Refuse a daemon that cannot serve the preview before the file is
+    // opened, as `add` does, and one that cannot apply before `--yes` reads.
+    if !client.supports(&["mcp.import.preview"])
+        || (*yes && !client.supports(&["mcp.import.apply"]))
+    {
+        return Err(t("This daemon cannot import MCP servers.")
+            .to_owned()
+            .into());
+    }
+    let document = path
+        .as_deref()
+        .map(|path| read_text(Path::new(path)))
+        .transpose()?;
+    let input = match (document.as_deref(), from.as_deref()) {
+        (Some(document), None) => mcp::ImportInput::Document(document),
+        (None, Some(id)) => mcp::ImportInput::Store(id),
+        _ => return Err("Use one of PATH, --from ID or --discover".into()),
+    };
+    let source = options.mcp_source.as_deref().unwrap_or("user");
+    let preview = mcp::preview_import(client, cwd, source, input)
+        .await
+        .map_err(mcp::import_failure)?;
+    print_import_preview(&preview, source, *yes);
+    if !*yes {
+        return Ok(0);
+    }
+    let resolutions = import_resolutions(&preview, replace, rename, only)?;
+    let revision = mcp::apply_import(
+        client,
+        cwd,
+        source,
+        input,
+        &preview.revision,
+        preview.source_revision.clone(),
+        &resolutions,
+    )
+    .await
+    .map_err(mcp::import_failure)?;
+    print_import_applied(&preview, &resolutions, &revision);
+    Ok(0)
+}
+
+/// What `--discover` prints: one row per known store, then the columns and the
+/// rule that no value is read out. A store that is not ready shows the owner's
+/// message instead of a count.
+fn print_import_sources(sources: &[mcp::ImportSource]) {
+    let rows = sources
+        .iter()
+        .map(|source| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                safe_line(&source.id),
+                safe_line(&source.client),
+                safe_line(&source.scope),
+                safe_line(&source.path),
+                source.state.as_str(),
+                safe_line(&source.detail()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let notes = vec![
+        t("Columns: ID, client, scope, path, state, entries or error.").to_owned(),
+        t("No value from a store is read out or printed; --from ID previews one inside the daemon.")
+            .to_owned(),
+    ];
+    print_report(rows, notes);
+}
+
+/// The resolutions `--yes` sends: each entry's default by status and the
+/// flags that override it. A flag that names an id the document does not hold
+/// is still sent, so the owner's own refusal names it.
+fn import_resolutions(
+    preview: &mcp::ImportPreview,
+    replace: &[String],
+    rename: &[(String, String)],
+    only: &[String],
+) -> Result<Vec<mcp::ImportResolution>> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let replace: BTreeSet<&str> = replace.iter().map(String::as_str).collect();
+    let renamed: BTreeMap<&str, &str> = rename
+        .iter()
+        .map(|(old, new)| (old.as_str(), new.as_str()))
+        .collect();
+    let only: BTreeSet<&str> = only.iter().map(String::as_str).collect();
+    if let Some(old) = renamed.keys().copied().find(|old| replace.contains(*old)) {
+        return Err(format!("--replace and --rename both name {old:?}; pick one.").into());
+    }
+    let mut resolutions: BTreeMap<String, mcp::ImportResolution> = BTreeMap::new();
+    for entry in &preview.entries {
+        let mut action = if entry.status.imports() {
+            mcp::ImportAction::Import
+        } else {
+            mcp::ImportAction::Skip
+        };
+        if !only.is_empty() && !only.contains(entry.id.as_str()) {
+            action = mcp::ImportAction::Skip;
+        }
+        if replace.contains(entry.id.as_str()) {
+            action = mcp::ImportAction::Replace;
+        }
+        let new_id = renamed.get(entry.id.as_str()).map(|id| (*id).to_owned());
+        if new_id.is_some() {
+            action = mcp::ImportAction::Rename;
+        }
+        resolutions.insert(
+            entry.id.clone(),
+            mcp::ImportResolution {
+                id: entry.id.clone(),
+                action,
+                new_id,
+            },
+        );
+    }
+    for id in replace {
+        resolutions
+            .entry(id.to_owned())
+            .or_insert_with(|| mcp::ImportResolution {
+                id: id.to_owned(),
+                action: mcp::ImportAction::Replace,
+                new_id: None,
+            });
+    }
+    for (old, new) in &renamed {
+        resolutions
+            .entry((*old).to_owned())
+            .or_insert_with(|| mcp::ImportResolution {
+                id: (*old).to_owned(),
+                action: mcp::ImportAction::Rename,
+                new_id: Some((*new).to_owned()),
+            });
+    }
+    for id in only {
+        resolutions
+            .entry(id.to_owned())
+            .or_insert_with(|| mcp::ImportResolution {
+                id: id.to_owned(),
+                action: mcp::ImportAction::Skip,
+                new_id: None,
+            });
+    }
+    Ok(resolutions.into_values().collect())
+}
+
+/// What a preview prints: one row per entry, then the fields the owner's cap
+/// left out, the top-level members the import would not carry and the
+/// revision the source was read at. `--yes` prints the same rows before it
+/// applies, so the user sees what is written.
+fn print_import_preview(preview: &mcp::ImportPreview, source: &str, apply: bool) {
+    let rows = preview
+        .entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{:?}\t{}\t{}\t{}\t{}\t{}",
+                entry.id,
+                entry.status.as_str(),
+                entry.transport.as_deref().unwrap_or("—"),
+                import_fields(&entry.changes),
+                import_unsupported(&entry.unsupported),
+                entry
+                    .error
+                    .as_deref()
+                    .map(safe_line)
+                    .unwrap_or_else(|| "—".to_owned()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut notes = Vec::new();
+    if let Some(store) = &preview.store {
+        notes.push(format!(
+            "{} · {} · {} · {}",
+            store.id,
+            store.client,
+            store.scope,
+            safe_line(&store.path),
+        ));
+    }
+    if preview.entries.is_empty() {
+        notes.push(t("The document holds no mcpServers entries.").to_owned());
+    } else {
+        notes.push(t(
+            "Columns: ID, status, transport, changed fields, unsupported fields, error.\n\
+             A changed field names what a write would change and the kind of value it holds; no value is printed.\n\
+             An unsupported field is kept unused or dropped, as shown after the field.",
+        )
+        .to_owned());
+        if source == "project" {
+            notes.push(t(
+                "A project entry is written as its public skeleton: the workspace file gets the command, declared cwd, URL origin and public OAuth fields. Its arguments, environment and header values, bearer token, a URL with userinfo, path, query or fragment, and unknown members go to your user-scope mcp-secrets record, never to the workspace file.",
+            )
+            .to_owned());
+        }
+    }
+    for entry in &preview.entries {
+        if entry.omitted > 0 {
+            notes.push(tf(
+                "{id} has {count} more field names than the lists above show.",
+                &[
+                    ("id", &format!("{:?}", entry.id)),
+                    ("count", &entry.omitted.to_string()),
+                ],
+            ));
+        }
+    }
+    notes.push(match preview.unknown_top_level.as_slice() {
+        [] => t("Top-level members the import does not carry: none.").to_owned(),
+        names => tf(
+            "Top-level members the import does not carry: {names}.",
+            &[("names", &import_names(names))],
+        ),
+    });
+    notes.push(format!(
+        "The {source} source was read at revision {}.",
+        safe_line(&preview.revision)
+    ));
+    if apply {
+        notes.push(t("Applying the selection at this revision.").to_owned());
+    }
+    print_report(rows, notes);
+}
+
+/// What an applied import prints: each entry's action and destination, the
+/// counts, and the state imported entries start in.
+fn print_import_applied(
+    preview: &mcp::ImportPreview,
+    resolutions: &[mcp::ImportResolution],
+    revision: &str,
+) {
+    use std::collections::BTreeMap;
+    let resolutions: BTreeMap<&str, &mcp::ImportResolution> = resolutions
+        .iter()
+        .map(|resolution| (resolution.id.as_str(), resolution))
+        .collect();
+    let (mut imported, mut replaced, mut renamed, mut skipped, mut unchanged) = (0, 0, 0, 0, 0);
+    let mut rows = Vec::new();
+    for entry in &preview.entries {
+        let Some(resolution) = resolutions.get(entry.id.as_str()) else {
+            continue;
+        };
+        let (action, destination) = match resolution.action {
+            mcp::ImportAction::Skip => {
+                skipped += 1;
+                ("skipped", "—".to_owned())
+            }
+            mcp::ImportAction::Import if entry.status == mcp::ImportStatus::Identical => {
+                unchanged += 1;
+                ("unchanged", entry.id.clone())
+            }
+            mcp::ImportAction::Import => {
+                imported += 1;
+                ("imported", entry.id.clone())
+            }
+            mcp::ImportAction::Replace => {
+                replaced += 1;
+                ("replaced", entry.id.clone())
+            }
+            mcp::ImportAction::Rename => {
+                renamed += 1;
+                (
+                    "renamed",
+                    resolution.new_id.clone().unwrap_or_else(|| "—".to_owned()),
+                )
+            }
+        };
+        rows.push(format!(
+            "{:?}\t{action}\t{}",
+            entry.id,
+            safe_line(&destination)
+        ));
+    }
+    let mut notes = vec![
+        t(
+            "Columns: ID, action, destination ID.\n\
+             A renamed entry is written under its destination id; the source's entry with the old id is left as it was.",
+        )
+        .to_owned(),
+        format!(
+            "Imported {imported}, replaced {replaced}, renamed {renamed}, skipped {skipped}, unchanged {unchanged}."
+        ),
+        t(
+            "Imported and replaced entries start disabled: a user entry is written with enabled: false, and a project entry has no enablement record until you enable it locally.",
+        )
+        .to_owned(),
+    ];
+    if unchanged > 0 {
+        notes.push(
+            t("An unchanged entry was already in the source and was not written.").to_owned(),
+        );
+    }
+    notes.push(format!(
+        "The source is now at revision {}.",
+        safe_line(revision)
+    ));
+    print_report(rows, notes);
+}
+
+/// Changed fields as `field:kind` pairs.
+fn import_fields(fields: &[mcp::ImportField]) -> String {
+    if fields.is_empty() {
+        return "—".to_owned();
+    }
+    fields
+        .iter()
+        .map(|field| format!("{}:{}", safe_line(&field.field), field.kind))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Unsupported members as `field:effect` pairs.
+fn import_unsupported(fields: &[mcp::ImportUnsupported]) -> String {
+    if fields.is_empty() {
+        return "—".to_owned();
+    }
+    fields
+        .iter()
+        .map(|field| format!("{}:{}", safe_line(&field.field), field.effect.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Document names, each kept on one line.
+fn import_names(names: &[String]) -> String {
+    if names.is_empty() {
+        return "—".to_owned();
+    }
+    names
+        .iter()
+        .map(|name| safe_line(name))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The document a command reads, from a file or from stdin for `-`.
@@ -229,13 +594,14 @@ fn read_text(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()).into())
 }
 
-/// The document and the revision to write it at, read immediately before.
+/// The document and the revision to write it at, read immediately before,
+/// with the source an MCP entry's row reports so the write names it.
 async fn read(
     client: &mut Client,
     options: &Options,
     area: &Area,
     id: Option<&str>,
-) -> Result<(String, Value)> {
+) -> Result<(String, Value, Option<String>)> {
     management::supported(
         client,
         &ManagementRequest {
@@ -258,23 +624,34 @@ async fn read(
             let model = provider
                 .model(id)
                 .ok_or_else(|| format!("No model has that id: {id}"))?;
-            Ok((version.to_string(), models::edit_template(&provider, model)))
+            Ok((
+                version.to_string(),
+                models::edit_template(&provider, model),
+                None,
+            ))
         }
         Area::Hooks => {
             let catalog = hooks::catalog(client, options.workspace().as_str()).await?;
             let document = catalog
                 .user_document
                 .ok_or("The daemon reports no hook document to edit.")?;
-            Ok((catalog.user_revision, document))
+            Ok((catalog.user_revision, document, None))
         }
         Area::Mcp => {
             let Some(id) = id else {
                 return Err("mcp edit and set take an entry id.".to_owned().into());
             };
-            let server = mcp::target(client, options.workspace().as_str(), id).await?;
+            let server = mcp::target(
+                client,
+                options.workspace().as_str(),
+                id,
+                options.mcp_source.as_deref(),
+            )
+            .await?;
             if server.source == "plugin" {
                 return Err("plugin MCP entries change through their plugin".into());
             }
+            let source = server.source.clone();
             let editable = mcp::editable(client, options.workspace().as_str(), &server).await?;
             // A plugin entry's read reports no revision; the refusal above
             // already covers it, and any other missing revision leaves
@@ -283,7 +660,7 @@ async fn read(
                 .revision
                 .ok_or("The daemon reports no revision for this MCP entry to edit.")?;
             let document = mcp::seed(&editable.configuration)?;
-            Ok((revision, document))
+            Ok((revision, document, Some(source)))
         }
         Area::Scheduled => {
             let Some(id) = id else {
@@ -295,7 +672,7 @@ async fn read(
                 .iter()
                 .find(|job| job.id == id)
                 .ok_or_else(|| format!("No scheduled job has that id: {id}"))?;
-            Ok((job.revision.to_string(), job.document()))
+            Ok((job.revision.to_string(), job.document(), None))
         }
         Area::Workflow => {
             let Some(id) = id else {
@@ -325,7 +702,7 @@ async fn read(
             let (revision, document) = listing
                 .document(entry)
                 .ok_or("The user workflow source has no such definition.")?;
-            Ok((revision.to_owned(), document.clone()))
+            Ok((revision.to_owned(), document.clone(), None))
         }
         Area::Permissions => Err("A command rule has no document to edit.".to_owned().into()),
     }
@@ -336,6 +713,8 @@ async fn read(
 struct Draft {
     area: Area,
     id: Option<String>,
+    /// The source an MCP entry's row reports, which its save names.
+    source: Option<String>,
     text: String,
     /// The revision the document was read at.
     revision: String,
@@ -358,11 +737,15 @@ async fn write(client: &mut Client, options: &Options, draft: &Draft) -> Result<
         area: draft.area.clone(),
         action: ManagementAction::Save {
             id: draft.id.clone(),
+            source: draft.source.clone(),
             expected_revision: draft.revision.clone(),
             document,
         },
     };
-    match management::apply(client, &request, options.named_workspace(), None).await {
+    match management::apply(client, &request, options.named_workspace(), None)
+        .await
+        .result
+    {
         ManagementResult::Refused(error) => {
             Err(format!("{error} Your text is kept in {}.", draft.kept).into())
         }
@@ -405,7 +788,10 @@ async fn create(
         area,
         action: ManagementAction::Add { document },
     };
-    match management::apply(client, &request, options.named_workspace(), None).await {
+    match management::apply(client, &request, options.named_workspace(), None)
+        .await
+        .result
+    {
         ManagementResult::View { note, .. } => {
             // The note names the entry the owner saved: made safe, as every
             // line the Scheduler prints is.
@@ -654,11 +1040,19 @@ async fn run_mcp(
         request.action,
         ManagementAction::List | ManagementAction::Reload
     ) {
-        let (rows, notes) = crate::mcp::catalog_report(client, options).await?;
+        let (rows, notes) =
+            crate::mcp::catalog_report(client, options.workspace().as_str()).await?;
         print_report(rows, notes);
         return Ok(0);
     }
-    match mcp::apply(client, &request.action, options.workspace().as_str()).await {
+    match mcp::apply_named(
+        client,
+        &request.action,
+        options.workspace().as_str(),
+        options.mcp_source.as_deref(),
+    )
+    .await
+    {
         // A test's tools are typed: one row per tool, `name\tdescription`,
         // and the no-tools sentence when the owner found none.
         Ok(mcp::Answer::Tools { tools, .. }) => {

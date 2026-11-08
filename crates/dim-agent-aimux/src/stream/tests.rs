@@ -8,7 +8,8 @@ use std::{
     task::{Context, Poll},
 };
 
-use aimux_core::types::{FinishReason, TokenUsage};
+use aimux_core::result::Source;
+use aimux_core::types::{FinishReason, InputTokenUsage, OutputTokenUsage};
 use futures_util::Stream;
 use serde_json::json;
 
@@ -45,8 +46,8 @@ fn fixture(
             parts: parts.into(),
             dropped: dropped.clone(),
         }),
-        request_body: Some(json!({ "messages": "private request text" })),
-        response_headers: None,
+        request: None,
+        response: None,
     };
     let cancel = CancellationToken::new();
     let abort = AbortSignal::new();
@@ -99,18 +100,19 @@ fn finish(reason: FinishReasonUnified, usage: NativeUsage) -> StreamPart {
     }
 }
 
-fn tool(input: &str) -> StreamPart {
-    StreamPart::ToolCall {
-        tool_call_id: "call-1".into(),
-        tool_name: "lookup".into(),
-        input: Value::String(input.into()),
+fn call(id: &str, name: &str, input: &str) -> RawToolCall {
+    RawToolCall {
+        tool_call_id: id.into(),
+        tool_name: name.into(),
+        input: input.into(),
         provider_executed: None,
         dynamic: None,
-        thought_signature: None,
-        invalid: None,
-        error: None,
         provider_metadata: None,
     }
+}
+
+fn tool(input: &str) -> StreamPart {
+    StreamPart::ToolCall(call("call-1", "lookup", input))
 }
 
 #[tokio::test]
@@ -121,11 +123,13 @@ async fn native_content_and_tools_convert_in_order_to_agent_chunks() {
                 message: "diagnostic".into(),
             }],
         }),
-        Ok(StreamPart::ResponseMetadata {
-            id: Some("provider-id".into()),
-            timestamp: None,
-            model_id: None,
-        }),
+        Ok(StreamPart::ResponseMetadata(
+            aimux_core::types::ResponseMetadata {
+                id: Some("provider-id".into()),
+                timestamp: None,
+                model_id: None,
+            },
+        )),
         Ok(StreamPart::ReasoningStart {
             id: "reasoning".into(),
             provider_metadata: None,
@@ -133,7 +137,9 @@ async fn native_content_and_tools_convert_in_order_to_agent_chunks() {
         Ok(StreamPart::ReasoningDelta {
             id: "reasoning".into(),
             delta: "thinking".into(),
-            provider_metadata: Some(json!({"new_key":true})),
+            provider_metadata: Some(
+                aimux_core::shared::provider_namespace("openai", json!({"new_key":true})).unwrap(),
+            ),
         }),
         Ok(StreamPart::ReasoningEnd {
             id: "reasoning".into(),
@@ -175,17 +181,7 @@ async fn native_content_and_tools_convert_in_order_to_agent_chunks() {
             provider_metadata: None,
         }),
         Ok(tool("{\"query\":\"test\"}")),
-        Ok(StreamPart::ToolCall {
-            tool_call_id: "call-2".into(),
-            tool_name: "lookup".into(),
-            input: Value::String("{}".into()),
-            provider_executed: None,
-            dynamic: None,
-            thought_signature: None,
-            invalid: None,
-            error: None,
-            provider_metadata: None,
-        }),
+        Ok(StreamPart::ToolCall(call("call-2", "lookup", "{}"))),
         Ok(StreamPart::Raw {
             raw_value: json!({"ignored":"raw payload"}),
         }),
@@ -236,16 +232,16 @@ async fn native_content_and_tools_convert_in_order_to_agent_chunks() {
 #[tokio::test]
 async fn finish_releases_transport_before_usage_and_survives_late_cancel() {
     let usage = NativeUsage {
-        input_tokens: TokenUsage {
+        input_tokens: InputTokenUsage {
             total: Some(u32::MAX),
             cache_read: Some(0),
             ..Default::default()
         },
-        output_tokens: TokenUsage {
+        output_tokens: OutputTokenUsage {
             total: Some(u32::MAX),
             ..Default::default()
         },
-        raw: Some(json!({"ignored":"raw usage"})),
+        raw: Some(json!({"ignored":"raw usage"}).as_object().cloned().unwrap()),
     };
     let (mut stream, cancel, _, dropped) = fixture(vec![
         Ok(start()),
@@ -276,11 +272,11 @@ async fn finish_releases_transport_before_usage_and_survives_late_cancel() {
 async fn missing_usage_is_distinct_from_zero_and_length_remains_max_tokens() {
     for total in [None, Some(0)] {
         let usage = NativeUsage {
-            input_tokens: TokenUsage {
+            input_tokens: InputTokenUsage {
                 total,
                 ..Default::default()
             },
-            output_tokens: TokenUsage {
+            output_tokens: OutputTokenUsage {
                 total,
                 ..Default::default()
             },
@@ -339,18 +335,20 @@ async fn errors_release_transport_and_do_not_expose_request_or_tool_input() {
         "Rate limited",
         "https://test.invalid",
         json!({"secret":secret}),
-        aimux_core::ApiCallErrorOrigin::HttpResponse,
-    );
+    )
+    .with_origin(aimux_core::ApiCallErrorOrigin::HttpResponse);
     api_error.status_code = Some(429);
     api_error.provider_code = Some("rate_limit_exceeded".into());
     api_error.response_body = Some(secret.into());
     let cases = [
-        (Err(AiMuxError::ApiCall(Box::new(api_error))), "429"),
-        (Ok(tool(secret)), "InvalidToolInput"),
+        (
+            Err(AiMuxError::ApiCall(Box::new(api_error))),
+            "rate limiting",
+        ),
         (Ok(tool("[1, 2]")), "JSON object"),
         (
             Ok(StreamPart::Error {
-                error: AiMuxError::InvalidResponseData("Truncated model stream".into()),
+                error: AiMuxError::invalid_response_data("Truncated model stream"),
             }),
             "Truncated",
         ),
@@ -380,16 +378,47 @@ async fn errors_release_transport_and_do_not_expose_request_or_tool_input() {
         cancel.cancel();
         assert!(stream.next().await.is_none());
     }
+
+    // A tool argument failure names the tool and never its input.
+    let (mut stream, cancel, abort, dropped) = fixture(vec![
+        Ok(start()),
+        Ok(tool(secret)),
+        Ok(finish(FinishReasonUnified::Stop, NativeUsage::default())),
+    ]);
+    stream.next().await.unwrap().unwrap();
+    let Some(Err(HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    })) = stream.next().await
+    else {
+        panic!("missing failure")
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert!(
+        model
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("'lookup'")),
+        "{model:?}"
+    );
+    assert!(
+        message.contains("invalid arguments for tool 'lookup'"),
+        "{message}"
+    );
+    let boundary = format!("{message:?} {message} {model:?}");
+    assert!(!boundary.contains(secret), "{boundary}");
+    assert!(abort.is_aborted());
+    assert!(dropped.load(Ordering::SeqCst));
+    cancel.cancel();
+    assert!(stream.next().await.is_none());
 }
 
 #[tokio::test]
 async fn unsupported_parameters_and_results_end_the_call() {
     let mut provider_tool = tool("{}");
-    if let StreamPart::ToolCall {
-        provider_executed, ..
-    } = &mut provider_tool
-    {
-        *provider_executed = Some(true);
+    if let StreamPart::ToolCall(call) = &mut provider_tool {
+        call.provider_executed = Some(true);
     }
     let cases = [
         StreamPart::StreamStart {
@@ -399,13 +428,12 @@ async fn unsupported_parameters_and_results_end_the_call() {
             }],
         },
         provider_tool,
-        StreamPart::Source {
+        StreamPart::Source(Source::Url {
             id: "source".into(),
-            source_type: "url".into(),
-            url: None,
+            url: "https://example.test/source".into(),
             title: None,
             provider_metadata: None,
-        },
+        }),
         finish(FinishReasonUnified::ContentFilter, NativeUsage::default()),
     ];
     for part in cases {
@@ -434,6 +462,10 @@ async fn dropping_output_stream_releases_transport_without_another_poll() {
 
 #[tokio::test]
 async fn malformed_tool_lifecycles_fail_and_release_transport() {
+    // The lifecycles strict mode now rejects (a delta before its start, a
+    // repeated start, a late end) are covered by the provider-level guard and
+    // by `malformed_native_block_lifecycle_is_a_classified_failure`; what
+    // stays here are the checks the adapter itself makes.
     let input_start = || StreamPart::ToolInputStart {
         id: "call-1".into(),
         tool_name: "lookup".into(),
@@ -442,46 +474,15 @@ async fn malformed_tool_lifecycles_fail_and_release_transport() {
         title: None,
         provider_metadata: None,
     };
-    let delta = || StreamPart::ToolInputDelta {
-        id: "call-1".into(),
-        delta: "{}".into(),
-        provider_metadata: None,
-    };
     let end = || StreamPart::ToolInputEnd {
         id: "call-1".into(),
         provider_metadata: None,
     };
-    let mut mismatched = tool("{}");
-    if let StreamPart::ToolCall { tool_name, .. } = &mut mismatched {
-        *tool_name = "different".into();
-    }
     let cases = [
-        (vec![delta()], "Tool delta without an active tool input"),
-        (
-            vec![input_start(), input_start()],
-            "Duplicate tool input start",
-        ),
-        (
-            vec![input_start(), end(), delta()],
-            "Tool delta without an active tool input",
-        ),
-        (
-            vec![input_start(), end(), end()],
-            "Duplicate or late tool input end",
-        ),
-        (
-            vec![input_start(), mismatched],
-            "Duplicate or mismatched tool call",
-        ),
         (
             vec![tool("{}"), tool("{}")],
             "Duplicate or mismatched tool call",
         ),
-        (
-            vec![tool("{}"), input_start()],
-            "Duplicate tool input start",
-        ),
-        (vec![tool("{}"), end()], "Duplicate or late tool input end"),
         (
             vec![
                 input_start(),
@@ -510,14 +511,35 @@ async fn malformed_tool_lifecycles_fail_and_release_transport() {
                 ..
             }
         ));
-        assert!(
-            failure.to_string().contains("invalid_response_data"),
-            "{failure}"
-        );
+        let HostError::Failed {
+            model: Some(model), ..
+        } = failure
+        else {
+            panic!("{failure:?}");
+        };
+        assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
         assert!(failure.to_string().contains(diagnostic), "{failure}");
         assert!(abort.is_aborted());
         assert!(dropped.load(Ordering::SeqCst));
     }
+    // A tool call whose name disagrees with its started input is mismatched.
+    let mut mismatched = call("call-1", "different", "{}");
+    mismatched.tool_call_id = "call-1".into();
+    let (stream, _, abort, _) = fixture(vec![
+        Ok(input_start()),
+        Ok(StreamPart::ToolCall(mismatched)),
+    ]);
+    let chunks = stream.collect::<Vec<_>>().await;
+    let Some(Err(failure)) = chunks.last() else {
+        panic!("missing failure: {chunks:?}")
+    };
+    assert!(
+        failure
+            .to_string()
+            .contains("Duplicate or mismatched tool call"),
+        "{failure}"
+    );
+    assert!(abort.is_aborted());
 }
 
 #[tokio::test]
@@ -562,7 +584,10 @@ async fn whole_tool_with_input_end_and_truncated_open_blocks_remain_valid() {
 }
 
 #[tokio::test]
-async fn block_ends_are_validated_even_without_native_content_preservation() {
+async fn a_text_block_can_reopen_after_its_end() {
+    // Strict mode rejects an end for a block that never started, a repeated
+    // start and a repeated end; what remains here is the adapter's own
+    // behavior for a provider that reuses a block id.
     let text_start = || StreamPart::TextStart {
         id: "block".into(),
         provider_metadata: None,
@@ -571,34 +596,6 @@ async fn block_ends_are_validated_even_without_native_content_preservation() {
         id: "block".into(),
         provider_metadata: None,
     };
-    let reasoning_end = || StreamPart::ReasoningEnd {
-        id: "block".into(),
-        provider_metadata: None,
-    };
-    for parts in [
-        vec![text_end()],
-        vec![reasoning_end()],
-        vec![text_start(), reasoning_end()],
-        vec![text_start(), text_end(), text_end()],
-        vec![text_start(), text_start()],
-    ] {
-        let (stream, _, abort, dropped) = fixture(parts.into_iter().map(Ok).collect());
-        let chunks = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            stream.collect::<Vec<_>>(),
-        )
-        .await
-        .unwrap();
-        let Some(Err(failure)) = chunks.last() else {
-            panic!("missing failure: {chunks:?}")
-        };
-        assert!(
-            failure.to_string().contains("invalid_response_data"),
-            "{failure}"
-        );
-        assert!(abort.is_aborted());
-        assert!(dropped.load(Ordering::SeqCst));
-    }
     let (stream, _, _, dropped) = fixture(vec![
         Ok(text_start()),
         Ok(StreamPart::TextDelta {
@@ -643,4 +640,176 @@ async fn block_ends_are_validated_even_without_native_content_preservation() {
         Some(ModelChunk::MessageStop { .. })
     ));
     assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_timeout_is_unknown_and_not_retried() {
+    let failure = error(
+        AiMuxError::Timeout("model response timed out".into()),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::Unknown);
+    assert_eq!(model.status, None);
+    assert_eq!(model.cause, Vec::<String>::new());
+    assert_eq!(model.reason.as_deref(), Some("model response timed out"));
+    assert_eq!(
+        message,
+        "The model request failed: model response timed out. See the details."
+    );
+}
+
+#[test]
+fn a_deep_transport_chain_keeps_its_innermost_frame_as_the_reason() {
+    let mut cause = aimux_core::SourceError {
+        message: "frame 8".into(),
+        cause: None,
+    };
+    for frame in (1..8).rev() {
+        cause = aimux_core::SourceError {
+            message: format!("frame {frame}"),
+            cause: Some(Box::new(cause)),
+        };
+    }
+    let detail = aimux_core::ApiCallError {
+        status_code: None,
+        is_retryable: true,
+        cause: Some(ErrorCause::Source(cause)),
+        origin: aimux_core::ApiCallErrorOrigin::Transport,
+        ..aimux_core::ApiCallError::new("frame 0", "http://example.test/v1", serde_json::json!({}))
+    };
+    let failure = error(
+        AiMuxError::ApiCall(Box::new(detail)),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(model.reason.as_deref(), Some("frame 8"));
+    assert_eq!(model.cause.len(), FAILURE_CAUSE_FRAMES);
+    assert_eq!(model.cause.first().map(String::as_str), Some("frame 0"));
+    assert_eq!(model.cause.last().map(String::as_str), Some("frame 5"));
+}
+
+#[test]
+fn an_unknown_tool_names_the_tool_without_the_available_list() {
+    let failure = error(
+        AiMuxError::NoSuchTool {
+            tool_name: "ghost".into(),
+            available_tools: Some(vec!["read".into(), "write".into()]),
+            tool_input: Some("private tool input".into()),
+        },
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("the model called an unknown tool 'ghost'")
+    );
+    let boundary = format!("{model:?} {message}");
+    assert!(boundary.contains("ghost"), "{boundary}");
+    assert!(!boundary.contains("read"), "{boundary}");
+    assert!(!boundary.contains("write"), "{boundary}");
+    assert!(!boundary.contains("private tool input"), "{boundary}");
+}
+
+#[test]
+fn a_repair_failure_classifies_as_its_inner_failure() {
+    let inner = AiMuxError::InvalidToolInput {
+        tool_name: "lookup".into(),
+        tool_input: "private tool input".into(),
+        cause: ErrorCause::Source(aimux_core::SourceError {
+            message: "expected value".into(),
+            cause: None,
+        }),
+    };
+    let failure = error(
+        AiMuxError::ToolCallRepair {
+            original_error: Box::new(inner.clone()),
+            cause: Box::new(inner.clone()),
+        },
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        message,
+        model: Some(model),
+        ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    let bare = error(inner, &CancellationToken::new());
+    let HostError::Failed {
+        message: bare_message,
+        model: Some(bare),
+        ..
+    } = bare
+    else {
+        panic!("unexpected failure: {bare:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(model.kind, bare.kind);
+    assert_eq!(model.reason, bare.reason);
+    assert_eq!(message, bare_message);
+    assert!(!message.contains("private tool input"));
+}
+
+#[test]
+fn provider_codes_and_request_ids_are_one_bounded_line() {
+    let mut detail = aimux_core::ApiCallError::new(
+        "request rejected",
+        "https://test.invalid",
+        serde_json::json!({}),
+    );
+    detail.status_code = Some(400);
+    detail.provider_code = Some(format!("code\n{}", "p".repeat(1_000)));
+    let mut headers = std::collections::HashMap::new();
+    headers.insert(
+        "x-request-id".into(),
+        format!("first\r\n{}", "r".repeat(1_000)),
+    );
+    detail.response_headers = Some(headers);
+    let failure = error(
+        AiMuxError::ApiCall(Box::new(detail)),
+        &CancellationToken::new(),
+    );
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("unexpected failure: {failure:?}");
+    };
+    let provider_code = model.provider_code.expect("a code");
+    assert!(!provider_code.contains(['\n', '\r']), "{provider_code}");
+    assert!(
+        provider_code.chars().count() <= FAILURE_CAUSE_CHARS,
+        "{provider_code}"
+    );
+    assert!(provider_code.starts_with("code "), "{provider_code}");
+    let request_id = model.request_id.expect("a request id");
+    assert!(!request_id.contains(['\n', '\r']), "{request_id}");
+    assert!(
+        request_id.chars().count() <= FAILURE_CAUSE_CHARS,
+        "{request_id}"
+    );
+    assert!(request_id.starts_with("first "), "{request_id}");
 }

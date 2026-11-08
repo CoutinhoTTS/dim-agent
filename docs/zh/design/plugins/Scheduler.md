@@ -1,6 +1,6 @@
 # Scheduler
 
-状态：设计已批准，可选包实现见 [#317](https://github.com/arcships/dim/pull/317)。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：优先 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
+状态：设计已批准，可选包实现见 [#317](https://github.com/arcships/dim/pull/317)。总体设计：[overview §4](../overview.md#4-插件目录)；作用域：[ADR 002](../../adr/002-plugin-scope.md)（进程 + Session）。阶段：P2。语言：Rust，原生，无 Node 依赖（[overview 附录 C](../overview.md#附录-c-实现语言)）。TypeScript 包已随迁移移除。
 
 **交付边界。** 包及其公开流程验证由 [#317](https://github.com/arcships/dim/pull/317) 提供，按 §1.3 显式安装。C4 工具 #150、Settings 来源声明/读写 #175、事件 #177、S2 sessions、实时权限读取 #259、原生输入所有权 #267 与 S10 的[公开装配](../../../design/process-typescript.md#52-public-pluginfiles-binding)已提供公开依赖。Agents 空闲卸载 #126/#331 与首次 reuse 合同 #339 已合入。包使用统一升级的 rutis 0.16.0，并保留 §1.3 与附录 D 的失败报告检查；不扩充 core 或 rutis。
 
@@ -56,48 +56,45 @@ flowchart LR
 共享声明加载仍有限制：模块顶层加载卡住会使宿主启动超时；进程模块不在顶层执行业务 I/O。
 
 [已确认的功能依赖绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-在可选 Session 工具模块声明 `definePlugin.inject: ["scheduleJobs", "toolRegistry"]`。
+声明 `scheduleJobs` 与 `toolRegistry` 为这个可选 Session 工具模块的依赖。
 提供者激活、退役、重试和恢复采用该绑定的当前规则，Scheduler 不另定接入策略或复制错误文本。
 进程依赖稳定边界仍适用；#35 访问选择已确定，包须实施绑定的生命周期合同。
 
 | 入口 | 当前实现与约束 |
 | --- | --- |
 | Session 工具 | 由进程行经 partRegistry 注册的 C4 Session 定义注入 toolRegistry，在 apply 中以其声明和异步 execute 注册 schedule，注册不做 I/O；注册和提供者代际变化遵循当前 C4 绑定（§1.1）。 |
-| 进程包 / scheduleJobs | ServerConfig.session_typescript.rows 中的一行在共享运行时装载包的普通进程 owner；每个 Session 在该运行时挂载其 Session 定义的一份副本。Session 工具在 definePlugin.inject 声明 scheduleJobs（§1.1）。 |
+| 进程包 / `scheduleJobs` | 经 `AgentBuilder::optional_plugin` 注册的可选进程行 `Scheduler` 装载进程 owner；其 `apply` 经 `partRegistry` 注册 `SchedulerSession` 部分。Session 部分经 `names.key()` 读取 `scheduleJobs`（§1.1）。 |
 | 管理命名空间 | 进程行先恢复运行存储，再把 schedule 注册到 managementMethods 并发布 scheduleJobs。恢复失败时保留 fault，仍注册命名空间后使行失败，让后续调用返回该行的失败状态。原生按调用准入及 report/drain 跟随注册行的生命周期和状态。 |
-| Settings | owner settings.read/update、settings/schedule 已实现（#175/#177）。仅进程 row 登记来源 schedule、用户文件 schedule.json、无 projectFile，以及 userOnly /max_concurrent_runs（§7.1）。使用时读取已校验/默认化文档，以 expectedRevision 做 CAS。整份文档的本地写入沿用 Settings 信任边界（§7），不证明经过 Scheduler 保存。 |
+| Settings | 仅进程 row 登记来源 schedule、用户文件 schedule.json、无 projectFile（§7.1）。使用时读取已校验/默认化文档，以文档 revision 做 CAS。原生绑定使用类型化 owner 读写；客户端通过 schedule.* 管理任务，而不是通用 settings.*。 |
 | 存储 | [公开绑定](../../../design/process-typescript.md#52-public-pluginfiles-binding)在宿主授权 product root 提供 pluginFiles。宿主在启用行前创建 `scheduler/`；父目录缺失时在事务回调前返回 `io`。Scheduler 内部 v1（A.7）与宿主外层 v1 不变。 |
 | Sessions | 既有信封 {ok:true,value} / {ok:false,error:{code,message,retryable}}；launch 返回 {sessionId,policy}，input 返回 {inputId,sequence}，lookup 返回 accepted/unknown，直接使用既有形状。 |
 | 原生生命周期 | S2 调用各自持有租约。[#126](https://github.com/arcships/dim/issues/126) 的 Agents 自动空闲卸载由 [#331](https://github.com/arcships/dim/pull/331) 提供。Scheduler 不把断开当作关闭，不自建卸载循环。 |
 
 ### 1.2 影响面
 
-不提运行时、门面、loader、事件格式或 rutis 改动，新业务归 Scheduler 包。来源、工具与管理命名空间分别由 Settings、ToolRegistry、运维方消费；scheduleJobs 只连接功能的两个真实作用域。不增加注册表、就绪服务、通知总线或 App Server 业务模块。
+不提门面、loader、事件格式或 rutis 改动，新业务归 Scheduler 包。运行时装配新增一个入口 `AgentBuilder::optional_plugin`，使进程行为可选（宿主不等待它），`plugin_rows` 返回带可选行 id 的 `PluginRows`；不改变核心就绪路径或机制。来源、工具与管理命名空间分别由 Settings、ToolRegistry、运维方消费；scheduleJobs 只连接功能的两个真实作用域。不增加注册表、就绪服务、通知总线或 App Server 业务模块。
 
 ### 1.3 具体包行
 
-可选包位于 `runtime/plugins/scheduler`，包名 `@dimcode/scheduler`；根模块为进程插件，
-并在 apply 中经 `partRegistry` 把 `session.ts` 注册为 Session 定义 `SchedulerSession`，即 Session 工具。
-插件目录带有 `dim-plugin.json`，是 `runtime/default-plugins.json` 列出的默认插件，由 PluginManager 加载（`--defaults`）。
-嵌入宿主仍可从清单的 `code` 字段构造下面这一行。
+原生实现位于 `crates/dim-agent-scheduler`。进程部分是经 `AgentBuilder::optional_plugin` 注册的可选行，Session 部分由该行在 `apply` 中经 `partRegistry` 注册。`dimcode` 通过 `dim_app_server::cli` 的 `ProductInstall` 安装它，它不在默认插件清单中。
 
 | row 字段 | 进程行 |
 | --- | --- |
-| `id` | `scheduler` |
-| `name` | `@dimcode/scheduler` |
+| `id` | `Scheduler` |
+| `name` | `Scheduler` |
 | `config` | `{}` |
-| `inject` | `sessions`、`sessionPermissions`、`settings`、`pluginFiles`、`managementMethods`、`partRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`；apply 把 `schedule` 注册到 `managementMethods`，把 Session 定义注册到 `partRegistry` |
+| `inject` | `settings`、`pluginFiles`、`managementMethods`、`sessionPermissions`、`partRegistry`；`sessions` 经宿主分派名称调用（§1.1） |
+| `provides` | `scheduleJobs`；apply 把 `schedule` 注册到 `managementMethods`，把 `SchedulerSession` 部分注册到 `partRegistry` |
 | `settings` | §7.1 完整的 schedule 来源及 schema |
 
-Session 定义注入 `scheduleJobs` 与 `toolRegistry`，不提供服务，在 apply 中把 `schedule` 注册到 `toolRegistry`。
+`SchedulerSession` 部分注入 `scheduleJobs`、`toolRegistry`、guide 条目、`SessionConfig` 与 `SessionIdentity`，不提供服务，在 apply 中把 `schedule` 注册到 `toolRegistry` 并注册 §5.2 guide 条目。
 
 **失败 owner 报告。** 统一的 [rutis 0.16 升级](../rutis-0.16-upgrade.md)
 提供附录 C 与附录 D 第 8、12、13 项要求的加载失败报告。运行存储不可读或无效时，
 进程行失败，`schedule.*` 返回 `service_unavailable`，原始字节保持不变。
 行级依赖与失败断言保持原样。Scheduler 与宿主使用同一 SDK 版本，不增加加载器绕过逻辑。
 
-模块的 definePlugin 与包行声明相同依赖和方法种类；两个行属于同一功能，
+可选进程行与其注册的 Session 部分声明相同依赖和方法种类；它们属于同一功能，
 不是两个运行时。进程原行提供 scheduleJobs 并注册管理命名空间，不增加方法适配器或 Session 转发插件。
 结构 config 不含任务、权限默认值、凭据、定时配置或运行状态。
 
@@ -113,8 +110,9 @@ sessionPermissions 与 sessions 由同一稳定 Agents 目录提供，按调用�
 开始清理后，保留的 handler 使用[已确认功能绑定](../../../design/process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
 的当前不可用提供者与重试合同，不固化其错误文本，也不假定具体的提供者重新接入路径。
 
-进程行注册的声明只有 A.3 的六个字面方法：list/history 不修改状态并使用 report；
-其余四个修改方法使用 drain；全部 progress:false。结果与错误使用既有 MethodReply；
+进程行注册的声明只有 A.3 的七个字面方法：list、history 和 watch 不修改状态并使用 report；
+其余四个修改方法使用 drain；除 watch 外都使用 progress:false，watch 声明 progress，
+其项就是这次观察的变化（§11.2、A.3）。结果与错误使用既有 MethodReply；
 工具把 A.2 回复放入 ToolResult.content 与 isError，不新增 App Server 方法。
 
 | 决定点 | 必需读取 |
@@ -285,7 +283,7 @@ equal 比较预设，并把每个工具列表视为集合，忽略顺序和重�
 `within(x,savedEffective)` 与 `within(x,currentStarterOrHostBound)`。
 这是 S2 的保守 cap 稳定检查，不是逐工具权限等价判定。不得为通过检查而改写被复用 Session 的权限。
 
-TypeScript 包按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
+`PermissionPolicy::cap` 与 `within`（`crates/dim-agent-types/src/permission.rs`）按共享[权限 cap 样例](../../../../tests/fixtures/permission-policy-cap.json)
 实现该纯计算。样例分为 cap 向量和独立 reuse 向量，后者包含 x、savedEffective、
 liveBound、withinSaved、withinLive。标记 job-save-and-launch 的 cap 向量使用仅含
 预设的任务请求；launch-only 向量验证完整策略的 launch 输入，不扩大 Job.policy。
@@ -334,8 +332,10 @@ sequenceDiagram
 | 位置 | 模型看到的内容 | 形式 | 位置与存续 |
 | --- | --- | --- | --- |
 | 调用方 Session | `schedule` 声明 | 已采用配置中的工具声明（每个 Session；只在交互式 leader 中可用） | 配置；压缩后保留 |
+| 调用方 Session | `wakeup` 声明 | 已采用配置中的工具声明（每个 Session；只在交互式 leader 中可用） | 配置；压缩后保留 |
 | 调用方 Session | `schedule` 结果 | `ToolResult.content` | 批次结果位置；压缩后仅存于摘要 |
 | 运行 Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`，随后是作为用户内容的提示词 | 一个 Queue 输入的 raw 标记块 + 用户文本 | 位于其 `input/consumed` 位置；无 key，因此压缩后只经由摘要；若在切点前已消费，子分支会继承 |
+| 被唤醒 Session | `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`，随后是作为用户内容的提示词 | 一个 Queue 输入的 raw 标记块 + 用户文本 | 位于其 `input/consumed` 位置；无 key（§10） |
 | 保存方分支 | `<dim-scheduler kind="report" job="..." run="...">`，随后是运行结局、已知 Session id 与历史读取路径（A.6） | 经现有 sessions.input 写的一个 Steer 输入的 raw 标记块 | 位于其消费位置；无 key；失败或丢失后不补发 |
 
 运行 Session 是非交互的：ask_user 与 schedule 仍声明，处理函数返回错误；reuse 的先前运行保留为普通输入历史。任务/运行记录经 ToolResult.content 或已消费的结果报告到达调用模型，不自动把存储、定时器或诊断注入上下文。
@@ -349,32 +349,35 @@ sequenceDiagram
 | `schedule` 声明的 inputSchema | Protocol：动作集合、`job_id`、`enabled`、`limit` 以及 `job` 对象及其字段 |
 | `schedule` 声明的 description | Protocol："Manage scheduled jobs across this host, including other workspaces." 说明工具的作用范围；"Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch." 与 "An omitted policy keeps its stored value, whose default can change with the saving origin." 陈述运行时保证。Policy："Inspect the old-to-new authority transition in the result." 是工作方式指引 |
 | `schedule` 结果 | Protocol：首行 `schedule: <code>` 与其消息、`schedule is available only in interactive leader Sessions.`、`schedule: cancelled before handover`，以及两条卸载通知。代码为 `schedule_invalid`、`schedule_not_found`、`schedule_conflict`、`service_unavailable`、`service_reloading` 和 `invalid_data`；模型读取并按之行事 |
-| 运行标记 | Protocol：元素 `dim-scheduler`、其 kind `scheduled-run` 与 `report`、属性 `job` 与 `run`，以及各自开辟的输入。scheduled-run 的正文是任务名，其后的文本是为该任务保存的提示词；report 的正文陈述运行结局、已知时的 Session id，以及运行历史所在 |
+| `wakeup` 声明的 description | Protocol："The wakeup fires one turn on the same Session with the given prompt, preserving its history and branch; it can be listed and cancelled from any client, and an expired or cancelled wakeup is never replayed." 陈述工具行为与重放规则；首句命名动作 |
+| `wakeup` 结果 | Protocol：首行 `wakeup: created` 与错误的首行 `wakeup: <code>`、`wakeup is available only in interactive leader Sessions.`、`wakeup: cancelled before handover`，以及两条卸载通知；记录字段是 protocol 的标识符 |
+| 运行标记 | Protocol：元素 `dim-scheduler`、其 kind `scheduled-run`、`report` 与 `wakeup`、属性 `job` 与 `run`，以及各自开辟的输入。scheduled-run 的正文是任务名，其后的文本是为该任务保存的提示词；wakeup 的正文是 wakeup id，其后的文本是保存该唤醒时用的提示词；report 的正文陈述运行结局、已知时的 Session id，以及运行历史所在 |
 | 运行结果报告的正文 | Protocol：`Scheduled job …, run …: <state> (<detail>).`、已知时的 Session id 与运行可报告的结局词表。Policy：`Inspect schedule.history for this job.` 是工作方式指引，位于正文最后一行；它所写的方名属 protocol |
 
 报告的正文保留其句子，并以 `escaped(...)` 作为一整段文本转义，与 Workflow 报告的做法相同，因此带有标记文字的任务 id 或结局细节无法开启或关闭该标记；属性同样转义。
 
-policy 文本是出厂配置成员：`code.config.description` 替换声明的 description，`code.config.report_guidance` 替换结果报告的指引行；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一行指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 scheduler 对这次运行结局的记述，因此含换行的值会在插件加载时被拒绝（`scheduler/index.ts`）。改动它的 profile 也保持它只有一行。
+policy 文本是出厂配置成员：`description` 替换声明的 description，`report_guidance` 替换结果报告的指引行（附录 G）；产品不设置它们，因此内置文本生效。一个成员承载一段文本——整段 description，或一行指引——其中的 protocol 句子由流程测试钉住：候选若改动其中一句，就是改动 protocol，必须与行为和测试一起落地（[面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)）。`report_guidance` 必须是一行，且由配置强制：guide 条目（§5.2）告诉模型报告的最后一行是指引，不属于 scheduler 对这次运行结局的记述，因此含换行的值会在安装插件时被拒绝。改动它的 profile 也保持它只有一行。
 
-两个 kind 都带有 guide 条目：Scheduler 的 Session 部件在 `apply` 中为 `dim-scheduler` 注册一个条目，按 session 范围生效，因此 scheduled-run 标记所开辟的运行 Session 中的请求、以及报告落到的保存方分支所在的 Session 中的请求，各自带上本 Session 部件的该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
+三个 kind 都带有 guide 条目：Scheduler 的 Session 部件在 `apply` 中为 `dim-scheduler` 注册一个条目，按 session 范围生效，因此 scheduled-run 标记所开辟的运行 Session 中的请求、wakeup 标记所开辟的被唤醒 Session 中的请求、以及报告落到的保存方分支所在的 Session 中的请求，各自带上本 Session 部件的该条目（[Prompt §6.2](Prompt.md#62-写入者)）。
 
 在报告标记出现之前的历史按原样保留：没有任何东西重写历史，所以恢复的分支回放的是旧的裸文本，通道规则的例外清单不因它而增加（[面向模型的提示词 §6.1](../model-prompts.md#61-覆盖什么)）。
 
 ### 5.2 guide 条目
 
-一个条目覆盖两个 kind，其文本是代码（[Prompt §5](Prompt.md#5-复现它的事实)）：
+一个条目覆盖三个 kind，其文本是代码（[Prompt §5](Prompt.md#5-复现它的事实)）：
 
 ```
-<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next.
+<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next. And <dim-scheduler kind="wakeup">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id.
 ```
 
-每一句都是 protocol，各自说明模型定位这两个标记所需的一件事：
+每一句都是 protocol，各自说明模型定位这些标记所需的一件事：
 
-- 「a scheduled job's saved prompt, delivered when the job runs, and … how that run ended」——两个标记各是什么。
+- 「a scheduled job's saved prompt, delivered when the job runs, and … how that run ended」——各个标记是什么。
 - 「job names the job, run names the run, in both.」——属性。
 - 「In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel.」——scheduled-run 输入的形状，以及其提示词到达的通道。
 - 「In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request.」——报告的正文形状，及其信任类别。
 - 「The report's last line is not part of that account: it is guidance on what to do next.」——结尾行的归类：它是对接下来做什么的指引，不属于它上面的记述。
+- 「And <dim-scheduler kind=\"wakeup\">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id.」——wakeup 标记的 kind、一次性投递与正文（§10）。
 
 它在形式与长度上沿用 exec 通知的条目（`<dim-notification>`，序号 10，[WorkspaceTools](../../../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec)）：一个用属性携带一次运行标识的运行时通知。
 
@@ -383,6 +386,8 @@ policy 文本是出厂配置成员：`code.config.description` 替换声明的 d
 | 接口 | 类型 | 用途 |
 | --- | --- | --- |
 | `schedule` | 注册到 `toolRegistry` 的工具（Session），风险 `persistent_configuration` | 模型管理任务 |
+| `wakeup` | 注册到 `toolRegistry` 的工具（Session），风险 `persistent_configuration` | 模型为自己的 Session 安排唤醒（§10） |
+| `session.wakeup.create/list/cancel` | `sessionMethods`（Session，命名空间 `session.wakeup`） | 客户端创建、读取与取消一个 Session 的唤醒（§10） |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods`（进程，命名空间 `schedule`） | 运维方管理任务 |
 | 运行结果投递 | 向保存方分支尝试一个 Steer，不补发（A.6） | Scheduler 自有通知；持久记录为 schedule.history |
 | CLI 入口 | `dimcode scheduled <verb>` 与 `/scheduled` 面板（[管理界面](../cli-commands.md#管理界面)） | 运维方在终端经这些方法管理任务：面板中每个任务一个条目，提供 toggle、edit、add、remove、run 与 history；子命令是同一适配器，无需 Session |
@@ -390,11 +395,11 @@ policy 文本是出厂配置成员：`code.config.description` 替换声明的 d
 
 ## 7. 安全
 
-schedule 声明 persistent_configuration，Permission 按未分类处理：FullAccess 允许（E1）、WorkspaceWrite 询问、ReadOnly 拒绝，不改 Permission（#45）。运行只写输入，工具按运行 Session policy 准入，不预授审批。工具任务记录 created_by。owner settings.update 不能改变 userOnly /max_concurrent_runs；已实现的受保护客户端 settings.update 可以。任务不存凭据。工具可访问本宿主 Scheduler 的全局任务：已准入的交互 leader 能跨 Session/工作区 list/get 任务提示词，并更新另一分支的任务。授权更新按 §3.3 接管后续权限和报告路由，不通知之前的保存分支；管理权限同样能读取全部任务提示词。这不提供 Session/cwd 隔离。
+schedule 声明 persistent_configuration，Permission 按未分类处理：FullAccess 允许（E1）、WorkspaceWrite 询问、ReadOnly 拒绝，不改 Permission（#45）。运行只写输入，工具按运行 Session policy 准入，不预授审批。工具任务记录 created_by。Scheduler 跨任务最多准入八个活动运行，工具和管理方法均不配置此上限（A13）。任务不存凭据。工具可访问本宿主 Scheduler 的全局任务：已准入的交互 leader 能跨 Session/工作区 list/get 任务提示词，并更新另一分支的任务。授权更新按 §3.3 接管后续权限和报告路由，不通知之前的保存分支；管理权限同样能读取全部任务提示词。这不提供 Session/cwd 隔离。
 
-schedule 来源沿用 [Settings 的信任边界](../appserver/settings-service.md#7-安全)：受保护的本地客户端和用户自身配置均为受信任写入者。整份文档的 settings.update 或直接编辑用户文件可以指定 created_by 与 policy_cap；Scheduler 使用这些声明值决定未来的权限上限与报告路由。这些值是配置，不是 Scheduler 确实捕获过分支权限的证明。这类写入不视为 schedule.save，不将来源归一为 user，不合成权限上限，也不重定向报告。写入者负责文档语义一致性，包括修改任务时递增 revision；A.5 的 revision 比较无法识别复用同一 revision 的编辑。需要 Scheduler 捕获来源/上限并管理任务 revision 时使用 schedule.save。
+schedule 来源沿用 [Settings 的信任边界](../appserver/settings-service.md#7-安全)：用户自身持久化配置受信任。原生客户端使用 schedule.*；此 Rust 来源不经通用 settings.read/update 暴露。持久化文档可以指定 created_by 与 policy_cap；Scheduler 使用这些声明值决定未来的权限上限与报告路由。这些值是配置，不是 Scheduler 确实捕获过分支权限的证明。这类写入不视为 schedule.save，不将来源归一为 user，不合成权限上限，也不重定向报告。写入者负责文档语义一致性，包括修改任务时递增 revision；A.5 的 revision 比较无法识别复用同一 revision 的编辑。需要 Scheduler 捕获来源/上限并管理任务 revision 时使用 schedule.save。
 
-写入整份用户文档是运维方行为，可以修改所有任务和报告目标；它的范围大于始终捕获 user 且只记历史的管理 schedule.save。项目来源不得提供这些权限。进程内插件仍受信任（AGENTS.md 规则 11）；userOnly 是既有 owner 写入限制，不是针对这类插件的沙箱。来源编辑不修改已接受运行固定的 report_to 或已启动权限。未来运行仍应用 §3.3 的实时 starter/宿主上限及 reuse 检查；配置的 cap 不授予超出这些上限的权限。包须在 launch 或 reuse 输入前执行这些实时权限检查。不增加来源证明服务、签名、额外元数据存储、Settings 限制或 core 协议。
+写入整份用户文档是运维方行为，可以修改所有任务和报告目标；它的范围大于始终捕获 user 且只记历史的管理 schedule.save。项目来源不得提供这些权限。进程内插件仍受信任（AGENTS.md 规则 11），不受 Settings 沙箱隔离。来源编辑不修改已接受运行固定的 report_to 或已启动权限。未来运行仍应用 §3.3 的实时 starter/宿主上限及 reuse 检查；配置的 policy cap 不授予超出这些上限的权限。包须在 launch 或 reuse 输入前执行这些实时权限检查。不增加来源证明服务、签名、额外元数据存储、Settings 限制或 core 协议。
 
 ### 7.1 Settings 来源
 
@@ -405,8 +410,8 @@ Scheduler 进程 row 在其 apply 中登记唯一来源（[Settings §3.1](../ap
 | source | schedule |
 | userFile | schedule.json；原生 profile 改用 Settings 既有 user/schedule 行 |
 | projectFile | 缺省：仅用户 scope，无项目作用域或合并 |
-| userOnly | ["/max_concurrent_runs"]；Scheduler 的 owner 写入保留此值 |
-| schema 根 | 对象，含 jobs（数组，默认 []）及 max_concurrent_runs（整数，最小 1，默认 4）；任务字段与约束见 A.1/A.4 |
+| 文档根 | 对象，含 jobs（数组，默认 []）；任务字段与约束见 A.1/A.4 |
+| 旧字段 | max_concurrent_runs（整数，最小 1，默认 4）仅为持久化文档兼容而保留读取，任务写入保留其值，不影响准入。固定上限为八（A13），不要求可配置的并发字段或 userOnly 声明。 |
 
 Settings 在外部边界统一应用默认值并校验文档。非法文档返回错误，不视为空任务列表。来源只保存任务；A.7 内部 v1 运行历史仍保存在 pluginFiles 中。读取或修改该文档不触发包的结构重载。
 
@@ -434,7 +439,105 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 
 ## 9. 向机制所有者提出的需求
 
-无。以现有 C3/C4、S2、Settings、pluginFiles 为前提；附录 F 区分已明确的绑定和包验收，实现不增加可选服务 API、通知协议、运行时事件或基础设施需求。
+唯一新增机制是绑定用到的运行时装配入口：`AgentBuilder::optional_plugin`（可选进程行）、`plugin_rows` 返回的 `PluginRows`，以及用于 Session 部分的 `PartRegistry::register`。以现有 C3/C4、S2、Settings、pluginFiles 为前提；附录 F 区分已明确的绑定和包验收，实现除这些装配入口外不增加可选服务 API、通知协议、运行时事件或基础设施需求。
+
+## 10. Session 作用域的一次性唤醒
+
+唤醒（wakeup）是一次性的、按计划投向现有 Session 的 `input/message`：经 `session.wakeup` 方法创建、列出与取消，或在交互式 leader Session 中经 `wakeup` 工具调用。它不是 Job：不捕获策略、不 launch 任何东西、没有截止期，也从不出现于 `schedule.list` 或运行历史。
+
+### 10.1 所有者与记录
+
+唤醒由 Scheduler 进程部分拥有，理由与 §1 给任务的理由相同：触发器是宿主侧定时器，必须在目标 Session 空闲或已卸载、且没有任何客户端连接时仍能触发，记录必须越过客户端退出与守护进程重启而存在。Session 部分不拥有其中任何一项（[ADR 002](../../adr/002-plugin-scope.md) D1）；Session 侧只是经 keyed service 转发到进程所有者的 C1 表面，正如 `SchedulerSession`→`ScheduleJobs` 转发 `schedule` 工具一样（[session-boundary](../contracts/session-boundary.md) D2 的"关于 Session 的客户端方法"行）。
+
+记录存放于 Scheduler 自己的 [`pluginFiles`](../../../../crates/dim-app-server/README.md#trusted-plugin-storage) 作用域下的 `scheduler/wakeups.json`：宿主不变的 `{version: 1, text}` 信封内的、自身的内层 v1 文档，与 `scheduler/runs.json`（A.7）使用同一个 `withLock` 与 `file.replace` 事务写入。`runs.json` 原样不动，不做任何迁移。
+
+| 字段 | 含义 |
+| --- | --- |
+| `wakeup_id` | 记录身份；工具与方法返回它 |
+| `session_id`, `branch_id` | 目标；记录永不改变它们 |
+| `at` | 写输入的规范 UTC 时刻（A.1 的时间戳形式） |
+| `prompt` | 投递的文本（非空，与任务提示词一样至多 32 KiB） |
+| `state` | `scheduled`、`fired`、`cancelled` 或 `expired`；三种终态带 `settled_at` |
+| `created_at`, `settled_at?` | 规范 UTC 时间戳 |
+
+文件缺失意味着没有记录。不是合法 v1 的文件——畸形 JSON、未知版本、重复 id 或不一致的记录——与非法运行存储一样使行失败，字节原样保留。
+
+### 10.2 方法与工具
+
+`session.wakeup` 是 Scheduler 的 Session 部件注册的叶子 `sessionMethods` 命名空间（[session-boundary A.1](../contracts/session-boundary.md)）。Rpc 对每个调用恢复已卸载的 Session，因此目标处于冷态时 list 与 cancel 仍可用。
+
+| 方法 | 参数 | 回复 |
+| --- | --- | --- |
+| `session.wakeup.create` | `{sessionId, branchId, at, prompt}` | `{wakeupId}` |
+| `session.wakeup.list` | `{sessionId, branchId?}` | `{wakeups: [{wakeupId, at, prompt, state}]}`，新的在前；`branchId` 缺省为 `main` |
+| `session.wakeup.cancel` | `{sessionId, wakeupId}` | 本调用把 `scheduled` 记录置终态时回复 `{}`；记录已到终态时回复 `{state}` |
+
+`at` 是绝对的 RFC 3339 时刻。字段为 camelCase 且 `deny_unknown_fields`，空字符串与相邻 Session 方法一样是 `invalid_params`。错误：`invalid_params` 对应畸形 `at`、空字段、未知字段或超过 32 KiB 的提示词；`wakeup_not_found` 对应 cancel 指定的记录不属于调用方 Session（另一个 Session 的 id 与未知 id 回答相同）；Rpc 自己的 `session_closed` 对应不存在的 Session id；Scheduler 行缺失、重载或失败时，方法表给出 `unknown_method`、`service_reloading` 或 `service_unavailable`。大小界在 wire 边界检查，因此调用方超长的提示词绝不会成为存储数据的 `invalid_data`；记录自身的校验仍作为存储侧守卫。
+
+`wakeup` 工具接受 `{at, prompt}`，Session 与分支缺省为调用方。其声明在 `prompt` 的说明中写明至多 32768 个 UTF-8 字节，处理函数对更长的提示词以 `invalid_params` 拒绝；界以处理函数为唯一权威，因为 JSON Schema 的 `maxLength` 按字符而非字节计数。其处理函数像 `schedule` 工具一样拒绝非交互 Session 与 Collaboration 成员，拒绝时不写任何东西。
+
+### 10.3 触发与取消边界
+
+定时器把唤醒求值与任务窗口放在同一个每秒一趟的通道里；没有第二个调度器，也不经过 Job 引擎路径。`scheduled` 记录的时刻在宽限窗口内被观察到时触发一次：进程所有者经公共 `sessions.input` 写一个 Queue 输入，`submissionId` 为 `wakeup:<wakeup_id>`，首个 raw 块为 `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`，提示词作为内容。除此之外什么都不调：没有 `sessions.launch`、没有 `sessions.stop`、没有 `withdraw`、没有截止期。同一趟里多条到期的记录按其时刻（`at`）顺序到达各自的 Session，时刻相同的按记录 id 排序；文件顺序不是契约。
+
+目标自己的 InputQueue 与回合调度器决定输入变成什么：空闲 Session 起一个回合，运行中的在 `turn/end` 后每回合一个地排队，已卸载的 Session 由 `sessions.input` 内部的 acquire 恢复。Session 保持其 id、`main` 分支与整条 Timeline；fork 是不同的 Session id，不继承任何东西。
+
+记录只在输入的写入发布后才置为 `fired`。取消/触发边界就是那次写入：先置终态的 `session.wakeup.cancel` 阻止输入被写，写入之后到达的 cancel 报告 `fired` 且不是错误。通道与 cancel 在记录层面串行，因此这两种结局是穷尽的：`{}` 回复绝不覆盖已写入输入的记录。因此 cancel 可能等待与一次冷 Session 恢复同样长的时间，因为通道在写输入期间持有该锁。同一把锁也覆盖 §10.4 的过期检查：其 `sessions.lookup` 同样 acquire 目标，因此检查一条陈旧记录可能恢复一个空闲卸载的 Session，cancel 也可能要等这次恢复。这是可接受的：要准确回答提示词是否已投递必须读目标的 Timeline，而 `sessions` 服务没有任何跳过 acquire 的读取。代价有界：每条陈旧记录一次查询，且只针对越过宽限的记录；确定答案会落定记录，因此只有暂时性失败使记录无法落定时，后续通道才会重复查询。目标 Session 已不存在（`session_closed`、`branch_missing`，或 `branch_ended`：已结束的支线不接受新输入）的记录置为 `cancelled`，绝不重建 Session。任何其他写失败都让记录保持 `scheduled`：下一趟以同一 submission id 重试，而分支对每个 id 只接受一次，或由宽限窗口将其过期。
+
+### 10.4 重启与过期
+
+记录越过目标空闲卸载与守护进程重启而存在。该规则由定时器的每秒通道（随行启动）强制执行：启动时重新求值每条 `scheduled` 记录。仍在 60 s 宽限（A.4 的窗口规则）内的时刻触发；更早的置为 `expired` 且永不重放；Session 或分支已不存在的记录置为 `cancelled`。输入的写入先于记录的落定发布，因此在两者之间停止的进程会留下一条 `scheduled`、而其提示词已在目标历史中的记录；对这样的记录，通道在过期它之前执行与重启处理不确定运行相同的 `sessions.lookup`（`submissionId` 为 `wakeup:<wakeup_id>`），找到输入即置为 `fired` 且不再写第二份，因此已投递的提示词绝不会被报告为 `expired`，投递仍恰好一次。只有查明确认目标从未接受该 submission 的查询才使记录过期，查明确认 Session 或分支已不存在的则置为 `cancelled`；其他任何失败都让记录保持 `scheduled`，下一趟重复该检查，直到得到确定答案。创建时已超过宽限的时刻立即记为 `expired`。过期检查不 launch、不停止任何东西，也不写任何输入；它对目标的唯一影响是 `sessions.lookup` 内部的 acquire，可能恢复一个空闲卸载的 Session（§10.3）。
+
+**保留。** 终态记录在落定后没有消费者：`list` 是它唯一的读者，而没人列出的记录本就不可恢复，因此这个界并不损失设计承诺的信息。终态记录在落定满七天后被移除——按 `settled_at` 而非 `created_at` 计算，因此创建很久之后才触发的记录不会被提前移除；定时器通道在与本次其他结局相同的一次写入中移除它们，因此文件永无界增长、每秒通道绝不多解析它必须解析的内容，`list` 读到的正是存储中的内容。通道每秒读一次文件、取一次时钟读数、每趟至多写一次。
+
+### 10.5 Goal 与 Collaboration
+
+活跃 Goal 中的唤醒像用户输入一样流入：它是普通 Queue 输入，其 `turn/end` 只是 Goal 的一个决策点，不改变 Goal 状态，也不消耗延续预算——预算只数 Goal 自己的延续输入（[Goal §2](Goal.md#2-数据与状态)）。在 Collaboration 成员 Session 中工具拒绝；经方法创建的唤醒仍是普通输入，与其他输入一样按 sequence 与 leader 的委派交错。
+
+规则检查：定时器只经公共 `sessions` 服务写 `input/message`（§4 规则 1）；唤醒输入只作为已消费的 Queue 输入到达模型（§4 规则 6）；core 中不新增任何结构或业务——记录是 Scheduler 自己的业务存储（D4），表面是指定的 `sessionMethods` 命名空间（D5）；无需 ADR，因为 D1 的作用域规则与 D2 的客户端方法行已决定归属。
+
+## 11. 客户端变更通知
+
+Scheduler 的记录是进程状态，没有 Timeline 事实，因此要展示它们的客户端读取所有者自己的查询——唤醒读 `session.wakeup.list`，任务读 `schedule.list` 与 `schedule.history`——否则只能轮询。已提交的变更以 Session 通知的形式公告（[Session 广播通知](../appserver/session-notices.md)）：`{source: "Scheduler", kind: "wakeup", data: {branchId, wakeupId, state}}` 发往目标 Session 的通道，在记录写入提交之后由 Scheduler 自己的上下文调用 `session_broadcast::notify` 发出。通知报告记录已经改变；所有者自己的查询才是真相，不认识 `source` 或 `kind` 的客户端直接忽略。
+
+### 11.1 一次性唤醒
+
+| 变更 | 通知 | 时机 |
+| --- | --- | --- |
+| `create` 存入记录 | `state` 是记录创建时的状态：`scheduled`；时刻已超出宽限期时为 `expired` | 文件写入提交之后 |
+| `cancel` 结算一条 `scheduled` 记录 | `cancelled` | 文件写入提交之后；对终态记录的 cancel 不改变任何东西，也不发通知 |
+| 定时器通道结算记录 | 每条被结算的记录一条通知：`fired`、`cancelled`（目标 Session 或分支已不存在）或 `expired` | 这一趟的结算写入提交之后 |
+| 保留期清理 | 无 | 被清理记录最后一次可读的变化在它结算时就已公告 |
+
+- `fired` 通知是已提交状态的通知。通道先把输入发布到 Timeline，再结算记录，然后在结算写入提交之后公告。它与输入被 Session 分派时发出的 `session.event` 没有顺序关系，两者都可能先到达客户端（[Session 通知 §4](../appserver/session-notices.md#4-发出)；契约的 Order 规则只覆盖通过广播观察到事件后再响应的事件所有者）。客户端用输入的 submission id `wakeup:<wakeup_id>` 把通知与输入对应起来。
+- 通知带 `branchId`，因为记录指向一个分支；但它在 Session 的通道上传递：attach 到该 Session 的每个客户端都会收到，与它查看哪个分支无关。
+- 不写 Timeline 事件，也不加入 `hello.features`：通知不是后续决策使用的事实，通知也不是方法（[Session 广播通知 §5](../appserver/session-notices.md#5-rpc-转发)）。协议 v3 连接会收到它；v1 与 v2 永远不会。
+- 投递遵循通知契约：没有装载、或没有客户端观察的 Session 没有监听者，通知被丢弃，也不会重放。客户端在 attach 之后、以及收到每条通知时读取 `session.wakeup.list`。
+
+### 11.2 任务与运行
+
+管理客户端没有 Session，因此任务与运行这一半是调用连接上的连接绑定变化流，而不是 Session 通知。`schedule.watch {}` 声明 `progress`，在观察期间保持调用打开，并把每一项作为该调用的 progress 发送：`management.progress {id, method: "schedule.watch", data}`，在回复之前写出，绝不会被回复扣住。每个观察从 0 开始编号：
+
+| 项 | 时机 |
+| --- | --- |
+| `{seq: 0, kind: "watching"}` | 一次，在连接上的观察注册之后、任何变化能发给它之前 |
+| `{seq: n, kind: "jobs"}` | `schedule` Settings 文档的一次写入提交：任务保存、删除、暂停/恢复，以及运行对任务 `session_id` 的一次写入；来自 `schedule` 来源的 `settings.changed` 事件 |
+| `{seq: n, kind: "run", jobId, runId, state, terminal}` | 一次运行的记录改变：该次写入中记录经历的每个状态一项，按写入发生的顺序；`terminal` 恰在结束运行的状态上为 true：`completed`、`failed`、`cancelled`、`timed_out`、`lost`、`skipped` 或 `missed` |
+
+- 项只发给观察过的连接：没有广播，未观察的连接什么也收不到。
+- 每个连接一个观察：同一连接上的第二次 `schedule.watch` 让前一个调用回答 `{}` 并接管，因此一次变化只发一项。前一个调用的 progress 在其回复处结束。
+- 观察属于接纳它的那一代。调用按客户端看到的方式以三种之一结束：
+
+  | 事件 | 打开的 `schedule.watch` 调用回答 |
+  | --- | --- |
+  | Scheduler 这一代卸载（重载、禁用、关闭） | `operation_interrupted`，由现有调用准入发出。客户端再次调用 `schedule.watch`；命名空间重载期间，该调用回答 `service_reloading`，可重试 |
+  | 同一连接再次调用 `schedule.watch` | `{}`，新调用接管 |
+  | 连接关闭 | `{}`，无人收到。断开本身不取消任何东西，因此处理器在 `caller.closed()` 上结束 |
+
+- 观察以调用的回复结束，而不是以通知结束：被注入行的绑定被撤销时，rutis 取消消费者的代令牌，早于正在停止的这一代任何监听者或任务运行，此后它的 caller 一律回答 `gone`（A.2）。
+- progress 是尽力而为：连接承受不了的投递会被丢弃，项可能丢失。每一项都带自己的 `seq`；缺口告诉客户端重新读取。
+- 客户端规则：调用 `schedule.watch`，在 `seq: 0` 到达之后用 `schedule.list` 与 `schedule.history` 读取，从而关闭注册与读取之间的竞态；每收到一项就重新读取；遇到 `seq` 缺口就全部重新读取；收到 `operation_interrupted` 后再次调用 `schedule.watch`。`schedule.list` 与 `schedule.history` 才是真相。
+- 不声明通知名：`hello.features` 与命名空间的其他方法一起列出 `schedule.watch`，这些项是该调用的 progress，不是通知。
 
 ## 附录 A. 接口细节
 
@@ -445,7 +548,7 @@ Settings 在外部边界统一应用默认值并校验文档。非法文档返�
 | Job | `id`、`name`、`schedule`（A.4）、`prompt`（文本 ≤ 32 KiB）、`cwd`、`resource_node`（仅 P3；当前包不含该字段，使用控制节点）、`model`（`None` = profile 的模型）、`agent_id`（可选；`None` = Agents 的默认 profile）、`mode`（`create` \| `reuse`）、`session_id`（`reuse` 在首次运行时绑定）、`policy`（可选预设，只收窄）、`policy_cap`（最近一次授权保存时与 created_by 一起捕获）、`enabled`、`enabled_at?`（启用时必须存在，禁用时不存在）、`max_run_minutes`（默认 60，A7）、`revision`、`created_by`（`user` \| `tool{session_id,branch_id}`；最近一次授权保存） |
 | Run | `run_id`、`job_id`、`window`（时刻或 `manual`）、`state`、`deadline_at?`、`session_id?`、`session_origin?`（`launch` \| `reuse`）、`policy?`（运行 Session 的实际权限）、`input_event_id?`、`submission_id`、`report_to`（工具保存任务的保存方分支；管理保存任务无此字段）、`created_at`、`ended_at`（仅终态）、`detail`。终态 `state` 即运行结果；时间戳使用 UTC `YYYY-MM-DDTHH:mm:ss.sssZ`，固定三位小数，使时间顺序与字典序一致。 |
 
-运行状态：`skipped`（重叠、容量、禁用、节点不可用、policy、任务改变、`settings_read_failed` 和 `binding_unconfirmed`）、`missed`、`launching`、`submitted`、`running`，终态 `completed`/`failed`/`cancelled`/`timed_out`/`lost`。A.5.1 的 `binding_conflict` 是继续运行时的 Run.detail 诊断，不是跳过结果。每个任务保留最近 100 次终态运行，活动运行、自持 Session 清理尚未结算的记录，以及每个仍被引用 Session 的最后一条 launch 所有权记录另行保留（A8、A.7）。Settings 来源 `schedule` 保存一个文档 `{ jobs: [Job], max_concurrent_runs }`（A13），由 Settings 在写入和读取持久化文件时按 Scheduler 的 schema 校验并填充默认值；Scheduler 按交付的样子使用。任务写入是 Scheduler 对该文档的类型化写入，按文档 revision 做 CAS，因此工具保存和管理保存绝不会静默互相覆盖，但不认证其他客户端/文件写入（§7）。Job.revision 是选中任务的 revision，由 Scheduler 每次任务变更时推进；它不同于 CAS 使用的 Settings 不透明文档 revision。运行记录使用现有 `pluginFiles` 事务（A.7）。
+运行状态：`skipped`（重叠、容量、禁用、节点不可用、policy、任务改变、`settings_read_failed` 和 `binding_unconfirmed`）、`missed`、`launching`、`submitted`、`running`，终态 `completed`/`failed`/`cancelled`/`timed_out`/`lost`。A.5.1 的 `binding_conflict` 是继续运行时的 Run.detail 诊断，不是跳过结果。每个任务保留最近 100 次终态运行，活动运行、自持 Session 清理尚未结算的记录，以及每个仍被引用 Session 的最后一条 launch 所有权记录另行保留（A8、A.7）。Settings 来源 `schedule` 保存一个任务文档及 §7.1 的旧兼容字段。Settings 在写入和读取持久化数据时应用 Scheduler 的文档默认值与校验；Scheduler 直接使用交付的任务。任务写入是 Scheduler 对该文档的类型化写入，按文档 revision 做 CAS，因此工具保存和管理保存绝不会静默互相覆盖，但不认证其他客户端/文件写入（§7）。Job.revision 是选中任务的 revision，由 Scheduler 每次任务变更时推进；它不同于 CAS 使用的 Settings 不透明文档 revision。运行记录使用现有 `pluginFiles` 事务（A.7）。
 
 以下字段是重启后仍需使用的事实，保留在上述既有记录中，不增所有权存储或调度状态文档。
 
@@ -491,7 +594,7 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 
 ### A.3 管理方法
 
-命名空间 `schedule` 注册到 `managementMethods`：其声明列出下列方法（除 `list` 和 `history` 外均为 `mutating`）；其 `call(MethodCall, cancelled, progress): async -> MethodReply` 分派它们。参数和结果是 JSON 对象；错误为 `{code, message}`，业务代码见附录 C，JSON-RPC 错误映射归 Rpc。
+命名空间 `schedule` 注册到 `managementMethods`：其声明列出下列方法（除 `list`、`history` 和 `watch` 外均为 `mutating`）；其 `call(MethodCall, cancelled, progress): async -> MethodReply` 分派它们。参数和结果是 JSON 对象；错误为 `{code, message}`，业务代码见附录 C，JSON-RPC 错误映射归 Rpc。`schedule.watch` 声明 `progress`，不声明通知（§11.2）。
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
@@ -501,8 +604,9 @@ cwd 默认取调用方 Session 配置；P3 前没有 resource_node，使用控�
 | `schedule.set_enabled` | `{job_id, enabled}` | 暂停/恢复 |
 | `schedule.run_now` | `{job_id}` | 它接受或跳过的 `Run` 记录（A.1）：`run_id`、`job_id`、`window`、`state`、`detail`、`created_at`、`ended_at`、`submission_id`，以及该运行实际具备的 A.1 可选字段 |
 | `schedule.history` | `{job_id, limit?}` | 运行列表，最新在前 |
+| `schedule.watch` | `{}` | `{}`。注册调用连接的观察并在观察期间保持打开（§11.2）；同一连接的第二次观察让前一个调用回答 `{}` 并接管 |
 
-进程行的 schedule 命名空间（§1.3）复用现有准入：list/history 为 report，变更为 drain，使已接受工作在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method。
+进程行的 schedule 命名空间（§1.3）复用现有准入：list/history/watch 为 report，变更为 drain，使已接受工作在卸载前结算。Pending/重载 owner 返回 service_reloading，Failed/Unresolved 返回 service_unavailable，禁用/不存在返回 unknown_method。
 
 ### A.4 调度格式
 
@@ -594,7 +698,7 @@ Session，在记录仍属于任务最近 100 条终态运行时保持被引用�
 launch 一个 Session。不增加立即删除策略，也不从旧运行推断绑定。
 
 同一窗口到期的未绑定 reuse 任务会并发写同一个 Settings 文档，最多同时有
-`max_concurrent_runs` 个，因而可能彼此冲突。后续窗口若 launch 新 Session，不会继承
+八个（A13），因而可能彼此冲突。后续窗口若 launch 新 Session，不会继承
 首次窗口的历史。
 
 一次性禁用使用 A.4 的既有已记录窗口检查：已有准入输入或终态运行时，由定时器普通
@@ -722,7 +826,7 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 
    跨来源编辑：从工具分支 A 保存一个没有显式 policy 的 create 模式任务，启动运行并观察其输入已发布。随后管理 schedule.save 将来源/上限一起替换为 user/宿主最大值，后续运行采用管理只读默认值且只记历史；再从 FullAccess 工具分支 B 省略 policy 只改名时，两者一起替换为 B/其当前上限，后续运行采用 FullAccess 并报告给 B。验证工具描述说明接管，结果展示 ReadOnly → FullAccess 及来源/上限/报告目标变化。已接受运行仍报告给 A，已启动权限不变。policy 超过新上限、CAS 过期或必需权限读取失败均保留旧任务及字段对；run_now 和 set_enabled 不改来源/上限字段对。在 launching 记录提交后、launch 前挂起运行、修改其任务，验证 skipped: changed 且不 launch/input；在 launch 后 input 前重复，保留自持 Session 供清理。修改另一任务不跳过本运行。授权保存沿用不重试 CAS 的规则。A.5.1 覆盖另一任务引起的一次绑定冲突及重读/复核重试；第二次明确冲突时，符合条件的未变任务仍输入一次、detail 记录 binding_conflict、任务保持未绑定，包含一次性 at 任务。任务改变/禁用/已有绑定/create、读取失败、明确拒绝及可能已提交回复沿各自结果。绑定前/期间重启结算 lost 并按来源报告，不重复 launch/input。验证下次运行只从 Settings 得知绑定，未使用 Session 遵循最近 100 条终态引用的保留规则。覆盖全局跨工作区工具可见性。
 
-15. 经受保护的本地 settings.update 和用户配置存储修改任务来源/上限，并递增 revision。未来运行使用配置的报告目标，仍受实时 starter/宿主上限约束，不替换字段或虚构 Scheduler 保存。已接受运行保留原目标和权限。展示同 revision 的原始编辑不会被已接受运行的 revision 复核识别（§7）。缺少配置时使用 schema 默认值；非法文档保持非法；拒绝项目 scope；owner 写入不能更改 /max_concurrent_runs，本地受保护客户端可以更改。
+15. 经用户自身持久化配置修改任务来源/权限上限，并递增 revision。未来运行使用配置的报告目标，仍受实时 starter/宿主上限约束，不替换字段或虚构 Scheduler 保存。已接受运行保留原目标和权限。展示同 revision 的原始编辑不会被已接受运行的 revision 复核识别（§7）。缺少配置时使用文档默认值；非法文档保持非法；拒绝项目 scope。工具和管理方法配置并发的尝试被拒绝，不改变任务。旧 max_concurrent_runs 小于或大于八时，仍准入八个不同任务的活动运行，第九个因容量跳过。任务写入保留旧字段；此 Rust 来源仍不经通用 settings.* 暴露。
 
 ## 附录 E. 假设
 
@@ -738,7 +842,7 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 | A9 | 工具只在交互式 leader Session 中可用；在其他 Session 中处理函数拒绝 | [Overview §6.2](../overview.md#62-约束) 约束 15；判断 | 运行可创建任务 |
 | A10 | 所有动作使用一个风险类别 | [Overview §6.2](../overview.md#62-约束) 约束 7 | 拆分出只读工具 |
 | A11 | 工具创建的任务使用调用方的资源节点 | 判断（overview §6.3） | 允许其他节点 |
-| A13 | 最大并发运行数 = 4，即 `schedule` 文档中仅限用户的字段 `max_concurrent_runs`，在每个窗口读取 | 判断；ADR 002 D4 | 其他上限 |
+| A13 | 跨任务最多八个活动运行，由 Scheduler 固定，不供用户配置。同一任务仍在活动时，后续窗口跳过，不排队补跑。 | 维护者决定 | 其他上限 |
 | A14 | 删除任务不停止其活动运行 | 判断 | 删除即停止运行 |
 | A15 | 每次授权保存时一起捕获来源/上限（§3.3） | E2 范围内的用户决定 | 其他保存授权语义 |
 
@@ -762,19 +866,28 @@ launch 一个 Session。不增加立即删除策略，也不从旧运行推断�
 | 记录完整性 | A.1 在既有 Job/Run 中明确启用锚点、接受时截止时间、实际权限与 Session 来源；A.7 明确首次生产的完整内部 v1。记录合同已由 #270 接受；实施后按附录 D 验收重启、超时与所有权保留；不提出 core/协议需求。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 已由 #331 合入。Scheduler 复用 S2 租约，不实现宿主卸载。 |
 
-已知首次复用限制（A.5.1）：同一窗口到期的未绑定 reuse 任务会并发写同一个 Settings 文档，最多同时有 `max_concurrent_runs` 个，因而可能彼此冲突。两次明确冲突时，首次窗口仍可执行并在 detail 记录 binding_conflict，但任务保持未绑定。这些运行及 `failed: binding_rejected`、`lost` 和跳过运行引用的 Session 均沿最近 100 条终态记录的引用保留规则。任务未绑定时，后续每个窗口都可能分配另一个 Session，不继承首次窗口的历史，不承诺更紧分配上限。未确认绑定回复仍跳过且不输入，只记历史，并由普通结算禁用一次性 `at` 任务而不运行。输入前重启时，已知 Session 的运行经 lookup 结算 lost，不修复绑定；工具保存任务的 lost 沿用 A.6 报告。
+已知首次复用限制（A.5.1）：同一窗口到期的未绑定 reuse 任务会并发写同一个 Settings 文档，最多同时有八个（A13），因而可能彼此冲突。两次明确冲突时，首次窗口仍可执行并在 detail 记录 binding_conflict，但任务保持未绑定。这些运行及 `failed: binding_rejected`、`lost` 和跳过运行引用的 Session 均沿最近 100 条终态记录的引用保留规则。任务未绑定时，后续每个窗口都可能分配另一个 Session，不继承首次窗口的历史，不承诺更紧分配上限。未确认绑定回复仍跳过且不输入，只记历史，并由普通结算禁用一次性 `at` 任务而不运行。输入前重启时，已知 Session 的运行经 lookup 结算 lost，不修复绑定；工具保存任务的 lost 沿用 A.6 报告。
 
 已知恢复限制：launch 可能在调用方消失后完成，Session id 尚未持久化。此时运行标为 lost，不再次启动；Scheduler 无法识别所产生的 Session 来跟踪或按保留期删除。明确记录该限制，留给后续统一恢复设计，不在此增加幂等协议、注册表或基础设施门槛。
 
 ## 附录 G. Rust 绑定
 
-下列公开绑定已可用；#317 的包拥有 Scheduler 功能服务和任务，交付仍须通过上述失败报告检查。
+Scheduler 以原生 Rust 实现，没有 TypeScript 包、Node 进程或回退路径。上文合同不变，只更换绑定。
+
+位置：独立业务 crate `crates/dim-agent-scheduler`，不属于 App Server 代码（principles §1）。产品入口经 App Server 的原生 profile 安装函数（`process_entry(args, provider, install)`）安装它，App Server crate 不依赖它；未安装它的宿主没有 `schedule.*` 方法和 `schedule` 工具。进程部分经 `AgentBuilder::optional_plugin` 添加，并在其 `apply` 中经 `partRegistry` 注册 `SchedulerSession` 部分。两部分都使用现有 Rust 名称：`Names::key`、`Key<T>`、`require_at`、`provide_as` 与 `PartRegistry::register`。
 
 | 中立 | Rust |
 | --- | --- |
-| 注册到 toolRegistry 的工具 schedule | SchedulerSession 在 apply 中经 `Keyed<ToolRegistry>` 调用 `tools.register(ctx, ToolContribution {definition, handler})`；execute(ToolCall,cancel) |
-| 注册到 `managementMethods` 的命名空间 `schedule` | 由 Rpc 按调用查找而不依赖 |
-| sessions | 公开命名服务 host_key("sessions")；原生请求类型和 AgentIndex::acquire 是私有实现，不是外部 crate API |
-| scheduleJobs | Scheduler 已实现的进程服务，依赖绑定见 §1.1 |
-| 进程存储 | 既有 pluginFiles.open scope，立即登记 effect 清理；使用 A.7 已确定的内部 v1 格式 |
-| 定时器 / 跟踪 | 进程插件拥有，立即登记清理，apply 后启动业务，卸载前停止新工作并结算 |
+| 注册到 toolRegistry 的工具 schedule | Session 部分经 `names.key()` 取得 `ToolRegistry`，在 apply 中调用 `tools.register(ctx, ToolContribution {definition, handler})` |
+| 注册到 `managementMethods` 的命名空间 `schedule` | 进程部分取得 `ManagementMethods` 并调用 `methods.register(ctx, "schedule", declarations, handler)`；Rpc 按调用查找，不依赖 Scheduler |
+| scheduleJobs | 以 `names::register::<ScheduleJobs>(catalog, None)` 注册的进程组名称；Session 部分经 `names.key()` 读取，没有接线部分或转发插件 |
+| sessionPermissions、settings、pluginFiles | App Server 的类型化服务（`SessionPermissions`、`SettingsService`、`PluginFileTransactions`），经 `names.key()` 取得；crate 依赖 `dim-app-server`，`xtask check` 允许该依赖 |
+| sessions | 共享的 host-dispatch 名称，以 JSON 信封调用；其原生请求类型是 App Server 私有实现 |
+| 权限 cap | `dim-agent-types` 中的 `PermissionPolicy::cap` 与 `within`，与 S2 launch 使用同一函数，并按共享样例测试 |
+| 进程存储 | App Server 的类型化 `PluginFileTransactions` 服务；宿主写 `{version: 1, text}` 信封，Scheduler 提供内部 v1 文本，字节与 TypeScript 版本相同 |
+| 定时器 / 跟踪 | 进程部分拥有：定时器、运行任务、恢复与保留在其任务跟踪器中运行，在方法与服务注册后启动。卸载时（`ctx.cancellation_token()`）停止新工作并结束等待，清理在存储 scope 关闭前等待跟踪器；已接纳的 `sessions` 调用先结算。仍活动的运行留在文件中，由下一代恢复。Session 工具返回 §1.3 的卸载结果及各自的 `schedule: cancelled before handover` 或 `wakeup: cancelled before handover` |
+| policy 文本 | `install_with(builder, SchedulerTexts {description, report_guidance})`；`install` 使用内置文本。含换行的 `report_guidance` 被拒绝 |
+| guide 条目 | Session 部分取得 `GuideEntries`，注册 §5.2 的条目，session 范围，order 110 |
+| 可选行 | `AgentBuilder::optional_plugin`：宿主不等待该行，依赖缺失或运行存储不可读只让 Scheduler 失败（附录 D 第 12 项） |
+| Cron 与时区 | `croner` 与 `chrono-tz`，由 `deny.toml` 检查。墙钟时间落在夏令时空档的触发被跳过，回拨时重复的时间只在较早的那一刻触发一次 |
+| 测试 | 经管理方法、`schedule` 工具与 CLI wire 测试的公开流程，脚本模型可挂起一个 turn；不添加私有辅助函数单元测试（AGENTS.md Testing） |

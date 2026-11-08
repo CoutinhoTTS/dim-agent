@@ -60,7 +60,23 @@
 <main>
   <h1>Rust 版 dimcode 发布 alpha</h1>
   <p class="lede">正式版和 beta 是 npm 包 <code>dimcode</code>（命令 <code>dim</code>），alpha 是单独的包 <code>dimcode-alpha</code>（命令 <code>dima</code>）。两个包可以同时装，互不覆盖；每个通道只在自己内部升级。</p>
-  <p>让 Claude 代办时，使用项目 skill <code>dim-alpha-release</code>（<a href="../../skills/dim-alpha-release/SKILL.md"><code>skills/dim-alpha-release/SKILL.md</code></a>）。它和本页步骤一致，改动时两边要一起更新。</p>
+  <p>让 agent 代办时，CI 发版和版本 PR 使用 <a href="../../.agents/skills/dim-release/SKILL.md"><code>dim-release</code></a>；<a href="../../skills/dim-alpha-release/SKILL.md"><code>dim-alpha-release</code></a>负责选择 alpha 路径，只有明确选择本机 Mac 时才执行本机发布命令。用法与版本字段见<a href="README.md#release-skills">发布文档</a>。</p>
+
+  <h2>让 agent 准备版本或发版</h2>
+  <p>可以直接使用下面的请求。若 agent 没有列出对应 skill，让它读取上面链接指向的仓库 <code>SKILL.md</code> 即可。</p>
+<pre><code>使用 $dim-release，准备下一个 alpha 的版本 PR。
+查询所有相关 npm 包和远端 tag，选择未使用的版本，同步版本字段并验证。
+只开 PR，不合并、不打 tag、不触发构建、不发布。
+
+使用 $dim-release，为 main 上已通过 CI 的发版提交构建 GitHub prerelease 草稿。
+检查产物后停在草稿，不公开 Release，不发布 npm。
+
+使用 $dim-release，把现有 GitHub prerelease vX.Y.Z-alpha.N 发布到 npm。
+沿用原始产物，通过配置好的 OIDC 工作流发布，不重新构建。
+
+使用 $dim-alpha-release，仅在本机 Mac 做 dry run，允许编译和校验。
+不发布 npm，不创建 GitHub tag 或 Release。</code></pre>
+  <p>手动准备版本 PR 时，先把统一版本号提交到 <code>Cargo.toml</code>、<code>Cargo.lock</code>、npm 外壳和 runtime 元数据，再合入 <code>main</code>、打对应的 <code>vX.Y.Z-alpha.N</code> tag。完整字段见<a href="README.md#version-preparation">版本准备</a>。本机脚本则临时改版本、结束时还原，两条路径不能混用。</p>
 
   <h2>通道规则</h2>
   <div class="table-wrap">
@@ -68,7 +84,7 @@
     <tr><th>版本号</th><th>npm dist-tag</th><th>安装 / 升级</th><th>当前用途</th></tr>
     <tr><td><code>X.Y.Z</code></td><td><code>latest</code></td><td><code>npm i -g dimcode</code></td><td>TS 版正式</td></tr>
     <tr><td><code>X.Y.Z-beta.N</code></td><td><code>beta</code></td><td><code>npm i -g dimcode@beta</code></td><td>TS 版 beta</td></tr>
-    <tr><td><code>X.Y.Z-alpha.N</code></td><td><code>alpha</code></td><td><code>npm i -g dimcode-alpha@alpha</code>，命令 <code>dima</code></td><td>Rust 版</td></tr>
+    <tr><td><code>X.Y.Z-alpha.N</code></td><td>CI 入口：<code>latest</code> / <code>alpha</code></td><td><code>npm i -g dimcode-alpha</code> 或 <code>npm i -g dimcode-alpha@alpha</code>，命令 <code>dima</code></td><td>Rust nightly，仍是预发布版本</td></tr>
   </table>
   </div>
   <p><code>scripts/publish-npm.mjs</code> 按版本号自动选 dist-tag 和外壳包：alpha 发 <code>dimcode-alpha</code>，只带 <code>dima</code> 命令；其他预发布标识（例如 <code>rc</code>）直接拒绝。平台包 <code>dimcode-&lt;平台&gt;</code> 和 <code>dimcode-web</code> 两边共用，外壳包锁定精确版本。alpha 构建默认使用独立的数据目录 <code>~/.dimcode-alpha</code>，不读写 <code>dim</code> 的 <code>~/.dimcode</code>。</p>
@@ -86,8 +102,15 @@
   </div>
   <p>只有想去掉上面那条「alpha 必须低于 beta」的限制时，才需要在 TS 仓库改 <code>packages/cli/src/core/upgrade/update-version.ts</code>，让预发布轨道只选同一标识的版本，然后发一版 beta。这个改动只对升级到新 beta 的用户生效，没升级的老版本仍按旧逻辑选。</p>
 
-  <h2>一条命令：build + 发布</h2>
-  <p>和 TS 版的 <code>bun publish:bin</code> 一样，在本机 Mac 上一次完成编译、打包和发布：</p>
+  <h2>GitHub 托管 runner 构建和发布</h2>
+  <p>手动从 <code>main</code> 准备下一个 GitHub alpha。预检读取入口两标签，并校验 Web、六平台 tarball 的完整性、源提交、账号构建以及入口的精确依赖；只有 Git tag 或 Web 源提交匹配不够。若选定的 main SHA 已有完整 nightly，普通构建请求会停止并提示，不会直接宣称跳过成功。否则它自动取号，由 GitHub 托管 runner 按目标系统和架构构建六个平台，并在 Ubuntu 构建 Web，把原始压缩包、清单和校验和上传到 prerelease 草稿。</p>
+  <pre><code>gh workflow run release.yml --ref main</code></pre>
+  <p>若已授权标签修复、镜像同步和安装验收，可加 <code>-f repair_nightly=true</code>：完整 nightly 会复用而不重建，通过验收后才报告无需构建。新构建仍须检查附件并在 GitHub 发布 prerelease，然后用它的真实 tag 运行 npm 工作流。GitHub 托管 runner 通过 OIDC 发布 Release 附件，验证完整性和来源后让入口 <code>latest</code> / <code>alpha</code> 同指新 nightly；平台包和 Web 仍只更新 <code>alpha</code>。不会发布 <code>dimcode</code> 或改动其任何标签。验收使用全新 prefix/cache 分别安装默认入口和 <code>@alpha</code>，在官方源及同步后的阿里镜像上核对包版本和 <code>dima --version</code>；镜像滞后也算失败。见<a href="README.md#alpha-npm-publication">发布配置与重试说明</a>。</p>
+  <pre><code>gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z-alpha.N -f publish=true</code></pre>
+  <p>纯标签恢复可用 <code>npm-publish.yml --ref main -f source_commit=FULL_MAIN_SHA -f publish=true</code>，只接受本次 dispatch 的 main SHA 且要求已有完整 nightly；不支持任意旧祖先提交。旧版本有已发布 GitHub Release 时仍可用 <code>release_tag</code> 重试，但不得回退标签；没有 Release 的旧 nightly 需要新 main 构建。入口 trusted publisher 要单独允许 <code>npm dist-tag</code>；从 <code>release.yml</code> 复用恢复流程还需以该调用工作流配置第二个 tag-only trusted publisher。首次运行前确认权限和 <code>NPM_ALPHA_PUBLISH_ENABLED=true</code>。</p>
+
+  <h2>本机替代方案：一条命令 build + 发布</h2>
+  <p>和 TS 版的 <code>bun publish:bin</code> 一样，在本机 Mac 上一次完成编译、打包和发布。这条替代路线仅发布 <code>alpha</code>，不对齐入口 <code>latest</code>、不同步镜像，也不提供 CI 的双入口验收；需要双标签 nightly 时使用上面的 CI 路线：</p>
 <pre><code>npm login --registry https://registry.npmjs.org   # 第一次
 node scripts/publish-alpha.mjs                       # 自动取下一个 alpha
 node scripts/publish-alpha.mjs 0.1.0-alpha.3         # 指定版本
@@ -117,8 +140,8 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（�
     </li>
     <li>
       <strong>发布 npm</strong>
-      <code>publish-npm.mjs --publish-local</code> 先发 6 个平台包，最后发 <code>dimcode</code>，全部打 <code>alpha</code> tag，然后打印 dist-tags。开了 2FA 的话每个包都会提示输入 OTP。
-      <code>--publish-local</code> 只接受 alpha；beta 和正式版只能从已发布的 GitHub Release 发。
+      <code>publish-npm.mjs --publish-local</code> 先发 6 个平台包和 Web，最后发 <code>dimcode-alpha</code>，全部打 <code>alpha</code> tag，然后打印 dist-tags。开了 2FA 的话每个包都会提示输入 OTP。
+      <code>--publish-local</code> 只接受 alpha；本仓库尚未配置 Rust beta 和正式版的 CI 发布。
     </li>
     <li>
       <strong>清理</strong>
@@ -139,19 +162,19 @@ node scripts/publish-alpha.mjs --platform darwin-arm64  # 只发指定平台（�
     <strong>账号插件：</strong>默认打出来的 alpha 不带 Dim 账号，只支持 API key。要带账号，运行前设置 <code>DIM_OAUTH_CLIENT_ID_CN</code> 和 <code>DIM_OAUTH_CLIENT_ID_GLOBAL</code>（不要提交到仓库）。
   </div>
 
-  <h2>验证</h2>
+  <h2>本机发布后验证</h2>
 <pre><code>npm view dimcode-alpha dist-tags
 npm i -g dimcode-alpha@alpha &amp;&amp; dima --version
 git status # 应该是干净的</code></pre>
   <p>应看到 <code>dimcode-alpha</code> 的 <code>alpha</code> 指向新版本，<code>dimcode</code> 的 dist-tag 没有变化，<code>dim</code> 仍是原来的版本。以前装过 <code>dimcode@alpha</code> 的用户不会再收到 alpha 升级，需要手动装一次 <code>dimcode-alpha@alpha</code>。</p>
 
-  <h2>出错时</h2>
+  <h2>本机命令出错时</h2>
   <ul>
     <li><strong>任何一步失败：</strong>修好后原样重跑同一条命令。重跑会从头编译，并取下一个版本号；发到一半的那个版本号作废，不会再用。</li>
     <li><strong>alpha 版本号高过 beta 被拦：</strong>显式指定一个更低的版本。不要去改这条检查。</li>
     <li><strong>某个平台编译失败：</strong>修好后重跑。没加 <code>--platform</code> 时，6 个平台包缺一个都不发。</li>
   </ul>
-  <p>也可以走 CI：打 <code>vX.Y.Z-alpha.N</code> tag，由 release CI 生成 GitHub Release，再用 <code>publish-npm.mjs --publish</code> 发布，流程同 <a href="../../.agents/skills/dim-release/SKILL.md">dim-release</a>。</p>
+  <p>CI 重试遵循 <a href="../../.agents/skills/dim-release/SKILL.md">dim-release</a>：源码不变时重试同一 tag 和原始 Release 包；源码变化才使用新版本。不要把本机命令“重新选下一版”的恢复方式套到 CI 发布。</p>
   <p>完整的发布约束见 <a href="README.md">docs/release/README.md</a> 和 <a href="../../.agents/skills/dim-release/SKILL.md">dim-release skill</a>。</p>
 </main>
 </body>

@@ -374,7 +374,15 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         let stopped = exported(&database, &session).await;
         assert_eq!(std::fs::read(&database).unwrap(), bytes);
         assert_eq!(stopped[0], live[0]);
-        assert_eq!(stopped.len(), live.len() + 2);
+        assert!(stopped.len() >= live.len() + 2);
+        for event in &events {
+            assert_eq!(
+                stopped.iter().find(|line| line["kind"] == "event"
+                    && line["event"]["id"] == event["event"]["id"]),
+                Some(*event),
+                "stopping the daemon preserves every exported fact"
+            );
+        }
         let stored_markers: (i64, i64) = rusqlite::Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap()
             .query_row(
@@ -389,6 +397,28 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         std::fs::copy(&database, &readonly).unwrap();
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).unwrap();
         assert_eq!(exported(&readonly, &session).await, stopped);
+
+        // A damaged request body fails the export before its first line: the
+        // preflight rebuilds and hash-checks every body.
+        let damaged = directory.join("copies/damaged.sqlite");
+        std::fs::copy(&database, &damaged).unwrap();
+        let connection = rusqlite::Connection::open(&damaged).unwrap();
+        assert!(
+            connection
+                .execute(
+                    "UPDATE timeline_content SET body = 'unreadable request body' \
+                     WHERE session_id = ?1 AND kind = 'node'",
+                    [&session],
+                )
+                .unwrap()
+                > 0
+        );
+        drop(connection);
+        assert!(
+            rejected(&damaged, &session)
+                .await
+                .contains("request content hash mismatch")
+        );
 
         for (version, dropped, end_index) in [
             (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;", true),
@@ -406,6 +436,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (30, "", false),
             (31, "", false),
             (32, "", false),
+            (33, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -431,8 +462,14 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else {
                 ""
             };
-            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index}
-                DROP TABLE session_worktrees; DROP TABLE worktree_directories; DROP TABLE agent_store_format;
+            // Every format before v33 lacks the worktree tables.
+            let worktrees = if version < 33 {
+                "DROP TABLE session_worktrees; DROP TABLE worktree_directories;"
+            } else {
+                ""
+            };
+            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees}
+                DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
             if version < 31 {
@@ -460,8 +497,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
 
         for (name, sql) in [
             ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
-                INSERT INTO agent_store_format VALUES (34);"),
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 35));
+                INSERT INTO agent_store_format VALUES (35);"),
             ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
         ] {
             let path = directory.join("copies").join(name);

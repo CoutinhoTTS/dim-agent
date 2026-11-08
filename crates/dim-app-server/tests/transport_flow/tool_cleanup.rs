@@ -1,5 +1,6 @@
 use super::*;
 use dim_agent_capabilities::{host::HostError, tool_registry::definition};
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 use std::{net::SocketAddr, process::Stdio};
 use tokio::{net::TcpListener, process::Command};
@@ -321,7 +322,7 @@ async fn running_tool_stop_and_close_survive_disconnect_during_cleanup() {
                 .unwrap()
                 .get_session(sid.as_str().unwrap())
                 .unwrap();
-            let events = v1_events(&session.history("main", None).await.unwrap(), 0);
+            let events = v1_events(&chain_events(&session, "main", ..).await.unwrap(), 0);
             let results: Vec<_> = events
                 .iter()
                 .filter(|e| e["name"] == "tool-result")
@@ -347,9 +348,12 @@ async fn running_tool_stop_and_close_survive_disconnect_during_cleanup() {
             assert!(process_exists(pid));
             assert!(session.state("main").unwrap().stopping);
             assert!(
-                !v1_events(&session.history("main", None).await.unwrap(), normal_high)
-                    .iter()
-                    .any(|e| e["name"] == "tool-result")
+                !v1_events(
+                    &chain_events(&session, "main", ..).await.unwrap(),
+                    normal_high
+                )
+                .iter()
+                .any(|e| e["name"] == "tool-result")
             );
             assert!(
                 tokio::time::timeout(Duration::from_millis(100), &mut stopped)
@@ -363,7 +367,10 @@ async fn running_tool_stop_and_close_survive_disconnect_during_cleanup() {
             assert_ok(&response);
             assert_ok(&origin.rpc("session.idle", json!({"sessionId":sid})).await);
             eprintln!("control -> stop completed after process exit");
-            let events = v1_events(&session.history("main", None).await.unwrap(), normal_high);
+            let events = v1_events(
+                &chain_events(&session, "main", ..).await.unwrap(),
+                normal_high,
+            );
             assert_eq!(
                 events
                     .iter()
@@ -390,7 +397,7 @@ async fn running_tool_stop_and_close_survive_disconnect_during_cleanup() {
                 .unwrap()
                 .get_session(sid.as_str().unwrap())
                 .unwrap();
-            let events = v1_events(&session.history("main", None).await.unwrap(), 0);
+            let events = v1_events(&chain_events(&session, "main", ..).await.unwrap(), 0);
             let results: Vec<_> = events
                 .iter()
                 .filter(|e| e["name"] == "tool-result")
@@ -449,8 +456,7 @@ async fn running_tool_stop_and_close_survive_disconnect_during_cleanup() {
                 .rpc("session.submit", json!({"sessionId":sid,"text":"late"}))
                 .await;
             assert_eq!(rejected["error"]["data"]["appError"], "session_closed");
-            let events: Vec<_> = session
-                .history("main", None)
+            let events: Vec<_> = chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()

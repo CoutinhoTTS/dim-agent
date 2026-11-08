@@ -56,13 +56,6 @@ impl Agent {
     pub fn catalog(&self) -> &rutis_loader::ServiceCatalog {
         self.0.builder.catalog()
     }
-    /// How many branch openings of this Agent's Sessions are alive: an
-    /// opening ends when its branch leaves `Loading` or its build is torn
-    /// down. For tests of that release.
-    #[cfg(feature = "testing")]
-    pub fn live_openings(&self) -> usize {
-        self.0.assembly.openings.alive()
-    }
     pub async fn create_session(&self, config: SessionConfig) -> Result<Session> {
         self.create(
             Uuid::new_v4().to_string(),
@@ -485,6 +478,21 @@ impl Session {
         }
         self.published(branch)?.input(data).await
     }
+    /// Appends a validated batch of input to `branch` as one atomic commit;
+    /// see [`Branch::inputs`] for the contract.
+    pub async fn inputs(
+        &self,
+        inputs: Vec<InputMessageData>,
+        branch: &str,
+    ) -> Result<Vec<Arc<AgentEvent>>> {
+        if let Some(error) = self.0.owner.faults.failure() {
+            return Err(error);
+        }
+        if self.0.owner.closing.is_cancelled() {
+            return Err(AgentError::Closed(self.id().into()));
+        }
+        self.published(branch)?.inputs(inputs).await
+    }
     /// See [`Branch::lookup`].
     pub async fn lookup(&self, branch: &str, id: &str) -> Result<Option<Arc<AgentEvent>>> {
         self.published(branch)?.lookup(id).await
@@ -521,74 +529,24 @@ impl Session {
         }
         idle
     }
-    pub async fn context(&self, branch: &str, through: u64) -> Result<ContextHistory> {
-        self.published(branch)?.context(through).await
+    /// See [`Branch::query`].
+    pub async fn query(&self, branch: &str, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        self.published(branch)?.query(query).await
     }
-    /// See [`Branch::compaction_cut`].
-    pub async fn compaction_cut(&self, branch: &str, through: u64) -> Result<Option<u64>> {
-        self.published(branch)?.compaction_cut(through).await
-    }
-    /// See [`Branch::context_page`].
-    pub async fn context_page(
-        &self,
-        branch: &str,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        self.published(branch)?
-            .context_page(after, limit, through)
-            .await
-    }
-    pub async fn history(
-        &self,
-        branch: &str,
-        through: Option<u64>,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        self.published(branch)?.history(through).await
-    }
-    pub async fn local<R: std::ops::RangeBounds<u64> + Send>(
-        &self,
-        branch: &str,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        self.published(branch)?.local(range).await
-    }
-    /// Reads a local page of complete batches without exceeding the line's
-    /// head: its published head while it is open, its fixed head once it ended.
-    /// A paging read does not rebuild stored requests: `context/prepare` and
-    /// `model/call` records carry an empty request. Use [`Self::local`] for
-    /// complete events.
-    pub async fn local_page(
-        &self,
-        branch: &str,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        if through > self.sequence(branch)? {
-            return Err(AgentError::InvalidInput("future Timeline sequence".into()));
-        }
-        let key = TimelineKey {
-            session_id: self.id().into(),
-            branch_id: branch.into(),
-        };
-        Ok(self
-            .0
-            .owner
-            .assembly
-            .store
-            .read_page_without_request_bodies(&key, after, limit, through)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
+    /// See [`Branch::batch_end`].
+    pub async fn batch_end(&self, branch: &str, sequence: u64) -> Result<()> {
+        self.published(branch)?.batch_end(sequence).await
     }
     pub fn sequence(&self, branch: &str) -> Result<u64> {
-        if let Some(head) = self.0.tree.ended_head(branch) {
-            return Ok(head);
+        match self.published(branch) {
+            Ok(line) => Ok(line.sequence()),
+            Err(AgentError::BranchEnded(_)) => self
+                .0
+                .tree
+                .ended_head(branch)
+                .ok_or_else(|| AgentError::BranchEnded(branch.into())),
+            Err(error) => Err(error),
         }
-        Ok(self.published(branch)?.sequence())
     }
     /// The fixed head of an ended line, `None` for an open or unknown one.
     pub fn ended_head(&self, branch: &str) -> Option<u64> {
@@ -616,6 +574,11 @@ impl Session {
     }
     pub fn branches(&self) -> Vec<TimelineInfo> {
         self.0.tree.list()
+    }
+    /// The complete branch directory: open, ending and ended lines. `main`
+    /// comes first, then the rest in branch identity order.
+    pub fn directory(&self) -> Vec<BranchDirectoryEntry> {
+        self.0.tree.directory()
     }
     pub async fn branch(&self, parent: String, at: u64, options: BranchOptions) -> Result<String> {
         self.branch_with_admission(parent, at, options, CancellationToken::new())
@@ -655,9 +618,6 @@ impl Session {
         branch: &str,
     ) -> Result<rutis::host::diagnostics::RuntimeDiagnostics> {
         Ok(self.published(branch)?.diagnostics())
-    }
-    pub async fn trace(&self, branch: &str, sequence: u64) -> Result<Option<TimelineTrace>> {
-        self.published(branch)?.trace(sequence).await
     }
     pub fn get<S: Clone + Send + Sync + 'static>(&self, branch: &str) -> Result<Option<S>> {
         Ok(self.published(branch)?.get::<S>())

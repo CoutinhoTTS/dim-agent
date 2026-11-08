@@ -5,6 +5,7 @@ use dim_agent_capabilities::session_broadcast::{
     SessionBroadcast, SessionBroadcastEvent, session_channel,
 };
 use dim_agent_runtime::Session;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_types::AgentEvent;
 use rutis::Ctx;
 use rutis::Disposer;
@@ -45,8 +46,7 @@ impl Events {
                 }
             })
             .unwrap();
-        let history: VecDeque<_> = session
-            .local(&branch, ..)
+        let history: VecDeque<_> = branch_events(session, &branch, ..)
             .await
             .unwrap()
             .into_iter()
@@ -98,9 +98,7 @@ impl Committed {
     }
     pub async fn next(&mut self) -> Arc<AgentEvent> {
         loop {
-            let next = self
-                .session
-                .local(&self.branch, ..)
+            let next = branch_events(&self.session, &self.branch, ..)
                 .await
                 .unwrap()
                 .into_iter()

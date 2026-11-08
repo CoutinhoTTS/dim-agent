@@ -10,6 +10,7 @@ use dim_agent_capabilities::{
     tool_registry::definition,
 };
 use dim_agent_runtime::SESSION_GROUP;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_types::{MessageContent, MessagePart, ModelRequest, Role};
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use rutis::host::{CtxHost, InstanceId};
@@ -101,7 +102,7 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
     assert_ok(&created);
     let sid = created["result"]["sessionId"].as_str().unwrap();
     let session = agent.get_session(sid).unwrap();
-    let before = session.history("main", None).await.unwrap();
+    let before = chain_events(&session, "main", ..).await.unwrap();
     let request = json!({"model":{"providerId":"018ec73f-0000-7000-8000-000000000009","modelId":"title"}, "request":{
         "system":"Write a title", "messages":[{"role":"user","content":"hello"}], "maxOutputTokens":32
     }});
@@ -159,11 +160,12 @@ async fn node_session_part_calls_provider_auxiliary_model_without_timeline_write
         requests.try_recv().is_err(),
         "invalid calls must not reach the model"
     );
-    let after = session.history("main", None).await.unwrap();
-    assert_eq!(
-        before.iter().map(|event| &event.id).collect::<Vec<_>>(),
-        after.iter().map(|event| &event.id).collect::<Vec<_>>()
-    );
+    let after = chain_events(&session, "main", ..).await.unwrap();
+    assert!(after.starts_with(&before));
+    assert!(after[before.len()..].iter().all(|event| {
+        matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_none() && data.effective_mode() == dim_agent_types::InputMode::Append)
+            || matches!(&event.kind, EventKind::InputApplied(data) if data.mode == Some(dim_agent_types::InputMode::Append))
+    }), "auxiliary calls append no business facts: {after:?}");
     let pending = client
         .send(
             "session.auxiliary.complete",
@@ -400,14 +402,6 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
     let second = new_session(&mut client, json!(["echo"])).await;
     let first_session = server.agent().unwrap().get_session(&first).unwrap();
-    let first_after = first_session.sequence("main").unwrap();
-    let second_after = server
-        .agent()
-        .unwrap()
-        .get_session(&second)
-        .unwrap()
-        .sequence("main")
-        .unwrap();
     let initial = when_served(
         &mut client,
         "session.observer.status",
@@ -415,17 +409,41 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
     )
     .await;
     assert_ok(&initial);
-    let loading: Vec<Value> = first_session
-        .local("main", ..=first_after)
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.second.status",
+            json!({"sessionId":first}),
+        )
+        .await,
+    );
+    let first_after = first_session.sequence("main").unwrap();
+    assert_ok(
+        &when_served(
+            &mut client,
+            "session.observer.status",
+            json!({"sessionId":second}),
+        )
+        .await,
+    );
+    let second_after = server
+        .agent()
+        .unwrap()
+        .get_session(&second)
+        .unwrap()
+        .sequence("main")
+        .unwrap();
+    let initial_records = initial["result"]["records"].as_array().unwrap();
+    let initial_through = initial_records
+        .last()
+        .map_or(0, |record| record["event"]["sequence"].as_u64().unwrap());
+    let loading: Vec<Value> = branch_events(&first_session, "main", ..=initial_through)
         .await
         .unwrap()
         .iter()
         .map(|event| json!({"sessionId":first,"branchId":"main","event":event}))
         .collect();
-    assert!(
-        loading.ends_with(initial["result"]["records"].as_array().unwrap()),
-        "{initial}"
-    );
+    assert!(loading.ends_with(initial_records), "{initial}");
     assert_eq!(initial["result"]["binding"]["sessionId"], first);
     assert!(
         initial["result"]["binding"]["config"]
@@ -503,8 +521,21 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
             .await,
     );
     let through = first_session.sequence("main").unwrap();
-    let expected: Vec<Value> = first_session
-        .local("main", first_after + 1..)
+    let child = first_session
+        .branch(
+            "main".into(),
+            through,
+            dim_agent_runtime::BranchOptions {
+                prompt: "child branch observation".into(),
+                source: dim_agent_types::BranchSource::Host {
+                    operation_id: "observation".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    first_session.idle(&child).await.unwrap();
+    let expected: Vec<Value> = branch_events(&first_session, "main", first_after + 1..=through)
         .await
         .unwrap()
         .iter()
@@ -520,41 +551,23 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         assert_ok(&observed);
         assert_eq!(observed["result"]["records"], json!(expected));
     }
-    let child = first_session
-        .branch(
-            "main".into(),
-            through,
-            dim_agent_runtime::BranchOptions {
-                prompt: "child branch observation".into(),
-                source: dim_agent_types::BranchSource::Host {
-                    operation_id: "observation".into(),
-                },
-            },
-        )
+    let child_through = first_session.sequence(&child).unwrap();
+    let child_history = branch_events(&first_session, &child, ..=child_through)
         .await
         .unwrap();
-    first_session.idle(&child).await.unwrap();
-    let child_history = first_session.local(&child, ..).await.unwrap();
     let child_records = client
         .rpc(
             "session.observer.through",
             json!({"sessionId":first,
-        "branchId":child,"sequence":first_session.sequence(&child).unwrap()}),
+        "branchId":child,"sequence":child_through}),
         )
         .await;
     assert_ok(&child_records);
-    let actual_child: Vec<_> = child_records["result"]["records"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|record| record["branchId"] == child)
-        .cloned()
-        .collect();
     let expected_child: Vec<_> = child_history
         .iter()
         .map(|event| json!({"sessionId":first,"branchId":child,"event":event}))
         .collect();
-    assert_eq!(actual_child, expected_child);
+    assert_eq!(child_records["result"]["records"], json!(expected_child));
     let view = session_copy(
         &ctx,
         session_instance,
@@ -665,18 +678,18 @@ async fn node_session_typescript_broadcast_isolation_fences_and_cleanup() {
         other["result"]["generation"]
     );
     let restored_session = server.agent().unwrap().get_session(&second).unwrap();
-    let restoring: Vec<Value> = restored_session
-        .local("main", ..)
+    let restored_records = restored["result"]["records"].as_array().unwrap();
+    let restored_through = restored_records
+        .last()
+        .map_or(0, |record| record["event"]["sequence"].as_u64().unwrap());
+    submit(&mut client, &second, "restored channel receives new facts").await;
+    let restoring: Vec<Value> = branch_events(&restored_session, "main", ..=restored_through)
         .await
         .unwrap()
         .iter()
         .map(|event| json!({"sessionId":second,"branchId":"main","event":event}))
         .collect();
-    assert!(
-        restoring.ends_with(restored["result"]["records"].as_array().unwrap()),
-        "{restored}"
-    );
-    submit(&mut client, &second, "restored channel receives new facts").await;
+    assert!(restoring.ends_with(restored_records), "{restored}");
     let current = server.agent().unwrap().get_session(&second).unwrap();
     assert_ok(
         &client
@@ -764,7 +777,7 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         call(&mut client, "session.observer.release_session", release).await,
         json!(false)
     );
-    assert!(session.unload_if_idle().await.unwrap());
+    super::collaboration::unload(&server.agent().unwrap(), &id).await;
 
     let id = new_session(&mut client, json!(["echo"])).await;
     let (session_instance, ctx, _, _) = controls.recv().await.unwrap();
@@ -793,7 +806,7 @@ async fn node_session_row_hold_lasts_until_released_or_its_row_unloads() {
         call(&mut client, "session.observer.release_session", release).await,
         json!(false)
     );
-    assert!(session.unload_if_idle().await.unwrap());
+    super::collaboration::unload(&server.agent().unwrap(), &id).await;
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -841,7 +854,6 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         assert_ok(&client.rpc("session.attach", attach.clone()).await);
         assert_eq!(loads.of(&id), (round + 1, round == 1));
         let session = server.agent().unwrap().get_session(&id).unwrap();
-        let after = session.sequence("main").unwrap();
         let status = when_served(
             &mut client,
             "session.observer.status",
@@ -849,10 +861,18 @@ async fn node_session_typescript_observes_a_session_across_idle_unloads() {
         )
         .await;
         assert_ok(&status);
+        assert_ok(
+            &when_served(
+                &mut client,
+                "session.second.status",
+                json!({"sessionId":id}),
+            )
+            .await,
+        );
+        let after = session.sequence("main").unwrap();
         submit(&mut client, &id, text).await;
         let through = session.sequence("main").unwrap();
-        let expected: Vec<Value> = session
-            .local("main", after + 1..)
+        let expected: Vec<Value> = branch_events(&session, "main", after + 1..=through)
             .await
             .unwrap()
             .iter()
@@ -945,6 +965,7 @@ async fn node_session_typescript_creation_config_and_misplaced_rows() {
             .accept(
                 "session.observer.status".into(),
                 json!({"sessionId":session.id()}),
+                None,
                 CancellationToken::new(),
                 |_| {},
             )
@@ -1091,7 +1112,7 @@ impl ModelDriver for CheckedModel {
             .cloned()
             .collect();
         let _ = self.tools.send(tools);
-        let batch = request.messages.last().is_some_and(|message| {
+        let batch = EchoModel::last_message(&request).is_some_and(|message| {
             message.role == Role::User
                 && match &message.content {
                     MessageContent::Text(text) => text == "batch",
@@ -1272,18 +1293,20 @@ pub(super) async fn plugin_active(server: &RunningServer, row: &Value) {
 /// The reply of `method` once the optional row that serves it has registered
 /// it: a Session is published without waiting for its optional rows, and a
 /// namespace is `unknown_method` until its row registers it.
+/// The availability deadline does not cancel an admitted call.
 pub(super) async fn when_served(client: &mut Client, method: &str, params: Value) -> Value {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let reply = client.rpc(method, params.clone()).await;
-            if !waiting(&reply) {
-                return reply;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let reply = client.rpc(method, params.clone()).await;
+        if !waiting(&reply) {
+            return reply;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{method} is served"))
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{method} is served: {reply}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Reconciles the loader's layers with a fixture layer `name` of
@@ -1341,6 +1364,36 @@ pub(super) fn session_copies(
         })
         .filter_map(|plugin| ctx.view(plugin.id))
         .collect()
+}
+
+/// Waits until a Session mounts `part` and the mounted copy is Active. A
+/// Session is published before its parts mount for it (process TypeScript
+/// §2.1, #207), and a row that contributes no method has no served call to
+/// wait on: the copy turns Active once its `apply`, which registers the row's
+/// tools, returns. Callers cover a single Session per server, as
+/// `node_session_typescript_tool_only_first_request_on_create_and_restore`
+/// does.
+pub(super) async fn session_part_active(server: &RunningServer, part: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let plugins = server.diagnostics().plugins;
+            let by_id = |id: rutis::host::PluginId| plugins.iter().find(|plugin| plugin.id == id);
+            let mounted = plugins.iter().any(|plugin| {
+                plugin.name == part
+                    && plugin.state == rutis::host::FiberState::Active
+                    && plugin
+                        .parent
+                        .and_then(by_id)
+                        .is_some_and(|mounter| mounter.name.starts_with("Session"))
+            });
+            if mounted {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the Session mounts an active copy of {part}"));
 }
 
 /// The one copy of `part` in the Session `session`, once it is mounted.
@@ -1409,6 +1462,21 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     let mut client = Client::new_version(&server, false, 3).await;
     let first = new_session(&mut client, json!(["ts_echo", "native_slow", "echo"])).await;
     let second = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    // A published Session mounts the row's parts after it is published
+    // (process TypeScript §2.1), so the first turn must wait for them or its
+    // request goes out without the row's tools.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": first}),
+    )
+    .await;
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": second}),
+    )
+    .await;
     submit(&mut client, &first, r#"tool:ts_echo {"text":"first"}"#).await;
     assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
     let status = client
@@ -1455,7 +1523,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
             .await,
     );
     let session = server.agent().unwrap().get_session(&first).unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let results: Vec<_> = history
         .iter()
         .filter_map(|event| match &event.kind {
@@ -1521,7 +1589,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
     assert_eq!(progress["params"]["data"]["phase"], "started");
     assert_ok(&client.response(progress_call).await);
     submit(&mut client, &first, r#"tool:ts_echo {"text":"malformed"}"#).await;
-    assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| result.result.is_error == Some(true)))));
+    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| result.result.is_error == Some(true)))));
 
     assert_ok(&client.rpc("session.submit", json!({"sessionId":first,"branchId":"main","text":r#"tool:ts_echo {"text":"cancel"}"#})).await);
     assert_ok(
@@ -1571,6 +1639,7 @@ async fn node_session_typescript_tools_methods_and_generation_lifetimes() {
             .accept(
                 "session.typescript.status".into(),
                 json!({}),
+                None,
                 CancellationToken::new(),
                 |_| {}
             )
@@ -1605,8 +1674,18 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
         ..Default::default()
     };
     let (server, _requests, _) = start(config.clone()).await;
+    plugin_active(&server, &fixture().rows[0]).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let session_id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    // The Session is published before the row's parts mount (process
+    // TypeScript §2.1): wait for them, or the first request carries no
+    // `ts_echo`.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session_id}),
+    )
+    .await;
     submit(&mut client, &session_id, r#"tool:ts_echo {"text":"saved"}"#).await;
     drop(client);
     server.shutdown();
@@ -1616,6 +1695,15 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
     plugin_active(&server, &fixture().rows[0]).await;
     assert!(server.agent().unwrap().get_session(&session_id).is_none());
     let mut client = Client::new_version(&server, false, 3).await;
+    // The call restores the Session and waits until the row's parts are
+    // mounted for it; the restored Session is published before they are
+    // (process TypeScript §2.1).
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session_id}),
+    )
+    .await;
     submit(
         &mut client,
         &session_id,
@@ -1659,7 +1747,7 @@ async fn node_session_typescript_restore_fork_delete_and_disabled_parts() {
         1
     );
     let fork = server.agent().unwrap().get_session(fork_id).unwrap();
-    let history = fork.history("main", None).await.unwrap();
+    let history = chain_events(&fork, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()
@@ -2050,6 +2138,15 @@ async fn node_session_typescript_accepts_type_array_schemas_and_names_a_refused_
     plugin_active(&server, &fixture().rows[0]).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let session = new_session(&mut client, json!(["ts_echo", "ts_nullable", "echo"])).await;
+    // The Session is published before the row's parts mount (process
+    // TypeScript §2.1); the first request must wait for the row so it offers
+    // `ts_nullable`.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
     submit(&mut client, &session, r#"tool:echo {"text":"offered"}"#).await;
     let offered = recorded.recv().await.unwrap();
     let nullable = offered
@@ -2154,7 +2251,7 @@ async fn node_session_typescript_failed_part_namespace_stays_unknown() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_session_typescript_tool_only_first_request_on_create_and_restore() {
+async fn node_session_typescript_required_tool_only_part_is_in_the_first_request() {
     let home = std::env::temp_dir().join(format!("dm-ts-tool-{}", uuid::Uuid::new_v4()));
     let mut parts = fixture();
     let entry = PathBuf::from(parts.rows[0]["name"].as_str().unwrap());
@@ -2170,9 +2267,98 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
     };
     let mut saved: Option<String> = None;
     for text in ["created", "restored"] {
-        // Once the plugin row has registered its part, the part settles
-        // before a Session that opens is published (ADR 006 D3,
-        // Publication), so its tool is in the first request.
+        // A required tool-only part, with no method namespace, is in the
+        // immediate first request after create and after restore
+        // (docs/design/session-typescript.md:429-431). Declaring it required
+        // publishes each Session only once its copy is Active
+        // (`assembly.rs:1525-1538`), so this flow submits with no readiness
+        // wait and still carries the tool.
+        let (mut builder, mut requests, _) = setup();
+        builder.require_part("SessionToolOnlyFixture");
+        let server = serve(
+            builder,
+            ServerConfig {
+                unix_path: Some(std::env::temp_dir().join(format!(
+                    "dm-ts-{}/server.sock",
+                    &uuid::Uuid::new_v4().simple().to_string()[..8]
+                ))),
+                ..config.clone()
+            },
+        )
+        .await
+        .unwrap();
+        plugin_active(
+            &server,
+            &config.session_typescript.as_ref().unwrap().rows[0],
+        )
+        .await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let session_id = match &saved {
+            Some(id) => {
+                assert!(server.agent().unwrap().get_session(id).is_none());
+                id.clone()
+            }
+            None => new_session(&mut client, json!(["ts_echo", "echo"])).await,
+        };
+        // No readiness wait: the required copy is Active before the Session
+        // is published, both for the created Session and for the one this
+        // round restores by its saved id.
+        submit(
+            &mut client,
+            &session_id,
+            &format!(r#"tool:ts_echo {{"text":"{text}"}}"#),
+        )
+        .await;
+        assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
+        let session = server.agent().unwrap().get_session(&session_id).unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
+        let result = history
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ToolResult(batch) => batch.results.first(),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(result.result.is_error, Some(true));
+        let dim_agent_types::ToolContent::Text(content) = &result.result.content else {
+            panic!("text result")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(content).unwrap()["arguments"]["text"],
+            text
+        );
+        saved = Some(session_id);
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// An optional tool-only row may become Active after the Session that opens
+/// before it was published (process TypeScript §2.1, #207), and
+/// `docs/design/session-typescript.md:429-431` calls optional parts "once
+/// they serve": this flow waits for the copy before the turn that must offer
+/// its tool, which is the race the CI failures showed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_optional_tool_only_part_is_called_once_it_serves() {
+    let home = std::env::temp_dir().join(format!("dm-ts-tool-{}", uuid::Uuid::new_v4()));
+    let mut parts = fixture();
+    let entry = PathBuf::from(parts.rows[0]["name"].as_str().unwrap());
+    parts.rows[0]["name"] = json!(entry.with_file_name("session-tool-only.ts"));
+    parts.rows[0]["provides"] = serde_json::from_str(include_str!(
+        "../../../../runtime/fixtures/session-tool-only.json"
+    ))
+    .unwrap();
+    let config = ServerConfig {
+        database_path: Some(home.join("sessions.sqlite")),
+        session_typescript: Some(parts),
+        ..Default::default()
+    };
+    let mut saved: Option<String> = None;
+    for text in ["created", "restored"] {
         let (server, mut requests, _) = start(config.clone()).await;
         plugin_active(
             &server,
@@ -2187,6 +2373,15 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
             }
             None => new_session(&mut client, json!(["ts_echo", "echo"])).await,
         };
+        // This row contributes no method to wait on, so load the Session
+        // (`session.methods` pins it, restoring the one the previous round
+        // saved) and wait for the copy whose `apply` registers `ts_echo`.
+        assert_ok(
+            &client
+                .rpc("session.methods", json!({"sessionId": session_id}))
+                .await,
+        );
+        session_part_active(&server, "SessionToolOnlyFixture").await;
         submit(
             &mut client,
             &session_id,
@@ -2195,7 +2390,7 @@ async fn node_session_typescript_tool_only_first_request_on_create_and_restore()
         .await;
         assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
         let session = server.agent().unwrap().get_session(&session_id).unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         let result = history
             .iter()
             .rev()
@@ -2244,6 +2439,14 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
     plugin_active(&server, &fixture().rows[0]).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let session_id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before reading it.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session_id}),
+    )
+    .await;
     let (session_instance, ctx, _, registry) = controls.recv().await.unwrap();
     let retained = registry.contributed("ts_echo").unwrap();
     let old = client
@@ -2280,7 +2483,7 @@ async fn node_session_typescript_row_reload_settles_tools_and_rejects_retained_h
             .await,
     );
     let session = server.agent().unwrap().get_session(&session_id).unwrap();
-    assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| {
         matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| {
             result.result.is_error == Some(true)
                 && result.result.content == dim_agent_types::ToolContent::Text("tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.".into())
@@ -2424,10 +2627,18 @@ async fn node_session_typescript_tool_result_carries_declared_effects() {
     plugin_active(&server, &fixture().rows[0]).await;
     let mut client = Client::new_version(&server, false, 3).await;
     let id = new_session(&mut client, json!(["ts_echo", "echo"])).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before the first request.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": id}),
+    )
+    .await;
     submit(&mut client, &id, r#"tool:ts_echo {"text":"declares"}"#).await;
     assert!(requests.recv().await.unwrap().contains(&"ts_echo".into()));
     let session = server.agent().unwrap().get_session(&id).unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let declared = events
         .iter()
         .find_map(|event| match &event.kind {
@@ -2452,6 +2663,381 @@ async fn node_session_typescript_tool_result_carries_declared_effects() {
             },
         ])
     );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Methods contract A.2 and the C4 binding: a TypeScript method provider
+/// declares a notification, keeps `origin.connectionId`, replies, then sends
+/// the notification through `callChannel`; the client receives it after the
+/// reply. An undeclared name rejects with `undeclared`, and `closed` resolves
+/// after the client disconnects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_sends_connection_bound_notifications() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut creator = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut creator, json!(["echo"])).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before the first call.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
+    let id = client
+        .send("session.typescript.channel", json!({"sessionId": session}))
+        .await;
+    let reply = client.read("the method reply").await;
+    assert_eq!(reply["id"], id, "{reply}");
+    assert_eq!(reply["result"]["code"], "undeclared", "{reply}");
+    assert!(reply["result"]["connectionId"].is_string(), "{reply}");
+    let note = client.read("the connection-bound notification").await;
+    assert_eq!(note["method"], "session.typescript.changed", "{note}");
+    assert_eq!(note["params"], json!({"ok": true}));
+    drop(client);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = creator
+            .rpc(
+                "session.typescript.channel_state",
+                json!({"sessionId": session}),
+            )
+            .await;
+        if state["result"]["closed"] == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the caller's closed is recorded: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// F1: a notification for a call that has replied is written before a later
+/// call's reply, not held behind it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_notification_of_a_replied_call_precedes_a_later_reply() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before the first call.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
+    let first = client
+        .send(
+            "session.typescript.channel_after_b",
+            json!({"sessionId": session}),
+        )
+        .await;
+    let blocked = client
+        .send(
+            "session.typescript.channel_block",
+            json!({"sessionId": session}),
+        )
+        .await;
+    let reply = client.response(first).await;
+    assert!(reply["result"]["connectionId"].is_string(), "{reply}");
+    let note = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.read("the notification of the replied call"),
+    )
+    .await
+    .expect("the replied call's notification is not held behind the blocked call");
+    assert_eq!(note["method"], "session.typescript.changed", "{note}");
+    assert_eq!(note["params"], json!({"call":"A"}), "{note}");
+    assert_ok(
+        &client
+            .rpc(
+                "session.typescript.channel_release",
+                json!({"sessionId": session}),
+            )
+            .await,
+    );
+    let reply = client.response(blocked).await;
+    assert_eq!(reply["id"], blocked, "{reply}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// F1: a call's notification follows that call's reply, not the newest
+/// call's, when two calls are in flight and the later one replies first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_notification_follows_its_own_call_not_the_newest() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before the first call.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
+    let held = client
+        .send(
+            "session.typescript.channel_hold_after_b",
+            json!({"sessionId": session}),
+        )
+        .await;
+    let fast = client
+        .send("session.typescript.channel", json!({"sessionId": session}))
+        .await;
+    let reply = client.response(fast).await;
+    assert_eq!(reply["id"], fast, "{reply}");
+    let note = client.notice("session.typescript.changed").await;
+    assert_eq!(note["params"], json!({"ok": true}), "{note}");
+    let release = client
+        .send(
+            "session.typescript.channel_release",
+            json!({"sessionId": session}),
+        )
+        .await;
+    loop {
+        let value = client.read("the held call's reply").await;
+        if value["id"] == json!(held) {
+            break;
+        }
+        assert_ne!(
+            value["method"], "session.typescript.changed",
+            "a notification of the held call preceded its reply: {value}"
+        );
+        if value["id"] == json!(release) {
+            continue;
+        }
+        panic!("unexpected message before the held call's reply: {value}");
+    }
+    let note = client.notice("session.typescript.changed").await;
+    assert_eq!(note["params"], json!({"call": "A"}), "{note}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// F1: a notification names its call (`callId` is required) and a connection
+/// the row received no call from is `gone`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_call_channel_checks_the_call_and_the_connection() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before the first call.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
+    let bad = client
+        .rpc(
+            "session.typescript.channel_bad_request",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_eq!(bad["result"]["code"], "bad-value", "{bad}");
+    assert!(
+        bad["result"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("callId")),
+        "{bad}"
+    );
+    let unknown = client
+        .rpc(
+            "session.typescript.channel_unknown",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_eq!(unknown["result"]["code"], "gone", "{unknown}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: an oversized notification from another language writes nothing and
+/// keeps the connection open. The bridge that carries the payload already
+/// refuses any message over 16 MiB, the same limit as the notification
+/// frame, so the refusal a foreign provider can actually observe is the
+/// bridge's (`bad-value`), not `too_large`: a request the App Server would
+/// encode past its frame limit cannot reach it. `too_large` itself is
+/// covered by the Rust binding's flow test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_oversized_notification_writes_nothing_and_keeps_the_connection() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before the first call.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
+    // The wait's own progress notices (`phase` started and settled, which the
+    // fixture writes before the reply) are the only frames this connection
+    // has taken; the call below must write nothing.
+    client.notices.clear();
+    let reply = client
+        .rpc(
+            "session.typescript.channel_too_large",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_eq!(reply["result"]["code"], "bad-value", "{reply}");
+    assert!(
+        reply["result"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("16 MiB")),
+        "{reply}"
+    );
+    assert_ok(&client.rpc("daemon.ping", json!({})).await);
+    assert!(
+        client.notices.is_empty(),
+        "an oversized notification was written: {:?}",
+        client.notices
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: a notification for a call that has already replied is written
+/// directly, in order after that reply and before the next reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_notification_after_the_reply_goes_out_in_order() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut client, json!(["echo"])).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before the first call.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
+    let replied = client
+        .rpc(
+            "session.typescript.channel_after_reply",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_ok(&replied);
+    let next = client
+        .send(
+            "session.typescript.channel_notify_after_reply",
+            json!({"sessionId": session}),
+        )
+        .await;
+    let note = client.read("the notification of the replied call").await;
+    assert_eq!(note["method"], "session.typescript.changed", "{note}");
+    assert_eq!(note["params"], json!({"after": "reply"}), "{note}");
+    let reply = client.response(next).await;
+    assert_eq!(reply["id"], next, "{reply}");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A.2: after its connection closes, the foreign binding answers a name the
+/// generation did not declare `undeclared`, and a declared name `gone`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_closed_connection_does_not_hide_an_undeclared_name() {
+    let (server, _requests, _release) = start(ServerConfig {
+        session_typescript: Some(fixture()),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut creator = Client::new_version(&server, false, 3).await;
+    let session = new_session(&mut creator, json!(["echo"])).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    // The Session is published before the row's parts mount for it (process
+    // TypeScript §2.1), so wait for the row before the first call.
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.typescript.channel_remember",
+                json!({"sessionId": session}),
+            )
+            .await,
+    );
+    drop(client);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let state = creator
+            .rpc(
+                "session.typescript.channel_state",
+                json!({"sessionId": session}),
+            )
+            .await;
+        if state["result"]["closed"] == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the caller's closed is recorded: {state}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let codes = creator
+        .rpc(
+            "session.typescript.channel_after_close_codes",
+            json!({"sessionId": session}),
+        )
+        .await;
+    assert_eq!(codes["result"]["undeclared"], "undeclared", "{codes}");
+    assert_eq!(codes["result"]["declared"], "gone", "{codes}");
     server.shutdown();
     server.join().await.unwrap();
 }

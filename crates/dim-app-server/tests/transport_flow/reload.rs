@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_types::{SystemPrompt, SystemPromptPart};
 use rutis::host::CtxHost;
 
@@ -473,8 +474,7 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
     release.notify_one();
     let ended = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let end = session
-                .history("main", None)
+            let end = chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .into_iter()
@@ -504,8 +504,7 @@ async fn reloaded_loop_fails_the_unfinished_turn_and_later_turns_run() {
     );
     assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
     assert!(
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -667,8 +666,7 @@ async fn contributed_tools_follow_session_config_and_survive_tool_host_reload() 
             .map(|plugin| plugin.generation)
     };
     let last_result = async || {
-        session
-            .history("main", None)
+        chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -790,8 +788,7 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
         async move { session.stop("main", "stopped while reloading".into()).await }
     });
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !session
-            .history("main", None)
+        while !chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -811,8 +808,7 @@ async fn a_stop_while_loop_reloads_waits_for_its_successor() {
         .expect("stop returned")
         .unwrap()
         .unwrap();
-    let interrupts = session
-        .history("main", None)
+    let interrupts = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -932,7 +928,7 @@ fn system_of(prompt: &SystemPrompt) -> String {
 
 /// The system text of the last model call on `branch`.
 pub(super) async fn last_system(session: &dim_agent_runtime::Session, branch: &str) -> String {
-    let events = session.history(branch, None).await.unwrap();
+    let events = chain_events(session, branch, ..).await.unwrap();
     let request = events
         .iter()
         .rev()

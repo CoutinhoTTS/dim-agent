@@ -1,7 +1,7 @@
 import { computed, ref } from "vue"
 import { defineStore } from "pinia"
 import { readCreate, readSummaries } from "../rpc/read"
-import type { ModelId, SessionSummary } from "../rpc/protocol"
+import type { ModelId, SessionSummary, SessionTitle } from "../rpc/protocol"
 import { useConnectionStore } from "./connection"
 
 /** Sessions that share a working directory: the sidebar's workspace groups. */
@@ -14,6 +14,7 @@ export const useSessionsStore = defineStore("sessions", () => {
   const loaded = ref(false)
   const error = ref("")
   let refreshing: Promise<void> | undefined
+  const pendingTitles = new Map<string, SessionTitle>()
 
   const byId = computed(() => new Map(summaries.value.map((session) => [session.sessionId, session])))
 
@@ -35,6 +36,15 @@ export const useSessionsStore = defineStore("sessions", () => {
   function refresh(): Promise<void> {
     refreshing ??= useConnectionStore().client.call("session.summaries", {}, readSummaries)
       .then((list) => {
+        for (const session of list) {
+          const current = byId.value.get(session.sessionId) ?? pendingTitles.get(session.sessionId)
+          if (current !== undefined && current.titleRevision >= session.titleRevision) {
+            session.title = current.title
+            session.titleSource = current.titleSource
+            session.titleRevision = current.titleRevision
+          }
+          pendingTitles.delete(session.sessionId)
+        }
         summaries.value = list
         loaded.value = true
         error.value = ""
@@ -61,11 +71,21 @@ export const useSessionsStore = defineStore("sessions", () => {
     if (session !== undefined && session.running !== running) session.running = running
   }
 
+  /** Applies owner commits, including notices received before the directory reply. */
+  function setTitle(sessionId: string, title: SessionTitle): void {
+    const session = byId.value.get(sessionId)
+    const current = session ?? pendingTitles.get(sessionId)
+    if (current !== undefined && title.titleRevision <= current.titleRevision) return
+    if (session === undefined) pendingTitles.set(sessionId, title)
+    else Object.assign(session, title)
+  }
+
   function forget(sessionId: string): void {
+    pendingTitles.delete(sessionId)
     summaries.value = summaries.value.filter((session) => session.sessionId !== sessionId)
   }
 
-  return { summaries, loaded, error, byId, workspaces, refresh, create, setRunning, forget }
+  return { summaries, loaded, error, byId, workspaces, refresh, create, setRunning, setTitle, forget }
 })
 
 export function workspaceName(cwd: string): string {

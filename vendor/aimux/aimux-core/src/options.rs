@@ -4,58 +4,79 @@
 
 use std::collections::HashMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use ts_rs::TS;
 
 use crate::AbortSignal;
 use crate::language_model_message::LanguageModelPrompt;
-pub use crate::tool::{FunctionTool, ProviderTool, Tool, ToolChoice};
+use crate::shared::SharedProviderOptions;
+pub use crate::tool::{
+    FunctionTool, FunctionToolInputExample, LanguageModelV4ToolChoice, ProviderTool, Tool,
+    ToolChoice, prepare_tool_choice,
+};
 use crate::types::ReasoningEffort;
 
 /// How the model should format its response.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ResponseFormat {
     /// Plain text (default).
     Text,
     /// JSON output, optionally constrained to a schema.
     Json {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
 }
 
 /// Per-call timeout configuration.
 ///
-/// Aligned with V4 `LanguageModelV4CallOptions.timeout`
-/// (`TimeoutConfiguration`). All values are milliseconds; `None` disables the
-/// corresponding limit. A `total` timeout also covers retry backoff and the
-/// whole streamed response.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+/// The object form of the AI SDK's `TimeoutConfiguration`
+/// (`ai/src/prompt/request-options.ts:13-22`), a request option of
+/// `generateText` / `streamText` (`RequestOptions.timeout`, `:126`).
+/// `LanguageModelV4CallOptions` has no timeout. Aimux runs no tools, so
+/// upstream's `toolMs` / `tools` keys and the bare-number form of `totalMs`
+/// are absent.
+///
+/// All values are milliseconds; `None` disables the corresponding limit. A
+/// `total` timeout also covers retry backoff and the whole streamed response.
+///
+/// Unknown keys, upstream's `toolMs` / `tools` among them, are rejected
+/// (RFC-0042 §7.2): aimux 0.5's `total_ms` is an error naming it, not a call
+/// without a timeout.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(deny_unknown_fields)]
 pub struct TimeoutConfiguration {
     /// Overall timeout for the entire call (including retries and, for
     /// streaming, the whole stream), in milliseconds.
-    // `number`, not the `bigint` ts-rs infers from u64: the JS bindings pass
-    // options through `JSON.stringify`, which throws on BigInt. Milliseconds
-    // cannot reach 2^53 (~285k years), so precision is never at stake.
-    #[ts(type = "number | null")]
+    // `number` on the TypeScript side: the JS bindings pass options through
+    // `JSON.stringify`, which throws on BigInt. Milliseconds cannot reach
+    // 2^53 (~285k years), so precision is never at stake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_ms: Option<u64>,
     /// Timeout for one generation step, including that step's attempts and
     /// retry backoff, in milliseconds. Aimux currently has one step.
-    #[ts(type = "number | null")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_ms: Option<u64>,
     /// Timeout waiting for the first stream chunk (streaming only).
     ///
     /// Counted from operation start, so it also bounds stream establishment
     /// and any retries before the first semantic output: it is the
     /// user-perceived time-to-first-output budget, not a per-attempt timer.
-    #[ts(type = "number | null")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_chunk_ms: Option<u64>,
     /// Maximum idle time between consecutive stream chunks (streaming only).
-    #[ts(type = "number | null")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_ms: Option<u64>,
 }
 
@@ -64,126 +85,112 @@ pub struct TimeoutConfiguration {
 /// This is the **provider-facing** options struct. Users interact with
 /// `GenerateTextOptions` (user-facing) which is converted to `CallOptions`
 /// by the `generate_text` / `stream_text` functions.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
+///
+/// The retry count, the timeout and the session id are settings of the
+/// operation (`OperationSettings`), not call options, as in the AI SDK
+/// (`language-model-v4-call-options.ts:8-138` has none of them).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct CallOptions {
     /// The standardized prompt (message array). Required.
     pub prompt: LanguageModelPrompt,
 
     /// Maximum tokens to generate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
 
     /// Sampling temperature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
 
     /// Stop sequences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
 
     /// Nucleus sampling `top_p`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
 
     /// Top-k sampling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<f64>,
 
     /// Presence penalty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f64>,
 
     /// Frequency penalty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f64>,
 
     /// Response format (text or JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
 
     /// Seed for reproducibility.
-    #[ts(type = "number | null")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
 
     /// Tools available to the model (function tools and/or provider-defined tools).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
 
-    /// How the model should choose tools.
-    pub tool_choice: ToolChoice,
+    /// How the model should choose tools. `generate_text` / `stream_text`
+    /// always set it through [`prepare_tool_choice`], as the AI SDK does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<LanguageModelV4ToolChoice>,
 
     /// Extra HTTP headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
 
     /// Provider-specific options (keyed by provider name).
-    pub provider_options: Option<HashMap<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<SharedProviderOptions>,
 
     /// Top-level reasoning effort. Maps to OpenAI `reasoning_effort` and
     /// Anthropic `thinking` config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningEffort>,
-
-    /// Per-call request body overrides. Deep-merged into the provider-built
-    /// request body (after any built-in vendor override) before sending.
-    /// `null` values delete the corresponding key. See RFC-0017.
-    pub body_overrides: Option<Value>,
-
-    /// Per-call retry count override. `None` uses the provider's configured
-    /// Core operation retry. `Some(0)` disables retries.
-    pub max_retries: Option<u32>,
-
-    /// Per-call timeout configuration (total / first-chunk / chunk idle).
-    /// `None` = no timeouts (provider defaults still apply at the HTTP layer).
-    pub timeout: Option<TimeoutConfiguration>,
-
-    /// Session identifier, for grouping consecutive calls into a session
-    /// (observability, see RFC-0024). Explicit values take precedence; when
-    /// `None` and the optional session inferer is enabled, one may be inferred.
-    /// Orthogonal to RFC-0019 session-affinity headers: this field is for
-    /// local grouping, while session headers in `headers` are for upstream
-    /// routing — both may share an id value but travel different paths.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
 
     /// Abort signal for cancelling the call.
     ///
     /// Runtime handle — never crosses the JSON boundary (bindings that only
     /// pass JSON cannot set it; Node bridges a JS `AbortSignal` natively).
     #[serde(skip)]
-    #[ts(skip)]
     pub abort_signal: Option<AbortSignal>,
 
-    /// RFC-0023 recording correlation id (internal; never serialized).
-    #[serde(skip)]
-    #[ts(skip)]
-    pub call_id: Option<String>,
-
-    /// RFC-0023 recording context (R7 快照绑定;internal;never serialized)。
-    /// 层 A 入口构造一次,provider 复制到 `HttpRequest`。None = 不录制。
-    #[serde(skip)]
-    #[ts(skip)]
-    pub recording_context: Option<crate::recording::RecordingContext>,
-
-    /// Emit raw provider stream chunks as `StreamPart::Raw` (debugging aid).
-    /// When `Some(true)`, streaming providers yield one `Raw` part per JSON
-    /// SSE event, carrying the **parsed JSON payload** of the event, emitted
-    /// before the parsed parts. Excludes the `[DONE]` sentinel; unparsable
-    /// chunks emit only `Error`. `null`/`Some(false)` = off.
-    /// Currently honored by the OpenAI-compatible family (openai / azure /
-    /// openai-compatible registry providers); other provider families ignore
-    /// it for now (RFC-0016 M2).
+    /// Emit raw provider stream chunks as `StreamPart::Raw` (the AI SDK's
+    /// `includeRawChunks`). When `Some(true)`, a streaming model yields one
+    /// `Raw` part per SSE event, carrying the event's parsed JSON, before the
+    /// parts made from it; the `[DONE]` sentinel is excluded. A chunk that is
+    /// not JSON yields `Raw` with `null` in Groq and Anthropic, as the AI SDK
+    /// does, and only `Error` elsewhere. `None` / `Some(false)` = off.
+    /// Honored by OpenAI chat, OpenAI-compatible chat and completion (registry
+    /// presets and Azure included), Groq, DeepSeek, Anthropic Messages, and
+    /// the OpenAI and ElevenLabs transcription streams; the other model
+    /// families do not emit `Raw` yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_raw_chunks: Option<bool>,
+
+    /// Strict stream mode. When `Some(true)`, a streaming model ends the
+    /// stream with a terminal error instead of finishing it when the
+    /// protocol's evidence of a complete reply is missing: the stream ends
+    /// without the protocol's terminal event (a `finish_reason`,
+    /// `message_stop`, `messageStop`, `response.completed`, ...) or without a
+    /// `Finish` part, a delta arrives for a text, reasoning or tool-input
+    /// block that was not started, or a block is started twice. A client
+    /// tool call is delivered only once the terminal event has been seen,
+    /// right before `Finish`; a stream that fails or finishes with an error
+    /// never delivers it. `None` / `Some(false)` keeps the AI SDK's lenient
+    /// behavior. Not part of the AI SDK.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strict_stream: Option<bool>,
 }
 
 impl CallOptions {
-    /// Clone these options for one composite child step (Router child, MoA
-    /// reference or aggregator): the recording context, when present, is
-    /// replaced by a child context labeled `step`, so the child's exchanges
-    /// and retry attempts are recorded as their own step instead of blending
-    /// into the parent operation's.
-    #[must_use]
-    pub fn for_step(&self, step: impl Into<String>) -> Self {
-        let mut child = self.clone();
-        child.recording_context = self
-            .recording_context
-            .as_ref()
-            .map(|context| context.child(step.into()));
-        child
-    }
-
     /// Create a `CallOptions` with the given prompt and all other fields set
-    /// to their defaults (`None` / `ToolChoice::Auto`).
+    /// to `None`.
     ///
     /// This is the recommended construction baseline in tests — combined with
     /// struct-update syntax (`CallOptions { tools: Some(..), ..CallOptions::new(prompt) }`)
@@ -203,18 +210,13 @@ impl CallOptions {
             response_format: None,
             seed: None,
             tools: None,
-            tool_choice: ToolChoice::default(),
+            tool_choice: None,
             headers: None,
             provider_options: None,
             reasoning: None,
-            body_overrides: None,
-            max_retries: None,
-            timeout: None,
-            session_id: None,
             abort_signal: None,
-            call_id: None,
-            recording_context: None,
             include_raw_chunks: None,
+            strict_stream: None,
         }
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 use dim_app_server::session_typescript::SessionTypeScriptConfig;
 use std::path::PathBuf;
 
@@ -142,6 +143,47 @@ async fn node_public_plugin_files_process_storage_and_close_drain() {
         json!({"ok":true,"value":{"ok":false,"error":"invalid_data"}})
     );
     assert_eq!(std::fs::read(invalid).unwrap(), bytes);
+
+    assert_eq!(
+        client.rpc("files.bytes", json!({})).await["result"],
+        json!({"ok":true,"value":{"ok":true,"value":[0,1,2,250,255,128]}})
+    );
+    assert_eq!(
+        std::fs::read(home.join("public-files/blob.bin")).unwrap(),
+        vec![0, 1, 2, 250, 255, 128]
+    );
+    assert_eq!(
+        client.rpc("files.envelope", json!({})).await["result"],
+        json!({"ok":true,"value":{"ok":true,"value":"{\"version\":1,\"text\":\"public process text\"}"}})
+    );
+    assert_eq!(
+        client.rpc("files.list", json!({})).await["result"],
+        json!({"ok":true,"value":[
+            {"name":"public-files/blob.bin","kind":"file"},
+            {"name":"public-files/invalid.json","kind":"file"},
+            {"name":"public-files/state.json","kind":"file"},
+        ]})
+    );
+    assert_eq!(
+        client.rpc("files.invalid_names", json!({})).await["result"],
+        json!([
+            {"ok":false,"error":"invalid_path"},
+            {"ok":false,"error":"invalid_path"},
+            {"ok":false,"error":"invalid_path"},
+        ])
+    );
+    assert_eq!(
+        client.rpc("files.remove", json!({})).await["result"],
+        json!({"ok":true,"value":null})
+    );
+    assert!(!home.join("public-files/blob.bin").exists());
+    assert_eq!(
+        client.rpc("files.list", json!({})).await["result"],
+        json!({"ok":true,"value":[
+            {"name":"public-files/invalid.json","kind":"file"},
+            {"name":"public-files/state.json","kind":"file"},
+        ]})
+    );
 
     let held = client.send("files.hold", json!({})).await;
     let (mut release, _) = tokio::time::timeout(Duration::from_secs(10), gate.accept())
@@ -487,7 +529,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
     let fresh = session_typescript::new_session(&mut client, json!(["ts_echo", "echo"])).await;
     session_typescript::submit(&mut client, &fresh, r#"tool:ts_echo {"text":"new owner"}"#).await;
     let fresh = server.agent().unwrap().get_session(&fresh).unwrap();
-    let history = fresh.history("main", None).await.unwrap();
+    let history = chain_events(&fresh, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()
@@ -514,7 +556,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
             .await,
     );
     let session = server.agent().unwrap().get_session(&sessions[0]).unwrap();
-    assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| {
         matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| {
             result.call_id == "slow"
                 && result.result.content == dim_agent_types::ToolContent::Text("native slow completed".into())
@@ -529,7 +571,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
         r#"tool:ts_echo {"text":"existing session"}"#,
     )
     .await;
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()
@@ -554,7 +596,7 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
         )
         .await;
         let session = server.agent().unwrap().get_session(&id).unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| {
             matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| {
                 result.result.content == dim_agent_types::ToolContent::Text("native survives owner reload".into())
                     && result.result.is_error != Some(true)

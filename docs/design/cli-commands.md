@@ -27,7 +27,12 @@ Settings · Interface
   Thinking details   collapsed
 ```
 
-Collapsed tool groups retain their existing header and member cards. Summary
+Collapsed tool groups retain their existing header and member cards. The header
+appends the first program name of each shell call, without arguments, executable
+paths, script bodies or output. Names stay in first-call order, with repetitions
+counted (`python ×2, rg`), including shell calls classified as reads or searches.
+The header remains one terminal row and keeps its disclosure when truncated.
+Other tools retain their existing header summaries. Summary
 adds one row per call, in call order, naming its tool and input target or command,
 without output, diffs or script bodies. Each row truncates to one terminal row;
 a multiline command shows its first nonblank line followed by `…`. Expanded
@@ -42,20 +47,21 @@ written to the terminal remains append-only; fullscreen redraws retained history
 
 ## Command menu
 
-In both scrollback and fullscreen TUI, list commands in a fixed task order:
-Session, model and permissions, extensions and automation, view, then app.
-Within each category use the following order, not alphabetical or recent-use order:
+In both scrollback and fullscreen TUI, list commands in one fixed, curated
+order, not alphabetically or by recent use. The menu draws no category column:
 
-| Category | Commands in order |
-| --- | --- |
-| `session` | `/new`, `/resume`, `/timeline`, `/goal`, `/tasks`, `/lines`, `/branch`, `/fork`, `/compact`, `/usage`, `/rename`, `/web` |
-| `model` | `/models`, `/agent`, `/effort`, `/fast`, `/permissions`, `/connect`, `/login` |
-| `extensions` | `/skills`, `/mcp`, `/plugins`, `/hooks`, `/scheduled`, `/workflow`, `/workflow:save`, `/reload-skills`, `/runtime` |
-| `view` | `/theme`, `/language`, `/tools`, `/tui` |
-| `app` | `/settings`, `/keys`, `/exit` |
+```text
+/new /resume /models /compact /usage
+/effort /fast /agent /permissions /settings
+/branch /fork /lines /timeline /queue /export /goal
+/tasks /rename /web /connect /login
+/skills /reload-skills /mcp /plugins /runtime
+/hooks /scheduled /workflow /workflow:save
+/tools /tui /theme /language /keys /exit
+```
 
 `/fast` is listed only when the model advertises service tiers.
-Search relevance takes priority; equally ranked matches keep this task order.
+Search relevance takes priority; equally ranked matches keep this order.
 The order is independent of the interface language. Opening `/` selects `/new`;
 `/exit` is last in the unfiltered command list.
 Exit requires its exact name or alias before dispatch: choosing an
@@ -63,21 +69,37 @@ incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
 Menu selection can still complete rather than dispatch an exact name: commands
 with inline arguments and `/goal` fill the composer for a separate submission.
+`Tab` only completes the selected row and never runs or sends it: a command
+fills its name, one that takes an argument also fills the space after it, and a
+Skill row fills its `$skill: <name> ` marker. A query matching nothing leaves the
+draft unchanged. A command without an argument runs on `Enter` only.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
 remain compatibility aliases when typed directly. Run, queue and steer keys are
-omitted from the menu. The menu only lists slash commands: the view actions for
+omitted from the menu. The menu lists slash commands and Skills: the view actions for
 picking an earlier message and scrolling to the top or bottom are also omitted;
-`Tab`, `Home` and `End` retain their bindings.
+`Tab`, `Home` and `End` keep their fullscreen message-picker and scroll bindings
+outside the menu.
+
+A Skill row reads `$name` with its description. Only
+an enabled Skill that no other root shadows is listed; a name containing whitespace
+is not listed either, because a reference ends at the first whitespace. The list follows the
+Session's catalog: the client rereads it on attach, on a Session switch, after
+`/reload-skills`, and after a change in `/skills`. A daemon that does not serve
+`skills.catalog` shows the commands alone, without an error. Choosing a Skill row,
+with `Enter` or `Tab`, fills `$skill: <name> ` and never sends; the marker is part
+of the message text. Skills come after commands; a Skill leads only when its name
+starts with the query and no command name or alias does, so a name shared with a
+command keeps both rows, the command first. `/` is the only trigger: `@` stays the
+file picker.
 
 The menu fits the available terminal columns and rows in both modes. Command
-names take priority over category labels, descriptions and shortcut labels;
-category labels shorten when needed to preserve command names. A shortcut that
+names take priority over descriptions and shortcut labels. A shortcut that
 would crowd out its command name is omitted from the row, without changing
 the binding. On short screens, fewer commands are shown and the window follows
 the selection. Scrollback keeps the command draft visible above the menu and
 omits the menu title and footer when necessary; fullscreen keeps its palette
-query and selection above the composer. Category grouping and ordering do not
-change with terminal size.
+query and selection above the composer. The order does not change with terminal
+size.
 
 When the usual history reservation leaves fewer than eight live rows,
 live controls take priority: either renderer can use up to eight rows for
@@ -114,13 +136,13 @@ Natural height                                      Short budget, 5 rows
 
 ```text
 Commands
-  session /new         start a new session
-  session /resume      resume a previous session
-  session /timeline    jump to a message of the shown line
-  session /goal        follow or change the shown line's goal
-  session /tasks       view command output or interrupt a member
-  session /lines       follow, talk to and end this session's lines
-  model   /permissions permission preset and command rules
+  /new         start a new session
+  /resume      resume a previous session
+  /models      select a model
+  /compact     compact the context of the shown line
+  /usage       show the context window usage
+  /effort      show or set the reasoning effort
+  $commit      write a commit message for the staged changes
 
 / + Enter          -> start a new session
 /ex + Enter        -> /exit (completion only)
@@ -132,10 +154,10 @@ Commands
 Fullscreen, 8 rows             Scrollback, 8 rows
 +- Command Palette -------+
 | >                       |   +- input -----------------+
-| session /new            |   | > /                     |
+| /new                    |   | > /                     |
 +-------------------------+   +-------------------------+
                               +-------------------------+
-+- input -----------------+   | session /new            |
++- input -----------------+   | /new                    |
 |                         |   +-------------------------+
 +-------------------------+   AGENT
 ```
@@ -152,9 +174,9 @@ Enter               submit                       queue the draft; empty draft:
                                                  steer the oldest queued message
 Tab                 pick an earlier message      pick an earlier message
                     (fullscreen)                 (fullscreen)
-Shift+Left          —                            empty draft: take the newest queued
-                                                 message back into the draft
-Esc                 keep the draft               interrupt; every queued message
+Shift+Left          —                            empty draft: recall the newest held
+                                                 message only if one text block
+Esc                 keep the draft               interrupt; every held message
                                                  returns to the draft, oldest first
 Ctrl+S              —                            draft not empty: steer the draft;
                                                  empty: steer the oldest queued message
@@ -165,26 +187,52 @@ Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
 - A queued message runs after the current run ends, one message per run. A
   steered message joins the current run at its next turn boundary.
 - Taking a message back, and interrupting, withdraw the message through
-  `session.input.withdraw`. The text
-  enters the draft only after the withdrawal is deleted. A message that already left
-  the queue is not put back, and its text is not sent again.
+  `session.input.withdraw`. Its content enters the draft only after the withdrawal
+  is deleted. Shift+Left accepts only a single text block; interrupt restores
+  every held message, including its image blocks and stored paste/file links.
+  A message that already left the queue is not put back or sent again.
 - Withdrawals of an interrupt are sent before the stop, so the run does not start the
   next queued message.
 - `Ctrl+C` clears the draft. `Esc` never clears it.
 
+### Queued messages
+
+`/queue` requires an attached Session and opens the shown line's unconsumed
+messages in both terminal modes. Applied-but-unconsumed messages are labelled
+`Incorporating`; unapplied messages are labelled `Held`. Up/Down selects a row,
+Enter steers it and `x` deletes it through the existing withdrawal operation.
+Only held messages can change; `notHeld` is a notice, not a failed run. Esc
+closes the panel without interrupting. Committed events refresh the panel,
+and changing attachment or shown line closes it.
+
+Shift+Left only withdraws a message with one text block. Images and multi-block
+messages remain held with a notice directing the user to `/queue`; no partial
+text draft replaces their attachments. Esc interrupt instead withdraws all held
+messages before stopping, restoring their operator content to the draft, oldest
+first, so they cannot start a new run automatically. Appended runtime text blocks
+(after the first block, starting with `<dim-`) are not restored; references such
+as `$skill: name` stay so resubmission loads fresh context. Adjacent operator text
+blocks are separated by newlines. Images and stored paste/file links are kept.
+Steering always uses the owner's full held input.
+
 ### Queue strip
 
-With a message queued, the strip above the composer draws the queue in a titled border: messages oldest first, the next to run at the top, then a hint naming the keys that act on them. During a run, `Shift+Left` on an empty draft withdraws the newest queued message into the composer to edit. `Ctrl+S` steers the draft, or the oldest queued message when the draft is empty; `Enter` on an empty draft also steers the oldest queued message. Up/Down remain input history. The hint names a command only when the command table has one for the queue, so a typed `/name` it shows runs locally instead of being sent to the model. No command views the queue, so the hint names keys only.
+The strip and `/queue` read the same unconsumed input projection: incorporating
+messages in transcript order, then held messages oldest first. Each strip row
+names its state. During a run, `Shift+Left` on an empty draft recalls the newest
+held message subject to the attachment rule above. `Ctrl+S` steers the draft,
+or the oldest held message when the draft is empty; empty Enter does the same.
+Up/Down remain input history outside the panel.
 
 ```text
-┌─ Queue (2) ─────────────────────────────────────┐
-│ › fix the failing test in session_host          │
-│ › then update the design note                   │
-│ shift+← edit last · ctrl+s steer now            │
-└────────────────────────────────────────────────┘
+┌─ Queue (2) ──────────────────────────────────────────────┐
+│ › Incorporating · fix the failing test                   │
+│ › Held · then update the design note                     │
+│ /queue manage · shift+← edit last · ctrl+s steer         │
+└──────────────────────────────────────────────────────────┘
 ```
 
-A queued message the strip does not show adds its count to the hint: `+3 more · shift+← edit last · ctrl+s steer now`. The strip shows at most five messages and keeps the height it reached while the queue drains.
+A queued message the strip does not show adds its count to the hint. The strip shows at most five messages and keeps the height it reached while the queue drains.
 
 ## Usage report
 
@@ -222,8 +270,8 @@ below uses synthetic data; an account need not have a 5h window.
 `/goal` reads the goal of the line the client shows and writes it through the methods Goal
 registers. The methods, the marker blocks and the rule that reads the goal belong to
 [Goal](plugins/Goal.md#a2-session-methods) (A.2, A.3) and [Pursuit](plugins/Pursuit.md#3-changes-to-goal);
-this section owns what the native clients do with them. The command is listed in the palette as a
-`session` command, like `/compact`.
+this section owns what the native clients do with them. The command is listed in the palette,
+like `/compact`.
 
 In both TUI modes, selecting `/goal` with Enter or Tab only fills `/goal ` in the
 composer and closes the palette. It does not dispatch until the user submits the
@@ -267,13 +315,18 @@ a goal an evaluator judges keeps its judge through `/goal edit`, which writes on
 A `/pursue` form is Pursuit's later option (§10) and is not part of this contract.
 
 **Reading the goal.** The client folds the goal from the branch events it already reads, by Goal
-A.3's rule: the latest live `goal:objective` block is the objective, the latest live `goal:status`
-block is the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue
-deleted leaves the fold. It adds no query method and asks Goal no question. `/goal` with no
-arguments prints usage before that fold. Before it picks between `set` and `edit` the client reads the line up
-to its published head, and after a write it reads again before printing: the state shown and the
-method chosen come from the events, never from a guess taken from the reply. The fold starts over
-at the line's own opening — its
+A.3's rule: the newest live `goal:state` record is the goal; on a history written before the record,
+the latest live `goal:objective` block is the objective and the latest live `goal:status` block is
+the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue deleted leaves
+the fold. It adds no query method and asks Goal no question. `/goal` with no arguments prints usage
+before that fold. Before it picks between `set` and `edit` the client reads the line up to its
+published head. After a write, it folds the events that write produced before printing: the line
+prompt reads them again, and the terminal UI waits for them among the line's live events. The
+report is released at the `sequence` the method returned, for every daemon: a daemon built from main
+answers with the same sequence and publishes the old keys, and the command must not stay parked
+waiting for a record such a daemon never writes. The state shown and the method chosen come from the
+events, never from a guess taken from the reply. The
+fold starts over at the line's own opening — its
 `branch/start`, or the `session/forked` a fork writes after the facts it copied — so a new line has
 no goal and a forked Session's `main` never shows the copied one (Goal §2, A11). A v3 client
 receives that opening, so a fork reads the same here as it does in Goal.
@@ -382,7 +435,7 @@ form, and opening it starts nothing.
         ▼
 ╭─ OpenAI Codex OAuth ─────────────────────────╮
 │   Browser login                              │
-│ https://…/authorize?…                        │
+  https://…/authorize?…
 │   Callback URL: (paste here)                 │
 │   Submit callback                            │
 ╰─ Select to copy · Enter opens link ──────────╯
@@ -390,11 +443,15 @@ form, and opening it starts nothing.
 ╭─ Grok Build OAuth ───────────────────────────╮
 │   Device login                               │
 │   Enter code:    ABCD-EFGH                   │
-│ https://…/device                             │
+  https://…/device
 │   Restart device login                       │
 │   Waiting for authorization                  │
 ╰─ Select to copy · Enter opens link ──────────╯
 ```
+
+Authorization URL rows have no side borders, including wrapped continuation
+rows, so native terminal selection does not copy dialog borders into the URL.
+The other rows keep their borders; Enter on the URL still opens the full link.
 
 `dimcode login [PROVIDER]` starts the same flow in the line client and prints
 the URL or the code the daemon returns; without a PROVIDER it lists the
@@ -406,7 +463,7 @@ commands.
 
 ## Plugin runtimes
 
-RuntimeManager supplies the Node and Python runtimes that plugin code runs in
+RuntimeManager supplies the Node and Python runtimes that plugin code runs in, and the uv tool that launches Python MCP servers
 ([RuntimeManager](plugins/RuntimeManager.md)). The daemon reads its configuration when an
 action applies it (RuntimeManager §3.3), so a client can turn a runtime on, say where it comes
 from and show what it is doing, without editing `<home>/runtimes/config.json` by hand and without
@@ -415,15 +472,17 @@ restarting anything. `/runtime` opens one panel in both terminal modes and the s
 
 ### The panel
 
-Rows are the two runtimes, always node then python. A row shows its name, the configured source
+Rows are the two runtimes and the uv tool, always node, then python, then uv. A row shows its name,
+the configured source
 (`download` or `system`), the version in effect (the fixed version for `download`, the checked
 interpreter's version for `system`, empty while it is `off` and nothing has been checked), `auto`
 when it is on, and the status `runtime.list` gives: `off`, `acquiring`, `starting`, `ready`, `down` with its reason, or
-`failed` with the reason that lists every source and its error.
+`failed` with the reason that lists every source and its error. uv launches no runtime, so it never
+shows `starting` or `down`: it is `ready` once installed under the plan in effect.
 
 Below the rows the panel names what waits on the runtime — the plugin rows that are Pending because
 one is `off` or `down` ([PluginManager §2.5](plugins/PluginManager.md#25-runtimes)) — so "why is
-goal not working" is answered in the same place as its fix. A failure prints one line per source,
+workflow not working" is answered in the same place as its fix. A failure prints one line per source,
 as `runtime.list` reports it.
 
 ```text
@@ -431,8 +490,9 @@ as `runtime.list` reports it.
 ╭─ Plugin runtimes ─────────────────────────────────────────────────────────╮
 │ › node      download  24.21.0    ready                                    │
 │   python    system    3.12.15    off      not installed                   │
+│   uv        download  0.13.7     off                                      │
 │                                                                           │
-│   3 plugins wait for node: goal, scheduler, workflow                      │
+│   1 plugin waits for node: workflow                                       │
 ╰─ Enter install or apply · s source · a auto · r retry · Esc close ────────╯
 ```
 
@@ -450,7 +510,7 @@ as `runtime.list` reports it.
 │               https://npmmirror.com/mirrors/node/v24.21.0/…: 404         │
 │   python    system    3.12.15    off      not installed                   │
 │                                                                           │
-│   3 plugins wait for node: goal, scheduler, workflow                      │
+│   1 plugin waits for node: workflow                                       │
 ╰─ Enter retry · s switch node to system · Esc close ───────────────────────╯
 ```
 
@@ -460,7 +520,7 @@ daemon already reports it.
 
 ### Menu entry
 
-`/runtime` is a slash command in category `extensions`; its position follows the
+`/runtime` is a slash command; its position follows the
 [command menu order](#command-menu). It needs no Session (`Needs::Nothing`) and takes no inline
 argument, because the panel carries the actions. The typed subforms below are accepted when typed,
 not offered as menu completions.
@@ -504,9 +564,9 @@ with that runtime selected. Today the row says only `pending`.
 ```text
 /plugins
 ╭─ Plugins ─────────────────────────────────────────────────────────────────╮
-│ › goal           on     pending · waits for the node runtime              │
+│ › goal           on     ready · built-in                                  │
 │   session-title  on     ready · built-in                                  │
-│   scheduler      on     pending · waits for the node runtime              │
+│   scheduler      on     ready · built-in                                  │
 │   workflow       on     pending · waits for the node runtime              │
 ╰─ Enter open /runtime · o on/off · r reload · Esc close ───────────────────╯
 ```
@@ -518,6 +578,7 @@ The typed forms are the whole area, so a caller needs no panel:
 ```text
 /runtime                              the same rows, in the scrollback client
 /runtime install node                 apply the configuration for node
+/runtime install uv                   install the uv tool
 /runtime source node system           switch node to the system interpreter and apply
 /runtime auto python on               turn python on by configuration and apply
 ```
@@ -526,14 +587,14 @@ The typed forms are the whole area, so a caller needs no panel:
 $ dimcode runtime list
 node    download  24.21.0   ready
 python  system    3.12.15   off       not installed
-3 plugins wait for node: goal, scheduler, workflow
+1 plugin waits for node: workflow
 $ dimcode runtime install node
 node    download  24.21.0   acquiring
 $ dimcode runtime config python --source system --auto on
 python  system    3.12.15   off
 ```
 
-`dimcode runtime list` prints one tab-separated row per runtime with the fields the panel shows.
+`dimcode runtime list` prints one tab-separated row per runtime or tool (node, python, uv) with the fields the panel shows.
 Which plugins wait for a runtime is `/plugins`' answer (`dimcode plugin list` in the line client), not
 this command's: one place names it per plugin, and the panel repeats it only for the runtime in view. `install` and `config` print the runtime's row after the
 call, which is `acquiring` or the state it returned to; a failed call prints the error and exits
@@ -649,6 +710,11 @@ opens the external editor on it first, and sends what it leaves with the run.
 
 The client has a closed set of action kinds. Each kind has one key in every panel, and the hint
 lists the area's kinds plus the selected entry's kinds, in the table's order.
+
+An action that names one entry carries the entry's id and the source its row reports. Two entries
+of one id in different sources are two rows, each selected and acted on on its own, and the
+adapter acts on the source the action names rather than searching its catalog for one. An area
+whose owner reports no source leaves the source out, and its ids are unique on their own.
 
 | Kind | Key | What it does |
 | --- | --- | --- |
@@ -1057,7 +1123,9 @@ disabled because only the toggle or `dimcode mcp enable|disable` turns it on. An
 round trip would erase them.
 
 The edit document is the patch: an omitted field keeps its stored value, a present value replaces
-it, and `env` or `headers` changes only the keys it names. The seed names the command and working
+it, and `env` or `headers` changes only the keys it names. It may also state `timeout`, the
+entry's tool-call limit in milliseconds from 1000 to 86400000; `null` clears it and the ten-minute
+default applies ([MCP management §D20](appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)). The seed names the command and working
 directory, empty `env` and `headers`, and a configured OAuth's reported fields; it never names a
 stored argument, environment value, header value, bearer token or URL, because those are withheld
 or wholesale-replaced. The document carries no transport, since the stored entry's transport is
@@ -1076,6 +1144,8 @@ stored.
 {"url": "https://mcp.example.com/mcp", "headers": {"X-Key": "value"}}
 ```
 
+A definition states `timeout` the same way, and the inspection shows a stated one.
+
 Add writes `mcp.save` with the catalog's source revision — `userRevision`, or `projectRevision`
 for a source of `project` — and refuses an id the catalog already lists, since a save would replace
 that entry. The create document is one entry with its source and the definition `mcp.save` takes:
@@ -1093,6 +1163,61 @@ that entry. The create document is one entry with its source and the definition 
   }
 }
 ```
+
+Every `dimcode mcp` command that names one stored entry by `ID` takes an optional
+`--source SOURCE`, whose values are the source names `mcp list` prints: `user`, `project` and
+`plugin`. One resolver turns `(catalog, id, source)` into one entry, valid or broken. With a
+source it is that source's entry, or a refusal that names the source; without one, an id a single
+source lists is that entry, and an id more than one source lists is refused, naming the sources and
+the flag. The client never picks one. The panel uses the same resolver with the source of the row
+the action came from, and `mcp list` already prints the source each id is in.
+
+Import takes a standard `mcpServers` document — the shape other MCP clients write — instead of
+the create document. `dimcode mcp import PATH [--source user|project] [--cwd DIR]` reads the file,
+or stdin for `-`, and sends its text to `mcp.import.preview`; the client decodes, compares and
+validates nothing itself. `--from ID` names one known store of another local client instead, and
+`--discover` lists those stores; the CLI never holds a discovered store's text. The preview
+prints one row per entry — id, status (`identical`, `changed`, `conflict` or `invalid`),
+transport, the changed field names with the JSON kind each holds, the members the decoder keeps
+unused or drops, and the entry's error — then how many field names the owner's cap left out of
+those lists, the top-level members the import does not carry, and the revision the source was
+read at. No value is printed: a changed entry is named by field, not content. A project preview adds a note that the workspace file receives each entry's public
+skeleton, while arguments, environment and header values, the bearer token, a URL with userinfo,
+path, query or fragment, hidden OAuth fields and unknown members go to the user-scope
+`mcp-secrets` record (the split a move into project applies). A document that is not an
+`mcpServers` object, exceeds 8 MiB or 1,000 entries, or names an id whose entry does not decode is
+reported with the owner's message; the preview still exits 0, since it answered what the import
+would do.
+
+`--yes` prints the same preview rows and notes first, so the user sees the fields that change
+before anything is written, then applies the default selection at the preview's revision:
+`changed` and `identical` entries import, `conflict` and `invalid` entries skip. `--replace ID`
+replaces the target's entry with the document's, `--rename OLD=NEW` writes the entry under a new
+id (the target's `OLD` entry stays), and `--only ID` restricts the default selection to the named
+ids; each flag may repeat. `--replace` or `--rename` selects the id it names whether or not
+`--only` lists it, and a `conflict` or `invalid` entry only comes in through `--replace`,
+`--rename`, or an explicit action in the preview. The apply is one `settings.update` at one
+revision: imported user entries are written with `enabled: false`, imported project entries carry
+no `enabled` member and have every enablement record withdrawn before the write, so imported and
+replaced entries start disabled. A project apply then writes the withheld records in one
+`mcp-secrets` update, replacing or removing each destination's record; a record write that fails
+after the source commit reports `mcp_import_partial` and exits 1, and replacing the entries again
+rewrites both. A source that changed since the preview refuses the whole import
+(`mcp_settings_conflict`, exit 1), as do `mcp_import_conflict` and `mcp_invalid_config`; a
+successful apply then prints each entry's action and destination, the counts, and the new
+revision, and exits 0. The `/mcp` line commands do not include import: that dispatcher is its own
+list of verbs, not the one-shot parser.
+
+`dimcode mcp import --from ID` runs the same preview and apply from one known store instead of a
+file: the request carries `from` in place of `document`, and the apply also carries the preview's
+`sourceRevision` as `expectedSourceRevision`, so the owner writes the store text it previewed. The
+store's text never reaches the CLI, and a store that changed since the preview exits 1 with the
+owner's conflict. `dimcode mcp import --discover` lists the known stores over
+`mcp.import.sources` — id, client, scope, path, state and the entry count or the owner's message,
+with no value — so a user can pick a `ready` id for `--from`. `--cwd` names the workspace whose
+project stores and Claude Code local record are reported; without it the command uses its launch
+workspace. A path, `--from` and `--discover` are mutually exclusive, and `--discover` takes no
+`--source`, `--yes`, `--replace`, `--rename` or `--only`.
 
 The two remote forms replace `configuration` with
 `{"type": "http", "url": "https://mcp.example.com/mcp", "headers": {}, "enabled": false}` or the
@@ -1216,23 +1341,31 @@ whole rule as one quoted argument, so global options stay unambiguous.
 
 | Entry | Behavior |
 | --- | --- |
-| `dimcode tui` | Open the existing interactive scrollback client. |
+| `dimcode tui [-p TEXT] [--image PATH ...]` | Open the existing interactive scrollback client; `-p` sends TEXT as its first message ([starting with a first message](#starting-with-a-first-message)). |
 | `dimcode acp [--agent ID]` | Serve ACP over stdin/stdout through the client-host [AcpGateway](plugins/AcpGateway.md); lifecycle and unsupported features follow its contract. |
 | `dimcode exec [-p TEXT] [--image PATH ...] [--json]` | Run text and/or local images and exit; read redirected stdin when `-p` is absent. |
 | `dimcode exec resume SESSION_ID [-p TEXT] [--image PATH ...] [--json]` | Continue the named persisted Session with text and/or images. |
+| `dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` | Open one realtime session and stream it as JSON lines ([Realtime sessions](#realtime-sessions)): stdin lines are text frames, events and the end print to stdout, and EOF or Ctrl+C closes it. |
 | `dimcode session export SESSION_ID --format markdown\|json [--output PATH]` | Export the main branch; write to stdout when no output path is supplied. |
 | `dimcode session rename SESSION TITLE` | Set the Session's manual title through `session.rename` and print the title the server returns. |
 | `dimcode session rename SESSION --clear` | Clear the manual title, so the Session is untitled again. |
 | `dimcode session delete SESSION` | Permanently delete the Session and everything the store keeps for it; there is no prompt. |
 | `dimcode session cleanup (--older-than DURATION\|--keep N) [--yes]` | Show the Sessions one selector matches, then delete them after confirmation. |
 | `/rename TITLE` or `/rename --clear` | Set, or clear, the shown Session's manual title; the text is a command and never becomes model input. |
-| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` cycles this workspace, this repository when offered, and every workspace. |
+| `/resume` | Open the Sessions picker on this workspace ([the `/resume` picker](#the-resume-picker)); `Ctrl+S` toggles between the local scope — the launch workspace, or its repository once git answers — and every workspace. |
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
+| `/export` in either terminal UI | Choose Markdown or JSON in a dialog for an opened Session; save a uniquely named file in the CLI current directory. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
+| `dimcode modality [--json]` | Table of every Modality category and operation over `modality.capabilities` ([Modality](plugins/Modality.md#a5-cli)): availability, the owner's reasons as `dimension: detail` lines, the default and the effective model; `--json` prints the reply unchanged. A daemon that does not advertise the method says it serves no Modality and exits 1. |
+| `dimcode modality set-default <category>[.<operation>] <provider>/<model>` / `--clear` | Write one operation default over `modality.configure` with the revision read immediately before, retried once after a `modality_conflict`; `--clear` sends `model: null`; prints the operation's row, or the reply under `--json`. |
+| `dimcode image generate\|edit PROMPT [FILE...]`, `image enhance MODE [FILE...]`, `video generate\|edit\|enhance PROMPT [FILE...]`, `speech synthesize TEXT`, `speech transcribe FILE`, `music\|audio\|motion generate PROMPT`, `asset generate PROMPT [FILE...]` | Submit one task over `modality.task.submit` ([Modality](plugins/Modality.md#a5-cli)): `--mask` sends the mask as an input file named by `params.mask`, `--param KEY=VALUE` adds one adapter parameter (JSON when it parses as JSON, a string otherwise), and the inputs go inline when the whole set fits 8 MiB and by `node_path` above it. Waits and writes the result files to `--out`, a directory that defaults to `.`, refusing to replace an existing file; `--no-wait` prints the id, `--json` the record. |
+| `dimcode modality task list [--state S] [--category C] [--limit N] [--after ID]` | List one page of Modality tasks over `modality.task.list` ([Modality](plugins/Modality.md#a5-cli)), newest first, as `ID STATE OPERATION MODEL CREATED`, with `More: --after <id>` on stderr when another page exists; `--json` prints the reply unchanged. |
+| `dimcode modality task status\|wait\|cancel ID` | Print one task's row, progress, error and result files over `modality.task.status`; wait for it over `modality.task.wait`, writing results only with `--out DIR`; or cancel it over `modality.task.cancel`, reporting the state the owner returned. |
+| `dimcode ocr FILE [--output-mode text\|layout] [--out DIR]` | Submit `ocr.recognize` over `modality.task.submit` ([Modality](plugins/Modality.md#a5-cli)) and wait for it: a text within 64 KiB and 30,000 UTF-16 units prints inline and writes nothing, a longer one is written with a 2,000-character preview and its path, `--output-mode layout` writes the page images, and `--out` asks for the result set beside the printed text. |
 | `dimcode skills list` | List the Skills of the workspace over `skills.catalog`: each entry's name, source, state, file and description, then the catalog's issues. |
 | `dimcode skills enable\|disable ID` | Enable or disable one Skill over `skills.set_enabled`, then report the catalog again. |
 | `dimcode skills reload` | Rescan the user and project roots over `skills.refresh` and report what it found, through the [Skills management surface](#management-surfaces). |
@@ -1263,15 +1396,18 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/workflow:save` | Open the Workflow panel in its create editor. |
 | `dimcode mcp list` | List the effective catalog over `mcp.catalog` ([The MCP area](#the-mcp-area)): each entry's id, source, transport, enablement and authorization, then each source application's errors. |
 | `dimcode mcp add PATH` | Create an entry from the panel's create document, `-` for stdin, over `mcp.save` with the source revision `mcp.catalog` reported; an id the catalog already lists is refused. |
-| `dimcode mcp edit ID` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
-| `dimcode mcp set ID PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
-| `dimcode mcp remove ID` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
-| `dimcode mcp test ID` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
-| `dimcode mcp inspect ID` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
-| `dimcode mcp disconnect ID` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
-| `dimcode mcp login\|logout\|enable\|disable ID` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
+| `dimcode mcp import PATH [--source user\|project] [--yes]` | Preview a standard `mcpServers` document over `mcp.import.preview`, one row per entry with its status, changed and unsupported field names and error, then the count of field names the cap left out, the unknown top-level members and the revision; `--yes` prints that preview and then applies the default selection (or `--replace ID`, `--rename OLD=NEW`, `--only ID`) at that revision over `mcp.import.apply`, writing imported and replaced entries disabled. A project apply writes the public skeleton to `.mcp.json` and the withheld values to the user-scope `mcp-secrets` record. |
+| `dimcode mcp import --from ID [--source user\|project] [--yes]` | The same preview and import from one known store of another local client over `mcp.import.preview` and `mcp.import.apply` with `from`, the apply carrying the preview's `sourceRevision` as `expectedSourceRevision`; the store's text never reaches the CLI. |
+| `dimcode mcp import --discover [--cwd DIR]` | List the known stores over `mcp.import.sources`: id, client, scope, path, state and the entry count or the owner's message; no value is printed, and only a `ready` id is usable with `--from`. |
+| `dimcode mcp edit ID [--source SOURCE]` | Open the entry's `mcp.update` patch in `$VISUAL`, `$EDITOR` or the platform default, and write it at the revision `mcp.configuration` reported; unchanged text writes nothing. |
+| `dimcode mcp set ID [--source SOURCE] PATH` | The same write from a file, or from stdin for `-`, with the revision read immediately before the write. |
+| `dimcode mcp remove ID [--source SOURCE]` | Delete one entry over `mcp.remove` at its source revision, without a prompt: the id on the command line is the intent. |
+| `dimcode mcp test ID [--source SOURCE]` | Run the stored entry once over `mcp.test` and print the tools the temporary connection found; nothing is saved. |
+| `dimcode mcp inspect ID [--source SOURCE]` | Print the effective configuration and the Session's connections over `mcp.inspect`, without contacting the server. |
+| `dimcode mcp disconnect ID [--source SOURCE]` | Close the entry's live connections over `mcp.disconnect`; it writes no configuration, and the entry reconnects on next use. |
+| `dimcode mcp login\|logout\|enable\|disable ID [--source SOURCE]` | Keep their behavior: browser or device sign-in, sign-out, and the enablement both `/mcp` clients share. |
 | `/mcp` | Open the MCP panel of the Session's workspace ([management surfaces](#management-surfaces)): an entry per server, grouped `user`, `project` and `plugin`, with the toggle, edit, add, remove, test and inspect kinds. |
-| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands, unchanged: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. |
+| `/mcp list\|login\|callback\|logout\|disconnect\|enable\|disable` | The line commands: `list` prints the catalog and the Session's server states, `disconnect` closes one entry's live connections, and the rest sign in, complete a callback, sign out or toggle. They use the attached Session's workspace, like the panel; without a Session, or when an older daemon omits its workspace, they use the launch workspace. One-shot `dimcode mcp` commands always use the launch workspace. Every command that names one stored entry (`login`, `logout`, `disconnect`, `enable`, `disable`) takes an optional `--source SOURCE`, as `dimcode mcp` does; an id more than one source lists requires it. |
 
 | `dimcode permissions list` | List the user's command rules over `permission.rules`: each rule's decision, match and command, then the columns and what deny means. |
 | `dimcode permissions add PATH` | Add one rule from `PATH`, or from stdin for `-`, over `permission.rules` and `permission.set_rules`: an equal rule writes nothing; a conflict re-reads and retries, at most three attempts. |
@@ -1302,11 +1438,41 @@ executable is an error. A path that does not exist, a program that exits
 before serving, or one that does not start serving in time is reported with the
 same requirement, unless it left a [startup note](#daemon-startup-failure).
 Existing login/account/logout, models, MCP and daemon commands remain
-available. Existing `--prompt`, piped stdin and `--resume` calls retain their
-behavior; `exec resume` also accepts the same existing global options.
-Supplying the Session twice or the prompt twice is an argument error. `--json`
-serves `exec` and `migration`, and `tui` requires a terminal. Help/version and
-argument errors do not start the daemon.
+available. Existing piped stdin and `--resume` calls retain their behavior, and
+`--prompt` keeps its one-shot meaning for `exec` and the bare chat; `tui -p`
+sends the first message
+([starting with a first message](#starting-with-a-first-message)).
+`exec resume` also accepts the same existing global options. Supplying the Session twice or the prompt twice is an
+argument error. `--json` serves `exec`, `migration` and the Modality commands (`modality`,
+the category commands and `ocr`), and `tui` requires a terminal. Help/version and argument errors do not start the daemon.
+
+### Starting with a first message
+
+`dimcode tui -p TEXT` opens the interactive terminal UI and sends `TEXT` as its
+first message. The command decides the lifetime: `exec -p` and the bare chat's
+`-p` still run one prompt and exit. `--resume SESSION_ID -p TEXT` attaches to
+that Session and sends the message there. `--image PATH` is accepted with `tui`
+only together with `-p`; the images are read and scaled at the CLI boundary like
+`exec`'s and attached to the first message in argument order (text first). Without
+`-p` the flag keeps its `--image requires exec or tui -p` refusal. `--json` stays refused
+for `tui`, and `--no-tui` keeps the one-shot line-client behavior.
+
+The message is submitted once, after the first frame is drawn, through the same
+composer a typed message uses, in both terminal UI modes: the text becomes the
+draft and the images its tokens, then the composer's submit applies the command
+palette rules (an exact `/name` or alias runs that command, and unmatched `/`
+text is ordinary input), `!`/`!!` shell mode, the line draft, and the
+queue/steer rule. Nothing re-parses the command line after startup.
+
+A message no Session can take — no model, not signed in, or a Session that fails
+to start — leaves the text and its image tokens in the composer as an unsent
+draft beside the Home/sign-in hint or the startup error, instead of being
+discarded. If the user has started another draft in the meantime, that newer
+draft is kept and the interface reports that the first message was not sent
+instead of restoring it. The interface does not exit for that case. Without
+`-p` the existing startup rule stands: a resumed Session that cannot start
+shows the error and exits nonzero, and Home remains available after a failed
+creation.
 
 ### Daemon startup failure
 
@@ -1343,6 +1509,21 @@ the flag must name a standalone `dim-app-server` binary. The failed launch
 removes the note after reading; a successful connection removes any note. The
 CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
 the store, and exits 1.
+
+While a store format upgrade runs, the daemon writes the same note as a
+progress kind, `dimcode-startup-progress v1 pid=<pid>` with
+`store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
+after each upgrade step; a fresh store or one at the current format writes
+none. Both startup waits read it: the spawn wait counts only its child's pid,
+the start-lock wait any pid, and each new counter moves the wait's bound
+forward by the bound itself (10 s for the spawn, one verified shutdown plus
+one startup plus a margin for the lock). A store format upgrade is the long
+phase that reports progress and moves the bound; every other phase of
+startup is bounded by the client's fixed value. The first such
+note prints, once on stderr in every mode, `Upgrading the local store from
+format v<from> to v<to>; this can take a while on a large store.`; stdout and
+JSON output stay unchanged. A client that only knows the failure kind ignores
+the progress kind and falls back to the generic messages above.
 Development documentation continues to use `./dev` and its isolated home; the
 terminal note itself names a compatible build or `--home PATH`.
 
@@ -1356,7 +1537,7 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
   Details: /Users/me/.dimcode-alpha/rust/daemon.log
 ```
 
-The interactive export parser reads the format token and treats the remainder
+The line-client export parser reads the format token and treats the remainder
 of the line as a literal path, including spaces, without shell evaluation or
 quote expansion. Missing paths and unsupported formats print usage and return
 to the prompt without submitting input. `/exit` takes no arguments. Only these
@@ -1372,11 +1553,16 @@ and refuses a path that is not, before it connects to the daemon. A chat that
 resumes a Session and runs on a prompt (`--resume ID -p TEXT`, or a prompt read
 from stdin) names no workspace: it attaches, reads history and submits, and the
 composer never runs, so it keeps working in a directory whose path is not valid
-UTF-8. An interactive resume, a new Session and the TUI still name it. The list
-holds the stored Sessions of exactly that workspace, newest first, and every
-open starts there. `Ctrl+S` cycles this workspace, this repository and all
-workspaces, and the title names the scope shown. The filter keeps the
-composer's `Ctrl+A` and `Ctrl+W`, and `Tab` moves the selection down.
+UTF-8. An interactive resume, a new Session and the TUI still name it. The
+local scope holds the stored Sessions of the launch workspace and, in a git
+checkout, of the same relative directory in its other worktrees, newest first,
+and every open starts there. `Ctrl+S` toggles between the local scope and all
+workspaces: two states, never a third, whatever git, the worktree count or the
+daemon offer. The title names the scope shown: `Sessions · This workspace`
+until git answers, `Sessions · This repository` once it does — even when the
+repository has one worktree — and `Sessions · All workspaces` for the other
+state. The filter keeps the composer's `Ctrl+A` and `Ctrl+W`, and `Tab` moves
+the selection down.
 
 ```text
 ╭─ Sessions · This workspace ──────────────────────────────────────────────────╮
@@ -1411,23 +1597,31 @@ composer's `Ctrl+A` and `Ctrl+W`, and `Tab` moves the selection down.
 - A scope change works like a new query: it cancels the pending read, drops the
   cursor and reads the first page again; the query stays and applies within the
   new scope.
-- This repository holds the launch workspace and the same relative directory in
+- The local scope is the launch workspace and the same relative directory in
   every worktree of its git repository, read with `git rev-parse` and
   `git worktree list --porcelain` in the background when the picker opens. The
-  first page does not wait for git, and both reads share a two-second bound; a
-  git that fails or does not answer leaves the scope out, without a notice. It
-  is offered only when the set holds more than one entry and the daemon reads a
-  set of workspaces (`session.catalog.workspaces`) or lists through
-  `session.summaries`. A bare worktree adds nothing.
-- Outside this workspace's scope every row leads with its update time and then
+  first page does not wait for git, and both reads share a two-second bound. A
+  git that succeeds names the scope `This repository`; when the picker is
+  showing the local scope and the set holds more than one entry, the title
+  changes and the first page is read again, and a one-entry set changes only
+  the title, since the catalog's canonical `cwd` treats the single workspace as
+  the same filter. A git that fails or does not answer, and a daemon that reads
+  neither a workspace set (`session.catalog.workspaces`) nor
+  `session.summaries`, leave the local scope named `This workspace` and listing
+  exactly the launch workspace, without a notice. A bare worktree adds nothing.
+- The rows name their workspace inside the local scope only when it holds more
+  than one workspace, so a one-worktree repository adds no path to every row;
+  in the all-workspaces scope every row leads with its update time and then
   names its workspace, with the home directory written `~`. The label takes at
   most half the row, and the time comes first, so a long path is what gets cut.
-- With no Sessions and no query, this workspace's scope says `No saved sessions
-  in this workspace. Ctrl+S shows more.`; the other empty and no-match lines
-  stay unchanged.
+- With no Sessions and no query, the local scope says `No saved sessions in
+  this workspace. Ctrl+S shows more.` while it lists exactly the launch
+  workspace — before git answers, outside a git repository, and for a
+  one-worktree repository; a local scope over more worktrees, the
+  all-workspaces scope and the no-match line say `No saved sessions yet.`.
 - A daemon before `session.catalog` is listed through `session.summaries`, and
-  the client applies the scope to the rows it receives with the same exact
-  match.
+  the client applies the scope to the rows it receives: the exact launch
+  workspace, membership in the git set, or no filter.
 - `dimcode --resume ID` resumes a Session of any workspace, and cleanup selects
   across every workspace.
 
@@ -1491,7 +1685,10 @@ command cannot see a closed Session; it therefore stops before any delete, print
 so a server that refuses one refuses both, and a delete that answers `invalid_params`
 before anything was deleted stops the same way. It
 selects with one of two selectors and reads both from the `updatedAt` of
-`session.summaries`, the Session's last activity:
+`session.summaries`, the Session's activity time ([session catalog](appserver/session-catalog.md#32-order-cursor-and-paging)),
+not the time of its last stored event: attaching, restoring and every other housekeeping
+event leave it alone, so a Session that was only attached or resumed keeps its earlier
+time and can become eligible for deletion:
 
 | Selector | Selection |
 | --- | --- |
@@ -1751,6 +1948,15 @@ Exported Markdown: /tmp/Session notes.md
 Exported JSON: /tmp/events.json
 
 > /exit
++--------------------------------------------------------+
+| Bye!                                                   |
+|                                                        |
+| Feedback or ideas? Join us on Discord:                  |
+| https://discord.gg/ds35K3TadP                           |
+|                                                        |
+| To resume this session:                                |
+|   dimcode --resume <session-id>                         |
++--------------------------------------------------------+
 $
 
 $ dimcode session export <session-id> --format markdown > notes.md
@@ -1761,6 +1967,9 @@ The prompt keeps keyboard focus and the terminal keeps scrollback. There are no
 new dialogs, overlays or fixed-width columns. Paths and error messages use the
 existing terminal text filter; narrow terminals wrap normally. An empty Session
 exports an empty event list or a Markdown heading without fabricated messages.
+
+Both TUI modes print the feedback invitation when exiting. The resume command
+appears only when there is an active Session to resume.
 
 ## Execution and JSONL output
 
@@ -1807,13 +2016,52 @@ rewrite data in machine output. The CLI adds no synthetic lifecycle events or
 second event schema. Notification delivery keeps the daemon's existing
 best-effort semantics; consumers needing a fixed complete record use export.
 
+## Realtime sessions
+
+`dimcode realtime [--operation voice] [--model PROVIDER/MODEL]` opens one session over
+`modality.realtime.open` with `params: {}`
+([Modality A.3](plugins/Modality.md#a3-methods)). The operation defaults to `voice`; `--model`
+names the provider and model as every CLI model reference does. The command names no workspace.
+
+The provider session is configured by the client, not the command: each stdin line is one JSON
+value sent as a text frame over `modality.realtime.send`, so the first line a pipe carries can be
+the provider's own `session.update`. Blank lines are skipped; a line that is not JSON ends the
+command with exit code 1.
+
+Each `modality.realtime.event` notification prints its `event` as one compact JSON line on
+stdout, and `modality.realtime.ended` prints its params, so a consumer reads one JSON value per
+line and keeps the `reason` of the end. Errors stay off stdout: an error reply prints its message
+on stderr and the command exits 1.
+
+Stdin EOF closes the session over `modality.realtime.close` and exits 0; so does Ctrl+C once the
+session is open. Ctrl+C before the open reply exits 130 and opens nothing. A `direct` session
+prints its `connection` object as the first line and then holds: the caller talks to the
+provider's own transport, stdin lines are ignored, and EOF or Ctrl+C still closes the session
+over `modality.realtime.close`.
+
 ## Conversation export
 
-Both entries call the existing `session.history` RPC. The first response fixes
+The subcommand, line client and both terminal UIs call the existing `session.history` RPC. The first response fixes
 `through`; subsequent pages use that watermark and the server's `nextAfter`,
 including gaps caused by filtered records. The CLI reuses its existing cursor
 checks. Export does not submit input, change model context, close the Session,
 or implement a server-side exporter.
+
+In both terminal UIs `/export` is available only with an opened Session and
+opens a dialog containing exactly `Markdown (.md)` and `JSON (.json)`.
+Up/Down chooses, Enter exports and Esc cancels without a history read or file
+write. There are no inline arguments or path-entry steps. Files are saved in
+the CLI current directory as `session-<unique-id>.md` or `.json`, with a fresh
+UUID per export. Success names the absolute path; errors remain UI diagnostics,
+never model input. The worker settles an admitted export before processing
+further commands and leaves rendering on the interface thread.
+
+```text
+╭─ Export session ───────────────────────╮
+│ > Markdown (.md)                       │
+│   JSON (.json)                         │
+╰──────────── Enter export · Esc cancel ─╯
+```
 
 The exported branch is always `main`; child branch histories are not fetched or
 included. Markdown renders each `branch/create` fact with its child id as
@@ -1832,13 +2080,17 @@ reasoning, tool calls/results and non-text attachments. It does not execute
 content, resolve attachment URLs, or replay tools. It preserves code fences
 without allowing a message to close the surrounding tool-result fence.
 
-The CLI reads the fixed prefix successfully before opening an output file.
-Files use create-new semantics: existing paths fail without replacement.
+The CLI opens the output file before reading the fixed prefix, and removes it
+when the read or a write fails, so a completed run leaves the file and a failed
+one does not. Files use create-new semantics: existing paths fail without
+replacement.
 On Unix they are created with mode 0600 through the standard OpenOptions
 extension; Windows uses the native inherited ACL. Existing files are never
 opened to change their permissions.
-No output file is created after a history error. A write failure is reported
-and may leave a partial newly created file; no success message is printed.
+A history error removes the file the run created, so no partial export stays
+behind; a process killed mid-run can leave the partial file, because nothing
+runs to remove it. A write failure is reported and the file is removed; no
+success message is printed.
 Export-to-stdout failures return a nonzero code. Interactive export errors
 return to the input prompt and never become model input. During an admitted
 interactive export, Ctrl+C reports that the CLI is waiting for the result and

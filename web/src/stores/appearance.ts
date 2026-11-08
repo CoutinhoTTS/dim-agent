@@ -21,9 +21,11 @@ export const useAppearanceStore = defineStore("appearance", () => {
     }
   } catch { error.value = "Browser appearance preferences could not be read." }
 
+  const resolvedTheme = ref<"light" | "dark">("light")
   const systemDark = matchMedia("(prefers-color-scheme: dark)")
   function apply(): void {
-    document.documentElement.classList.toggle("dark", theme.value === "dark" || (theme.value === "system" && systemDark.matches))
+    resolvedTheme.value = theme.value === "dark" || (theme.value === "system" && systemDark.matches) ? "dark" : "light"
+    document.documentElement.classList.toggle("dark", resolvedTheme.value === "dark")
     document.documentElement.style.setProperty("--ui-font-size", String(fontSize.value))
   }
   apply()
@@ -41,5 +43,5 @@ export const useAppearanceStore = defineStore("appearance", () => {
       language.value = value
     } catch { error.value = "The selected language could not be loaded." }
   }
-  return { theme, fontSize, language, selectLanguage, error }
+  return { theme, resolvedTheme, fontSize, language, selectLanguage, error }
 })

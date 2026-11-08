@@ -21,6 +21,7 @@ use dim_agent_capabilities::{
     },
     workspace_tools::{self, WorkspaceToolsConfig},
 };
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use local_support::{Dirs, HoldingStore, platform, run, system_text};
@@ -118,8 +119,7 @@ fn work_config(dirs: &Dirs) -> SessionConfig {
 
 /// The last model call on `branch`.
 async fn last_call(session: &Session, branch: &str) -> ModelCallData {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .into_iter()
@@ -133,8 +133,7 @@ async fn last_call(session: &Session, branch: &str) -> ModelCallData {
 
 /// The last adopted configuration on `branch`.
 async fn last_configured(session: &Session, branch: &str) -> ContextConfiguredData {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .into_iter()
@@ -148,8 +147,7 @@ async fn last_configured(session: &Session, branch: &str) -> ContextConfiguredDa
 
 /// Every adopted configuration on `branch`, oldest first.
 async fn configurations(session: &Session, branch: &str) -> Vec<ContextConfiguredData> {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .into_iter()
@@ -270,7 +268,7 @@ async fn both_paths_carry_one_composition() {
         .await
         .unwrap();
     run(&session, "hello").await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let adopted_call = events
         .iter()
         .rev()
@@ -314,7 +312,7 @@ async fn both_paths_carry_one_composition() {
         .await
         .unwrap();
     run(&session, "hello").await;
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let hosted_call = events
         .iter()
         .rev()
@@ -2089,10 +2087,13 @@ async fn each_branch_keeps_its_own_entries() {
         1,
         "the line carries its own exec entry once, not both lines': {line:?}"
     );
-    assert_eq!(
-        guide_of(&line),
-        guide_of(&main),
-        "both lines load the same writers, so their guides compose the same text"
+    assert!(
+        guide_of(&line).contains("<dim-branch-parent"),
+        "the line was cut from main, so its guide explains the parent block: {line:?}"
+    );
+    assert!(
+        guide_of(&main).contains("<dim-branch-parent"),
+        "the parent entry registers for the Session, so main carries it too: {main:?}"
     );
 
     // Ending the line withdraws its entries and leaves main's unchanged.

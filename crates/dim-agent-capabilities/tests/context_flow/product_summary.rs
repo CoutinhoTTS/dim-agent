@@ -5,13 +5,14 @@
 use super::*;
 use dim_agent_capabilities::{
     agent_loop::AgentLoop,
-    context_model::ProductContextModel,
+    context_model::{ProductContextModel, output_allowance},
     history::{context_messages, project_context_history},
     summary_strategy::{
         LengthSentence, ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin,
         SummaryReasoning, TargetRule,
     },
 };
+use dim_agent_runtime::testing::chain_events;
 use serde_json::Value;
 use std::{
     collections::VecDeque,
@@ -41,7 +42,7 @@ fn reply_usage() -> Usage {
 /// The messages a preparation at the head would start from.
 async fn projected(session: &dim_agent_runtime::Session, branch: &str) -> Vec<Message> {
     let through = session.sequence(branch).unwrap();
-    let context = session.context(branch, through).await.unwrap();
+    let context = read_context_in(session, branch, through).await.unwrap();
     let history = project_context_history(&context).unwrap();
     context_messages(&context, &history)
         .into_iter()
@@ -58,7 +59,7 @@ async fn compact_now(session: &dim_agent_runtime::Session) -> (u64, Vec<Arc<Agen
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                 EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -116,6 +117,7 @@ impl ModelDriver for Recorder {
             });
         }
         let calls = self.calls.lock().unwrap().pop_front().unwrap_or_default();
+        let invokes_tools = !calls.is_empty();
         Box::pin(async move {
             let mut chunks = vec![Ok(ModelChunk::MessageStart {
                 message_id: "reply".into(),
@@ -138,10 +140,10 @@ impl ModelDriver for Recorder {
             chunks.push(Ok(ModelChunk::Usage(reply_usage())));
             chunks.push(Ok(ModelChunk::MessageStop {
                 message_id: "reply".into(),
-                reason: if chunks.len() == 2 {
-                    ModelStopReason::EndTurn
-                } else {
+                reason: if invokes_tools {
                     ModelStopReason::ToolUse
+                } else {
+                    ModelStopReason::EndTurn
                 },
             }));
             Ok(Box::pin(futures_util::stream::iter(chunks)) as ModelStream)
@@ -240,6 +242,7 @@ async fn product_session_with(
         output,
         config,
         SessionConfig::default(),
+        None,
         Arc::new(Local),
         None,
     )
@@ -254,6 +257,7 @@ async fn product_session_on(
     output: u64,
     config: ProductSummaryStrategyConfig,
     config_session: SessionConfig,
+    stored_config: Option<ModelConfig>,
     connection: Arc<dyn ResolveModelConnection>,
     reasoning: Option<serde_json::Value>,
 ) -> (MinimalHost, dim_agent_runtime::Session) {
@@ -299,7 +303,7 @@ async fn product_session_on(
                 provider_id: "local".into(),
                 model_id: "small".into(),
                 capability_snapshot: Some(snapshot),
-                config: None,
+                config: stored_config,
                 metadata: None,
             }),
         }),
@@ -333,7 +337,7 @@ async fn every_summary_request_fits_the_window_for_cjk_history() {
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                 EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -505,7 +509,7 @@ async fn compact_first_turn(session: &dim_agent_runtime::Session) -> Vec<Arc<Age
         .unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(&event.kind,
                 EventKind::ContextCompaction(data) if data.command == Some(command))
@@ -684,9 +688,10 @@ async fn a_retried_piece_carrying_a_long_summary_still_fits_the_input_budget() {
             .await
             .unwrap();
         let tokens = model.count_tokens(request);
+        let budget = model.context_window() - model.output_tokens();
         assert!(
-            tokens <= (WINDOW - output) as f64,
-            "summary request of {tokens} tokens exceeds the input budget"
+            tokens <= budget,
+            "summary request of {tokens} tokens exceeds the input budget of {budget}"
         );
     }
     assert!(!events.iter().any(|event| matches!(&event.kind,
@@ -713,6 +718,10 @@ async fn the_trigger_reserves_a_bounded_share_of_the_input_budget() {
         .unwrap();
         let request = ModelRequest {
             capability_snapshot: Some(snapshot),
+            config: Some(ModelConfig {
+                max_tokens: Some(output as f64),
+                ..Default::default()
+            }),
             ..ModelRequest::new("local", "small", Vec::new())
         };
         let model = ProductContextModel
@@ -720,6 +729,38 @@ async fn the_trigger_reserves_a_bounded_share_of_the_input_budget() {
             .await
             .unwrap();
         assert_eq!(model.threshold_tokens(), threshold, "{window}/{output}");
+    }
+}
+
+/// The allowance leaves at least half the window as input budget, whatever a
+/// source declares, and never exceeds the reply ceiling (ContextCompaction
+/// §5.1).
+#[test]
+fn the_adopted_allowance_bounds_a_declaration_by_half_the_window() {
+    let cases = [
+        (128_000, 128_000, 64_000),
+        (131_072, 131_072, 65_536),
+        (131_072, 200_000, 65_536),
+        (256_000, 256_000, 128_000),
+        (262_144, 262_144, 131_072),
+        (500_000, 500_000, 131_072),
+        (32_768, 32_768, 16_384),
+        (32_768, 65_536, 16_384),
+        (4_000, 5_000, 2_000),
+        (8_192, 4_095, 4_095),
+        (8_192, 4_096, 4_096),
+        (8_192, 4_097, 4_096),
+        (2, 2, 1),
+        (1, 1, 1),
+        (200_000, 100_000, 100_000),
+        (400_000, 128_000, 128_000),
+    ];
+    for (window, declared, expected) in cases {
+        assert_eq!(
+            output_allowance(window, declared),
+            expected,
+            "window {window}, declared output {declared}"
+        );
     }
 }
 
@@ -760,7 +801,7 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
     );
     session.submit(old, InputMode::Queue, "main").await.unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let completed = |events: &[Arc<AgentEvent>]| {
         events
             .iter()
@@ -828,7 +869,7 @@ async fn a_second_compaction_carries_the_previous_summary_and_pins_only() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(completed(&events), 2, "the second turn compacts");
     let requests = recorder.requests.lock().unwrap().clone();
     assert!(requests.len() > first, "the second compaction summarized");
@@ -881,12 +922,17 @@ impl ModelDriver for FailingBeforeStream {
                         budget: None,
                         kind: HostErrorKind::Transport,
                         model: Some(Box::new(ModelFailureFacts {
-                            origin: ModelFailureOrigin::Transport,
-                            error_type: Some("overloaded".into()),
-                            message: Some("The summarizer is unavailable".into()),
+                            kind: ModelFailureKind::Network,
+                            reason: Some("The summarizer is unavailable".into()),
+                            status: None,
+                            provider_code: None,
                             request_id: None,
-                            transient: true,
+                            cause: Vec::new(),
                             retry_after: Some(Duration::ZERO),
+                            attempts: 1,
+                            waited: Duration::ZERO,
+                            retry_after_stop: None,
+                            retry_forbidden: false,
                         })),
                         presentation: None,
                     })
@@ -1043,6 +1089,7 @@ async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
                 ..Default::default()
             },
             SessionConfig::default(),
+            None,
             Arc::new(Compatible),
             Some(declared),
         )
@@ -1091,6 +1138,163 @@ async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_summaries_keep_selection_and_strategy_reasoning_without_narrowing_capacity() {
+    use dim_agent_capabilities::{
+        context_preparation::ContextPreparation, prompt::Prompt, prompt_state::PromptSnapshot,
+    };
+
+    for startup in [false, true] {
+        let recorder = Arc::new(Recorder::default());
+        let (agent, session) = product_session_on(
+            WINDOW,
+            Arc::new(MockTools),
+            recorder.clone(),
+            OUTPUT,
+            ProductSummaryStrategyConfig::default(),
+            SessionConfig::default(),
+            None,
+            Arc::new(Compatible),
+            Some(serde_json::json!({
+                "supported": true,
+                "off": {"kind": "thinking_type", "value": "disabled"}
+            })),
+        )
+        .await;
+        let adopted = session
+            .get::<PromptSnapshot>("main")
+            .unwrap()
+            .unwrap()
+            .configuration
+            .unwrap();
+        let mut selected = ModelSelection {
+            provider_id: adopted.provider_id,
+            model_id: adopted.model_id,
+            capability_snapshot: adopted.capability_snapshot,
+            config: adopted.config,
+            metadata: adopted.metadata,
+        };
+        selected.config = Some(
+            serde_json::from_value(serde_json::json!({
+                "maxTokens": 80,
+                "temperature": 0.25,
+                "providerOptions": {"openai-compatible": {"reasoningEffort": "high"}}
+            }))
+            .unwrap(),
+        );
+        selected.metadata = Some(RequestMetadata {
+            session_id: Some("old-session".into()),
+            run_id: Some("old-run".into()),
+            trace_id: Some("old-trace".into()),
+            turn_id: Some("old-turn".into()),
+            startup: startup.then(|| ModelStartup {
+                connection: Some(StartupConnectionSource {
+                    id: "summary-source".into(),
+                    api_format: ModelProtocol::OpenaiCompatible,
+                    base_url: "http://127.0.0.1:9/gateway".into(),
+                    auth: StartupAuth::Anonymous,
+                    header_names: Vec::new(),
+                }),
+                auto_compact_window: Some(2_000),
+            }),
+            agent_id: None,
+            extensions: serde_json::from_value(
+                serde_json::json!({"providerRoute":"captured-route", "requestId":"turn-model-call"}),
+            )
+            .unwrap(),
+        });
+        session
+            .service::<Prompt>("main")
+            .unwrap()
+            .configure_loaded(Some(selected.clone()), Vec::new())
+            .await
+            .unwrap();
+        let usage = session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(usage.context_window, WINDOW as f64);
+        assert_eq!(usage.output_tokens, 80.);
+        assert_eq!(
+            usage.threshold_tokens,
+            if startup { 1_920. } else { 3_136. }
+        );
+
+        for text in [cjk(2_000), cjk(1_400)] {
+            session
+                .submit(text, InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+        }
+        let before_manual = recorder.requests.lock().unwrap().len();
+        assert_eq!(
+            before_manual > 0,
+            startup,
+            "only the startup threshold should trigger"
+        );
+        let (command, events) = compact_now(&session).await;
+        let requests = recorder.requests.lock().unwrap().clone();
+        assert!(
+            requests.len() > before_manual,
+            "manual compaction still runs below the ordinary threshold"
+        );
+        for request in requests {
+            assert_eq!(request.provider_id, selected.provider_id);
+            assert_eq!(request.model_id, selected.model_id);
+            assert_eq!(request.capability_snapshot, selected.capability_snapshot);
+            let metadata = request.metadata.as_ref().unwrap();
+            assert_eq!(
+                metadata.startup,
+                selected.metadata.as_ref().unwrap().startup
+            );
+            assert_eq!(
+                metadata.extensions.get("providerRoute"),
+                Some(&serde_json::json!("captured-route"))
+            );
+            assert!(
+                !metadata.extensions.contains_key("requestId"),
+                "each summary call must receive its own recording identity"
+            );
+            assert!(
+                metadata.session_id.is_none()
+                    && metadata.run_id.is_none()
+                    && metadata.trace_id.is_none()
+                    && metadata.turn_id.is_none()
+            );
+            let config = request.config.as_ref().unwrap();
+            assert_eq!(config.max_tokens, Some(80.));
+            assert_eq!(config.temperature, Some(0.25));
+            assert_eq!(
+                config
+                    .provider_options
+                    .as_ref()
+                    .unwrap()
+                    .openai_compatible
+                    .as_ref()
+                    .unwrap()
+                    .thinking
+                    .as_ref()
+                    .unwrap()
+                    .thinking_type,
+                Some(ThinkingType::Disabled)
+            );
+            let model = ProductContextModel
+                .resolve(request.clone(), CancellationToken::new())
+                .await
+                .unwrap();
+            assert!(model.count_tokens(&request) <= WINDOW as f64 - 80.);
+        }
+        assert!(events.iter().any(|event| matches!(&event.kind,
+            EventKind::ContextCompaction(ContextCompactionData {
+                command: Some(fact), outcome: ContextCompactionResult::Completed { diagnostics, .. }, ..
+            }) if *fact == command && diagnostics.strategy.details["reasoning"] == "off")));
+        agent.close().await.unwrap();
+    }
+}
+
 /// The previous digest is never sent to the summarizer: the strategy carries
 /// the previous summary part and the newly cut entries, and the digest part
 /// rolls forward from the record instead (ContextCompaction §5.10).
@@ -1116,6 +1320,7 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
             },
             ..SessionConfig::default()
         },
+        None,
         Arc::new(Local),
         None,
     )
@@ -1188,6 +1393,172 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
     assert!(
         !later.contains("wrote /work/a.rs"),
         "no digest entry reaches the summarizer"
+    );
+    agent.close().await.unwrap();
+}
+
+/// A declared output limit at or above the context window still leaves an
+/// input budget: Provider's adopted allowance keeps the budget positive, so
+/// the turn completes without a recovery compaction (#1130).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_output_limit_at_or_above_the_window_still_leaves_an_input_budget() {
+    const WINDOW: u64 = 32_768;
+    let allowance = 16_384;
+    for output in [WINDOW, WINDOW + 7_232] {
+        let recorder = Arc::new(Recorder::default());
+        let (agent, session) = product_session_on(
+            WINDOW,
+            Arc::new(MockTools),
+            recorder.clone(),
+            output,
+            ProductSummaryStrategyConfig::default(),
+            SessionConfig::default(),
+            None,
+            Arc::new(Local),
+            None,
+        )
+        .await;
+        session
+            .submit("hello".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+
+        let budget = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextBudget(data) => Some(data),
+                _ => None,
+            })
+            .expect("the preparation writes its budget");
+        assert_eq!(budget.context_window, WINDOW as f64);
+        assert_eq!(budget.output_tokens, allowance as f64);
+        assert!(budget.estimated_input_tokens > 0.);
+
+        assert!(
+            !events.iter().any(|event| matches!(
+                &event.kind,
+                EventKind::ContextCompactionStart(_) | EventKind::ContextCompaction(_)
+            )),
+            "a positive input budget starts no recovery"
+        );
+        let end = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::TurnEnd(data) => Some(data),
+                _ => None,
+            })
+            .expect("the turn ends");
+        assert!(
+            matches!(&end.outcome, TurnOutcome::Completed { .. }),
+            "the turn ended with {:?}",
+            end.outcome
+        );
+        agent.close().await.unwrap();
+    }
+}
+
+/// A Session adopted before the rule stored an allowance equal to its window.
+/// The request boundary repairs it from the same function, so the Session
+/// prepares a positive budget and compacts normally; the stored fact is not
+/// rewritten (#1130).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_allowance_from_before_the_rule_is_repaired_at_the_request() {
+    use dim_agent_capabilities::prompt_state::PromptSnapshot;
+
+    const WINDOW: u64 = 32_768;
+    let allowance = 16_384;
+    let recorder = Arc::new(Recorder::default());
+    let stored = ModelConfig {
+        max_tokens: Some(WINDOW as f64),
+        ..Default::default()
+    };
+    let (agent, session) = product_session_on(
+        WINDOW,
+        Arc::new(MockTools),
+        recorder.clone(),
+        WINDOW,
+        ProductSummaryStrategyConfig::default(),
+        SessionConfig::default(),
+        Some(stored.clone()),
+        Arc::new(Local),
+        None,
+    )
+    .await;
+    session
+        .submit("a".repeat(60_000), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+
+    let budget = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextBudget(data) => Some(data),
+            _ => None,
+        })
+        .expect("the preparation writes its budget");
+    assert_eq!(budget.output_tokens, allowance as f64);
+    assert!(budget.estimated_input_tokens > 0.);
+
+    let start = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompactionStart(data) => Some(data),
+            _ => None,
+        })
+        .expect("the full budget starts a recovery compaction");
+    assert_eq!(
+        start.trigger,
+        CompactionTrigger::ProviderOutputBudgetExhausted
+    );
+    let compaction = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data) => Some(data),
+            _ => None,
+        })
+        .expect("the recovery compaction commits its result");
+    assert!(
+        matches!(
+            &compaction.outcome,
+            ContextCompactionResult::Completed { .. }
+        ),
+        "expected a completed compaction, got {:?}",
+        compaction.outcome
+    );
+    let requests = recorder.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "one summarizer request");
+    assert_eq!(
+        requests[0].config.as_ref().unwrap().max_tokens,
+        Some(allowance as f64)
+    );
+
+    let end = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::TurnEnd(data) => Some(data),
+            _ => None,
+        })
+        .expect("the turn ends");
+    assert!(
+        matches!(&end.outcome, TurnOutcome::Completed { .. }),
+        "the turn ended with {:?}",
+        end.outcome
+    );
+
+    let adopted = session
+        .get::<PromptSnapshot>("main")
+        .unwrap()
+        .unwrap()
+        .configuration
+        .unwrap();
+    assert_eq!(
+        adopted.config.unwrap().max_tokens,
+        stored.max_tokens,
+        "the stored configuration keeps the value it adopted"
     );
     agent.close().await.unwrap();
 }

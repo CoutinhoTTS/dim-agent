@@ -27,7 +27,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), Box<dyn std::er
     run_with(args, None, |_| {})
 }
 
-/// Installs the host profile with `install` before assembly.
 /// Runs a process that serves the App Server: closes every descriptor above
 /// standard error that the process inherited, then runs [`run_with`].
 ///
@@ -401,7 +400,7 @@ pub fn run_with(
             .ok_or("--defaults needs --product-home or --home")?;
         let home = std::path::absolute(home)?;
         let preset = crate::plugin_manager::Defaults::read(defaults)?.runtimes;
-        let runtimes = Arc::new(Runtimes::load(&home, &preset)?);
+        let runtimes = Arc::new(Runtimes::load(&home, &preset, None)?);
         config.session_typescript =
             Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![]));
     }
@@ -416,6 +415,9 @@ pub fn run_with(
     }
     if !mock_model && model_config.is_none() && config.product_home.is_none() {
         return Err("Product home is required; use --product-home PATH, --model-config PATH or --mock-model".into());
+    }
+    if config.product_home.is_none() && config.plugin_files.is_none() {
+        config.plugin_files = config.target_home.clone();
     }
     if config.product_home.is_some() || model_config.is_some() {
         product_session_defaults(&mut config.session_defaults);
@@ -510,6 +512,13 @@ pub fn run_with(
             dim_agent_capabilities::prompt_suggestion::install(&mut builder);
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);
+            if let Some(root) = config
+                .product_home
+                .as_ref()
+                .or(config.plugin_files.as_ref())
+            {
+                super::create_private_directory(&root.join("scheduler"))?;
+            }
             install(&mut builder);
         } else if mock_model {
             defaults::install(&mut builder);

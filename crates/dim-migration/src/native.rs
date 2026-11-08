@@ -849,6 +849,10 @@ fn validate_settings(source: &str, value: &Value) -> Result<()> {
             use dim_app_server::settings::BusinessDocument;
             let document: dim_app_server::mcp::config::McpSettings =
                 serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+            // The legacy-home import writes only entries that decode, one by
+            // one; a broken entry stays there and is recorded with its error.
+            // A target document that already holds a broken entry therefore
+            // does not reject the group, and the rest of it still merges.
             document.validate().map_err(|_| invalid())?;
         }
         "collaboration" => {
@@ -928,4 +932,28 @@ fn validate_settings(source: &str, value: &Value) -> Result<()> {
         _ => return Err(invalid()),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The legacy-home import splits entries before it fills the native
+    /// store. A target document that already holds a broken entry therefore
+    /// does not reject the whole group; an empty id still fails the document.
+    #[test]
+    fn a_v13_mcp_group_with_a_broken_entry_validates() {
+        validate_settings(
+            "mcp",
+            &json!({"mcpServers": {
+                "good": {"command": "server"},
+                "broken": {"command": ""}
+            }}),
+        )
+        .unwrap();
+        assert!(
+            validate_settings("mcp", &json!({"mcpServers": {"": {"command": "server"}}})).is_err()
+        );
+    }
 }

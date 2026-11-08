@@ -1,5 +1,29 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "대기열",
+        "Export session" => "세션 내보내기",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter steer · x 보류 중인 메시지 삭제 · Esc 닫기"
+        }
+        "No queued messages." => "대기열에 메시지가 없습니다.",
+        "Held · awaiting application" => "보류 중 · 적용 대기",
+        "Incorporating · awaiting model consumption" => "반영 중 · 모델 읽기 대기",
+        "Held" => "보류 중",
+        "Incorporating" => "반영 중",
+        "Enter export · Esc cancel" => "Enter 내보내기 · Esc 취소",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "첨부 파일이 있는 메시지는 대기열에 남습니다. /queue에서 steer하거나 삭제하세요"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue 관리 · shift+← 마지막 편집 · ctrl+s 지금 steer"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count}개 더 · /queue 관리 · shift+← 마지막 편집 · ctrl+s 지금 steer"
+        }
+        "steer or delete queued messages" => "대기열 메시지 steer 또는 삭제",
+        "export this conversation" => "이 대화 내보내기",
+        "That message has already left the queue." => "해당 메시지는 이미 대기열에서 나갔습니다.",
+        "Exported {format}: {path}" => "{format} 내보내기 완료: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 출력/멤버 중단 · x 명령 중지 · Esc 닫기"
@@ -275,14 +299,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C로 Web 작업 공간 중지",
         "To resume this session:" => "세션 재개:",
 
-        // composer/commands.rs: categories
-        "session" => "세션",
-        "run" => "실행",
-        "view" => "보기",
-        "model" => "모델",
-        "extensions" => "확장",
-        "app" => "앱",
-        "skill" => "스킬",
         // composer/commands.rs: descriptions
         "start a new session" => "새 세션 시작",
         "show or set the reasoning effort" => "추론 강도 보기/설정",
@@ -292,7 +308,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "MCP 서버 목록, 로그인/로그아웃 (login|logout ID)"
         }
         "resume a previous session" => "이전 세션 재개",
-        "open this session in the browser" => "브라우저에서 이 세션 열기",
+        "turn the web interface on or off" => "웹 인터페이스 켜기 또는 끄기",
         "show the context window usage" => "컨텍스트 창 사용량 보기",
         "interrupt the run" => "실행 중단",
         "steer with the next queued message" => "다음 대기 메시지로 steer",
@@ -320,6 +336,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc 닫기",
         "Suggestions" => "추천",
         "Skills" => "스킬",
+        "Skill loaded: {name}" => "스킬 로드됨: {name}",
         "Commands" => "명령",
         "Command Palette" => "명령 팔레트",
         "No matches" => "결과 없음",
@@ -520,6 +537,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "고정된 입력",
         "digest" => "다이제스트",
         "summary" => "요약",
+        "The first message was not sent; your new draft was kept." => {
+            "첫 메시지는 전송되지 않았습니다. 새 초안은 유지되었습니다."
+        }
+        "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server가 아직 {server}입니다. 다른 클라이언트가 사용 중이라 이 {client} 클라이언트도 그것을 사용합니다. 끝나면 `dimcode daemon stop`을 실행하세요. 다음 시작에서는 {client}가 실행됩니다."
+        }
+        "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server가 아직 {server}입니다. 다른 클라이언트가 사용 중입니다(연결: {connections}, 연결된 세션: {attached}, 실행 중인 턴: {running}). 이 {client} 클라이언트도 그것을 사용합니다. 끝나면 `dimcode daemon stop`을 실행하세요. 다음 시작에서는 {client}가 실행됩니다."
+        }
+        "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
+            "로컬 저장소를 포맷 v{from}에서 v{to}(으)로 업그레이드하는 중입니다. 큰 저장소에서는 시간이 걸릴 수 있습니다."
+        }
         _ => return None,
     })
 }

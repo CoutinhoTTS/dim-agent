@@ -1,5 +1,6 @@
 #![cfg(unix)]
 use dim_agent_capabilities::defaults;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::EventKind;
 use dim_app_server::{ServerConfig, serve, storage::SqliteStorage};
@@ -216,7 +217,9 @@ async fn migration_retains_unsafe_objects_and_cleans_interrupted_snapshots() {
             })
             .unwrap()
     );
-    assert_eq!(native.query_row("SELECT count(*) FROM session_catalog c JOIN timeline_events e ON e.session_id=c.session_id AND e.branch_id='main' AND e.last_sequence=(SELECT sequence FROM timeline_branches WHERE session_id=c.session_id AND branch_id='main') WHERE c.updated_at_ms!=json_extract(e.body,'$.record.event.create_at')", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    // #1099: the catalog's activity time is the newest activity event on
+    // `main`, or the Session's creation time when there is none.
+    assert_eq!(native.query_row("SELECT count(*) FROM session_catalog c WHERE c.updated_at_ms!=COALESCE((SELECT json_extract(e.body,'$.record.event.create_at') FROM timeline_events e WHERE e.session_id=c.session_id AND e.branch_id='main' AND e.kind IN ('input/message','turn/end','branch/create','session/forked') AND NOT (e.kind='input/message' AND json_extract(e.body,'$.record.event.data.user') IS NULL) ORDER BY e.sequence DESC LIMIT 1), (SELECT a.created_at_ms FROM agent_sessions a WHERE a.session_id=c.session_id))", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     assert_eq!(
         native
             .query_row(
@@ -654,7 +657,7 @@ async fn migration_keeps_large_images_as_files_without_rejecting_session_history
         .await
         .unwrap();
         let session = server.agent().unwrap().restore_session(id).await.unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         let replacement = history
             .iter()
             .find_map(|event| match &event.kind {
@@ -861,7 +864,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         .rpc("session.attach", json!({"sessionId":id}))
         .await
         .unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         history
             .iter()
@@ -885,7 +888,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
         .await
         .unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let request = history
         .iter()
         .find_map(|e| match &e.kind {
@@ -1324,6 +1327,260 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
     assert_eq!(snapshot(&source), before);
     plugin.dispose().await.unwrap();
     root.shutdown().await.unwrap();
+}
+
+/// #951: a legacy entry that does not decode stays in the legacy home and is
+/// recorded on its own, while a decodable entry imports beside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_imports_decodable_mcp_entries_and_records_broken_ones() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let marker = "token-like-value-2f9a";
+    let servers = json!({
+        "docs": {"type": "streamable-http", "url": "https://mcp.example.test/mcp", "headers": {"X-Key": "public"}, "future": {"keep": 1}},
+        "broken": {"type": "http", "url": "https://mcp.example.test", "headers": {"Authorization": {"leak": marker}}}
+    });
+    std::fs::write(
+        source.join("mcp.json"),
+        json!({"mcpServers": servers.clone()}).to_string(),
+    )
+    .unwrap();
+    let before = snapshot(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    let imported = report
+        .objects
+        .iter()
+        .find(|item| item.id == "mcp.mcpServers")
+        .unwrap();
+    assert_eq!(imported.outcome, Outcome::Imported, "{report:?}");
+    let broken = report
+        .objects
+        .iter()
+        .find(|item| item.id == "mcpServers.broken")
+        .unwrap();
+    assert_eq!(broken.outcome, Outcome::Unsupported, "{report:?}");
+    let reason = broken.reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("headers.Authorization"), "{reason}");
+    assert!(!reason.contains(marker), "{reason}");
+    assert_eq!(snapshot(&source), before);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let stored: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["mcpServers"]["docs"], servers["docs"]);
+    assert!(stored["mcpServers"].get("broken").is_none());
+    assert!(!stored.to_string().contains(marker));
+}
+
+/// #951: a legacy file whose entries all decode imports exactly as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_imports_a_fully_valid_mcp_file_as_before() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let servers = json!({
+        "local": {"command": "legacy-server", "args": ["--flag"], "env": {"A": "one"}, "future": {"keep": true}},
+        "remote": {"type": "sse", "url": "https://mcp.example.test/sse", "headers": {"X-Key": "public"}, "enabled": false}
+    });
+    std::fs::write(
+        source.join("mcp.json"),
+        json!({"mcpServers": servers.clone()}).to_string(),
+    )
+    .unwrap();
+    let before = snapshot(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|item| item.id == "mcp.mcpServers" && item.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    assert!(
+        !report
+            .objects
+            .iter()
+            .any(|item| item.id.starts_with("mcpServers.")),
+        "{report:?}"
+    );
+    assert_eq!(snapshot(&source), before);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let stored: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["mcpServers"], servers);
+}
+/// #953: a `timeout` imports as written, with no unit conversion, and an
+/// invalid value makes only its own entry an import error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_imports_a_tool_call_timeout_as_written_and_rejects_an_invalid_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let servers = json!({
+        "local": {"command": "legacy-server", "timeout": 1000},
+        "remote": {"type": "http", "url": "https://mcp.example.test/mcp", "timeout": 86400000},
+        "fraction": {"type": "http", "url": "https://mcp.example.test/fraction", "timeout": 1500.5}
+    });
+    std::fs::write(
+        source.join("mcp.json"),
+        json!({"mcpServers": servers.clone()}).to_string(),
+    )
+    .unwrap();
+    let before = snapshot(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|item| item.id == "mcp.mcpServers" && item.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    let fraction = report
+        .objects
+        .iter()
+        .find(|item| item.id == "mcpServers.fraction")
+        .unwrap();
+    assert_eq!(fraction.outcome, Outcome::Unsupported, "{report:?}");
+    let reason = fraction.reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("timeout"), "{reason}");
+    assert!(!reason.contains("1500.5"), "{reason}");
+    assert_eq!(snapshot(&source), before);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let stored: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["mcpServers"]["local"], servers["local"]);
+    assert_eq!(stored["mcpServers"]["remote"], servers["remote"]);
+    assert!(stored["mcpServers"].get("fraction").is_none());
+}
+
+/// #952: a variable reference imports exactly as written; the migrated entry
+/// is user text and expands only when it connects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migration_imports_an_entry_with_a_variable_reference_as_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source");
+    let _db = fixture(&source);
+    let servers = json!({
+        "docs": {
+            "type": "http",
+            "url": "https://${MCP_HOST}/mcp",
+            "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}
+        }
+    });
+    std::fs::write(
+        source.join("mcp.json"),
+        json!({"mcpServers": servers.clone()}).to_string(),
+    )
+    .unwrap();
+    let before = snapshot(&source);
+    let target = directory.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    let root = rutis::Ctx::root().unwrap();
+    let plugin = root.plugin(MigrationPlugin::new(
+        target.clone(),
+        "rust".into(),
+        vec!["system".into()],
+    ));
+    (&plugin).await.unwrap();
+    let report = root
+        .get::<Migration>()
+        .unwrap()
+        .run(source.clone(), true, None)
+        .await
+        .unwrap();
+    assert!(
+        report
+            .objects
+            .iter()
+            .any(|item| item.id == "mcp.mcpServers" && item.outcome == Outcome::Imported),
+        "{report:?}"
+    );
+    assert!(
+        !report
+            .objects
+            .iter()
+            .any(|item| item.id.starts_with("mcpServers.") && item.outcome == Outcome::Unsupported),
+        "{report:?}"
+    );
+    assert_eq!(snapshot(&source), before);
+    plugin.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
+    let stored: String = native
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored["mcpServers"], servers);
 }
 
 /// #522: a legacy limit equal to the assumed pair imports as undeclared,
@@ -2096,7 +2353,7 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
             .await
             .unwrap();
         let session = agent.get_session(&id).unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().all(|event| !matches!(
             event.kind,
             EventKind::ModelCall(_)
@@ -2120,7 +2377,7 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
             .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
             .await
             .unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         let request = history
             .iter()
             .find_map(|event| match &event.kind {
@@ -2177,8 +2434,7 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler() {
+async fn migration_configuration_is_consumed_by_unchanged_web_and_the_native_scheduler() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(
         directory.path(),
@@ -2226,15 +2482,11 @@ async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler
     let choices: Value =
         serde_json::from_slice(&std::fs::read(target.join("plugins.json")).unwrap()).unwrap();
     assert_eq!(choices["names"]["web"]["off"], true);
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
-    let defaults = target.join("defaults.json");
-    std::fs::write(&defaults,json!({"plugins":{"scheduler":repository.join("runtime/plugins/scheduler")},"locked":["PluginManager","Rpc","Transport"]}).to_string()).unwrap();
+    std::fs::create_dir_all(target.join("scheduler")).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts(&mut builder);
+    dim_agent_scheduler::install(&mut builder);
     let server = serve(
         builder,
         ServerConfig {
@@ -2242,17 +2494,6 @@ async fn node_migration_configuration_is_consumed_by_unchanged_web_and_scheduler
             database_path: Some(target.join("rust/dimcode.sqlite")),
             product_home: Some(target),
             unix_path: Some(directory.path().join("native.sock")),
-            plugin_defaults: Some(defaults),
-            session_typescript: Some(
-                dim_app_server::session_typescript::SessionTypeScriptConfig {
-                    node: std::env::var_os("DIM_TEST_NODE").unwrap().into(),
-                    js_runtime: std::env::var_os("DIM_TEST_JS_RUNTIME").unwrap().into(),
-                    anchor: repository.join("runtime/package.json"),
-                    python: None,
-                    acquire: None,
-                    rows: vec![],
-                },
-            ),
             ..Default::default()
         },
     )

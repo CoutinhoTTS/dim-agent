@@ -18,8 +18,11 @@ cargo run --locked -p dim-app-server -- \
 ```
 
 A configured model file uses the same public execution capabilities: workspace tools, approvals,
-Skills, prompt sources, MCP, branches and collaboration. Provider selection does not select a
-different harness. Account/provider management remains specific to the product provider.
+Skills, prompt sources, MCP, branches, collaboration and automatic Session titles. The configured
+catalog provides the auxiliary model those titles use, and plugin files live under `--home`; a host
+started with only a database file has no plugin files root and registers no `pluginFiles` provider.
+Provider selection does not select a different harness. Accounts,
+OAuth sign-in and provider management remain specific to the product provider.
 
 ```sh
 cargo run --locked -p dim-app-server -- \
@@ -145,6 +148,27 @@ not the user source.
 - `mcp.test` probes one configuration without attaching a Session; the
   [MCP configuration management](../../docs/design/appserver/mcp-management.md#45-probe-mcptest)
   contract defines its outcome, latency, tools and auth report.
+- `mcp.import.sources({cwd?})` reports the known MCP stores of other local clients — Claude Code,
+  Codex and OMP — with each store's id, client, scope, display path, state (`ready`, `absent`,
+  `unreadable`, `too-large` or `malformed`) and entry count, or the owner's message. Each request
+  reads the fixed files its scope names once; it never returns an entry or a value, and writes
+  nothing. The
+  [MCP configuration management](../../docs/design/appserver/mcp-management.md#49-discovery-mcpimportsources-and-from)
+  contract owns the source table, the Codex mapping and the bounds.
+- `mcp.import.preview({source, document? | from?, cwd?})` decodes a client-supplied standard
+  `mcpServers` document and reports each entry's `id`, `transport`, `status` (`identical`,
+  `changed`, `conflict` or `invalid`), the changed field names and JSON kinds, the `unsupported`
+  members (`kept-unused` or `dropped`) and the entry's error, plus `unknownTopLevel` and the
+  target `revision`; it writes nothing. With `from` the owner reads one known store itself and
+  the converted text never leaves the daemon; the reply then also carries `sourceRevision`.
+  `mcp.import.apply` takes the same input, the preview's revision as `expectedVersion` (and, with
+  `from`, `sourceRevision` as `expectedSourceRevision`) and one resolution per entry (`import`,
+  `skip`, `replace` or `rename` with `newId`), re-validates them against the source and writes
+  every accepted entry with one compare-and-set; an import never enables an entry, and a project
+  import writes each entry as its public skeleton and puts the withheld values in the user-scope
+  `mcp-secrets` record, as a move into project does. The
+  [MCP configuration management](../../docs/design/appserver/mcp-management.md#48-import-mcpimportpreview-mcpimportapply)
+  contract defines the statuses, the resolutions and the errors.
 - `mcp.remove` removes the entry from the selected source; it can reveal a lower-precedence entry.
 - `mcp.set_enabled` additionally takes `enabled`. A user entry's `enabled` field changes and the
   rest of the entry is preserved. For a project entry, enabling checks `expectedVersion` against
@@ -153,6 +177,42 @@ not the user source.
   unreadable or no longer defines the entry, and `mcp.remove` withdraws it before editing the file.
 - `mcp.disconnect` takes `source`, `id` and optional `cwd`, without a revision; it does not edit
   persisted intent.
+
+A document decodes entry by entry: an entry that does not decode is kept as written and reported
+in the catalog's `invalid` list (`[{id, source, error}]`), while every valid entry loads. Its error
+names the id and the field and states the expected kind, never a value. A broken entry takes no
+`mcp-secrets` overlay and cannot be updated, enabled, tested or inspected: `mcp.remove` deletes it
+and `mcp.save` replaces it with a valid definition, deleting the project record the broken entry
+kept. Every write puts each entry it did not change
+back exactly as it was read. A file that is not JSON and a non-object `mcpServers` still fail the
+whole document, with the decoder's line and column and no value. A client that predates `invalid`
+still reads every valid `servers` row and shows nothing about the broken entries.
+
+A stdio or remote entry may state `timeout`: an integer number of milliseconds from 1000 to
+86400000 that bounds that entry's `tools/call` requests. Without one a tool call waits up to ten
+minutes; every other request keeps its sixty-second exchange limit, and starting a server keeps its
+own deadline. Any other value, including `null`, is the entry's own error under the one-by-one
+rule. A timeout fails the call with an error that names the limit and its source and sends
+`notifications/cancelled` for the request, and the management read shows the value when it is
+stated ([MCP configuration management](../../docs/design/appserver/mcp-management.md#d20-a-tool-call-waits-as-long-as-its-entry-allows)).
+
+An entry's `command`, each argument, each `env` value, `cwd`, the remote `url`, each header value
+and the bearer token may carry `${NAME}` or `${NAME:-default}`; any other `$` text is literal, a
+variable set to the empty string counts as set, and a default ends at the first `}`. The daemon
+expands a reference from its own environment when it builds the effective configuration a
+connection runs, and the stored document keeps the text the user wrote. A reference the
+environment does not set keeps its text too: the entry loads and its connection fails with the
+usual transport error. A user entry expands every reference. A plugin entry is guarded in every
+guarded field, and a workspace entry is guarded in the members that come from `.mcp.json`: there a
+protected name in the remote `url`, a header value or the bearer token expands to the empty string
+whether it is set or not, and its default is ignored. A protected name is one of the daemon's
+model provider, cloud, proxy, code hosting or package registry variable, a name with the
+`DIM_`/`DIMCODE_` prefix or one of those exact names, matched without case, or a variable the
+model profile names for a provider key. Stdio fields are not guarded, because enabling a workspace stdio entry already
+runs it with the user's authority, and a plugin entry's `cwd` is not expanded. `mcp.catalog` rows
+and the configuration view carry `referencedVariables` and `unsetVariables`, sorted names only; a
+protected name in a guarded field is referenced and never unset, and an invalid entry and a probe
+result carry neither.
 
 Edits are source-local. No atomic user/project scope migration is offered; the Web editor fixes
 the selected entry's source rather than copying secrets into another scope. OAuth sign-in,
@@ -183,8 +243,10 @@ and `mcp.set_enabled` refuse them, while `mcp.disconnect` and sign-in work as fo
 Successful configuration mutations return `{}` after persistence, not after connection/tool
 adoption; disabling or removing an entry also waits until its running generations have closed in
 every Session. The catalog also returns `userApplication`, `pluginApplication` and optional `projectApplication`, each with
-`appliedRevision`, `error` and `cleanupError`. Application describes source eligibility
-and instance creation failures; it does not confirm a network connection or tool adoption.
+`appliedRevision`, `error` and `cleanupError`. `appliedRevision` is the source token of the
+applied configuration — `userRevision` or `projectRevision` — so a client comparing it with the
+token it read sees whether that configuration is the one applied. Application describes source
+eligibility and instance creation failures; it does not confirm a network connection or tool adoption.
 An application error leaves persisted intent intact. Cleanup errors remain visible for that
 source during this publisher's lifetime, including after later successful application.
 Read `session.mcp` for runtime state. A conflict requires rereading the source;
@@ -227,8 +289,9 @@ loopback HTTP; an entry's optional `oauth` object (`clientId`, `callbackPort`,
 - `mcp.auth.start({source, id, cwd?, clientSecret?})` needs an enabled entry. It discovers the
   authorization server through Protected Resource Metadata (or `oauth.authServerMetadataUrl` when
   the server publishes none), registers a client when needed, and returns
-  `{attemptId, authorizationUrl, redirectUri, resource, issuer, expiresAt}`. The redirect URI is
-  `http://localhost:{callbackPort}/callback` (default 1456); the daemon runs no listener.
+  `{attemptId, authorizationUrl, redirectUri, resource, issuer, expiresAt}`. `resource` is the
+  entry's expanded endpoint. The redirect URI is `http://localhost:{callbackPort}/callback`
+  (default 1456); the daemon runs no listener.
 - `mcp.auth.complete({attemptId, callbackUrl})` takes the full callback URL, captured by the
   client's loopback listener or pasted by the user, validates it and exchanges the code. A wrong
   redirect, `state` or `iss` leaves the attempt pending.
@@ -367,7 +430,9 @@ Unix endpoint directories must be private (0700), sockets use 0600, and cleanup 
 
 ### Shutdown completion
 
-For authorized transports, v3 `hello.features` includes `daemon.shutdown.completed`. A successful `daemon.shutdown` response with `force: false` (the default) certifies that Agent work, connections and the Rutis process tree have settled, including storage and plugin disposal. Cleanup failure returns `shutdown_failed` without exposing disposer error details. EOF alone is not success. `force: true` retains its early acknowledgement and does not promise cleanup.
+For authorized transports, v3 `hello.features` includes `daemon.shutdown.completed` and `daemon.shutdown.ifIdle`. A successful `daemon.shutdown` response with `force: false` (the default) certifies that Agent work, connections and the Rutis process tree have settled, including storage and plugin disposal. Cleanup failure returns `shutdown_failed` without exposing disposer error details. EOF alone is not success. `force: true` retains its early acknowledgement and does not promise cleanup.
+
+`daemon.shutdown {ifIdle: true}` stops the daemon only while it is idle: no other client connection is open, no Session has an attached client, and no turn is running; the requesting connection is not counted in the connection total. The decision is atomic with hello and Session attach admission: a concurrent client is either counted before the decision or refused as shutting down, so none joins a daemon the call is closing. A daemon in use answers the app error `daemon_busy` carrying the `connections`, `attachedSessions` and `running` counts and changes nothing. Without `ifIdle` the method behaves as above; the CLI uses it to replace a daemon of another build only when replacing it disturbs no one.
 
 The requesting connection hands only its final-response writer to the existing process coordinator before leaving the plugin graph. The coordinator sends successful completion after `root.shutdown()`; no graph-owned RPC task waits on its own disposal. Shutdown first stops RPC admission and joins admitted shutdown handlers, including force acknowledgement writes. If an admitted force request wins, the coordinator joins connection handoffs and returns `shutdown_failed` to pending graceful callers without waiting for business cleanup. Reply writes are bounded by the transport write deadline. Client disconnect does not cancel accepted cleanup. Clients must check the feature before relying on this completion contract from an older daemon.
 
@@ -389,16 +454,20 @@ The public server runs without a managed provider. API-key and supported native 
 
 ```rust
 // `dimcode app-server …`, run by the CLI as its daemon from this same executable.
-dim_app_server::cli::process_entry(args, Some(ManagedProviderRow(Arc::new(|builtins, root| {
-    dim_agent_runtime::register_part(builtins, &dim_app_server::catalog(), move |names| {
-        Ok(Box::new(MyProviderPlugin::new(names, root)?))
-    }).expect("managed provider dependencies")
-}))))
+dim_app_server::cli::process_entry(
+    args,
+    Some(ManagedProviderRow(Arc::new(|builtins, root| {
+        dim_agent_runtime::register_part(builtins, &dim_app_server::catalog(), move |names| {
+            Ok(Box::new(MyProviderPlugin::new(names, root)?))
+        }).expect("managed provider dependencies")
+    }))),
+    install_product_plugins,
+)
 ```
 
 `ManagedProviderRow` registers the plugin's process row given the product root's FileStorage index and returns the row name; `ServerConfig.managed_provider` carries it for embedders. It is installed only with a product home, beside `ManagedProviderBinding`, which hands the provider to `ManagedProviders`. The plugin owns its account schema, authentication, token refresh and catalog normalization; the host does not interpret supplier-specific responses. Files it keeps under the product root go through FileStorage; `auth.json` is plain JSON shared with the native subscription providers, each owning its own root fields.
 
-`process_entry` is the process entry: on Unix it closes every descriptor above standard error that the process inherited, then calls `run_with`, so a process `main` calls it before it opens anything. Linux closes the range in one `close_range` call; where that call is unavailable, and on the other Unix systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes every number the listing names; when no listing can be read it closes 3 up to the process's descriptor limit, which is the soft limit, else the hard limit, else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no inherited descriptor stays open. `run_with` and `run` do not touch the descriptors the process has open and are the entries for an embedder that keeps its own. `process_entry` and `run_with` take a native-profile installer, `fn(&mut AgentBuilder)`, called when the product-home or model-config execution profile is assembled. It contributes host-selected plugins through the existing builder API. `run` and the standalone server choose no additional native plugins; `dimcode` installs its product plugins from their own crates.
+`process_entry` is the process entry: on Unix it closes every descriptor above standard error that the process inherited, then calls `run_with`, so a process `main` calls it before it opens anything. Linux closes the range in one `close_range` call; where that call is unavailable, and on the other Unix systems, the daemon lists `/proc/self/fd` (Linux) or `/dev/fd` and closes every number the listing names; when no listing can be read it closes 3 up to the process's descriptor limit, which is the soft limit, else the hard limit, else `sysconf(_SC_OPEN_MAX)`, else 65,536, so no inherited descriptor stays open. `run_with` and `run` do not touch the descriptors the process has open and are the entries for an embedder that keeps its own. `process_entry` and `run_with` take a native-profile installer, `fn(&mut AgentBuilder)`, called when the product-home or model-config execution profile is assembled. It contributes host-selected plugins through the existing builder API. `run` and the standalone server choose no additional native plugins; `dimcode` installs its product plugins from their own crates (`dim_session_title::install`, `dim_agent_scheduler::install`, `dim_goal::install` and `dim_modality::install`) for both profiles. The Scheduler and the Goal are among those plugins and are no longer default TypeScript plugins, so a host that wants `schedule.*` and the `schedule` tool calls `dim_agent_scheduler::install` from its installer, one that wants `goal_update`, `session.goal.*` and continuation calls `dim_goal::install`, one that wants `modality.*` calls `dim_modality::install`, and the plain `dim-app-server` binary serves none of them.
 
 The Dim account (`dimcode-api-oauth`) is such a plugin, in [`crates/dim-oauth`](../dim-oauth/README.md); `dimcode` built with the account's client IDs is the account build. See the [development contract](../../docs/architecture/development.md#managed-provider-boundary) and [release packaging](../../docs/release/README.md#local-packaging).
 
@@ -411,10 +480,32 @@ that root, no provider or working-directory fallback is supplied. See the
 [public binding](../../docs/design/process-typescript.md#52-public-pluginfiles-binding).
 The embedding host must provision each consumer's parent directories before
 enabling it: `withLock` returns `io` for a missing parent and does not create it.
+A host without a product home names its plugin root in `ServerConfig.plugin_files`. The `dimcode` development profile (`--model-config`) uses its `--home` directory, so the root and its `scheduler/` directory are provisioned there.
 
 A plugin declares `inject: ['pluginFiles']` and opens a fresh scope during each `apply`. Register `scope.close()` with `ctx.effect` immediately after opening, then register business cleanup. The host chooses the authorized product root; the plugin supplies relative file paths only. This is a trusted-plugin API, not a sandbox for untrusted Node code.
 
-Import `PluginFiles`, `FileScope`, `FileLease` and `FileResult` with
+A scope offers `withLock(name, callback, cancelled?)`, `list(prefix)` and `remove(name)`; a lease offers `read()`, `replace(text)`, `backup(suffix)`, `readBytes()` and `replaceBytes(bytes)`. Every name is a path relative to the authorized root, resolved through FileStorage: `..`, an absolute path and this module's reserved names fail `invalid_path`.
+
+`list(prefix)` returns one level of the directory `prefix`, sorted by name, each entry its name relative to the authorized root and its kind (`file`, `directory`, or `other` for a link or special file, never followed). A returned name is the stored components joined by `/`, so it can be passed straight to another operation; on Unix a backslash is part of a name, and on Windows it is a separator. It does not recurse and does not enter a directory entry, and the root itself is not listed, so a prefix names a directory. An entry whose name is not valid UTF-8 is omitted: these operations address names as strings, so it could not be read either, but removing the directory removes it. `remove(name)` removes a file, or a directory and everything beneath it. A file a lease holds, and a directory with a lease held beneath it, fail `locked`; an absent entry counts as removed, so a retry is safe. Removal is not atomic: an error can leave part of a tree removed.
+
+Every file is either a text envelope or raw bytes. `read()` and `replace(text)` use the envelope below. `readBytes()` returns the file's bytes whole, so a text file returns its stored envelope; `replaceBytes(bytes)` writes raw bytes with no envelope. A text read of a raw file fails `invalid_data` and leaves it untouched. Both byte operations are whole-buffer and capped at [`MAX_WHOLE_FILE_BYTES`](src/plugin_files.rs) (8 MiB): the runtime channel's frame is 16 MiB and carries bytes base64-encoded, four bytes for every three, so 12 MiB is the raw ceiling before any envelope and 8 MiB leaves the envelope and both sides' copies room while bounding one allocation. A file over the cap fails `invalid_data` before it is read, and a replacement over it fails `invalid_data` without writing. A buffer large enough that its call message would exceed the runtime's 16 MiB frame never reaches the host: the plugin's own runtime refuses that call before sending it, with a `RangeError` coded `bad-value` naming the argument and the limit, and neither the plugin row nor the file store is affected — the same holds for any call argument, a large text `replace` included. Stream larger files through the typed Rust API instead.
+
+A Rust process plugin uses the typed `PluginFileTransactions` service (`names.key::<PluginFileTransactions>()`) instead. `transact(name, change)` runs `change` on the inner text under the file's lock. `change` receives `None` for a missing file and returns the replacement text (`None` keeps the file as it is) together with its own result. The host writes and checks the same `{version: 1, text}` envelope. An envelope that is not version 1 fails with `InvalidData` before `change` runs, and its bytes stay unchanged.
+
+Besides `transact`, the service offers:
+
+| Method | Value |
+| --- | --- |
+| `read_bytes(name)` | the whole file, envelope included, or `None` when absent; over the cap is `InvalidData` |
+| `open_read(name)` | a `FileReader` pinning the file for offset reads of at most 64 KiB, or `None` when absent |
+| `write_stream(name, source)` | replaces the file from a reader under its lock; no envelope and no size bound |
+| `list(prefix)` | one level under `prefix`, each a `PluginFileEntry { name, kind }` |
+| `remove(name)` | a file or a directory tree; `Locked` while a lease holds it or a file beneath it |
+| `directory(name)` | makes the directory and its missing parents (mode 0700) and returns the absolute path |
+
+`write_stream` writes through FileStorage's own temporary file and atomic rename, so a failure or cancellation leaves the old content and no temporary file. `directory` is for handing a work directory to a helper process: a link or other non-directory at any existing component fails `InvalidPath`, so the returned path never names a followed link. The path names what the call created; a component replaced by a link afterwards is outside its control. There is no JavaScript binding for it, because a sandboxed JavaScript part has no use for a path string.
+
+Import `PluginFiles`, `FileScope`, `FileLease`, `FileEntry` and `FileResult` with
 `import type { PluginFiles } from 'dimcode/plugin'`. The
 [SDK declarations](../../npm/plugin.d.ts) define the method types; the
 [plugin author's guide](../../docs/typescript-plugin-authoring.md) shows their use.
@@ -443,8 +534,9 @@ and additional fields are invalid. The host does not parse or validate `text`.
 `replace(text)` atomically writes this envelope through the existing FileStorage
 lease, preserving the existing permissions, durability and cancellation rules.
 `read()` decodes and validates the envelope at this external storage boundary
-and returns only `text`; a missing file still returns `null`. The named service,
-method arguments and successful reply shapes do not change.
+and returns only `text`; a missing file still returns `null`. Only `read` and
+`replace` use the envelope; `readBytes` and `replaceBytes` carry the file's
+bytes as they are.
 
 An unversioned file, malformed record, unknown version or invalid UTF-8 returns
 the existing fixed `invalid_data` error, without file contents or parser details.
@@ -460,7 +552,8 @@ baseline is separate from native SQLite storage and changes no database format.
 envelope or any rejected legacy bytes. A backup must not decode, re-encode or
 upgrade its source. An explicit `replace` writes version 1; the caller still owns
 the decision to replace existing data and to make a successful backup first.
-Binary payload support is outside S10 and remains P3 work.
+`readBytes` and `replaceBytes` do not use this envelope: a binary file is raw
+bytes, and a text file's bytes are its envelope.
 
 ##### Rule check
 
@@ -474,9 +567,11 @@ the existing language-neutral service and error data unchanged.
 ##### Requirements raised to mechanism owners
 
 None (§4 rule 8). Existing atomic
-replacement and backup primitives cover the format. Acceptance uses disposable
-plugin roots to verify round-trip text, stored version, reopen, version rejection
-with byte preservation and unchanged transaction/backup/lifecycle behavior.
+replacement, listing, removal and directory primitives cover the operations.
+Acceptance uses disposable plugin roots to verify round-trip text and binary
+files, stored version, reopen, version rejection with byte preservation, the
+whole-buffer bound, listings, removal under a held lease, work directories and
+unchanged transaction/backup/lifecycle behavior.
 
 ## Managed provider contract
 

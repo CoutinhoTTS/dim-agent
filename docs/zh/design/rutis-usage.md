@@ -336,7 +336,7 @@ impl DynPlugin for WaitBranch {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let dispatcher = ctx.require_at(&self.dispatcher)?;
-            /* dispatcher.follow(ctx, "Wait", keys, handler).await?, the Rust form of `consume`
+            /* dispatcher.consume(ctx, "Wait", keys, rebuild, handler).await?
                (plugin contract §5.2), then ctx.provide_at(self.wait.clone(), wait) */
             Ok(Effect::Done)
         })
@@ -386,6 +386,7 @@ Agent（`AgentBuilder::build`），宿主以 `partRegistry` 把它提供给自�
 - **可选依赖与由配置选择的依赖。** 同 §3.5：由配置选择的依赖在被选中时门控（工厂填的 `Option<Key<T>>`），
   组合检查此时也覆盖它；只在存在时才用的依赖用 `get_at` 读取，不列在 `injects` 中。它的名称仍须登记。
 - **启动进展。** `startup_timeout` 限制 loader 启动、reconcile、必需行就绪和打开重放期间连续没有进展的时间。本次打开中一行的首次激活、分支派发序号前进或一份打开回执完成会重置间隔；同一行反复重启不算新的进展。
+  `apply` 运行较久的插件可用 `opening_advanced(ctx)`（`dim_agent_runtime::assembly`）报告真实进展，同样重置该间隔；工作在阻塞线程上运行的插件从那里报告。
   只计本次打开范围内的进展，其他 Session 的活动不算；不设固定总时限。
   Session、分支、进程启动和 restart 使用同一规则。分支等待父分支时跟随父分支自身受限的打开过程，
   不另加总时限。没有进展时列出未 Active 的行及缺少的依赖并失败；组合错误或必需提供者失败立即返回。
@@ -469,28 +470,32 @@ async def apply(ctx, config):
 ```
 
 ```ts
-// A Capability that rebuilds from history, then follows live events (plugin contract §5.2).
+// A Capability that rebuilds from the query including its publishing facts, then
+// follows live events (plugin contract §5.2).
 export default definePlugin({
   name: 'ExampleCounter',
-  inject: ['dispatcher'],
+  inject: ['dispatcher', 'timeline'],
   provides: { exampleCounter: { get: 'sync' } },
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
+    const timeline = ctx.use<Services['timeline']>('timeline')
     let count = 0
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
-    await dispatcher.consume('example-counter', ['input/message'], delivery => {
-      if ('live' in delivery) fold(delivery.live)
-      else delivery.replay.forEach(fold)
-    })
+    await dispatcher.consume('example-counter', ['input/message'], async () => {
+      const page = await timeline.query({
+        scope: 'branch', include_publishing: true, direction: 'ascending', kinds: ['input/message'], limit: 1024n, offset: 0n,
+      })
+      page.events.forEach(fold)
+      return BigInt(page.through)
+    }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
 })
 ```
 
-手写形式仍然有效：先 `listen`，再取 `committed()`，在处理函数等待期间从 `local` 重建到该截止点，
-并跳过重建已覆盖的实时事件。
+不读取历史的部件用 `listen` 注册，它只投递实时事实；需要重建的部件用 `consume`。
 
-仓库的 fixture 展示了两种语言和两种形式：`runtime/fixtures/branch-part.ts` 手写重建，
-`runtime/fixtures/python/python_branch_part.py` 与 `runtime/plugins/goal/branch.ts` 使用 `consume`。
+仓库的 fixture 展示了两种语言的同一形式：`runtime/fixtures/branch-part.ts`、
+`runtime/fixtures/python/python_branch_part.py` 与 `crates/dim-goal/src/branch.rs` 都这样消费分支。

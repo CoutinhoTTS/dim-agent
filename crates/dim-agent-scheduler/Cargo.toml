@@ -1,0 +1,34 @@
+[package]
+name = "dim-agent-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Scheduled jobs: a native process owner and Session feature for Dim"
+
+[dependencies]
+dim-agent-runtime.workspace = true
+dim-agent-capabilities.workspace = true
+dim-agent-types.workspace = true
+dim-app-server.workspace = true
+rutis.workspace = true
+rutis-bridge.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+chrono-tz = "0.10"
+croner = "4"
+
+[dev-dependencies]
+rusqlite = "0.40.2"
+tempfile = "3"
+tokio.workspace = true
+serde_json.workspace = true
+dim-client.workspace = true
+futures-util.workspace = true

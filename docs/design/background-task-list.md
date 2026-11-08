@@ -17,6 +17,7 @@ Use the existing Session attachment and history, not a server task registry:
 | `session.history {sessionId,branchId,after,limit,through?}` | Branch-local, fixed-watermark history; read through the existing authorization and dispatch boundary |
 | `branch/create`, `branch/start`, `branch/create-failed` | Discover branch identities and creation outcomes from their owner's facts |
 | `session.state {sessionId,branchId,...}` | Discover published branches through the attachment's initial state watches and subsequent updates |
+| `session.branches {sessionId}` | The complete line directory — open, ending or ended — with each line's state and head ([timeline branches §14](timeline-branches.md#14-clients)) |
 | `session.event {sessionId,branchId,event}` | Live facts, with a separate sequence cursor for each branch |
 | `exec/started`, `exec/ended` | Command identity, description and actual terminal result |
 | `collaboration/request`, `collaboration/delivered`, `collaboration/result` | Delegation identity, actual member Session and outcome |
@@ -30,10 +31,11 @@ stored branch directory and publishes successfully restored branches; failed or
 unfinished child creations are not published. Thus an existing child can be
 discovered by its state notice without finding its creation in main's local history. A
 reloading branch's state can be delayed until its Loop returns. Clients consume
-these public notices, not the internal branch directory. There is no initial
-enumeration-complete notice or snapshot barrier. The public
-[history handler](../../crates/dim-app-server/src/connection/tree.rs) calls
-`Session::local_page`, which reads the named branch's own records; it does not
+these public notices; `session.branches` answers the complete directory, so a
+client enumerates with one read and uses the notices for lines that open or end
+after it rather than waiting for an enumeration notice. The public
+[history handler](../../crates/dim-app-server/src/connection/tree.rs) reads
+the named branch's own records; it does not
 copy ancestor records into that branch's task list. The v3
 [event filter](../../crates/dim-app-server/src/tree_protocol.rs) already exposes
 the branch and task facts above.
@@ -45,13 +47,15 @@ cursors from #299. Seed main and enqueue every branch ID observed in
 `session.state`, independently of the parent or its history cursor. Branch
 identities in local `branch/create`/`branch/start` or live task facts supplement
 discovery; read each discovered branch's own history and follow further identities
-there. Main's local history is not a complete branch directory. An explicit
+there. Main's local history is not a complete branch directory; `session.branches`
+is ([timeline branches §14](timeline-branches.md#14-clients)). An explicit
 create-failed fact settles that creation attempt;
 an unavailable history read does not mean the branch is empty or finished.
 Key discovery by branch ID within the current Session projection: repeated
 history facts or state notices do not queue another initial read for a branch
-already queued, loading, loaded or failed. Only reopening the panel retries a
-known failed read, as specified below.
+already queued, loading, loaded or failed. Reopening the tasks panel retries a
+known failed read as specified below; the first open of a line's transcript can
+also restart its history through the same queue.
 
 For each discovered branch, read from `after:0`, fix the first page's `through`,
 then use `nextAfter` as the next `after` and that same fixed watermark until
@@ -91,9 +95,9 @@ No polling timer, persisted index or generic observation framework is added.
 A failed main-history read reports a connection failure and disables submission;
 the unsent draft remains in the current UI, and recovery requires exit/resume. The following local-error rules
 apply to child branches. Loading or failed branch reads are visible. Individual known targets remain
-usable, but stop-all is disabled while a discovered branch's initial history is
-unread or failed, because the list cannot yet describe its tasks. A reply releases
-the global request slot. A failed page in the current projection keeps its last
+usable, but stop-all is disabled while any discovered branch's history is
+loading or failed, including the transcript reread triggered by its first open.
+A reply releases the global request slot. A failed page in the current projection keeps its last
 validated cursor and watermark. Reopening the panel queues each failed page once,
 after any outstanding read: resume from the last valid `nextAfter` (or `after:0`
 if no page succeeded), retaining the fixed `through` if known. A first successful
@@ -103,6 +107,14 @@ and is discarded if that projection is invalid before send; an already-sent
 retry uses the same stale-reply and slot-lifetime rules above. State notices and
 live facts do not automatically retry a failed read; an unseen branch still
 queues its first read. There is no retry timer or automatic retry loop.
+For the [first open of a line's transcript](timeline-branches.md#14-clients),
+reuse an outstanding initial read from `after:0` if it has consumed no page.
+Otherwise restart that branch's history from `after:0` with a fresh watermark,
+including after a failed discovery read, so the transcript receives the complete
+history rather than only the task inventory's unread suffix. Previously folded
+tasks remain deduplicated. Keep any superseded outstanding page in the global
+slot until its reply, mark it noncurrent, and queue the fresh read behind it.
+Later opens of the retained transcript do not restart its history.
 On a child read failure, discard buffered event payloads and stop accumulating
 live payloads for that failed read. After an explicit reopen finishes the
 retained fixed window, enqueue one catch-up read from its validated `nextAfter`

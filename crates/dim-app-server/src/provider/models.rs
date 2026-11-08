@@ -331,10 +331,10 @@ impl ProviderService {
             [edit.context_window, edit.max_output_tokens]
                 .into_iter()
                 .flatten()
-                .any(|limit| limit.get() > MAX_MODEL_TOKENS)
+                .any(|limit| !limit_valid(limit.get()))
         }) {
             return Err(ProviderError::InvalidConfig(
-                "Model limits must be safe JSON integers".into(),
+                "Model limits must be positive safe JSON integers".into(),
             ));
         }
         if edit
@@ -603,7 +603,7 @@ impl ProviderService {
                             let governed: Vec<String> = record
                                 .effective_models(&bundled)
                                 .into_iter()
-                                .filter(|model| model.unavailable_reason.is_none())
+                                .filter(|model| model.unavailable.is_none())
                                 .map(|model| model.entry.model_id)
                                 .collect();
                             record

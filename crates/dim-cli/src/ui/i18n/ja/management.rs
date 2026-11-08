@@ -293,6 +293,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "MCP's documents belong to one entry; this save names none." => {
             "MCP のドキュメントはエントリごとです。この保存はエントリを指定していません。"
         }
+        "{id} is in more than one MCP source: {sources}. Name one with --source." => {
+            "{id} は複数の MCP ソースにあります: {sources}。--source でいずれかを指定してください。"
+        }
+        "The action names no MCP source; a row carries the source its owner reported." => {
+            "この操作は MCP ソースを指定していません。行には所有者が報告したソースが付きます。"
+        }
+        "No MCP server {id} is in source {source}." => {
+            "ソース {source} に MCP サーバー {id} はありません。"
+        }
         "No MCP server has that id." => "その id の MCP サーバーはありません。",
         "This workspace has no project MCP source." => {
             "このワークスペースにはプロジェクトの MCP ソースがありません。"

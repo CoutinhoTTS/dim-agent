@@ -10,6 +10,7 @@ mod new_api;
 mod preferences;
 mod remote;
 mod secrets;
+mod startup;
 mod view;
 pub use dim_agent_types::ModelPreferences;
 pub use editing::{ConnectionInput, CreateProvider, ProbeProvider, ProbeResult, ProviderPatch};
@@ -21,25 +22,30 @@ pub use legacy::{
 pub use models::PreferencesPatch;
 use secrets::StaticCredential;
 pub use secrets::{ProviderSecret, ProviderSecretHost, ResolveProviderSecret};
+pub use startup::{StartupInput, StartupSelection};
 pub use view::{ManagementProvider, ManagementView, ModelsListed};
 
 use crate::{
     codex_oauth::OpenAICodexOAuthService,
     grok_oauth::GrokOAuthService,
     managed_oauth,
-    managed_provider::{AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders},
+    managed_provider::{
+        AccountSnapshot, CredentialLease, ManagedModel, ManagedProviders, reason_excludes_modality,
+    },
     model_catalog::{
-        BundledCatalog, CatalogCapabilities, CatalogProvider, MAX_MODEL_TOKENS, ModelEdit,
-        ModelEntry, ModelMetadata, ModelSource, NewApiEndpoint, ProviderProjection,
-        declarations_hold, declare, declare_supplied_limits, declared_limit_values,
-        drop_undeclared_limits, inherit_limits, limits_valid,
+        BundledCatalog, CatalogCapabilities, CatalogProvider, ModelEdit, ModelEntry, ModelMetadata,
+        ModelSource, NewApiEndpoint, ProviderProjection, declarations_hold, declare,
+        declare_supplied_limits, declared_limit_values, drop_undeclared_limits, inherit_limits,
+        limit_valid, limits_valid,
     },
     storage::SqliteStorage,
 };
+use dim_agent_capabilities::context_model::output_allowance;
 use dim_agent_capabilities::host::*;
 use dim_agent_runtime::{AgentError, Names};
 use dim_agent_types::{
-    ModelCapabilitySnapshot, ModelConfig, ModelId, ModelRequest, ModelSelection,
+    ModalityModelSnapshot, ModelCapabilitySnapshot, ModelConfig, ModelId, ModelRequest,
+    ModelSelection,
 };
 use futures_util::future::BoxFuture as SharedFuture;
 use reqwest::Client;
@@ -165,6 +171,15 @@ pub struct ProviderModel {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_limits: Vec<String>,
     pub unavailable_reason: Option<String>,
+    /// Why the model cannot serve a non-conversational (modality) use. The
+    /// conversational reason above also excludes models a modality operation
+    /// may use (text modality, chat kind, text limits), so the two are
+    /// separate rules over the same entry, both derived from one
+    /// `Unavailable` the catalog builds. This rule is the App Server's own
+    /// and is never part of a reply: a client learns what modality can use
+    /// from `modality.*`, so the field is skipped on the wire.
+    #[serde(skip)]
+    pub(crate) modality_unavailable_reason: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub zdr: bool,
     pub metadata: Option<ModelMetadata>,
@@ -442,6 +457,11 @@ impl ProviderRecord {
     /// derived from the effective limits, so a supplied limit makes the
     /// model available again, while the stored value stays for the reset
     /// that puts the base entry back in force.
+    ///
+    /// The boundary rule classifies the entry, not only its reason: an
+    /// `unavailable` status excludes every use, so the catalog publishes the
+    /// stored reason (or the generic every-use one when the status alone is
+    /// the cause) for both uses and neither selection lists it.
     pub(crate) fn effective_models(&self, bundled: &BundledCatalog) -> Vec<EffectiveModel<'_>> {
         self.models
             .iter()
@@ -456,13 +476,24 @@ impl ProviderRecord {
                 };
                 fill_bundled_limits(bundled, &mut entry);
                 let missing_limits = entry.capabilities.missing_limits();
-                let unavailable_reason =
-                    limits_reason(source.unavailable_reason.clone(), &missing_limits);
+                let unavailable = if source.excluded_from_every_use() {
+                    // A stored limits reason is the weaker derived fact and
+                    // does not name an entry the status excludes.
+                    Some(Unavailable::every_use(
+                        source
+                            .unavailable_reason
+                            .as_deref()
+                            .filter(|reason| *reason != "limits_undeclared")
+                            .unwrap_or("provider_unavailable"),
+                    ))
+                } else {
+                    limits_reason(source.unavailable_reason.clone(), &missing_limits)
+                };
                 EffectiveModel {
                     source,
                     entry,
                     missing_limits,
-                    unavailable_reason,
+                    unavailable,
                     overridden: replacement.is_some(),
                 }
             })
@@ -477,19 +508,29 @@ impl ProviderRecord {
             models: self
                 .effective_models(bundled)
                 .into_iter()
-                .map(|model| ProviderModel {
-                    id: model.entry.model_id,
-                    name: model.entry.display_name,
-                    endpoint: Some(model.source.protocol),
-                    config: ModelConfig {
-                        max_tokens: model.entry.capabilities.max_output_tokens.map(|n| n as f64),
-                        ..Default::default()
-                    },
-                    capabilities: model.entry.capabilities,
-                    missing_limits: model.missing_limits,
-                    unavailable_reason: model.unavailable_reason,
-                    zdr: model.source.zdr,
-                    metadata: model.entry.metadata,
+                .map(|model| {
+                    let (unavailable_reason, modality_unavailable_reason) =
+                        catalog_reasons(&model.unavailable);
+                    ProviderModel {
+                        id: model.entry.model_id,
+                        name: model.entry.display_name,
+                        endpoint: Some(model.source.protocol),
+                        config: ModelConfig {
+                            max_tokens: model.entry.capabilities.declared().map(|capabilities| {
+                                output_allowance(
+                                    capabilities.context_window,
+                                    capabilities.max_output_tokens,
+                                ) as f64
+                            }),
+                            ..Default::default()
+                        },
+                        capabilities: model.entry.capabilities,
+                        missing_limits: model.missing_limits,
+                        unavailable_reason,
+                        modality_unavailable_reason,
+                        zdr: model.source.zdr,
+                        metadata: model.entry.metadata,
+                    }
                 })
                 .collect(),
         }
@@ -503,8 +544,66 @@ pub(crate) struct EffectiveModel<'a> {
     pub source: &'a ManagedModel,
     pub entry: ModelEntry,
     pub missing_limits: Vec<String>,
-    pub unavailable_reason: Option<String>,
+    pub unavailable: Option<Unavailable>,
     pub overridden: bool,
+}
+
+/// Why a catalog entry cannot serve a use, and whether the same rule also
+/// excludes a non-conversational one. Both catalog builders produce it beside
+/// the reason they publish, so the conversational and the modality selection
+/// rules read one typed fact and neither parses the reason text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Unavailable {
+    /// The text a client reads as `unavailableReason`.
+    pub reason: String,
+    /// True when the rule excludes a non-conversational use too: the status,
+    /// route, credential, provider and account rules do, while text modality,
+    /// chat kind and text limits do not.
+    pub excludes_modality: bool,
+}
+
+impl Unavailable {
+    /// A rule that excludes every use, named from the static path.
+    fn every_use(reason: &str) -> Self {
+        Self {
+            reason: reason.to_owned(),
+            excludes_modality: true,
+        }
+    }
+
+    /// A rule that excludes a conversational use only.
+    fn conversational(reason: &str) -> Self {
+        Self {
+            reason: reason.to_owned(),
+            excludes_modality: false,
+        }
+    }
+
+    /// The class of a reason a managed record stored, through the one rule the
+    /// managed contract states.
+    fn of(reason: String) -> Self {
+        Self {
+            excludes_modality: reason_excludes_modality(&reason),
+            reason,
+        }
+    }
+
+    /// The reason a non-conversational use sees, `None` when this rule does
+    /// not exclude it.
+    fn modality_reason(&self) -> Option<String> {
+        self.excludes_modality.then(|| self.reason.clone())
+    }
+}
+
+/// The two reasons a catalog publishes for one derivation: the conversational
+/// reason, and the modality one when the same rule excludes that use too.
+fn catalog_reasons(unavailable: &Option<Unavailable>) -> (Option<String>, Option<String>) {
+    (
+        unavailable
+            .as_ref()
+            .map(|unavailable| unavailable.reason.clone()),
+        unavailable.as_ref().and_then(Unavailable::modality_reason),
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -516,12 +615,82 @@ pub struct ProviderCatalog {
     pub version: u32,
 }
 impl ProviderCatalog {
+    fn apply_startup_limits(&mut self, context: Option<u64>, output: Option<u64>) {
+        for model in &mut self.models {
+            if let Some(limit) = context {
+                model.capabilities.context_window = Some(limit);
+            }
+            if let Some(limit) = output {
+                model.capabilities.max_output_tokens = Some(limit);
+            }
+            model.missing_limits = model.capabilities.missing_limits();
+            if model.unavailable_reason.as_deref() == Some("limits_undeclared")
+                && model.missing_limits.is_empty()
+            {
+                model.unavailable_reason = None;
+            }
+            if let (Some(window), Some(declared)) = (
+                model.capabilities.context_window,
+                model.capabilities.max_output_tokens,
+            ) {
+                model.config.max_tokens = Some(output_allowance(window, declared) as f64);
+            }
+        }
+    }
+
     fn selectable(&self, id: &str) -> Option<&ProviderModel> {
         self.models.iter().find(|model| {
             model.id == id
                 && model.unavailable_reason.is_none()
                 && !self.disabled_model_ids.contains(&model.id)
         })
+    }
+
+    /// A model selectable for a non-conversational use: the same status,
+    /// route, credential and account rules as [`Self::selectable`], without
+    /// the text-modality, chat-kind and declared-text-limit requirements.
+    fn selectable_modality(&self, id: &str) -> Option<&ProviderModel> {
+        self.models.iter().find(|model| {
+            model.id == id
+                && model.modality_unavailable_reason.is_none()
+                && !self.disabled_model_ids.contains(&model.id)
+        })
+    }
+}
+
+impl ProviderModel {
+    /// The `<category>.<operation>` ids this entry declares for modality
+    /// (Modality §9.2), in their catalog order; `None` when it declares none.
+    fn modality_operations(&self) -> Option<Vec<String>> {
+        let values = self
+            .metadata
+            .as_ref()?
+            .raw
+            .get("modalityCapabilities")?
+            .as_array()?;
+        let operations: Vec<String> = values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        (!operations.is_empty()).then_some(operations)
+    }
+
+    /// The realtime transport this entry's `metadata.raw.realtime` declares,
+    /// parsed here where the catalog's external data enters (§3.6); `None`
+    /// when the entry declares none.
+    fn realtime(&self) -> Result<Option<RealtimeDeclaration>, String> {
+        let Some(value) = self.metadata.as_ref().and_then(|metadata| {
+            metadata
+                .raw
+                .get("realtime")
+                .filter(|value| !value.is_null())
+        }) else {
+            return Ok(None);
+        };
+        serde_json::from_value(value.clone())
+            .map(Some)
+            .map_err(|_| "The model's realtime declaration needs a protocol and a path".to_owned())
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -836,38 +1005,51 @@ fn static_models(
         .into_iter()
         .map(|entry| {
             let missing_limits = entry.capabilities.missing_limits();
-            let unavailable =
-                matches!(entry.status, crate::model_catalog::ModelStatus::Unavailable)
-                    || !entry.capabilities.modalities.iter().any(|m| m == "text")
-                    || (record.driver_kind != "new-api-router"
-                        && entry
-                            .metadata
-                            .as_ref()
-                            .and_then(crate::model_catalog::model_kind)
-                            .is_some_and(|kind| kind != "chat"))
-                    || !record.enabled
-                    || !record.routes.contains_key(&entry.model_id)
-                    || !account_available
-                    || (record.credential_authority == CredentialAuthority::Static
-                        && record.auth != StaticAuth::Anonymous
-                        && record.credential.is_none());
+            let status_unavailable =
+                matches!(entry.status, crate::model_catalog::ModelStatus::Unavailable);
+            // Rules that exclude a model from execution but not from a
+            // non-conversational use: it needs neither a text modality, nor
+            // the chat kind, nor the two chat limits.
+            let chat_only_unavailable = !entry.capabilities.modalities.iter().any(|m| m == "text")
+                || (record.driver_kind != "new-api-router"
+                    && entry
+                        .metadata
+                        .as_ref()
+                        .and_then(crate::model_catalog::model_kind)
+                        .is_some_and(|kind| kind != "chat"));
+            let provider_unavailable = !record.enabled
+                || !record.routes.contains_key(&entry.model_id)
+                || !account_available
+                || (record.credential_authority == CredentialAuthority::Static
+                    && record.auth != StaticAuth::Anonymous
+                    && record.credential.is_none());
+            let unavailable = if status_unavailable || provider_unavailable {
+                Some(Unavailable::every_use("provider_unavailable"))
+            } else if chat_only_unavailable {
+                Some(Unavailable::conversational("provider_unavailable"))
+            } else if !missing_limits.is_empty() {
+                Some(Unavailable::conversational("limits_undeclared"))
+            } else {
+                None
+            };
+            let (unavailable_reason, modality_unavailable_reason) = catalog_reasons(&unavailable);
             let endpoint = record.routes.get(&entry.model_id).copied();
             ProviderModel {
                 id: entry.model_id,
                 name: entry.display_name,
                 endpoint,
                 config: ModelConfig {
-                    max_tokens: entry.capabilities.max_output_tokens.map(|n| n as f64),
+                    max_tokens: entry.capabilities.declared().map(|capabilities| {
+                        output_allowance(
+                            capabilities.context_window,
+                            capabilities.max_output_tokens,
+                        ) as f64
+                    }),
                     ..Default::default()
                 },
                 capabilities: entry.capabilities,
-                unavailable_reason: if unavailable {
-                    Some("provider_unavailable".into())
-                } else if !missing_limits.is_empty() {
-                    Some("limits_undeclared".into())
-                } else {
-                    None
-                },
+                unavailable_reason,
+                modality_unavailable_reason,
                 missing_limits,
                 zdr: false,
                 metadata: entry.metadata,
@@ -1122,6 +1304,7 @@ pub struct ProviderService {
     stop: CancellationToken,
     tasks: TaskTracker,
     admission: Mutex<()>,
+    startup: Mutex<startup::StartupBindings>,
 }
 fn failure(error: impl std::fmt::Display) -> HostError {
     HostError::failed(error.to_string())
@@ -1283,10 +1466,14 @@ pub(crate) fn fill_bundled_limits(bundled: &BundledCatalog, model: &mut ModelEnt
 
 /// A stored reason other than the limit-derived one stands; otherwise an
 /// absent limit names `limits_undeclared`, so a supplied limit clears it.
-pub(crate) fn limits_reason(reason: Option<String>, missing_limits: &[String]) -> Option<String> {
+pub(crate) fn limits_reason(
+    reason: Option<String>,
+    missing_limits: &[String],
+) -> Option<Unavailable> {
     reason
         .filter(|reason| reason != "limits_undeclared")
-        .or_else(|| (!missing_limits.is_empty()).then(|| "limits_undeclared".into()))
+        .or_else(|| (!missing_limits.is_empty()).then(|| "limits_undeclared".to_owned()))
+        .map(Unavailable::of)
 }
 
 fn save_catalog(
@@ -1506,11 +1693,12 @@ impl ProviderService {
         Ok(list)
     }
 
-    /// Every model execution would accept, one snapshot per provider.
-    pub async fn selectable_models(
+    /// Every catalog the owner would serve, in provider-id order: the
+    /// providers it enumerates that have a readable catalog.
+    async fn selectable_catalogs(
         self: &Arc<Self>,
         cancel: &CancellationToken,
-    ) -> Result<Vec<ModelCapabilitySnapshot>, HostError> {
+    ) -> Result<Vec<(String, ProviderCatalog)>, HostError> {
         self.check(cancel)?;
         let mut providers: BTreeSet<String> = self
             .oauth
@@ -1527,12 +1715,24 @@ impl ProviderService {
                 .into_iter()
                 .map(|provider| provider.provider_id),
         );
-        let mut models = Vec::new();
+        let mut catalogs = Vec::new();
         for provider_id in providers {
-            let catalog = match self.catalog_for(provider_id.clone(), cancel).await {
-                Ok(Some(catalog)) => catalog,
+            match self.catalog_for(provider_id.clone(), cancel).await {
+                Ok(Some(catalog)) => catalogs.push((provider_id, catalog)),
                 Ok(None) | Err(_) => continue,
-            };
+            }
+        }
+        self.check(cancel)?;
+        Ok(catalogs)
+    }
+
+    /// Every model execution would accept, one snapshot per provider.
+    pub async fn selectable_models(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ModelCapabilitySnapshot>, HostError> {
+        let mut models = Vec::new();
+        for (provider_id, catalog) in self.selectable_catalogs(cancel).await? {
             for model in &catalog.models {
                 let Some(model) = catalog.selectable(&model.id) else {
                     continue;
@@ -1549,7 +1749,36 @@ impl ProviderService {
                 );
             }
         }
-        self.check(cancel)?;
+        Ok(models)
+    }
+
+    /// Every model a non-conversational use could select, with the modality
+    /// operations each declares (Modality §9.2). The same provider, account,
+    /// model, route, credential and status rules as [`Self::selectable_models`],
+    /// without its text-modality, chat-kind and declared-text-limit
+    /// requirements; a model that declares no operation is omitted.
+    pub async fn selectable_modality_models(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ModalityModelSnapshot>, HostError> {
+        let mut models = Vec::new();
+        for (provider_id, catalog) in self.selectable_catalogs(cancel).await? {
+            for model in &catalog.models {
+                let Some(model) = catalog.selectable_modality(&model.id) else {
+                    continue;
+                };
+                let Some(operations) = model.modality_operations() else {
+                    continue;
+                };
+                models.push(ModalityModelSnapshot {
+                    target: ModelId {
+                        provider_id: provider_id.clone(),
+                        model_id: model.id.clone(),
+                    },
+                    operations,
+                });
+            }
+        }
         Ok(models)
     }
 
@@ -1844,6 +2073,18 @@ impl ProviderService {
         preferences: ModelPreferences,
         cancel: &CancellationToken,
     ) -> Result<ModelSelection, HostError> {
+        self.configuration_with_limits(explicit, cwd, preferences, (None, None), cancel)
+            .await
+    }
+
+    async fn configuration_with_limits(
+        self: &Arc<Self>,
+        explicit: Option<ModelId>,
+        cwd: Option<&Path>,
+        preferences: ModelPreferences,
+        limits: (Option<u64>, Option<u64>),
+        cancel: &CancellationToken,
+    ) -> Result<ModelSelection, HostError> {
         self.check(cancel)?;
         let explicit_target = explicit.is_some();
         let mut candidates = vec![];
@@ -1872,12 +2113,13 @@ impl ProviderService {
             );
         }
         for (id, model_id) in candidates {
-            let catalog = match self.catalog_for(id.clone(), cancel).await {
+            let mut catalog = match self.catalog_for(id.clone(), cancel).await {
                 Ok(Some(c)) => c,
                 Ok(None) => continue,
                 Err(_) if !explicit_target => continue,
                 Err(e) => return Err(e),
             };
+            catalog.apply_startup_limits(limits.0, limits.1);
             let model = match model_id {
                 Some(ref m) => catalog.selectable(m),
                 None => catalog
@@ -1930,16 +2172,61 @@ impl ProviderService {
         cancel: &CancellationToken,
     ) -> Result<ModelSelection, HostError> {
         self.check(cancel)?;
-        let catalog = self
-            .catalog_for(current.provider_id.clone(), cancel)
-            .await?
-            .ok_or_else(|| failure("Provider is unavailable"))?;
-        let model = catalog
-            .selectable(&current.model_id)
-            .ok_or_else(|| failure("Model is unavailable"))?;
-        let protocol = model
-            .endpoint
-            .ok_or_else(|| failure("Missing model protocol"))?;
+        let source = current
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.startup.as_ref())
+            .and_then(|startup| startup.connection.as_ref());
+        let (protocol, declared, snapshot) = if let Some(source) = source {
+            self.startup_connection(source)?;
+            (
+                source.api_format,
+                ModelConfig::default(),
+                current
+                    .capability_snapshot
+                    .clone()
+                    .ok_or_else(|| failure("Model capabilities are not adopted"))?,
+            )
+        } else {
+            let mut catalog = self
+                .catalog_for(current.provider_id.clone(), cancel)
+                .await?
+                .ok_or_else(|| failure("Provider is unavailable"))?;
+            if current
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.startup.is_some())
+            {
+                let snapshot = current
+                    .capability_snapshot
+                    .as_ref()
+                    .ok_or_else(|| failure("Model capabilities are not adopted"))?;
+                snapshot
+                    .validate_for(&current.provider_id, &current.model_id)
+                    .map_err(failure)?;
+                catalog.apply_startup_limits(
+                    Some(snapshot.capabilities.context_window),
+                    Some(snapshot.capabilities.max_output_tokens),
+                );
+            }
+            let model = catalog
+                .selectable(&current.model_id)
+                .ok_or_else(|| failure("Model is unavailable"))?;
+            (
+                model
+                    .endpoint
+                    .ok_or_else(|| failure("Missing model protocol"))?,
+                model.config.clone(),
+                capability_snapshot(
+                    model,
+                    ModelId {
+                        provider_id: current.provider_id.clone(),
+                        model_id: current.model_id.clone(),
+                    },
+                )
+                .map_err(|error| failure(error.to_string()))?,
+            )
+        };
         if current
             .metadata
             .as_ref()
@@ -1951,17 +2238,7 @@ impl ProviderService {
                 "Model route changed; select the model again",
             ));
         }
-        let snapshot = capability_snapshot(
-            model,
-            ModelId {
-                provider_id: current.provider_id.clone(),
-                model_id: current.model_id.clone(),
-            },
-        )
-        .map_err(|error| failure(error.to_string()))?;
-        // A clear carries what an explicit adoption of the same model would,
-        // so the declared configuration includes the catalog's own defaults.
-        let declared = preferences::catalog_defaults(&model.config, &snapshot, protocol);
+        let declared = preferences::catalog_defaults(&declared, &snapshot, protocol);
         let mut base = current.config.clone().unwrap_or_default();
         if update.clears_reasoning() {
             preferences::restore_reasoning(&mut base, &declared, protocol);
@@ -1990,6 +2267,307 @@ impl ProviderService {
         })
     }
 }
+/// What a connection is resolved for.
+#[derive(Clone, Copy)]
+enum ConnectionUse<'a> {
+    /// A chat request: the catalog's chat selection rule, plus the request
+    /// facts that shape its wire connection.
+    Chat(&'a ModelRequest),
+    /// One non-conversational call of `operation`: the modality selection rule
+    /// and the operation the model must declare, with no request facts.
+    Modality { operation: &'a str },
+}
+impl ConnectionUse<'_> {
+    /// The catalog entry `model_id` selects under this use's rule, or the
+    /// refusal execution reports for it.
+    fn select<'a>(
+        &self,
+        catalog: &'a ProviderCatalog,
+        model_id: &str,
+    ) -> Result<&'a ProviderModel, HostError> {
+        match self {
+            Self::Chat(_) => catalog.selectable(model_id).ok_or_else(|| {
+                let message = catalog
+                    .models
+                    .iter()
+                    .find(|model| model.id == model_id)
+                    .filter(|model| !model.missing_limits.is_empty())
+                    .map(|model| undeclared_limits(&model.capabilities))
+                    .unwrap_or_else(|| "Model is unavailable".into());
+                failure(message)
+            }),
+            Self::Modality { operation } => {
+                let model = catalog
+                    .selectable_modality(model_id)
+                    .ok_or_else(|| failure("Model is unavailable"))?;
+                if !model
+                    .modality_operations()
+                    .is_some_and(|operations| operations.iter().any(|id| id == operation))
+                {
+                    return Err(undeclared_modality_operation(operation));
+                }
+                Ok(model)
+            }
+        }
+    }
+
+    /// The declared limits a chat request's temporary startup connection
+    /// supplies; no other use has them.
+    fn startup_limits(&self) -> Option<(u64, u64)> {
+        let Self::Chat(request) = self else {
+            return None;
+        };
+        let snapshot = request.capability_snapshot.as_ref()?;
+        request.metadata.as_ref()?.startup.as_ref()?;
+        Some((
+            snapshot.capabilities.context_window,
+            snapshot.capabilities.max_output_tokens,
+        ))
+    }
+
+    /// The protocol a chat request adopted for its route, which a route change
+    /// must keep. Only a chat request records one.
+    fn adopted_protocol(&self) -> Option<&serde_json::Value> {
+        let Self::Chat(request) = self else {
+            return None;
+        };
+        request
+            .metadata
+            .as_ref()?
+            .extensions
+            .get("providerProtocol")
+    }
+
+    /// The Session a chat request reports to the OpenCode Go gateway. A
+    /// non-conversational call reports none.
+    fn session_id(&self) -> Option<&str> {
+        let Self::Chat(request) = self else {
+            return None;
+        };
+        request.metadata.as_ref()?.session_id.as_deref()
+    }
+
+    /// The realtime transport the selected entry declares, for a `realtime.*`
+    /// operation only. A declaration that does not parse is an invalid request
+    /// naming the field, never a silent absence.
+    fn realtime(&self, model: &ProviderModel) -> Result<Option<RealtimeDeclaration>, HostError> {
+        match self {
+            Self::Modality { operation } if operation.starts_with("realtime.") => model
+                .realtime()
+                .map_err(|message| HostError::classified(HostErrorKind::InvalidRequest, message)),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// What one resolution produced: the connection both ports hand out, the route
+/// the catalog carries, and a Modality model's declared realtime transport.
+struct Resolution {
+    connection: ResolvedModelConnection,
+    protocol: ModelProtocol,
+    realtime: Option<RealtimeDeclaration>,
+}
+
+impl ProviderService {
+    /// The one resolution both connection ports run: the static vs managed
+    /// (OAuth) split, the record read, the catalog build, selection and the
+    /// managed credential lease. `use_` decides the selectability rule; the
+    /// temporary startup connection and the adopted capability snapshot stay
+    /// with the chat port.
+    async fn resolve_connection(
+        self: &Arc<Self>,
+        provider_id: &str,
+        model_id: &str,
+        use_: ConnectionUse<'_>,
+        cancel: &CancellationToken,
+    ) -> Result<Resolution, HostError> {
+        if !self
+            .oauth
+            .contains(provider_id, cancel)
+            .await
+            .map_err(failure)?
+        {
+            let lookup = provider_id.to_owned();
+            let db = self.db.clone();
+            let record = self
+                .owned(cancel, move |_| {
+                    Box::pin(async move {
+                        db.run_read(move |connection| read_static(connection, &lookup))
+                            .await
+                            .map_err(failure)
+                    })
+                })
+                .await?
+                .ok_or_else(|| failure("Provider not found"))?;
+            self.check(cancel)?;
+            let mut catalog = static_catalog(&self.bundled, provider_id, &record, true);
+            if let Some((window, output)) = use_.startup_limits() {
+                catalog.apply_startup_limits(Some(window), Some(output));
+            }
+            let model = use_.select(&catalog, model_id)?;
+            let protocol = model
+                .endpoint
+                .ok_or_else(|| failure("Model is unavailable"))?;
+            let realtime = use_.realtime(model)?;
+            if record.driver_kind == "new-api-router"
+                && use_
+                    .adopted_protocol()
+                    .is_some_and(|adopted| adopted != &serde_json::json!(protocol))
+            {
+                return Err(HostError::classified(
+                    HostErrorKind::InvalidRequest,
+                    "Model route changed; select the model again",
+                ));
+            }
+            if record.credential_authority != CredentialAuthority::Static {
+                let lease = self
+                    .managed_credential(record.credential_authority, None, cancel)
+                    .await?;
+                let recovered = managed_connection(
+                    self.clone(),
+                    record.credential_authority,
+                    lease,
+                    record.network,
+                );
+                return Ok(Resolution {
+                    connection: ResolvedModelConnection {
+                        connection: recovered.connection,
+                        recovery: Some(recovered.recovery),
+                        failure_policy: None,
+                    },
+                    protocol,
+                    realtime,
+                });
+            }
+            let credential = self
+                .credential(provider_id, &record.credential, &record.auth, cancel)
+                .await?;
+            let mut headers = record.headers;
+            let mut bearer = None;
+            match record.auth {
+                StaticAuth::Anonymous => {}
+                StaticAuth::Bearer => {
+                    let ProviderSecret::Token(value) =
+                        credential.ok_or_else(|| failure("Provider credential is required"))?
+                    else {
+                        return Err(failure("Invalid provider credential type"));
+                    };
+                    bearer = Some(value)
+                }
+                StaticAuth::ApiKey {
+                    header_name,
+                    prefix,
+                } => {
+                    let ProviderSecret::Token(value) =
+                        credential.ok_or_else(|| failure("Provider credential is required"))?
+                    else {
+                        return Err(failure("Invalid provider credential type"));
+                    };
+                    if header_name.eq_ignore_ascii_case("authorization") && prefix == "Bearer " {
+                        bearer = Some(value);
+                    } else {
+                        headers.insert(header_name, format!("{prefix}{value}"));
+                    }
+                }
+                StaticAuth::CustomHeader { header_name } => {
+                    let ProviderSecret::Token(value) =
+                        credential.ok_or_else(|| failure("Provider credential is required"))?
+                    else {
+                        return Err(failure("Invalid provider credential type"));
+                    };
+                    headers.insert(header_name, value);
+                }
+                StaticAuth::AwsBedrock => {
+                    let auth = match credential
+                        .ok_or_else(|| failure("Provider credential is required"))?
+                    {
+                        ProviderSecret::Token(value) => BedrockAuth::Bearer(value),
+                        ProviderSecret::Aws(credentials) => BedrockAuth::SigV4 {
+                            credentials,
+                            region: record
+                                .bedrock_region
+                                .ok_or_else(|| failure("Amazon Bedrock region is missing"))?,
+                        },
+                    };
+                    return Ok(Resolution {
+                        connection: ResolvedModelConnection {
+                            connection: ModelConnection::Bedrock(BedrockModelConnection {
+                                base_url: record.base_url,
+                                network: record.network,
+                                headers,
+                                auth,
+                            }),
+                            failure_policy: None,
+                            recovery: None,
+                        },
+                        protocol,
+                        realtime,
+                    });
+                }
+            }
+            let mut connection =
+                drivers::connection(&record.driver_kind, protocol, &record.base_url, headers);
+            if provider_id == "opencode-go" {
+                let session_id = use_
+                    .session_id()
+                    .filter(|id| {
+                        !id.is_empty()
+                            && id.trim() == *id
+                            && id.bytes().all(|b| (0x20..=0x7e).contains(&b))
+                    })
+                    .ok_or_else(|| failure("OpenCode Go requires a printable session ID"))?;
+                connection
+                    .headers
+                    .retain(|name, _| !name.eq_ignore_ascii_case("x-opencode-session"));
+                connection
+                    .headers
+                    .insert("x-opencode-session".into(), session_id.into());
+            }
+            connection.bearer = bearer;
+            connection.network = record.network;
+            return Ok(Resolution {
+                connection: ResolvedModelConnection {
+                    connection: ModelConnection::Http(connection),
+                    failure_policy: None,
+                    recovery: None,
+                },
+                protocol,
+                realtime,
+            });
+        }
+        let mut catalog = self
+            .catalog(provider_id.to_owned(), cancel)
+            .await?
+            .ok_or_else(|| failure("No current managed catalog"))?;
+        if let Some((window, output)) = use_.startup_limits() {
+            catalog.apply_startup_limits(Some(window), Some(output));
+        }
+        let model = use_.select(&catalog, model_id)?;
+        let realtime = use_.realtime(model)?;
+        let lease = self
+            .oauth
+            .credential(provider_id, model_id, cancel)
+            .await
+            .map_err(failure)?;
+        if catalog.account.as_ref() != Some(&lease.account)
+            || model.endpoint != Some(lease.protocol)
+        {
+            return Err(failure("Managed account or model route changed"));
+        }
+        let protocol = lease.protocol;
+        let recovered = plugin_connection(self.clone(), lease);
+        Ok(Resolution {
+            connection: ResolvedModelConnection {
+                connection: recovered.connection,
+                recovery: Some(recovered.recovery),
+                failure_policy: None,
+            },
+            protocol,
+            realtime,
+        })
+    }
+}
+
 struct ProductResolver(Arc<ProviderService>);
 impl ResolveModelConnection for ProductResolver {
     fn resolve(
@@ -1999,208 +2577,68 @@ impl ResolveModelConnection for ProductResolver {
     ) -> HostFuture<'_, ResolvedModelConnection> {
         Box::pin(async move {
             self.0.check(&cancel)?;
-            request
-                .capability_snapshot
-                .as_ref()
-                .ok_or_else(|| {
-                    HostError::classified(
-                        HostErrorKind::InvalidRequest,
-                        "Model capabilities are not adopted; select the model again",
-                    )
-                })?
+            let snapshot = request.capability_snapshot.as_ref().ok_or_else(|| {
+                HostError::classified(
+                    HostErrorKind::InvalidRequest,
+                    "Model capabilities are not adopted; select the model again",
+                )
+            })?;
+            snapshot
                 .validate_for(&request.provider_id, &request.model_id)
                 .map_err(|message| HostError::classified(HostErrorKind::InvalidRequest, message))?;
-            if !self
-                .0
-                .oauth
-                .contains(&request.provider_id, &cancel)
-                .await
-                .map_err(failure)?
+            if let Some(source) = request
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.startup.as_ref())
+                .and_then(|startup| startup.connection.as_ref())
             {
-                let provider_id = request.provider_id.clone();
-                let model_id = request.model_id.clone();
-                let db = self.0.db.clone();
-                let record = self
-                    .0
-                    .owned(&cancel, move |_| {
-                        Box::pin(async move {
-                            db.run_read(move |connection| read_static(connection, &provider_id))
-                                .await
-                                .map_err(failure)
-                        })
-                    })
-                    .await?
-                    .ok_or_else(|| failure("Provider not found"))?;
-                self.0.check(&cancel)?;
-                let catalog = static_catalog(&self.0.bundled, &request.provider_id, &record, true);
-                if catalog.selectable(&model_id).is_none() {
-                    let message = catalog
-                        .models
-                        .iter()
-                        .find(|model| model.id == model_id)
-                        .filter(|model| !model.missing_limits.is_empty())
-                        .map(|model| undeclared_limits(&model.capabilities))
-                        .unwrap_or_else(|| "Model is unavailable".into());
-                    return Err(failure(message));
-                }
-                let protocol = record.routes[&model_id];
-                if record.driver_kind == "new-api-router"
-                    && request
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.extensions.get("providerProtocol"))
-                        .is_some_and(|adopted| adopted != &serde_json::json!(protocol))
-                {
-                    return Err(HostError::classified(
-                        HostErrorKind::InvalidRequest,
-                        "Model route changed; select the model again",
+                if source.id != request.provider_id {
+                    return Err(failure(
+                        "Temporary model connection identity does not match request",
                     ));
                 }
-                if record.credential_authority != CredentialAuthority::Static {
-                    let lease = self
-                        .0
-                        .managed_credential(record.credential_authority, None, &cancel)
-                        .await?;
-                    let recovered = managed_connection(
-                        self.0.clone(),
-                        record.credential_authority,
-                        lease,
-                        record.network,
-                    );
-                    return Ok(ResolvedModelConnection {
-                        connection: recovered.connection,
-                        recovery: Some(recovered.recovery),
-                        failure_policy: None,
-                    });
-                }
-                let credential = self
-                    .0
-                    .credential(
-                        &request.provider_id,
-                        &record.credential,
-                        &record.auth,
-                        &cancel,
-                    )
-                    .await?;
-                let mut headers = record.headers;
-                let mut bearer = None;
-                match record.auth {
-                    StaticAuth::Anonymous => {}
-                    StaticAuth::Bearer => {
-                        let ProviderSecret::Token(value) =
-                            credential.ok_or_else(|| failure("Provider credential is required"))?
-                        else {
-                            return Err(failure("Invalid provider credential type"));
-                        };
-                        bearer = Some(value)
-                    }
-                    StaticAuth::ApiKey {
-                        header_name,
-                        prefix,
-                    } => {
-                        let ProviderSecret::Token(value) =
-                            credential.ok_or_else(|| failure("Provider credential is required"))?
-                        else {
-                            return Err(failure("Invalid provider credential type"));
-                        };
-                        if header_name.eq_ignore_ascii_case("authorization") && prefix == "Bearer "
-                        {
-                            bearer = Some(value);
-                        } else {
-                            headers.insert(header_name, format!("{prefix}{value}"));
-                        }
-                    }
-                    StaticAuth::CustomHeader { header_name } => {
-                        let ProviderSecret::Token(value) =
-                            credential.ok_or_else(|| failure("Provider credential is required"))?
-                        else {
-                            return Err(failure("Invalid provider credential type"));
-                        };
-                        headers.insert(header_name, value);
-                    }
-                    StaticAuth::AwsBedrock => {
-                        let auth = match credential
-                            .ok_or_else(|| failure("Provider credential is required"))?
-                        {
-                            ProviderSecret::Token(value) => BedrockAuth::Bearer(value),
-                            ProviderSecret::Aws(credentials) => BedrockAuth::SigV4 {
-                                credentials,
-                                region: record
-                                    .bedrock_region
-                                    .ok_or_else(|| failure("Amazon Bedrock region is missing"))?,
-                            },
-                        };
-                        return Ok(ResolvedModelConnection {
-                            connection: ModelConnection::Bedrock(BedrockModelConnection {
-                                base_url: record.base_url,
-                                network: record.network,
-                                headers,
-                                auth,
-                            }),
-                            failure_policy: None,
-                            recovery: None,
-                        });
-                    }
-                }
-                let mut connection =
-                    drivers::connection(&record.driver_kind, protocol, &record.base_url, headers);
-                if request.provider_id == "opencode-go" {
-                    let session_id = request
-                        .metadata
-                        .as_ref()
-                        .and_then(|m| m.session_id.as_deref())
-                        .filter(|id| {
-                            !id.is_empty()
-                                && id.trim() == *id
-                                && id.bytes().all(|b| (0x20..=0x7e).contains(&b))
-                        })
-                        .ok_or_else(|| failure("OpenCode Go requires a printable session ID"))?;
-                    connection
-                        .headers
-                        .retain(|name, _| !name.eq_ignore_ascii_case("x-opencode-session"));
-                    connection
-                        .headers
-                        .insert("x-opencode-session".into(), session_id.into());
-                }
-                connection.bearer = bearer;
-                connection.network = record.network;
                 return Ok(ResolvedModelConnection {
-                    connection: ModelConnection::Http(connection),
-                    failure_policy: None,
+                    connection: ModelConnection::Http(self.0.startup_connection(source)?),
                     recovery: None,
+                    failure_policy: None,
                 });
             }
-            let catalog = self
-                .0
-                .catalog(request.provider_id.clone(), &cancel)
-                .await?
-                .ok_or_else(|| failure("No current managed catalog"))?;
-            let model = catalog.selectable(&request.model_id).ok_or_else(|| {
-                let message = catalog
-                    .models
-                    .iter()
-                    .find(|model| model.id == request.model_id)
-                    .filter(|model| !model.missing_limits.is_empty())
-                    .map(|model| undeclared_limits(&model.capabilities))
-                    .unwrap_or_else(|| "Model is unavailable".into());
-                failure(message)
-            })?;
-            let lease = self
-                .0
-                .oauth
-                .credential(&request.provider_id, &request.model_id, &cancel)
+            self.0
+                .resolve_connection(
+                    &request.provider_id,
+                    &request.model_id,
+                    ConnectionUse::Chat(&request),
+                    &cancel,
+                )
                 .await
-                .map_err(failure)?;
-            if catalog.account.as_ref() != Some(&lease.account)
-                || model.endpoint != Some(lease.protocol)
-            {
-                return Err(failure("Managed account or model route changed"));
-            }
-            let recovered = plugin_connection(self.0.clone(), lease);
-            Ok(ResolvedModelConnection {
-                connection: recovered.connection,
-                recovery: Some(recovered.recovery),
-                failure_policy: None,
+                .map(|resolution| resolution.connection)
+        })
+    }
+}
+impl ResolveModalityConnection for ProductResolver {
+    fn resolve_for_modality(
+        &self,
+        target: ModalityTarget,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModalityConnection> {
+        Box::pin(async move {
+            self.0.check(&cancel)?;
+            let resolution = self
+                .0
+                .resolve_connection(
+                    &target.target.provider_id,
+                    &target.target.model_id,
+                    ConnectionUse::Modality {
+                        operation: &target.operation,
+                    },
+                    &cancel,
+                )
+                .await?;
+            Ok(ModalityConnection {
+                resolved: resolution.connection,
+                protocol: resolution.protocol,
+                model: target.target.model_id,
+                realtime: resolution.realtime,
             })
         })
     }
@@ -2231,6 +2669,13 @@ impl SelectableModels for ProductResolver {
     ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>> {
         let owner = self.0.clone();
         Box::pin(async move { owner.selectable_models(&cancel).await })
+    }
+    fn selectable_for_modality(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<ModalityModelSnapshot>> {
+        let owner = self.0.clone();
+        Box::pin(async move { owner.selectable_modality_models(&cancel).await })
     }
 }
 struct ManagedRecovery {
@@ -2398,6 +2843,7 @@ fn oauth_rejection(error: &HostError, phase: CredentialRecoveryPhase) -> Credent
 
 pub struct ProviderPlugin {
     db: Key<SqliteStorage>,
+    index: Option<Key<crate::agents::AgentIndex>>,
     oauth: Key<ManagedProviders>,
     codex: Key<OpenAICodexOAuthService>,
     grok: Key<GrokOAuthService>,
@@ -2409,15 +2855,19 @@ pub struct ProviderPlugin {
 impl ProviderPlugin {
     /// The Provider part without a ProviderSecretHost.
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
-        Self::keyed(names, false)
+        Self::keyed(names, false, false)
     }
     /// The supplying plugin must provide ProviderSecretHost before activation.
     pub fn with_secret_host(names: &Names<'_>) -> rutis::Result<Self> {
-        Self::keyed(names, true)
+        Self::keyed(names, true, false)
     }
-    fn keyed(names: &Names<'_>, secret_host: bool) -> rutis::Result<Self> {
+    pub(crate) fn with_session_lifecycle(names: &Names<'_>) -> rutis::Result<Self> {
+        Self::keyed(names, false, true)
+    }
+    fn keyed(names: &Names<'_>, secret_host: bool, lifecycle: bool) -> rutis::Result<Self> {
         Ok(Self {
             db: names.key()?,
+            index: lifecycle.then(|| names.key()).transpose()?,
             oauth: names.key()?,
             codex: names.key()?,
             grok: names.key()?,
@@ -2440,12 +2890,18 @@ impl DynPlugin for ProviderPlugin {
             self.host.erase(),
             self.methods.erase(),
         ];
+        keys.extend(self.index.as_ref().map(Key::erase));
         keys.extend(self.secret_host.as_ref().map(Key::erase));
         keys
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let db = ctx.require_at(&self.db)?;
+            let index = self
+                .index
+                .as_ref()
+                .map(|key| ctx.require_at(key))
+                .transpose()?;
             let oauth = ctx.require_at(&self.oauth)?;
             let codex = ctx.require_at(&self.codex)?;
             let grok = ctx.require_at(&self.grok)?;
@@ -2471,6 +2927,7 @@ impl DynPlugin for ProviderPlugin {
                     stop: CancellationToken::new(),
                     tasks: TaskTracker::new(),
                     admission: Mutex::new(()),
+                    startup: Mutex::new(startup::StartupBindings::default()),
                 });
             let owner = service.clone();
             ctx.effect(move || async move {
@@ -2480,7 +2937,22 @@ impl DynPlugin for ProviderPlugin {
                     owner.tasks.close();
                 }
                 owner.tasks.wait().await;
+                *owner.startup.lock().unwrap() = startup::StartupBindings::default();
                 Ok(())
+            })?;
+            if let Some(index) = index {
+                let restored = service.clone();
+                ctx.on::<crate::agents::SessionRestored>(move |event, _| {
+                    if let Some((_, session)) = index.session(&event.session_id) {
+                        restored.restore_startup(session);
+                    }
+                    async { Ok(None) }
+                })?;
+            }
+            let deleted = service.clone();
+            ctx.on::<crate::agents::UnloadedSessionDeleted>(move |event, _| {
+                deleted.forget_startup(&event.session_id);
+                async { Ok(None) }
             })?;
             service.seed_bundled().await.map_err(|error| {
                 rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
@@ -2488,16 +2960,13 @@ impl DynPlugin for ProviderPlugin {
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
             ctx.provide(ModelSelectionHost(resolver.clone()))?;
+            ctx.provide(ModalityConnectionHost(resolver.clone()))?;
             ctx.provide(SelectableModelsHost(resolver))?;
             let auxiliary = Arc::new(auxiliary::AuxiliaryModel {
                 owner: service.clone(),
                 host,
             });
-            ctx.provide(AuxiliaryModelHost(auxiliary.clone()))?;
-            ctx.provide_at(
-                rutis_bridge::session::host_key("auxiliaryModel"),
-                auxiliary as Arc<dyn rutis_bridge::session::HostDispatch>,
-            )?;
+            dim_agent_capabilities::auxiliary_model::provide(ctx, auxiliary)?;
             management::provide(ctx, &methods, service.clone())?;
             ctx.provide_as::<ProviderService>(service)?;
             Ok(Effect::Done)

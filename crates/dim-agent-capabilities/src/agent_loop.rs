@@ -6,8 +6,8 @@ use crate::{
     tool_binding::ToolBinding,
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, LoopPhase, LoopSnapshot, LoopState,
-    Names, PolicyFacts, Result, StateCell, Timeline, TimelineIdentity,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, LoopPhase, LoopSnapshot, LoopState, Names,
+    Result, StateCell, Timeline, TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -174,6 +174,28 @@ impl AgentLoop {
             running: None,
         });
         Ok(sequence)
+    }
+    /// Stops one turn if it is still the open one: commits the same
+    /// `stop/interrupt` a stop of the running turn writes, with the same
+    /// scope and effect, decided under the lock that opens and closes turns.
+    /// A turn that already ended, or an id that is not the open turn's,
+    /// writes nothing and answers `None`.
+    pub fn stop_turn(&self, turn_id: &str, reason: String) -> Result<Option<u64>> {
+        let slot = self.turn.lock().unwrap();
+        if !slot
+            .as_ref()
+            .is_some_and(|turn| turn.id == turn_id && !turn.ending)
+        {
+            return Ok(None);
+        }
+        let interrupt = self.timeline.append(
+            EventKind::StopInterrupt(StopInterruptData {
+                reason,
+                scope: InterruptScope::Turn,
+            })
+            .into(),
+        )?;
+        Ok(Some(interrupt.sequence))
     }
     /// Starts a turn when idle and an applied input drives one; nothing
     /// starts while a compaction step runs.
@@ -361,13 +383,17 @@ impl AgentLoop {
         ) else {
             return failed("Context is not configured; adopt a model first".into());
         };
-        let facts = PolicyFacts::from_context(&context, through);
+        let events: Vec<Arc<AgentEvent>> = crate::context_policy::estimate_events_in(&context)
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect();
         let view = policy
             .view(
                 request,
                 crate::context_policy::PolicyContext::from_context(context),
                 history,
-                facts,
+                through,
+                events,
                 Vec::new(),
             )
             .await
@@ -631,6 +657,7 @@ impl AgentLoop {
                         error: CAPABILITY_RELOADING.into(),
                         budget: None,
                         presentation: None,
+                        failure: None,
                     },
                 })
                 .into(),
@@ -702,7 +729,10 @@ impl AgentLoop {
                                 .map_err(AgentError::InvalidInput)?,
                         }),
                         system: data.system.clone(),
-                        config: data.settings.config.clone(),
+                        config: crate::context_model::adopted_config(
+                            data.settings.capability_snapshot.as_ref(),
+                            data.settings.config.as_ref(),
+                        ),
                         metadata: data.settings.metadata.clone(),
                     },
                     None => {
@@ -731,6 +761,7 @@ impl AgentLoop {
                     }),
                     prompt,
                     recovery: None,
+                    failure_chain: None,
                 })
             }).catch_unwind();
             let result = tokio::select! {
@@ -792,6 +823,7 @@ impl AgentLoop {
                                 error: error.to_string(),
                                 budget: None,
                                 presentation: None,
+                                failure: None,
                             },
                         }),
                     },
@@ -1244,11 +1276,13 @@ impl DynPlugin for LoopPlugin {
                 Ok(())
             })?;
             let owner = service.clone();
+            let read = service.clone();
+            let read_timeline = service.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "Loop",
-                    &[
+                    "Loop".into(),
+                    [
                         "input/applied",
                         "input/consumed",
                         "stop/interrupt",
@@ -1263,25 +1297,48 @@ impl DynPlugin for LoopPlugin {
                         "step/tool-result",
                         "context/compact",
                         "context/compaction",
-                    ],
-                    move |delivery| {
-                        let result = match delivery {
-                            Delivery::Replay(events) => {
-                                let mut slot = owner.turn.lock().unwrap();
-                                let rebuilt = owner.rebuild(&mut slot, &events);
-                                if rebuilt.is_ok() {
-                                    owner.binding.retain_only(
-                                        slot.as_ref()
-                                            .and_then(|turn| turn.request.as_ref())
-                                            .map(|request| request.id.as_str()),
-                                    );
-                                }
-                                rebuilt
-                            }
-                            Delivery::Live(event) => owner.on_event(event),
-                        };
-                        Box::pin(async { result })
-                    },
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "input/applied",
+                                    "input/consumed",
+                                    "context/compact",
+                                    "context/compaction-start",
+                                    "context/compaction",
+                                    "stop/interrupt",
+                                    "turn/start",
+                                    "turn/end",
+                                    "step/model-start",
+                                    "context/prepare",
+                                    "step/tool-use-start",
+                                    "step/tool-use",
+                                    "step/model-output-end",
+                                    "step/tool-call",
+                                    "step/tool-result",
+                                ],
+                            )
+                            .await?;
+                            let mut slot = read.turn.lock().unwrap();
+                            read.rebuild(&mut slot, &reply.events)?;
+                            read.binding.retain_only(
+                                slot.as_ref()
+                                    .and_then(|turn| turn.request.as_ref())
+                                    .map(|request| request.id.as_str()),
+                            );
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| {
+                        let owner = owner.clone();
+                        Box::pin(async move { owner.on_event(Arc::new(event)) })
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.state.clone(), service.observable.clone())?;

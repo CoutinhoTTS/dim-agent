@@ -1,4 +1,3 @@
-use crate::core::OpeningCount;
 use crate::*;
 use futures_util::FutureExt;
 use rutis::host::{
@@ -32,6 +31,26 @@ pub(crate) struct OpeningAdvanced(pub PluginId);
 impl rutis::Event for OpeningAdvanced {
     const NAME: &'static str = "dim/opening-advanced";
     type Value = ();
+}
+
+/// Reports that the opening this context's plugin belongs to advanced: the
+/// plugin made real progress in its `apply`. Any plugin whose opening can run
+/// long may call it; it renews the [`StartupProgress`] inactivity interval of
+/// every opening whose subtree contains the plugin's row, and changes nothing
+/// else about the opening. A report is a synchronous event, so a plugin whose
+/// work runs on a blocking thread reports from there. A context whose plugin
+/// has no live fiber reports nothing: the report would be dropped anyway.
+pub fn opening_advanced(ctx: &Ctx) {
+    let instance = ctx.instance();
+    let id = ctx
+        .diagnostics()
+        .plugins
+        .into_iter()
+        .find(|plugin| plugin.instance == instance)
+        .map(|plugin| plugin.id);
+    if let Some(id) = id {
+        let _ = ctx.emit(OpeningAdvanced(id));
+    }
 }
 
 /// Bounds an opening by inactivity in its own fiber subtrees, including rows
@@ -170,8 +189,6 @@ pub(crate) struct Assembly {
     pub startup_timeout: Duration,
     pub store: Arc<dyn TimelineStore>,
     pub ephemeral_store: Option<Arc<MemoryTimelineStore>>,
-    /// This Agent's branch openings that are alive.
-    pub openings: OpeningCount,
     /// Shutdowns of instances whose creation was abandoned before the
     /// instance could be found; the Agent's close waits for them.
     pub abandoned: tokio_util::task::TaskTracker,
@@ -183,6 +200,8 @@ pub(crate) struct Assembly {
     plugins: Vec<PartMake>,
     /// Where the plugin of each feature is in `plugins`, by name.
     features: std::collections::HashMap<String, usize>,
+    /// Which of `plugins` are optional ([`AgentBuilder::optional_plugin`]).
+    optional_plugins: HashSet<usize>,
     /// The parts plugins register: the builder's, for the host that builds
     /// its Agents ([`AgentBuilder::build`]); the minimal host takes a fresh one.
     pub parts: Arc<crate::parts::PartRegistry>,
@@ -214,13 +233,13 @@ impl AgentBuilder {
                 startup_timeout: Duration::from_secs(10),
                 store: Arc::new(MemoryTimelineStore::default()),
                 ephemeral_store: None,
-                openings: OpeningCount::default(),
                 abandoned: tokio_util::task::TaskTracker::new(),
                 values: vec![],
                 value_names: vec![],
                 process_values: vec![],
                 plugins: vec![],
                 features: Default::default(),
+                optional_plugins: Default::default(),
                 parts: Arc::default(),
                 required_parts: Arc::default(),
                 required_rows: Arc::default(),
@@ -274,6 +293,22 @@ impl AgentBuilder {
         self.assembly.plugins.push(Arc::new(make));
         self
     }
+    /// Adds an optional process plugin ([`Self::plugin`]): its row is not
+    /// required for the host to start, so a failed or missing dependency
+    /// affects only the plugin's own features. [`Self::plugin_rows`] names
+    /// the optional rows.
+    pub fn optional_plugin(
+        &mut self,
+        make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error>
+        + Send
+        + Sync
+        + 'static,
+    ) -> &mut Self {
+        self.assembly
+            .optional_plugins
+            .insert(self.assembly.plugins.len());
+        self.plugin(make)
+    }
     /// Adds the plugin of `feature` ([`Self::plugin`]). A feature of the
     /// same name added before is replaced.
     pub fn feature(&mut self, feature: crate::Feature) -> &mut Self {
@@ -301,10 +336,11 @@ impl AgentBuilder {
     }
     /// Registers in `builtins` the module providing [`Self::parts`] at
     /// `partRegistry` and those of the plugins added with [`Self::plugin`],
-    /// and returns their rows, for the host that builds its Agents. Register
-    /// them before [`Self::install`]; a module of the same name registered
-    /// already fails.
-    pub async fn plugin_rows(&self, builtins: &mut Modules) -> Result<Vec<Value>> {
+    /// and returns their rows, for the host that builds its Agents, with the
+    /// ids of the optional ones ([`Self::optional_plugin`]). Register them
+    /// before [`Self::install`]; a module of the same name registered already
+    /// fails.
+    pub async fn plugin_rows(&self, builtins: &mut Modules) -> Result<PluginRows> {
         let registry = self.assembly.parts.clone();
         let registry: PartMake = Arc::new(move |names| {
             Ok(Box::new(crate::parts::PartRegistryPlugin {
@@ -313,7 +349,15 @@ impl AgentBuilder {
             }))
         });
         let mut rows = vec![];
-        for make in std::iter::once(&registry).chain(&self.assembly.plugins) {
+        let mut optional_rows = vec![];
+        let optional = std::iter::once(false).chain(
+            (0..self.assembly.plugins.len())
+                .map(|index| self.assembly.optional_plugins.contains(&index)),
+        );
+        for (make, optional) in std::iter::once(&registry)
+            .chain(&self.assembly.plugins)
+            .zip(optional)
+        {
             let name = make(&Names::check(&self.catalog, &[], None))
                 .map_err(|error| AgentError::Build(format!("a process plugin: {error}")))?
                 .name()
@@ -325,9 +369,15 @@ impl AgentBuilder {
             }
             let make = make.clone();
             register_part(builtins, &self.catalog, move |names| make(names))?;
+            if optional {
+                optional_rows.push(name.clone());
+            }
             rows.push(row(&name));
         }
-        Ok(rows)
+        Ok(PluginRows {
+            rows,
+            optional: optional_rows,
+        })
     }
     /// Makes the registered part `name` part of the profile: a Session or
     /// branch publishes only once its copy is Active, and a copy that fails
@@ -335,6 +385,12 @@ impl AgentBuilder {
     pub fn require_part(&mut self, name: impl Into<String>) -> &mut Self {
         Arc::make_mut(&mut self.assembly.required_parts).insert(name.into());
         self
+    }
+    /// Whether the profile requires the registered part `name`
+    /// ([`Self::require_part`]): a composition root adds a row that serves one
+    /// of that part's dependencies only to profiles that install it.
+    pub fn requires_part(&self, name: &str) -> bool {
+        self.assembly.required_parts.contains(name)
     }
     /// A Rust part of the Session extension `group`: a nested instanced
     /// group created only for Sessions that ask for it, with a value of type
@@ -597,7 +653,6 @@ impl AgentBuilder {
     }
     fn finished(&self) -> Assembly {
         let mut assembly = self.assembly.clone();
-        assembly.openings = OpeningCount::default();
         assembly.abandoned = tokio_util::task::TaskTracker::new();
         assembly.catalog = Arc::new(self.catalog.clone());
         if !self.custom_store {
@@ -831,6 +886,13 @@ fn extension_value<V: Send + Sync + 'static>(build: &Build) -> std::result::Resu
     })
 }
 /// A row named after its module.
+/// The process rows of [`AgentBuilder::plugin_rows`].
+pub struct PluginRows {
+    pub rows: Vec<Value>,
+    /// The ids of the rows the host does not need Active to start.
+    pub optional: Vec<String>,
+}
+
 pub(crate) fn row(module: &str) -> Value {
     json!({ "id": module, "name": module })
 }
@@ -1119,7 +1181,6 @@ impl DynPlugin for BranchScopePlugin {
             ctx.provide_at(scope.key::<Timeline>(), Arc::new(timeline.clone()))?;
             ctx.provide_at(scope.key::<Dispatcher>(), Arc::new(dispatcher.clone()))?;
             let lifecycle = BranchLifecycle::new();
-            timeline.begin_opening(&lifecycle, &session.assembly.openings);
             ctx.provide_at(scope.key::<BranchLifecycle>(), Arc::new(lifecycle.clone()))?;
             let opening = Arc::new(BranchOpening::new());
             ctx.provide_at(scope.key::<BranchOpening>(), opening.clone())?;
@@ -1431,10 +1492,11 @@ async fn create_instance(
         })
         .collect();
     let mut created = Created {
-        children: rows(loader, &created.view, None),
+        children: Vec::new(),
         view: created.view,
     };
     if let Err(error) = AgentError::aggregate(failures) {
+        created.children = rows(loader, &created.view);
         return Err((error, Some(created)));
     }
     // The instance's settle returns with its group or a row still waiting for
@@ -1446,7 +1508,14 @@ async fn create_instance(
         .wait(active_rows(&group, cancel), || vec![created.view.id])
         .await
         .unwrap_or_else(|| Err(timed_out(ctx, &group)));
-    let mut waiting = rows(loader, &created.view, Some(&required));
+    // Read after the group is Active: a settle can return while it still waits,
+    // and its rows are the ones the required-row wait has to name.
+    let mut waiting: Vec<FiberView> = loader
+        .instance_rows(created.view.instance())
+        .into_iter()
+        .filter(|(id, _)| required.contains(id))
+        .map(|(_, view)| view)
+        .collect();
     if ready.is_ok() {
         ready = progress
             .wait(active_rows(&waiting, cancel), || vec![created.view.id])
@@ -1477,7 +1546,9 @@ async fn create_instance(
             .await
             .unwrap_or_else(|| Err(timed_out(ctx, &parts)));
     }
-    created.children = rows(loader, &created.view, None);
+    // Parts create nested instances while they load, and their rows are this
+    // creation's members: read them once the waits above are done.
+    created.children = rows(loader, &created.view);
     extend_children(&mut created.children, handed.all());
     if let Err(error) = ready {
         return Err((error, Some(created)));
@@ -1525,13 +1596,12 @@ fn extend_children(children: &mut Vec<FiberView>, views: impl Iterator<Item = Fi
     let mut seen: HashSet<_> = children.iter().map(|view| view.id).collect();
     children.extend(views.filter(|view| seen.insert(view.id)));
 }
-/// Reads current candidate rows, including nested instances added during readiness waits.
-/// Main and child branches have their own assembly snapshots.
-fn rows(loader: &Loader, instance: &FiberView, required: Option<&[String]>) -> Vec<FiberView> {
+/// The rows `instance` holds now, its own group row aside, including the rows
+/// of nested instances created under it.
+fn rows(loader: &Loader, instance: &FiberView) -> Vec<FiberView> {
     loader
         .instance_rows(instance.instance())
         .into_iter()
-        .filter(|(id, _)| required.is_none_or(|rows| rows.contains(id)))
         .map(|(_, view)| view)
         .collect()
 }
@@ -1573,7 +1643,7 @@ fn locate(loader: &Loader, ctx: &Ctx, instance: rutis::host::InstanceId) -> Opti
         .id;
     let view = ctx.view(plugin)?;
     Some(Created {
-        children: rows(loader, &view, None),
+        children: rows(loader, &view),
         view,
     })
 }

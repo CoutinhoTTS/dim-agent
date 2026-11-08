@@ -1,11 +1,15 @@
 //! MCP configuration directory. Connections belong to McpServer, not Settings.
 mod auth;
 pub mod config;
+mod discovery;
+mod import;
 pub(crate) mod management;
 mod publication;
 #[cfg(feature = "testing")]
 pub use auth::testing;
 pub use auth::{McpAuth, McpAuthError};
+#[cfg(feature = "testing")]
+pub use import::testing as import_testing;
 pub mod server;
 mod session;
 mod temporary;
@@ -18,16 +22,18 @@ pub use session::{
 
 use crate::settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService};
 use config::{
-    McpPluginDocument, McpPluginServers, McpProjectEnablement, McpSecretEntry, McpSecrets,
-    McpServerSettings, McpSettings,
+    McpEntryError, McpPluginDocument, McpPluginServers, McpProjectEnablement, McpSecretEntry,
+    McpSecrets, McpServerSettings, McpSettings,
 };
 use dim_agent_capabilities::file_storage::FileStorage;
+use dim_agent_capabilities::host::{CredentialVariables, CredentialVariablesHost};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use server::{McpServer, McpServerError};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     sync::{
         Arc, Mutex,
@@ -44,6 +50,8 @@ pub enum McpError {
     InvalidId,
     #[error("MCP server is not configured in this source")]
     UnknownServer,
+    #[error("{0}")]
+    InvalidEntry(#[from] McpEntryError),
     #[error("MCP destination source already has this entry")]
     MoveConflict,
     #[error("MCP move is partial")]
@@ -52,6 +60,10 @@ pub enum McpError {
     CredentialsAreUserScoped,
     #[error("MCP withheld record has no project entry")]
     StaleSecretRecord,
+    #[error("MCP import of {id}: {reason}")]
+    ImportConflict { id: String, reason: String },
+    #[error("MCP import is partial")]
+    ImportPartial,
     #[error("MCP server is disabled")]
     Disabled,
     #[error("MCP server Plugin could not be loaded")]
@@ -97,13 +109,33 @@ impl From<SettingsScope> for McpSource {
     }
 }
 
+/// The sources in ascending precedence. The last source that holds a decoded
+/// entry for an id is that id's server; a broken entry holds none, so it
+/// shadows nothing.
+pub(crate) fn sources_in_precedence(project: Option<usize>) -> impl Iterator<Item = McpSource> {
+    [McpSource::User, McpSource::Plugins]
+        .into_iter()
+        .chain(project.map(McpSource::Project))
+}
+
 /// Server-side configuration, including secrets. Not a wire or logging type.
-/// For a project entry, the configuration is effective: its enablement comes
-/// from the user's record (`config::effective`).
+/// For a project entry the configuration is the effective view: the overlay
+/// is merged, the workspace `cwd` is joined and the enablement comes from the
+/// user's record (`config::effective`). Environment references stay as the
+/// user wrote them; only the resolved entry's expanded copy is what a
+/// connection runs.
 #[derive(Clone)]
 pub struct McpServerEntry {
     pub source: McpSource,
     pub configuration: McpServerSettings,
+    /// Names the effective view references, as written.
+    pub referenced_variables: BTreeSet<String>,
+    /// Referenced names that are unset and have no default.
+    pub unset_variables: BTreeSet<String>,
+    /// The expanded credential key of an entry that can use OAuth, carried
+    /// beside the entry so a shadowing entry never inherits the key of the
+    /// entry it shadows.
+    pub(crate) credential: Option<auth::CredentialKey>,
 }
 impl McpServerEntry {
     pub fn enabled(&self) -> bool {
@@ -111,11 +143,29 @@ impl McpServerEntry {
     }
 }
 
+/// One source entry as a path that contacts the server sees it: the effective
+/// view, the user overlay that supplied its withheld members, and the
+/// configuration with environment references expanded.
+pub struct McpResolvedEntry {
+    pub entry: McpServerEntry,
+    pub secret: Option<McpSecretEntry>,
+    pub expanded: McpServerSettings,
+}
+
+/// The environment a connection expands its references from.
+pub(crate) fn daemon_environment(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
 /// One source's entry as that source declares it, for editing: the declared
 /// configuration, the source revision a write takes (absent for a plugin
 /// entry) and the enablement the entry runs with.
 pub struct McpEditableEntry {
     pub configuration: McpServerSettings,
+    /// Names the declared configuration references, as written.
+    pub referenced_variables: BTreeSet<String>,
+    /// Referenced names that are unset and have no default.
+    pub unset_variables: BTreeSet<String>,
     pub revision: Option<String>,
     pub enabled: bool,
     /// The entry has a user-scope secret overlay; the withheld members are
@@ -198,6 +248,24 @@ impl McpProbe {
             ..Self::base(ProbeStatus::Failed, latency)
         }
     }
+    /// The URL still names references the daemon does not set, so it cannot
+    /// address a server and the probe contacts nothing: it reports the names
+    /// rather than a configuration error (D19).
+    fn unresolved(names: &BTreeSet<String>) -> Self {
+        let (noun, verb) = if names.len() == 1 {
+            ("variable", "is")
+        } else {
+            ("variables", "are")
+        };
+        let names = names.iter().cloned().collect::<Vec<_>>().join(", ");
+        Self {
+            reason: Some(ProbeReason::Unavailable),
+            message: Some(server::bounded_diagnostic(format!(
+                "environment {noun} {names} {verb} not set"
+            ))),
+            ..Self::base(ProbeStatus::Failed, std::time::Duration::ZERO)
+        }
+    }
     /// The server answered, and its answer ends the probe.
     fn ended(error: server::McpServerError, latency: std::time::Duration) -> Self {
         match error {
@@ -209,7 +277,9 @@ impl McpProbe {
                 missing_scopes: Some(scopes.split_whitespace().map(str::to_owned).collect()),
                 ..Self::base(ProbeStatus::AuthRequired, latency)
             },
-            server::McpServerError::Timeout => Self::failed(ProbeReason::Timeout, error, latency),
+            server::McpServerError::Timeout { .. } => {
+                Self::failed(ProbeReason::Timeout, error, latency)
+            }
             server::McpServerError::InvalidResponse(_) => {
                 Self::failed(ProbeReason::Response, error, latency)
             }
@@ -225,6 +295,15 @@ pub struct McpCatalog {
     pub user_revision: String,
     pub project_revision: Option<String>,
     pub servers: BTreeMap<String, McpServerEntry>,
+    /// Entries that did not decode, in the source that declares them.
+    pub invalid: Vec<McpInvalidEntry>,
+}
+
+/// One entry the catalog could not decode, with the entry's own error.
+pub struct McpInvalidEntry {
+    pub id: String,
+    pub source: McpSource,
+    pub error: McpEntryError,
 }
 
 pub enum McpChange {
@@ -316,16 +395,77 @@ impl Drop for McpConnection {
     }
 }
 
+/// One source entry with every derived field: the effective view a read
+/// shows, the overlay that supplied its withheld members, the expansion a
+/// connection runs, and the credential key of that expansion. Every read and
+/// every path that contacts a server uses this one order.
+fn resolved_entry(
+    settings: &SettingsService,
+    source: McpSource,
+    id: &str,
+    configuration: McpServerSettings,
+    secret: Option<&McpSecretEntry>,
+    enablement: &McpProjectEnablement,
+    protected: &BTreeSet<String>,
+) -> Result<McpResolvedEntry> {
+    let origin = match source {
+        McpSource::User => config::Origin::User,
+        McpSource::Plugins => config::Origin::Plugin,
+        McpSource::Project(_) => config::Origin::Workspace { overlay: secret },
+    };
+    let expansion = config::connected(
+        settings,
+        configuration.clone(),
+        config::Connection {
+            scope: source.scope(),
+            id,
+            secret,
+            origin,
+            enablement,
+            environment: &daemon_environment,
+            protected,
+        },
+    )?;
+    let configuration = config::viewed(
+        settings,
+        source.scope(),
+        id,
+        configuration,
+        secret,
+        enablement,
+    )?;
+    let credential = auth::credential_key(id, &expansion.configuration).map(|(key, _)| key);
+    Ok(McpResolvedEntry {
+        entry: McpServerEntry {
+            source,
+            configuration,
+            referenced_variables: expansion.referenced,
+            unset_variables: expansion.unset,
+            credential,
+        },
+        secret: secret.cloned(),
+        expanded: expansion.configuration,
+    })
+}
+
 pub struct McpService {
     settings: Arc<SettingsService>,
-    /// Why the last registration of a plugin was refused, by plugin id.
-    refused: Mutex<BTreeMap<String, String>>,
+    credentials: Arc<dyn CredentialVariables>,
+    /// Why the last registration of a plugin was refused, by plugin id: the
+    /// raw error, and its static reason when the cause has one
+    /// (PluginManager A.2).
+    refused: Mutex<BTreeMap<String, (String, Option<&'static str>)>>,
     publication: Arc<publication::Publication>,
     stopping: CancellationToken,
     gate: Mutex<()>,
     tasks: TaskTracker,
 }
 impl McpService {
+    /// The credential variable names the daemon owns now.
+    pub(crate) fn protected(&self) -> BTreeSet<String> {
+        self.credentials.credential_variables()
+    }
+
     /// Acquire a generation in an explicit owner's loader subtree.
     pub async fn server(
         self: &Arc<Self>,
@@ -378,21 +518,31 @@ impl McpService {
         document: serde_json::Value,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let valid = serde_json::from_value::<McpSettings>(document)
-            .map_err(|_| SettingsError::Invalid("invalid MCP configuration"))
-            .and_then(|document| {
-                let registration = McpPluginDocument {
-                    dir,
-                    mcp_servers: document.mcp_servers,
-                };
-                McpPluginServers {
-                    plugins: BTreeMap::from([(plugin.clone(), registration.clone())]),
-                    extra: BTreeMap::new(),
-                }
-                .validate()
-                .and_then(|()| registration.confine())
-                .map(|()| registration)
-            });
+        let valid = McpSettings::from_value(document).and_then(|mut document| {
+            // A plugin registers its MCP content as one unit, and dim does
+            // not manage a plugin entry on its own. Refuse the document
+            // with the first broken entry's error rather than drop it.
+            if let Some(error) = document.invalid_entries().values().next() {
+                return Err(SettingsError::Document(error.to_string()));
+            }
+            // The wrapper owns its members: `dir` and the file's shape are
+            // `McpPluginDocument`'s, and a plugin document's own top-level
+            // members are not part of the registration, as the typed map
+            // dropped them. Keeping one would write a second `dir` beside the
+            // wrapper's and make the whole file unreadable for every plugin.
+            document.extra.clear();
+            let registration = McpPluginDocument {
+                dir,
+                servers: document,
+            };
+            McpPluginServers {
+                plugins: BTreeMap::from([(plugin.clone(), registration.clone())]),
+                extra: BTreeMap::new(),
+            }
+            .validate()
+            .and_then(|()| registration.confine())
+            .map(|()| registration)
+        });
         let result = match valid {
             Ok(registration) => {
                 self.set_plugin(plugin.clone(), Some(registration), cancel)
@@ -405,8 +555,15 @@ impl McpService {
         };
         let mut refused = self.refused.lock().unwrap();
         match &result {
-            Err(error) => refused.insert(plugin, error.to_string()),
-            Ok(()) => refused.remove(&plugin),
+            Err(McpError::Settings(error)) => {
+                refused.insert(plugin, (error.to_string(), error.reason()));
+            }
+            Err(error) => {
+                refused.insert(plugin, (error.to_string(), None));
+            }
+            Ok(()) => {
+                refused.remove(&plugin);
+            }
         };
         result
     }
@@ -422,8 +579,11 @@ impl McpService {
         self.set_plugin(plugin, None, cancel).await
     }
 
-    /// Why Mcp refused the last document `plugin` registered.
-    pub fn plugin_refusal(&self, plugin: &str) -> Option<String> {
+    /// Why Mcp refused the last document `plugin` registered: the raw error,
+    /// and its static reason when the cause has one (PluginManager A.2).
+    /// Both under one lock, so a registration between two reads cannot pair
+    /// one cause's error with another's reason.
+    pub fn plugin_refusal(&self, plugin: &str) -> Option<(String, Option<&'static str>)> {
         self.refused.lock().unwrap().get(plugin).cloned()
     }
 
@@ -497,12 +657,16 @@ impl McpService {
         cancel: &CancellationToken,
     ) -> Result<McpCatalog> {
         self.publication.refresh();
+        let credentials = self.credentials.clone();
         self.run(cancel, move |settings, cancel| async move {
+            let protected = credentials.credential_variables();
             let mut catalog = McpCatalog {
                 user_revision: String::new(),
                 project_revision: None,
                 servers: BTreeMap::new(),
+                invalid: Vec::new(),
             };
+            let mut invalid: BTreeMap<(McpSource, String), McpEntryError> = BTreeMap::new();
             let enablement = match project {
                 Some(_) => settings
                     .read::<McpProjectEnablement>(SettingsScope::User, &cancel)
@@ -520,22 +684,27 @@ impl McpService {
                 }
                 None => McpSecrets::default(),
             };
-            for source in [McpSource::User, McpSource::Plugins]
-                .into_iter()
-                .chain(project.map(McpSource::Project))
-            {
+            for source in sources_in_precedence(project) {
                 let Some(scope) = source.scope() else {
                     let plugins = settings
                         .read::<McpPluginServers>(SettingsScope::User, &cancel)
                         .await?;
-                    for (id, configuration) in plugins.document.entries() {
-                        catalog.servers.insert(
-                            id,
-                            McpServerEntry {
-                                source,
-                                configuration,
-                            },
-                        );
+                    let (entries, broken) = plugins.document.into_entries();
+                    for (id, error) in broken {
+                        invalid.insert((source, id), error);
+                    }
+                    for (id, configuration) in entries {
+                        let entry = resolved_entry(
+                            &settings,
+                            source,
+                            &id,
+                            configuration,
+                            None,
+                            &enablement,
+                            &protected,
+                        )?
+                        .entry;
+                        catalog.servers.insert(id, entry);
                     }
                     continue;
                 };
@@ -547,27 +716,39 @@ impl McpService {
                 match scope {
                     SettingsScope::User => catalog.user_revision = snapshot.revision,
                     SettingsScope::Project(_) => {
-                        catalog.project_revision = Some(snapshot.revision);
+                        let overlays = workspace
+                            .as_ref()
+                            .map_or_else(BTreeMap::new, |workspace| secrets.overlays(workspace));
+                        catalog.project_revision =
+                            Some(source_revision(scope, &snapshot.revision, &overlays));
                     }
                 }
                 let document = snapshot.document;
-                for (id, mut configuration) in document.mcp_servers {
-                    if let Some(workspace) = &workspace
-                        && let Some(secret) = secrets.get(workspace, &id)
-                    {
-                        config::merge_secret(&mut configuration, secret)?;
-                    }
-                    let configuration =
-                        config::effective(&settings, scope, &id, configuration, &enablement)?;
-                    catalog.servers.insert(
-                        id,
-                        McpServerEntry {
-                            source,
-                            configuration,
-                        },
-                    );
+                let (servers, invalid_entries) = document.into_parts();
+                for (id, configuration) in servers {
+                    let secret = workspace
+                        .as_ref()
+                        .and_then(|workspace| secrets.get(workspace, &id));
+                    let entry = resolved_entry(
+                        &settings,
+                        source,
+                        &id,
+                        configuration,
+                        secret,
+                        &enablement,
+                        &protected,
+                    )?
+                    .entry;
+                    catalog.servers.insert(id, entry);
+                }
+                for (id, error) in invalid_entries {
+                    invalid.insert((source, id.clone()), error);
                 }
             }
+            catalog.invalid = invalid
+                .into_iter()
+                .map(|((source, id), error)| McpInvalidEntry { id, source, error })
+                .collect();
             Ok(catalog)
         })
         .await
@@ -581,41 +762,63 @@ impl McpService {
         id: String,
         cancel: &CancellationToken,
     ) -> Result<McpServerEntry> {
+        Ok(self.resolved(source, id, cancel).await?.entry)
+    }
+
+    /// One source's entry for a path that contacts the server: the effective
+    /// view, the overlay that supplied its withheld members, and the same
+    /// expanded configuration the publisher gives a connection.
+    pub async fn resolved(
+        &self,
+        source: McpSource,
+        id: String,
+        cancel: &CancellationToken,
+    ) -> Result<McpResolvedEntry> {
+        let credentials = self.credentials.clone();
         self.run(cancel, move |settings, cancel| async move {
+            let protected = credentials.credential_variables();
             let Some(scope) = source.scope() else {
-                let configuration = settings
+                let (mut entries, mut invalid) = settings
                     .read::<McpPluginServers>(SettingsScope::User, &cancel)
                     .await?
                     .document
-                    .entries()
-                    .find(|(entry, _)| *entry == id)
-                    .map(|(_, configuration)| configuration)
-                    .ok_or(McpError::UnknownServer)?;
-                return Ok(McpServerEntry {
-                    source,
-                    configuration,
-                });
-            };
-            let source = scope;
-            let configuration = settings
-                .read::<McpSettings>(source, &cancel)
-                .await?
-                .document
-                .mcp_servers
-                .remove(&id)
-                .ok_or(McpError::UnknownServer)?;
-            let configuration = declared(&settings, source, &id, configuration, &cancel).await?;
-            let enablement = enablement(&settings, source, &cancel).await;
-            Ok(McpServerEntry {
-                source: source.into(),
-                configuration: config::effective(
+                    .into_entries();
+                let Some(configuration) = entries.remove(&id) else {
+                    return match invalid.remove(&id) {
+                        Some(error) => Err(McpError::InvalidEntry(error)),
+                        None => Err(McpError::UnknownServer),
+                    };
+                };
+                return resolved_entry(
                     &settings,
                     source,
                     &id,
                     configuration,
-                    &enablement,
-                )?,
-            })
+                    None,
+                    &McpProjectEnablement::default(),
+                    &protected,
+                );
+            };
+            let source = scope;
+            let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
+            let document = snapshot.document;
+            let Some(configuration) = document.get(&id).cloned() else {
+                return match document.invalid_error(&id) {
+                    Some(error) => Err(McpError::InvalidEntry(error.clone())),
+                    None => Err(McpError::UnknownServer),
+                };
+            };
+            let secret = secret(&settings, source, &id, &cancel).await?;
+            let enablement = enablement(&settings, source, &cancel).await;
+            resolved_entry(
+                &settings,
+                source.into(),
+                &id,
+                configuration,
+                secret.as_ref(),
+                &enablement,
+                &protected,
+            )
         })
         .await
     }
@@ -630,32 +833,73 @@ impl McpService {
         if id.trim().is_empty() {
             return Err(McpError::InvalidId);
         }
+        let protected = self.protected();
         self.run(cancel, move |settings, cancel| async move {
             let Some(scope) = source.scope() else {
-                let configuration = settings
+                let configuration = match settings
                     .read::<McpPluginServers>(SettingsScope::User, &cancel)
                     .await?
                     .document
                     .declared(&id)
-                    .ok_or(McpError::UnknownServer)?;
+                {
+                    Ok(Some(configuration)) => configuration,
+                    Ok(None) => return Err(McpError::UnknownServer),
+                    Err(error) => return Err(McpError::InvalidEntry(error)),
+                };
+                let expansion = config::connected(
+                    &settings,
+                    configuration.clone(),
+                    config::Connection {
+                        scope: None,
+                        id: &id,
+                        secret: None,
+                        origin: config::Origin::Plugin,
+                        enablement: &McpProjectEnablement::default(),
+                        environment: &daemon_environment,
+                        protected: &protected,
+                    },
+                )?;
                 return Ok(McpEditableEntry {
                     enabled: configuration.enabled(),
                     configuration,
+                    referenced_variables: expansion.referenced,
+                    unset_variables: expansion.unset,
                     revision: None,
                     secrets_in_user_scope: false,
                     secret: None,
                 });
             };
-            let mut snapshot = settings.read::<McpSettings>(scope, &cancel).await?;
-            let mut configuration = snapshot
-                .document
-                .mcp_servers
-                .remove(&id)
-                .ok_or(McpError::UnknownServer)?;
-            let secret = secret(&settings, scope, &id, &cancel).await?;
+            let snapshot = settings.read::<McpSettings>(scope, &cancel).await?;
+            let Some(mut configuration) = snapshot.document.get(&id).cloned() else {
+                return match snapshot.document.invalid_error(&id) {
+                    Some(error) => Err(McpError::InvalidEntry(error.clone())),
+                    None => Err(McpError::UnknownServer),
+                };
+            };
+            let overlays = overlays(&settings, scope, &cancel).await?;
+            let secret = overlays.get(&id).cloned();
             if let Some(secret) = &secret {
                 config::merge_secret(&mut configuration, secret)?;
             }
+            let origin = match scope {
+                SettingsScope::User => config::Origin::User,
+                SettingsScope::Project(_) => config::Origin::Workspace {
+                    overlay: secret.as_ref(),
+                },
+            };
+            let expansion = config::connected(
+                &settings,
+                configuration.clone(),
+                config::Connection {
+                    scope: None,
+                    id: &id,
+                    secret: None,
+                    origin,
+                    enablement: &McpProjectEnablement::default(),
+                    environment: &daemon_environment,
+                    protected: &protected,
+                },
+            )?;
             let enabled = match scope {
                 SettingsScope::User => configuration.enabled(),
                 SettingsScope::Project(_) => {
@@ -666,7 +910,9 @@ impl McpService {
             };
             Ok(McpEditableEntry {
                 configuration,
-                revision: Some(snapshot.revision),
+                referenced_variables: expansion.referenced,
+                unset_variables: expansion.unset,
+                revision: Some(source_revision(scope, &snapshot.revision, &overlays)),
                 enabled,
                 secrets_in_user_scope: secret.is_some(),
                 secret,
@@ -712,24 +958,39 @@ impl McpService {
         .await
     }
 
-    /// The configuration a Session runs, from the declared one a client reads
-    /// and patches.
-    pub async fn effective(
+    /// The configuration a connection runs, from the declared one a client
+    /// reads and patches. The caller merges the stored overlay exactly once
+    /// into that configuration; `overlay` answers only which members are the
+    /// user's own text for the expansion guard.
+    pub(crate) async fn connected(
         &self,
         scope: SettingsScope,
         id: String,
         configuration: McpServerSettings,
+        overlay: Option<McpSecretEntry>,
         cancel: &CancellationToken,
-    ) -> Result<McpServerSettings> {
+    ) -> Result<config::Expanded> {
+        let protected = self.protected();
         self.run(cancel, move |settings, cancel| async move {
-            let configuration = declared(&settings, scope, &id, configuration, &cancel).await?;
             let enablement = enablement(&settings, scope, &cancel).await;
-            Ok(config::effective(
+            let origin = match scope {
+                SettingsScope::User => config::Origin::User,
+                SettingsScope::Project(_) => config::Origin::Workspace {
+                    overlay: overlay.as_ref(),
+                },
+            };
+            Ok(config::connected(
                 &settings,
-                scope,
-                &id,
                 configuration,
-                &enablement,
+                config::Connection {
+                    scope: Some(scope),
+                    id: &id,
+                    secret: None,
+                    origin,
+                    enablement: &enablement,
+                    environment: &daemon_environment,
+                    protected: &protected,
+                },
             )?)
         })
         .await
@@ -742,6 +1003,12 @@ impl McpService {
         configuration: McpServerSettings,
         cancel: &CancellationToken,
     ) -> Result<McpProbe> {
+        if let McpServerSettings::Remote { url, .. } = &configuration {
+            let unresolved = config::unresolved(url);
+            if !unresolved.is_empty() {
+                return Ok(McpProbe::unresolved(&unresolved));
+            }
+        }
         self.run(cancel, move |_, cancel| async move {
             let key = Key::<McpServer>::dynamic(format!("mcp-test:{}", uuid::Uuid::new_v4()))
                 .instance(ctx.instance());
@@ -765,7 +1032,10 @@ impl McpService {
                 Ok(Err(error)) => Err(error),
                 Err(_deadline) => Ok(McpProbe::failed(
                     ProbeReason::Timeout,
-                    server::McpServerError::Timeout,
+                    server::McpServerError::Timeout {
+                        millis: PROBE_DEADLINE.as_millis() as u64,
+                        origin: "the probe deadline",
+                    },
                     latency,
                 )),
             };
@@ -783,7 +1053,10 @@ impl McpService {
 
     /// Mutate exactly one persisted source, not the merged effective view.
     /// Concurrent edits fail CAS rather than overwriting another server.
-    /// Returns the revision of `source` after the change.
+    /// Returns the source's revision token after the change, the same token
+    /// `mcp.catalog` reports for it; a disable whose document could not be
+    /// read returns the caller's `expected` unchanged, since nothing was
+    /// read to compute a newer one.
     ///
     /// A project entry's enablement is the user's record (ADR 003 D3), never
     /// project files. Enabling checks `expected` against the project source and
@@ -812,6 +1085,7 @@ impl McpService {
         let withdraws = matches!(change, McpChange::SetEnabled(false) | McpChange::Remove);
         let publication = self.publication.clone();
         let cleanup_id = id.clone();
+        let supplied = expected.clone();
         let written = self
             .run(cancel, move |settings, cancel| async move {
                 write(&settings, source, expected, id, change, &cancel).await
@@ -831,7 +1105,54 @@ impl McpService {
                 })
                 .await;
         }
-        Ok(written.revision)
+        // The source's token names the document and, for a project source, the
+        // records, which the removal's cleanup may have deleted. When the
+        // document could not be read, the caller's token is the best answer.
+        let revision = match &written.revision {
+            Some(document) => read_source_revision(&self.settings, source, document, cancel).await,
+            None => supplied,
+        };
+        Ok(revision)
+    }
+
+    /// Previews importing one `mcpServers` document into one source. The
+    /// source is read with its revision; nothing is written or executed.
+    pub(crate) async fn preview_import(
+        &self,
+        source: SettingsScope,
+        document: McpSettings,
+        cancel: &CancellationToken,
+    ) -> Result<import::ImportPreview> {
+        self.run(cancel, move |settings, cancel| async move {
+            let snapshot = settings.read::<McpSettings>(source, &cancel).await?;
+            let overlays = overlays(&settings, source, &cancel).await?;
+            Ok(import::preview(
+                &document,
+                &snapshot.document,
+                matches!(source, SettingsScope::Project(_)),
+                &overlays,
+                &source_revision(source, &snapshot.revision, &overlays),
+            ))
+        })
+        .await
+    }
+
+    /// Imports the entries a selection accepts from one `mcpServers`
+    /// document. The source is read once at `expected`; every accepted entry
+    /// is written into that snapshot and committed with one Settings update,
+    /// so one revision change covers the whole import.
+    pub(crate) async fn import_entries(
+        &self,
+        source: SettingsScope,
+        expected: String,
+        document: McpSettings,
+        resolutions: BTreeMap<String, import::ImportResolution>,
+        cancel: &CancellationToken,
+    ) -> Result<String> {
+        self.run(cancel, move |settings, cancel| async move {
+            write_import(&settings, source, expected, document, resolutions, &cancel).await
+        })
+        .await
     }
 
     /// Move one entry between the user and project sources. The destination is
@@ -864,26 +1185,32 @@ impl McpService {
         self.run(cancel, move |settings, cancel| async move {
             let from_snapshot = settings.read::<McpSettings>(from_scope, &cancel).await?;
             let to_snapshot = settings.read::<McpSettings>(to_scope, &cancel).await?;
-            if from_snapshot.revision != expected_from || to_snapshot.revision != expected_to {
+            let from_overlays = overlays(&settings, from_scope, &cancel).await?;
+            let to_overlays = overlays(&settings, to_scope, &cancel).await?;
+            if source_revision(from_scope, &from_snapshot.revision, &from_overlays) != expected_from
+                || source_revision(to_scope, &to_snapshot.revision, &to_overlays) != expected_to
+            {
                 return Err(SettingsError::Conflict.into());
             }
-            if to_snapshot.document.mcp_servers.contains_key(&id) {
+            if to_snapshot.document.contains(&id)
+                || to_snapshot.document.invalid_error(&id).is_some()
+            {
                 return Err(McpError::MoveConflict);
             }
-            let mut entry = from_snapshot
-                .document
-                .mcp_servers
-                .get(&id)
-                .cloned()
-                .ok_or(McpError::UnknownServer)?;
-            let from_secret = secret(&settings, from_scope, &id, &cancel).await?;
-            if let Some(secret) = &from_secret {
+            let Some(mut entry) = from_snapshot.document.get(&id).cloned() else {
+                return match from_snapshot.document.invalid_error(&id) {
+                    Some(error) => Err(McpError::InvalidEntry(error.clone())),
+                    None => Err(McpError::UnknownServer),
+                };
+            };
+            let from_secret = from_overlays.get(&id);
+            if let Some(secret) = from_secret {
                 config::merge_secret(&mut entry, secret)?;
             }
             let enablement = enablement(&settings, from_scope, &cancel).await;
             let mut entry = config::effective(&settings, from_scope, &id, entry, &enablement)?;
             let mut document = McpSettings::default();
-            document.mcp_servers.insert(id.clone(), entry.clone());
+            document.insert(id.clone(), entry.clone());
             document.validate()?;
 
             match to_scope {
@@ -892,7 +1219,7 @@ impl McpService {
                     let (skeleton, to_secret) = config::split_entry(&entry);
                     set_project_enabled(&settings, to_scope, &id, false, &cancel).await?;
                     let mut destination = to_snapshot.document;
-                    destination.mcp_servers.insert(id.clone(), skeleton);
+                    destination.insert(id.clone(), skeleton);
                     settings
                         .update(to_scope, &to_snapshot.revision, destination, &cancel)
                         .await?;
@@ -908,7 +1235,7 @@ impl McpService {
                         return Err(partial(error, into_project));
                     }
                     let mut source = from_snapshot.document;
-                    source.mcp_servers.remove(&id);
+                    source.remove(&id);
                     settings
                         .update(from_scope, &from_snapshot.revision, source, &cancel)
                         .await
@@ -921,7 +1248,7 @@ impl McpService {
                     | McpServerSettings::Remote { enabled: field, .. }) = &mut entry;
                     *field = Some(enabled);
                     let mut destination = to_snapshot.document;
-                    destination.mcp_servers.insert(id.clone(), entry);
+                    destination.insert(id.clone(), entry);
                     settings
                         .update(to_scope, &to_snapshot.revision, destination, &cancel)
                         .await?;
@@ -936,7 +1263,7 @@ impl McpService {
                         return Err(partial(error, into_project));
                     }
                     let mut source = from_snapshot.document;
-                    source.mcp_servers.remove(&id);
+                    source.remove(&id);
                     settings
                         .update(from_scope, &from_snapshot.revision, source, &cancel)
                         .await
@@ -1015,30 +1342,16 @@ async fn secret(
     Ok(snapshot.document.get(&workspace, id).cloned())
 }
 
-/// The declared project entry with its overlay merged.
-async fn declared(
-    settings: &SettingsService,
-    scope: SettingsScope,
-    id: &str,
-    configuration: McpServerSettings,
-    cancel: &CancellationToken,
-) -> Result<McpServerSettings> {
-    let mut configuration = configuration;
-    if let Some(secret) = secret(settings, scope, id, cancel).await? {
-        config::merge_secret(&mut configuration, &secret)?;
-    }
-    Ok(configuration)
-}
-
 /// A probe gives one disposable connection this long to initialize and list
 /// every tool page.
 const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// One source mutation's committed result: the source revision, the generation
-/// of the withheld record captured before a project entry removal, and whether
-/// the entry was already absent.
+/// One source mutation's committed result: the source document's revision,
+/// absent when a disable could not read the file, the generation of the
+/// withheld record captured before a project entry removal, and whether the
+/// entry was already absent.
 struct WriteOutcome {
-    revision: String,
+    revision: Option<String>,
     captured: Option<String>,
     entry_absent: bool,
 }
@@ -1055,39 +1368,53 @@ async fn write(
 ) -> Result<WriteOutcome> {
     let project = matches!(source, SettingsScope::Project(_));
     if project && matches!(change, McpChange::SetEnabled(false)) {
+        // A disable does not need the project file, so an unreadable file
+        // still withdraws the record. A readable file names a broken entry,
+        // whose disable is refused.
+        let snapshot = settings.read::<McpSettings>(source, cancel).await;
+        if let Ok(snapshot) = &snapshot
+            && let Some(error) = snapshot.document.invalid_error(&id)
+        {
+            return Err(McpError::InvalidEntry(error.clone()));
+        }
         set_project_enabled(settings, source, &id, false, cancel).await?;
         return Ok(WriteOutcome {
-            revision: settings
-                .read::<McpSettings>(source, cancel)
-                .await
-                .map_or(expected, |snapshot| snapshot.revision),
+            revision: snapshot.map(|snapshot| snapshot.revision).ok(),
             captured: None,
             entry_absent: false,
         });
     }
     let snapshot = settings.read::<McpSettings>(source, cancel).await?;
-    if snapshot.revision != expected {
+    let overlays = overlays(settings, source, cancel).await?;
+    if source_revision(source, &snapshot.revision, &overlays) != expected {
         return Err(SettingsError::Conflict.into());
     }
     let mut document = snapshot.document;
     if project && matches!(change, McpChange::SetEnabled(true)) {
-        if !document.mcp_servers.contains_key(&id) {
+        if let Some(error) = document.invalid_error(&id) {
+            return Err(McpError::InvalidEntry(error.clone()));
+        }
+        if !document.contains(&id) {
             return Err(McpError::UnknownServer);
         }
         set_project_enabled(settings, source, &id, true, cancel).await?;
         return Ok(WriteOutcome {
-            revision: snapshot.revision,
+            revision: Some(snapshot.revision),
             captured: None,
             entry_absent: false,
         });
     }
     let removed = match change {
         McpChange::Put(configuration) => {
-            document.mcp_servers.insert(id.clone(), configuration);
+            let configuration = configuration
+                .canonical(&id)
+                .map_err(McpError::InvalidEntry)?;
+            document.insert(id.clone(), configuration);
             None
         }
         McpChange::Remove => {
-            let present = document.mcp_servers.remove(&id).is_some();
+            let present = document.contains(&id) || document.invalid_error(&id).is_some();
+            document.remove(&id);
             // The record goes before the source is rewritten, and only once
             // the revision matched, so a stale remove withdraws nothing.
             if project && present {
@@ -1096,10 +1423,12 @@ async fn write(
             Some(present)
         }
         McpChange::SetEnabled(value) => {
-            let configuration = document
-                .mcp_servers
-                .get_mut(&id)
-                .ok_or(McpError::UnknownServer)?;
+            let Some(configuration) = document.configure_mut(&id) else {
+                return match document.invalid_error(&id) {
+                    Some(error) => Err(McpError::InvalidEntry(error.clone())),
+                    None => Err(McpError::UnknownServer),
+                };
+            };
             let (McpServerSettings::Stdio { enabled, .. }
             | McpServerSettings::Remote { enabled, .. }) = configuration;
             *enabled = Some(value);
@@ -1107,41 +1436,236 @@ async fn write(
         }
     };
     let Some(present) = removed else {
+        let written = settings
+            .update(source, &snapshot.revision, document, cancel)
+            .await?;
         return Ok(WriteOutcome {
-            revision: settings
-                .update(source, &expected, document, cancel)
-                .await?
-                .revision,
+            revision: Some(written.revision),
             captured: None,
             entry_absent: false,
         });
     };
     // Capture the record generation this removal owns before the document
     // commit, so the cleanup cannot delete a replacement entry's record.
-    let captured = if project {
-        secret(settings, source, &id, cancel)
-            .await?
-            .map(|secret| secret.generation)
-    } else {
-        None
-    };
+    let captured = overlays.get(&id).map(|secret| secret.generation.clone());
     let revision = if present {
         settings
-            .update(source, &expected, document, cancel)
+            .update(source, &snapshot.revision, document, cancel)
             .await?
             .revision
     } else {
-        expected
+        snapshot.revision.clone()
     };
     Ok(WriteOutcome {
-        revision,
+        revision: Some(revision),
         captured,
         entry_absent: !present,
     })
 }
 
+/// Writes every entry a resolution accepts with one document revision check
+/// and one Settings update. A request that accepts no entry writes nothing,
+/// so re-importing unchanged entries leaves the source revision as it was.
+///
+/// A project import writes what a move into project writes (D25): the public
+/// skeleton enters `.mcp.json` and the withheld part the workspace's
+/// user-scope record. The enablement records are withdrawn first, so an
+/// imported configuration never runs enabled; a compare-and-set that then
+/// fails writes no entry but leaves an entry the import would have replaced
+/// disabled, and `mcp.set_enabled` enables it again. The source update
+/// commits next and the withheld records last; a record failure after the
+/// source commit answers `ImportPartial`, and the source entries stay as
+/// written.
+async fn write_import(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    expected: String,
+    document: McpSettings,
+    resolutions: BTreeMap<String, import::ImportResolution>,
+    cancel: &CancellationToken,
+) -> Result<String> {
+    let snapshot = settings.read::<McpSettings>(source, cancel).await?;
+    let project = matches!(source, SettingsScope::Project(_));
+    let overlays = overlays(settings, source, cancel).await?;
+    if source_revision(source, &snapshot.revision, &overlays) != expected {
+        return Err(SettingsError::Conflict.into());
+    }
+    let changes = import::plan(
+        &document,
+        &snapshot.document,
+        project,
+        &overlays,
+        &resolutions,
+    )?;
+    if changes.is_empty() {
+        return Ok(source_revision(source, &snapshot.revision, &overlays));
+    }
+    let mut target = snapshot.document;
+    if !project {
+        for (id, configuration) in changes {
+            target.insert(id, configuration);
+        }
+        let written = settings
+            .update(source, &snapshot.revision, target, cancel)
+            .await?;
+        return Ok(source_revision(source, &written.revision, &overlays));
+    }
+    let workspace = config::workspace(settings, source)?;
+    // Every id the import writes, an import or a replace, has its
+    // `mcp-projects` record withdrawn before the source write, so an imported
+    // configuration never runs enabled and a replaced entry cannot run while
+    // it reads its new skeleton with its old record (D24, D25). Withdrawing
+    // first also makes a failed compare-and-set fail closed: it writes no
+    // entry, but an entry it would have replaced stays disabled, and
+    // `mcp.set_enabled` enables it again. A failed withdrawal answers before
+    // the source write, so `.mcp.json` is unchanged.
+    for id in changes.keys() {
+        set_project_enabled(settings, source, id, false, cancel).await?;
+    }
+    let mut records = Vec::with_capacity(changes.len());
+    for (id, configuration) in changes {
+        let (skeleton, record) = config::split_entry(&configuration);
+        target.insert(id.clone(), skeleton);
+        records.push((id, record));
+    }
+    let revision = settings
+        .update(source, &snapshot.revision, target, cancel)
+        .await?
+        .revision;
+    #[cfg(feature = "testing")]
+    import::testing::pause(&workspace).await;
+    write_import_secrets(settings, &workspace, &records, &overlays, cancel)
+        .await
+        .map_err(|_| McpError::ImportPartial)?;
+    Ok(read_source_revision(settings, source, &revision, cancel).await)
+}
+
+/// Writes the withheld records of one import in one update. A record a
+/// concurrent writer renewed since the plan is not ours to write: the import
+/// answers `ImportPartial`, having already committed its skeletons, rather
+/// than replacing a newer record with the one it planned (`mcp_import_partial`
+/// reaches the caller through `write_import`). Other ids still commute, so a
+/// lost race on one of them only re-runs the update. An entry with no withheld
+/// part removes the destination's record, so the pair the import leaves is
+/// exactly the configuration the document carried.
+async fn write_import_secrets(
+    settings: &Arc<SettingsService>,
+    workspace: &str,
+    records: &[(String, Option<McpSecretEntry>)],
+    planned: &BTreeMap<String, McpSecretEntry>,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    loop {
+        let snapshot = settings
+            .read::<McpSecrets>(SettingsScope::User, cancel)
+            .await?;
+        let current = snapshot
+            .document
+            .entries
+            .get(workspace)
+            .cloned()
+            .unwrap_or_default();
+        if records.iter().any(|(id, _)| {
+            current.get(id).map(|record| &record.generation)
+                != planned.get(id).map(|record| &record.generation)
+        }) {
+            return Err(SettingsError::Conflict.into());
+        }
+        let mut document = snapshot.document;
+        for (id, record) in records {
+            match record {
+                Some(record) => {
+                    let mut record = record.clone();
+                    record.generation = uuid::Uuid::new_v4().to_string();
+                    document.set(workspace, id, record);
+                }
+                None => {
+                    document.remove(workspace, id);
+                }
+            }
+        }
+        match settings
+            .update(SettingsScope::User, &snapshot.revision, document, cancel)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(SettingsError::Conflict) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// The `mcp-secrets` records of one project source's workspace, by id. A user
+/// source has no record.
+async fn overlays(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    cancel: &CancellationToken,
+) -> Result<BTreeMap<String, McpSecretEntry>> {
+    let SettingsScope::Project(_) = source else {
+        return Ok(BTreeMap::new());
+    };
+    let workspace = config::workspace(settings, source)?;
+    Ok(settings
+        .read::<McpSecrets>(SettingsScope::User, cancel)
+        .await?
+        .document
+        .overlays(&workspace))
+}
+
 fn partial(_error: McpError, into_project: bool) -> McpError {
     McpError::MovePartial { into_project }
+}
+
+/// What separates this digest from any other digest of the same document.
+const PROJECT_REVISION_TAG: &[u8] = b"dim-mcp-project-source-v1";
+
+/// One project source's revision: its `.mcp.json` revision and this
+/// workspace's withheld records as `(id, generation)` pairs, under one digest,
+/// so the value a client holds covers both documents an entry is served from
+/// (D23). A generation is random and renewed on every write (`config.rs`), so
+/// the digest identifies a record version without deriving from its values.
+fn project_revision(file: &str, overlays: &BTreeMap<String, McpSecretEntry>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(PROJECT_REVISION_TAG);
+    digest.update([0]);
+    digest.update(file.as_bytes());
+    for (id, record) in overlays {
+        digest.update([0]);
+        digest.update(id.as_bytes());
+        digest.update([0]);
+        digest.update(record.generation.as_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
+/// The revision every method hands out and checks: a user source's document
+/// revision unchanged, a project source's digest of that revision and its
+/// withheld records.
+fn source_revision(
+    source: SettingsScope,
+    file: &str,
+    overlays: &BTreeMap<String, McpSecretEntry>,
+) -> String {
+    match source {
+        SettingsScope::User => file.to_owned(),
+        SettingsScope::Project(_) => project_revision(file, overlays),
+    }
+}
+
+/// `source_revision` with the records read here, for the returns that do not
+/// already hold them. A source whose records cannot be read keeps the document
+/// revision: no caller can apply against it, so the fallback fails closed.
+async fn read_source_revision(
+    settings: &Arc<SettingsService>,
+    source: SettingsScope,
+    file: &str,
+    cancel: &CancellationToken,
+) -> String {
+    match overlays(settings, source, cancel).await {
+        Ok(overlays) => source_revision(source, file, &overlays),
+        Err(_) => file.to_owned(),
+    }
 }
 
 async fn write_secret(
@@ -1254,6 +1778,7 @@ pub struct McpPlugin {
     files: Key<FileStorage>,
     methods: Key<crate::methods::ManagementMethods>,
     parts: Key<dim_agent_runtime::PartRegistry>,
+    credentials: Key<CredentialVariablesHost>,
 }
 impl McpPlugin {
     pub fn new(names: &Names<'_>, home_root: usize) -> rutis::Result<Self> {
@@ -1264,6 +1789,7 @@ impl McpPlugin {
             files: names.key()?,
             methods: names.key()?,
             parts: names.key()?,
+            credentials: names.key()?,
         })
     }
 }
@@ -1278,6 +1804,7 @@ impl DynPlugin for McpPlugin {
             self.files.erase(),
             self.methods.erase(),
             self.parts.erase(),
+            self.credentials.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -1287,6 +1814,7 @@ impl DynPlugin for McpPlugin {
             let files = ctx.require_at(&self.files)?;
             let methods = ctx.require_at(&self.methods)?;
             let parts = ctx.require_at(&self.parts)?;
+            let credentials = ctx.require_at(&self.credentials)?;
             settings.register::<McpSettings>(ctx)?;
             settings.register::<McpProjectEnablement>(ctx)?;
             settings.register::<McpPluginServers>(ctx)?;
@@ -1294,6 +1822,7 @@ impl DynPlugin for McpPlugin {
             let auth = McpAuth::new(files, self.home_root).map_err(ErrorKind::PluginFailed)?;
             let service = Arc::new(McpService {
                 settings,
+                credentials: credentials.0.clone(),
                 refused: Mutex::default(),
                 publication,
                 stopping: ctx.cancellation_token(),

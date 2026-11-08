@@ -108,6 +108,30 @@ impl TimelineStore for MemoryTimelineStore {
             Ok(branch.events.len() as u64)
         })
     }
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if sequence == 0 {
+                return Ok(());
+            }
+            let sessions = self.0.lock().unwrap();
+            let session = sessions.get(&key.session_id).ok_or_else(|| {
+                AgentError::Storage(format!("unknown session {}", key.session_id))
+            })?;
+            let branch = session
+                .branches
+                .get(&key.branch_id)
+                .ok_or_else(|| AgentError::Storage(format!("unknown branch {}", key.branch_id)))?;
+            let record = branch.events.get((sequence - 1) as usize).ok_or_else(|| {
+                AgentError::Storage(format!("Timeline has no sequence {sequence}"))
+            })?;
+            if record.batch_end > sequence {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {sequence} is inside an atomic batch"
+                )));
+            }
+            Ok(())
+        })
+    }
     fn append(
         &self,
         key: TimelineKey,
@@ -219,24 +243,7 @@ impl TimelineStore for MemoryTimelineStore {
             let mut matched: Vec<&StoredEvent> = events
                 .iter()
                 .filter(|record| record.event.sequence >= from && record.event.sequence <= through)
-                .filter(|record| {
-                    let event = &record.event;
-                    (query.kinds.is_empty()
-                        || query.kinds.iter().any(|kind| kind == event.kind.key()))
-                        && (query.flags.is_empty()
-                            || query
-                                .flags
-                                .iter()
-                                .any(|flag| flag.is_set(event.kind.context_flags())))
-                        && query
-                            .event_id
-                            .as_ref()
-                            .is_none_or(|wanted| wanted == &event.id)
-                        && query
-                            .predicate
-                            .as_ref()
-                            .is_none_or(|predicate| predicate.matches(event))
-                })
+                .filter(|record| query.accepts(&record.event))
                 .collect();
             if query.direction == TimelineQueryDirection::Descending {
                 matched.reverse();
@@ -259,39 +266,6 @@ impl TimelineStore for MemoryTimelineStore {
                     .collect(),
                 skipped: skipped as u64,
             })
-        })
-    }
-    fn read_kind_page<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        kinds: &'a [&'a str],
-        before: u64,
-        limit: usize,
-    ) -> BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        Box::pin(async move {
-            if before == 0 || limit == 0 {
-                return Ok(Vec::new());
-            }
-            let sessions = self.0.lock().unwrap();
-            let events = &sessions
-                .get(&key.session_id)
-                .ok_or_else(|| AgentError::Storage(format!("unknown session {}", key.session_id)))?
-                .branches
-                .get(&key.branch_id)
-                .ok_or_else(|| AgentError::Storage(format!("unknown branch {}", key.branch_id)))?
-                .events;
-            let mut page: Vec<_> = events
-                .iter()
-                .rev()
-                .filter(|record| {
-                    record.event.sequence <= before
-                        && kinds.iter().any(|kind| record.event.kind.key() == *kind)
-                })
-                .take(limit)
-                .cloned()
-                .collect();
-            page.reverse();
-            Ok(page)
         })
     }
     fn trace<'a>(

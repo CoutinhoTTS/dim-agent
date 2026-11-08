@@ -4,11 +4,12 @@
 //! (`reference/ai/packages/provider/src/video-model/v4/`).
 
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use std::time::{Duration, Instant};
 
+use crate::download::{Download, create_download};
 use crate::error::AiMuxError;
 use crate::shared::{
     AspectRatio, SharedHeaders, SharedProviderMetadata, SharedProviderOptions, Size, Warning,
@@ -18,8 +19,12 @@ use crate::{AbortSignal, retry, timeout};
 /// A video or image file used for video editing or image-to-video generation.
 ///
 /// Aligned with V4 `VideoModelV4File`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VideoFile {
     /// Inline file data (base64 or binary) with an explicit media type.
     File {
@@ -33,13 +38,17 @@ pub enum VideoFile {
         /// The URL of the video or image file.
         url: String,
         /// The media type of the referenced file, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         media_type: Option<String>,
     },
 }
 
 /// File payload for a [`VideoFile::File`]: base64 string or raw bytes.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+///
+/// The JSON is a base64 string either way, as in the AI SDK's JSON.
+#[derive(Debug, Clone, JsonSchema)]
+#[schemars(with = "String")]
+#[schemars(extend("x-aimux-codec" = "base64"))]
 pub enum VideoFileData {
     /// Base64-encoded string.
     Base64(String),
@@ -47,11 +56,16 @@ pub enum VideoFileData {
     Binary(Vec<u8>),
 }
 
+crate::wire::base64_wire_enum!(VideoFileData);
+
 /// The role a frame image plays in video generation.
 ///
-/// Aligned with V4 `VideoModelV4FrameType`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
+/// `VideoModelV4FrameType` (`@ai-sdk/provider@4.0.22`
+/// `src/video-model/v4/video-model-v4-frame-image.ts:9`): the values are
+/// upstream's literals `'first_frame' | 'last_frame'`, snake_case as there,
+/// which `ai@7.0.127` compares against (`generate-video.ts:814`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum VideoFrameType {
     /// The starting frame the model animates from.
     FirstFrame,
@@ -62,8 +76,8 @@ pub enum VideoFrameType {
 /// A role-tagged image input for image-to-video and first-last-frame generation.
 ///
 /// Aligned with V4 `VideoModelV4FrameImage`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoFrameImage {
     /// The image file used for this frame.
     pub image: VideoFile,
@@ -75,24 +89,34 @@ pub struct VideoFrameImage {
 ///
 /// Aligned with V4 `VideoModelV4VideoData`. Most providers return URLs due to
 /// large file sizes.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum VideoData {
     /// Video available as a URL (most common).
     Url { url: String, media_type: String },
     /// Video as a base64-encoded string.
     Base64 { data: String, media_type: String },
-    /// Video as binary data.
-    Binary { data: Vec<u8>, media_type: String },
+    /// Video as binary data (a base64 string in the JSON).
+    Binary {
+        #[schemars(with = "String", extend("x-aimux-codec" = "base64"))]
+        #[serde(with = "crate::wire::base64_bytes")]
+        data: Vec<u8>,
+        media_type: String,
+    },
 }
 
 /// Options passed to [`VideoModel::do_start`] and [`VideoModel::do_status`].
 ///
 /// Aligned with V4 `VideoModelV4CallOptions`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VideoCallOptions {
     /// Text prompt for the video generation. `None` when not required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
 
     /// Number of videos to generate. Default `1`; most models only support
@@ -103,31 +127,39 @@ pub struct VideoCallOptions {
     pub n: u32,
 
     /// Aspect ratio, in `{width}:{height}` format (e.g. `"16:9"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aspect_ratio: Option<AspectRatio>,
 
     /// Resolution, in `{width}x{height}` format (e.g. `"1280x720"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<Size>,
 
     /// Duration of the video in seconds. Typically 3–10 seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration: Option<u32>,
 
     /// Frames per second. Common values: 24, 30, 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<u32>,
 
     /// Seed for deterministic generation. `None` uses a random seed.
-    #[ts(type = "number | null")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
 
     /// Input image for image-to-video generation (the starting frame).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<VideoFile>,
 
     /// Role-tagged image inputs for first-last-frame generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_images: Option<Vec<VideoFrameImage>>,
 
     /// Reference inputs for reference-to-video generation (images or videos).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_references: Option<Vec<VideoFile>>,
 
     /// Whether the model should generate audio alongside the video.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_audio: Option<bool>,
 
     /// Additional provider-specific options, keyed by provider name.
@@ -136,21 +168,35 @@ pub struct VideoCallOptions {
 
     /// Abort signal for cancelling the operation.
     #[serde(skip)]
-    #[ts(skip)]
     pub abort_signal: Option<AbortSignal>,
 
-    /// Per-call retry override. `None` uses the model default.
+    /// Maximum number of retries, the AI SDK's `maxRetries`; `Some(0)` disables
+    /// retrying. `None` uses 2, the AI SDK default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retries: Option<u32>,
 
-    /// Per-call poll pacing override for the start/status flow. Unset fields
-    /// fall back to the model's [`VideoModel::poll_config`].
+    /// Poll pacing for the start/status flow, the AI SDK's `generateVideo`
+    /// `poll` option. Unset fields use the AI SDK defaults (5000 ms between
+    /// status checks, 600000 ms in total).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<VideoPollOptions>,
 
     /// Per-call operation timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<crate::options::TimeoutConfiguration>,
 
     /// Additional HTTP headers to send with the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<SharedHeaders>,
+
+    /// The download of the videos a model returns as URLs, the AI SDK's
+    /// `generateVideo` `download` option (`generate-video.ts:136`,
+    /// `:253-261`). `None` uses the guarded download
+    /// ([`create_download`]`(None)`, 2 GiB limit).
+    ///
+    /// Runtime handle; never crosses the JSON boundary.
+    #[serde(skip)]
+    pub download: Option<Download>,
 }
 
 fn default_video_n() -> u32 {
@@ -178,29 +224,32 @@ impl VideoCallOptions {
             poll: None,
             timeout: None,
             headers: None,
+            download: None,
         }
     }
 }
 
-/// Per-call poll pacing for video generation (AI SDK `generateVideo` `poll`).
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
+/// Per-call poll pacing for video generation (AI SDK `generateVideo` `poll`,
+/// ai@7.0.127 `generate-video/generate-video.ts:55-80`). The poll settings
+/// belong to the operation, as upstream: a video model has none of its own.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VideoPollOptions {
     /// Delay between consecutive status checks, in milliseconds.
-    // `number`, not the `bigint` ts-rs infers from u64: the JS bindings pass
-    // options through `JSON.stringify`, which throws on BigInt.
-    #[ts(type = "number | null")]
+    // `number` on the TypeScript side: the JS bindings pass options through
+    // `JSON.stringify`, which throws on BigInt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
     /// Maximum total time to wait for completion, in milliseconds.
-    #[ts(type = "number | null")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
 
 /// The final result of a video generation operation.
 ///
 /// Aligned with V4 `VideoModelV4Result`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoResult {
     /// Generated videos as URLs, base64 strings, or binary data.
     pub videos: Vec<VideoData>,
@@ -209,6 +258,7 @@ pub struct VideoResult {
     pub warnings: Vec<Warning>,
 
     /// Additional provider-specific metadata, keyed by provider name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<SharedProviderMetadata>,
 
     /// Response information for telemetry and debugging.
@@ -216,14 +266,17 @@ pub struct VideoResult {
 }
 
 /// Response information for a video generation call.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoResponse {
-    /// Timestamp for the start of the generated response (ISO 8601 string).
-    pub timestamp: Option<String>,
+    /// Timestamp for the start of the generated response (`toISOString()` in the JSON).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<crate::timestamp::Timestamp>,
     /// The ID of the model that was used to generate the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     /// Response headers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<SharedHeaders>,
 }
 
@@ -251,6 +304,10 @@ pub struct VideoOperationStart {
 ///
 /// Aligned with V4 `VideoModelV4OperationStatusResult`; its `error` arm maps
 /// to `Err(AiMuxError)` (a terminally failed task should be non-retryable).
+// One value per status poll, matched at once by the poll loop: boxing the
+// completed arm would only add an allocation. Insertion-ordered metadata maps
+// (`IndexMap`) put `VideoResult` just over clippy's size threshold.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum VideoOperationStatus {
     /// The generation is still in progress; poll again later.
@@ -259,22 +316,39 @@ pub enum VideoOperationStatus {
     Completed(VideoResult),
 }
 
-/// Pacing for the Core-owned status poll loop.
+/// AI SDK `generateVideo` poll defaults (ai@7.0.127
+/// `generate-video/generate-video.ts:543-544`).
+const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_POLL_TIMEOUT_MS: u64 = 600_000;
+
+/// Pacing for the Core-owned status poll loop, resolved from
+/// [`VideoCallOptions::poll`].
 #[derive(Debug, Clone, Copy)]
-pub struct VideoPollConfig {
-    /// Delay between consecutive `do_status` calls.
-    pub interval: Duration,
-    /// Maximum total time to wait for the generation to complete.
-    pub timeout: Duration,
+struct PollPacing {
+    interval: Duration,
+    timeout: Duration,
+    timeout_ms: u64,
 }
 
-impl Default for VideoPollConfig {
-    fn default() -> Self {
-        // AI SDK generate-video defaults (intervalMs: 5000, timeoutMs: 600_000).
+impl PollPacing {
+    fn resolve(poll: Option<VideoPollOptions>) -> Self {
+        let poll = poll.unwrap_or_default();
+        let interval_ms = poll.interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS);
+        let timeout_ms = poll.timeout_ms.unwrap_or(DEFAULT_POLL_TIMEOUT_MS);
         Self {
-            interval: Duration::from_secs(5),
-            timeout: Duration::from_secs(600),
+            interval: Duration::from_millis(interval_ms),
+            timeout: Duration::from_millis(timeout_ms),
+            timeout_ms,
         }
+    }
+
+    /// The AI SDK's `pollingTimeoutError` text
+    /// (`generate-video/generate-video.ts:547-549`).
+    fn timeout_error(&self) -> AiMuxError {
+        AiMuxError::Timeout(format!(
+            "Video generation timed out after {}ms.",
+            self.timeout_ms
+        ))
     }
 }
 
@@ -297,16 +371,6 @@ pub trait VideoModel: Send + Sync {
 
     /// Provider-specific model ID, e.g. `"kling-video"`.
     fn model_id(&self) -> &str;
-
-    fn retry_config(&self) -> retry::RetryConfig {
-        retry::RetryConfig::default()
-    }
-
-    /// Poll pacing for this model. Defaults to the AI SDK values; providers
-    /// with configurable polling should surface their configuration here.
-    fn poll_config(&self) -> VideoPollConfig {
-        VideoPollConfig::default()
-    }
 
     /// Limit of how many videos can be generated in a single API call.
     ///
@@ -347,11 +411,20 @@ pub trait VideoModel: Send + Sync {
 /// deep-merged the same way start/completion metadata is within a batch (see
 /// `merge_provider_metadata`).
 ///
+/// Every video returned as a URL is then downloaded, in order, with
+/// [`VideoCallOptions::download`] and returned as [`VideoData::Binary`], as
+/// the AI SDK returns generated files (`generate-video.ts:383-410`). Its
+/// media type is the video's own unless that is empty or
+/// `application/octet-stream`, else the downloaded one under the same rule,
+/// else `video/mp4`; aimux has no byte sniffing in Core, so upstream's
+/// `detectMediaType` step is skipped.
+///
 /// # Errors
 ///
 /// Returns `InvalidArgument` when `options.n == 0` (checked before any
 /// network call), or the first batch's provider failure, retry exhaustion,
-/// poll or operation timeout, or caller abort — Rust drops the other
+/// poll or operation timeout, a video download failure, or caller abort —
+/// Rust drops the other
 /// in-flight batches' futures on the first error, unlike `Promise.all`,
 /// which lets sibling settles run to completion; their partial network
 /// effects (e.g. an already-started but abandoned batch) are the same
@@ -375,27 +448,15 @@ async fn start_and_poll(
     options: VideoCallOptions,
 ) -> Result<VideoResult, AiMuxError> {
     if options.n == 0 {
-        return Err(AiMuxError::InvalidArgument(
+        return Err(AiMuxError::invalid_argument(
             "video generation `n` must be at least 1".to_string(),
         ));
     }
 
     let abort_signal = options.abort_signal.clone();
-    let retries = retry::prepare_retries(
-        options.max_retries,
-        model.retry_config(),
-        abort_signal.clone(),
-    );
+    let retries = retry::prepare_retries(options.max_retries, abort_signal.clone());
 
-    let mut poll = model.poll_config();
-    if let Some(overrides) = options.poll {
-        if let Some(ms) = overrides.interval_ms {
-            poll.interval = Duration::from_millis(ms);
-        }
-        if let Some(ms) = overrides.timeout_ms {
-            poll.timeout = Duration::from_millis(ms);
-        }
-    }
+    let poll = PollPacing::resolve(options.poll);
 
     // Split `n` into `max_per_call`-sized batches (AI SDK `generateVideo` /
     // `generateImage`): every batch but the last is full-sized, the last one
@@ -436,18 +497,56 @@ async fn start_and_poll(
         merged.provider_metadata =
             merge_provider_metadata(merged.provider_metadata, result.provider_metadata);
     }
+
+    let download = options
+        .download
+        .clone()
+        .unwrap_or_else(|| create_download(None));
+    for video in &mut merged.videos {
+        if let VideoData::Url { url, media_type } = video {
+            let file = download.download(url, abort_signal.as_ref()).await?;
+            let media_type = downloaded_video_media_type(media_type, file.media_type.as_deref());
+            *video = VideoData::Binary {
+                data: file.data,
+                media_type,
+            };
+        }
+    }
     Ok(merged)
+}
+
+/// The media type of a downloaded video (generate-video.ts:395-406): the
+/// video's own, else the downloaded one, else `video/mp4`, skipping empty
+/// and `application/octet-stream` values (`isUsableMediaType`).
+fn downloaded_video_media_type(own: &str, downloaded: Option<&str>) -> String {
+    let usable =
+        |media_type: &&str| !media_type.is_empty() && *media_type != "application/octet-stream";
+    Some(own)
+        .filter(usable)
+        .or_else(|| downloaded.filter(usable))
+        .unwrap_or("video/mp4")
+        .to_owned()
 }
 
 /// Run one `do_start` + poll cycle for a single provider-sized batch.
 ///
 /// Each batch mints its own idempotency key (AI SDK batching semantics): a
 /// batch, not the whole `n`-video request, is the unit of idempotent replay.
+///
+/// The key aimux mints goes on `do_start` only; `do_status` gets the
+/// caller's headers as given. So a caller-supplied `idempotency-key`
+/// reaches the status calls too (as `<key>:batch:<i>` when there are
+/// several batches), while a minted key never does. This follows the AI
+/// SDK, which adds its key to `startCallOptions` alone and passes
+/// `callOptions.headers` to `doStatus` (ai@7.0.127
+/// `generate-video/generate-video.ts:520-536`, `:582`, `:613`). Tests:
+/// `start_retry_reuses_one_idempotency_key`,
+/// `caller_idempotency_key_is_preserved_for_start_and_status`.
 async fn start_and_poll_one_batch(
     model: &dyn VideoModel,
     options: VideoCallOptions,
     retries: &retry::PreparedRetries,
-    poll: VideoPollConfig,
+    poll: PollPacing,
     abort_signal: Option<AbortSignal>,
 ) -> Result<VideoResult, AiMuxError> {
     // `do_start` is billable: mint one idempotency key per logical start,
@@ -472,10 +571,7 @@ async fn start_and_poll_one_batch(
     loop {
         let elapsed = poll_started.elapsed();
         if elapsed >= poll.timeout {
-            return Err(AiMuxError::Timeout(format!(
-                "Video generation timed out after {:?}.",
-                poll.timeout
-            )));
+            return Err(poll.timeout_error());
         }
         retry::delay(
             poll.interval.min(poll.timeout - elapsed),
@@ -483,19 +579,21 @@ async fn start_and_poll_one_batch(
         )
         .await?;
 
-        if poll_started.elapsed() >= poll.timeout {
-            return Err(AiMuxError::Timeout(format!(
-                "Video generation timed out after {:?}.",
-                poll.timeout
-            )));
+        let elapsed = poll_started.elapsed();
+        if elapsed >= poll.timeout {
+            return Err(poll.timeout_error());
         }
 
-        // Matching the AI SDK, the poll budget paces the loop between status
-        // checks; a hung status GET is already bounded by the per-exchange
-        // response guard in provider-utils, and the retry count is finite.
-        let status = retries
-            .retry(|| model.do_status(&start.operation, &options))
-            .await?;
+        // As the AI SDK does, each status check, retries included, races the
+        // time left in the poll budget; when the budget runs out the pending
+        // request is dropped (cancelled) and the poll fails with the polling
+        // timeout (ai@7.0.127 generate-video/generate-video.ts:586-625).
+        let status = tokio::time::timeout(
+            poll.timeout - elapsed,
+            retries.retry(|| model.do_status(&start.operation, &options)),
+        )
+        .await
+        .map_err(|_| poll.timeout_error())??;
         match status {
             VideoOperationStatus::Pending => {}
             VideoOperationStatus::Completed(mut result) => {
@@ -517,30 +615,22 @@ async fn start_and_poll_one_batch(
 /// the other phase set once both phases report the *same* provider key — e.g.
 /// a start call's `job_id` disappearing once the completion call also reports
 /// metadata under `x_provider`. Objects under a shared key are unioned
-/// instead, with `b` (the later phase) winning a field collision. Anything
-/// that is not a pair of objects has nothing to union, so `b` replaces `a`.
+/// instead, with `b` (the later phase) winning a field collision.
 fn merge_provider_metadata(
     a: Option<SharedProviderMetadata>,
     b: Option<SharedProviderMetadata>,
 ) -> Option<SharedProviderMetadata> {
     let Some(mut merged) = a else { return b };
-    for (provider, b_value) in b.into_iter().flatten() {
-        let value = match (merged.remove(&provider), b_value) {
-            (Some(serde_json::Value::Object(mut a_obj)), serde_json::Value::Object(b_obj)) => {
-                a_obj.extend(b_obj);
-                serde_json::Value::Object(a_obj)
-            }
-            (_, b_value) => b_value,
-        };
-        merged.insert(provider, value);
+    for (provider, b_obj) in b.into_iter().flatten() {
+        merged.entry(provider).or_default().extend(b_obj);
     }
     Some(merged)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::error::ApiCallError;
@@ -604,13 +694,6 @@ mod tests {
             "scripted"
         }
 
-        fn retry_config(&self) -> crate::retry::RetryConfig {
-            crate::retry::RetryConfig {
-                initial_delay: Duration::from_millis(1),
-                ..crate::retry::RetryConfig::default()
-            }
-        }
-
         fn max_videos_per_call(&self) -> Option<u32> {
             Some(1)
         }
@@ -645,7 +728,6 @@ mod tests {
                         "start unavailable",
                         "https://test/start",
                         serde_json::json!({}),
-                        crate::ApiCallErrorOrigin::Local,
                     )
                 })));
             }
@@ -674,17 +756,14 @@ mod tests {
                 StatusStep::RetryableFailure => Err(AiMuxError::ApiCall(Box::new(ApiCallError {
                     status_code: Some(429),
                     is_retryable: true,
-                    ..ApiCallError::new(
-                        "rate limited",
-                        "https://test",
-                        serde_json::json!({}),
-                        crate::ApiCallErrorOrigin::Local,
-                    )
+                    ..ApiCallError::new("rate limited", "https://test", serde_json::json!({}))
                 }))),
                 StatusStep::Pending => Ok(VideoOperationStatus::Pending),
                 StatusStep::Complete => Ok(VideoOperationStatus::Completed(VideoResult {
+                    // A loopback URL: an injected download fetches it, the
+                    // guarded default download refuses it.
                     videos: vec![VideoData::Url {
-                        url: "https://cdn/video.mp4".to_string(),
+                        url: "http://127.0.0.1:9/video.mp4".to_string(),
                         media_type: "video/mp4".to_string(),
                     }],
                     warnings: vec![Warning::Other {
@@ -703,20 +782,39 @@ mod tests {
             interval_ms: Some(1),
             timeout_ms: Some(2_000),
         });
+        options.download = Some(Download::new(|_| async {
+            Ok(crate::download::DownloadedFile {
+                data: b"video".to_vec(),
+                media_type: None,
+            })
+        }));
         options
     }
 
     /// The core guarantee of the do_start/do_status split: a transient poll
     /// failure retries the status check against the same operation and never
     /// re-creates the billed task.
-    #[tokio::test]
+    ///
+    /// The status retry waits the jittered exponential backoff, anywhere in
+    /// 0..=2 s, and that wait is bounded by the poll timeout. With the 2 s
+    /// timeout of `fast_poll_options` on the wall clock, a draw near 2 s
+    /// timed the generation out on a slow runner. Paused time keeps the test
+    /// from waiting, and a poll budget above the largest backoff keeps the
+    /// retry from racing the timeout (that race has its own test,
+    /// `status_retries_race_the_remaining_poll_timeout`).
+    #[tokio::test(start_paused = true)]
     async fn transient_status_failure_never_restarts_the_task() {
         let model = ScriptedVideoModel::new(vec![
             StatusStep::Pending,
             StatusStep::RetryableFailure,
             StatusStep::Complete,
         ]);
-        let result = generate_video(&model, fast_poll_options()).await.unwrap();
+        let mut options = fast_poll_options();
+        options.poll = Some(VideoPollOptions {
+            interval_ms: Some(1),
+            timeout_ms: Some(60_000),
+        });
+        let result = generate_video(&model, options).await.unwrap();
         assert_eq!(model.starts.load(Ordering::SeqCst), 1);
         assert_eq!(model.statuses.load(Ordering::SeqCst), 3);
         assert!(
@@ -731,7 +829,8 @@ mod tests {
         assert_eq!(result.videos.len(), 1);
     }
 
-    #[tokio::test]
+    // Paused time: the fixed 2s retry delay must not make the test wait.
+    #[tokio::test(start_paused = true)]
     async fn start_retry_reuses_one_idempotency_key() {
         let model = ScriptedVideoModel::new(vec![StatusStep::Complete]).with_start_failures(1);
         let mut options = fast_poll_options();
@@ -794,23 +893,6 @@ mod tests {
         let messages: Vec<String> = result.warnings.iter().map(|w| format!("{w:?}")).collect();
         assert!(messages[0].contains("from start"), "{messages:?}");
         assert!(messages[1].contains("from status"), "{messages:?}");
-    }
-
-    #[test]
-    fn merge_provider_metadata_unions_same_provider_key_across_phases() {
-        let phase = |value| Some(SharedProviderMetadata::from([("fal".to_string(), value)]));
-        let merged = merge_provider_metadata(
-            phase(serde_json::json!({ "job_id": "job-1", "region": "us-east" })),
-            phase(serde_json::json!({ "region": "eu-west", "seed": 42 })),
-        )
-        .expect("both phases reported metadata");
-
-        // `job_id` is start-only and must survive instead of being dropped by
-        // an `entry().or_insert()` collision on the shared provider key.
-        assert_eq!(
-            merged["fal"],
-            serde_json::json!({ "job_id": "job-1", "region": "eu-west", "seed": 42 })
-        );
     }
 
     #[tokio::test]
@@ -879,6 +961,204 @@ mod tests {
         );
     }
 
+    /// A video model whose status check never answers.
+    struct HangingStatus(ScriptedVideoModel);
+
+    #[async_trait]
+    impl VideoModel for HangingStatus {
+        fn provider(&self) -> &str {
+            "test"
+        }
+        fn model_id(&self) -> &str {
+            "hanging"
+        }
+        fn max_videos_per_call(&self) -> Option<u32> {
+            Some(1)
+        }
+        async fn do_start(
+            &self,
+            options: &VideoCallOptions,
+        ) -> Result<VideoOperationStart, AiMuxError> {
+            self.0.do_start(options).await
+        }
+        async fn do_status(
+            &self,
+            _operation: &serde_json::Value,
+            _options: &VideoCallOptions,
+        ) -> Result<VideoOperationStatus, AiMuxError> {
+            self.0.statuses.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+    }
+
+    /// ai@7.0.127 generate-video/generate-video.ts:586-625: each status
+    /// check races the time left in the poll budget, and losing the race
+    /// fails with the polling timeout error (`:547-549`).
+    #[tokio::test]
+    async fn a_hanging_status_check_is_bounded_by_the_poll_timeout() {
+        let model = HangingStatus(ScriptedVideoModel::new(vec![]));
+        let mut options = VideoCallOptions::new("a cat");
+        options.poll = Some(VideoPollOptions {
+            interval_ms: Some(1),
+            timeout_ms: Some(50),
+        });
+
+        let error = tokio::time::timeout(Duration::from_secs(5), generate_video(&model, options))
+            .await
+            .expect("the poll timeout must end a hanging status check")
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, AiMuxError::Timeout(message)
+                if message == "Video generation timed out after 50ms."),
+            "{error:?}"
+        );
+        assert_eq!(model.0.statuses.load(Ordering::SeqCst), 1);
+    }
+
+    /// The race covers the status retries too (upstream passes the status
+    /// timeout signal to `prepareRetries`, generate-video.ts:602-605): a
+    /// retry delay longer than the remaining budget ends with the polling
+    /// timeout, not after the delay. The failed check asks for a 30 s delay
+    /// (`retry-after-ms`, honoured exactly below 60 s), so the delay does not
+    /// depend on the jittered exponential backoff.
+    #[tokio::test]
+    async fn status_retries_race_the_remaining_poll_timeout() {
+        struct SlowRetries(ScriptedVideoModel);
+        #[async_trait]
+        impl VideoModel for SlowRetries {
+            fn provider(&self) -> &str {
+                "test"
+            }
+            fn model_id(&self) -> &str {
+                "slow-retries"
+            }
+            fn max_videos_per_call(&self) -> Option<u32> {
+                Some(1)
+            }
+            async fn do_start(
+                &self,
+                options: &VideoCallOptions,
+            ) -> Result<VideoOperationStart, AiMuxError> {
+                self.0.do_start(options).await
+            }
+            async fn do_status(
+                &self,
+                operation: &serde_json::Value,
+                options: &VideoCallOptions,
+            ) -> Result<VideoOperationStatus, AiMuxError> {
+                self.0
+                    .do_status(operation, options)
+                    .await
+                    .map_err(|error| match error {
+                        AiMuxError::ApiCall(mut detail) => {
+                            detail.response_headers =
+                                Some([("retry-after-ms".to_string(), "30000".to_string())].into());
+                            AiMuxError::ApiCall(detail)
+                        }
+                        other => other,
+                    })
+            }
+        }
+        let model = SlowRetries(ScriptedVideoModel::new(vec![
+            StatusStep::RetryableFailure,
+            StatusStep::Complete,
+        ]));
+        let mut options = VideoCallOptions::new("a cat");
+        options.poll = Some(VideoPollOptions {
+            interval_ms: Some(1),
+            timeout_ms: Some(50),
+        });
+
+        let error = tokio::time::timeout(Duration::from_secs(5), generate_video(&model, options))
+            .await
+            .expect("the poll timeout must cut the retry delay short")
+            .unwrap_err();
+
+        assert!(matches!(error, AiMuxError::Timeout(_)), "{error:?}");
+        assert_eq!(model.0.statuses.load(Ordering::SeqCst), 1);
+    }
+
+    /// Without a `poll` option the AI SDK defaults apply
+    /// (generate-video.ts:543-544); the model has no poll settings.
+    #[tokio::test]
+    async fn url_videos_are_downloaded_with_the_injected_download() {
+        let model = ScriptedVideoModel::new(vec![StatusStep::Complete]);
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut options = fast_poll_options();
+        let recorded = requests.clone();
+        options.download = Some(Download::new(
+            move |request: crate::download::DownloadRequest| {
+                recorded.lock().unwrap().push(request.url);
+                async {
+                    Ok(crate::download::DownloadedFile {
+                        data: vec![7, 7],
+                        media_type: Some("video/webm".into()),
+                    })
+                }
+            },
+        ));
+        let result = generate_video(&model, options).await.unwrap();
+        assert_eq!(*requests.lock().unwrap(), ["http://127.0.0.1:9/video.mp4"]);
+        // The video's own media type comes first.
+        assert!(
+            matches!(&result.videos[..], [VideoData::Binary { data, media_type }]
+                if *data == [7, 7] && media_type == "video/mp4"),
+            "{:?}",
+            result.videos
+        );
+    }
+
+    /// Without an injected download, the guarded download refuses a
+    /// loopback URL.
+    #[tokio::test]
+    async fn the_default_video_download_is_guarded() {
+        let model = ScriptedVideoModel::new(vec![StatusStep::Complete]);
+        let mut options = fast_poll_options();
+        options.download = None;
+        let error = generate_video(&model, options).await.unwrap_err();
+        assert!(
+            matches!(&error, AiMuxError::InvalidArgument { message, .. }
+                if message == "download URL targets a non-public address: 127.0.0.1"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_downloaded_video_takes_the_first_usable_media_type() {
+        assert_eq!(
+            downloaded_video_media_type("video/mp4", Some("video/webm")),
+            "video/mp4"
+        );
+        assert_eq!(
+            downloaded_video_media_type("application/octet-stream", Some("video/webm")),
+            "video/webm"
+        );
+        assert_eq!(
+            downloaded_video_media_type("", Some("video/webm")),
+            "video/webm"
+        );
+        assert_eq!(
+            downloaded_video_media_type("", Some("application/octet-stream")),
+            "video/mp4"
+        );
+        assert_eq!(downloaded_video_media_type("", None), "video/mp4");
+    }
+
+    #[test]
+    fn poll_pacing_defaults_to_the_ai_sdk_values() {
+        let pacing = PollPacing::resolve(None);
+        assert_eq!(pacing.interval, Duration::from_millis(5_000));
+        assert_eq!(pacing.timeout, Duration::from_millis(600_000));
+
+        let pacing = PollPacing::resolve(Some(VideoPollOptions {
+            interval_ms: Some(10),
+            timeout_ms: None,
+        }));
+        assert_eq!(pacing.interval, Duration::from_millis(10));
+        assert_eq!(pacing.timeout, Duration::from_millis(600_000));
+    }
+
     #[tokio::test]
     async fn n_zero_is_rejected_before_any_network_call() {
         let model = ScriptedVideoModel::new(vec![StatusStep::Complete]);
@@ -888,7 +1168,7 @@ mod tests {
         let error = generate_video(&model, options).await.unwrap_err();
 
         assert!(
-            matches!(error, AiMuxError::InvalidArgument(_)),
+            matches!(error, AiMuxError::InvalidArgument { .. }),
             "expected InvalidArgument, got {error:?}"
         );
         assert_eq!(
@@ -929,7 +1209,7 @@ mod tests {
         assert_eq!(unique.len(), 3, "one key per batch: {keys:?}");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn caller_key_is_distinct_per_batch_and_stable_across_retries_and_replays() {
         let model = ScriptedVideoModel::new(vec![]).with_start_failures(1);
         let mut options = fast_poll_options();

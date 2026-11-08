@@ -9,8 +9,7 @@
 //!   registered yet. Zero-friction for FFI/binding users: set an env var and
 //!   logs appear.
 //! - **programmatic API** (`init_logging`): idempotent (`Once`-guarded), used
-//!   by Rust consumers, the bindings' Rust side, and the `aimux_init_logging`
-//!   C ABI export.
+//!   by Rust consumers and the shared `runtime.configure` operation.
 //!
 //! Privacy rules (§4.3): header *values*, URL query strings, and request/
 //! response bodies are **never** logged by default. Bodies only appear when
@@ -18,39 +17,49 @@
 //! auth-looking JSON fields redacted.
 
 use std::io::Write;
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 
-/// Idempotency guard shared by every entry point (env / API / C ABI).
+/// Idempotency guard shared by environment, native API and ops initialization.
 static INIT: Once = Once::new();
+static REQUESTED_LEVEL: OnceLock<String> = OnceLock::new();
 
 /// Default level: `warn` — only retries and failures are printed, normal
 /// traffic stays silent.
-pub const DEFAULT_LEVEL: &str = "warn";
+const DEFAULT_LEVEL: &str = "warn";
 
 /// Body log truncation limit (bytes), RFC-0014 §4.3.
-pub const BODY_LOG_LIMIT: usize = 4096;
+const BODY_LOG_LIMIT: usize = 4096;
 
 /// Initialize the global logger (idempotent). Every entry point funnels here.
 ///
 /// Precedence: `AIMUX_LOG` (RUST_LOG-style directives) > `AIMUX_LOG_LEVEL`
-/// (simple level name) > `level` argument > [`DEFAULT_LEVEL`].
+/// (simple level name) > `level` argument > `DEFAULT_LEVEL`.
 ///
 /// No-ops (without registering anything) when a global subscriber is already
 /// installed by the consumer — we never override the host's own logger.
-fn init_once(level: Option<&str>) {
+fn init_once(level: Option<&str>) -> bool {
+    let mut applied = false;
     INIT.call_once(|| {
         if tracing::dispatcher::has_been_set() {
             return;
         }
         let filter = build_filter(level);
-        let _ = fmt()
+        if fmt()
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
-            .try_init();
+            .try_init()
+            .is_ok()
+        {
+            if let Some(level) = level {
+                let _ = REQUESTED_LEVEL.set(level.to_owned());
+            }
+            applied = true;
+        }
     });
+    applied
 }
 
 /// Programmatic init: `aimux_providers::init_logging("debug")`.
@@ -61,12 +70,39 @@ pub fn init_logging(level: &str) {
     init_once(Some(level));
 }
 
+/// Whether aimux or the host has initialized the process logger.
+#[must_use]
+pub fn logging_initialized() -> bool {
+    INIT.is_completed() || tracing::dispatcher::has_been_set()
+}
+
+/// Programmatic level requested at initialization; environment directives can override it.
+#[must_use]
+pub fn requested_logging_level() -> Option<&'static str> {
+    REQUESTED_LEVEL.get().map(String::as_str)
+}
+
+/// Initialize logging through the shared guard, permitting identical requests.
+/// # Errors
+/// Returns an error when the host/environment or a different level froze logging.
+pub fn configure_logging(level: &str) -> Result<(), LoggingFrozen> {
+    if init_once(Some(level)) || requested_logging_level() == Some(level) {
+        Ok(())
+    } else {
+        Err(LoggingFrozen)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("logging is frozen")]
+pub struct LoggingFrozen;
+
 /// Lazy env-driven auto-init, called by the shared API-call primitive.
 ///
 /// Cheap when already initialized (`Once::is_completed` is a single atomic
 /// load). Registers a subscriber only when an `AIMUX_LOG*` env var is present
 /// **and** no global subscriber exists yet.
-pub fn auto_init_from_env() {
+pub(crate) fn auto_init_from_env() {
     if INIT.is_completed() || tracing::dispatcher::has_been_set() {
         return;
     }
@@ -79,7 +115,7 @@ pub fn auto_init_from_env() {
 
 /// Whether request/response body trace logging is enabled (`AIMUX_LOG_BODY=1`).
 #[must_use]
-pub fn body_logging_enabled() -> bool {
+pub(crate) fn body_logging_enabled() -> bool {
     std::env::var("AIMUX_LOG_BODY")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -104,7 +140,7 @@ fn build_filter(level: Option<&str>) -> EnvFilter {
     EnvFilter::try_new(format!("aimux={level}")).unwrap_or_else(|_| EnvFilter::new(DEFAULT_LEVEL))
 }
 
-/// Truncate `body` to [`BODY_LOG_LIMIT`] bytes at a UTF-8 char boundary.
+/// Truncate `body` to `BODY_LOG_LIMIT` bytes at a UTF-8 char boundary.
 fn truncate(body: &str) -> &str {
     if body.len() <= BODY_LOG_LIMIT {
         return body;
@@ -119,9 +155,9 @@ fn truncate(body: &str) -> &str {
 /// Redact a body for trace logging: JSON object keys whose lowercased name
 /// match the shared recording sensitivity policy have their values replaced
 /// with `[REDACTED]`. Non-JSON bodies pass through unchanged. Always truncated
-/// to [`BODY_LOG_LIMIT`].
+/// to `BODY_LOG_LIMIT`.
 #[must_use]
-pub fn redact_body(body: &str) -> String {
+pub(crate) fn redact_body(body: &str) -> String {
     let truncated = truncate(body);
     match serde_json::from_str::<serde_json::Value>(truncated) {
         Ok(value) => serde_json::to_string(&redact_error_context(value))
@@ -184,7 +220,7 @@ fn redact_value(value: serde_json::Value, depth: usize) -> serde_json::Value {
 
 /// Sanitize request values before storing them in a public `ApiCallError`.
 #[must_use]
-pub fn redact_request_values(body: &crate::http::HttpBody) -> serde_json::Value {
+pub(crate) fn redact_request_values(body: &crate::http::HttpBody) -> serde_json::Value {
     match body {
         crate::http::HttpBody::Json(value) => redact_error_context(value.clone()),
         crate::http::HttpBody::Bytes(bytes, content_type) => serde_json::json!({
@@ -265,6 +301,65 @@ mod tests {
 
     fn captured_text(captured: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> String {
         String::from_utf8(captured.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn startup_logging_shares_native_environment_host_and_concurrent_initialization() {
+        const CASE: &str = "AIMUX_LOGGING_TEST_CASE";
+        let Ok(case) = std::env::var(CASE) else {
+            for case in ["native", "environment", "host", "concurrent"] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact", "logging::tests::startup_logging_shares_native_environment_host_and_concurrent_initialization", "--nocapture"])
+                    .env(CASE, case).env_remove("AIMUX_LOG").env_remove("AIMUX_LOG_LEVEL");
+                if case == "environment" {
+                    command.env("AIMUX_LOG_LEVEL", "error");
+                }
+                assert!(command.status().unwrap().success(), "scenario {case}");
+            }
+            return;
+        };
+        assert!(!logging_initialized());
+        match case.as_str() {
+            "native" => {
+                init_logging("info");
+                assert!(configure_logging("info").is_ok());
+                assert!(configure_logging("trace").is_err());
+                assert_eq!(requested_logging_level(), Some("info"));
+            }
+            "environment" => {
+                auto_init_from_env();
+                assert!(logging_initialized());
+                assert_eq!(requested_logging_level(), None);
+                assert!(configure_logging("trace").is_err());
+            }
+            "host" => {
+                tracing::subscriber::set_global_default(
+                    tracing::subscriber::NoSubscriber::default(),
+                )
+                .unwrap();
+                assert!(configure_logging("warn").is_err());
+                assert_eq!(requested_logging_level(), None);
+            }
+            "concurrent" => {
+                let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+                let callers: Vec<_> = (0..8)
+                    .map(|index| {
+                        let barrier = barrier.clone();
+                        std::thread::spawn(move || {
+                            let level = if index % 2 == 0 { "warn" } else { "trace" };
+                            barrier.wait();
+                            (level, configure_logging(level).is_ok())
+                        })
+                    })
+                    .collect();
+                for caller in callers {
+                    let (level, applied) = caller.join().unwrap();
+                    assert_eq!(applied, requested_logging_level() == Some(level));
+                }
+            }
+            _ => panic!("unknown test scenario"),
+        }
+        assert!(logging_initialized());
     }
 
     #[test]

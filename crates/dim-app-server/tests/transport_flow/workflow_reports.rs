@@ -1,5 +1,6 @@
 //! Public report/store binding acceptance; no Workflow stage engine is installed.
 use super::*;
+use dim_agent_runtime::testing::branch_events;
 use std::path::{Path, PathBuf};
 
 fn parts() -> dim_app_server::session_typescript::SessionTypeScriptConfig {
@@ -66,7 +67,7 @@ async fn phase(client: &mut Client, id: u64, phase: &str) {
     }
 }
 async fn count(session: &Session) -> usize {
-    session.local("main", ..).await.unwrap().iter().filter(|event|
+    branch_events(session, "main", ..).await.unwrap().iter().filter(|event|
         matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("workflow:report:binding-report"))
     ).count()
 }

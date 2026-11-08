@@ -1,22 +1,13 @@
 //! URL utilities.
 
-/// Remove a trailing path slash while retaining query and fragment values.
+/// Remove a trailing slash from a URL string.
 #[must_use]
 pub fn without_trailing_slash(url: &str) -> String {
-    let end = url.find(['?', '#']).unwrap_or(url.len());
-    let (base, suffix) = url.split_at(end);
-    if let Some(stripped) = base.strip_suffix('/') {
-        format!("{stripped}{suffix}")
+    if let Some(stripped) = url.strip_suffix('/') {
+        stripped.to_string()
     } else {
         url.to_string()
     }
-}
-
-/// Remove a trailing slash from an optional URL string, mirroring the TS
-/// `withoutTrailingSlash(url: string | undefined)` signature: `None` in,
-/// `None` out.
-pub fn without_trailing_slash_opt(url: Option<&str>) -> Option<String> {
-    url.map(without_trailing_slash)
 }
 
 /// Validate that a base URL is a valid HTTP(S) URL.
@@ -30,24 +21,28 @@ pub fn without_trailing_slash_opt(url: Option<&str>) -> Option<String> {
 ///
 /// # Errors
 ///
-/// Returns `AiMuxError::InvalidArgument` when the URL cannot be parsed, the
-/// scheme is not `http`/`https`, or the host is missing.
+/// Returns `AiMuxError::invalid_argument` when the URL is empty or blank
+/// (`"baseURL must be a non-empty string."`), cannot be parsed, the scheme is
+/// not `http`/`https`, or the host is missing.
 pub fn validate_base_url(url: &str) -> Result<String, aimux_core::AiMuxError> {
-    if url.is_empty() {
-        return Err(aimux_core::AiMuxError::InvalidArgument(
-            "base URL cannot be empty".to_string(),
+    // `validateBaseURL` in `@ai-sdk/provider-utils`.
+    if url.trim().is_empty() {
+        return Err(aimux_core::AiMuxError::invalid_argument(
+            "baseURL must be a non-empty string.".to_string(),
         ));
     }
-    let parsed = url::Url::parse(url)
-        .map_err(|e| aimux_core::AiMuxError::InvalidArgument(format!("invalid base URL: {e}")))?;
+    let parsed = url::Url::parse(url).map_err(|e| aimux_core::AiMuxError::InvalidArgument {
+        message: format!("invalid base URL: {e}"),
+        cause: Some(aimux_core::ErrorCause::source(&e)),
+    })?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(aimux_core::AiMuxError::InvalidArgument(format!(
+        return Err(aimux_core::AiMuxError::invalid_argument(format!(
             "base URL must be http or https, got: {}",
             parsed.scheme()
         )));
     }
     if parsed.host_str().map(str::is_empty).unwrap_or(true) {
-        return Err(aimux_core::AiMuxError::InvalidArgument(
+        return Err(aimux_core::AiMuxError::invalid_argument(
             "base URL must have a host".to_string(),
         ));
     }

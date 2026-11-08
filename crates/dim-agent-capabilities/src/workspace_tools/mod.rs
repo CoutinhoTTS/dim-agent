@@ -1,11 +1,14 @@
 //! Workspace tools, see `docs/architecture/rust-agent/plugins/WorkspaceTools.md`.
 //!
-//! `WorkspaceToolsPlugin` (Session) provides `S:ToolHost` executing `read`
-//! `write` `edit` `glob` `grep` `exec` `exec_stop`. Branch parts are looked up per call on
-//! the calling branch: `FileReads` for file tools and `BackgroundExec` for a
-//! command that moves to the background. Admission happened before a call
-//! reaches execution; `resolve_write` only prepares its target before admission.
-//! Nothing here decides permissions, approvals or sandboxes.
+//! `WorkspaceToolsOwner` (process) registers the Session part `WorkspaceTools`,
+//! which provides `S:ToolHost` executing `read` `write` `edit` `glob` `grep`
+//! `exec` `exec_stop`, and the branch parts `FileReads` and `BackgroundExec`.
+//! It holds the file-write coordinator: one lock domain for every Session it
+//! serves. Branch parts are looked up per call on the calling branch: `FileReads`
+//! for file tools and `BackgroundExec` for a command that moves to the
+//! background. Admission happened before a call reaches execution;
+//! `resolve_write` only prepares its target before admission. Nothing here
+//! decides permissions, approvals or sandboxes.
 pub mod background;
 pub mod exec;
 pub mod file_reads;
@@ -15,13 +18,13 @@ pub mod mentions;
 use crate::{
     host::{HostError, HostFuture, SessionFilesHost, ToolDriver, ToolExecutionContext, ToolHost},
     host_platform::HostPlatform,
-    methods::{Interruption, MethodDecl, RpcError, SessionMethods, params, reply},
+    methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
 };
 use background::BackgroundExecPlugin;
 use dim_agent_runtime::{
-    AgentBuilder, AgentError, CAPABILITY_RELOADING, CollaborationRole, Names, SessionConfig,
-    SessionIdentity,
+    AgentBuilder, AgentError, CAPABILITY_RELOADING, CollaborationRole, Names, PartRegistry,
+    PartScope, SessionConfig, SessionIdentity,
 };
 use dim_agent_types::*;
 use file_reads::{FileReads, FileReadsPlugin};
@@ -34,6 +37,14 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// Host tools this capability provides.
 pub const TOOL_NAMES: [&str; 7] = ["read", "write", "edit", "glob", "grep", "exec", "exec_stop"];
 const OUTPUT_METHOD: &str = "session.exec.output";
+/// `session.exec.output.page`: the tail's sibling, reading the task's
+/// registered output file by byte cursor.
+const PAGE_OUTPUT_METHOD: &str = "session.exec.output.page";
+/// Default page and largest page `session.exec.output.page` serves; a
+/// caller's `limit` clamps to the latter, following `session.files.search`'s
+/// own clamp.
+const OUTPUT_PAGE_BYTES: u64 = 1024 * 1024;
+const OUTPUT_PAGE_BYTES_MAX: u64 = 4 * 1024 * 1024;
 /// The `session.files` namespace: the files an `@` mention offers.
 const FILES_NAMESPACE: &str = "session.files";
 const SEARCH_METHOD: &str = "session.files.search";
@@ -44,28 +55,81 @@ pub struct WorkspaceToolsConfig {
     pub output_root: PathBuf,
 }
 
-/// Installs the WorkspaceTools plugin: its Session part and its branch
-/// parts. The plugin holds the file-write coordinator, one lock domain for
-/// every Session it serves, across their generations and its own, and hands
-/// it to each Session's part.
+/// Installs WorkspaceTools: the process owner, which registers its Session and
+/// branch parts, and the parts themselves. The owner holds the file-write
+/// coordinator, one lock domain for every Session it serves, across their
+/// generations and its own, and hands it to each Session's part.
 pub fn install(builder: &mut AgentBuilder, config: WorkspaceToolsConfig) {
     let coordinator = Arc::<FileWriteCoordinator>::default();
-    builder.require_feature(
-        dim_agent_runtime::Feature::new("WorkspaceTools")
-            .session("WorkspaceTools", move |names| {
-                Ok(Box::new(WorkspaceToolsPlugin::new(
-                    names,
+    builder.plugin(move |names| {
+        Ok(Box::new(WorkspaceToolsOwner::new(
+            names,
+            config.clone(),
+            coordinator.clone(),
+        )?) as Box<dyn DynPlugin>)
+    });
+    builder.require_part("WorkspaceTools");
+    builder.require_part("FileReads");
+    builder.require_part("BackgroundExec");
+}
+
+/// The process plugin: it registers the Session part and both branch parts
+/// with the part registry, holds the file-write coordinator, and provides the
+/// one `MentionIndex` its Session parts read, so `session.files.search` and
+/// `workspace.files.search` share one walked index (WorkspaceTools §1).
+struct WorkspaceToolsOwner {
+    parts: Key<PartRegistry>,
+    config: WorkspaceToolsConfig,
+    coordinator: Arc<FileWriteCoordinator>,
+}
+impl WorkspaceToolsOwner {
+    fn new(
+        names: &Names<'_>,
+        config: WorkspaceToolsConfig,
+        coordinator: Arc<FileWriteCoordinator>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            parts: names.key()?,
+            config,
+            coordinator,
+        })
+    }
+}
+impl DynPlugin for WorkspaceToolsOwner {
+    fn name(&self) -> &str {
+        "WorkspaceToolsOwner"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.parts.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let parts = ctx.require_at(&self.parts)?;
+            // One index per process, read by every Session part this owner
+            // serves and by the App Server's sessionless search.
+            ctx.provide_as::<mentions::MentionIndex>(Arc::new(mentions::MentionIndex::default()))?;
+            let config = self.config.clone();
+            let coordinator = self.coordinator.clone();
+            parts.register(ctx, PartScope::Session, "WorkspaceTools", move |mount| {
+                Ok(Some(Box::new(WorkspaceToolsPlugin::new(
+                    mount.names,
                     config.clone(),
                     coordinator.clone(),
-                )?))
-            })
-            .branch("FileReads", |names| {
-                Ok(Box::new(FileReadsPlugin::new(names)?))
-            })
-            .branch("BackgroundExec", |names| {
-                Ok(Box::new(BackgroundExecPlugin::new(names)?))
-            }),
-    );
+                )?) as Box<dyn DynPlugin>))
+            })?;
+            parts.register(ctx, PartScope::Branch, "FileReads", |mount| {
+                Ok(Some(
+                    Box::new(FileReadsPlugin::new(mount.names)?) as Box<dyn DynPlugin>
+                ))
+            })?;
+            parts.register(ctx, PartScope::Branch, "BackgroundExec", |mount| {
+                Ok(Some(
+                    Box::new(BackgroundExecPlugin::new(mount.names)?) as Box<dyn DynPlugin>
+                ))
+            })?;
+            Ok(Effect::Done)
+        })
+    }
 }
 
 pub(crate) struct WorkspaceTools {
@@ -230,6 +294,8 @@ struct WorkspaceToolsPlugin {
     identity: Key<SessionIdentity>,
     tree: Key<TreeCommands>,
     methods: Key<SessionMethods>,
+    /// The owner's one walked index, shared with `workspace.files.search`.
+    mentions: Key<mentions::MentionIndex>,
     config: WorkspaceToolsConfig,
     coordinator: Arc<FileWriteCoordinator>,
 }
@@ -247,6 +313,7 @@ impl WorkspaceToolsPlugin {
             identity: names.key()?,
             tree: names.key()?,
             methods: names.key()?,
+            mentions: names.key()?,
             config,
             coordinator,
         })
@@ -263,6 +330,7 @@ impl DynPlugin for WorkspaceToolsPlugin {
             self.identity.erase(),
             self.tree.erase(),
             self.methods.erase(),
+            self.mentions.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -300,13 +368,16 @@ impl DynPlugin for WorkspaceToolsPlugin {
                 owner.calls.wait().await;
                 Ok(())
             })?;
-            let mentions = Arc::new(mentions::MentionIndex::default());
+            // The owner's one searched index, shared with
+            // `workspace.files.search`.
+            let mentions = ctx.require_at(&self.mentions)?;
             let search_root = tools.cwd.clone();
             methods.register(
                 ctx,
                 FILES_NAMESPACE,
                 vec![MethodDecl::new(SEARCH_METHOD, false, Interruption::Report)],
-                Arc::new(move |_, value, _, _| {
+                Arc::new(move |call, _, _| {
+                    let MethodCall { params: value, .. } = call;
                     let (mentions, root) = (mentions.clone(), search_root.clone());
                     Box::pin(async move {
                         #[derive(serde::Deserialize)]
@@ -324,9 +395,7 @@ impl DynPlugin for WorkspaceToolsPlugin {
                         if session_id.is_empty() {
                             return Err(RpcError::invalid("sessionId must not be empty"));
                         }
-                        let limit = limit
-                            .unwrap_or(mentions::DEFAULT_LIMIT)
-                            .clamp(1, mentions::MAX_LIMIT);
+                        let limit = mentions::parse_limit(limit);
                         let found = tokio::task::spawn_blocking(move || {
                             mentions.search(&root, &query, limit)
                         })
@@ -334,11 +403,7 @@ impl DynPlugin for WorkspaceToolsPlugin {
                         .map_err(|error| {
                             RpcError::app(-32000, "session_files_failed", error.to_string())
                         })?;
-                        reply(serde_json::json!({"candidates": found.iter().map(|candidate| serde_json::json!({
-                            "relativePath": candidate.relative_path,
-                            "absolutePath": candidate.absolute_path,
-                            "dir": candidate.dir,
-                        })).collect::<Vec<_>>()}))
+                        reply(serde_json::json!({"candidates": mentions::candidates(&found)}))
                     })
                 }),
             )?;
@@ -346,10 +411,63 @@ impl DynPlugin for WorkspaceToolsPlugin {
             methods.register(
                 ctx,
                 OUTPUT_METHOD,
-                vec![MethodDecl::new(OUTPUT_METHOD, false, Interruption::Report)],
-                Arc::new(move |_, value, _, _| {
+                vec![
+                    MethodDecl::new(OUTPUT_METHOD, false, Interruption::Report),
+                    MethodDecl::new(PAGE_OUTPUT_METHOD, false, Interruption::Report),
+                ],
+                Arc::new(move |call, _, _| {
+                    let MethodCall { method, params: value, .. } = call;
                     let tree = tree.clone();
                     Box::pin(async move {
+                        if method == PAGE_OUTPUT_METHOD {
+                            #[derive(serde::Deserialize)]
+                            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                            struct PageParams {
+                                session_id: String,
+                                branch_id: String,
+                                task_id: String,
+                                cursor: Option<u64>,
+                                limit: Option<u64>,
+                            }
+                            let PageParams {
+                                session_id,
+                                branch_id,
+                                task_id,
+                                cursor,
+                                limit,
+                            } = params(value)?;
+                            if session_id.is_empty() || branch_id.is_empty() || task_id.is_empty() {
+                                return Err(RpcError::invalid(
+                                    "sessionId, branchId and taskId must not be empty",
+                                ));
+                            }
+                            let limit = match limit {
+                                Some(0) => {
+                                    return Err(RpcError::invalid("limit must be at least 1"))
+                                }
+                                Some(limit) => limit.clamp(1, OUTPUT_PAGE_BYTES_MAX),
+                                None => OUTPUT_PAGE_BYTES,
+                            };
+                            let page = tree
+                                .get(&branch_id)?
+                                .service::<background::BackgroundExec>()?
+                                .output_page(&task_id, cursor.unwrap_or(0), limit as usize)
+                                .await
+                                .map_err(|error| match error {
+                                    background::OutputPageError::Unknown => RpcError::app(
+                                        -32000,
+                                        "exec_task_unknown",
+                                        "No such task is known on this branch",
+                                    ),
+                                    background::OutputPageError::Unavailable => RpcError::app(
+                                        -32000,
+                                        "exec_output_unavailable",
+                                        "The task's output file is no longer available; it was removed or its Session was deleted",
+                                    ),
+                                    background::OutputPageError::Closed => RpcError::reloading(),
+                                })?;
+                            return reply(page);
+                        }
                         #[derive(serde::Deserialize)]
                         #[serde(rename_all = "camelCase", deny_unknown_fields)]
                         struct Params {

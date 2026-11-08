@@ -53,7 +53,13 @@ pub enum Block {
         insufficient: Vec<CompactionPartSize>,
         expanded: bool,
     },
-    Error(String),
+    /// A model failure or a turn failure: the one line, with the model
+    /// failure's details behind the details cycle.
+    Error {
+        text: String,
+        details: Option<crate::model::view::FailureDetail>,
+        expanded: bool,
+    },
     Status {
         text: String,
         tone: Tone,
@@ -122,7 +128,11 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
                 tone: Tone::Muted,
             },
         },
-        RowKind::Error => Block::Error(row.text.clone()),
+        RowKind::Error => Block::Error {
+            text: row.text.clone(),
+            details: row.failure.clone(),
+            expanded: detail != Detail::Collapsed,
+        },
         RowKind::StreamingAssistant | RowKind::Status | RowKind::Other => Block::Status {
             text: if row.text == crate::model::view::INTERRUPT_REASON {
                 crate::ui::i18n::t(crate::model::view::INTERRUPT_REASON).to_owned()
@@ -174,6 +184,7 @@ mod tests {
 
     fn row(kind: RowKind, text: &str) -> ViewRow {
         ViewRow {
+            failure: None,
             row_id: "r".into(),
             kind,
             text: text.into(),
@@ -284,8 +295,71 @@ mod tests {
         assert_eq!(group_rows(&published, 0).len(), 3);
         assert_eq!(
             drawn(&rows, Detail::Collapsed, 80),
-            ["✓ Ran 1 command, ran 1 search, read 1 file · 1 failed ▸"]
+            ["✓ Ran 1 command, ran 1 search, read 1 file · 1 failed · npm ▸"]
         );
+    }
+
+    #[test]
+    fn collapsed_commands_show_only_program_names_in_mixed_groups() {
+        let mut rows = vec![call(
+            "exec",
+            json!({"command": "\nTOKEN='private value' \"/opt/My Tools/python\" - <<'PY'\nprint('script body')\nPY"}),
+            Some("private output"),
+        )];
+        assert_eq!(
+            drawn(&rows, Detail::Collapsed, 100),
+            ["✓ Ran 1 command · python ▸"]
+        );
+        rows.extend([
+            call(
+                "bash",
+                json!({"command": "python -c 'other body'"}),
+                Some("ok"),
+            ),
+            call(
+                "exec",
+                json!({"command": "rg private-pattern src/"}),
+                Some("private matches"),
+            ),
+        ]);
+        assert_eq!(
+            drawn(&rows, Detail::Collapsed, 100),
+            ["✓ Ran 2 commands, ran 1 search · python ×2, rg ▸"]
+        );
+        rows.extend([
+            call(
+                "web_search",
+                json!({"query": "private query"}),
+                Some("web results"),
+            ),
+            call("read", json!({"path": "docs/INDEX.md"}), Some("file body")),
+            call(
+                "write",
+                json!({"path": "src/new.rs", "content": "new body\n"}),
+                Some("ok"),
+            ),
+        ]);
+        let header = "✓ Ran 2 commands, ran 2 searches, read 1 file, changed src/new.rs (+1)";
+        assert_eq!(
+            drawn(&rows, Detail::Collapsed, 160),
+            [format!("{header} · python ×2, rg ▸")]
+        );
+        assert_eq!(drawn(&rows, Detail::Summary, 160)[0], format!("{header} ▾"));
+        assert_eq!(
+            drawn(&rows, Detail::Expanded, 160)[0],
+            format!("{header} ▾")
+        );
+        for width in 12..120 {
+            let lines = drawn(&rows, Detail::Collapsed, width);
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].ends_with(" ▸"), "{width}: {lines:?}");
+            assert!(
+                crate::ui::text::display_width(&lines[0]) <= width,
+                "{width}: {lines:?}"
+            );
+        }
+        rows[0].pending = true;
+        assert!(drawn(&rows, Detail::Collapsed, 160)[0].ends_with(" · python ×2, rg ▸"));
     }
 
     #[test]
@@ -520,7 +594,7 @@ mod tests {
         let expected = "✓ Ran 1 command, changed 2 files (+5 -2) · src/main.rs, tests/main.rs";
         assert_eq!(
             drawn(&mixed, Detail::Collapsed, 100),
-            [format!("{expected} ▸")]
+            [format!("{expected} · cargo ▸")]
         );
         assert_eq!(
             drawn(&mixed, Detail::Expanded, 100)[0],
@@ -529,7 +603,9 @@ mod tests {
         mixed[1].result_is_error = true;
         assert_eq!(
             drawn(&mixed, Detail::Collapsed, 100),
-            ["✓ Ran 1 command, changed 2 files (+3 -1) · src/main.rs, tests/main.rs · 1 failed ▸"]
+            [
+                "✓ Ran 1 command, changed 2 files (+3 -1) · src/main.rs, tests/main.rs · 1 failed · cargo ▸"
+            ]
         );
     }
 

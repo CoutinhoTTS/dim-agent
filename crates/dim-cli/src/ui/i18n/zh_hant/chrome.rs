@@ -1,5 +1,27 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "佇列",
+        "Export session" => "匯出工作階段",
+        "Enter steer · x delete held · Esc close" => "Enter steer · x 刪除暫存訊息 · Esc 關閉",
+        "No queued messages." => "佇列中沒有訊息。",
+        "Held · awaiting application" => "暫存中 · 等待套用",
+        "Incorporating · awaiting model consumption" => "納入中 · 等待模型讀取",
+        "Held" => "暫存中",
+        "Incorporating" => "納入中",
+        "Enter export · Esc cancel" => "Enter 匯出 · Esc 取消",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "附有附件的訊息會留在佇列中；使用 /queue 對其執行 steer 或刪除"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue 管理 · shift+← 編輯最後一則 · ctrl+s 立即 steer"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "還有 {count} 則 · /queue 管理 · shift+← 編輯最後一則 · ctrl+s 立即 steer"
+        }
+        "steer or delete queued messages" => "對佇列訊息執行 steer 或刪除",
+        "export this conversation" => "匯出此對話",
+        "That message has already left the queue." => "該訊息已離開佇列。",
+        "Exported {format}: {path}" => "已匯出 {format}：{path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 輸出/中斷成員 · x 停止指令 · Esc 關閉"
@@ -263,14 +285,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "按 Ctrl+C 停止 Web 工作區。",
         "To resume this session:" => "繼續此工作階段：",
 
-        // composer/commands.rs: categories
-        "session" => "工作階段",
-        "run" => "執行",
-        "view" => "檢視",
-        "model" => "模型",
-        "extensions" => "擴充",
-        "app" => "應用程式",
-        "skill" => "技能",
         // composer/commands.rs: descriptions
         "start a new session" => "開始新工作階段",
         "show or set the reasoning effort" => "檢視或設定推理強度",
@@ -280,7 +294,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "列出 MCP 伺服器，登入或登出（login|logout ID）"
         }
         "resume a previous session" => "繼續先前工作階段",
-        "open this session in the browser" => "在瀏覽器中開啟此工作階段",
+        "turn the web interface on or off" => "開啟或關閉 Web 介面",
         "show the context window usage" => "顯示上下文視窗用量",
         "interrupt the run" => "中斷執行",
         "steer with the next queued message" => "以下一則佇列訊息 steer",
@@ -308,6 +322,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc 關閉",
         "Suggestions" => "建議",
         "Skills" => "技能",
+        "Skill loaded: {name}" => "已載入技能：{name}",
         "Commands" => "指令",
         "Command Palette" => "命令面板",
         "No matches" => "無相符項目",
@@ -500,6 +515,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "釘住的輸入",
         "digest" => "清單",
         "summary" => "摘要",
+        "The first message was not sent; your new draft was kept." => {
+            "首條訊息未傳送；已保留你的新草稿。"
+        }
+        "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server 仍是 {server}，因為其他用戶端正在使用它；這個 {client} 用戶端也使用它。等它們結束後執行 `dimcode daemon stop`，下次啟動就會執行 {client}。"
+        }
+        "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server 仍是 {server}，因為其他用戶端正在使用它（連線：{connections}，已附加工作階段：{attached}，執行中的回合：{running}）；這個 {client} 用戶端也使用它。等它們結束後執行 `dimcode daemon stop`，下次啟動就會執行 {client}。"
+        }
+        "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
+            "正在把本機資料庫從格式 v{from} 升級到 v{to}；大型資料庫可能需要一段時間。"
+        }
         _ => return None,
     })
 }

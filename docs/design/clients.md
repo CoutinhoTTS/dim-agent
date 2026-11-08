@@ -48,7 +48,7 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 
 | Contract | Owner document |
 | --- | --- |
-| Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 5); [App Server README](../../crates/dim-app-server/README.md) |
+| Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 2); [App Server README](../../crates/dim-app-server/README.md) |
 | Session methods versus management methods, and which entry is served which | [Session boundary](contracts/session-boundary.md) (A.3 entries), [management methods](appserver/management-methods.md) |
 | Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves. The attach reply carries that Session's `SessionInfo`, whose `model` follows the Session's latest adopted configuration, so a client that opens a known Session takes the model from it and reads no catalog; `session.summaries` items still report the creation model until [#795](https://github.com/arcships/dim/issues/795) lands. A reload leaves the title fields absent and `running` false, and the notices that follow correct them. The `session.create` and `session.attach` replies also carry `modelPreferences`, the preferences the Session's adopted configuration sends, derived from it and absent when it carries none; `session.summaries` items do not carry it | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
 | Broadcast notices that are not Timeline facts (`session.notice`, e.g. titles) | [Session notices](appserver/session-notices.md) |
@@ -110,8 +110,8 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 
 | Capability | CLI | Web | Source |
 | --- | --- | --- | --- |
-| New, resume, Session list | done; `/resume` opens on this workspace and `Ctrl+S` cycles it, this repository's worktrees when offered, and every workspace. It labels each row by creation origin and hides ACP Sessions unless the preference says otherwise | done (grouped by directory) | [Session classification](appserver/session-classification.md), [CLI commands](cli-commands.md#the-resume-picker) |
-| Export conversation | done in the line client and `dimcode session export`; inside the terminal UIs: none | — | [CLI commands](cli-commands.md) |
+| New, resume, Session list | done; `/resume` opens on the local scope — the launch workspace, or its repository's worktrees once git answers — and `Ctrl+S` toggles it with every workspace; two states, never three. It labels each row by creation origin and hides ACP Sessions unless the preference says otherwise | done (grouped by directory) | [Session classification](appserver/session-classification.md), [CLI commands](cli-commands.md#the-resume-picker) |
+| Export conversation | done in the line client, both terminal UIs and `dimcode session export` | — | [CLI commands](cli-commands.md) |
 | `/timeline` and message actions | done in the TUI; it also replaces `/history`'s paging | — | [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message) |
 | Titles | automatic: done (optional SessionTitle package); manual rename: designed | — | [SessionTitle](plugins/SessionTitle.md) |
 | Fork | designed in the CLI (server `session.fork` done) | later phase | [Session deletion and fork](appserver/session-deletion-and-fork.md) |
@@ -125,10 +125,10 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | --- | --- | --- | --- |
 | Send, queue (`Enter` while running), automatic sending, steer (`Ctrl+S`, or `Enter` on an empty draft), interrupt | done | send and stop: done; queue: later phase | InputQueue (S1) |
 | Lines: tree, switch, create, send, stop, approvals, end | done | done (right-side Lines panel) | [Timeline branches](timeline-branches.md) §14, [Web workspace](web-workspace.md#41-lines-and-branch) |
-| `/queue` panel and queue deletion | none | — | server contract done (S1) |
-| Retrieve a queued message for editing | done; a message with attachments loses them (§4 item 4) | — | |
+| `/queue` panel and queue deletion | done in both terminal UIs | — | [CLI commands](cli-commands.md#queued-messages) |
+| Retrieve a queued message for editing | done; images and multi-block messages remain queued with a notice | — | [CLI commands](cli-commands.md#queued-messages) |
 | Multiline, paste, large paste, images, mixed attachments, `@` files, `!` / `!!` | done | attachments: later phase | [CLI attachment input](cli-attachment-input.md), [ShellInput](plugins/ShellInput.md) |
-| Skill references (`$`, `/`, `@`) | partial: palette code exists, no Skills are listed | — | none |
+| Skill references: the `/` palette lists them, and `$skill: <name>` loads one with the message | done | none | [Skills](plugins/Skills.md#9-references-load-with-the-operators-input) |
 | Clipboard text, images, files; selection copy; OSC 52 | done | browser | |
 | Message copying through message actions | none | — | |
 | Open links, tool groups, `/tools` | done | done (rendering) | |
@@ -163,12 +163,9 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 Undesigned capabilities from §3, in feature-list order:
 
 1. Message copying (`/timeline` and its other message actions: [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message)).
-2. The `/queue` panel and queue deletion (the server contract exists).
-3. Skill references through `$`, `/`, `@` (the palette code exists, nothing feeds it).
-4. Retrieving a queued message that has attachments: `QueuedInput` keeps only text, so the attachments are lost. Either the client refuses it, as the feature list says, or the queue keeps the attachments.
-5. A prose reference for protocol v3: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
-6. Questions in the Web workspace: it handles approvals but not `ask_user`, and web-workspace §4 does not list it as deferred.
-7. Session list project/all switch, `/debug`, the remaining `/settings` items, export inside the terminal UIs, `dimcode upgrade`.
+2. A prose reference for protocol v3: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
+3. Questions in the Web workspace: it handles approvals but not `ask_user`, and web-workspace §4 does not list it as deferred.
+4. Session list project/all switch, `/debug`, the remaining `/settings` items, `dimcode upgrade`.
 
 Documents that disagree with the code or with each other:
 
@@ -177,7 +174,7 @@ Documents that disagree with the code or with each other:
 | Only scrollback is designed; fullscreen-only items (rollback, mouse, `/stats`) are out of scope | [overview](overview.md) line 15, App. A | The fullscreen terminal UI, its mouse mode and `/tui` are implemented and documented in the [native CLI contract](../../crates/dim-cli/README.md); rollback and `/stats` are not |
 | F6 does not implement a fullscreen interface | [CLI commands](cli-commands.md) | Same as above |
 | `/web` is new work for RemoteGateway | [overview](overview.md) App. A | Delivered by the phase-1 web entry |
-| Remote entries never get management methods; no web entry in the entries table | [Session boundary](contracts/session-boundary.md) A.3, [RemoteGateway](plugins/RemoteGateway.md) | The web entry serves the read-only model discovery methods defined in [web workspace §2.5](web-workspace.md#25-protocol-on-the-entry) |
+| Remote entries never get management methods; no web entry in the entries table | [Session boundary](contracts/session-boundary.md) A.3, [RemoteGateway](plugins/RemoteGateway.md) | The web entry serves the explicit read-only model and UI discovery methods defined in [web workspace §2.5](web-workspace.md#25-protocol-on-the-entry), including `ui.extensions.list` and reliable `ui.extensions.changed` notices |
 | RemoteGateway does not reference the web entry that implements part of it | [RemoteGateway](plugins/RemoteGateway.md) | [Web workspace](web-workspace.md) §2.6 lists the differences |
 
 ## 5. This repository and Desktop
@@ -187,12 +184,19 @@ Desktop lives in its own repository. This repository owns the App Server contrac
 | Desktop need | Answer |
 | --- | --- |
 | Current turn, branch head, live Session list | Derived from history and paging `session.catalog` ([#276](https://github.com/arcships/dim/issues/276)) |
-| Rename and goal on the stock daemon | Today `--session-rows` installs SessionTitle and Goal ([#277](https://github.com/arcships/dim/issues/277), #290); with [PluginManager](plugins/PluginManager.md) they are default plugins loaded by the default configuration file |
+| Rename and goal on the stock daemon | Today `--session-rows` installs SessionTitle and Goal ([#277](https://github.com/arcships/dim/issues/277), #290); with [PluginManager](plugins/PluginManager.md) they are built-in plugins of the default CLI |
 | Approval outcome, pending question | `approval.resolved` (#289); a pending question is read from history ([#278](https://github.com/arcships/dim/issues/278)) |
 | Attachment read, archive, file history | Attachment path from `attachment.put`; archive is client-local; rewind is `session.fork` ([#279](https://github.com/arcships/dim/issues/279)) |
 | Branch metadata, rename, per-branch model | From `branch/*` facts; rename client-local; per-branch model not built ([#280](https://github.com/arcships/dim/issues/280)) |
 | Local tools, edit/retry, usage, subagent relations | Client-run MCP server; `session.fork` + `session.submit`; client-side usage; `collaboration/*` facts ([#281](https://github.com/arcships/dim/issues/281)) |
 | MCP App views (widget document, a view's tool call, its message) | The Session's own MCP connection through `session.mcp.app.*`; rendering and sandboxing stay in the client ([MCP Apps](appserver/mcp-apps.md), [#451](https://github.com/arcships/dim/issues/451)) |
+| UI extension assets and Session media without a byte-stream entry | Protocol page reads `ui.extensions.read` and `session.ui.resources.read` ([client UI extensions](client-ui-extensions.md), [#1170](https://github.com/arcships/dim/issues/1170)) |
+| Assistant model (the default for new conversations) | Provider's scoped selection: read `provider.selection {cwd?}`, write `provider.select {cwd?, providerId, modelId, expectedVersion?}` ([provider management](appserver/provider-management.md#3-management-contract)). `version` is the CAS token and a stale one is `provider_conflict`; `cwd` absent is the global default, and a workspace selection wins over it at `session.create` |
+| Custom instructions (global) | The user's `~/AGENTS.md`, which PromptSources reads at branch load and re-checks every 60 s ([PromptSources](plugins/PromptSources.md#13-content)); a local client may open or edit that file, and no App Server method or setting holds it. A per-conversation instruction is `session.create {systemPrompt?, appendSystemPrompt?}` |
+| Subagent max concurrency | Declined: Dim has no member-concurrency setting ([Collaboration](plugins/Collaboration.md)), so a client renders the control unavailable and never saves it locally |
+| External agents (enabled state, executable path) | `external_agents.list`, `external_agents.set_enabled` and `external_agents.configure`, with the document revision they CAS ([ExternalAgent A.1](plugins/ExternalAgent.md#a1-management-methods)); a client offers these controls only while `hello.features` lists their methods |
+
+A setting with no owner here is rendered unavailable by the client, never saved locally as if it applied.
 
 Desktop's own feature coverage and UI acceptance are tracked in its repository. A capability that this repository's contracts cannot back becomes an issue here, under the same rule.
 
@@ -208,7 +212,7 @@ flowchart LR
 
 1. **Fullscreen terminal UI.** The code ships it; the overview says it is out of scope. Either accept it in scope (update the overview and CLI commands, and decide whether rollback and `/stats` stay out) or freeze it.
 2. **Web phase 2 scope**, including whether the loopback web entry may carry management methods for settings pages (web-workspace Q2), and whether Questions is required in the Web workspace.
-3. **Which §4 gaps get designs**, and in which milestone: `/timeline` and message actions, `/queue`, Skill references, queued attachments.
-4. **A protocol v3 reference** (§4 item 5): write one, or keep the code as the reference.
+3. **Which §4 gaps get designs**, and in which milestone: message copying and the remaining `/timeline` actions.
+4. **A protocol v3 reference** (§4 item 2): write one, or keep the code as the reference.
 5. **Milestones for the open client issues**: [#263](https://github.com/arcships/dim/issues/263) (member transcript cards, subagent model policy runtime), [#264](https://github.com/arcships/dim/issues/264) (Workflow view), [#386](https://github.com/arcships/dim/issues/386) (UI events toward the agent).
 6. **Owner of the client lane** in the roadmap.

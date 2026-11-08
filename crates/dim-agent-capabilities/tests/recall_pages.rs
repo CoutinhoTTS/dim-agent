@@ -13,6 +13,7 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use std::{sync::Arc, time::Duration};
@@ -59,8 +60,7 @@ async fn no_match_folds(agent: &MinimalHost, turns: usize) -> usize {
         .unwrap();
     session.idle("main").await.unwrap();
     let folds = folds();
-    let result = session
-        .history("main", None)
+    let result = chain_events(&session, "main", ..)
         .await
         .unwrap()
         .iter()

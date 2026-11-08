@@ -17,6 +17,66 @@ fn branch() -> Value {
     json!({"sessionId":"session","branchId":"main"})
 }
 
+#[test]
+fn tui_resume_requires_the_explicit_permission_before_attaching() {
+    for fullscreen in [false, true] {
+        for leaf in [false, true] {
+            for failure in ["unsupported", "read", "update"] {
+                let home = Home::new();
+                let daemon = home.daemon(move |wire| {
+                    let mut methods = Vec::new();
+                    if leaf {
+                        methods.push("ui.leaf.2");
+                    }
+                    if failure != "unsupported" {
+                        methods.extend(PRESET_METHODS);
+                    }
+                    wire.hello(&methods);
+                    if failure != "unsupported" {
+                        let get = wire.read("session.permission.get");
+                        assert_eq!(get["params"], branch());
+                        if failure == "read" {
+                            fail(wire, &get, "service_reloading");
+                        } else {
+                            wire.reply(
+                                &get,
+                                json!({"version":7,"policy":policy("full-access", &["fixture-tool"], &["blocked"])}),
+                            );
+                            let update = wire.read("session.permission.update");
+                            assert_eq!(
+                                update["params"],
+                                json!({"sessionId":"session","branchId":"main","expectedVersion":7,
+                                    "policy":policy("read-only", &["fixture-tool"], &["blocked"])})
+                            );
+                            fail(wire, &update, "permission_failed");
+                        }
+                    }
+                    assert_eq!(
+                        wire.trailing_request(),
+                        None,
+                        "a refused explicit permission must not adopt, attach, open a UI or submit"
+                    );
+                });
+                let mut command = home.command();
+                command.args(["--permission", "read-only", "--model", "replacement"]);
+                if fullscreen {
+                    command.arg("--fullscreen");
+                }
+                let mut terminal = Terminal::resume_tui(command);
+                terminal.until(match failure {
+                    "unsupported" => "cannot change a Session's permission preset",
+                    "read" => "fixture service_reloading",
+                    _ => "fixture permission_failed",
+                });
+                assert_eq!(terminal.wait().code(), Some(1));
+                assert_ne!(terminal.local_mode() & libc::ICANON, 0);
+                assert_ne!(terminal.local_mode() & libc::ECHO, 0);
+                daemon.join().unwrap();
+            }
+        }
+    }
+}
+
 /// One submitted turn that completes without tool calls.
 fn quiet_turn(wire: &mut Wire) {
     let submit = wire.read("session.submit");
@@ -98,6 +158,8 @@ fn tui_permission_flag_overrides_saved_controls_and_invalid_defaults_are_ignored
             .unwrap();
             let daemon = home.daemon(move |wire| {
                 wire.hello(&PRESET_METHODS);
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
                 let create = wire.created();
                 let preset = if explicit {
                     "read-only"
@@ -120,9 +182,10 @@ fn tui_permission_flag_overrides_saved_controls_and_invalid_defaults_are_ignored
                     &read,
                     json!({"version":1,"policy":policy(preset, &[], &[])}),
                 );
+                let submit = wire.read("session.submit");
+                assert_eq!(submit["params"]["text"], "first message");
+                wire.reply(&submit, json!({"event":{}}));
                 wire.no_context();
-                let providers = wire.read("account.providers");
-                wire.reply(&providers, json!([]));
                 let mut line = String::new();
                 while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                     line.clear();
@@ -136,8 +199,10 @@ fn tui_permission_flag_overrides_saved_controls_and_invalid_defaults_are_ignored
                 command.args(["--permission", "read-only"]);
             }
             let mut terminal = Terminal::launch_tui(command);
+            terminal.until("Welcome to DIM");
+            terminal.write(b"first message\r");
             terminal.until("test / model");
-            terminal.signal(libc::SIGKILL);
+            home.kill(&terminal);
             terminal.wait();
             daemon.join().unwrap();
         }
@@ -150,12 +215,13 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
         for fullscreen in [false, true] {
             let home = Home::new();
             let daemon = home.daemon(move |wire| {
-                wire.hello(if initial_setup { &[] } else { &PRESET_METHODS });
-                if initial_setup {
-                    let create = wire.read("session.create");
-                    fail(wire, &create, "provider_failed");
-                } else {
-                    wire.created();
+                let mut features = Vec::new();
+                if !initial_setup {
+                    features.extend(PRESET_METHODS);
+                    features.push("session.create.modelFromSession");
+                }
+                wire.hello(&features);
+                if !initial_setup {
                     let attach = wire.read("session.attach");
                     wire.reply(&attach, attach_record(&attach));
                     let history = wire.read("session.history");
@@ -177,6 +243,9 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
                     create["params"]["permissionPolicy"],
                     json!({"preset":"full-access"})
                 );
+                if !initial_setup {
+                    assert_eq!(create["params"]["modelFromSession"], "session");
+                }
                 wire.reply(
                     &create,
                     json!({"sessionId":"session","sequence":8,"model":{"providerId":"test","modelId":"model"}}),
@@ -218,9 +287,12 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
             if fullscreen {
                 command.arg("--fullscreen");
             }
+            if !initial_setup {
+                command.args(["--resume", "session"]);
+            }
             let mut terminal = Terminal::launch_tui(command);
             if initial_setup {
-                terminal.until("Sign in with /login");
+                terminal.until("Welcome to DIM");
             } else {
                 terminal.until("test / model");
                 terminal.write(b"/new\r");
@@ -241,7 +313,7 @@ fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_me
             assert!(!terminal.transcript[mark..].contains("New members from main"));
             terminal.write(b"first message\r");
             terminal.until("accepted first message");
-            terminal.signal(libc::SIGKILL);
+            home.kill(&terminal);
             terminal.wait();
             daemon.join().unwrap();
         }
@@ -1604,7 +1676,6 @@ fn permissions_refuse_a_read_only_daemon_but_still_list() {
 /// Session attach, then the readings the interface asks for when it enters.
 fn rules_start(wire: &mut Wire) {
     wire.hello(&RULE_METHODS);
-    wire.created();
     let attach = wire.read("session.attach");
     wire.reply(&attach, attach_record(&attach));
     let history = wire.read("session.history");
@@ -1689,7 +1760,7 @@ fn tui_permissions_panel_lists_command_rules_and_returns() {
             command.arg("--fullscreen");
         }
         sized(&mut command, 80, 24);
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         open_command_rules(&mut terminal);
@@ -1794,7 +1865,7 @@ fn tui_permissions_panel_adds_and_removes_command_rules() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         open_command_rules(&mut terminal);
@@ -1864,7 +1935,7 @@ fn tui_permissions_panel_opens_a_placeholder_template() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         open_command_rules(&mut terminal);
@@ -1912,7 +1983,7 @@ fn tui_permissions_panel_reports_a_raced_remove() {
         wire.reply(&request, rules_reply("r2", json!([])));
         rules_drain(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     open_command_rules(&mut terminal);
@@ -1963,7 +2034,7 @@ fn tui_permissions_panel_shows_a_rule_written_elsewhere_on_the_next_read() {
         );
         rules_drain(wire);
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     open_command_rules(&mut terminal);
@@ -2012,7 +2083,7 @@ fn tui_permissions_arguments_open_the_panel_and_are_not_ignored() {
         if fullscreen {
             command.arg("--fullscreen");
         }
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/permissions allow prefix npm test\r");

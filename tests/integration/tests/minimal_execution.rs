@@ -7,6 +7,7 @@
 mod compaction_support;
 #[path = "local_support/process.rs"]
 mod process_support;
+use dim_agent_capabilities::toolchain::ToolchainSourceHost;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
     execution_settings::{ExecutionSettings, ExecutionSettingsHost},
@@ -20,6 +21,7 @@ use dim_agent_capabilities::{
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use process_support::{gone, pid_in};
@@ -128,6 +130,7 @@ fn configured_platform(home: PathBuf) -> impl FnOnce(&mut AgentBuilder) {
                 names,
                 HostPlatformConfig {
                     execution: names.key()?,
+                    toolchain: names.key()?,
                     exec_shell_file: Some((0, "exec-shell.json".into())),
                     home: None,
                 },
@@ -227,6 +230,7 @@ impl Harness {
             root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
                 ExecutionSettings::default(),
             )))?;
+            root.provide_as::<ToolchainSourceHost>(Arc::new(ToolchainSourceHost::fixed(vec![])))?;
             Ok(())
         })
         .await
@@ -290,7 +294,7 @@ impl Harness {
 }
 
 async fn local_events(session: &Session) -> Vec<Arc<AgentEvent>> {
-    session.local("main", ..).await.unwrap()
+    branch_events(session, "main", ..).await.unwrap()
 }
 
 async fn until(
@@ -401,8 +405,7 @@ fn system_text(prompt: &SystemPrompt) -> String {
 
 /// The system of a branch's last model call.
 async fn last_system(session: &Session, branch: &str) -> String {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -465,7 +468,7 @@ async fn a_line_carries_the_identity_entry_without_the_branch_tool() {
         .unwrap();
     session.idle(&child).await.unwrap();
 
-    let events = session.history(&child, None).await.unwrap();
+    let events = chain_events(&session, &child, ..).await.unwrap();
     let opening = events
         .iter()
         .find_map(|event| match &event.kind {

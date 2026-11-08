@@ -1,12 +1,12 @@
 use super::keys::KeyFilter;
 use crate::{
-    AgentError, BoxFuture, BranchCursor, BranchLifecycle, BranchPage, FaultReporter, PolicyFacts,
-    PolicyOrder, PolicyOrderEvent, PolicyWindow, Result, StoredEvent, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryReply, TimelineQueryScope, TimelineStore,
+    AgentError, BoxFuture, FaultReporter, Result, StoredEvent, TimelineKey, TimelineQuery,
+    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPage, TimelineQueryReply,
+    TimelineQueryScope, TimelineStore,
 };
 use dim_agent_types::{
     AgentEvent, EventDraft, EventKind, InputMessageData, ProjectionCheckpoint, RecoverySnapshot,
-    TimelinePosition,
+    ResumePoint, TimelinePosition,
 };
 use rutis::events::SyncCall;
 #[allow(unused_imports)]
@@ -15,26 +15,17 @@ use rutis::service;
 use rutis::{Ctx, Disposer, Event};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque},
-    ops::{Bound, RangeBounds},
+    collections::{HashMap, HashSet, VecDeque},
+    num::NonZeroU64,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::{OnceCell, watch};
+use tokio::sync::watch;
 use uuid::Uuid;
 
-/// Which turn starts a policy order read keeps.
-#[derive(Debug, Clone, Copy)]
-pub enum PolicyTurns<'a> {
-    /// Only each segment's last turn start, next to its last compaction
-    /// start: the anchors a streamed context resolves cut ids against.
-    Anchors,
-    /// Every turn start of every segment.
-    All,
-    /// Every turn start after this chain position.
-    After(&'a TimelinePosition),
-}
+/// Inputs one page of the restored submission index keeps.
+const SUBMISSION_PAGE: u64 = 256;
 
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
@@ -89,9 +80,6 @@ struct Inner {
     ancestors: Vec<(String, u64)>,
     store: Arc<dyn TimelineStore>,
     restored_sequence: u64,
-    /// The branch opening, alive while its lifecycle holds it; see
-    /// [`Opening`].
-    opening: OnceLock<Weak<Opening>>,
     data: Mutex<Data>,
     commit: Mutex<()>,
     /// The submission ids of the inputs the branch was restored with, set
@@ -103,11 +91,17 @@ struct Inner {
     changed: watch::Sender<(u64, bool)>,
     faults: FaultReporter,
 }
-/// The inputs a branch holds for one submission id: one, by its sequence,
-/// or several, written before the branch accepted each id once.
-#[derive(Debug, Clone, Copy)]
+/// The committed input one submission id names.
+#[derive(Debug, Clone)]
+pub(crate) struct SubmissionInput {
+    pub id: String,
+    pub sequence: u64,
+}
+/// The inputs a branch holds for one submission id: one, by its event id and
+/// sequence, or several, written before the branch accepted each id once.
+#[derive(Debug, Clone)]
 enum Submission {
-    Input(u64),
+    Input(SubmissionInput),
     Ambiguous,
 }
 fn index_submission(index: &mut HashMap<String, Submission>, event: &AgentEvent) {
@@ -119,7 +113,12 @@ fn index_submission(index: &mut HashMap<String, Submission>, event: &AgentEvent)
         index
             .entry(id.clone())
             .and_modify(|found| *found = Submission::Ambiguous)
-            .or_insert(Submission::Input(event.sequence));
+            .or_insert_with(|| {
+                Submission::Input(SubmissionInput {
+                    id: event.id.clone(),
+                    sequence: event.sequence,
+                })
+            });
     }
 }
 /// What [`Timeline::input`] did.
@@ -128,6 +127,15 @@ pub(crate) enum Appended {
     /// An input with the same submission id is already committed at this
     /// sequence; nothing was written.
     Existing(u64),
+}
+/// What [`Timeline::inputs`] did.
+pub(crate) enum AppendedBatch {
+    /// The whole batch was written, in the given order and at contiguous
+    /// sequences.
+    Written(Vec<Arc<AgentEvent>>),
+    /// Every input's submission id is already committed, at these sequences
+    /// in the batch's given order; nothing was written.
+    Existing(Vec<u64>),
 }
 #[derive(Default)]
 struct Data {
@@ -207,7 +215,6 @@ impl Timeline {
             ancestors,
             store,
             restored_sequence: sequence,
-            opening: OnceLock::new(),
             data: Mutex::new(Data {
                 allocated: sequence,
                 published: sequence,
@@ -275,9 +282,9 @@ impl Timeline {
         let _append = AppendGuard::enter()?;
         let _commit = self.0.commit.lock().unwrap();
         if let Some(id) = &data.submission_id
-            && let Some(sequence) = self.submission(id)?
+            && let Some(input) = self.submission(id)?
         {
-            return Ok(Appended::Existing(sequence));
+            return Ok(Appended::Existing(input.sequence));
         }
         admit()?;
         let mut events = self.commit(vec![EventKind::InputMessage(data).into()], |_| Ok(()))?;
@@ -285,29 +292,120 @@ impl Timeline {
             events.pop().expect("single-event batch returned one event"),
         ))
     }
-    /// The sequence of the committed input with submission id `id`.
-    pub(crate) fn submission(&self, id: &str) -> Result<Option<u64>> {
+    /// Commits `inputs` as one atomic batch, unless every input's submission
+    /// id is already committed on this branch: all ids are required and
+    /// distinct. The check, admission and append hold the commit lock, so the
+    /// whole batch is decided at once. One id committed and another not fails
+    /// with [`AgentError::PartialSubmission`] and writes nothing.
+    pub(crate) fn inputs_checked(
+        &self,
+        inputs: Vec<InputMessageData>,
+        admit: impl FnOnce() -> Result<()>,
+    ) -> Result<AppendedBatch> {
+        let _append = AppendGuard::enter()?;
+        let _commit = self.0.commit.lock().unwrap();
+        let mut ids = HashSet::with_capacity(inputs.len());
+        for input in &inputs {
+            let Some(id) = &input.submission_id else {
+                return Err(AgentError::InvalidInput(
+                    "every input in a batch must carry a submission id".into(),
+                ));
+            };
+            if !ids.insert(id.as_str()) {
+                return Err(AgentError::InvalidInput(format!(
+                    "submission id {id} appears more than once in one batch"
+                )));
+            }
+        }
+        let mut committed = HashMap::with_capacity(inputs.len());
+        let mut pending = Vec::new();
+        for id in &ids {
+            match self.submission(id)? {
+                Some(input) => {
+                    committed.insert(*id, input.sequence);
+                }
+                None => pending.push(*id),
+            }
+        }
+        if pending.is_empty() {
+            // Every id is committed: the batch is a replay. Keep the given
+            // order, not the set's.
+            let sequences = inputs
+                .iter()
+                .map(|input| {
+                    let id = input
+                        .submission_id
+                        .as_deref()
+                        .expect("every id was checked above");
+                    committed[id]
+                })
+                .collect();
+            return Ok(AppendedBatch::Existing(sequences));
+        }
+        if !committed.is_empty() {
+            return Err(AgentError::PartialSubmission(pending.join(", ")));
+        }
+        admit()?;
+        let events = self.commit(
+            inputs
+                .into_iter()
+                .map(|input| EventKind::InputMessage(input).into())
+                .collect(),
+            |_| Ok(()),
+        )?;
+        Ok(AppendedBatch::Written(events))
+    }
+    /// The committed input with submission id `id`: its event id and sequence.
+    pub(crate) fn submission(&self, id: &str) -> Result<Option<SubmissionInput>> {
         let restored = self.0.restored.get().ok_or_else(|| {
             AgentError::fault("timeline.input", "restored submissions are not indexed")
         })?;
         let committed = self.0.submissions.lock().unwrap();
         match (restored.get(id), committed.get(id)) {
             (None, None) => Ok(None),
-            (Some(Submission::Input(sequence)), None)
-            | (None, Some(Submission::Input(sequence))) => Ok(Some(*sequence)),
+            (Some(Submission::Input(input)), None) | (None, Some(Submission::Input(input))) => {
+                Ok(Some(input.clone()))
+            }
             _ => Err(AgentError::AmbiguousSubmission(id.into())),
         }
     }
     /// Indexes the submission ids of the inputs the branch was restored
-    /// with. The branch's build calls it before the branch accepts input; it
-    /// reads the opening's copy of the branch's own history.
+    /// with. The branch's build calls it before the branch accepts input, so
+    /// the published head is the restored head and nothing of this branch is
+    /// written and not yet published.
     pub(crate) async fn index_submissions(&self) -> Result<()> {
         if self.0.restored.get().is_some() {
             return Ok(());
         }
         let mut restored = HashMap::new();
-        for event in self.local(1..=self.0.restored_sequence).await? {
-            index_submission(&mut restored, &event);
+        let mut from = 1;
+        loop {
+            let reply = self
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    include_publishing: false,
+                    from_event: None,
+                    from_sequence: Some(from),
+                    order_by: TimelineQueryOrderBy::Sequence,
+                    direction: TimelineQueryDirection::Ascending,
+                    kinds: vec!["input/message".into()],
+                    flags: Vec::new(),
+                    event_id: None,
+                    predicate: None,
+                    limit: NonZeroU64::new(SUBMISSION_PAGE)
+                        .expect("a page keeps at least one input"),
+                    offset: 0,
+                })
+                .await?;
+            let short = (reply.events.len() as u64) < SUBMISSION_PAGE;
+            let last = reply.events.last().map(|event| event.sequence);
+            for event in &reply.events {
+                index_submission(&mut restored, event);
+            }
+            match last {
+                Some(last) if !short => from = last + 1,
+                _ => break,
+            }
         }
         let _ = self.0.restored.set(restored);
         Ok(())
@@ -463,284 +561,61 @@ impl Timeline {
         })
     }
     fn through(&self, through: Option<u64>) -> Result<u64> {
-        let committed = self.committed();
-        let through = through.unwrap_or(committed);
-        if through > committed {
+        through.map_or_else(|| Ok(self.committed()), |through| self.bound(through))
+    }
+    /// The last sequence a read may take: `through`, which may not pass the
+    /// sequence this branch has assigned.
+    #[service(skip)]
+    pub fn bound(&self, through: u64) -> Result<u64> {
+        if through > self.committed() {
             return Err(AgentError::InvalidInput(format!(
                 "future timeline sequence {through}"
             )));
         }
         Ok(through)
     }
-    /// Events of `branch` in `start..=end`. For this branch the hot window
-    /// holds every event not yet dispatched, which includes every event not
-    /// yet published; the store holds everything published.
-    async fn records(&self, branch: &str, start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
-        if end == 0 || start > end {
-            return Ok(vec![]);
-        }
+    /// The event a context checkpoint is anchored at. It is one fact, so it is
+    /// read as one event and never as a range that reaches the cut: this
+    /// branch's hot window while it holds the event, otherwise a one-event
+    /// query of the store. A point read is not a range, so a row inside an
+    /// atomic batch is read like any other.
+    async fn anchor(&self, branch: &str, sequence: u64) -> Result<Option<Arc<AgentEvent>>> {
         if branch == self.0.key.branch_id {
-            let (published, hot_start, hot) = {
-                let data = self.0.data.lock().unwrap();
-                if data
-                    .hot
-                    .iter()
-                    .any(|r| r.event.sequence == end && r.batch_end > end)
-                {
-                    return Err(AgentError::InvalidInput(format!(
-                        "sequence {end} is inside an atomic batch"
-                    )));
-                }
-                let hot_start = data.hot.front().map_or(u64::MAX, |r| r.event.sequence);
-                let from = if start >= hot_start {
-                    start
-                } else {
-                    start.max(data.published + 1)
-                };
-                let hot: Vec<_> = data
-                    .hot
-                    .iter()
-                    .filter(|r| r.event.sequence >= from && r.event.sequence <= end)
-                    .map(|r| r.event.clone())
-                    .collect();
-                (data.published, hot_start, hot)
-            };
-            if start >= hot_start {
-                return Ok(hot);
-            }
-            let mut stored = self.stored(start, end.min(published)).await?;
-            stored.extend(hot);
-            return Ok(stored);
-        }
-        let segment = [(branch.to_owned(), start, end)];
-        if let Some(mut shared) = self.shared_ancestry(&segment).await? {
-            return Ok(shared.pop().unwrap_or_default());
-        }
-        Ok(events(
-            self.0
-                .store
-                .read(
-                    &TimelineKey {
-                        session_id: self.0.key.session_id.clone(),
-                        branch_id: branch.into(),
-                    },
-                    start..=end,
-                )
-                .await?,
-        ))
-    }
-    /// The event a context checkpoint is anchored at, out of the events of
-    /// `branch` up to `cut`. The point read decodes one row. A row inside an
-    /// atomic batch cannot end a range, so an invalid point read falls back to
-    /// the segment read this check made before the point read existed.
-    async fn anchor(
-        &self,
-        branch: &str,
-        sequence: u64,
-        cut: u64,
-    ) -> Result<Option<Arc<AgentEvent>>> {
-        match self.records(branch, sequence, sequence).await {
-            Ok(records) => Ok(records.into_iter().next()),
-            Err(AgentError::InvalidInput(_)) => Ok(self
-                .records(branch, sequence, cut)
-                .await?
-                .into_iter()
-                .next()),
-            Err(error) => Err(error),
-        }
-    }
-    /// This branch's stored events in `start..=end`, `end` at most the
-    /// published sequence. While the branch opens, the part up to the head
-    /// the Timeline was built at is served from the opening's copy and only
-    /// the rest is read from the store.
-    async fn stored(&self, start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
-        let Some((mut shared, head)) = self.shared_own(start, end).await? else {
-            return Ok(events(self.0.store.read(&self.0.key, start..=end).await?));
-        };
-        if end > head {
-            shared.extend(events(
-                self.0.store.read(&self.0.key, head + 1..=end).await?,
-            ));
-        }
-        Ok(shared)
-    }
-    /// While the branch opens, its events in `start..=end` up to the head,
-    /// sliced from the opening's copy, with that head; `None` when they are
-    /// read from the store. Only a read of the whole part fills the copy: a
-    /// read of a part uses it once it exists and reads alone before, so it
-    /// never decodes the events before its start.
-    async fn shared_own(
-        &self,
-        start: u64,
-        end: u64,
-    ) -> Result<Option<(Vec<Arc<AgentEvent>>, u64)>> {
-        let Some(opening) = self.opening() else {
-            return Ok(None);
-        };
-        let head = opening.head;
-        if start > end || start > head {
-            return Ok(None);
-        }
-        let own = if start == 1 && end >= head {
-            let fill = async {
-                let records = self.0.store.read(&self.0.key, 1..=head).await?;
-                Ok::<_, AgentError>(entries(records))
-            };
-            Some(opening.own.get_or_try_init(|| fill).await?)
-        } else {
-            opening.own.get()
-        };
-        own.map(|own| Ok((slice(own, start, end.min(head))?, head)))
-            .transpose()
-    }
-    /// While the branch opens, the events of ancestor `segments`, each
-    /// `(branch, start, end)`, sliced from the opening's copy of its
-    /// ancestry, one list per segment; `None` when they are read from the
-    /// store. As for the own part, only a read of the whole ancestry (every
-    /// ancestor from 1 to its cut) fills the copy, and a read of a part uses
-    /// it once it exists and reads alone before.
-    async fn shared_ancestry(
-        &self,
-        segments: &[(String, u64, u64)],
-    ) -> Result<Option<Vec<Vec<Arc<AgentEvent>>>>> {
-        let Some(opening) = self.opening() else {
-            return Ok(None);
-        };
-        if opening.ancestry.is_empty() {
-            return Ok(None);
-        }
-        let whole = segments.len() == opening.ancestry.len()
-            && segments.iter().zip(&opening.ancestry).all(
-                |((branch, start, end), (ancestor, cut))| {
-                    branch == ancestor && *start == 1 && end == cut
-                },
-            );
-        let ancestors = if whole {
-            let fill = async {
-                let ranges = opening
-                    .ancestry
-                    .iter()
-                    .map(|(ancestor, cut)| (ancestor.clone(), 1..=*cut))
-                    .collect();
-                let read = self
-                    .0
-                    .store
-                    .read_segments(&self.0.key.session_id, ranges)
-                    .await?;
-                Ok::<_, AgentError>(read.into_iter().map(entries).collect::<Vec<_>>())
-            };
-            Some(opening.ancestors.get_or_try_init(|| fill).await?)
-        } else {
-            opening.ancestors.get()
-        };
-        let Some(ancestors) = ancestors else {
-            return Ok(None);
-        };
-        let mut shared = Vec::with_capacity(segments.len());
-        for (branch, start, end) in segments {
-            let Some(index) = opening
-                .ancestry
+            let hot = self.0.data.lock().unwrap();
+            if let Some(record) = hot
+                .hot
                 .iter()
-                .position(|(ancestor, cut)| ancestor == branch && end <= cut)
-            else {
-                return Ok(None);
-            };
-            if start > end {
-                return Ok(None);
+                .find(|record| record.event.sequence == sequence)
+            {
+                return Ok(Some(record.event.clone()));
             }
-            shared.push(slice(&ancestors[index], *start, *end)?);
         }
-        Ok(Some(shared))
-    }
-    async fn history_records(
-        &self,
-        segments: Vec<(String, u64, u64)>,
-    ) -> Result<Vec<Vec<Arc<AgentEvent>>>> {
-        if let [(branch, start, end)] = &segments[..] {
-            return Ok(vec![self.records(branch, *start, *end).await?]);
-        }
-        let own = segments
-            .last()
-            .filter(|(branch, _, _)| *branch == self.0.key.branch_id)
-            .cloned();
-        let ancestors: Vec<_> = segments
-            .into_iter()
-            .take_while(|(branch, _, _)| *branch != self.0.key.branch_id)
-            .collect();
-        let mut records = if ancestors.is_empty() {
-            Vec::new()
-        } else if let Some(shared) = self.shared_ancestry(&ancestors).await? {
-            shared
-        } else {
-            self.0
-                .store
-                .read_segments(
-                    &self.0.key.session_id,
-                    ancestors
-                        .into_iter()
-                        .map(|(branch, start, end)| (branch, start..=end))
-                        .collect(),
-                )
-                .await?
-                .into_iter()
-                .map(events)
-                .collect()
+        let key = TimelineKey {
+            session_id: self.0.key.session_id.clone(),
+            branch_id: branch.into(),
         };
-        if let Some((branch, start, end)) = own {
-            records.push(self.records(&branch, start, end).await?);
-        }
-        Ok(records)
-    }
-    /// Starts the branch opening: while `lifecycle` is `Loading`, reads of
-    /// the history this Timeline was built with share one decoded copy (see
-    /// [`Opening`]). The lifecycle holds the opening and drops it when the
-    /// branch leaves `Loading`; reads after that go to the store, and a
-    /// reader that already holds the copy finishes with it. Called once, by
-    /// the branch scope that builds both; `count` counts the opening while it
-    /// is alive.
-    pub(crate) fn begin_opening(&self, lifecycle: &BranchLifecycle, count: &OpeningCount) {
-        let head = self.0.restored_sequence;
-        let ancestry: Vec<_> = self
-            .0
-            .ancestors
-            .iter()
-            .filter(|(_, cut)| *cut > 0)
-            .cloned()
-            .collect();
-        if head == 0 && ancestry.is_empty() {
-            return;
-        }
-        let opening = Arc::new(Opening {
-            head,
-            own: OnceCell::new(),
-            ancestry,
-            ancestors: OnceCell::new(),
-            count: count.opened(),
-        });
-        if self.0.opening.set(Arc::downgrade(&opening)).is_ok() {
-            lifecycle.hold(opening);
-        }
-    }
-    fn opening(&self) -> Option<Arc<Opening>> {
-        self.0.opening.get().and_then(Weak::upgrade)
-    }
-    pub async fn history(&self, through: Option<u64>) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.through(through)?;
-        let segments = self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
-            .filter(|(_, cut)| *cut > 0)
-            .map(|(branch, cut)| (branch, 1, cut))
-            .collect();
+        let point = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from_event: None,
+            from_sequence: None,
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            include_publishing: false,
+            kinds: Vec::new(),
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::new(1).expect("one is nonzero"),
+            offset: 0,
+        };
         Ok(self
-            .history_records(segments)
+            .0
+            .store
+            .query(&key, &point, sequence, sequence)
             .await?
+            .events
             .into_iter()
-            .flatten()
-            .collect())
+            .next())
     }
     /// One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
     /// [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
@@ -752,12 +627,54 @@ impl Timeline {
     /// segment did not use moves to the next one, so paging is skipping and a
     /// page shorter than the limit means the selection is exhausted. The read
     /// never returns a fact above a branch's coverage: an ancestor to its cut,
-    /// this branch to its published head.
+    /// this branch to the published head, or to the committed head when the
+    /// query asks for it, in which case this branch's own facts in
+    /// `published+1..=through` are part of the same page.
+    ///
+    /// The reply's `through` is the cutoff the read took on this branch: the
+    /// published head, or the committed head the query asked for, which is
+    /// read when the call starts, so a write during the call stays out of the
+    /// page. The published part and the tail are disjoint in sequence, so each
+    /// fact is returned once. A caller that holds live events releases the ones
+    /// above the cutoff ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
     pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        let (published, through, tail) = {
+            let data = self.0.data.lock().unwrap();
+            let through = if query.include_publishing {
+                data.allocated
+            } else {
+                data.published
+            };
+            let tail = (through > data.published).then(|| {
+                data.hot
+                    .iter()
+                    .filter(|record| {
+                        record.event.sequence > data.published && record.event.sequence <= through
+                    })
+                    .map(|record| record.event.clone())
+                    .collect::<Vec<_>>()
+            });
+            (data.published, through, tail)
+        };
+        self.query_page(query, published, through, tail).await
+    }
+    /// [`Self::query`] with this branch clipped at `published` and, when
+    /// `through` names a committed sequence above it, the branch's own facts in
+    /// `published+1..=through` merged in. The query's start, selection and page
+    /// apply to the merged result: the tail continues the published page when
+    /// ascending and precedes it when descending, and a page shorter than the
+    /// limit means the selection is exhausted up to the tail's end.
+    async fn query_page(
+        &self,
+        query: TimelineQuery,
+        published: u64,
+        through: u64,
+        tail: Option<Vec<Arc<AgentEvent>>>,
+    ) -> Result<TimelineQueryReply> {
         use TimelineQueryDirection::Descending;
 
         query.validate()?;
-        let published = self.sequence();
+        let tail = tail.map(|events| (events, through));
         let clips: Vec<(String, u64)> = match query.scope {
             TimelineQueryScope::Branch => vec![(self.0.key.branch_id.clone(), published)],
             TimelineQueryScope::Chain => self
@@ -791,6 +708,7 @@ impl Timeline {
                         from_sequence: None,
                         order_by: query.order_by,
                         direction: TimelineQueryDirection::Ascending,
+                        include_publishing: false,
                         kinds: Vec::new(),
                         flags: Vec::new(),
                         event_id: Some(event_id.clone()),
@@ -804,6 +722,14 @@ impl Timeline {
                         break;
                     }
                 }
+                if found.is_none() {
+                    found = tail.as_ref().and_then(|(events, _)| {
+                        events
+                            .iter()
+                            .find(|event| &event.id == event_id)
+                            .map(|event| (Some(self.0.key.branch_id.clone()), event.sequence))
+                    });
+                }
                 found
             }
             (Some(_), Some(_)) => unreachable!("validate rejects two anchors"),
@@ -812,6 +738,7 @@ impl Timeline {
             return Ok(TimelineQueryReply {
                 events: Vec::new(),
                 positions: Vec::new(),
+                through,
             });
         }
         let anchor_index = match &anchor {
@@ -877,159 +804,108 @@ impl Timeline {
                 session_id: self.0.key.session_id.clone(),
                 branch_id: branch.clone(),
             };
-            let page = self
-                .0
-                .store
-                .query(
-                    &key,
-                    &TimelineQuery {
-                        scope: TimelineQueryScope::Branch,
-                        from_event: None,
-                        from_sequence: None,
-                        order_by: query.order_by,
-                        direction: query.direction,
-                        kinds: query.kinds.clone(),
-                        flags: query.flags.clone(),
-                        event_id: query.event_id.clone(),
-                        predicate: query.predicate.clone(),
-                        limit: std::num::NonZeroU64::new(
-                            u64::try_from(limit - events.len())
-                                .unwrap_or(u64::MAX)
-                                .max(1),
-                        )
-                        .expect("a read keeps one event of its limit"),
-                        offset: skip,
-                    },
-                    from,
-                    bound,
-                )
-                .await?;
-            let reached = page.skipped + page.events.len() as u64;
-            skip = skip.saturating_sub(reached);
-            events.extend(page.events);
-            positions.extend(page.positions);
+            let tail_bounds = match (&tail, *branch == self.0.key.branch_id) {
+                (Some((_, through)), true) => Some(match query.direction {
+                    TimelineQueryDirection::Ascending => (from, *through),
+                    Descending => (
+                        1,
+                        match (&anchor, anchor_index) {
+                            (Some((Some(_), sequence)), Some(start_index))
+                                if index == start_index =>
+                            {
+                                *sequence
+                            }
+                            (Some((None, sequence)), _) => *sequence,
+                            _ => *through,
+                        }
+                        .min(*through),
+                    ),
+                }),
+                _ => None,
+            };
+            let parts: [bool; 2] = match query.direction {
+                TimelineQueryDirection::Ascending => [false, true],
+                Descending => [true, false],
+            };
+            for is_tail in parts {
+                if events.len() >= limit {
+                    break;
+                }
+                let page = if is_tail {
+                    let (Some((tail_events, _)), Some((from, bound))) = (&tail, tail_bounds) else {
+                        continue;
+                    };
+                    self.tail_page(tail_events, &query, from, bound, limit - events.len(), skip)
+                } else {
+                    let mut request = query.clone();
+                    request.scope = TimelineQueryScope::Branch;
+                    request.from_event = None;
+                    request.from_sequence = None;
+                    request.limit = std::num::NonZeroU64::new(
+                        u64::try_from(limit - events.len())
+                            .unwrap_or(u64::MAX)
+                            .max(1),
+                    )
+                    .expect("a read keeps one event of its limit");
+                    request.offset = skip;
+                    self.0.store.query(&key, &request, from, bound).await?
+                };
+                let reached = page.skipped + page.events.len() as u64;
+                skip = skip.saturating_sub(reached);
+                events.extend(page.events);
+                positions.extend(page.positions);
+            }
         }
-        Ok(TimelineQueryReply { events, positions })
-    }
-    /// The first page of a backward, kind-filtered read of the branch chain
-    /// at a published `through`.
-    #[service(skip)]
-    pub fn page_cursor(&self, through: u64) -> Result<BranchCursor> {
-        let segments = self.segments(through)?;
-        let segment = segments.len().checked_sub(1);
-        Ok(BranchCursor {
+        Ok(TimelineQueryReply {
+            events,
+            positions,
             through,
-            segment,
-            before: segment.map_or(0, |index| segments[index].1),
         })
     }
-    /// One page of that read: the newest `limit` stored rows of `kinds` at or
-    /// below the cursor's sequence, oldest first. The next page continues the
-    /// same segment or moves to the ancestor before it.
-    #[service(skip)]
-    pub async fn page(
+    /// The part of one page the tail holds: the facts `query` accepts in
+    /// `from..=bound`, in the query's direction, with the read's offset
+    /// applied.
+    fn tail_page(
         &self,
-        cursor: BranchCursor,
+        tail: &[Arc<AgentEvent>],
+        query: &TimelineQuery,
+        from: u64,
+        bound: u64,
         limit: usize,
-        kinds: &[&str],
-    ) -> Result<BranchPage> {
-        let segments = self.segments(cursor.through)?;
-        let exhausted = BranchPage {
-            events: vec![],
-            next: None,
-            own: false,
-        };
-        if limit == 0 || kinds.is_empty() {
-            return Ok(exhausted);
+        offset: u64,
+    ) -> TimelineQueryPage {
+        let mut events: Vec<Arc<AgentEvent>> = tail
+            .iter()
+            .filter(|event| (from..=bound).contains(&event.sequence) && query.accepts(event))
+            .cloned()
+            .collect();
+        if query.direction == TimelineQueryDirection::Descending {
+            events.reverse();
         }
-        let (mut segment, mut before) = (cursor.segment, cursor.before);
-        loop {
-            let Some(index) = segment else {
-                return Ok(exhausted);
-            };
-            let Some((branch, _)) = segments.get(index) else {
-                return Ok(exhausted);
-            };
-            if before == 0 {
-                segment = index.checked_sub(1);
-                before = segment.map_or(0, |prev| segments[prev].1);
-                continue;
-            }
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            let records = self
-                .0
-                .store
-                .read_kind_page(&key, kinds, before, limit)
-                .await?;
-            let Some(first) = records.first().map(|record| record.event.sequence) else {
-                segment = index.checked_sub(1);
-                before = segment.map_or(0, |prev| segments[prev].1);
-                continue;
-            };
-            let next = if first > 1 {
-                Some(BranchCursor {
-                    through: cursor.through,
-                    segment: Some(index),
-                    before: first - 1,
+        let skipped = events
+            .len()
+            .min(usize::try_from(offset).unwrap_or(usize::MAX));
+        let events: Vec<Arc<AgentEvent>> = events.into_iter().skip(skipped).take(limit).collect();
+        TimelineQueryPage {
+            positions: events
+                .iter()
+                .map(|event| TimelinePosition {
+                    branch_id: self.0.key.branch_id.clone(),
+                    sequence: event.sequence,
                 })
-            } else {
-                index.checked_sub(1).map(|prev| BranchCursor {
-                    through: cursor.through,
-                    segment: Some(prev),
-                    before: segments[prev].1,
-                })
-            };
-            return Ok(BranchPage {
-                events: records.into_iter().map(|record| record.event).collect(),
-                next,
-                own: cursor.through > 0 && Some(index) == segments.len().checked_sub(1),
-            });
+                .collect(),
+            events,
+            skipped: skipped as u64,
         }
     }
+    /// Checks that `sequence` ends an atomic batch: a stored row's structure,
+    /// not event content, so the store answers it and it is not a query
+    /// (ADR 020 D4). The check stays out of the service surface because no
+    /// other language reads batch structure.
     #[service(skip)]
-    pub async fn local<R: RangeBounds<u64> + Send>(
-        &self,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let start = match range.start_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_add(1),
-            Bound::Unbounded => 1,
-        }
-        .max(1);
-        let end = match range.end_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_sub(1),
-            Bound::Unbounded => self.committed(),
-        };
-        let end = self.through(Some(end))?;
-        self.records(&self.0.key.branch_id, start, end).await
+    pub async fn batch_end(&self, sequence: u64) -> Result<()> {
+        self.0.store.batch_end(&self.0.key, sequence).await
     }
-    /// Reads complete batches after `after`, targeting `limit` events and
-    /// never ending inside an atomic batch. Projection reads do not use
-    /// stored requests, so `context/prepare` and `model/call` records carry
-    /// an empty request.
-    #[service(skip)]
-    pub async fn stored_page(
-        &self,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.through(Some(through))?;
-        Ok(self
-            .0
-            .store
-            .read_page_without_request_bodies(&self.0.key, after, limit, through)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
-
     /// The branch chain the context covers, root first: each ancestor to its
     /// fixed cut and the local branch to `through`.
     #[service(skip)]
@@ -1045,310 +921,10 @@ impl Timeline {
             .collect())
     }
 
-    /// The ancestor events of one kind, root first.
-    #[service(skip)]
-    pub async fn ancestor_events_of_kind(&self, kind: &str) -> Result<Vec<Arc<AgentEvent>>> {
-        let mut events = Vec::new();
-        for (branch, cut) in &self.0.ancestors {
-            if *cut == 0 {
-                continue;
-            }
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            events.extend(self.0.store.events_of_kind(&key, kind, *cut).await?);
-        }
-        Ok(events)
-    }
-
-    /// The event with this id on the local branch.
-    #[service(skip)]
-    pub async fn event_by_id(&self, id: &str) -> Result<Option<Arc<AgentEvent>>> {
-        self.0.store.event_by_id(&self.0.key, id).await
-    }
-
-    /// The position of one event anywhere in the branch chain.
-    #[service(skip)]
-    pub async fn event_position(&self, id: &str) -> Result<Option<TimelinePosition>> {
-        for (branch, _) in self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), 0)))
-        {
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            if let Some(event) = self.0.store.event_by_id(&key, id).await? {
-                return Ok(Some(TimelinePosition {
-                    branch_id: branch,
-                    sequence: event.sequence,
-                }));
-            }
-        }
-        Ok(None)
-    }
-
-    /// The cut of the latest completed compaction at or below `through`, when
-    /// it is one of this branch's own events before the fact that names it. A
-    /// completed compaction's cut is a validated context boundary, so a read
-    /// may start there. A stored reference that names another branch's event or
-    /// a later one is ignored: a read then replays from the segment start
-    /// instead of folding a tail that never covered `through`.
-    #[service(skip)]
-    pub async fn compaction_cut(&self, through: u64) -> Result<Option<u64>> {
-        let through = self.through(Some(through))?;
-        let Some(cut) = self
-            .0
-            .store
-            .last_compaction_cut(&self.0.key, through)
-            .await?
-        else {
-            return Ok(None);
-        };
-        let Some(position) = self.event_position(&cut.retain_from).await? else {
-            return Ok(None);
-        };
-        let usable = position.branch_id == self.0.key.branch_id && position.sequence < cut.sequence;
-        Ok(usable.then_some(position.sequence))
-    }
-
-    /// One filtered page of `branch`, which may be an ancestor.
-    #[service(skip)]
-    pub async fn stored_context_page_in(
-        &self,
-        branch: &str,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let key = TimelineKey {
-            session_id: self.0.key.session_id.clone(),
-            branch_id: branch.to_owned(),
-        };
-        Ok(self
-            .0
-            .store
-            .read_context_page(&key, after, limit, through)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
-
-    /// Reads the rows this projection consumes after an event cursor; a cursor
-    /// inside an atomic batch reads that row and filters by sequence. The event
-    /// limit is a target: the final batch may exceed it.
-    pub async fn stored_context_page(
-        &self,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let through = self.through(Some(through))?;
-        if after > through {
-            return Err(AgentError::InvalidInput("future Timeline cursor".into()));
-        }
-        Ok(self
-            .0
-            .store
-            .read_context_page(&self.0.key, after, limit, through)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
-    /// A local event range read from the store, bypassing the hot cache.
-    #[service(skip)]
-    pub async fn stored_local<R: RangeBounds<u64> + Send>(
-        &self,
-        range: R,
-    ) -> Result<Vec<Arc<AgentEvent>>> {
-        let start = match range.start_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_add(1),
-            Bound::Unbounded => 1,
-        }
-        .max(1);
-        let end = match range.end_bound() {
-            Bound::Included(n) => *n,
-            Bound::Excluded(n) => n.saturating_sub(1),
-            Bound::Unbounded => self.committed(),
-        };
-        let end = self.through(Some(end))?;
-        Ok(self
-            .0
-            .store
-            .read(&self.0.key, start..=end)
-            .await?
-            .into_iter()
-            .map(|record| record.event)
-            .collect())
-    }
-
-    /// Full fact replay; no interpreter or snapshot is required.
-    #[service(skip)]
-    pub async fn context(&self, through: u64) -> Result<ContextHistory> {
-        self.context_from(through, None).await
-    }
-    /// The policy-relevant events at `through`, filtered by the store.
-    #[service(skip)]
-    pub async fn policy_facts(&self, through: u64, turn_id: &str) -> Result<PolicyFacts> {
-        let published = self.sequence();
-        if through > published {
-            return Err(AgentError::InvalidInput(format!(
-                "future timeline sequence {through}"
-            )));
-        }
-        let mut events = Vec::new();
-        for (branch, cut) in self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
-        {
-            if cut == 0 {
-                continue;
-            }
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch,
-            };
-            events.extend(self.0.store.policy_facts(&key, cut, turn_id).await?.events);
-        }
-        Ok(PolicyFacts { through, events })
-    }
-    /// The last event at or before a fixed cut, even inside its atomic batch.
-    #[service(skip)]
-    async fn boundary_event(&self, key: &TimelineKey, cut: u64) -> Result<Option<Arc<AgentEvent>>> {
-        self.0.store.last_event(key, cut).await
-    }
-
-    /// The event order for legal compaction cuts: each segment's boundary, its
-    /// last turn start and its last compaction start at its cut, and the turn
-    /// starts `turns` keeps.
-    #[service(skip)]
-    pub async fn policy_order(&self, through: u64, turns: PolicyTurns<'_>) -> Result<PolicyOrder> {
-        let through = self.through(Some(through))?;
-        let segments: Vec<_> = self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), through)))
-            .collect();
-        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
-        let window = match turns {
-            PolicyTurns::Anchors => None,
-            PolicyTurns::All => Some(None),
-            PolicyTurns::After(at) => Some(rank(&at.branch_id).map(|index| (index, at.sequence))),
-        };
-        let mut events = Vec::new();
-        let mut branches = Vec::new();
-        for (index, (branch, cut)) in segments.into_iter().enumerate() {
-            if cut == 0 {
-                continue;
-            }
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            branches.push(branch.clone());
-            let turns = match window {
-                None => cut.saturating_add(1)..=cut,
-                Some(None) => 1..=cut,
-                Some(Some((rank, _))) if index > rank => 1..=cut,
-                Some(Some((rank, sequence))) if index == rank => sequence.saturating_add(1)..=cut,
-                Some(Some(_)) => cut.saturating_add(1)..=cut,
-            };
-            events.extend(self.0.store.policy_order(&key, turns, cut).await?.events);
-            if let Some(boundary) = self.boundary_event(&key, cut).await? {
-                events.push(PolicyOrderEvent {
-                    id: boundary.id.clone(),
-                    branch_id: branch,
-                    sequence: boundary.sequence,
-                    turn_start: matches!(boundary.kind, EventKind::TurnStart(_)),
-                    compaction_start: None,
-                    boundary: true,
-                });
-            }
-        }
-        let rank = |branch: &str| branches.iter().position(|name| name == branch);
-        events.sort_by_key(|event| (rank(&event.branch_id), event.sequence));
-        Ok(PolicyOrder {
-            through,
-            branches,
-            events,
-        })
-    }
-
-    /// The anchor and turn window for a known compaction cut.
-    #[service(skip)]
-    pub async fn policy_window(
-        &self,
-        through: u64,
-        turn_id: &str,
-        cut: &str,
-    ) -> Result<PolicyWindow> {
-        let through = self.through(Some(through))?;
-        let mut window = self
-            .0
-            .store
-            .policy_window(&self.0.key, through, turn_id, cut)
-            .await?;
-        let current = std::mem::take(&mut window.tool_results);
-        for (branch, segment_through) in &self.0.ancestors {
-            if *segment_through == 0 {
-                continue;
-            }
-            let key = TimelineKey {
-                session_id: self.0.key.session_id.clone(),
-                branch_id: branch.clone(),
-            };
-            let ancestor = self
-                .0
-                .store
-                .policy_window(&key, *segment_through, turn_id, cut)
-                .await?;
-            if window.cut_position.is_none() {
-                window.cut_position = ancestor.cut_position;
-            }
-            if !window.events.iter().any(|event| event.id == cut) {
-                window.events.extend(
-                    ancestor
-                        .events
-                        .iter()
-                        .filter(|event| event.id == cut)
-                        .cloned(),
-                );
-            }
-            for result in ancestor.tool_results {
-                if !window
-                    .tool_results
-                    .iter()
-                    .any(|seen| seen.event.id == result.event.id)
-                {
-                    window.tool_results.push(result);
-                }
-            }
-        }
-        for result in current {
-            if !window
-                .tool_results
-                .iter()
-                .any(|seen| seen.event.id == result.event.id)
-            {
-                window.tool_results.push(result);
-            }
-        }
-        Ok(window)
-    }
     /// The latest interpreter-compatible checkpoint at `through`, if one is
-    /// valid for this branch and its fixed ancestor chain.
+    /// valid for this branch and its fixed ancestor chain. The resume it names
+    /// is read with `from_event` and returned at the position that event
+    /// occupies; the recorded position is used when no event carries the id.
     #[service(skip)]
     pub async fn checkpoint(
         &self,
@@ -1386,15 +962,19 @@ impl Timeline {
             {
                 continue;
             }
-            let Some(anchor) = self.anchor(branch, snapshot.sequence, *cut).await? else {
+            let Some(anchor) = self.anchor(branch, snapshot.sequence).await? else {
                 continue;
             };
             if anchor.id != snapshot.event_id || anchor.sequence != snapshot.sequence {
                 continue;
             }
-            let Some(checkpoint) = decode(&snapshot, &anchor) else {
+            let Some(mut checkpoint) = decode(&snapshot, &anchor) else {
                 continue;
             };
+            if let Some(position) = self.resume_position(&checkpoint.resume).await? {
+                checkpoint.resume.branch_id = position.branch_id;
+                checkpoint.resume.sequence = position.sequence;
+            }
             let Some(resume_index) = segments[..=index]
                 .iter()
                 .position(|(id, _)| *id == checkpoint.resume.branch_id)
@@ -1411,67 +991,27 @@ impl Timeline {
         }
         Ok(None)
     }
-    /// Select an interpreter-compatible cache before decoding or trimming facts.
-    /// Invalid caches are disposable; failures reading required facts are not.
+    /// The position of the event a checkpoint resumes at, read with
+    /// `from_event`, which names the branch the event sits in. A resume event
+    /// the store holds no id for (an event inside a merged output row) keeps
+    /// the position the checkpoint recorded.
     #[service(skip)]
-    pub async fn context_with_checkpoint(
-        &self,
-        through: u64,
-        interpreter: &str,
-        decode: fn(&RecoverySnapshot, &AgentEvent) -> Option<ProjectionCheckpoint>,
-    ) -> Result<ContextHistory> {
-        let checkpoint = self.checkpoint(through, interpreter, decode).await?;
-        self.context_from(through, checkpoint).await
-    }
-    async fn context_from(
-        &self,
-        through: u64,
-        checkpoint: Option<ProjectionCheckpoint>,
-    ) -> Result<ContextHistory> {
-        let through = self.through(Some(through))?;
-        let segments = self
-            .0
-            .ancestors
-            .iter()
-            .cloned()
-            .chain(std::iter::once((self.0.key.branch_id.clone(), through)));
-        let resume = checkpoint.as_ref().map(|checkpoint| &checkpoint.resume);
-        let mut active = resume.is_none();
-        let ranges: Vec<_> = segments
-            .filter_map(|(branch, cut)| {
-                let start = match &resume {
-                    Some(position) if !active && position.branch_id == branch => {
-                        active = true;
-                        position.sequence
-                    }
-                    _ => 1,
-                };
-                (active && cut > 0).then_some((branch, start, cut))
-            })
-            .collect();
-        let records = self.history_records(ranges.clone()).await?;
-        let mut events = Vec::new();
-        let mut positions = Vec::new();
-        for ((branch, _, _), records) in ranges.into_iter().zip(records) {
-            for event in records {
-                positions.push(TimelinePosition {
-                    branch_id: branch.clone(),
-                    sequence: event.sequence,
-                });
-                events.push(event);
-            }
-        }
-        Ok(ContextHistory {
-            checkpoint,
-            ancestry: self
-                .0
-                .ancestors
-                .iter()
-                .map(|(branch, _)| branch.clone())
-                .collect(),
-            events,
-            positions,
-        })
+    async fn resume_position(&self, resume: &ResumePoint) -> Result<Option<TimelinePosition>> {
+        let query = TimelineQuery {
+            scope: TimelineQueryScope::Chain,
+            include_publishing: false,
+            from_event: Some(resume.event_id.clone()),
+            from_sequence: None,
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: Vec::new(),
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: std::num::NonZeroU64::new(1).expect("one is nonzero"),
+            offset: 0,
+        };
+        Ok(self.query(query).await?.positions.into_iter().next())
     }
     /// Waits for the anchor's durable publication, then writes only the cache.
     /// The owner tracks this future along with its other preparation work.
@@ -1492,16 +1032,6 @@ impl Timeline {
                 .map_err(|_| AgentError::Closed(self.0.key.branch_id.clone()))?;
         }
         self.0.store.save_snapshot(&self.0.key, snapshot).await
-    }
-    pub async fn trace(&self, sequence: u64) -> Result<Option<TimelineTrace>> {
-        self.through(Some(sequence))?;
-        {
-            let data = self.0.data.lock().unwrap();
-            if let Some(record) = data.hot.iter().find(|r| r.event.sequence == sequence) {
-                return Ok(record.trace.clone());
-            }
-        }
-        self.0.store.trace(&self.0.key, sequence).await
     }
     pub(crate) fn read(&self, after: u64) -> EventReader {
         self.0.data.lock().unwrap().reader_active = true;
@@ -1676,84 +1206,7 @@ impl EventReader {
         }
     }
 }
-/// The events of a store read; reads of committed history return events
-/// only, traces have their own read.
-fn events(records: Vec<StoredEvent>) -> Vec<Arc<AgentEvent>> {
-    records.into_iter().map(|record| record.event).collect()
-}
 
-/// The history a branch was built with, shared by its readers while the
-/// branch opens (its lifecycle's `Loading` phase): its own events up to
-/// `head`, and its ancestry, each ancestor up to its cut. Every rebuilding
-/// capability reads these prefixes, so the first read that needs all of a
-/// part decodes it once; readers that need it meanwhile wait for that read,
-/// which holds no lock, and a failed read is not kept. Events are facts once
-/// sequenced, so a slice of the copy, after the store's end check, is what a
-/// store read of that range returns. Events after `head` are never kept:
-/// they are read as outside an opening.
-pub(crate) struct Opening {
-    head: u64,
-    own: OnceCell<Vec<Entry>>,
-    /// The ancestors with a cut above 0, in ancestry order.
-    ancestry: Vec<(String, u64)>,
-    /// One list per ancestor of `ancestry`.
-    ancestors: OnceCell<Vec<Vec<Entry>>>,
-    count: OpeningCount,
-}
-impl Drop for Opening {
-    fn drop(&mut self) {
-        self.count.closed();
-    }
-}
-/// How many of an Agent's branch openings are alive, with or without their
-/// copy. Only the `testing` feature counts, for tests of their release.
-#[derive(Clone, Default)]
-pub(crate) struct OpeningCount(#[cfg(feature = "testing")] Arc<std::sync::atomic::AtomicUsize>);
-impl OpeningCount {
-    /// Counts one more opening; the opening uncounts itself when dropped.
-    fn opened(&self) -> Self {
-        #[cfg(feature = "testing")]
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.clone()
-    }
-    fn closed(&self) {
-        #[cfg(feature = "testing")]
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
-    #[cfg(feature = "testing")]
-    pub(crate) fn alive(&self) -> usize {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
-    }
-}
-/// One event of the copy and the end of the atomic batch it was committed
-/// in, as the fill read them; the trace is not kept.
-struct Entry {
-    event: Arc<AgentEvent>,
-    batch_end: u64,
-}
-fn entries(records: Vec<StoredEvent>) -> Vec<Entry> {
-    records
-        .into_iter()
-        .map(|record| Entry {
-            event: record.event,
-            batch_end: record.batch_end,
-        })
-        .collect()
-}
-/// The events of `entries`, in sequence order, with sequences in
-/// `start..=end`. As in a store read, the start may be inside an atomic
-/// batch and the end must be a batch boundary.
-fn slice(entries: &[Entry], start: u64, end: u64) -> Result<Vec<Arc<AgentEvent>>> {
-    let from = entries.partition_point(|entry| entry.event.sequence < start);
-    let to = entries.partition_point(|entry| entry.event.sequence <= end);
-    let entries = &entries[from..to];
-    if entries.last().is_some_and(|entry| entry.batch_end > end) {
-        return Err(AgentError::InvalidInput(format!(
-            "sequence {end} is inside an atomic batch"
-        )));
-    }
-    Ok(entries.iter().map(|entry| entry.event.clone()).collect())
-}
 pub fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

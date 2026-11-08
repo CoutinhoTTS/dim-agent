@@ -5,6 +5,7 @@ use dim_agent_capabilities::{
     defaults,
     host::{HostFuture, ToolDriver, ToolExecutionContext},
 };
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
 use dim_agent_types::{EventKind, ToolCall, ToolDefinition, ToolResult};
 use dim_app_server::{RunningServer, ServerConfig, ShutdownReason, serve};
@@ -29,12 +30,17 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "transport_flow/approval.rs"]
 mod approval;
+#[path = "transport_flow/call_channel.rs"]
+mod call_channel;
 
 #[path = "transport_flow/tool_cleanup.rs"]
 mod tool_cleanup;
 
 #[path = "transport_flow/branch_events.rs"]
 mod branch_events;
+
+#[path = "transport_flow/branches.rs"]
+mod branches;
 
 #[path = "transport_flow/branch_end.rs"]
 mod branch_end;
@@ -45,17 +51,28 @@ mod tree;
 #[path = "transport_flow/history_window.rs"]
 mod history_window;
 
+#[path = "transport_flow/history_forward.rs"]
+mod history_forward;
+
+#[path = "transport_flow/keyed_blocks.rs"]
+mod keyed_blocks;
+
 #[path = "transport_flow/reload.rs"]
 mod reload;
 
 #[path = "transport_flow/agents.rs"]
 mod agents;
 
+#[path = "transport_flow/agent_get.rs"]
+mod agent_get;
+
 #[path = "transport_flow/collaboration.rs"]
 mod collaboration;
 
 #[path = "transport_flow/catalog.rs"]
 mod catalog;
+#[path = "transport_flow/configured_auxiliary.rs"]
+mod configured_auxiliary;
 #[path = "transport_flow/native_storage.rs"]
 mod native_storage;
 
@@ -74,8 +91,23 @@ mod barrier;
 #[path = "transport_flow/product_protocol.rs"]
 mod product_protocol;
 
+#[path = "transport_flow/mcp_import.rs"]
+mod mcp_import;
+
+#[path = "transport_flow/mcp_discovery.rs"]
+mod mcp_discovery;
+
+#[path = "transport_flow/model_startup.rs"]
+mod model_startup;
+
+#[path = "transport_flow/model_switch.rs"]
+mod model_switch;
+
 #[path = "transport_flow/summaries.rs"]
 mod summaries;
+
+#[path = "transport_flow/shutdown_idle.rs"]
+mod shutdown_idle;
 
 #[path = "transport_flow/management.rs"]
 mod management;
@@ -106,14 +138,12 @@ mod branch_typescript;
 #[path = "transport_flow/runtime_manager.rs"]
 mod runtime_manager;
 
+#[path = "transport_flow/agent_models.rs"]
+mod agent_models;
 #[path = "transport_flow/foreign_rows.rs"]
 mod foreign_rows;
-#[path = "transport_flow/goal.rs"]
-mod goal;
 #[path = "transport_flow/guide_entries.rs"]
 mod guide_entries;
-#[path = "transport_flow/modality.rs"]
-mod modality;
 #[path = "transport_flow/plugin_manager.rs"]
 mod plugin_manager;
 #[path = "transport_flow/process_typescript.rs"]
@@ -130,17 +160,26 @@ mod web;
 #[path = "transport_flow/skills.rs"]
 mod skills;
 
+#[path = "transport_flow/skill_references.rs"]
+mod skill_references;
+
 #[path = "transport_flow/sessions.rs"]
 mod sessions;
 
 #[path = "transport_flow/shell_input.rs"]
 mod shell_input;
 
+#[path = "transport_flow/workspace_files.rs"]
+mod workspace_files;
+
 #[path = "transport_flow/deletion.rs"]
 mod deletion;
 
 #[path = "transport_flow/notices.rs"]
 mod notices;
+
+#[path = "transport_flow/attachments.rs"]
+mod attachments;
 
 #[path = "transport_flow/fork.rs"]
 mod fork;
@@ -150,6 +189,8 @@ mod titles;
 
 #[path = "transport_flow/named_parts.rs"]
 mod named_parts;
+#[path = "transport_flow/ui_extensions.rs"]
+mod ui_extensions;
 #[path = "transport_flow/ui_host.rs"]
 mod ui_host;
 #[path = "transport_flow/web_entry.rs"]
@@ -159,9 +200,6 @@ mod web_entry;
 mod prompt_suggestion;
 #[path = "transport_flow/workflow.rs"]
 mod workflow;
-
-#[path = "transport_flow/scheduler.rs"]
-mod scheduler;
 
 #[path = "transport_flow/questions.rs"]
 mod questions;
@@ -360,6 +398,11 @@ async fn launch_inner(
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
     install_collaboration(&mut builder);
+    // A product profile serves Modality through its installer, as the product
+    // does; the other profiles do not load it.
+    if config.product_home.is_some() {
+        dim_modality::install(&mut builder);
+    }
     extra(&mut builder);
     serve(builder, config).await
 }
@@ -616,14 +659,16 @@ fn v1_events(events: &[Arc<dim_agent_types::AgentEvent>], after: u64) -> Vec<Val
         .map(|event| serde_json::to_value(event).unwrap())
         .collect()
 }
-async fn receive_events_through(client: &mut Client, through: u64) -> Vec<Value> {
+async fn receive_events_through(client: &mut Client, after: u64, through: u64) -> Vec<Value> {
     let mut events = vec![];
     loop {
         let notice = client.notice("session.event").await;
         let event = notice["params"]["event"].clone();
         let typed: dim_agent_types::v1::AgentEvent = serde_json::from_value(event.clone()).unwrap();
         assert!(typed.sequence <= through, "received past fixed snapshot");
-        events.push(event);
+        if typed.sequence > after {
+            events.push(event);
+        }
         if typed.sequence == through {
             return events;
         }
@@ -662,7 +707,7 @@ async fn v2_v3_submit_accepts_typed_user_and_state_but_rejects_internal_blocks_a
                 )
                 .await,
         );
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind,
             EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user|
                 matches!(user.content.as_slice(), [
@@ -739,15 +784,19 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         assert_ok(&created);
         let sid = created["result"]["sessionId"].as_str().unwrap();
         let session = agent.get_session(sid).unwrap();
-        assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
-
+        let initial = client.rpc("session.attach", json!({"sessionId":sid})).await;
+        assert_ok(&initial);
+        let live_after = session.sequence("main").unwrap();
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
-        let idle_events = session.history("main", None).await.unwrap();
-        assert!(idle_events.iter().any(|event| matches!(
-            &event.kind,
-            EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn
-        )));
-        assert!(v1_events(&idle_events, 0).is_empty());
+        let idle_events = chain_events(&session, "main", ..).await.unwrap();
+        let stop = idle_events
+            .iter()
+            .find(|event| {
+                matches!(&event.kind,
+                EventKind::StopInterrupt(data) if data.scope == InterruptScope::Turn)
+            })
+            .expect("the idle stop records its control fact");
+        assert!(v1_events(std::slice::from_ref(stop), 0).is_empty());
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
         assert_eq!(attached["result"]["sessionId"], sid);
 
@@ -773,10 +822,11 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
         }
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
-        let stopped = session.history("main", None).await.unwrap();
-        let expected = v1_events(&stopped, 0);
+        let stopped = chain_events(&session, "main", ..).await.unwrap();
+        let expected = v1_events(&stopped, live_after);
         let last_business = expected.last().unwrap()["sequence"].as_u64().unwrap();
-        live.extend(receive_events_through(&mut client, last_business).await);
+        live.retain(|event| event["sequence"].as_u64().unwrap() > live_after);
+        live.extend(receive_events_through(&mut client, live_after, last_business).await);
         assert_eq!(
             live, expected,
             "live events must retain their real IDs and sequences"
@@ -786,22 +836,25 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
                 .any(|pair| pair[1]["sequence"].as_u64().unwrap()
                     > pair[0]["sequence"].as_u64().unwrap() + 1)
         );
-        let high = session.sequence("main").unwrap();
         drop(client);
 
         let mut client = Client::new(&server, ws).await;
         let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
         assert_eq!(attached["result"]["sessionId"], sid);
+        let high = session.sequence("main").unwrap();
         assert_ok(
             &client
                 .rpc("session.submit", json!({"sessionId":sid,"text":"resumed"}))
                 .await,
         );
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
-        let resumed = session.history("main", None).await.unwrap();
+        let resumed = chain_events(&session, "main", ..).await.unwrap();
         let expected = v1_events(&resumed, high);
         let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
-        assert_eq!(receive_events_through(&mut client, last).await, expected);
+        assert_eq!(
+            receive_events_through(&mut client, high, last).await,
+            expected
+        );
 
         assert_ok(&client.rpc("session.stop", json!({"sessionId":sid})).await);
         let high = session.sequence("main").unwrap();
@@ -814,10 +867,13 @@ async fn both_transports_filter_controls_and_keep_real_timeline_sequences() {
                 .await,
         );
         assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
-        let final_events = session.history("main", None).await.unwrap();
+        let final_events = chain_events(&session, "main", ..).await.unwrap();
         let expected = v1_events(&final_events, high);
         let last = expected.last().unwrap()["sequence"].as_u64().unwrap();
-        assert_eq!(receive_events_through(&mut client, last).await, expected);
+        assert_eq!(
+            receive_events_through(&mut client, high, last).await,
+            expected
+        );
         assert_ok(&client.rpc("session.close", json!({"sessionId":sid})).await);
         client.notice("session.closed").await;
         assert!(
@@ -1305,7 +1361,9 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
     assert_ok(&created);
     let sid = created["result"]["sessionId"].clone();
     let session = agent.get_session(sid.as_str().unwrap()).unwrap();
-    assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+    let attached = client.rpc("session.attach", json!({"sessionId":sid})).await;
+    assert_ok(&attached);
+    let live_after = attached["result"]["sequence"].as_u64().unwrap();
     assert_ok(
         &client
             .rpc(
@@ -1331,14 +1389,14 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
             .filter(|notice| notice["method"] == "session.event")
             .map(|notice| notice["params"]["event"].clone()),
     );
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(observed.iter().all(|event| event["type"] != "stop"));
     let business: Vec<_> = history
         .iter()
         .filter(|event| !event.kind.key().starts_with("stop/"))
         .cloned()
         .collect();
-    assert_eq!(v1_events(&business, 0), observed);
+    assert_eq!(v1_events(&business, live_after), observed);
     assert!(
         history
             .iter()
@@ -1557,8 +1615,12 @@ async fn attach_replies_the_record_the_listing_shows_for_that_session() {
         for field in ["preview", "updatedAt", "closed"] {
             entry.as_object_mut().unwrap().remove(field);
         }
+        let mut attached_info = attached["result"].clone();
+        assert!(entry["sequence"].as_u64().unwrap() >= attached_info["sequence"].as_u64().unwrap());
+        entry.as_object_mut().unwrap().remove("sequence");
+        attached_info.as_object_mut().unwrap().remove("sequence");
         assert_eq!(
-            attached["result"], entry,
+            attached_info, entry,
             "the attach reply is the listed record"
         );
         assert_eq!(attached["result"]["attachedClients"], 1);
@@ -1649,7 +1711,7 @@ async fn attach_replies_first_and_replays_only_current_pending_approvals() {
             .submit("after attach".into(), InputMode::Append, "main")
             .await
             .unwrap();
-        receive_events_through(&mut client, last.sequence).await;
+        receive_events_through(&mut client, 0, last.sequence).await;
         assert!(
             !client
                 .notices
@@ -2211,13 +2273,13 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         let local = |catalog: &Value| catalog["result"]["servers"].as_array().unwrap().iter().find(|entry| entry["id"] == "local").cloned();
         if restart {
             let listed = client.rpc("mcp.catalog", json!({"cwd":project})).await;
-            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":true,"transport":"stdio"})));
+            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":true,"transport":"stdio","referencedVariables":[],"unsetVariables":[]})));
         } else {
             std::fs::create_dir_all(&project).unwrap();
             std::fs::write(project.join(".mcp.json"), json!({"mcpServers":{"local":{"command":"never-run-this-test-command","enabled":true}}}).to_string()).unwrap();
             let original = std::fs::read(project.join(".mcp.json")).unwrap();
             let listed = client.rpc("mcp.catalog", json!({"cwd":project})).await;
-            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":false,"transport":"stdio"})));
+            assert_eq!(local(&listed), Some(json!({"id":"local","source":"project","enabled":false,"transport":"stdio","referencedVariables":[],"unsetVariables":[]})));
             assert_ok(&client.rpc("mcp.set_enabled", json!({"cwd":project,"id":"local","source":"project","expectedVersion":listed["result"]["projectRevision"],"enabled":true})).await);
             assert_eq!(std::fs::read(project.join(".mcp.json")).unwrap(), original);
             let workspace = std::fs::canonicalize(&project).unwrap();
@@ -2225,7 +2287,7 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
             assert_eq!(record, json!({"enabled":{(workspace.to_str().unwrap()):["local"]}}));
         }
         if restart {
-            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http"}]));
+            assert_eq!(catalog["result"]["servers"], json!([{"id":"managed-fixture","source":"user","enabled":false,"transport":"http","referencedVariables":[],"unsetVariables":[]}]));
             assert_ok(&client.rpc("mcp.remove", json!({"source":"user","id":"managed-fixture","expectedVersion":expected})).await);
             let empty = client.rpc("mcp.catalog", json!({})).await;
             assert_ok(&empty);
@@ -2424,3 +2486,25 @@ async fn unmounted_management_preserves_mock_sessions_and_wire_admission() {
 
 #[path = "transport_flow/worktrees.rs"]
 mod worktrees;
+
+/// The `create_at` of the newest Session-activity event in `events`, `None`
+/// when the list holds none (issue #1099): the value the stored
+/// `updated_at_ms` and the listings' `updatedAt` derive from. Each module
+/// that states the rule in raw SQL keeps its own copy of the SQL on
+/// purpose; the in-memory expectation lives here, shared.
+pub(crate) fn activity_time(events: &[Arc<dim_agent_types::AgentEvent>]) -> Option<u64> {
+    const KINDS: [&str; 4] = [
+        "input/message",
+        "turn/end",
+        "branch/create",
+        "session/forked",
+    ];
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            KINDS.contains(&event.kind.key())
+                && !matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_none())
+        })
+        .map(|event| event.create_at)
+}

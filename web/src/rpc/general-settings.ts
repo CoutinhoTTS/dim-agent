@@ -87,68 +87,6 @@ export function readSkills(value: unknown): SkillsView {
   }) }
 }
 
-export type SkillSource = { path: string } | { git: string; ref: string | undefined; commit: string }
-function readSkillSource(value: unknown): SkillSource {
-  const source = object(value)
-  const path = optionalString(source.path)
-  if (path !== undefined) return { path }
-  return { git: string(source.git), ref: optionalString(source.ref), commit: string(source.commit) }
-}
-export function readSkillSourceText(source: SkillSource): string {
-  if ("path" in source) return source.path
-  return `${source.git}${source.ref === undefined ? "" : ` (${source.ref})`} @${source.commit.slice(0, 8)}`
-}
-export type SkillPreviewSkill = { path: string; name: string; description: string; revision: string }
-export type SkillPreviewNamed = { path: string; name: string; by: string }
-export type SkillPreview = { source: SkillSource; skills: SkillPreviewSkill[]; conflicts: SkillPreviewNamed[]; shadows: SkillPreviewNamed[]; issues: SkillIssue[] }
-export function readSkillPreview(value: unknown): SkillPreview {
-  const preview = object(value)
-  const named = (item: unknown) => {
-    const entry = object(item)
-    return { path: string(entry.path), name: string(entry.name), by: string(entry.by) }
-  }
-  return {
-    source: readSkillSource(preview.source),
-    skills: array(preview.skills, (item) => {
-      const skill = object(item)
-      return { path: string(skill.path), name: string(skill.name), description: string(skill.description), revision: string(skill.revision) }
-    }),
-    conflicts: array(preview.conflicts, named),
-    shadows: array(preview.shadows, named),
-    issues: array(preview.issues, (item) => {
-      const issue = object(item)
-      return { path: string(issue.path), message: string(issue.message) }
-    }),
-  }
-}
-export type SkillInstallation = { id: string; source: SkillSource; revision: string; skills: { path: string; id: string }[] }
-function readSkillInstallation(value: unknown): SkillInstallation {
-  const installation = object(value)
-  return {
-    id: string(installation.id), source: readSkillSource(installation.source), revision: string(installation.revision),
-    skills: array(installation.skills, (item) => {
-      const skill = object(item)
-      return { path: string(skill.path), id: string(skill.id) }
-    }),
-  }
-}
-export function readSkillInstallations(value: unknown): SkillInstallation[] {
-  return array(object(value).installations, readSkillInstallation)
-}
-export type SkillInstallResult = { installation: SkillInstallation; previous: SkillInstallation | undefined; version: number; issues: SkillIssue[] }
-export function readSkillInstall(value: unknown): SkillInstallResult {
-  const result = object(value)
-  return {
-    installation: readSkillInstallation(result.installation),
-    previous: result.previous === undefined ? undefined : readSkillInstallation(result.previous),
-    version: number(result.version),
-    issues: array(result.issues, (item) => {
-      const issue = object(item)
-      return { path: string(issue.path), message: string(issue.message) }
-    }),
-  }
-}
-
 export type PluginEntry = {
   name: string; use: string | undefined; off: boolean; locked: boolean; status: string | undefined; error: string | undefined
   candidates: { id: string; kinds: string[]; git: string | undefined }[]
@@ -172,15 +110,23 @@ export function readPlugins(value: unknown): PluginEntry[] {
   })
 }
 
-export type McpEntry = { id: string; source: "user" | "project" | "plugin"; enabled: boolean; transport: string; auth: string | undefined }
-export type McpView = { userRevision: string; projectRevision: string | undefined; servers: McpEntry[]; errors: string[] }
+export type McpEntry = { id: string; source: "user" | "project" | "plugin"; enabled: boolean; transport: string; auth: string | undefined; referencedVariables: string[]; unsetVariables: string[] }
+export type McpInvalidEntry = { id: string; source: "user" | "project" | "plugin"; error: string }
+export type McpView = { userRevision: string; projectRevision: string | undefined; servers: McpEntry[]; invalid: McpInvalidEntry[]; errors: string[] }
 export function readMcp(value: unknown): McpView {
   const source = object(value)
   return {
     userRevision: string(source.userRevision), projectRevision: optionalString(source.projectRevision),
     servers: array(source.servers, (item) => {
       const server = object(item)
-      return { id: string(server.id), source: choice(server.source, ["user", "project", "plugin"]), enabled: boolean(server.enabled), transport: string(server.transport), auth: server.auth === undefined ? undefined : string(object(server.auth).status) }
+      // A daemon older than these fields reports none.
+      const variables = (value: unknown) => value === undefined ? [] : array(value, string)
+      return { id: string(server.id), source: choice(server.source, ["user", "project", "plugin"]), enabled: boolean(server.enabled), transport: string(server.transport), auth: server.auth === undefined ? undefined : string(object(server.auth).status), referencedVariables: variables(server.referencedVariables), unsetVariables: variables(server.unsetVariables) }
+    }),
+    // A daemon older than this list reports no broken entries.
+    invalid: source.invalid === undefined ? [] : array(source.invalid, (item) => {
+      const entry = object(item)
+      return { id: string(entry.id), source: choice(entry.source, ["user", "project", "plugin"]), error: string(entry.error) }
     }),
     errors: [source.userApplication, source.pluginApplication, source.projectApplication].flatMap((item) => {
       if (item === null) return []
@@ -193,23 +139,26 @@ export function readMcp(value: unknown): McpView {
 export type McpOAuthConfiguration = { clientId: string | undefined; callbackPort: number | undefined; scopes: string | undefined; metadataConfigured: boolean }
 export type McpOAuthInput = { clientId?: string; callbackPort?: number; scopes?: string; authServerMetadataUrl?: string }
 export type McpConfigurationPatch = {
-  command?: string; args?: string[]; cwd?: string; url?: string
+  command?: string; args?: string[]; cwd?: string; url?: string; timeout?: number | null
   env?: Record<string, string | null>; headers?: Record<string, string | null>
   bearer?: { action: "set"; token: string } | { action: "remove" }
   oauth?: { action: "remove" } | { action: "set"; clientId?: string | null; callbackPort?: number | null; scopes?: string | null; authServerMetadataUrl?: string | null }
 }
 export type McpServerInput =
-  | { type: "stdio"; command: string; args: string[]; cwd?: string; env: Record<string, string>; enabled: boolean }
-  | { type: "http" | "sse"; url: string; headers: Record<string, string>; enabled: boolean; auth?: { type: "bearer"; token: string }; oauth?: McpOAuthInput }
+  | { type: "stdio"; command: string; args: string[]; cwd?: string; env: Record<string, string>; enabled: boolean; timeout?: number }
+  | { type: "http" | "sse"; url: string; headers: Record<string, string>; enabled: boolean; auth?: { type: "bearer"; token: string }; oauth?: McpOAuthInput; timeout?: number }
 export type McpConfiguration =
-  | { type: "stdio"; command: string; argsCount: number; cwd: string | undefined; envNames: string[] }
-  | { type: "http" | "sse"; endpoint: string; headerNames: string[]; authConfigured: boolean; oauthConfigured: boolean; oauth: McpOAuthConfiguration | undefined }
+  | { type: "stdio"; command: string; argsCount: number; cwd: string | undefined; envNames: string[]; timeout: number | undefined; referencedVariables: string[]; unsetVariables: string[] }
+  | { type: "http" | "sse"; endpoint: string; headerNames: string[]; authConfigured: boolean; oauthConfigured: boolean; oauth: McpOAuthConfiguration | undefined; timeout: number | undefined; referencedVariables: string[]; unsetVariables: string[] }
 export function readMcpConfiguration(value: unknown): McpConfiguration {
   const source = object(value)
   const type = choice(source.type, ["stdio", "http", "sse"])
-  if (type === "stdio") return { type, command: string(source.command), argsCount: number(source.argsCount), cwd: optionalString(source.cwd), envNames: array(source.envNames, string) }
+  const referencedVariables = source.referencedVariables === undefined ? [] : array(source.referencedVariables, string)
+  const unsetVariables = source.unsetVariables === undefined ? [] : array(source.unsetVariables, string)
+  const timeout = source.timeout === undefined || source.timeout === null ? undefined : number(source.timeout)
+  if (type === "stdio") return { type, command: string(source.command), argsCount: number(source.argsCount), cwd: optionalString(source.cwd), envNames: array(source.envNames, string), timeout, referencedVariables, unsetVariables }
   const oauth = source.oauth === null ? undefined : object(source.oauth)
-  return { type, endpoint: string(source.endpoint), headerNames: array(source.headerNames, string), authConfigured: boolean(source.authConfigured), oauthConfigured: boolean(source.oauthConfigured), oauth: oauth === undefined ? undefined : { clientId: optionalString(oauth.clientId), callbackPort: oauth.callbackPort === null ? undefined : number(oauth.callbackPort), scopes: optionalString(oauth.scopes), metadataConfigured: boolean(oauth.metadataConfigured) } }
+  return { type, endpoint: string(source.endpoint), headerNames: array(source.headerNames, string), authConfigured: boolean(source.authConfigured), oauthConfigured: boolean(source.oauthConfigured), oauth: oauth === undefined ? undefined : { clientId: optionalString(oauth.clientId), callbackPort: oauth.callbackPort === null ? undefined : number(oauth.callbackPort), scopes: optionalString(oauth.scopes), metadataConfigured: boolean(oauth.metadataConfigured) }, timeout, referencedVariables, unsetVariables }
 }
 export type McpEditableEntry = { revision: string | undefined; enabled: boolean; secretsInUserScope: boolean; configuration: McpConfiguration }
 export function readMcpEditableEntry(value: unknown): McpEditableEntry {
@@ -254,6 +203,76 @@ export function readMcpAuthStart(value: unknown): { attemptId: string; authoriza
   if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) throw new ProtocolError("Invalid MCP authorization URL")
   return { attemptId: string(source.attemptId), authorizationUrl, redirectUri: string(source.redirectUri), expiresAt: number(source.expiresAt) }
 }
+
+export type McpImportSourceState = "ready" | "absent" | "unreadable" | "too-large" | "malformed"
+/** One known store of another local client: its identity, the file read, its
+ * state and the count or the owner's message. Never an entry or a value. */
+export type McpImportSource = {
+  id: string; client: string; scope: string; path: string; state: McpImportSourceState
+  entries: number | undefined; error: string | undefined
+}
+export function readMcpImportSources(value: unknown): McpImportSource[] {
+  const source = object(value)
+  return array(source.sources, (item) => {
+    const row = object(item)
+    return {
+      id: string(row.id),
+      client: string(row.client),
+      scope: string(row.scope),
+      path: string(row.path),
+      state: choice(row.state, ["ready", "absent", "unreadable", "too-large", "malformed"]),
+      entries: row.entries === undefined ? undefined : number(row.entries),
+      error: optionalString(row.error),
+    }
+  })
+}
+
+export type McpImportStatus = "identical" | "changed" | "conflict" | "invalid"
+export type McpImportField = { field: string; kind: string }
+export type McpImportUnsupported = { field: string; effect: "kept-unused" | "dropped" }
+export type McpImportEntry = {
+  id: string; transport: string | undefined; status: McpImportStatus
+  changes: McpImportField[]; unsupported: McpImportUnsupported[]; omitted: number
+  error: string | undefined
+}
+/** The owner's preview of a standard `mcpServers` document: names and kinds,
+ * never a value. */
+export type McpImportPreviewSource = { id: string; client: string; scope: string; path: string }
+export type McpImportPreview = { revision: string; sourceRevision: string | undefined; store: McpImportPreviewSource | undefined; entries: McpImportEntry[]; unknownTopLevel: string[] }
+export function readMcpImportPreview(value: unknown): McpImportPreview {
+  const source = object(value)
+  return {
+    revision: string(source.revision),
+    sourceRevision: optionalString(source.sourceRevision),
+    store: source.store === undefined ? undefined : (() => {
+      const row = object(source.store)
+      return { id: string(row.id), client: string(row.client), scope: string(row.scope), path: string(row.path) }
+    })(),
+    entries: array(source.entries, (item) => {
+      const entry = object(item)
+      return {
+        id: string(entry.id),
+        transport: optionalString(entry.transport),
+        status: choice(entry.status, ["identical", "changed", "conflict", "invalid"]),
+        changes: array(entry.changes, (item) => {
+          const field = object(item)
+          return { field: string(field.field), kind: string(field.kind) }
+        }),
+        unsupported: array(entry.unsupported, (item) => {
+          const field = object(item)
+          return { field: string(field.field), effect: choice(field.effect, ["kept-unused", "dropped"]) }
+        }),
+        omitted: number(entry.omitted),
+        error: optionalString(entry.error),
+      }
+    }),
+    unknownTopLevel: array(source.unknownTopLevel, string),
+  }
+}
+export type McpImportAction = "import" | "skip" | "replace" | "rename"
+export type McpImportResolution = { id: string; action: McpImportAction; newId?: string }
+/** The apply's reply: the source revision the import wrote. */
+export function readMcpImportApplied(value: unknown): string { return string(object(value).revision) }
 
 export type SavedSessions = { sessions: SessionSummary[]; nextCursor: string | undefined }
 export function readSavedSessions(value: unknown): SavedSessions {

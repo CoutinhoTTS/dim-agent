@@ -34,21 +34,67 @@ impl Plugin for AimuxPlugin {
 /// execution capabilities are independent of this provider choice.
 pub struct ConfiguredModelsPlugin(pub Arc<AimuxModels>);
 impl Plugin for ConfiguredModelsPlugin {
-    type Deps = ();
+    /// The shared name and the run for auxiliary calls need the model host;
+    /// Aimux provides it and depends on nothing here.
+    type Deps = (Arc<ModelHost>,);
     fn name(&self) -> &str {
         "ConfiguredModels"
     }
-    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+    async fn apply(&self, ctx: &Ctx, (host,): Self::Deps) -> rutis::Result {
         ctx.provide_as::<AimuxModels>(self.0.clone())?;
         let resolver = Arc::new(ConfiguredConnection {
             models: self.0.clone(),
             generation: ctx.cancellation_token(),
         });
         ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
-        ctx.provide(ModelSelectionHost(resolver))?;
+        ctx.provide(ModelSelectionHost(resolver.clone()))?;
+        ctx.provide(ModalityConnectionHost(resolver.clone()))?;
+        ctx.provide(SelectableModelsHost(Arc::new(ConfiguredSelectable {
+            models: self.0.clone(),
+        })))?;
+        let auxiliary = Arc::new(crate::auxiliary::ConfiguredAuxiliary {
+            models: self.0.clone(),
+            connection: resolver,
+            host,
+        });
+        dim_agent_capabilities::auxiliary_model::provide(ctx, auxiliary)?;
         Ok(())
     }
 }
+/// The configured catalog's `selectableModels` read: the same entries
+/// execution resolves, listed by provider and model id.
+struct ConfiguredSelectable {
+    models: Arc<AimuxModels>,
+}
+impl SelectableModels for ConfiguredSelectable {
+    fn selectable(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<dim_agent_types::ModelCapabilitySnapshot>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled("selectable models cancelled".into()));
+            }
+            Ok(self.models.selectable())
+        })
+    }
+    fn selectable_for_modality(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<dim_agent_types::ModalityModelSnapshot>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled(
+                    "selectable modality models cancelled".into(),
+                ));
+            }
+            // The development model configuration declares no modality
+            // operation, so no model is offered for one.
+            Ok(Vec::new())
+        })
+    }
+}
+
 struct ConfiguredConnection {
     models: Arc<AimuxModels>,
     generation: CancellationToken,
@@ -163,6 +209,34 @@ impl ResolveModelConnection for ConfiguredConnection {
     }
 }
 
+impl ResolveModalityConnection for ConfiguredConnection {
+    fn resolve_for_modality(
+        &self,
+        target: ModalityTarget,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModalityConnection> {
+        Box::pin(async move {
+            if self.generation.is_cancelled() {
+                return Err(HostError::classified(
+                    HostErrorKind::OwnerClosed,
+                    "Model catalog owner is closed",
+                ));
+            }
+            if cancel.is_cancelled() {
+                return Err(HostError::Cancelled(
+                    "Connection resolution cancelled".into(),
+                ));
+            }
+            self.models
+                .get(&target.target.provider_id, &target.target.model_id)?;
+            // The model file declares no modality operation, so this profile's
+            // `selectableForModality` read answers none and every target fails
+            // the declaration rule before a connection is built.
+            Err(undeclared_modality_operation(&target.operation))
+        })
+    }
+}
+
 /// Request preparation stays on the calling side of the process adapter.
 pub struct ConfiguredModelPlugin {
     prepare: Key<PrepareModelHost>,
@@ -238,13 +312,9 @@ impl PrepareModel for Prepare {
         let mut settings =
             ModelSettings::new(&self.config.model.provider_id, &self.config.model.model_id);
         settings.capability_snapshot = self.config.model.capability_snapshot.clone();
-        settings.config = Some(
-            self.config
-                .model
-                .config
-                .as_ref()
-                .unwrap_or(&self.defaults)
-                .clone(),
+        settings.config = dim_agent_capabilities::context_model::adopted_config(
+            settings.capability_snapshot.as_ref(),
+            Some(self.config.model.config.as_ref().unwrap_or(&self.defaults)),
         );
         settings.system = (!self.config.system_prompt.is_empty())
             .then(|| SystemPrompt::Text(self.config.system_prompt.clone()));

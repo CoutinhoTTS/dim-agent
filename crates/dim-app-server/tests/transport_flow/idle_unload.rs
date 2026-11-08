@@ -4,6 +4,7 @@
 //! the loaded count in `agent.list`, or a call's reply.
 use super::super::deletion::eventually;
 use super::*;
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{SessionIdentity, TimelineTreeControl};
 use rutis::host::CtxHost;
 use std::sync::Weak;
@@ -170,11 +171,6 @@ async fn pages(sessions: &Sessions, id: &str, through: u64, limit: usize) -> Vec
     events
 }
 
-/// §13 item 1: 50 runs through `sessions`, each one input, `idle` and the
-/// `history` pages. Once dropped, all are unloaded after the grace and every
-/// released instance is gone; `session.summaries` still lists each at its stored
-/// head and its history reads in full. A later input restores one, and its
-/// turn runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fifty_dropped_runs_unload_and_the_next_input_restores_one() {
     let store = Store::new();
@@ -215,6 +211,7 @@ async fn fifty_dropped_runs_unload_and_the_next_input_restores_one() {
             .unwrap_or_else(|| panic!("{id} listed: {listed}"));
         assert_eq!(info["sequence"], *through, "{info}");
     }
+    assert_eq!(loaded(&mut client).await, 0);
 
     let (first, through, _) = &runs[0];
     let receipt = sessions
@@ -240,6 +237,7 @@ async fn fifty_dropped_runs_unload_and_the_next_input_restores_one() {
     );
     for (id, through, events) in &runs {
         assert_eq!(&pages(&sessions, id, *through, 4).await, events, "{id}");
+        assert!(loads.of(id).1, "expected Session {id} to be restored");
     }
     server.shutdown();
     server.join().await.unwrap();
@@ -409,6 +407,56 @@ async fn calls_during_an_unload_wait_and_read_the_restored_session() {
         "{rpc}"
     );
     assert_eq!(loads.of(&id), (2, true));
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// ADR 021 D3: a client `session.history` read of a Session the pass has
+/// unloaded acquires it and pages the same stored facts; the protocol has no
+/// branch that reads them without a Session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_history_read_acquires_an_unloaded_session() {
+    let store = Store::new();
+    let loads = Loads::default();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_unloading(&store, &loads, GRACE).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let id = launch(&sessions).await;
+    sessions
+        .ok("input", text_input(&id, "test:read", "hello"))
+        .await;
+    let through = sessions.ok("idle", at(&id)).await["sequence"]
+        .as_u64()
+        .unwrap();
+    let history = json!({"sessionId":id,"branchId":"main","after":0,"limit":256,
+        "through":through});
+    let before = client.rpc("session.history", history.clone()).await;
+    assert_ok(&before);
+    unloaded(agent.get_session(&id).unwrap()).await;
+    loads.released(&id).await;
+    assert_eq!(loads.of(&id), (1, false));
+
+    let page = client.rpc("session.history", history).await;
+    assert_ok(&page);
+    assert_eq!(loads.of(&id), (2, true), "the read acquired the Session");
+    assert_eq!(
+        page["result"]["events"], before["result"]["events"],
+        "the restored Session pages the same facts"
+    );
+    assert!(
+        page["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "input"
+                && event["data"]["user"]["content"][0]["text"] == "hello"),
+        "{page}"
+    );
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -658,7 +706,7 @@ async fn a_refused_unload_leaves_a_streaming_response_intact() {
     let through = sessions.ok("idle", at(&id)).await["sequence"]
         .as_u64()
         .unwrap();
-    let events = session.local("main", ..=through).await.unwrap();
+    let events = branch_events(&session, "main", ..=through).await.unwrap();
     let turn: Vec<_> = events
         .iter()
         .skip_while(|event| event.id != receipt["inputId"])
@@ -742,7 +790,22 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
         heads.insert(branch.to_owned(), idle);
     }
     assert_eq!(stored_heads(&store, &id), heads);
+    // #1099: the activity time is what the turn wrote. Unload writes
+    // nothing, and the restore writes only `branch/resume`, which is
+    // housekeeping, so the row must not move either time.
+    let updated_at = |store: &Store, id: &str| -> i64 {
+        rusqlite::Connection::open(store.database())
+            .unwrap()
+            .query_row(
+                "SELECT updated_at_ms FROM session_catalog WHERE session_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let steady = updated_at(&store, &id);
     unloaded(session).await;
+    assert_eq!(updated_at(&store, &id), steady);
     assert_eq!(stored_heads(&store, &id), heads);
     let listed = client.rpc("session.summaries", json!({})).await;
     assert!(
@@ -754,6 +817,7 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
         "{listed}"
     );
     assert_ok(&client.rpc("session.attach", json!({"sessionId":id})).await);
+    assert_eq!(updated_at(&store, &id), steady);
     for (branch, head) in &heads {
         let at = json!({"sessionId":id,"branchId":branch});
         let idle = sessions.ok("idle", at.clone()).await["sequence"]
@@ -767,6 +831,11 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
             .as_array()
             .unwrap()
             .iter()
+            .filter(|event| {
+                !(event["type"] == "input"
+                    && ((event["name"] == "applied" && event["data"]["mode"] == "append")
+                        || (event["name"] == "message" && event["data"]["user"].is_null())))
+            })
             .map(|event| format!("{}/{}", event["type"], event["name"]).replace('"', ""))
             .collect();
         assert_eq!(added, ["branch/resume"], "{branch}");

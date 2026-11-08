@@ -12,6 +12,7 @@ mod goal_command;
 mod images;
 mod input;
 mod leaf;
+mod locale;
 mod login;
 mod maintenance;
 mod management;
@@ -20,6 +21,7 @@ mod mcp;
 mod mcp_command;
 mod member_approval;
 mod migration_command;
+mod modality;
 mod model;
 mod permission;
 mod permission_command;
@@ -27,6 +29,7 @@ mod plugin_command;
 mod plugins;
 mod projection;
 mod question;
+mod realtime_command;
 mod recording;
 mod sanitize;
 mod session;
@@ -98,10 +101,12 @@ async fn daemon_link(
     root: &rutis::Ctx,
     options: &Options,
     start: bool,
+    locale: locale::Locale,
 ) -> Result<(rutis::host::FiberView, Arc<plugins::Connection>)> {
     let link = root.plugin(plugins::DaemonLink {
         options: options.clone(),
         start,
+        locale,
     });
     (&link).await.map_err(plugin_error)?;
     let connection = root
@@ -110,165 +115,65 @@ async fn daemon_link(
     Ok((link, connection))
 }
 
-/// Runs the ordinary TUI plugin directly, for an older daemon without the
-/// `ui.leaf.2` capability and for initial model setup. The caller
-/// owns the terminal; the daemon is only the protocol v3 business peer.
-async fn run_tui_with_connection(
+/// Starts the terminal interface at Home, or on the requested resumed
+/// Session, with the invocation's first message when it supplied one.
+async fn open_tui(
     root: &rutis::Ctx,
     options: &Options,
-    link: rutis::host::FiberView,
-    _connection: Arc<plugins::Connection>,
+    initial: Option<ui::Initial>,
+    locale: locale::Locale,
 ) -> Result<i32> {
+    let (link, _connection) = daemon_link(root, options, true, locale).await?;
     let env = ui::Env {
         home: options.home.clone(),
         workspace: options.workspace().as_str().to_owned(),
         fullscreen: options
             .fullscreen
             .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
+        initial,
     };
-    let (leave, left) = tokio::sync::oneshot::channel();
+    let (leave, mut left) = tokio::sync::oneshot::channel();
+    let (leaf_end, leaf_ended) = tokio::sync::oneshot::channel();
     let tui = root.plugin(plugins::Tui {
+        root: root.clone(),
         env,
         options: options.clone(),
         leave: std::sync::Mutex::new(Some(leave)),
+        leaf_end: std::sync::Mutex::new(Some(leaf_end)),
     });
     (&tui).await.map_err(plugin_error)?;
-    let leave = left
-        .await
-        .map_err(|_| "the terminal interface ended without a result")?;
+    let leave = tokio::select! {
+        leave = &mut left => leave,
+        ended = leaf_ended => {
+            if ended.is_ok() {
+                Ok(ui::tui::Leave::Exit(0))
+            } else {
+                left.await
+            }
+        }
+    }
+    .map_err(|_| "the terminal interface ended without a result")?;
     tui.dispose().await?;
     link.dispose().await?;
     match leave {
         ui::tui::Leave::Exit(code) => Ok(code),
-        ui::tui::Leave::Restart(restart) => relaunch(root, options, restart).await,
-    }
-}
-
-/// The interactive entry on a daemon that keeps UI leaves (Tui design
-/// §3.6): this process creates or resumes the Session, mounts its leaf
-/// node, asks the daemon to open a session with it, then runs its own
-/// `Tui`. It ends when the `Tui` leaves or the session ends.
-async fn open_tui_leaf(root: &rutis::Ctx, options: &Options) -> Result<i32> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Created {
-        session_id: String,
-    }
-
-    let (link, connection) = daemon_link(root, options, true).await?;
-    if !connection.offers("ui.leaf.2") {
-        return run_tui_with_connection(root, options, link, connection).await;
-    }
-    let mut client = connection.take().ok_or("App Server did not start")?;
-    link.dispose().await?;
-    let session_id = if let Some(id) = &options.resume {
-        if let Some(preset) = options.permission {
-            permission::select(&mut client, id, preset)
-                .await
-                .map_err(|error| format!("Cannot set the permission preset: {error}"))?;
-        }
-        client
-            .rpc("session.attach", serde_json::json!({ "sessionId": id }))
-            .await?;
-        id.clone()
-    } else {
-        let mut params = serde_json::json!({ "cwd": options.workspace().as_str() });
-        let mut preferences = None;
-        let mut target = None;
-        if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
-            params["model"] = serde_json::json!({
-                "provider": provider,
-                "modelId": model,
-            });
-            preferences =
-                session_host::saved_model_preferences(&mut client, provider, model).await?;
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
-            }
-            target = Some((provider.clone(), model.clone()));
-        }
-        if let Some(policy) = permission::creation_policy(options) {
-            params["permissionPolicy"] = policy;
-        }
-        let created: Created = match client.typed("session.create", params).await {
-            Ok(created) => created,
-            Err(error)
-                if options.provider.is_none()
-                    && options.model_config.is_none()
-                    && client::app_error(&error) == Some("provider_failed") =>
-            {
-                drop(client);
-                let (link, connection) = daemon_link(root, options, false).await?;
-                return run_tui_with_connection(root, options, link, connection).await;
-            }
-            Err(error) => {
-                let error = model_adoption_error(
-                    &mut client,
-                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
-                    error,
-                    preferences.as_ref(),
-                )
-                .await;
-                return Err(format!(
-                    "Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference"
-                ).into());
-            }
-        };
-        client
-            .rpc(
-                "session.attach",
-                serde_json::json!({ "sessionId": created.session_id }),
-            )
-            .await?;
-        created.session_id
-    };
-
-    let leaf = leaf::Leaf::bind(options)?;
-    let params = serde_json::json!({
-        "sessionId": session_id,
-        "kind": "tui",
-        "peer": leaf.peer,
-        "address": leaf.address,
-    });
-    let (node, ended) = leaf.node();
-    let node = root.plugin(node);
-    (&node).await.map_err(plugin_error)?;
-    let opened = client.typed::<leaf::Opened>("ui.open", params).await;
-    drop(client);
-    let opened = match opened {
-        Ok(opened) => opened,
-        Err(error) => {
-            node.dispose().await?;
-            return Err(error);
-        }
-    };
-    let (leave, left) = tokio::sync::oneshot::channel();
-    let tui = root.plugin(leaf::LeafTui::new(options, session_id, opened, leave));
-    if let Err(error) = (&tui).await {
-        let _ = tui.dispose().await;
-        node.dispose().await?;
-        return Err(plugin_error(error));
-    }
-    let leave = tokio::select! {
-        leave = left => leave.ok(),
-        _ = ended => None,
-    };
-    tui.dispose().await?;
-    node.dispose().await?;
-    match leave {
-        Some(ui::tui::Leave::Exit(code)) => Ok(code),
-        Some(ui::tui::Leave::Restart(restart)) => relaunch(root, options, restart).await,
-        None => Ok(0),
+        ui::tui::Leave::Restart(restart) => relaunch(root, options, restart, locale).await,
     }
 }
 
 /// Starts the updated CLI on the session the interface left. The daemon
 /// still runs the old executable, so it stops first and the new CLI starts
 /// its own. The original arguments carry over except the interface mode,
-/// which follows the one in use, and the session, which is the one left;
-/// a resumed session keeps its model, so the model flags drop with it.
-async fn relaunch(root: &rutis::Ctx, options: &Options, restart: ui::tui::Restart) -> Result<i32> {
-    let (link, connection) = daemon_link(root, options, false).await?;
+/// which follows the one in use, the session, which is the one left, and
+/// the first message (`--prompt` with its `--image`), which was already
+/// sent; a resumed session keeps its model, so the model flags drop with it.
+async fn relaunch(
+    root: &rutis::Ctx,
+    options: &Options,
+    restart: ui::tui::Restart,
+    locale: locale::Locale,
+) -> Result<i32> {
+    let (link, connection) = daemon_link(root, options, false, locale).await?;
     if let Some(client) = connection.take() {
         client::shutdown(client).await?;
     }
@@ -279,7 +184,7 @@ async fn relaunch(root: &rutis::Ctx, options: &Options, restart: ui::tui::Restar
         let resumed = restart.session_id.is_some();
         match arg.to_str() {
             Some("--fullscreen" | "--scrollback") => {}
-            Some("--resume") => {
+            Some("--resume" | "--prompt" | "-p" | "--image") => {
                 original.next();
             }
             Some("--provider" | "--model") if resumed => {
@@ -322,8 +227,12 @@ async fn hold_web(
     options: &Options,
     port: Option<u16>,
     open_browser: bool,
+    locale: locale::Locale,
 ) -> Result<i32> {
-    daemon_link(root, options, true).await?;
+    let (_, connection) = daemon_link(root, options, true, locale).await?;
+    if let Some(notice) = connection.take_notice() {
+        eprintln!("{}", daemon_notice(&notice));
+    }
     let (done, held) = tokio::sync::oneshot::channel();
     let hold = root.plugin(plugins::WebHold {
         port,
@@ -338,8 +247,8 @@ async fn hold_web(
 
 /// `dimcode web --off`: clear the daemon-owned switch without disconnecting a
 /// foreground holder.
-async fn disable_web(root: &rutis::Ctx, options: &Options) -> Result<i32> {
-    let (link, connection) = daemon_link(root, options, false).await?;
+async fn disable_web(root: &rutis::Ctx, options: &Options, locale: locale::Locale) -> Result<i32> {
+    let (link, connection) = daemon_link(root, options, false, locale).await?;
     let Some(mut client) = connection.take() else {
         println!("Daemon is not running.");
         let _ = link.dispose().await;
@@ -368,6 +277,80 @@ fn plugin_error(error: Arc<rutis::host::ErrorKind>) -> Error {
         rutis::host::ErrorKind::PluginFailed(source) => source.to_string().into(),
         other => other.to_string().into(),
     }
+}
+
+/// The line a client prints when it keeps a busy daemon of another build:
+/// line mode and `exec` put it on stderr, and the TUI shows it once in its
+/// notice area; stdout and JSON output stay unchanged.
+pub(crate) const DAEMON_BUSY: &str = "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}.";
+/// [`DAEMON_BUSY`] with the counts a `daemon_busy` refusal carried.
+pub(crate) const DAEMON_BUSY_COUNTS: &str = "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}.";
+
+/// The line a client prints once when a daemon reports a store upgrade while
+/// it starts; both waits then follow the daemon's progress instead of a fixed
+/// startup budget.
+pub(crate) const DAEMON_UPGRADING: &str = "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store.";
+
+/// [`DAEMON_UPGRADING`] with the formats the progress note named.
+pub(crate) fn store_upgrade_line(locale: locale::Locale, upgrade: &client::StoreUpgrade) -> String {
+    let from = upgrade.from.to_string();
+    let to = upgrade.to.to_string();
+    crate::ui::i18n::tf_in(locale, DAEMON_UPGRADING, &[("from", &from), ("to", &to)])
+}
+
+/// The notice for a kept daemon of another build, with the refusal's counts
+/// when it sent them.
+pub(crate) fn daemon_notice(notice: &client::DaemonNotice) -> String {
+    let server = sanitize::safe(&notice.server);
+    let client_version = env!("CARGO_PKG_VERSION");
+    match &notice.counts {
+        Some(counts) => {
+            let connections = counts.connections.to_string();
+            let attached = counts.attached_sessions.to_string();
+            let running = counts.running.to_string();
+            crate::ui::i18n::tf(
+                DAEMON_BUSY_COUNTS,
+                &[
+                    ("server", &server),
+                    ("client", client_version),
+                    ("connections", &connections),
+                    ("attached", &attached),
+                    ("running", &running),
+                ],
+            )
+        }
+        None => crate::ui::i18n::tf(
+            DAEMON_BUSY,
+            &[("server", &server), ("client", client_version)],
+        ),
+    }
+}
+
+/// Session creation parameters without a startup model selection.
+pub(crate) fn session_create_params(options: &Options) -> serde_json::Value {
+    let mut params = serde_json::json!({"cwd": options.workspace().as_str()});
+    if let Some(policy) = permission::creation_policy(options) {
+        params["permissionPolicy"] = policy;
+    }
+    params
+}
+
+/// Session creation with the launch options and the chosen model's saved preferences.
+pub(crate) async fn session_create_from_options(
+    client: &mut client::Client,
+    options: &Options,
+) -> Result<serde_json::Value> {
+    let mut params = session_create_params(options);
+    options.creation_startup(&mut params);
+    let saved = if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
+        session_host::saved_model_preferences(client, provider, model).await?
+    } else {
+        None
+    };
+    if let Some(preferences) = options.creation_preferences(saved) {
+        params["modelPreferences"] = preferences;
+    }
+    Ok(params)
 }
 
 /// The failure of adopting `target` into a Session. When the target's
@@ -399,22 +382,7 @@ async fn declaration_hint(
     provider_id: &str,
     model_id: &str,
 ) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Snapshot {
-        catalog: Option<Catalog>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Catalog {
-        models: Vec<CatalogModel>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct CatalogModel {
-        id: String,
-        #[serde(default)]
-        missing_limits: Vec<String>,
-    }
-    let snapshot: Snapshot = client
+    let snapshot: wire::ProviderCatalogSnapshot = client
         .typed(
             "provider.catalog",
             serde_json::json!({"providerId": provider_id}),
@@ -512,11 +480,20 @@ fn prepare() -> Result<Option<Options>> {
     Ok(Some(options))
 }
 
-async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>) -> Result<i32> {
+async fn run_acp(
+    root: &rutis::Ctx,
+    options: &Options,
+    agent_id: Option<String>,
+    locale: locale::Locale,
+) -> Result<i32> {
     let mut signals = plugins::Signals::listen()?;
-    let client = client::connect_inner(options, true)
+    let linked = client::connect_inner(options, true, locale)
         .await?
         .ok_or("App Server did not start")?;
+    if let Some(notice) = &linked.notice {
+        eprintln!("{}", daemon_notice(notice));
+    }
+    let client = linked.client;
     let (gateway, finished) = dim_acp::AcpGateway::new(
         client,
         dim_acp::Io {
@@ -573,36 +550,51 @@ async fn run_acp(root: &rutis::Ctx, options: &Options, agent_id: Option<String>)
 }
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
-    // `block_on` polls `act` on this thread, so the thread-local language holds.
-    crate::ui::i18n::set(crate::ui::i18n::interface_locale(&options.home));
+    // `block_on` polls `act` on this thread, so the thread-local language
+    // holds; the connection code may run on another thread, so it carries the
+    // same language as a value.
+    let locale = crate::ui::i18n::interface_locale(&options.home);
+    crate::ui::i18n::set(locale);
     if let Action::Migration(command) = &options.action {
-        return migration_command::run(root, &options, command).await;
+        return migration_command::run(root, &options, command, locale).await;
     }
     if let Action::Acp {
         auth_setup: Some(method),
         ..
     } = &options.action
     {
-        let mut client = client::connect_inner(&options, true)
+        let linked = client::connect_inner(&options, true, locale)
             .await?
             .ok_or("App Server did not start")?;
+        if let Some(notice) = &linked.notice {
+            eprintln!("{}", daemon_notice(notice));
+        }
+        let mut client = linked.client;
         let (provider, device) = dim_acp::auth::terminal_method(&mut client, method).await?;
         options.device = device;
         return login::login(&mut client, &options, Some(&provider)).await;
     }
     if let Action::Acp { agent_id, .. } = &options.action {
-        return run_acp(root, &options, agent_id.clone()).await;
+        return run_acp(root, &options, agent_id.clone(), locale).await;
     }
-    if matches!(options.action, Action::Chat | Action::Tui)
-        && options.prompt.is_none()
-        && !options.no_tui
-        && ui::tui::is_interactive()
-    {
+    let starts_tui = match options.action {
+        Action::Tui => true,
+        Action::Chat => options.prompt.is_none(),
+        _ => false,
+    };
+    if starts_tui && !options.no_tui && ui::tui::is_interactive() {
         if options.permission.is_none() {
             options.permission = ui::config::saved_permission(&options.home)
                 .and_then(|preset| permission::parse_preset(&preset).ok());
         }
-        return open_tui_leaf(root, &options).await;
+        let initial = match (&options.action, &options.prompt) {
+            (Action::Tui, Some(text)) => Some(ui::Initial {
+                text: text.clone(),
+                images: images::load(&options.images)?.images,
+            }),
+            _ => None,
+        };
+        return open_tui(root, &options, initial, locale).await;
     }
     if matches!(options.action, Action::WebInstall) {
         if !version::RELEASE {
@@ -626,9 +618,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
     } = options.action
     {
         if off {
-            return disable_web(root, &options).await;
+            return disable_web(root, &options, locale).await;
         }
-        return hold_web(root, &options, port, open_browser).await;
+        return hold_web(root, &options, port, open_browser, locale).await;
     }
 
     if let Action::Timeline {
@@ -646,9 +638,12 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
     }
     let images = images::load(&options.images)?;
     let stop = matches!(options.action, Action::DaemonStop);
-    let (_, connection) = daemon_link(root, &options, !stop).await?;
+    let (_, connection) = daemon_link(root, &options, !stop, locale).await?;
     if stop {
         return client::stop(connection.take()).await;
+    }
+    if let Some(notice) = connection.take_notice() {
+        eprintln!("{}", daemon_notice(&notice));
     }
     let mut client = connection.take().ok_or("App Server did not start")?;
     match &options.action {
@@ -658,6 +653,13 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             output,
         } => {
             export::write(&mut client, session_id, *format, output.as_deref()).await?;
+            if let Some(path) = output {
+                eprintln!(
+                    "Exported {}: {}",
+                    format.label(),
+                    sanitize::safe(&path.display().to_string())
+                );
+            }
             Ok(0)
         }
         Action::SessionRename {
@@ -709,31 +711,16 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
                 )
                 .await?;
             }
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Catalog {
-                models: Vec<Model>,
-                disabled_model_ids: Vec<String>,
-            }
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct Model {
-                id: String,
-                name: String,
-                unavailable_reason: Option<String>,
-                #[serde(default)]
-                missing_limits: Vec<String>,
-            }
             let params = serde_json::json!({"providerId":provider});
             let catalog = if options.refresh {
-                Some(client.typed::<Catalog>("provider.refresh", params).await?)
+                Some(
+                    client
+                        .typed::<wire::ProviderCatalog>("provider.refresh", params)
+                        .await?,
+                )
             } else {
-                #[derive(serde::Deserialize)]
-                struct Snapshot {
-                    catalog: Option<Catalog>,
-                }
                 client
-                    .typed::<Snapshot>("provider.catalog", params)
+                    .typed::<wire::ProviderCatalogSnapshot>("provider.catalog", params)
                     .await?
                     .catalog
             };
@@ -801,6 +788,18 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         Action::Plugin { method, params } => {
             plugin_command::run(&mut client, method, params.clone()).await
         }
+        Action::Modality(command) => {
+            let mut stdout = std::io::stdout();
+            let mut stderr = std::io::stderr();
+            let progress = stderr.is_terminal();
+            let mut output = modality::task::Output {
+                out: &mut stdout,
+                err: &mut stderr,
+                json: options.json,
+                progress,
+            };
+            modality::run(&mut client, &options, command, &mut output).await
+        }
         Action::RuntimeList => {
             runtime_list(&mut client).await?;
             Ok(0)
@@ -825,33 +824,54 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             Ok(0)
         }
         Action::McpList => {
-            mcp_command::list(&mut client, &options).await?;
+            mcp_command::list(&mut client, options.workspace().as_str()).await?;
             Ok(0)
         }
         Action::McpLogin(id) => {
             let mut input = input::Input::new()?;
             mcp_command::sign_in(
                 &mut client,
-                &options,
+                options.workspace().as_str(),
                 &mut input,
                 id,
+                options.mcp_source.as_deref(),
                 options.no_browser,
                 options.client_secret,
             )
             .await
         }
-        Action::McpLogout(id) => mcp_command::sign_out(&mut client, &options, id).await,
-        Action::McpDisconnect(id) => mcp_command::disconnect(&mut client, &options, id).await,
+        Action::McpLogout(id) => {
+            mcp_command::sign_out(
+                &mut client,
+                options.workspace().as_str(),
+                id,
+                options.mcp_source.as_deref(),
+            )
+            .await
+        }
+        Action::McpDisconnect(id) => {
+            mcp_command::disconnect(
+                &mut client,
+                options.workspace().as_str(),
+                id,
+                options.mcp_source.as_deref(),
+            )
+            .await
+        }
         Action::McpEnable { id, enabled } => {
             let state = management::mcp::set_enabled(
                 &mut client,
                 options.workspace().as_str(),
                 id,
+                options.mcp_source.as_deref(),
                 *enabled,
             )
             .await?;
             mcp_command::print_report(vec![state.sentence()], state.notes);
             Ok(0)
+        }
+        Action::McpImport(import) => {
+            management_command::import(&mut client, &options, import).await
         }
         Action::Management(request) => {
             management_command::run(&mut client, &options, request).await
@@ -876,8 +896,17 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
             .await
         }
         Action::Recording { enabled } => recording::run(&mut client, &options, *enabled).await,
+        Action::Realtime { operation } => {
+            realtime_command::run(
+                &mut client,
+                &options,
+                operation.as_deref().unwrap_or("voice"),
+            )
+            .await
+        }
         Action::Chat | Action::Tui | Action::Exec => {
-            session::chat(&mut client, &options, images.blocks, images.notes).await
+            let blocks = images.images.iter().map(|image| image.block()).collect();
+            session::chat(&mut client, &options, blocks, images.notes).await
         }
         Action::Acp { .. }
         | Action::Migration(_)

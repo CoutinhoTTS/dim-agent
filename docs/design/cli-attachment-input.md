@@ -95,8 +95,11 @@ clipboard image in it comes back as the literal `[Image]` without the image.
 After submission, the transcript draws the message's image blocks as those markers on separate
 lines in content order, including image-only messages and messages restored from history; a
 submitted image block has no filename. Tool results retain their existing text-only display.
-Editing, quoting, branching, forking and withdrawing a queued message reuse only its text;
-display markers are never inserted into those drafts.
+Editing, quoting, branching and forking reuse only the message's text; display markers are
+never inserted into those drafts. Shift+Left recalls only the newest held message, and only
+when it has a single text block. Esc interrupt instead restores held messages' operator text,
+image blocks and stored paste/file links, excluding appended runtime context
+([queue rules](cli-commands.md#queued-messages)).
 
 Suggestions show the current directory's matching entries; `Tab` enters a selected directory
 or inserts a selected file. Up/Down selects a suggestion; Esc leaves its text in the draft.
@@ -439,7 +442,11 @@ descriptor with `F_GETPATH`: `ttyname_r` scans `/dev` and can miss this terminal
 terminal's entry is removed. The CLI flow also verifies
 complete model output while a terminal reader pauses. Windows input uses virtual-terminal mode with the existing console
 record reader. Its ConPTY flow exercises Unicode/grapheme editing, arrow/delete input,
-bracketed paste boundaries and raw Ctrl+C clearing through the real console. It reuses the
+bracketed paste boundaries and raw Ctrl+C clearing through the real console. The terminal UI
+writes and reads its console text as UTF-16 through the wide-character console functions, so a
+console running a legacy OEM code page shows the frame and delivers typed text unchanged without
+reading or changing either code page; its own ConPTY flow paints a frame and types into such a
+console. It reuses the
 workspace's portable-pty version as a Windows-only development dependency. Native clipboard checks
 use a unique AppKit pasteboard and a private Windows window station.
 The Windows boundary flow runs on the disposable Windows CI job; its execution must pass before

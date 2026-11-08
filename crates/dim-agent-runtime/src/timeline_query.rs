@@ -6,7 +6,7 @@
 //! The request and the reply are serde data: they cross languages through the
 //! `timeline` service.
 
-use crate::{AgentError, Result};
+use crate::{AgentError, Result, Timeline};
 use dim_agent_types::{AgentEvent, TimelinePosition};
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU64, sync::Arc};
@@ -130,8 +130,8 @@ impl TimelineQueryPredicate {
     }
 }
 
-/// One bounded read of a branch's facts: what it covers, at which published
-/// sequence, what it accepts, and how much of the result it returns.
+/// One bounded read of a branch's facts: what it covers, how far it reaches,
+/// what it accepts, and how much of the result it returns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimelineQuery {
@@ -150,6 +150,11 @@ pub struct TimelineQuery {
     /// The end a page is taken from; ascending is the default.
     #[serde(default)]
     pub direction: TimelineQueryDirection,
+    /// Whether the queried branch's own facts written above the published head
+    /// belong to the read, up to the point the reply reports as `through`. An
+    /// ancestor is read to its cut either way.
+    #[serde(default)]
+    pub include_publishing: bool,
     /// Event kinds (`domain/name`) the read accepts; empty accepts every kind.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<String>,
@@ -175,6 +180,26 @@ fn is_zero(value: &u64) -> bool {
 }
 
 impl TimelineQuery {
+    /// Whether `event` satisfies the selection: the kinds, the flags, the
+    /// event id and the one predicate. The scope, the start, the page and the
+    /// direction belong to the read, not to a fact.
+    pub fn accepts(&self, event: &AgentEvent) -> bool {
+        (self.kinds.is_empty() || self.kinds.iter().any(|kind| kind == event.kind.key()))
+            && (self.flags.is_empty()
+                || self
+                    .flags
+                    .iter()
+                    .any(|flag| flag.is_set(event.kind.context_flags())))
+            && self
+                .event_id
+                .as_ref()
+                .is_none_or(|wanted| wanted == &event.id)
+            && self
+                .predicate
+                .as_ref()
+                .is_none_or(|predicate| predicate.matches(event))
+    }
+
     /// Checks the input a caller can get wrong before any storage read: the
     /// predicate's spelling and value. The read point is the store's to bound.
     pub fn validate(&self) -> Result<()> {
@@ -204,6 +229,11 @@ pub struct TimelineQueryReply {
     /// One position per event, in the same order: the branch the event was
     /// read from and its sequence there.
     pub positions: Vec<TimelinePosition>,
+    /// The sequence the read is cut at on the queried branch: what was
+    /// published when it ran, or the committed head it asked for. No fact
+    /// above it was read; an ancestor is read to its cut. A caller holding
+    /// live events releases the ones above this sequence.
+    pub through: u64,
 }
 
 /// What one branch's read returned: the page, and how many matching events it
@@ -214,4 +244,50 @@ pub struct TimelineQueryPage {
     pub events: Vec<Arc<AgentEvent>>,
     pub positions: Vec<TimelinePosition>,
     pub skipped: u64,
+}
+
+/// How many facts a rebuild reads at a time.
+const REBUILD_PAGE: u64 = 1024;
+
+/// Every fact of `kinds` on this branch through its committed head, in
+/// sequence order and each once: the selection read a page at a time at that
+/// bound, and the reply's cutoff the one the last page took. A rebuild folds
+/// the facts and hands the cutoff back as the point live delivery continues
+/// from
+/// ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md#d3-replay-is-removed)).
+pub async fn rebuild_facts(timeline: &Timeline, kinds: &[&str]) -> Result<TimelineQueryReply> {
+    let mut query = TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        from_event: None,
+        from_sequence: None,
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        include_publishing: true,
+        kinds: kinds.iter().map(|kind| (*kind).to_owned()).collect(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: NonZeroU64::new(REBUILD_PAGE).expect("a page keeps at least one fact"),
+        offset: 0,
+    };
+    let mut events = Vec::new();
+    let mut positions = Vec::new();
+    loop {
+        let reply = timeline.query(query.clone()).await?;
+        let through = reply.through;
+        let short = (reply.events.len() as u64) < REBUILD_PAGE;
+        let last = reply.positions.last().map(|position| position.sequence);
+        events.extend(reply.events);
+        positions.extend(reply.positions);
+        match last {
+            Some(last) if !short => query.from_sequence = Some(last + 1),
+            _ => {
+                return Ok(TimelineQueryReply {
+                    events,
+                    positions,
+                    through,
+                });
+            }
+        }
+    }
 }

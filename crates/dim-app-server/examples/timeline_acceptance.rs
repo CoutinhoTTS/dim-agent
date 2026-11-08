@@ -13,7 +13,7 @@ static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
-    history::{HistoryRenderer, summary_message},
+    history::{HistoryRenderer, read_context_in, replay_context, summary_message},
     host::*,
     timeline_tree::TreeCommands,
 };
@@ -761,6 +761,7 @@ async fn reads() -> std::result::Result<(), Error> {
                         )),
                         configuration: None,
                         prompt: None,
+                        failure_chain: None,
                     }),
                 ),
                 record(
@@ -795,8 +796,8 @@ async fn reads() -> std::result::Result<(), Error> {
         let mut timing = Vec::new();
         for _ in 0..20 {
             let start = Instant::now();
-            drop(timeline.context(4).await?);
-            drop(timeline.context(4).await?);
+            drop(replay_context(&timeline, 4).await?);
+            drop(replay_context(&timeline, 4).await?);
             timing.push(start.elapsed().as_secs_f64() * 1000.);
         }
         let captured = Arc::new(Mutex::new(None));
@@ -825,12 +826,13 @@ async fn reads() -> std::result::Result<(), Error> {
         let mut dispatch = Vec::new();
         for _ in 0..20 {
             let reader = active.clone();
+            let context = session.clone();
             let (started, running) = tokio::sync::oneshot::channel();
             let read = tokio::spawn(async move {
                 let through = reader.sequence();
                 let _ = started.send(());
-                drop(reader.context(through).await?);
-                drop(reader.context(through).await?);
+                drop(read_context_in(&context, "main", through).await?);
+                drop(read_context_in(&context, "main", through).await?);
                 Ok::<_, AgentError>(())
             });
             running.await?;
@@ -877,6 +879,9 @@ impl TimelineStore for BarrierStore {
     }
     fn head<'a>(&'a self, k: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
         self.inner.head(k)
+    }
+    fn batch_end<'a>(&'a self, k: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        self.inner.batch_end(k, sequence)
     }
     fn read_segments<'a>(
         &'a self,
@@ -1055,6 +1060,7 @@ fn interrupted_batch() -> Vec<EventDraft> {
             configuration: None,
             prompt: None,
             recovery: None,
+            failure_chain: None,
         })
         .into(),
     ]
@@ -1115,6 +1121,7 @@ async fn continue_after_recovery(path: &Path, label: &str) -> std::result::Resul
             request: interrupted_request(3),
             configuration: None,
             prompt: None,
+            failure_chain: None,
         }),
     );
     committed(&store, "interrupted", vec![next.clone()]).await?;

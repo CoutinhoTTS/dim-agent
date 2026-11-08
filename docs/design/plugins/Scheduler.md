@@ -1,6 +1,6 @@
 # Scheduler
 
-Status: Design approved; optional package implemented in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: TypeScript first ([overview Appendix C](../overview.md#appendix-c-implementation-language)).
+Status: Design approved; optional package implemented in [#317](https://github.com/arcships/dim/pull/317). Overall design: [overview §4](../overview.md#4-plugin-catalog); scope: [ADR 002](../../adr/002-plugin-scope.md) (process + Session). Phase: P2. Language: Rust, native, with no Node dependency ([overview Appendix C](../overview.md#appendix-c-implementation-language)). The TypeScript package it replaces is removed with the migration; [Appendix G](#appendix-g-rust-binding) is the Rust binding.
 
 **Delivery boundary.** The package and its public-flow verification are supplied by #317; installation remains explicit under §1.3. C4 tools (#150), Settings source declarations/read-write (#175), Settings events (#177), `sessions` (S2), live permission reads (#259), native input ownership (#267) and S10's [public composition](../process-typescript.md#52-public-pluginfiles-binding) supply its public dependencies. Agents idle unloading (#126/#331) and the first-reuse contract (#339) are merged. The package uses the coordinated rutis 0.16.0 upgrade and the unchanged Appendix D failure-reporting checks in §1.3; no core or rutis expansion is requested.
 
@@ -61,7 +61,7 @@ The shared declaration gate still permits a hung top-level module load to time
 out host startup; process modules follow the binding's author-guide rule.
 
 The [accepted feature dependency binding](../process-typescript.md#51-p6p7-access-through-declared-feature-dependencies)
-uses `definePlugin.inject: ["scheduleJobs", "toolRegistry"]` in this optional Session tool module.
+declares `scheduleJobs` and `toolRegistry` as this optional Session tool module's dependencies.
 Provider activation, retirement, retry and recovery follow that binding's current
 rules; Scheduler does not define another attachment policy or copy its error
 text. The stable process dependency boundary still applies. This settles the
@@ -70,38 +70,31 @@ text. The stable process dependency boundary still applies. This settles the
 | Surface | Current implementation and consequence |
 | --- | --- |
 | Session tool | A C4 Session definition, registered by the process row with `partRegistry`, injects `toolRegistry` and registers `schedule` from its apply with its declaration and asynchronous `execute`. Registration does no I/O. Registration and provider-generation changes follow the current C4 binding (§1.1). |
-| Process package / `scheduleJobs` | One row in `ServerConfig.session_typescript.rows` installs the package's ordinary process owner in the shared runtime; each Session mounts a copy of its Session definition there. The Session tool declares `scheduleJobs` in `definePlugin.inject` (§1.1). |
+| Process package / `scheduleJobs` | One optional process row, `Scheduler`, registered with `AgentBuilder::optional_plugin`, installs the process owner; its `apply` registers the `SchedulerSession` part with `partRegistry`. The Session part reads `scheduleJobs` through `names.key()` (§1.1). |
 | Management namespace | The process row restores its run store before registering `schedule` with `managementMethods` and publishing `scheduleJobs`. A failed restore retains the fault and still registers the namespace before failing the row, so subsequent calls report that row's failed status. Native per-call admission and `report`/`drain` follow the registering row's lifetime and status. |
-| Settings | Owner `settings.read/update` and `settings/schedule` are implemented (#175/#177). The process row alone declares source `schedule`, user file `schedule.json`, no `projectFile` and user-only `/max_concurrent_runs` (§7.1). Read the validated/defaulted document at use, and CAS with `expectedRevision`. Full-document local writes use Settings' existing trust boundary (§7); they do not authenticate a Scheduler save. |
+| Settings | The process row alone registers source `schedule`, user file `schedule.json`, no `projectFile` (§7.1). Read the validated/defaulted document at use, and CAS with its document revision. The native binding uses typed owner reads/writes; clients manage jobs through `schedule.*`, not generic `settings.*`. |
 | Storage | The [public binding](../process-typescript.md#52-public-pluginfiles-binding) supplies pluginFiles at the authorized product root. The embedding host provisions `scheduler/` before enabling the row; a missing parent returns `io` before the transaction callback. Scheduler inner v1 (A.7) and host outer v1 are unchanged. |
 | Sessions | Calls use `{ok:true,value}` / `{ok:false,error:{code,message,retryable}}`. `launch` returns `{sessionId,policy}`, `input` returns `{inputId,sequence}`, and `lookup` returns `accepted`/`unknown`. Keep data in these existing shapes. |
 | Native lifetime | Each S2 call holds its own lease. Agents' automatic idle unload is delivered by [#331](https://github.com/arcships/dim/pull/331) for [#126](https://github.com/arcships/dim/issues/126). Scheduler does not turn detachment into close or add its own unload loop. |
 
 ### 1.2 Impact
 
-No runtime, facade, loader, event format or rutis change is proposed. All new business behavior belongs to the Scheduler package. The source, tool and management namespace above have concrete consumers (Settings, ToolRegistry and operators); `scheduleJobs` exists only for the feature's two scopes. There is no additional registry, readiness service, notification bus or App Server business module.
+No facade, loader, event-format or rutis change is proposed; all new business behavior belongs to the Scheduler package. The runtime assembly gains one entry, `AgentBuilder::optional_plugin`, so the process row is optional (the host does not wait for it), and `plugin_rows` returns `PluginRows`, which carries the optional row ids; no core readiness path or mechanism is altered. The source, tool and management namespace above have concrete consumers (Settings, ToolRegistry and operators); `scheduleJobs` exists only for the feature's two scopes. There is no additional registry, readiness service, notification bus or App Server business module.
 
 ### 1.3 Concrete package row
 
-The optional package lives at `runtime/plugins/scheduler`, with package name
-`@dimcode/scheduler`. Its root module is the process plugin; from its apply it
-registers `session.ts` with `partRegistry` as the Session definition
-`SchedulerSession`, the Session tool. The plugin directory carries `dim-plugin.json`
-and is a default plugin listed in `runtime/default-plugins.json`, which PluginManager
-loads (`--defaults`). An embedding host may still build the row below from the
-manifest's `code` fields.
+The row fields below are the dependency, method-kind and Settings contract that the native binding keeps. Their TypeScript spelling (manifest `code` fields, `definePlugin`, `ctx.use`) is replaced by [Appendix G](#appendix-g-rust-binding). The process part is an optional row registered by the product entry point with `AgentBuilder::optional_plugin`, and the Session part is registered through `partRegistry` from that row's `apply`.
 
 | Row field | Process row |
 | --- | --- |
-| `id` | `scheduler` |
-| `name` | `@dimcode/scheduler` |
+| `id` | `Scheduler` |
+| `name` | `Scheduler` |
 | `config` | `{}` |
-| `inject` | `sessions`, `sessionPermissions`, `settings`, `pluginFiles`, `managementMethods`, `partRegistry` |
-| `provides` | `scheduleJobs: {call:"async"}`; apply registers `schedule` with `managementMethods` and the Session definition with `partRegistry` |
+| `inject` | `settings`, `pluginFiles`, `managementMethods`, `sessionPermissions`, `partRegistry`, `sessions` |
+| `provides` | `scheduleJobs`; apply registers `schedule` with `managementMethods` and the `SchedulerSession` part with `partRegistry` |
 | `settings` | The complete `schedule` source in §7.1, including its schema |
 
-The Session definition injects `scheduleJobs` and `toolRegistry`, provides nothing,
-and registers `schedule` with `toolRegistry` from its apply.
+The `SchedulerSession` part injects `scheduleJobs`, `toolRegistry`, the guide entries, `SessionConfig` and `SessionIdentity`, provides nothing, and registers `schedule` with `toolRegistry` and the §5.2 guide entry from its apply.
 
 **Failed-owner reporting.** The coordinated [rutis 0.16 upgrade](../rutis-0.16-upgrade.md)
 supplies the loader failure reporting required by Appendix C and Appendix D
@@ -110,8 +103,8 @@ items 8, 12 and 13. An unreadable or invalid run store fails the process row;
 Keep the row-level dependencies and failure assertions unchanged. Scheduler uses
 the same SDK version as the host and adds no loader workaround.
 
-The module's `definePlugin` and its supplied row agree on dependencies and
-method kinds. The two rows are one feature with two owners of work, not separate
+The optional process row and its registered Session part agree on dependencies and
+method kinds; they are one feature with two owners of work, not separate
 runtimes. The process row provides `scheduleJobs` and registers its namespace on the original context;
 there is no methods adapter or Session forwarding plugin. Structural config
 contains no jobs, policy defaults, credentials, timer settings or run state.
@@ -136,10 +129,11 @@ handlers follow the current unavailable-provider and retry contract in the
 Scheduler does not hard-code that binding's error text or assume a particular
 provider reattachment path.
 
-The declarations the process row registers are A.3's six literal methods. `list` and
-`history` are non-mutating, `interruption:"report"`; the other four are
-mutating, `interruption:"drain"`. All use `progress:false`. Their JSON values
-and errors use existing `MethodReply`; the tool maps A.2's reply into
+The declarations the process row registers are A.3's seven literal methods. `list`,
+`history` and `watch` are non-mutating, `interruption:"report"`; the other four are
+mutating, `interruption:"drain"`. All but `watch` use `progress:false`; `watch`
+declares progress, and its items are the watch's changes (§11.2, A.3). Their JSON
+values and errors use existing `MethodReply`; the tool maps A.2's reply into
 `ToolResult.content` and `isError`. No new App Server method is added.
 
 Live-policy reads use the delivered generated interface directly:
@@ -324,7 +318,7 @@ each tool list as a set (order and duplicates do not matter). Require
 input. This is S2 cap-stability, a conservative check rather than pointwise
 permission equivalence. Do not rewrite the reused Session's policy to pass it.
 
-The TypeScript package implements this pure calculation against the shared
+`PermissionPolicy::cap` and `within` (`crates/dim-agent-types/src/permission.rs`) implement this pure calculation against the shared
 [policy-cap fixtures](../../../tests/fixtures/permission-policy-cap.json).
 The fixture has `cap` vectors and separate `reuse` vectors with `x`,
 `savedEffective`, `liveBound`, `withinSaved` and `withinLive`. Cap vectors marked
@@ -377,8 +371,10 @@ Full table: Appendix B.
 | Where | What the model sees | Form | Placement and survival |
 | --- | --- | --- | --- |
 | Calling Session | `schedule` declaration | Tool declaration in adopted configuration (every Session; usable only in interactive leaders) | Configuration; survives compaction |
+| Calling Session | `wakeup` declaration | Tool declaration in adopted configuration (every Session; usable only in interactive leaders) | Configuration; survives compaction |
 | Calling Session | `schedule` result | `ToolResult.content` | Batch result position; summary only after compaction |
 | Run Session | `<dim-scheduler kind="scheduled-run" job="..." run="...">job name</dim-scheduler>`, then the prompt as user content | Raw marker block + user text of one Queue input | At its `input/consumed` position; unkeyed, so only via summary after compaction; child branches inherit it if consumed before the cut |
+| Woken Session | `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`, then the prompt as user content | Raw marker block + user text of one Queue input | At its `input/consumed` position; unkeyed (§10) |
 | Saving branch | `<dim-scheduler kind="report" job="..." run="...">`, then the run's outcome, the known Session id and the history path (A.6) | Raw marker block of one Steer input through existing `sessions.input` | At its consumed position; unkeyed; a failed or lost report is not resent |
 
 Run Sessions are non-interactive: `ask_user` and `schedule` stay declared, and their handlers refuse with an error result. Prior runs in a `reuse` Session remain history like any input. Job/run records reach a calling model through `ToolResult.content` or a consumed outcome report; there is no automatic context injection of the store, timers or diagnostics.
@@ -392,23 +388,25 @@ A text is protocol or policy as [model-facing prompts §4](../model-prompts.md#4
 | `schedule` declaration, schema | Protocol: the action set, `job_id`, `enabled`, `limit` and the `job` object with its fields |
 | `schedule` declaration, description | Protocol: "Manage scheduled jobs across this host, including other workspaces." states the tool's reach; "Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch." and "An omitted policy keeps its stored value, whose default can change with the saving origin." state runtime guarantees. Policy: "Inspect the old-to-new authority transition in the result." is guidance about how to work |
 | `schedule` result | Protocol: the `schedule: <code>` first line and its message, `schedule is available only in interactive leader Sessions.`, `schedule: cancelled before handover`, and the two unloading notices. The codes are `schedule_invalid`, `schedule_not_found`, `schedule_conflict`, `service_unavailable`, `service_reloading` and `invalid_data`; the model reads them and acts on them |
-| Run markers | Protocol: the element `dim-scheduler`, its kinds `scheduled-run` and `report`, the attributes `job` and `run`, and the input each opens. The scheduled-run body is the job's name and the text after it is the prompt saved for the job; the report body states the run's outcome, the Session id when there is one, and where the run's history is |
+| `wakeup` declaration, description | Protocol: "The wakeup fires one turn on the same Session with the given prompt, preserving its history and branch; it can be listed and cancelled from any client, and an expired or cancelled wakeup is never replayed." states what the tool does and the replay rule; the first sentence names the action |
+| `wakeup` result | Protocol: the `wakeup: created` first line and the `wakeup: <code>` first line of an error, `wakeup is available only in interactive leader Sessions.`, `wakeup: cancelled before handover`, and the two unloading notices; the record fields are the protocol's identifiers |
+| Run markers | Protocol: the element `dim-scheduler`, its kinds `scheduled-run`, `report` and `wakeup`, the attributes `job` and `run`, and the input each opens. The scheduled-run body is the job's name and the text after it is the prompt saved for the job; the wakeup body is the wakeup id and the text after it is the prompt the wakeup was saved with; the report body states the run's outcome, the Session id when there is one, and where the run's history is |
 | Run outcome report, body | Protocol: "Scheduled job …, run …: <state> (<detail>).", the Session id when there is one, and the outcome vocabulary a run can report. Policy: "Inspect schedule.history for this job." is guidance about how to work, on the body's last line; the method name it states is protocol |
 
 The report's body keeps its sentences and is escaped as one text with `escaped(...)`, as the Workflow report's is, so a job id or an outcome detail that carries markup cannot open or close the tag; the attributes are escaped the same way.
 
-The policy text is a factory member: `code.config.description` replaces the declaration's description and `code.config.report_guidance` replaces the report's guidance line; the product sets neither, so the built-in texts are in force. A member holds one text — a whole description, or one line of guidance — and the flow tests pin any protocol sentence it contains: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)). `report_guidance` must be one line, and the configuration enforces it: the guide entry (§5.2) tells the model the report's last line is guidance and not part of the scheduler's account, so a value with a line break is refused when the plugin loads (`scheduler/index.ts`). A profile that changes it keeps it to one line.
+The policy text is a factory member: `description` replaces the declaration's description and `report_guidance` replaces the report's guidance line (Appendix G); the product sets neither, so the built-in texts are in force. A member holds one text — a whole description, or one line of guidance — and the flow tests pin any protocol sentence it contains: a candidate that changes one changes protocol, and lands with the behaviour and its test ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)). `report_guidance` must be one line, and the configuration enforces it: the guide entry (§5.2) tells the model the report's last line is guidance and not part of the scheduler's account, so a value with a line break is refused when the plugin is installed. A profile that changes it keeps it to one line.
 
-Both kinds carry the guide entry: the Scheduler Session part registers one entry for `dim-scheduler` from `apply`, session-scoped, so a request in the run Session the scheduled-run marker opens, and a request in the saving branch the report lands on, each carry the entry from that Session's part ([Prompt §6.2](Prompt.md#62-the-writers)).
+All three kinds carry the guide entry: the Scheduler Session part registers one entry for `dim-scheduler` from `apply`, session-scoped, so a request in the run Session the scheduled-run marker opens, a request in the woken Session the wakeup marker opens, and a request in the saving branch the report lands on, each carry the entry from that Session's part ([Prompt §6.2](Prompt.md#62-the-writers)).
 
 A history resumed from before the report marker keeps its bare report as written: nothing rewrites history, so a resumed branch replays the older untagged text and the channel rule's exception list does not grow for it ([model-facing prompts §6.1](../model-prompts.md#61-what-it-covers)).
 
 ### 5.2 The guide entry
 
-One entry covers both kinds, and its text is code ([Prompt §5](Prompt.md#5-facts-that-reproduce-it)):
+One entry covers all three kinds, and its text is code ([Prompt §5](Prompt.md#5-facts-that-reproduce-it)):
 
 ```
-<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next.
+<dim-scheduler kind="scheduled-run" job="nightly-build" run="run-7f2">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind="report" job="nightly-build" run="run-7f2">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next. And <dim-scheduler kind="wakeup">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id.
 ```
 
 Every sentence is protocol, and each states one thing the model needs in order to place the tags:
@@ -418,6 +416,7 @@ Every sentence is protocol, and each states one thing the model needs in order t
 - "In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel." — the scheduled-run input's shape and the channel its prompt arrives in.
 - "In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request." — the report's shape and its trust class.
 - "The report's last line is not part of that account: it is guidance on what to do next." — the closing line's class: guidance on what to do next, not part of the account above it.
+- "And <dim-scheduler kind=\"wakeup\">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id." — the wakeup tag's kind, the one-shot delivery and the body (§10).
 
 It follows the exec notification's entry (`<dim-notification>`, order 10, [WorkspaceTools](../../architecture/rust-agent/plugins/WorkspaceTools.md#backgroundexec)) in form and length: a runtime notice whose attributes carry the identifiers of a run.
 
@@ -426,6 +425,8 @@ It follows the exec notification's entry (`<dim-notification>`, order 10, [Works
 | Interface | Kind | Purpose |
 | --- | --- | --- |
 | `schedule` | Tool registered with `toolRegistry` (Session), risk `persistent_configuration` | Model manages jobs |
+| `wakeup` | Tool registered with `toolRegistry` (Session), risk `persistent_configuration` | The model schedules a wakeup for its own Session (§10) |
+| `session.wakeup.create/list/cancel` | `sessionMethods` (Session, namespace `session.wakeup`) | Clients create, read and cancel one Session's wakeups (§10) |
 | `schedule.list/save/delete/set_enabled/run_now/history` | `managementMethods` (process, namespace `schedule`) | Operators manage jobs |
 | Run outcome delivery | One Steer attempt to the saving branch; no resend (A.6) | Scheduler-owned notification; durable record is `schedule.history` |
 | CLI entry | `dimcode scheduled <verb>` and the `/scheduled` panel ([management surfaces](../cli-commands.md#management-surfaces)) | Operators manage jobs from the terminal over these methods: one job per panel entry, with toggle, edit, add, remove, run and history; the subcommands are the same adapter with no Session |
@@ -433,11 +434,11 @@ It follows the exec notification's entry (`<dim-notification>`, order 10, [Works
 
 ## 7. Security
 
-`schedule` declares the risk `persistent_configuration`, which Permission treats as unclassified: FullAccess allows it (E1), WorkspaceWrite asks and ReadOnly denies. No Permission change is needed (#45). A run only writes input; its tools are admitted under the run Session's policy, and approvals are not pre-granted. Tool-saved jobs record `created_by` and are visible for review. Owner `settings.update` cannot change user-only `/max_concurrent_runs`; the implemented protected client `settings.update` can. Jobs store no credentials. Tool access is global within this host's Scheduler: an admitted interactive leader can list/get job prompts across Sessions/workspaces and update another branch's job. An authorizing update takes over future authority and report routing as in §3.3; it does not notify the previous saving branch. Management access can also read all job prompts. This is not Session/cwd isolation.
+`schedule` declares the risk `persistent_configuration`, which Permission treats as unclassified: FullAccess allows it (E1), WorkspaceWrite asks and ReadOnly denies. No Permission change is needed (#45). A run only writes input; its tools are admitted under the run Session's policy, and approvals are not pre-granted. Tool-saved jobs record `created_by` and are visible for review. Scheduler admits at most eight active runs across jobs; neither tools nor management methods configure this limit (A13). Jobs store no credentials. Tool access is global within this host's Scheduler: an admitted interactive leader can list/get job prompts across Sessions/workspaces and update another branch's job. An authorizing update takes over future authority and report routing as in §3.3; it does not notify the previous saving branch. Management access can also read all job prompts. This is not Session/cwd isolation.
 
-The `schedule` source uses the existing [Settings trust boundary](../appserver/settings-service.md#7-security): protected local clients and the user's own configuration are trusted writers. A full-document `settings.update` or a direct user-file edit may supply `created_by` and `policy_cap`; Scheduler uses those declared values for future authority bounds and report routing. They are configuration, not proof that Scheduler captured an actual branch policy. These writes are not treated as `schedule.save`: they do not normalize the origin to `user`, synthesize a policy cap or redirect reports. The writer is responsible for the document's semantic consistency, including advancing a changed job's `revision`; an edit that reuses that revision is not detected by A.5's revision comparison. Use `schedule.save` for Scheduler's captured origin/cap and job-revision behavior.
+The `schedule` source uses the existing [Settings trust boundary](../appserver/settings-service.md#7-security): user-owned persisted configuration is trusted. Native clients use `schedule.*`; the Rust source is not exposed through generic `settings.read/update`. A persisted document may supply `created_by` and `policy_cap`; Scheduler uses those declared values for future authority bounds and report routing. They are configuration, not proof that Scheduler captured an actual branch policy. These writes are not treated as `schedule.save`: they do not normalize the origin to `user`, synthesize a policy cap or redirect reports. The writer is responsible for the document's semantic consistency, including advancing a changed job's `revision`; an edit that reuses that revision is not detected by A.5's revision comparison. Use `schedule.save` for Scheduler's captured origin/cap and job-revision behavior.
 
-Writing the user's full document is an operator action that can change all jobs and report destinations; it is broader than management `schedule.save`, which always captures `user` and reports only to history. No project source may supply that authority. In-process plugins remain trusted (AGENTS.md rule 11); `userOnly` is the existing owner-write restriction, not a sandbox against such a plugin. A source edit does not rewrite an accepted run's fixed `report_to` or launched policy. Every later run still applies §3.3's current starter/host bounds and reuse checks; a configured cap does not grant authority beyond them. The package must perform those live-policy checks before launch or reuse input. No provenance service, signature, extra metadata store, Settings restriction or core protocol is added.
+Writing the user's full document is an operator action that can change all jobs and report destinations; it is broader than management `schedule.save`, which always captures `user` and reports only to history. No project source may supply that authority. In-process plugins remain trusted (AGENTS.md rule 11), not sandboxed by Settings. A source edit does not rewrite an accepted run's fixed `report_to` or launched policy. Every later run still applies §3.3's current starter/host bounds and reuse checks; a configured policy cap does not grant authority beyond them. The package must perform those live-policy checks before launch or reuse input. No provenance service, signature, extra metadata store, Settings restriction or core protocol is added.
 
 ### 7.1 Settings source
 
@@ -449,8 +450,8 @@ The Scheduler process row registers one source in its `apply`
 | `source` | `schedule` |
 | `userFile` | `schedule.json`; the native profile uses Settings' existing `user/schedule` row instead |
 | `projectFile` | Absent: user scope only, no project scope or merge |
-| `userOnly` | `["/max_concurrent_runs"]`; Scheduler's owner writes preserve this value |
-| Schema root | Object with `jobs` (array, default `[]`) and `max_concurrent_runs` (integer, minimum 1, default 4); job fields and constraints are A.1/A.4 |
+| Document root | Object with `jobs` (array, default `[]`); job fields and constraints are A.1/A.4 |
+| Legacy field | `max_concurrent_runs` (integer, minimum 1, default 4) remains readable and is preserved by job writes solely for stored-document compatibility. It does not affect admission. The fixed limit is eight (A13); no user-configurable concurrency field or `userOnly` declaration is required. |
 
 Settings applies these defaults and validates external documents once at its boundary. An invalid
 document is an error, not an empty job list. The source holds jobs only; A.7's inner v1 run history
@@ -480,7 +481,105 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. Appendix F distinguishes the specified bindings from package acceptance; implementation adds no optional-service API, notification protocol, runtime event or infrastructure requirement.
+The only mechanism additions are the runtime assembly entries the binding uses: `AgentBuilder::optional_plugin` (an optional process row), `PluginRows` returned by `plugin_rows`, and `PartRegistry::register` for the Session part. Existing C3/C4, S2, Settings and pluginFiles mechanisms remain the baseline. Appendix F distinguishes the specified bindings from package acceptance; implementation adds no optional-service API, notification protocol, runtime event or infrastructure requirement beyond those assembly entries.
+
+## 10. Session-scoped wakeup
+
+A wakeup is a one-shot scheduled `input/message` into an existing Session: create, list and cancel through the `session.wakeup` methods, or through the `wakeup` tool in an interactive leader Session. It is not a Job: it captures no policy, launches nothing, has no deadline, and never appears in `schedule.list` or in the run history.
+
+### 10.1 Owner and record
+
+The Scheduler process part owns wakeups for the reason §1 gives for jobs: the trigger is a host-side timer that must fire while the target Session is idle or unloaded and while no client is connected, and the record must survive client exit and daemon restart. A Session part owns none of that ([ADR 002](../../adr/002-plugin-scope.md) D1); the Session side is only the C1 surface that forwards to the process owner through a keyed service, as `SchedulerSession`→`ScheduleJobs` forwards the `schedule` tool ([session-boundary](../contracts/session-boundary.md) D2's "client method about a Session" row).
+
+Records live in the Scheduler's own [`pluginFiles`](../../../crates/dim-app-server/README.md#trusted-plugin-storage) scope as `scheduler/wakeups.json`: its own inner v1 document inside the host's unchanged `{version: 1, text}` envelope, written with the same `withLock` and `file.replace` transaction as `scheduler/runs.json` (A.7). `runs.json` is untouched and nothing is migrated.
+
+| Field | Meaning |
+| --- | --- |
+| `wakeup_id` | The record's identity; the tool and the methods return it |
+| `session_id`, `branch_id` | The target; the record never changes them |
+| `at` | The canonical UTC instant the input is written (A.1's timestamp form) |
+| `prompt` | The delivered text (non-empty, at most 32 KiB as a job prompt) |
+| `state` | `scheduled`, `fired`, `cancelled` or `expired`; the three terminal states carry `settled_at` |
+| `created_at`, `settled_at?` | Canonical UTC timestamps |
+
+A missing file holds no records. A file that is not valid v1 — malformed JSON, an unknown version, a repeated id or an inconsistent record — fails the row like an invalid run store, and its bytes stay unchanged.
+
+### 10.2 Methods and tool
+
+`session.wakeup` is a leaf `sessionMethods` namespace registered by the Scheduler Session part ([session-boundary A.1](../contracts/session-boundary.md)). Rpc restores an unloaded Session for each call, so list and cancel keep working when the target is cold.
+
+| Method | Parameters | Reply |
+| --- | --- | --- |
+| `session.wakeup.create` | `{sessionId, branchId, at, prompt}` | `{wakeupId}` |
+| `session.wakeup.list` | `{sessionId, branchId?}` | `{wakeups: [{wakeupId, at, prompt, state}]}`, newest first; `branchId` defaults to `main` |
+| `session.wakeup.cancel` | `{sessionId, wakeupId}` | `{}` when the call settles a `scheduled` record; `{state}` when the record had already reached a terminal state |
+
+`at` is an absolute RFC 3339 instant. Fields are camelCase and `deny_unknown_fields`, and an empty string is `invalid_params` like the neighbouring Session methods. Errors: `invalid_params` for a malformed `at`, an empty field, an unknown field or a prompt over 32 KiB; `wakeup_not_found` for a cancel naming no record of the calling Session (another Session's id answers like an unknown one); Rpc's own `session_closed` for a Session id that names no Session; and the method table's `unknown_method`, `service_reloading` or `service_unavailable` while the Scheduler row is absent, reloading or failed. The size bound is checked at the wire boundary, so a caller's oversized prompt is never the stored data's `invalid_data`; the record's own validation stays as the storage-side guard.
+
+The `wakeup` tool takes `{at, prompt}` and defaults the Session and branch to the caller. Its declaration states the bound as at most 32768 bytes of UTF-8 in the `prompt` description, and its handler refuses a larger prompt with `invalid_params`; the handler is the bound's single authority because JSON Schema's `maxLength` counts characters, not bytes. Its handler refuses non-interactive Sessions and Collaboration members like the `schedule` tool, and a refusal writes nothing.
+
+### 10.3 Firing and the cancel boundary
+
+The timer evaluates wakeups as part of the same one-second pass as job windows; there is no second scheduler and no Job-engine path. A `scheduled` record whose instant is observed within the grace window fires once: the process owner writes one Queue input through the public `sessions.input` with `submissionId` `wakeup:<wakeup_id>`, a first raw block `<dim-scheduler kind="wakeup">wakeup id</dim-scheduler>`, and the prompt as content. Nothing else is called: no `sessions.launch`, no `sessions.stop`, no `withdraw`, no deadline. Several records due in one pass reach their Sessions in `at` order, with the record id as the stable tie-breaker between records sharing an instant; the file's order is not a contract.
+
+The target's own InputQueue and turn scheduler decide what the input becomes: an idle Session gets a turn, a running one queues the input behind it one turn per `turn/end`, and an unloaded Session is restored by the acquire inside `sessions.input`. The Session keeps its id, its `main` branch and its whole Timeline; a fork is a different Session id and inherits nothing.
+
+The record is settled `fired` only after the input's write is published. That write is the cancel/fire boundary: a `session.wakeup.cancel` that settles the record first prevents the input from being written, and one that arrives after the write reports `fired` and is not an error. The pass and a cancel are serialized at the record level, so those two outcomes are exhaustive: a `{}` reply never covers a record whose input was written. A cancel can therefore wait for as long as a cold-session restore takes, because the pass holds the lock across the input write. The same lock covers the expiry check of §10.4, whose `sessions.lookup` acquires the target too: checking a stale record can restore an idle-unloaded Session, and a cancel can wait for that restore. That is accepted because answering exactly whether the prompt was delivered reads the target's Timeline, and the `sessions` service has no read that skips the acquire. The cost is bounded to records past the grace, one lookup each: a definite answer settles the record, so the lookup repeats only while a transient failure keeps it from settling. A record whose target Session is gone (`session_closed`, `branch_missing`, or `branch_ended`: an ended line accepts no new input) is settled `cancelled` and never relaunches a Session. Any other write failure leaves the record `scheduled`: the next pass retries with the same submission id, which a branch accepts once, or the grace window expires it.
+
+### 10.4 Restart and expiry
+
+A record survives an idle unload of the target and a daemon restart. The rule is enforced by the timer's per-second pass, which starts with the row: on start it re-evaluates every `scheduled` record. An instant still inside the 60 s grace (A.4's window rule) fires; an older one becomes `expired` and is never replayed; a record whose Session or branch is gone becomes `cancelled`. The input write is published before the record is settled, so a process that stops between the two leaves a `scheduled` record whose prompt is already in the target's history; before it expires such a record the pass performs the same `sessions.lookup` a restart performs for an uncertain run (`submissionId` `wakeup:<wakeup_id>`) and settles `fired` when the input is found, without writing a second one, so a delivered prompt is never reported `expired` and delivery stays exactly-once. Only a lookup that answers that the target never accepted the submission expires the record, and one that answers that the Session or branch is gone settles it `cancelled`; any other failure leaves it `scheduled` for the next pass, which repeats the check until it gets a definite answer. An instant already past the grace at create is recorded `expired` immediately. An expiry check launches and stops nothing and writes no input; its only effect on the target is the acquire inside `sessions.lookup`, which can restore an idle-unloaded Session (§10.3).
+
+**Retention.** A terminal record has no consumer after it settles: `list` is its only reader, and a record nobody listed is already unrecoverable, so the bound costs no information the design promises. A terminal record is removed once seven days have passed since it settled — `settled_at`, not `created_at`, so a record created long before it fired is not dropped early; the timer pass removes it in the same write that settles the pass's other outcomes, so the file never grows without bound, the per-second pass never parses more than it must, and `list` reads exactly what is stored. The pass reads the file once per second, takes one clock reading, and writes at most once per pass.
+
+### 10.5 Goal and Collaboration
+
+A wakeup in an active Goal flows in like a user input: it is an ordinary Queue input, its `turn/end` is one more Goal decision point, it does not alter the Goal state, and it does not consume the continuation budget, which counts only Goal's own continuation inputs ([Goal §2](Goal.md#2-data-and-state)). In a Collaboration member Session the tool refuses; a wakeup created through the methods remains an ordinary input and interleaves with the leader's delegations by sequence like any other input.
+
+Rule check: the timer writes only `input/message` through the public `sessions` service (§4 rule 1); the wakeup input reaches the model only as a consumed Queue input (§4 rule 6); nothing structural or business lives in core — the record is Scheduler's own business store (D4) and the surface is the specified `sessionMethods` namespace (D5); and no ADR is needed because D1's scope rule and D2's client-method row already decide the placement.
+
+## 11. Client change notices
+
+Scheduler's records are process state with no Timeline fact, so a client that shows them reads the owner's query — `session.wakeup.list` for wakeups, `schedule.list` and `schedule.history` for jobs — and otherwise polls. A committed change is announced as a Session notice ([session broadcast notices](../appserver/session-notices.md)): `{source: "Scheduler", kind: "wakeup", data: {branchId, wakeupId, state}}` on the target Session's channel, sent with `session_broadcast::notify` from Scheduler's own context after the record's write commits. The notice reports that the record changed; the owner's query is its truth, and a client that does not handle `source` or `kind` ignores it.
+
+### 11.1 Wakeups
+
+| Change | Notice | When |
+| --- | --- | --- |
+| `create` stores a record | `state` is the state the record was created with: `scheduled`, or `expired` when the instant is already past the grace | After the file write commits |
+| `cancel` settles a `scheduled` record | `cancelled` | After the file write commits; a cancel of a terminal record changes nothing and sends nothing |
+| The timer pass settles records | One notice per settled record: `fired`, `cancelled` (the target Session or branch is gone), or `expired` | After the pass's settle write commits |
+| Retention pruning | None | A pruned record's last readable change was announced when it settled |
+
+- A `fired` notice is a committed-state notice. The pass publishes the input to the Timeline, settles the record, then announces it after the settle commits. It is not ordered against the input's `session.event`, which the Session emits when it dispatches the input, so either may reach a client first ([session notices §4](../appserver/session-notices.md#4-emitting); the contract's Order rule covers an owner that reacts to an event it observed through the broadcast). A client relates the notice and the input by the input's submission id `wakeup:<wakeup_id>`.
+- The notice names `branchId` because the record targets one branch, but it travels on the Session's channel: every client attached to the Session receives it, whichever branch it views.
+- No Timeline event and no `hello.features` entry: a notice is not a fact later decisions use, and notifications are not methods ([session broadcast notices §5](../appserver/session-notices.md#5-rpc-forwarding)). Protocol v3 connections receive it; v1 and v2 never do.
+- Delivery follows the notice contract: a Session that is not loaded, or that no client observes, has no listener, so the notice is dropped and nothing is replayed. A client reads `session.wakeup.list` when it attaches and on every notice.
+
+### 11.2 Jobs and runs
+
+A management client has no Session, so the jobs-and-runs half is a connection-bound change stream on the calling connection instead of a Session notice. `schedule.watch {}` declares `progress`, stays open while it watches, and sends every item as the call's progress: `management.progress {id, method: "schedule.watch", data}`, written before the reply and never held behind it. Each watch numbers its items from 0:
+
+| Item | When |
+| --- | --- |
+| `{seq: 0, kind: "watching"}` | Once, after the connection's watch is registered and before any change can be sent to it |
+| `{seq: n, kind: "jobs"}` | A write to the `schedule` Settings document commits: a job save, delete or pause/resume, and a run's write of the job's `session_id`, from the `schedule` source's `settings.changed` event |
+| `{seq: n, kind: "run", jobId, runId, state, terminal}` | A run's record changes: one item for each state the record took in that write, in the order the writes happened; `terminal` is true exactly on a state that ends the run: `completed`, `failed`, `cancelled`, `timed_out`, `lost`, `skipped` or `missed` |
+
+- Items go only to the connections that watched: there is no broadcast, and a connection that did not watch receives nothing.
+- One watch per connection: a second `schedule.watch` on the same connection answers the earlier call `{}` and takes over, so one change sends one item. The earlier call's progress ends at its reply.
+- A watch belongs to the generation that admitted it. The call ends in one of three ways, as the client sees it:
+
+  | Event | The open `schedule.watch` call answers |
+  | --- | --- |
+  | The Scheduler generation unloads (reload, disable, shutdown) | `operation_interrupted`, sent by the existing call admission. The client calls `schedule.watch` again; while the namespace reloads, that call answers `service_reloading`, which is retryable |
+  | The same connection calls `schedule.watch` again | `{}`, and the new call takes over |
+  | The connection closes | `{}`, which nobody receives. A disconnect cancels nothing, so the handler ends on `caller.closed()` |
+
+- A watch ends as the call's reply, not as a notice: rutis cancels a consumer's generation token at the provider's withdrawal, before any listener or task of the stopping generation can run, and its callers answer `gone` from then on (A.2).
+- Progress is best effort: a delivery the connection cannot take is dropped, and an item can be lost. Every item carries its per-watch `seq`; a gap tells the client to re-read.
+- The client's rules: call `schedule.watch`, then read `schedule.list` and `schedule.history` after `seq: 0` arrives, which closes the race between registering and reading; re-read on each item; re-read everything on a `seq` gap; on `operation_interrupted`, call `schedule.watch` again. `schedule.list` and `schedule.history` are the truth.
+- No notification name is declared: `hello.features` lists `schedule.watch` with the namespace's other methods, and the items are the call's progress, not a notification.
 
 ## Appendix A. Interface details
 
@@ -491,7 +590,7 @@ None. Existing C3/C4, S2, Settings and pluginFiles mechanisms are the baseline. 
 | Job | `id`, `name`, `schedule` (A.4), `prompt` (text ≤ 32 KiB), `cwd`, `resource_node` (P3 only; absent from current package records, which use the control node), `model` (`None` = the profile's model), `agent_id` (optional; `None` = Agents' default profile), `mode` (`create` \| `reuse`), `session_id` (bound by `reuse` on first run), `policy` (optional preset, narrowing only), `policy_cap` (captured with `created_by` at the latest authorizing save), `enabled`, `enabled_at?` (required exactly when enabled), `max_run_minutes` (default 60, A7), `revision`, `created_by` (`user` \| `tool{session_id,branch_id}`; latest authorizing save) |
 | Run | `run_id`, `job_id`, `window` (instant or `manual`), `state`, `deadline_at?`, `session_id?`, `session_origin?` (`launch` \| `reuse`), `policy?` (actual run Session policy), `input_event_id?`, `submission_id`, `report_to` (tool-saved job's saving branch; absent for management-saved jobs), `created_at`, `ended_at` (terminal only), `detail`. The terminal `state` is the outcome. Timestamps use UTC `YYYY-MM-DDTHH:mm:ss.sssZ`, always three fractional digits, so chronological and lexical order agree. |
 
-Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy, changed job, `settings_read_failed` and `binding_unconfirmed`), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. A.5.1's `binding_conflict` is a `Run.detail` diagnostic on a continuing run, not a skipped outcome. History keeps the last 100 terminal runs per job, in addition to active runs, records whose owned Session cleanup has not settled, and the last launch-ownership record of each still-referenced Session (A8, A.7). The Settings source `schedule` holds one document, `{ jobs: [Job], max_concurrent_runs }` (A13), validated against Scheduler's schema and given its defaults by Settings on write and when reading a persisted file; Scheduler uses it as delivered. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; this does not authenticate other client/file writes (§7). `Job.revision` is the selected job's revision, advanced by Scheduler on every job mutation. It is distinct from Settings' opaque document revision used for the CAS. Run records use the existing `pluginFiles` transactions (A.7).
+Run states: `skipped` (overlap, capacity, disabled, node unavailable, policy, changed job, `settings_read_failed` and `binding_unconfirmed`), `missed`, `launching`, `submitted`, `running`, terminal `completed`/`failed`/`cancelled`/`timed_out`/`lost`. A.5.1's `binding_conflict` is a `Run.detail` diagnostic on a continuing run, not a skipped outcome. History keeps the last 100 terminal runs per job, in addition to active runs, records whose owned Session cleanup has not settled, and the last launch-ownership record of each still-referenced Session (A8, A.7). The Settings source `schedule` holds one jobs document with the legacy compatibility field described in §7.1. Settings applies Scheduler's document defaults and validation on write and when reading persisted data; Scheduler uses the delivered jobs directly. Job writes are Scheduler's typed writes to that document, CAS on its revision, so tool and management saves never overwrite each other silently; this does not authenticate other client/file writes (§7). `Job.revision` is the selected job's revision, advanced by Scheduler on every job mutation. It is distinct from Settings' opaque document revision used for the CAS. Run records use the existing `pluginFiles` transactions (A.7).
 
 The following fields carry facts needed after restart. They belong to those existing
 records; no separate ownership store or scheduler state document is introduced.
@@ -544,7 +643,7 @@ Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, 
 
 ### A.3 Management methods
 
-Namespace `schedule`, registered with `managementMethods`: its declarations list the methods below (`mutating` for all but `list` and `history`); its `call(MethodCall, cancelled, progress): async -> MethodReply` dispatches them. Parameters and results are JSON objects; errors are `{code, message}` with business codes from Appendix C. Rpc owns their JSON-RPC error mapping.
+Namespace `schedule`, registered with `managementMethods`: its declarations list the methods below (`mutating` for all but `list`, `history` and `watch`); its `call(MethodCall, cancelled, progress): async -> MethodReply` dispatches them. Parameters and results are JSON objects; errors are `{code, message}` with business codes from Appendix C. Rpc owns their JSON-RPC error mapping. `schedule.watch` declares `progress` and no notification (§11.2).
 
 | Method | Parameters | Result |
 | --- | --- | --- |
@@ -554,8 +653,9 @@ Namespace `schedule`, registered with `managementMethods`: its declarations list
 | `schedule.set_enabled` | `{job_id, enabled}` | Pause/resume |
 | `schedule.run_now` | `{job_id}` | The `Run` record it accepted or skipped (A.1): `run_id`, `job_id`, `window`, `state`, `detail`, `created_at`, `ended_at`, `submission_id`, plus the optional fields A.1 defines, as that run has them |
 | `schedule.history` | `{job_id, limit?}` | Runs, newest first |
+| `schedule.watch` | `{}` | `{}`. Registers the calling connection's watch and stays open while it watches (§11.2); a second watch on the same connection answers the earlier call `{}` and takes over |
 
-The process row's `schedule` namespace (§1.3) uses existing method admission: `list`/`history` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent.
+The process row's `schedule` namespace (§1.3) uses existing method admission: `list`/`history`/`watch` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent.
 
 ### A.4 Schedule formats
 
@@ -666,7 +766,7 @@ launch another Session while the job remains unbound. No immediate-delete policy
 or binding inferred from old run history is introduced.
 
 Unbound reuse jobs due in the same window can conflict with one another while
-writing the shared Settings document, up to `max_concurrent_runs` at once. A later
+writing the shared Settings document, up to eight at once (A13). A later
 window that launches a new Session does not inherit the first window's history.
 
 One-off disabling uses A.4's existing recorded-window evaluation: a window with
@@ -805,7 +905,7 @@ Verify actual bridge flows through management methods and the `schedule` tool, w
 
    Cross-origin edit: save a create-mode job from tool branch A with no explicit policy, start a run and observe its published input. Management `schedule.save` then replaces its origin/cap with `user`/the host maximum; future runs use the management read-only default and only history. A rename-only tool update from FullAccess branch B, omitting `policy`, replaces both with B/its current cap; future runs now use FullAccess and report to B. Verify the tool description discloses the takeover and the result shows ReadOnly → FullAccess plus the origin/cap/report-target changes. The already-accepted run still reports to A and its launched authority is unchanged. An above-cap policy, stale CAS or failed required policy read preserves the previous job/pair; `run_now` and `set_enabled` preserve the origin/cap pair. Hold a run after its launching record commits but before launch, change its job, then verify `skipped: changed` and no launch/input; repeat after launch but before input, preserving the owned Session for cleanup. An edit to another job does not skip the run. Authorizing saves keep their no-retry CAS rule. A.5.1 covers one unrelated-job binding conflict with a reread/revalidated retry, then a second definitive conflict that still inputs once, records binding_conflict and keeps the unchanged eligible job unbound; include one-off at runs. Changed/disabled/bound/create-mode jobs, read failures, definitive rejection and possibly-committed replies retain their specified outcomes. Restart before/during binding settles lost with origin-dependent reporting and no repeated launch/input. Verify later runs learn binding only from Settings and unused Sessions follow newest-100 terminal-reference retention. Cover global cross-workspace tool visibility.
 
-15. Through protected local `settings.update` and the user configuration storage, change a job's origin/cap and advance its revision. The next run uses the configured report destination and still respects live starter/host bounds, without replacing the fields or fabricating a Scheduler save. An accepted run keeps its old destination and authority. Show that a same-revision raw edit is not detected by the accepted run's revision recheck (§7). Missing configuration gets the schema defaults; an invalid document remains invalid, project scope is rejected, owner writes cannot change `/max_concurrent_runs`, and a protected local client can.
+15. Through user-owned persisted configuration, change a job's origin/policy cap and advance its revision. The next run uses the configured report destination and still respects live starter/host bounds, without replacing the fields or fabricating a Scheduler save. An accepted run keeps its old destination and authority. Show that a same-revision raw edit is not detected by the accepted run's revision recheck (§7). Missing configuration gets the document defaults; an invalid document remains invalid and project scope is rejected. Tool and management attempts to configure concurrency are rejected without changing jobs. Eight distinct active jobs are admitted and the ninth is skipped for capacity, regardless of a lower or higher legacy `max_concurrent_runs` value. Job writes preserve that legacy field; generic `settings.*` remains unavailable for this Rust source.
 
 ## Appendix E. Assumptions
 
@@ -821,7 +921,7 @@ Verify actual bridge flows through management methods and the `schedule` tool, w
 | A9 | Tool usable only in interactive leader Sessions; the handler refuses elsewhere | [Overview §6.2](../overview.md#62-constraints) constraint 15; judgment | Runs could create jobs |
 | A10 | One risk category for all actions | [Overview §6.2](../overview.md#62-constraints) constraint 7 | Split read-only tool |
 | A11 | Tool-created jobs use the caller's resource node | Judgment (overview §6.3) | Other nodes allowed |
-| A13 | Max concurrent runs = 4, the user-only field `max_concurrent_runs` of the `schedule` document, read at each window | Judgment; ADR 002 D4 | Other limit |
+| A13 | At most eight active runs across jobs, fixed by Scheduler, not user-configurable. A later window of the same active job is skipped, not queued. | Maintainer decision | Other limit |
 | A14 | Deleting a job does not stop its active run | Judgment | Delete stops the run |
 | A15 | Capture source/cap together at each authorizing save (§3.3) | User decision within E2 | Other save-authorization semantics |
 
@@ -846,21 +946,36 @@ No complete Scheduler behavior is claimed before Appendix D passes.
 | Record completeness | A.1 defines the enable anchor, accepted deadline, actual policy and Session origin in the existing Job/Run records; A.7 defines the first producer's complete inner v1. The record contract is accepted in #270; implement it and exercise restart, timeout and retained ownership through Appendix D. No core/protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) is delivered by merged #331. Scheduler uses existing S2 holds and does not implement host unloading. |
 
-Known first-reuse limit (A.5.1): unbound reuse jobs due together can conflict while writing the same Settings document, up to `max_concurrent_runs` at once. After two definitive conflicts, the first window can run with `binding_conflict` while the job stays unbound. Sessions referenced by those runs, by `failed: binding_rejected` or `lost` runs, or by skipped runs follow the newest-100-terminal-record retention. While unbound, each later window can allocate a new Session without the first window's history; no tighter allocation bound is claimed. An unconfirmed binding reply skips input, records history only and lets ordinary settlement disable a one-off `at` job without running it. A restart before input settles a known-Session run `lost` by lookup and never repairs its binding; tool-origin `lost` follows A.6 reporting.
+Known first-reuse limit (A.5.1): unbound reuse jobs due together can conflict while writing the same Settings document, up to eight at once (A13). After two definitive conflicts, the first window can run with `binding_conflict` while the job stays unbound. Sessions referenced by those runs, by `failed: binding_rejected` or `lost` runs, or by skipped runs follow the newest-100-terminal-record retention. While unbound, each later window can allocate a new Session without the first window's history; no tighter allocation bound is claimed. An unconfirmed binding reply skips input, records history only and lets ordinary settlement disable a one-off `at` job without running it. A restart before input settles a known-Session run `lost` by lookup and never repairs its binding; tool-origin `lost` follows A.6 reporting.
 
 Known recovery limit: `launch` can finish after a caller disappears, before its id is persisted. A run without that id is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for tracking or retention deletion. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
 
 ## Appendix G. Rust binding
 
-The public bindings below are available. Scheduler owns the feature-specific
-services and tasks through the package in #317; delivery still requires the
-failure-reporting checks above.
+Scheduler is native Rust with no TypeScript package, Node process or fallback.
+The contract above is unchanged; only its binding moves.
+
+Placement: a dedicated business crate, `crates/dim-agent-scheduler`, not App
+Server code (principles §1). The product entry point installs it through the App
+Server's native-profile installer (`process_entry(args, provider, install)`), so
+the App Server crate does not depend on it; a host that does not install it has
+no `schedule.*` methods or `schedule` tool. The process part is added with
+`AgentBuilder::optional_plugin` and registers its `SchedulerSession` part through
+`partRegistry` from its `apply`. Both parts use the Rust names that exist today:
+`Names::key`, `Key<T>`, `require_at`, `provide_as` and `PartRegistry::register`.
 
 | Neutral | Rust |
 | --- | --- |
-| Tool `schedule` registered with `toolRegistry` | `SchedulerSession` calls `tools.register(ctx, ToolContribution {definition, handler})` through `Keyed<ToolRegistry>` in its `apply`; `execute(ToolCall, cancel)` |
-| Namespace `schedule` registered with `managementMethods` | Looked up by Rpc per call, not a dependency of Rpc ([methods Appendix F](../contracts/session-boundary.md#appendix-f-rust-binding)) |
-| `sessions` | Public named service through `host_key("sessions")`; native request types and `AgentIndex::acquire` are private implementation details, not an external crate API |
-| `scheduleJobs` | Scheduler's implemented process service; declared dependency binding in §1.1 |
-| Process storage | Existing `pluginFiles.open` scope, with immediate effect cleanup; use A.7's agreed inner v1 format |
-| Timer / trackers | Owned by the process plugin; register cleanup immediately and start business work after apply; stop new work and settle before unloading |
+| Tool `schedule` registered with `toolRegistry` | Session part keys `ToolRegistry` from `names.key()` and calls `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as `dim-agent-questions` does |
+| Namespace `schedule` registered with `managementMethods` | Process part keys `ManagementMethods` and calls `methods.register(ctx, "schedule", declarations, handler)`; Rpc looks it up per call and holds no dependency on Scheduler |
+| `scheduleJobs` | Process-group name registered with `names::register::<ScheduleJobs>(catalog, None)`; the Session part reads it with `names.key()`, so no wiring part or forwarding plugin exists |
+| `sessionPermissions`, `settings`, `pluginFiles` | Typed App Server services (`SessionPermissions`, `SettingsService`, `PluginFileTransactions`) keyed with `names.key()`; the crate depends on `dim-app-server`, which `xtask check` allows |
+| `sessions` | The shared host-dispatch name, called with its JSON envelope; its native request types are private to App Server |
+| Policy cap | `PermissionPolicy::cap` and `within` in `dim-agent-types`, the same functions the S2 launch uses, tested against the shared fixtures |
+| Process storage | The typed `PluginFileTransactions` service of App Server ([trusted plugin storage](../../../crates/dim-app-server/README.md#trusted-plugin-storage)). The host writes the `{version: 1, text}` envelope; Scheduler supplies the inner v1 text, the same bytes the TypeScript version wrote. |
+| Timer and trackers | Owned by the process part: the timer, run tasks, recovery and retention run in its task tracker and start after its methods and services are registered. On unload (`ctx.cancellation_token()`), new work stops, waits end, and cleanup joins the tracker before the storage scope closes; an admitted `sessions` call settles first. A run still active is left in the file for the next generation's recovery. The Session tools return the unloading results of §1.3 and their own `schedule: cancelled before handover` or `wakeup: cancelled before handover` |
+| Policy texts | `install_with(builder, SchedulerTexts {description, report_guidance})`; `install` uses the built-in texts. A `report_guidance` with a line break is refused |
+| Guide entry | The Session part keys `GuideEntries` and registers the §5.2 entry, session-scoped, order 110 |
+| Optional row | `AgentBuilder::optional_plugin`: the host does not wait for the row, so missing dependencies or an unreadable run store fail only Scheduler (Appendix D item 12) |
+| Cron and time zones | `croner` and `chrono-tz`, checked by `deny.toml`. Scheduler skips an occurrence whose wall time falls in a DST gap and fires a repeated fall-back time once, at its earlier instant |
+| Tests | Public flows through the management methods, the `schedule` tool and the CLI wire tests, with a scripted model that can hold a turn; private helper unit tests are not added (AGENTS.md Testing) |

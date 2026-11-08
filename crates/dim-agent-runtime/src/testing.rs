@@ -159,7 +159,7 @@ async fn assemble(
     });
     prepare(root, &mut builtins)?;
     let mut rows = match builder.has_plugins() {
-        true => builder.plugin_rows(&mut builtins).await?,
+        true => builder.plugin_rows(&mut builtins).await?.rows,
         false => vec![],
     };
     let session_row = builder.install(&mut builtins, []).await?;
@@ -227,4 +227,192 @@ impl DynPlugin for AgentAnchor {
             Ok(Effect::Done)
         })
     }
+}
+
+/// How many facts one read of a log asks for.
+const EVENTS_PAGE: u64 = 4096;
+
+/// The facts a flow reads from one log: its own branch through the branch
+/// query, or the Timeline service itself.
+#[derive(Clone, Copy)]
+enum Log<'a> {
+    Session(&'a Session, &'a str),
+    Timeline(&'a Timeline),
+}
+impl Log<'_> {
+    async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
+        match self {
+            Self::Session(session, branch) => session.query(branch, query).await,
+            Self::Timeline(timeline) => timeline.query(query).await,
+        }
+    }
+    fn branch(&self) -> String {
+        match self {
+            Self::Session(_, branch) => (*branch).to_owned(),
+            Self::Timeline(timeline) => timeline.branch_id(),
+        }
+    }
+}
+
+/// The facts `session` published on `branch` alone within `range`, oldest
+/// first: the whole selection, read a page at a time through the branch's
+/// query. A flow reads a branch's log with this instead of paging by hand.
+pub async fn branch_events<R: std::ops::RangeBounds<u64> + Send>(
+    session: &Session,
+    branch: &str,
+    range: R,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    read(
+        Log::Session(session, branch),
+        TimelineQueryScope::Branch,
+        range,
+        EVENTS_PAGE,
+    )
+    .await
+}
+
+/// [`branch_events`] over the branch's chain: each ancestor to its cut and then
+/// the branch, root first.
+pub async fn chain_events<R: std::ops::RangeBounds<u64> + Send>(
+    session: &Session,
+    branch: &str,
+    range: R,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    read(
+        Log::Session(session, branch),
+        TimelineQueryScope::Chain,
+        range,
+        EVENTS_PAGE,
+    )
+    .await
+}
+
+/// [`chain_events`] with an explicit page size, so a flow can cross the
+/// ancestor-to-branch boundary of a chain read without a log of thousands of
+/// facts.
+pub async fn chain_events_paged<R: std::ops::RangeBounds<u64> + Send>(
+    session: &Session,
+    branch: &str,
+    range: R,
+    page: u64,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    read(
+        Log::Session(session, branch),
+        TimelineQueryScope::Chain,
+        range,
+        page,
+    )
+    .await
+}
+
+/// [`branch_events`] through the Timeline service: every fact of the queried
+/// branch or of its chain within `range`, including the branch's own facts
+/// written but not yet published.
+pub async fn timeline_events<R: std::ops::RangeBounds<u64> + Send>(
+    timeline: &Timeline,
+    scope: TimelineQueryScope,
+    range: R,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    read(Log::Timeline(timeline), scope, range, EVENTS_PAGE).await
+}
+
+async fn read<R: std::ops::RangeBounds<u64> + Send>(
+    log: Log<'_>,
+    scope: TimelineQueryScope,
+    range: R,
+    page: u64,
+) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    use std::ops::Bound;
+    let start = match range.start_bound() {
+        Bound::Included(start) => *start,
+        Bound::Excluded(start) => start.saturating_add(1),
+        Bound::Unbounded => 1,
+    }
+    .max(1);
+    let end = match range.end_bound() {
+        Bound::Included(end) => Some(*end),
+        Bound::Excluded(end) => Some(end.saturating_sub(1)),
+        Bound::Unbounded => None,
+    };
+    let mut query = TimelineQuery {
+        scope,
+        from_event: None,
+        from_sequence: (start > 1).then_some(start),
+        order_by: TimelineQueryOrderBy::Sequence,
+        direction: TimelineQueryDirection::Ascending,
+        include_publishing: matches!(log, Log::Timeline(_)),
+        kinds: Vec::new(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: std::num::NonZeroU64::new(page).expect("a page keeps at least one fact"),
+        offset: 0,
+    };
+    let own = log.branch();
+    let mut events: Vec<(
+        dim_agent_types::TimelinePosition,
+        Arc<dim_agent_types::AgentEvent>,
+    )> = Vec::new();
+    // The fact the last page ended at, when the next page begins there again:
+    // a chain read anchored by event id includes the fact it names, so that
+    // page asks for one fact more than it keeps.
+    let mut repeated = None;
+    let mut request = page;
+    loop {
+        let mut reply = log.query(query.clone()).await?;
+        let short = (reply.events.len() as u64) < request;
+        if repeated.is_some() && repeated.as_ref() == reply.positions.first() {
+            reply.events.remove(0);
+            reply.positions.remove(0);
+        }
+        let last = reply.positions.last().cloned();
+        events.extend(reply.positions.into_iter().zip(reply.events));
+        if short {
+            break;
+        }
+        match last {
+            // A chain read's `from_sequence` is anchored on the queried branch,
+            // so a page that ended in an ancestor continues at that fact's id.
+            Some(last) if last.branch_id != own => {
+                let Some(id) = events.last().map(|(_, event)| event.id.clone()) else {
+                    break;
+                };
+                query.from_sequence = None;
+                query.from_event = Some(id);
+                request = page + 1;
+                query.limit =
+                    std::num::NonZeroU64::new(request).expect("a page keeps at least one fact");
+                repeated = Some(last);
+            }
+            Some(last) => {
+                query.from_event = None;
+                query.from_sequence = Some(last.sequence + 1);
+                request = page;
+                query.limit =
+                    std::num::NonZeroU64::new(request).expect("a page keeps at least one fact");
+                repeated = None;
+            }
+            None => break,
+        }
+        if end.is_some_and(|end| {
+            events.last().is_some_and(|(position, _)| {
+                // The end bounds the queried branch: a page that ends on an
+                // ancestor continues, since its sequence says nothing about
+                // the branch reaching the end.
+                position.branch_id == own && position.sequence >= end
+            })
+        }) {
+            break;
+        }
+    }
+    Ok(events
+        .into_iter()
+        .filter(|(position, event)| match end {
+            // The end bounds the branch the range names; an ancestor is read
+            // to its cut.
+            Some(end) => position.branch_id != own || event.sequence <= end,
+            None => true,
+        })
+        .map(|(_, event)| event)
+        .collect())
 }

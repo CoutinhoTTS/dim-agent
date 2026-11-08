@@ -1,4 +1,5 @@
 use super::*;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use rusqlite::Connection;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -47,7 +48,9 @@ async fn summaries_read_dormant_sessions_without_loading_them() {
     assert_eq!(reply["result"].as_array().unwrap().len(), 64);
     for row in reply["result"].as_array().unwrap() {
         let id = row["sessionId"].as_str().unwrap();
-        let body: String = database.query_row("SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id='main' ORDER BY sequence DESC LIMIT 1", [id], |r| r.get(0)).unwrap();
+        // The projection's activity time: the newest Session-activity event
+        // on `main` (issue #1099), not the last event of any kind.
+        let body: String = database.query_row("SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND kind IN ('input/message','turn/end','branch/create','session/forked') AND NOT (kind='input/message' AND json_extract(body,'$.record.event.data.user') IS NULL) ORDER BY sequence DESC LIMIT 1", [id], |r| r.get(0)).unwrap();
         let stored: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(row["preview"], expected[id]);
         assert_eq!(row["updatedAt"], stored["record"]["event"]["create_at"]);
@@ -289,7 +292,9 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
             let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
             assert_ok(&client.rpc("session.submit", json!({"sessionId":id,"branchId":"main","text":"text"})).await);
             assert_ok(&client.rpc("session.idle", json!({"sessionId":id,"branchId":"main"})).await);
-            let history = agent.get_session(&id).unwrap().history("main", None).await.unwrap();
+            let history = chain_events(&agent.get_session(&id).unwrap(), "main", ..)
+                .await
+                .unwrap();
             assert!(history.iter().any(|event| matches!(&event.kind, dim_agent_types::EventKind::Text(text) if text.delta == "process response")));
             sessions.push(id);
         }
@@ -382,19 +387,27 @@ async fn summaries_read_atomic_configuration_tails_and_survive_restart() {
         .unwrap();
     let through = session.sequence("main").unwrap();
     assert!(
-        session
-            .local_page("main", through - 1, 1, through)
-            .await
-            .is_err(),
+        session.batch_end("main", through - 1).await.is_err(),
         "regression fixture must end with a multi-event atomic batch"
     );
-    let history = session.local("main", ..=through).await.unwrap();
+    let history = branch_events(&session, "main", ..=through).await.unwrap();
     let reply = client.rpc("session.summaries", json!({})).await;
     assert_ok(&reply);
     assert_eq!(reply["result"][0]["sequence"], through);
+    // #1099: the trailing configuration batch is housekeeping, so the row
+    // holds the newest activity event, or the stored creation time when
+    // there is none — not the last event.
+    let created_at_ms: i64 = Connection::open(directory.join("dimcode.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT created_at_ms FROM agent_sessions WHERE session_id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(
         reply["result"][0]["updatedAt"],
-        history.last().unwrap().create_at
+        activity_time(&history).unwrap_or(created_at_ms as u64)
     );
     drop(session);
     drop(client);
@@ -402,19 +415,24 @@ async fn summaries_read_atomic_configuration_tails_and_survive_restart() {
     server.join().await.unwrap();
 
     let database = Connection::open(directory.join("dimcode.sqlite")).unwrap();
-    let body: String = database.query_row(
-        "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id='main' ORDER BY sequence DESC LIMIT 1",
-        [id], |row| row.get(0),
-    ).unwrap();
-    let stored: Value = serde_json::from_str(&body).unwrap();
+    let updated: i64 = database
+        .query_row(
+            "SELECT COALESCE(
+                (SELECT json_extract(body, '$.record.event.create_at') FROM timeline_events
+                 WHERE session_id=?1 AND branch_id='main'
+                   AND kind IN ('input/message','turn/end','branch/create','session/forked')
+                   AND NOT (kind='input/message' AND json_extract(body,'$.record.event.data.user') IS NULL)
+                 ORDER BY sequence DESC LIMIT 1),
+                (SELECT created_at_ms FROM agent_sessions WHERE session_id=?1))",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
     let server = serve(build(), config).await.unwrap();
     let mut client = Client::new_version(&server, true, 3).await;
     let reply = client.rpc("session.summaries", json!({})).await;
     assert_ok(&reply);
-    assert_eq!(
-        reply["result"][0]["updatedAt"],
-        stored["record"]["event"]["create_at"]
-    );
+    assert_eq!(reply["result"][0]["updatedAt"], updated);
     assert!(server.agent().unwrap().sessions().is_empty());
     drop(client);
     server.shutdown();
@@ -460,10 +478,7 @@ async fn database_session_creation_adopts_initial_prompt_once_across_restart() {
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    let before = agent
-        .get_session(&id)
-        .unwrap()
-        .history("main", None)
+    let before = chain_events(&agent.get_session(&id).unwrap(), "main", ..)
         .await
         .unwrap();
     assert_eq!(
@@ -493,10 +508,7 @@ async fn database_session_creation_adopts_initial_prompt_once_across_restart() {
     );
     let mut client = Client::new_version(&server, true, 3).await;
     assert_ok(&client.rpc("session.attach", json!({"sessionId": id})).await);
-    let after = agent
-        .get_session(&id)
-        .unwrap()
-        .history("main", None)
+    let after = chain_events(&agent.get_session(&id).unwrap(), "main", ..)
         .await
         .unwrap();
     assert_eq!(&after[..before.len()], before.as_slice());
@@ -840,7 +852,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
             .await,
     );
     let original = original_agent.get_session(&session_id).unwrap();
-    let before = original.history("main", None).await.unwrap();
+    let before = chain_events(&original, "main", ..).await.unwrap();
     let created = client.rpc("session.branch_create", json!({"sessionId": session_id,
         "parentBranchId": "main", "at": original.sequence("main").unwrap(), "prompt": "child input"})).await;
     assert_ok(&created);
@@ -892,7 +904,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
             .await,
     );
     let recovered = recovered_agent.get_session(&session_id).unwrap();
-    let after = recovered.history("main", None).await.unwrap();
+    let after = chain_events(&recovered, "main", ..).await.unwrap();
     assert_eq!(&after[..before.len()], &before);
     assert!(
         recovered
@@ -900,7 +912,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
             .iter()
             .any(|branch| branch.id == child_id)
     );
-    let child_history = recovered.history(&child_id, Some(0)).await.unwrap();
+    let child_history = chain_events(&recovered, &child_id, ..=0).await.unwrap();
     assert_eq!(&child_history[..before.len()], &before);
     assert_ok(
         &client
@@ -923,7 +935,7 @@ async fn agent_sessions_restore_owners_branches_and_continue_with_original_ids()
             )
             .await,
     );
-    assert!(recovered.local(&child_id, ..).await.unwrap().iter().any(|event|
+    assert!(branch_events(&recovered, &child_id, ..).await.unwrap().iter().any(|event|
         matches!(&event.kind, dim_agent_types::EventKind::Text(data) if data.delta.contains("after restart"))));
     drop(client);
     server.shutdown();
@@ -1189,7 +1201,13 @@ async fn stored_directories_outlive_idle_instances() {
                 .rpc("session.attach", json!({"sessionId":ids[1]}))
                 .await,
         );
-        assert!(first.unload_if_idle().await.unwrap());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !first.unload_if_idle().await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the detached Session releases once pending state is published");
         assert!(first.is_unloading());
         let connection = Connection::open(&database).unwrap();
         let head: i64 = connection
@@ -1199,10 +1217,17 @@ async fn stored_directories_outlive_idle_instances() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(
-            head as u64, before,
-            "idle release must append no settlement events"
-        );
+        assert!(head as u64 >= before);
+        let settled: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM timeline_events WHERE session_id=?1 AND branch_id='main' \
+             AND sequence>?2 AND (kind NOT IN ('input/message','input/applied') \
+             OR (kind='input/message' AND json_extract(body,'$.record.event.data.user') IS NOT NULL))",
+                rusqlite::params![ids[0], before as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(settled, 0, "idle release must append no settlement events");
         assert!(agent.get_session(&ids[0]).is_none());
         assert_ok(
             &client
@@ -1439,4 +1464,129 @@ async fn vacuum_mode_reclaims_an_offline_store_and_refuses_a_held_one() {
     );
     drop(db);
     tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// `storage.report` answers the store's own bytes and the space an offline
+/// `VACUUM` returns; the vacuum is the one-shot the daemon refuses while it
+/// serves (`native-storage-format.md`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn storage_report_counts_the_pages_the_offline_vacuum_returns() {
+    async fn vacuum(database: &std::path::Path) -> std::process::Output {
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_dim-app-server"))
+            .args(["--vacuum", "--database"])
+            .arg(database)
+            .output()
+            .await
+            .unwrap()
+    }
+
+    let directory = std::env::temp_dir().join(format!("dim-report-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let database = directory.join("dimcode.sqlite");
+    let config = ServerConfig {
+        database_path: Some(database.clone()),
+        ..Default::default()
+    };
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert!(
+        client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("storage.report")),
+        "{:?}",
+        client.features
+    );
+    let created = client.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"x".repeat(100_000)}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    assert_ok(&client.rpc("session.delete", json!({"sessionId":id})).await);
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // A restart folds the WAL into the file, so both reports are about the
+    // committed store rather than a checkpoint in flight.
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let before = client.rpc("storage.report", json!({})).await;
+    assert_ok(&before);
+    let before = before["result"].clone();
+    assert!(
+        before["reclaimableBytes"].as_u64().unwrap() > 0,
+        "a deleted Session leaves free pages: {before}"
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let vacuumed = vacuum(&database).await;
+    assert!(
+        vacuumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&vacuumed.stderr)
+    );
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let after = client.rpc("storage.report", json!({})).await;
+    assert_ok(&after);
+    let after = &after["result"];
+    assert_eq!(
+        after["reclaimableBytes"], 0,
+        "the vacuum returned every free page: {after}"
+    );
+    assert!(
+        after["databaseBytes"].as_u64().unwrap() < before["databaseBytes"].as_u64().unwrap(),
+        "the rewritten store is smaller: {before} -> {after}"
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(directory).await.unwrap();
+}
+
+/// A profile with no native storage registers no store owner, so the name is
+/// not served. `--model-config` is not such a profile: it requires `--home` or
+/// `--database` (`lib.rs` configuration), so every daemon this repository
+/// starts has a store; an embedded host may start without one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn storage_report_needs_native_storage() {
+    let server = launch(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert!(
+        !client
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("storage.report")),
+        "{:?}",
+        client.features
+    );
+    let reply = client.rpc("storage.report", json!({})).await;
+    assert_eq!(reply["error"]["code"], -32601, "{reply}");
+    assert_eq!(
+        reply["error"]["data"]["appError"], "unknown_method",
+        "{reply}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
 }

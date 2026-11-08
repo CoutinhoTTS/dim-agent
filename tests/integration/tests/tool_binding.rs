@@ -14,6 +14,7 @@ use dim_agent_capabilities::{
     },
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use local_support::*;
@@ -280,8 +281,7 @@ async fn adopted(session: &Session, branch: &str, sources: &[(&str, &str)]) {
         .collect();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let current = session
-                .history(branch, None)
+            let current = chain_events(session, branch, ..)
                 .await
                 .unwrap()
                 .iter()
@@ -316,8 +316,7 @@ fn declared(request: &ModelRequest) -> Vec<String> {
 }
 
 async fn last_result(session: &Session, branch: &str) -> String {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .iter()
@@ -700,7 +699,7 @@ async fn custom_preparation_keeps_none_empty_and_filtered_declarations() {
             }
         } else {
             assert!(sent.is_empty());
-            assert!(session.history("main", None).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if data.outcome == TurnOutcome::Failed { error: "invalid input: tool unavailable has no handler".into() })));
+            assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind, EventKind::TurnEnd(data) if data.outcome == TurnOutcome::Failed { error: "invalid input: tool unavailable has no handler".into() })));
         }
         agent.close().await.unwrap();
     }
@@ -782,7 +781,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
             .await
             .contains("provider unloaded")
     );
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     assert_eq!(
         history
             .iter()
@@ -829,8 +828,7 @@ async fn optional_contributors_do_not_gate_the_loop_and_follow_new_generations()
     assert_eq!(last_result(&session, "main").await, "generation 2");
     assert!(provided.lock().unwrap()[0].upgrade().is_none());
     assert!(
-        !session
-            .history("main", None)
+        !chain_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -1533,8 +1531,7 @@ async fn contributed_tools_follow_their_provider_until_the_session_closes() {
 
 /// The version of `key` in the newest tool part `branch` adopted.
 async fn adopted_version(session: &Session, branch: &str, key: &str) -> Option<String> {
-    session
-        .history(branch, None)
+    chain_events(session, branch, ..)
         .await
         .unwrap()
         .iter()

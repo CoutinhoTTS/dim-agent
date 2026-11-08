@@ -5,6 +5,7 @@ use dim_agent_capabilities::{
     host::{HostFuture, ModelConnection, ModelDriver, ModelStream},
     input_queue::{CheckSubmission, SubmitCheckReply, SubmitCheckRequest, SubmitChecks},
 };
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{Feature, Names};
 use dim_agent_types::{ContentBlock, InputMessageData, ModelRequest};
 use rutis::Ctx;
@@ -159,8 +160,7 @@ async fn launch(
 
 /// The operator inputs of a branch, in order.
 async fn inputs(session: &dim_agent_runtime::Session) -> Vec<InputMessageData> {
-    session
-        .local("main", ..)
+    branch_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -322,8 +322,7 @@ async fn a_proceeding_branch_create_drops_the_checks_context() {
         .as_str()
         .unwrap()
         .to_owned();
-    let first = session
-        .local(&child, ..)
+    let first = branch_events(&session, &child, ..)
         .await
         .unwrap()
         .into_iter()

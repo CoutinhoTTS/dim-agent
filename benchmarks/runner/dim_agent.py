@@ -116,8 +116,9 @@ class DimAgent(BaseInstalledAgent):
         ErrorPattern(r"insufficient_quota|Insufficient Balance", ApiUsageLimitError),
         ErrorPattern(r"50[023] (Internal|Bad Gateway|Service Unavailable)", ApiInternalServerError),
         ErrorPattern(r"server_overloaded|model is overloaded", ApiOverloadedError),
-        ErrorPattern(r"error sending request|connection (reset|refused|closed)|"
-                     r"dns error|operation timed out", NetworkConnectionError),
+        ErrorPattern(r"error decoding response body|error sending request|"
+                     r"connection (reset|refused|closed)|dns error|operation timed out",
+                     NetworkConnectionError),
         ErrorPattern(r"provider .* request failed", UnknownApiError),
         *BaseInstalledAgent.ERROR_PATTERNS,
     ]

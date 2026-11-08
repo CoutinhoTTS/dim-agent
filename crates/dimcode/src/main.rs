@@ -1,5 +1,6 @@
 //! One executable for the product: the terminal client, which starts this
 //! same file as its App Server daemon with the hidden `app-server`
+//! subcommand, and as the OCR helper with the hidden `ocr-helper`
 //! subcommand.
 
 #![allow(linker_messages)]
@@ -24,6 +25,25 @@ const fn present(value: Option<&'static str>) -> Option<&'static str> {
     }
 }
 
+/// The product's native plugins, added to the App Server before assembly.
+fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
+    dim_session_title::install(builder);
+    dim_agent_scheduler::install(builder);
+    dim_goal::install(builder);
+    // The adapter provides `modalityAdapter`; Modality reads it when it starts,
+    // so it is added first.
+    dim_modality_aimux::install(builder);
+    // Host tasks run this executable with the hidden `ocr-helper`
+    // subcommand.
+    dim_modality::install_with(
+        builder,
+        dim_modality::InstallOptions {
+            ocr_helper: std::env::current_exe().ok(),
+            ..dim_modality::InstallOptions::default()
+        },
+    );
+}
+
 fn main() {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -33,6 +53,15 @@ fn main() {
         mallopt(-3, 64 * 1024);
         mallopt(-8, 1);
     }
+    if std::env::args().nth(1).as_deref() == Some("ocr-helper") {
+        let mut stdout = std::io::stdout();
+        let mut stderr = std::io::stderr();
+        std::process::exit(dim_ocr::helper_main(
+            std::env::args_os().skip(2),
+            &mut stdout,
+            &mut stderr,
+        ));
+    }
     if std::env::args().nth(1).as_deref() == Some("app-server") {
         let provider = CLIENT_IDS.map(|(cn, global)| {
             dim_oauth::row(dim_oauth::ClientIds {
@@ -40,11 +69,9 @@ fn main() {
                 global: global.into(),
             })
         });
-        if let Err(error) = dim_app_server::cli::process_entry(
-            std::env::args().skip(2),
-            provider,
-            dim_session_title::install,
-        ) {
+        if let Err(error) =
+            dim_app_server::cli::process_entry(std::env::args().skip(2), provider, install)
+        {
             eprintln!("Error: {error}");
             std::process::exit(1);
         }

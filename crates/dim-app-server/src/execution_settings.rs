@@ -11,8 +11,8 @@ use dim_agent_capabilities::execution_settings::{
     SOURCE,
 };
 use dim_agent_capabilities::host_platform::{HostPlatform, SandboxBackend};
-use dim_agent_capabilities::methods::{Interruption, MethodDecl, params, reply};
-use dim_agent_runtime::Names;
+use dim_agent_capabilities::methods::{Interruption, MethodCall, MethodDecl, params, reply};
+use dim_agent_runtime::{Names, PartRegistry};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::json;
@@ -42,12 +42,14 @@ impl ExecutionSettingsSource for Storage {
 
 pub struct ExecutionSettingsPlugin {
     settings: Key<SettingsService>,
+    parts: Key<PartRegistry>,
 }
 
 impl ExecutionSettingsPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
+            parts: names.key()?,
         })
     }
 }
@@ -57,11 +59,12 @@ impl DynPlugin for ExecutionSettingsPlugin {
         "ExecutionSettings"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.settings.erase()]
+        vec![self.settings.erase(), self.parts.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let settings = ctx.require_at(&self.settings)?;
+            let parts = ctx.require_at(&self.parts)?;
             settings.register_declared(
                 ctx,
                 SourceDeclaration {
@@ -81,6 +84,7 @@ impl DynPlugin for ExecutionSettingsPlugin {
             )?;
             let host = ExecutionSettingsHost(Arc::new(Storage { settings }));
             ctx.provide_as::<ExecutionSettingsHost>(Arc::new(host))?;
+            dim_agent_capabilities::execution_settings::prompt::register_parts(ctx, &parts)?;
             Ok(Effect::Done)
         })
     }
@@ -128,7 +132,12 @@ impl DynPlugin for ExecutionBackendPlugin {
                     false,
                     Interruption::Report,
                 )],
-                Arc::new(move |method, value, _, _| {
+                Arc::new(move |call, _, _| {
+                    let MethodCall {
+                        method,
+                        params: value,
+                        ..
+                    } = call;
                     let platform = platform.clone();
                     Box::pin(async move {
                         match method.as_str() {

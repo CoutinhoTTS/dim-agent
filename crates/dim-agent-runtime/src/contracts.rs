@@ -1,13 +1,16 @@
 use crate::{Branch, Result};
-use dim_agent_types::{ModelSelection, PromptScope};
+use dim_agent_types::{ModelFailureKind, ModelSelection, PromptScope};
 use rutis::host::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::watch;
 
-/// Inputs admitted and not yet consumed by Loop.
+/// Inputs admitted and not yet consumed by Loop, except one addressed to a
+/// handover: that one is held for its turn and never counted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InputSnapshot {
+    /// Inputs held by the queue, released or not, that Loop has not consumed
+    /// yet. An input addressed to a handover is never counted.
     pub queued: usize,
 }
 /// Output of the running model request not yet written to the Timeline.
@@ -34,6 +37,21 @@ pub struct ModelProgress {
     pub thinking_offset: u64,
     /// Started calls whose arguments are not complete, in start order.
     pub tools: Vec<ToolProgress>,
+    /// The retry this request is waiting to make, while it sleeps.
+    pub retry: Option<RetryProgress>,
+}
+/// A retry a request is waiting for, shown while it sleeps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryProgress {
+    /// The attempt about to run, at least 2.
+    pub attempt: u8,
+    /// The total cap on attempts.
+    pub max_attempts: u8,
+    /// Unix milliseconds at which the attempt starts.
+    pub retry_at_ms: u64,
+    pub kind: ModelFailureKind,
+    /// The failure's bounded reason.
+    pub reason: Option<String>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolProgress {
@@ -115,6 +133,30 @@ pub struct TimelineInfo {
     pub source: Option<dim_agent_types::BranchSource>,
 }
 
+/// Whether a line takes input, is finishing a committed end, or has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchDirectoryState {
+    /// The line takes input, and its head is live.
+    Open,
+    /// The line's own `branch/end` is committed and its ended row is not: input
+    /// is refused, and its head is still live.
+    Ending,
+    /// The line has ended: its head and its end event are fixed.
+    Ended,
+}
+
+/// One line's directory record: its identity, its state, its head and its end.
+#[derive(Debug, Clone)]
+pub struct BranchDirectoryEntry {
+    pub info: TimelineInfo,
+    /// The published head while open or ending, the fixed head once ended.
+    pub head: u64,
+    pub state: BranchDirectoryState,
+    /// The sequence of the line's own `branch/end`: committed while ending,
+    /// recorded once ended.
+    pub end_event: Option<u64>,
+}
+
 impl From<BranchRecord> for TimelineInfo {
     fn from(record: BranchRecord) -> Self {
         Self {
@@ -146,8 +188,11 @@ pub trait TimelineTreeControl: Send + Sync + 'static {
     fn get(&self, id: &str) -> Option<Branch>;
     /// Ends the line `id` with `source`; only the target is checked.
     fn end(&self, id: String, source: dim_agent_types::BranchSource) -> BoxFuture<'_, Result<()>>;
-    /// The fixed head of an ended line, `None` for an open or unknown one.
+    /// The fixed head of an ended line, `None` for an open, ending or unknown
+    /// one.
     fn ended_head(&self, id: &str) -> Option<u64>;
     fn list(&self) -> Vec<TimelineInfo>;
+    /// The complete branch directory: open, ending and ended lines.
+    fn directory(&self) -> Vec<BranchDirectoryEntry>;
     fn close(&self) -> BoxFuture<'_, Result<()>>;
 }

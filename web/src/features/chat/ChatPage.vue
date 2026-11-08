@@ -10,6 +10,7 @@ import ComposerPanel from "./ComposerPanel.vue"
 import QueuedInputs from "./QueuedInputs.vue"
 import QuestionPrompt from "./QuestionPrompt.vue"
 import TimelineView from "./TimelineView.vue"
+import ExtensionMenu from "../extensions/ExtensionMenu.vue"
 import { MAIN_BRANCH, type ContextUsage, type DraftAttachments, type ModelId, type PermissionPreset } from "../../rpc/protocol"
 import { goalCall, goalObjective, parseGoalRequest, type Goal, type GoalStatus } from "../../goal"
 import { useChatStore } from "../../stores/chat"
@@ -34,7 +35,7 @@ watch(() => props.sessionId, (id) => chat.open(id), { immediate: true })
 
 const view = computed(() => chat.views[props.sessionId])
 const summary = computed(() => sessions.byId.get(props.sessionId))
-const title = computed(() => summary.value?.preview ?? t("sidebar.untitled"))
+const title = computed(() => summary.value?.title ?? summary.value?.preview ?? t("sidebar.untitled"))
 const approval = computed(() => view.value?.approvals.find((request) => request.branchId === MAIN_BRANCH))
 const questions = computed(() => view.value?.questions.filter((ask) => ask.branchId === MAIN_BRANCH) ?? [])
 const rulesAvailable = computed(() => connection.supports("permission.rules") && connection.supports("permission.set_rules"))
@@ -262,6 +263,7 @@ async function fork(): Promise<void> {
           </template>
           <h1 data-route-heading tabindex="-1" :title="title">{{ title }}</h1>
         </div>
+        <ExtensionMenu :session-id="sessionId" />
         <button
           v-if="connection.supports('session.branch_end')"
           class="ui-button session-lines"
@@ -281,6 +283,7 @@ async function fork(): Promise<void> {
     <TimelineView
       :rows="view.rows"
       :running="view.running"
+      :retry="view.retry"
       :quotable="!approval && questions.length === 0"
       :branchable="branchable && !approval && questions.length === 0"
       @branch="branch"

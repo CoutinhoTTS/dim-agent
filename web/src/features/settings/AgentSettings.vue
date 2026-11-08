@@ -4,19 +4,20 @@ import { useSettingsText } from "../../i18n/settings-general"
 import { readDefaultSelection, readExecShell, readModelPolicy, readRevision, readSelectedModel, type DefaultSelection, type ExecShellView, type ModelPolicyView } from "../../rpc/general-settings"
 import { useConnectionStore } from "../../stores/connection"
 import { useModelsStore } from "../../stores/models"
+import { useSessionsStore } from "../../stores/sessions"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
 import { bindSettingsDirty, messageFrom, reloadSettingsOnReconnect } from "./context"
 
 const s = useSettingsText()
 const connection = useConnectionStore()
 const models = useModelsStore()
+const sessions = useSessionsStore()
 const snapshot = ref<DefaultSelection>()
 const policy = ref<ModelPolicyView>()
 const memberModel = ref("agent")
 const shell = ref<ExecShellView>()
 const shellPath = ref("")
 const loaded = ref(false)
-const cwd = ref("")
 const loadedCwd = ref("")
 const selected = ref("")
 const busy = ref(false)
@@ -27,7 +28,7 @@ const current = computed(() => snapshot.value ? JSON.stringify([snapshot.value.p
 const currentPolicy = computed(() => policy.value?.policy.mode === "fixed" ? JSON.stringify([policy.value.policy.model.providerId, policy.value.policy.model.modelId]) : policy.value?.policy.mode ?? "agent")
 const dirty = computed(() => loaded.value && (selected.value !== current.value || memberModel.value !== currentPolicy.value || (shell.value !== undefined && shellPath.value !== (shell.value.executablePath ?? ""))))
 bindSettingsDirty(dirty)
-async function load(): Promise<void> {
+async function load(path = loadedCwd.value): Promise<void> {
   if (busy.value) return
   if (dirty.value && !window.confirm(s('Discard unsaved defaults?', '放弃未保存的默认设置？'))) return
   busy.value = true
@@ -35,7 +36,6 @@ async function load(): Promise<void> {
   saved.value = false
   try {
     if (!connection.supports("provider.selection")) throw new Error(s('Default model selection is not available on this server.', '此服务器不支持默认模型选择。'))
-    const path = cwd.value.trim()
     const [next, nextPolicy, nextShell] = await Promise.all([connection.client.call("provider.selection", path ? { cwd: path } : {}, readDefaultSelection), connection.supports("collaboration.model_policy") ? connection.client.call("collaboration.model_policy", {}, readModelPolicy) : undefined, connection.supports("host.exec_shell.get") ? connection.client.call("host.exec_shell.get", {}, readExecShell) : undefined, models.load()])
     snapshot.value = next
     policy.value = nextPolicy
@@ -75,15 +75,20 @@ async function save(): Promise<void> {
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }
-reloadSettingsOnReconnect(connection, load, dirty)
-onMounted(load)
+async function changeScope(event: Event): Promise<void> {
+  const select = event.target as HTMLSelectElement
+  await load(select.value)
+  select.value = loadedCwd.value
+}
+reloadSettingsOnReconnect(connection, () => load(), dirty)
+onMounted(() => load())
 </script>
 
 <template>
   <article class="settings-page">
     <header><h2 data-route-heading tabindex="-1">{{ s('Agent', '代理') }}</h2><p>{{ s('Choose the default model for new sessions. Existing sessions keep their selected model.', '为新会话选择默认模型。现有会话保留其已选模型。') }}</p></header>
-    <form class="settings-card settings-form" @submit.prevent="load"><label><span>{{ s('Project directory (blank for the global default)', '项目目录（留空表示全局默认）') }}</span><input v-model="cwd" class="ui-field" data-size="md" :disabled="busy" placeholder="/path/to/project" /></label><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy">{{ s('Load defaults', '加载默认设置') }}</button></form>
-    <GeneralSettingsStatus :busy="busy" :error="error" :saved="saved && !dirty" @reload="load" />
+    <div class="settings-card settings-form"><label><span>{{ s('Default model scope', '默认模型范围') }}</span><select :value="loadedCwd" class="ui-field" data-size="md" :disabled="busy" @change="changeScope"><option value="">{{ s('User default · all workspaces', '用户默认 · 所有工作区') }}</option><option v-for="workspace in sessions.workspaces" :key="workspace.cwd" :value="workspace.cwd">{{ workspace.name }} — {{ workspace.cwd }}</option></select></label><p>{{ s('A workspace default overrides the user default for new sessions in that workspace. Subagent policy and command shell below always apply to all workspaces.', '工作区默认值覆盖该工作区新会话使用的用户默认值。下方的子代理策略和命令 Shell 始终适用于所有工作区。') }}</p><button class="ui-button" data-size="md" data-variant="secondary" :disabled="busy" @click="load()">{{ s('Reload defaults', '重新加载默认设置') }}</button></div>
+    <GeneralSettingsStatus :busy="busy" :error="error" :saved="saved && !dirty" @reload="load()" />
     <form v-if="loaded" class="settings-form" @submit.prevent="save">
       <section class="settings-card"><h3>{{ s('Default model', '默认模型') }}</h3><p>{{ loadedCwd || s('Global default', '全局默认') }}</p><label><span>{{ s('Model', '模型') }}</span><select v-model="selected" class="ui-field" data-size="md" :disabled="busy || !connection.supports('provider.select')"><option value="" disabled>{{ s('Automatic fallback — choose a model to pin a default', '自动回退 — 选择模型以固定默认值') }}</option><option v-if="current && !options.some((option) => option.key === current)" :value="current" disabled>{{ snapshot?.providerId }} / {{ snapshot?.modelId }} ({{ s('unavailable', '不可用') }})</option><option v-for="option in options" :key="option.key" :value="option.key">{{ option.label }}</option></select></label><p v-if="!options.length">{{ s('No selectable models. Configure a provider and its model limits first.', '没有可选模型。请先配置提供商和模型限制。') }}</p></section>
       <section v-if="policy" class="settings-card"><h3>{{ s('Subagent models', '子代理模型') }}</h3><p>{{ s('Applies to every newly created native Collaboration member, including named agents. Existing members and external agents are unchanged.', '适用于每个新建的原生协作成员，包括命名代理。现有成员和外部代理不受影响。') }}</p><label><span>{{ s('Model policy', '模型策略') }}</span><select v-model="memberModel" class="ui-field" data-size="md" :disabled="busy || !connection.supports('collaboration.set_model_policy')"><option value="agent">{{ s('Agent decides (profile / workspace defaults)', '由代理决定（配置 / 工作区默认值）') }}</option><option value="inherit">{{ s('Inherit requesting branch model', '继承请求分支的模型') }}</option><option v-if="currentPolicy !== 'agent' && currentPolicy !== 'inherit' && !options.some((option) => option.key === currentPolicy)" :value="currentPolicy" disabled>{{ s('Configured model unavailable', '已配置模型不可用') }}</option><option v-for="option in options" :key="option.key" :value="option.key">{{ option.label }}</option></select></label></section>

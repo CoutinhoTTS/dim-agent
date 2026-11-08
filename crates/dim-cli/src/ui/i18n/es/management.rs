@@ -299,6 +299,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "MCP's documents belong to one entry; this save names none." => {
             "Los documentos MCP pertenecen a una entrada; este guardado no nombra ninguna."
         }
+        "{id} is in more than one MCP source: {sources}. Name one with --source." => {
+            "{id} está en más de una fuente MCP: {sources}. Indica una con --source."
+        }
+        "The action names no MCP source; a row carries the source its owner reported." => {
+            "La acción no nombra ninguna fuente MCP; una fila lleva la fuente que informa su propietario."
+        }
+        "No MCP server {id} is in source {source}." => {
+            "Ningún servidor MCP {id} en la fuente {source}."
+        }
         "No MCP server has that id." => "Ningún servidor MCP tiene ese id.",
         "This workspace has no project MCP source." => {
             "Este espacio de trabajo no tiene una fuente MCP de proyecto."

@@ -32,8 +32,13 @@ use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
 };
 use crate::projection::Projection;
-use crate::wire::{Configuration, Event, EventContent, Progress};
-use crate::{configure, mcp, permission, update};
+use crate::wire::{
+    Attached, CatalogModel, Configuration, Created, Event, EventContent, Progress,
+    ProviderCatalogSnapshot,
+};
+use crate::{
+    configure, mcp, permission, session_create_from_options, session_create_params, update,
+};
 
 mod member;
 mod tasks;
@@ -148,8 +153,16 @@ impl SessionPort for SessionHost {
 impl SessionHost {
     /// Runs the session on `client`, the connection the composition root
     /// took from the client tree, composing management text in `language`,
-    /// the interface's language code.
-    pub fn start(options: Options, client: Client, language: &'static str) -> Self {
+    /// the interface's language code. `notice` is shown once before the
+    /// Session opens; it says a daemon of another build was kept in use.
+    pub fn start(
+        options: Options,
+        client: Client,
+        language: &'static str,
+        notice: Option<String>,
+        ctx: rutis::Ctx,
+        leaf_end: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
         let (commands, command_rx) = unbounded_channel();
         let (update_tx, updates) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -166,7 +179,9 @@ impl SessionHost {
                         return;
                     }
                 };
-                runtime.block_on(run(options, client, command_rx, update_tx));
+                runtime.block_on(run(
+                    options, client, notice, command_rx, update_tx, ctx, leaf_end,
+                ));
             })
             .expect("spawn session thread");
         Self {
@@ -223,6 +238,9 @@ struct Worker {
     options: Options,
     client: Client,
     updates: mpsc::Sender<Update>,
+    ctx: rutis::Ctx,
+    leaf_end: Option<tokio::sync::oneshot::Sender<()>>,
+    ui_identity: Option<crate::leaf::Opened>,
     session_id: String,
     /// The Session's stored title, when it has a real one, and the newest
     /// `titleRevision` this client has: the attach record's or a later
@@ -250,6 +268,9 @@ struct Worker {
     task_history_queue: std::collections::VecDeque<String>,
     /// A stale request still occupies this slot until its reply arrives.
     task_history_request: Option<HistoryRequest>,
+    /// A `/goal` waiting for its line's history or for the event its write
+    /// produced, advanced by [`Worker::poll_goal`].
+    goal_pending: Option<PendingGoal>,
     task_stops: Option<StopBatch>,
     workflow: WorkflowReads,
     members: Members,
@@ -268,6 +289,7 @@ struct Worker {
     shell_stops: Vec<u64>,
     /// The model the session adopted, for the preference commands.
     model: Option<Configuration>,
+    model_session: Option<String>,
     /// The MCP sign-in waiting for its callback.
     mcp_attempt: Option<McpAttempt>,
     /// Callbacks the local listener captured.
@@ -309,6 +331,20 @@ struct MemberDetailRead {
     branch_id: String,
     request_id: String,
     allow: bool,
+}
+
+/// A `/goal` waiting on the shown line: the reader must finish the line's
+/// history before the call is chosen, and the event a write produced must be
+/// folded before the report prints. Both waits resume from the loop, so the
+/// command never holds the branch reader while it waits.
+struct PendingGoal {
+    request: crate::goal::Request,
+    branch: String,
+    /// The attachment this command was issued on; a switch drops the wait.
+    projection_id: u64,
+    /// The call sent, and the sequence of the event it wrote, once the reply
+    /// arrived.
+    written: Option<(crate::goal::Call, u64)>,
 }
 
 struct OutputWatch {
@@ -354,9 +390,15 @@ struct McpCallback {
 async fn run(
     options: Options,
     client: Client,
+    notice: Option<String>,
     mut commands: UnboundedReceiver<Command>,
     updates: mpsc::Sender<Update>,
+    ctx: rutis::Ctx,
+    leaf_end: tokio::sync::oneshot::Sender<()>,
 ) {
+    if let Some(notice) = notice {
+        let _ = updates.send(Update::Notice(notice));
+    }
     if update::enabled() {
         let offers = updates.clone();
         let home = options.home.clone();
@@ -370,11 +412,15 @@ async fn run(
         options,
         client,
         updates: updates.clone(),
+        ctx,
+        leaf_end: Some(leaf_end),
+        ui_identity: None,
         session_id: String::new(),
         session_title: None,
         title_revision: 0,
         session_cwd: None,
         parked: String::new(),
+        model_session: None,
         projection: Projection::default(),
         question_responses: Vec::new(),
         approval_details: Default::default(),
@@ -386,6 +432,7 @@ async fn run(
         task_history: Default::default(),
         task_history_queue: Default::default(),
         task_history_request: None,
+        goal_pending: None,
         task_stops: None,
         workflow: WorkflowReads::default(),
         members: Members::default(),
@@ -418,11 +465,8 @@ async fn run(
         ..Default::default()
     })));
     if let Err(error) = worker.open().await {
-        if worker.options.resume.is_some() {
-            let _ = updates.send(Update::Failed(error.to_string()));
-            return;
-        }
-        let _ = updates.send(Update::Notice(no_session(&error)));
+        let _ = updates.send(Update::StartupFailed(error.to_string()));
+        return;
     }
     loop {
         if let Err(error) = worker.poll_member().await {
@@ -433,6 +477,7 @@ async fn run(
             worker.send(Update::Failed(error.to_string()));
             break;
         }
+        worker.poll_goal().await;
         worker.poll_task_stops().await;
         worker.poll_workflow().await;
         worker.poll_context().await;
@@ -449,6 +494,23 @@ async fn run(
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
+                if worker.session_id.is_empty()
+                    && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
+                    && let Err(error) = worker.start_session().await
+                {
+                    if !worker.session_id.is_empty() {
+                        worker.send(Update::StartupFailed(error.to_string()));
+                        break;
+                    }
+                    worker.send(Update::SubmitNotSent(
+                        if worker.options.startup.is_some() || worker.model_session.is_some() {
+                            error.to_string()
+                        } else {
+                            no_session(&error)
+                        },
+                    ));
+                    continue;
+                }
                 if let Err(error) = worker.command(command).await {
                     let _ = updates.send(Update::Failed(error.to_string()));
                     break;
@@ -484,35 +546,6 @@ async fn run(
                 if worker.publish_at.is_some() => worker.publish(),
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Created {
-    session_id: String,
-    model: ModelId,
-}
-
-/// The record `session.attach` replies for the Session it opened. A server
-/// from before the record existed replies `{}`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Attached {
-    #[serde(default)]
-    model: Option<ModelId>,
-    /// The adopted configuration's preferences; absent when it carries none.
-    #[serde(default)]
-    model_preferences: Option<dim_agent_types::ModelPreferences>,
-    /// The Session's workspace; absent from servers older than the record.
-    #[serde(default)]
-    cwd: Option<String>,
-    /// The Session's stored title; absent from servers older than the title
-    /// fields, and `None` when it has none.
-    #[serde(default)]
-    title: Option<String>,
-    /// The title's revision; 0 on a server that reports none.
-    #[serde(default)]
-    title_revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -681,16 +714,6 @@ struct CancelNotice {
     branch_id: String,
 }
 
-/// `session.create` parameters: the workspace and, when one is chosen, the
-/// permission preset, which the Session's branches and members inherit.
-fn creation_params(options: &Options) -> serde_json::Value {
-    let mut params = json!({"cwd": options.workspace().as_str()});
-    if let Some(policy) = permission::creation_policy(options) {
-        params["permissionPolicy"] = policy;
-    }
-    params
-}
-
 impl Worker {
     async fn cancel_catalog(&mut self) -> crate::Result<()> {
         if let Some((request, _, _, _)) = self.catalog_request.take()
@@ -703,77 +726,81 @@ impl Worker {
         Ok(())
     }
 
-    /// The catalog `cwd` for `scope`: one workspace, the repository's set, or
-    /// none.
+    /// The catalog `cwd` for `scope`: the launch workspace, the git set (which
+    /// may hold one entry), or none.
     fn scope_cwd(&self, scope: &SessionsScope) -> Option<serde_json::Value> {
-        match scope {
-            SessionsScope::Workspace => Some(json!(self.options.workspace().as_str())),
-            SessionsScope::Repository(workspaces) => Some(json!(workspaces)),
-            SessionsScope::All => None,
-        }
+        scope_cwd(self.options.workspace().as_str(), scope)
     }
 
-    /// Creates or resumes the session the process was started for.
+    /// Resumes the requested Session; an ordinary startup stays at Home.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
-            let kind = if self.options.created_session {
-                SwitchKind::New
-            } else {
-                SwitchKind::Resumed
-            };
-            return self.attach(id, kind).await;
-        }
-        let attached_session = self.invalidate_projection();
-        let mut params = creation_params(&self.options);
-        let mut preferences = None;
-        let mut target = None;
-        if let (Some(provider), Some(model)) =
-            (self.options.provider.clone(), self.options.model.clone())
-        {
-            params["model"] = json!({"provider": provider, "modelId": model});
-            preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
+            if let Some(preset) = self.options.permission {
+                if !self.client.supports(&permission::PRESET_METHODS) {
+                    return Err(
+                        "This daemon cannot change a Session's permission preset; omit --permission"
+                            .into(),
+                    );
+                }
+                permission::select(&mut self.client, &id, preset)
+                    .await
+                    .map_err(|error| format!("Cannot set the permission preset: {error}"))?;
             }
-            target = Some((provider, model));
+            adopt_startup(&mut self.client, &self.options, &id).await?;
+            return self.attach(id, SwitchKind::Resumed).await;
         }
-        let created: Created = match self.client.typed("session.create", params).await {
-            Ok(created) => created,
-            Err(error) => {
-                return Err(crate::model_adoption_error(
-                    &mut self.client,
-                    target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
-                    error,
-                    preferences.as_ref(),
-                )
-                .await);
-            }
-        };
-        self.enter(
-            created.session_id,
-            Some(created.model),
-            SwitchKind::New,
-            attached_session,
-        )
-        .await
+        Ok(())
     }
 
-    /// Creates the Session the first message from home starts, on the model
-    /// the status line shows.
+    /// Creates Home's first Session using the launch settings or the model
+    /// selected or inherited there.
     async fn start_session(&mut self) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        let mut params = creation_params(&self.options);
-        let mut preferences = None;
-        let mut target = None;
+        let initial = self.model.is_none() && self.model_session.is_none();
+        let mut params = if initial {
+            session_create_from_options(&mut self.client, &self.options).await?
+        } else {
+            session_create_params(&self.options)
+        };
+        let mut preferences = params.get("modelPreferences").cloned();
+        let mut target = if initial {
+            self.options
+                .provider
+                .clone()
+                .zip(self.options.model.clone())
+        } else {
+            None
+        };
         let result = async {
-            if let Some(model) = &self.model {
-                params["model"] = json!({"provider": model.provider_id, "modelId": model.model_id});
+            if let Some(source) = &self.model_session
+                && self.client.offers("session.create.modelFromSession")
+            {
+                params["modelFromSession"] = json!(source);
+            } else if let Some(model) = &self.model {
                 let (provider, model) = (model.provider_id.clone(), model.model_id.clone());
-                preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
-                if let Some(preferences) = &preferences {
-                    params["modelPreferences"] = preferences.clone();
+                params["model"] = json!({"provider": provider, "modelId": model});
+                if self.model_session.is_some() && self.options.model_config.is_none() {
+                    let cannot_copy = "This daemon cannot copy the adopted Session model. Restart the daemon with a version supporting session.create.modelFromSession, then rebind the temporary connection with DIM_BASE_URL and DIM_API_FORMAT";
+                    if !self.client.offers("provider.management") {
+                        return Err(cannot_copy.into());
+                    }
+                    let snapshot: ProviderManagement = self
+                        .client
+                        .typed("provider.management", json!({}))
+                        .await?;
+                    let configured = snapshot
+                        .providers
+                        .into_iter()
+                        .find(|entry| entry.provider_id == provider)
+                        .ok_or_else(|| format!("{cannot_copy}, or select a configured Provider model before starting a new Session"))?;
+                    preferences = configured.preferences.get(&model).cloned();
+                } else {
+                    preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
                 }
                 target = Some((provider, model));
+            }
+            if let Some(preferences) = &preferences {
+                params["modelPreferences"] = preferences.clone();
             }
             match self.client.typed::<Created>("session.create", params).await {
                 Ok(created) => Ok(created),
@@ -781,7 +808,9 @@ impl Worker {
                     &mut self.client,
                     target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
                     error,
-                    preferences.as_ref(),
+                    preferences
+                        .as_ref()
+                        .filter(|_| !initial || self.options.effort.is_none()),
                 )
                 .await),
             }
@@ -811,14 +840,6 @@ impl Worker {
         kind: SwitchKind,
         attached_session: String,
     ) -> crate::Result<()> {
-        if let (SwitchKind::Resumed, Some(preset)) = (kind, self.options.permission)
-            && self.client.supports(&permission::PRESET_METHODS)
-            && let Err(error) = permission::select(&mut self.client, &session_id, preset).await
-        {
-            self.send(Update::Notice(format!(
-                "The permission preset was not applied: {error}"
-            )));
-        }
         if !attached_session.is_empty() && attached_session != session_id {
             self.client
                 .rpc("session.detach", json!({"sessionId": attached_session}))
@@ -839,11 +860,13 @@ impl Worker {
         let configuration = Configuration {
             provider_id: model.provider_id.clone(),
             model_id: model.model_id.clone(),
+            capability_snapshot: attached.capability_snapshot,
             model_preferences,
         };
         self.session_title = stored_title(attached.title.as_deref()).map(str::to_owned);
         self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
+        self.model_session = Some(session_id.clone());
         // The method table is read once per Session, before anything can ask
         // for an offer or probe the settings source: a Session that does not
         // list the methods is never asked.
@@ -852,7 +875,7 @@ impl Worker {
         self.send(Update::SuggestionMethods(offered));
         self.suggestion_throttle_noted = false;
         self.session_cwd = attached.cwd;
-        self.register_ui().await;
+        self.register_ui().await?;
         self.mcp_required.clear();
         self.model = Some(configuration.clone());
         self.discover_branch("main");
@@ -868,9 +891,33 @@ impl Worker {
             self.send(Update::Permissions(policy));
         }
         self.send(Update::Switched { session_id, kind });
+        self.refresh_skills().await;
         self.context_stale = true;
         self.publish();
         Ok(())
+    }
+
+    async fn refresh_skills(&mut self) {
+        if !self.client.supports(&["skills.catalog"]) {
+            self.send(Update::Skills(Vec::new()));
+            return;
+        }
+        let Some(cwd) = self.session_cwd.clone() else {
+            self.send(Update::Notice(
+                "Skills unavailable: the daemon did not report the Session workspace".into(),
+            ));
+            return;
+        };
+        match crate::management::skills::catalog(&mut self.client, &cwd).await {
+            Ok(catalog) => self.send(Update::Skills(catalog.entries)),
+            Err(error)
+                if error.downcast_ref::<client::RpcError>().and_then(app_error)
+                    == Some("unknown_method") =>
+            {
+                self.send(Update::Skills(Vec::new()))
+            }
+            Err(error) => self.send(Update::Notice(format!("Skills unavailable: {error}"))),
+        }
     }
 
     /// Whether the model takes image input, from its catalog entry:
@@ -902,17 +949,10 @@ impl Worker {
         if !self.client.offers("provider.catalog") {
             return None;
         }
-        #[derive(Deserialize)]
-        struct Snapshot {
-            catalog: Option<Catalog>,
-        }
-        #[derive(Deserialize)]
-        struct Catalog {
-            models: Vec<CatalogModel>,
-        }
-        let request = self
-            .client
-            .typed::<Snapshot>("provider.catalog", json!({"providerId": model.provider_id}));
+        let request = self.client.typed::<ProviderCatalogSnapshot>(
+            "provider.catalog",
+            json!({"providerId": model.provider_id}),
+        );
         let snapshot = tokio::time::timeout(Duration::from_secs(5), request)
             .await
             .ok()?
@@ -1042,13 +1082,6 @@ impl Worker {
     }
 
     async fn command(&mut self, command: Command) -> crate::Result<()> {
-        if self.session_id.is_empty()
-            && matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
-            && let Err(error) = self.start_session().await
-        {
-            self.send(Update::Notice(no_session(&error)));
-            return Ok(());
-        }
         match command {
             Command::Submit(text, mode) => self.submit(text, mode.as_str()).await,
             Command::SubmitDraft(parts, mode) => self.submit_draft(parts, mode.as_str()).await,
@@ -1115,6 +1148,7 @@ impl Worker {
                     .await;
                 if let Ok(opened) = &opened {
                     self.discover_branch(&opened.branch.branch_id);
+                    self.line_projection(&opened.branch.branch_id);
                     self.side = Some(opened.branch.branch_id.clone());
                     self.publish();
                 }
@@ -1257,6 +1291,15 @@ impl Worker {
                 }
             }
             Command::Resume(session_id) => {
+                if let Some(preset) = self.options.permission
+                    && self.client.supports(&permission::PRESET_METHODS)
+                    && let Err(error) =
+                        permission::select(&mut self.client, &session_id, preset).await
+                {
+                    self.send(Update::Notice(format!(
+                        "The permission preset was not applied: {error}"
+                    )));
+                }
                 self.attach(session_id, SwitchKind::Resumed).await?;
             }
             Command::ListSessions {
@@ -1300,7 +1343,11 @@ impl Worker {
                     let workspace = self.options.workspace().as_str().to_owned();
                     tokio::spawn(async move {
                         let workspaces = repository_workspaces(&workspace).await;
-                        if workspaces.len() > 1 {
+                        // Any git success answers with the launch workspace at
+                        // least, one worktree or several; a failure answers
+                        // nothing, and the local scope keeps the exact launch
+                        // workspace.
+                        if !workspaces.is_empty() {
                             let _ = updates.send(Update::RepositoryWorkspaces(workspaces));
                         }
                     });
@@ -1341,6 +1388,26 @@ impl Worker {
                 }
             }
             Command::Compact => self.compact().await,
+            Command::Export(format) => {
+                let extension = match format {
+                    crate::export::Format::Markdown => "md",
+                    crate::export::Format::Json => "json",
+                };
+                let directory = match std::env::current_dir() {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        self.report(error.to_string(), true);
+                        return Ok(());
+                    }
+                };
+                let path = directory.join(format!("session-{}.{extension}", uuid::Uuid::new_v4()));
+                match crate::export::write(&mut self.client, &self.session_id, format, Some(&path))
+                    .await
+                {
+                    Ok(()) => self.send(Update::Exported { format, path }),
+                    Err(error) => self.report(error.to_string(), true),
+                }
+            }
             Command::Rename(title) => self.rename(title).await,
             Command::Goal(request) => self.goal(request).await,
             Command::ToggleWeb => {
@@ -1352,9 +1419,12 @@ impl Worker {
                         let browser = state.enabled
                             && state.open
                             && url.as_deref().is_some_and(crate::browser::open);
-                        state.url = (state.enabled && state.open && !browser)
-                            .then_some(url)
-                            .flatten();
+                        state.url = url.map(|mut url| {
+                            if browser && let Some(fragment) = url.find('#') {
+                                url.truncate(fragment);
+                            }
+                            url
+                        });
                         self.send(Update::Web {
                             enabled: state.enabled,
                             open: state.open,
@@ -1751,10 +1821,18 @@ impl Worker {
                     session_id: self.session_id.clone(),
                     branch_id: self.focus.clone(),
                 });
-                let result =
+                let applied =
                     crate::management::apply(&mut self.client, &request, Some(cwd), line.as_ref())
                         .await;
-                self.send(Update::Management(ManagementReply { request, result }));
+                self.send(Update::Management(ManagementReply {
+                    request,
+                    result: applied.result,
+                }));
+                // The palette lists the same entries the panel's view was
+                // built from.
+                if let Some(entries) = applied.skills {
+                    self.send(Update::Skills(entries));
+                }
             }
             Command::SetLocale(language) => crate::management::use_language(language),
             Command::Configure(text) => {
@@ -1888,9 +1966,9 @@ impl Worker {
                     "branchId": self.focus,
                     "inputId": input_id,
                 });
+                let user = self.shown().held_input(&input_id).cloned();
                 if action == "steer" {
-                    let user = self.shown().held_input(&input_id).cloned();
-                    let Some(user) = user else {
+                    let Some(user) = &user else {
                         self.send(Update::Notice(QUEUE_LEFT.into()));
                         return Ok(());
                     };
@@ -1900,20 +1978,21 @@ impl Worker {
                 struct Withdrawn {
                     status: String,
                 }
-                match self
+                let result = self
                     .client
                     .typed::<Withdrawn>("session.input.withdraw", params)
-                    .await
-                {
-                    Ok(withdrawn) if withdrawn.status == "notHeld" => {
+                    .await;
+                match (result, user) {
+                    (Ok(withdrawn), _) if withdrawn.status == "notHeld" => {
                         self.send(Update::Notice(QUEUE_LEFT.into()))
                     }
-                    Ok(withdrawn) if withdrawn.status == "deleted" && action == "withdraw" => self
-                        .send(Update::Withdrawn {
-                            input_id: input_id.clone(),
-                        }),
-                    Ok(_) => {}
-                    Err(error) => self.send(Update::Notice(error.to_string())),
+                    (Ok(withdrawn), Some(user))
+                        if withdrawn.status == "deleted" && action == "withdraw" =>
+                    {
+                        self.send(Update::Withdrawn(user));
+                    }
+                    (Ok(_), _) => {}
+                    (Err(error), _) => self.send(Update::Notice(error.to_string())),
                 }
             }
         }
@@ -2005,67 +2084,119 @@ impl Worker {
     }
 
     /// `/goal`: the shown line's goal, written by the method the request
-    /// names. The line is read before the call is chosen, so a fold the
-    /// interface has not caught up with cannot pick the wrong method; a
-    /// write is followed by the events it produced, so the report shows the
-    /// state after it.
+    /// names. The call is chosen only once the reader has finished the line's
+    /// history, so a fold the interface has not caught up with cannot pick
+    /// the wrong method; the report waits for the event a write produced, so
+    /// it shows the state after it.
     async fn goal(&mut self, request: crate::goal::Request) {
-        let branch = self.focus.clone();
+        if self.goal_pending.is_some() {
+            self.report(
+                "Goal: a /goal is still in progress on this line".into(),
+                true,
+            );
+            return;
+        }
         if !crate::goal::available(&mut self.client, &self.session_id).await {
             self.report(crate::goal::NOT_AVAILABLE.into(), true);
             return;
         }
-        if let Err(error) = self.read_branch(&branch).await {
+        if self.session_id.is_empty() {
+            self.report(format!("Goal: {NO_SESSION}"), true);
+            return;
+        }
+        self.goal_pending = Some(PendingGoal {
+            request,
+            branch: self.focus.clone(),
+            projection_id: self.projection_id,
+            written: None,
+        });
+        self.poll_goal().await;
+    }
+
+    /// Advances the parked `/goal` from the loop: the task-history reader's
+    /// `done` releases the call, and the write's own event releases the
+    /// report. A line that is still loading or has no reply leaves it parked;
+    /// the reader's reply or its failure resumes it.
+    async fn poll_goal(&mut self) {
+        let Some(pending) = &self.goal_pending else {
+            return;
+        };
+        if pending.projection_id != self.projection_id {
+            self.goal_pending = None;
+            return;
+        }
+        let branch = pending.branch.clone();
+        if let Some((call, sequence)) = pending.written {
+            // The method writes a change input and replies with its sequence.
+            // The report is released at that sequence for every daemon, as on
+            // main: a daemon that publishes the old keys answers with the same
+            // sequence but writes no record, and must not leave the command
+            // parked (R6). The displayed goal follows the newest record or the
+            // old-key state as it arrives through the keyed projection.
+            if self.cursors.get(&branch).copied().unwrap_or(0) >= sequence {
+                self.finish_goal(&branch, Some(call));
+            }
+            return;
+        }
+        let history = self
+            .task_history
+            .get(&branch)
+            .expect("the shown line is discovered");
+        if let Some(error) = history.error.clone() {
+            self.goal_pending = None;
             self.report(format!("Goal: {error}"), true);
             return;
         }
-        let call = crate::goal::call(&request, self.shown().goal().as_ref());
-        if let Some(call) = call {
-            let mut params = json!({"sessionId": self.session_id, "branchId": branch});
-            if let Some(objective) = crate::goal::objective(&request) {
-                params["objective"] = json!(objective);
+        if !history.done {
+            return;
+        }
+        let request = self
+            .goal_pending
+            .as_ref()
+            .expect("parked goal")
+            .request
+            .clone();
+        let Some(call) = crate::goal::call(&request, self.goal_on(&branch).as_ref()) else {
+            self.finish_goal(&branch, None);
+            return;
+        };
+        let mut params = json!({"sessionId": self.session_id, "branchId": branch});
+        if let Some(objective) = crate::goal::objective(&request) {
+            params["objective"] = json!(objective);
+        }
+        #[derive(Deserialize)]
+        struct Written {
+            sequence: u64,
+        }
+        match self.client.typed::<Written>(call.method(), params).await {
+            Ok(written) => {
+                self.goal_pending.as_mut().expect("parked goal").written =
+                    Some((call, written.sequence));
             }
-            if let Err(error) = self.client.rpc(call.method(), params).await {
+            Err(error) => {
+                self.goal_pending = None;
                 let text = match crate::client::app_error(&error) {
                     Some("unknown_method") => crate::goal::NOT_AVAILABLE.to_owned(),
                     _ => format!("Goal: {error}"),
                 };
                 self.report(text, true);
-                return;
-            }
-            if let Err(error) = self.read_branch(&branch).await {
-                self.report(format!("Goal: {error}"), true);
-                return;
             }
         }
-        let text = crate::goal::report(&branch, call, self.shown().goal().as_ref()).join("\n");
-        self.report(text, false);
     }
 
-    /// Applies the portion of `branch` the interface has not folded yet, from
-    /// its applied sequence to the published head.
-    async fn read_branch(&mut self, branch: &str) -> crate::Result<()> {
-        let mut after = self.cursors.get(branch).copied().unwrap_or(0);
-        let mut through = None;
-        loop {
-            let mut params = json!({
-                "sessionId": self.session_id, "branchId": branch,
-                "after": after, "limit": HISTORY_PAGE,
-            });
-            if let Some(through) = through {
-                params["through"] = json!(through);
-            }
-            let page: crate::wire::History = self.client.typed("session.history", params).await?;
-            through = Some(page.through);
-            let next = page.next(after, through)?;
-            for value in page.events {
-                self.apply(branch, serde_json::from_value(value)?);
-            }
-            match next {
-                Some(next) => after = next,
-                None => return Ok(()),
-            }
-        }
+    /// Reports the parked `/goal` with the fold it now holds.
+    fn finish_goal(&mut self, branch: &str, call: Option<crate::goal::Call>) {
+        self.goal_pending = None;
+        let goal = self.goal_on(branch);
+        self.report(
+            crate::goal::report(branch, call, goal.as_ref()).join("\n"),
+            false,
+        );
+    }
+
+    /// The goal folded on `branch`, from the projection that draws it.
+    fn goal_on(&self, branch: &str) -> Option<crate::goal::Goal> {
+        self.projection_on(branch).goal()
     }
 
     /// Whether a request made from a snapshot still addresses this
@@ -2087,20 +2218,41 @@ impl Worker {
         }
     }
 
-    /// Registers this interface on the Session with the daemon's UI registry
-    /// (Tui design §3.6), when the daemon keeps one; a failure to register
-    /// is a notice, since the Session works without it.
-    async fn register_ui(&mut self) {
+    /// Opens this process's leaf on its first Session, then registers its
+    /// interface. Older daemons use the connection registration.
+    async fn register_ui(&mut self) -> crate::Result<()> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Attached {
             ui_id: String,
         }
+        if self.ui_identity.is_none() && self.client.offers("ui.leaf.2") {
+            let leaf = crate::leaf::Leaf::bind(&self.options)?;
+            let params = json!({
+                "sessionId": self.session_id,
+                "kind": "tui",
+                "peer": leaf.peer,
+                "address": leaf.address,
+            });
+            let end = self
+                .leaf_end
+                .take()
+                .ok_or("UI leaf has already been started")?;
+            let node = self.ctx.plugin(leaf.node(end));
+            (&node).await.map_err(crate::plugin_error)?;
+            match self.client.typed("ui.open", params).await {
+                Ok(opened) => self.ui_identity = Some(opened),
+                Err(error) => {
+                    node.dispose().await?;
+                    return Err(error);
+                }
+            }
+        }
         if !self.client.offers("ui.attach") {
-            return;
+            return Ok(());
         }
         let mut params = json!({"sessionId": self.session_id, "kind": "tui"});
-        if let Some(identity) = &self.options.ui_identity {
+        if let Some(identity) = &self.ui_identity {
             params["uiId"] = json!(identity.ui_id);
             params["token"] = json!(identity.token);
         }
@@ -2110,6 +2262,7 @@ impl Worker {
                 "Interface registration failed: {error}"
             ))),
         }
+        Ok(())
     }
 
     /// Put the browser on this Session's chat while keeping the bootstrap
@@ -2469,13 +2622,19 @@ impl Worker {
 
     /// `/mcp [list]`, `/mcp login [--no-browser] ID`, `/mcp callback URL`,
     /// `/mcp logout ID`, `/mcp disconnect ID`, `/mcp enable ID`,
-    /// `/mcp disable ID`.
+    /// `/mcp disable ID`; every command that names one entry takes
+    /// `--source SOURCE`.
     async fn mcp(&mut self, args: &str) -> crate::Result<()> {
-        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID]";
+        const USAGE: &str = "Usage: /mcp [list|login [--no-browser] ID|callback URL|logout ID|disconnect ID|enable ID|disable ID] [--source SOURCE]";
+        let cwd = self
+            .session_cwd
+            .as_deref()
+            .unwrap_or(self.options.workspace().as_str())
+            .to_owned();
         let words: Vec<&str> = args.split_whitespace().collect();
         match words.as_slice() {
             [] | ["list"] => {
-                let (rows, notes) = mcp::catalog_report(&mut self.client, &self.options).await?;
+                let (rows, notes) = mcp::catalog_report(&mut self.client, &cwd).await?;
                 let mut lines = rows;
                 lines.extend(notes);
                 // Without a Session there are no connections to report; the
@@ -2490,11 +2649,12 @@ impl Worker {
                 if rest.contains(&"--client-secret") {
                     return Err("A client secret needs hidden input; run dimcode mcp login ID --client-secret in a terminal".into());
                 }
+                let (source, rest) = crate::mcp::take_source(rest)?;
                 let ids: Vec<_> = rest.iter().filter(|word| !word.starts_with("--")).collect();
                 let [id] = ids.as_slice() else {
                     return Err(USAGE.into());
                 };
-                self.mcp_login(id, no_browser).await?;
+                self.mcp_login(id, source, no_browser).await?;
             }
             ["callback", url] => {
                 let Some(attempt) = &self.mcp_attempt else {
@@ -2503,12 +2663,18 @@ impl Worker {
                 let attempt_id = attempt.attempt_id.clone();
                 self.mcp_complete(attempt_id, url.to_string(), None).await;
             }
-            ["logout", id] => {
+            ["logout", rest @ ..] => {
                 #[derive(Deserialize)]
                 struct LoggedOut {
                     revoked: bool,
                 }
-                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let [id] = rest.as_slice() else {
+                    return Err(USAGE.into());
+                };
+                let params =
+                    crate::management::mcp::target_params(&mut self.client, &cwd, id, source)
+                        .await?;
                 let result: LoggedOut = self.client.typed("mcp.auth.logout", params).await?;
                 self.report(
                     format!("Signed out of {id:?}. Revoked: {}.", result.revoked),
@@ -2516,37 +2682,34 @@ impl Worker {
                 );
             }
             // The ID is the rest of the line, spaces included.
-            ["disconnect", ..] => {
-                let (_, id) = args
-                    .trim()
-                    .split_once(char::is_whitespace)
-                    .unwrap_or((args.trim(), ""));
-                let id = id.trim();
+            ["disconnect", rest @ ..] => {
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let id = rest.join(" ");
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
-                let params = mcp::target(&mut self.client, &self.options, id).await?;
+                let params =
+                    crate::management::mcp::target_params(&mut self.client, &cwd, &id, source)
+                        .await?;
                 self.client.rpc("mcp.disconnect", params).await?;
                 self.report(
-                    format!("Disconnected {}.", crate::sanitize::safe(id)),
+                    format!("Disconnected {}.", crate::sanitize::safe(&id)),
                     false,
                 );
             }
             // The ID is the rest of the line, spaces included.
-            ["enable", ..] | ["disable", ..] => {
-                let (command, id) = args
-                    .trim()
-                    .split_once(char::is_whitespace)
-                    .unwrap_or((args.trim(), ""));
-                let id = id.trim();
+            ["enable", rest @ ..] | ["disable", rest @ ..] => {
+                let (source, rest) = crate::mcp::take_source(rest)?;
+                let id = rest.join(" ");
                 if id.is_empty() {
                     return Err(USAGE.into());
                 }
                 let state = crate::management::mcp::set_enabled(
                     &mut self.client,
-                    self.options.workspace().as_str(),
-                    id,
-                    command == "enable",
+                    &cwd,
+                    &id,
+                    source,
+                    words[0] == "enable",
                 )
                 .await?;
                 let mut lines = vec![state.sentence()];
@@ -2572,9 +2735,19 @@ impl Worker {
         Ok(crate::recording::report(&state, &self.options))
     }
 
-    async fn mcp_login(&mut self, id: &str, no_browser: bool) -> crate::Result<()> {
+    async fn mcp_login(
+        &mut self,
+        id: &str,
+        source: Option<&str>,
+        no_browser: bool,
+    ) -> crate::Result<()> {
         self.end_mcp_attempt();
-        let params = mcp::target(&mut self.client, &self.options, id).await?;
+        let cwd = self
+            .session_cwd
+            .as_deref()
+            .unwrap_or(self.options.workspace().as_str());
+        let params =
+            crate::management::mcp::target_params(&mut self.client, cwd, id, source).await?;
         let started: mcp::Started = self.client.typed("mcp.auth.start", params).await?;
         let issuer = url::Url::parse(&started.issuer)?;
         let now = std::time::SystemTime::now()
@@ -2968,37 +3141,6 @@ impl Worker {
         struct Account {
             account: Option<serde_json::Value>,
         }
-        #[derive(Deserialize)]
-        struct Snapshot {
-            catalog: Option<Catalog>,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Catalog {
-            version: u32,
-            models: Vec<CatalogModel>,
-            disabled_model_ids: Vec<String>,
-        }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct CatalogModel {
-            id: String,
-            name: String,
-            unavailable_reason: Option<String>,
-            #[serde(default)]
-            missing_limits: Vec<String>,
-            #[serde(default)]
-            zdr: bool,
-            #[serde(default)]
-            capabilities: dim_agent_types::CatalogCapabilities,
-            #[serde(default)]
-            metadata: Option<CatalogReasoning>,
-        }
-        #[derive(Deserialize, Default)]
-        #[serde(rename_all = "camelCase")]
-        struct CatalogReasoning {
-            reasoning: Option<dim_agent_types::ModelReasoning>,
-        }
         let listed: Providers = self.client.typed("provider.list", json!({})).await?;
         let mut usable: Vec<(String, String, bool)> = Vec::new();
         // `provider.refresh` lists a static provider only; an account
@@ -3018,11 +3160,16 @@ impl Worker {
                 provider.remote_model_list,
             ));
         }
-        let managed: Vec<Managed> = self
-            .client
-            .typed("account.providers", json!({}))
-            .await
-            .unwrap_or_default();
+        let managed: Vec<Managed> = match self.client.typed("account.providers", json!({})).await {
+            Ok(providers) => providers,
+            Err(error)
+                if error.downcast_ref::<client::RpcError>().and_then(app_error)
+                    == Some("unknown_method") =>
+            {
+                Vec::new()
+            }
+            Err(error) => return Err(format!("account.providers: {error}").into()),
+        };
         for provider in managed {
             let status = self
                 .client
@@ -3042,10 +3189,13 @@ impl Worker {
         for (provider_id, provider_name, listable) in usable {
             let snapshot = self
                 .client
-                .typed::<Snapshot>("provider.catalog", json!({"providerId": provider_id}))
+                .typed::<ProviderCatalogSnapshot>(
+                    "provider.catalog",
+                    json!({"providerId": provider_id}),
+                )
                 .await;
             let catalog = match snapshot {
-                Ok(Snapshot { catalog }) => catalog,
+                Ok(ProviderCatalogSnapshot { catalog }) => catalog,
                 Err(_) => {
                     empty.push(EmptyProvider {
                         provider_id,
@@ -3294,6 +3444,7 @@ impl Worker {
             }
         }
         let model = if self.session_id.is_empty() {
+            self.model_session = None;
             let model = ModelId {
                 provider_id,
                 model_id,
@@ -3302,6 +3453,7 @@ impl Worker {
             let configuration = Configuration {
                 provider_id: model.provider_id.clone(),
                 model_id: model.model_id.clone(),
+                capability_snapshot: None,
                 model_preferences: None,
             };
             self.model = Some(configuration.clone());
@@ -3341,6 +3493,14 @@ impl Worker {
             let configuration = Configuration {
                 provider_id: updated.model.provider_id.clone(),
                 model_id: updated.model.model_id.clone(),
+                capability_snapshot: self
+                    .model
+                    .as_ref()
+                    .filter(|shown| {
+                        shown.provider_id == updated.model.provider_id
+                            && shown.model_id == updated.model.model_id
+                    })
+                    .and_then(|shown| shown.capability_snapshot.clone()),
                 model_preferences,
             };
             self.model = Some(configuration.clone());
@@ -3718,8 +3878,8 @@ impl Worker {
                     sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
                     let workspace = self.options.workspace().as_str();
                     sessions.retain(|session| match &scope {
-                        SessionsScope::Workspace => session.cwd == workspace,
-                        SessionsScope::Repository(workspaces) => workspaces.contains(&session.cwd),
+                        SessionsScope::Local(None) => session.cwd == workspace,
+                        SessionsScope::Local(Some(workspaces)) => workspaces.contains(&session.cwd),
                         SessionsScope::All => true,
                     });
                 }
@@ -3909,7 +4069,7 @@ impl Worker {
             return;
         }
         *cursor = event.sequence;
-        self.discover_workflow(&event);
+        self.discover_workflow(branch_id, &event);
         if branch_id == "main"
             && let EventContent::Configuration(configuration) = &event.content
         {
@@ -4019,9 +4179,14 @@ impl Worker {
 
     /// The transcript the screen shows: the focused line's, or `main`'s.
     fn shown(&self) -> &Projection {
+        self.projection_on(&self.focus)
+    }
+
+    /// The projection that draws `branch`, when the interface opened it.
+    fn projection_on(&self, branch: &str) -> &Projection {
         self.lines
-            .get(&self.focus)
-            .filter(|_| self.focus != "main")
+            .get(branch)
+            .filter(|_| branch != "main")
             .map_or(&self.projection, |line| &line.projection)
     }
 
@@ -4117,19 +4282,6 @@ fn group(n: u64) -> String {
     out
 }
 
-/// One model of `provider.catalog`, as far as the interface reads it.
-#[derive(Deserialize)]
-struct CatalogModel {
-    id: String,
-    capabilities: dim_agent_types::CatalogCapabilities,
-    metadata: Option<CatalogPreferences>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CatalogPreferences {
-    service_tier: Option<dim_agent_types::ModelServiceTier>,
-}
-
 fn effort_choices(
     capabilities: &dim_agent_types::CatalogCapabilities,
     reasoning: Option<&dim_agent_types::ModelReasoning>,
@@ -4149,6 +4301,38 @@ fn effort_choices(
         .clone()
         .filter(|effort| efforts.iter().any(|option| option == effort));
     (efforts, default)
+}
+
+pub(crate) async fn adopt_startup(
+    client: &mut Client,
+    options: &Options,
+    session_id: &str,
+) -> crate::Result<()> {
+    if options.startup.is_none() && options.effort.is_none() && options.model.is_none() {
+        return Ok(());
+    }
+    let mut params = json!({"sessionId":session_id,"branchId":"main"});
+    if let Some(startup) = &options.startup {
+        params["startup"] = startup.clone();
+    }
+    if let Some(model) = &options.model {
+        params["modelId"] = json!(model);
+    }
+    let mut saved = None;
+    if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
+        params["providerId"] = json!(provider);
+        saved = saved_model_preferences(client, provider, model).await?;
+    }
+    if let Some(preferences) = options.creation_preferences(saved) {
+        params["modelPreferences"] = preferences;
+    }
+    client
+        .rpc("session.model.update", params)
+        .await
+        .map_err(|error| {
+            format!("Cannot adopt startup configuration for resumed Session: {error}")
+        })?;
+    Ok(())
 }
 
 pub(crate) async fn saved_model_preferences(
@@ -4223,28 +4407,7 @@ pub(crate) async fn declare_model_limits(
     context_window: u64,
     max_output_tokens: u64,
 ) -> crate::Result<()> {
-    #[derive(Deserialize)]
-    struct Snapshot {
-        catalog: Option<Catalog>,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Catalog {
-        version: u32,
-        #[serde(default)]
-        disabled_model_ids: Vec<String>,
-        models: Vec<CatalogModel>,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct CatalogModel {
-        id: String,
-        #[serde(default)]
-        missing_limits: Vec<String>,
-        #[serde(default)]
-        unavailable_reason: Option<String>,
-    }
-    let snapshot: Snapshot = client
+    let snapshot: ProviderCatalogSnapshot = client
         .typed("provider.catalog", json!({"providerId": provider_id}))
         .await?;
     let catalog = snapshot
@@ -4353,10 +4516,21 @@ fn compact_reply(result: Result<serde_json::Value, client::RpcError>) -> Option<
     }
 }
 
+/// The catalog `cwd` for `scope`: the launch workspace, the git set (which
+/// may hold one entry), or none.
+fn scope_cwd(workspace: &str, scope: &SessionsScope) -> Option<serde_json::Value> {
+    match scope {
+        SessionsScope::Local(None) => Some(json!(workspace)),
+        SessionsScope::Local(Some(workspaces)) => Some(json!(workspaces)),
+        SessionsScope::All => None,
+    }
+}
+
 /// The workspaces `/resume` offers as one repository: the launch workspace
-/// and the same relative directory in every worktree of its git repository.
-/// Both reads share one two-second bound; a git that fails or does not answer
-/// leaves the set empty, and the picker keeps its two other scopes.
+/// and the same relative directory in every worktree of its git repository,
+/// one worktree or several. Both reads share one two-second bound; a git that
+/// fails or does not answer leaves the set empty, and the local scope keeps
+/// the exact launch workspace.
 async fn repository_workspaces(workspace: &str) -> Vec<String> {
     let read = async {
         let path = std::path::Path::new(workspace);
@@ -4401,7 +4575,14 @@ fn worktree_workspaces(list: &[u8], relative: &std::path::Path, workspace: &str)
             {
                 let path = std::path::Path::new(path);
                 let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-                let joined = path.join(relative);
+                // A launch at the repository root keeps the worktree path
+                // as it is: `join` with an empty relative path would add a
+                // trailing separator and list the launch workspace twice.
+                let joined = if relative.as_os_str().is_empty() {
+                    path
+                } else {
+                    path.join(relative)
+                };
                 if let Some(joined) = joined.to_str()
                     && !workspaces.iter().any(|workspace| workspace == joined)
                 {
@@ -4594,8 +4775,112 @@ mod tests {
         .unwrap();
         options.resolve_workspace().unwrap();
         assert_eq!(
-            creation_params(&options)["cwd"],
+            session_create_params(&options)["cwd"],
             directory.to_str().unwrap()
         );
+    }
+
+    /// The three cases the catalog `cwd` maps: the exact launch workspace,
+    /// the git set — even one entry, which the catalog canonicalizes to the
+    /// same filter — and no filter for every workspace.
+    #[test]
+    fn the_catalog_asks_for_the_launch_workspace_the_git_set_or_everything() {
+        assert_eq!(
+            scope_cwd("/repo/app", &SessionsScope::Local(None)),
+            Some(json!("/repo/app"))
+        );
+        let set = vec!["/repo/app".to_owned(), "/repo-fix/app".to_owned()];
+        assert_eq!(
+            scope_cwd("/repo/app", &SessionsScope::Local(Some(set.clone()))),
+            Some(json!(set))
+        );
+        assert_eq!(
+            scope_cwd(
+                "/repo/app",
+                &SessionsScope::Local(Some(vec!["/repo/app".to_owned()]))
+            ),
+            Some(json!(["/repo/app"]))
+        );
+        assert_eq!(scope_cwd("/repo/app", &SessionsScope::All), None);
+    }
+
+    /// One worktree, several, a bare entry, and a launch in a subdirectory:
+    /// each worktree contributes the same relative directory, and the launch
+    /// workspace appears once.
+    #[test]
+    fn the_worktree_set_holds_the_launch_workspace_and_each_sibling() {
+        let one = b"worktree /repo\0HEAD 111\0branch refs/heads/main\0\0";
+        assert_eq!(
+            worktree_workspaces(one, std::path::Path::new(""), "/repo"),
+            ["/repo"]
+        );
+        let several = b"worktree /repo\0HEAD 111\0branch refs/heads/main\0\0\
+                        worktree /repo-fix\0HEAD 222\0branch refs/heads/fix\0\0";
+        assert_eq!(
+            worktree_workspaces(several, std::path::Path::new(""), "/repo"),
+            ["/repo", "/repo-fix"]
+        );
+        let bare = b"worktree /repo\0bare\0\0";
+        assert_eq!(
+            worktree_workspaces(bare, std::path::Path::new(""), "/repo"),
+            ["/repo"]
+        );
+        // The launch workspace is the first worktree joined with the relative
+        // directory, so it is built the same way: `Path::join` gives the
+        // platform's separator, and the launch workspace is listed once.
+        let launch = std::path::Path::new("/repo").join("app");
+        let sibling = std::path::Path::new("/repo-fix").join("app");
+        assert_eq!(
+            worktree_workspaces(
+                several,
+                std::path::Path::new("app"),
+                launch.to_str().unwrap()
+            ),
+            [launch.to_str().unwrap(), sibling.to_str().unwrap()]
+        );
+    }
+
+    /// The git read itself: one worktree answers one entry, a sibling
+    /// worktree joins, and a directory outside git answers nothing.
+    #[tokio::test]
+    async fn the_git_read_answers_one_worktree_several_and_nothing_outside_git() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = std::fs::canonicalize(root.path()).unwrap();
+        assert!(
+            repository_workspaces(repo.to_str().unwrap())
+                .await
+                .is_empty()
+        );
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "test"]);
+        std::fs::write(repo.join("file"), "one\n").unwrap();
+        git(&repo, &["add", "file"]);
+        git(&repo, &["commit", "-qm", "one"]);
+        assert_eq!(
+            repository_workspaces(repo.to_str().unwrap()).await,
+            [repo.to_str().unwrap().to_owned()]
+        );
+        let sibling_root = tempfile::tempdir().unwrap();
+        let sibling = sibling_root.path().join("worktree");
+        git(&repo, &["worktree", "add", sibling.to_str().unwrap()]);
+        let sibling = std::fs::canonicalize(sibling).unwrap();
+        assert_eq!(
+            repository_workspaces(repo.to_str().unwrap()).await,
+            [
+                repo.to_str().unwrap().to_owned(),
+                sibling.to_str().unwrap().to_owned()
+            ]
+        );
+    }
+
+    fn git(directory: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(directory)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
     }
 }

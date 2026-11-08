@@ -8,7 +8,8 @@ use crate::{
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, Session, SessionConfig, TimelineKey,
+    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryOrderBy, TimelineQueryScope,
 };
 pub use dim_agent_types::AgentProfile;
 use dim_agent_types::{ContentBlock, EventKind};
@@ -22,6 +23,7 @@ use rutis_loader::edit::InstanceResult;
 use rutis_loader::resolve::Build;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    num::NonZeroU64,
     path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
@@ -35,7 +37,7 @@ mod configuration;
 pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
 mod sessions;
-pub use sessions::SessionPermissions;
+pub use sessions::{SessionPermissions, SessionRef, SessionsError};
 
 /// The process default profile carries the process Session defaults.
 fn process_default(defaults: &SessionConfig) -> AgentProfile {
@@ -79,7 +81,8 @@ pub struct AgentHost {
     pub(crate) ctx: Ctx,
 }
 
-/// A new loaded incarnation of a stored Session, before its caller receives it.
+/// A Session loaded from stored history, including a newly materialized fork,
+/// before its caller receives it.
 /// Listeners resolve the Session through [`AgentIndex::session`]; an event
 /// carries ids, never a handle.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -341,6 +344,114 @@ pub struct AgentIndex {
     #[cfg(feature = "testing")]
     idle_admitted: Arc<tokio::sync::Notify>,
 }
+/// One page of `branch`'s own facts after `after` through its Session's query:
+/// at most `limit`, never past `through`, ending on an atomic batch.
+async fn session_history_page(
+    session: &Session,
+    branch: &str,
+    after: u64,
+    limit: usize,
+    through: u64,
+) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    if after > 0 {
+        session.batch_end(branch, after).await?;
+    }
+    session.batch_end(branch, through).await?;
+    let mut events = session
+        .query(branch, history_page_query(after, limit))
+        .await?
+        .events;
+    events.retain(|event| event.sequence <= through);
+    while let Some(sequence) = events.last().map(|event| event.sequence) {
+        if sequence >= through {
+            break;
+        }
+        match session.batch_end(branch, sequence).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let next = session
+            .query(branch, history_page_query(sequence, 1))
+            .await?
+            .events;
+        let Some(event) = next.into_iter().find(|event| event.sequence <= through) else {
+            break;
+        };
+        events.push(event);
+    }
+    Ok(events)
+}
+
+/// One page of an ended `branch` at its fixed head, from the tree that owns
+/// the end. `through` must end an atomic batch, so the page is never cut
+/// inside one.
+async fn ended_page(
+    session: &Session,
+    branch: &str,
+    after: u64,
+    limit: usize,
+    through: u64,
+) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+    session
+        .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
+        .page(branch.to_owned(), after, limit, through)
+        .await
+}
+
+/// The facts after `after` a page asks for, up to `limit`.
+fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQuery {
+    dim_agent_runtime::TimelineQuery {
+        scope: dim_agent_runtime::TimelineQueryScope::Branch,
+        include_publishing: false,
+        from_event: None,
+        from_sequence: Some(after.saturating_add(1)),
+        order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
+        direction: dim_agent_runtime::TimelineQueryDirection::Ascending,
+        kinds: Vec::new(),
+        flags: Vec::new(),
+        event_id: None,
+        predicate: None,
+        limit: NonZeroU64::new(u64::try_from(limit).unwrap_or(u64::MAX).max(1))
+            .expect("a page keeps one fact"),
+        offset: 0,
+    }
+}
+
+/// How many facts one page of a prefix read holds.
+const PREFIX_PAGE: u64 = 4096;
+
+/// Folds the facts of the session's `main` chain through `at`, in chain order,
+/// into `rest` one page at a time: the fork's rest-point check reads them as
+/// one history without the prefix being held.
+async fn chain_through(
+    session: &Session,
+    at: u64,
+    rest: &mut RestPoint,
+) -> dim_agent_runtime::Result<()> {
+    let mut query = history_page_query(0, PREFIX_PAGE as usize);
+    query.scope = dim_agent_runtime::TimelineQueryScope::Chain;
+    loop {
+        let reply = session.query("main", query.clone()).await?;
+        let short = (reply.events.len() as u64) < PREFIX_PAGE;
+        let last = reply.positions.last().map(|position| position.sequence);
+        let cut = reply.events.partition_point(|event| event.sequence <= at);
+        rest.page(&reply.events[..cut]);
+        if reply
+            .events
+            .last()
+            .is_some_and(|event| event.sequence >= at)
+        {
+            break;
+        }
+        match (short, last) {
+            (false, Some(last)) => query.from_sequence = Some(last + 1),
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
 impl AgentIndex {
     /// Whether this profile resolves Session models through a host.
     pub(crate) fn selects_models(&self) -> bool {
@@ -355,7 +466,8 @@ impl AgentIndex {
             .then(|| self.ctx.get()?.get::<ModelSelectionHost>())
             .flatten()
     }
-    const SUMMARY_SCAN_LIMIT: usize = 256;
+    /// How many `input/message` facts a session summary's preview scan keeps.
+    const SUMMARY_SCAN_LIMIT: u64 = 256;
     const SUMMARY_PREVIEW_CHARS: usize = 120;
     /// Process Session defaults that Agent profiles apply on top of.
     pub fn session_defaults(&self) -> &SessionConfig {
@@ -375,6 +487,11 @@ impl AgentIndex {
     #[cfg(feature = "testing")]
     pub(crate) fn idle_admitted(&self) -> Arc<tokio::sync::Notify> {
         self.idle_admitted.clone()
+    }
+    /// How many uses Session `id` has right now. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn uses(&self, id: &str) -> usize {
+        self.directory.inner.lock().expect("agent index").uses(id)
     }
     pub fn default_host(&self) -> Option<Arc<AgentHost>> {
         self.host(Some(self.default_agent_id()))
@@ -515,6 +632,15 @@ impl AgentIndex {
             .map(|host| host.agent.sessions().len())
             .sum()
     }
+    /// Loaded Sessions with a running turn on `main`: work an idle shutdown
+    /// must not disturb.
+    pub(crate) fn running_sessions(&self) -> usize {
+        self.hosts()
+            .iter()
+            .flat_map(|host| host.agent.sessions())
+            .filter(|session| session.state("main").is_ok_and(|state| state.running))
+            .count()
+    }
     /// The public directory: the default Agent and the Agents
     /// `agent.create` made. An owned Agent belongs to one Team and is reached
     /// through Collaboration's tool.
@@ -631,137 +757,42 @@ impl AgentIndex {
     pub(crate) fn session_available(&self, id: &str) -> bool {
         self.host_by_session(id).is_some() && !self.closed(id)
     }
-    pub(crate) async fn read_page(
+    /// One page of `branch`'s own facts after `after`, at most `limit`, never
+    /// past `through`, ending on an atomic batch.
+    ///
+    /// The Session must already be loaded. An ended line is served by the tree
+    /// at its fixed head; otherwise the Session query serves the page. The
+    /// `ended_head` check is a snapshot: a line that ends while the query reads
+    /// it answers `BranchEnded`, and the page is re-read through the tree at
+    /// the fixed head.
+    pub(crate) async fn history_page(
         &self,
         id: &str,
+        branch: &str,
         after: u64,
         limit: usize,
-        through: Option<u64>,
-    ) -> dim_agent_runtime::Result<(u64, Vec<Arc<dim_agent_types::AgentEvent>>)> {
-        if let Some(store) = &self.session_store {
-            let head = match self
-                .session(id)
-                .map(|(_, session)| (session.sequence("main"), session))
-            {
-                Some((Ok(head), _)) => head,
-                Some((Err(error), session)) if !session.is_unloading() => return Err(error),
-                // Not loaded, or released under the read: the store holds
-                // every event it published (idle unload D8).
-                _ => {
-                    store
-                        .timeline_store()
-                        .head(&dim_agent_runtime::TimelineKey {
-                            session_id: id.into(),
-                            branch_id: "main".into(),
-                        })
-                        .await?
-                }
-            };
-            let through = through.unwrap_or(head);
-            if through > head {
-                return Err(AgentError::InvalidInput("future Timeline sequence".into()));
+        through: u64,
+    ) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
+        let (_, session) = self
+            .session(id)
+            .ok_or_else(|| AgentError::Closed(id.into()))?;
+        if session.is_unloading() {
+            return Err(AgentError::Storage("Session is unloading".into()));
+        }
+        if session.ended_head(branch).is_some() {
+            return ended_page(&session, branch, after, limit, through).await;
+        }
+        match session_history_page(&session, branch, after, limit, through).await {
+            Err(AgentError::BranchEnded(_)) => {
+                ended_page(&session, branch, after, limit, through).await
             }
-            return Ok((
-                through,
-                store
-                    .read_page_without_request_bodies(id, after, limit, through)
-                    .await?,
-            ));
+            page => page,
         }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        let through = through.unwrap_or(session.sequence("main")?);
-        Ok((
-            through,
-            session.local_page("main", after, limit, through).await?,
-        ))
-    }
-    /// The stored events of `event_ids` in one read; ids the store does not
-    /// hold are absent.
-    pub(crate) async fn read_events(
-        &self,
-        id: &str,
-        event_ids: &[String],
-    ) -> dim_agent_runtime::Result<HashMap<String, Arc<dim_agent_types::AgentEvent>>> {
-        if let Some(store) = &self.session_store {
-            return store.read_events(id, event_ids).await;
-        }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        Ok(session
-            .history("main", None)
-            .await?
-            .into_iter()
-            .filter(|event| event_ids.contains(&event.id))
-            .map(|event| (event.id.clone(), event))
-            .collect())
-    }
-    /// The main-branch `step/tool-use-start` of each `(request_id, call_id)`
-    /// in one read; calls the store does not hold are absent.
-    pub(crate) async fn read_tool_use_starts(
-        &self,
-        id: &str,
-        keys: &[(String, String)],
-    ) -> dim_agent_runtime::Result<HashMap<(String, String), Arc<dim_agent_types::AgentEvent>>>
-    {
-        if let Some(store) = &self.session_store {
-            return store.read_tool_use_starts(id, keys).await;
-        }
-        let (_, session) = self
-            .session(id)
-            .ok_or_else(|| AgentError::Closed(id.into()))?;
-        let mut starts = HashMap::with_capacity(keys.len());
-        for event in session.history("main", None).await? {
-            let key = match &event.kind {
-                EventKind::ToolUseStart(start) => (start.request_id.clone(), start.call_id.clone()),
-                _ => continue,
-            };
-            if keys.contains(&key) {
-                starts.insert(key, event);
-            }
-        }
-        Ok(starts)
-    }
-    /// The error a history window answers without the native Session store.
-    fn no_history_store() -> AgentError {
-        AgentError::InvalidInput("history windows require the native Session store".into())
     }
     /// Whether this index has the native Session store the history window
     /// reads (session-history-window §5.3).
     pub(crate) fn has_session_store(&self) -> bool {
         self.session_store.is_some()
-    }
-    /// The newest turn at `through` and the window's first sequence.
-    pub(crate) async fn turn_window(
-        &self,
-        id: &str,
-        branch: &str,
-        through: u64,
-    ) -> dim_agent_runtime::Result<crate::storage::TurnWindow> {
-        self.session_store
-            .as_ref()
-            .ok_or_else(Self::no_history_store)?
-            .turn_window(id, branch, through)
-            .await
-    }
-    /// The newest events below `before` in `window_start..=through`, whole
-    /// batches at both ends.
-    pub(crate) async fn read_page_before(
-        &self,
-        id: &str,
-        branch: &str,
-        before: u64,
-        limit: usize,
-        through: u64,
-        window_start: u64,
-    ) -> dim_agent_runtime::Result<Vec<dim_agent_runtime::StoredEvent>> {
-        self.session_store
-            .as_ref()
-            .ok_or_else(Self::no_history_store)?
-            .read_page_before(id, branch, before, limit, through, window_start)
-            .await
     }
     fn slot(&self, id: &str) -> Arc<SessionSlot> {
         self.directory
@@ -896,7 +927,6 @@ impl AgentIndex {
         request: crate::protocol::Catalog,
         agent: Option<String>,
         version: u32,
-        include_closed: bool,
         cancel: CancellationToken,
     ) -> dim_agent_runtime::Result<crate::protocol::CatalogResult> {
         let store = self
@@ -918,7 +948,7 @@ impl AgentIndex {
             .filter(|(_, slot)| slot.closed.load(Ordering::Acquire))
             .map(|(id, _)| id.clone())
             .collect();
-        let excluded: Vec<String> = if include_closed {
+        let excluded: Vec<String> = if request.include_closed {
             Vec::new()
         } else {
             closed.iter().cloned().collect()
@@ -1001,17 +1031,29 @@ impl AgentIndex {
         through: u64,
         created_at: u64,
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
+        let inputs = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            include_publishing: false,
+            from_event: None,
+            from_sequence: None,
+            order_by: TimelineQueryOrderBy::Sequence,
+            direction: TimelineQueryDirection::Ascending,
+            kinds: vec!["input/message".into()],
+            flags: Vec::new(),
+            event_id: None,
+            predicate: None,
+            limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT)
+                .expect("a summary scan keeps at least one input"),
+            offset: 0,
+        };
         let loaded = match self.session(id) {
             Some((_, session)) => match async {
-                let events = session
-                    .local_page("main", 0, Self::SUMMARY_SCAN_LIMIT, through)
-                    .await?;
-                let last = session.local("main", through..=through).await?.pop();
-                Ok::<_, AgentError>((events, last))
+                let events = session.query("main", inputs.clone()).await?.events;
+                Ok::<_, AgentError>(events)
             }
             .await
             {
-                Ok(read) => Some(read),
+                Ok(events) => Some(events),
                 // Released under the read: the store holds every event it
                 // published (idle unload D8).
                 Err(_) if session.is_unloading() => None,
@@ -1019,29 +1061,22 @@ impl AgentIndex {
             },
             None => None,
         };
-        let (events, last) = if let Some(read) = loaded {
-            read
+        let events = if let Some(events) = loaded {
+            events
         } else {
             let store = self
                 .session_store
                 .as_ref()
                 .ok_or_else(|| AgentError::Closed(id.into()))?;
-            let events = store
-                .read_page_without_request_bodies(id, 0, Self::SUMMARY_SCAN_LIMIT, through)
-                .await?;
-            let last = store
+            let key = TimelineKey {
+                session_id: id.into(),
+                branch_id: "main".into(),
+            };
+            store
                 .timeline_store()
-                .read(
-                    &TimelineKey {
-                        session_id: id.into(),
-                        branch_id: "main".into(),
-                    },
-                    through..=through,
-                )
+                .query(&key, &inputs, 1, through)
                 .await?
-                .pop()
-                .map(|record| record.event);
-            (events, last)
+                .events
         };
         let preview = events
             .iter()
@@ -1067,8 +1102,89 @@ impl AgentIndex {
                 (!text.is_empty())
                     .then(|| crate::storage::truncate_preview(&text, Self::SUMMARY_PREVIEW_CHARS))
             });
-        let updated_at = last.map_or(created_at, |event| event.create_at);
+        let updated_at = self
+            .latest_activity(id, through)
+            .await?
+            .map_or(created_at, |event| event.create_at);
         Ok((preview, updated_at))
+    }
+
+    /// The newest Session-activity event on `main` at or before `through`,
+    /// or `None` when the branch holds none (issue #1099): the value the
+    /// summary's `updatedAt` derives from, selected by the same predicate
+    /// and kinds as the storage catalog, so the two listings cannot
+    /// disagree. A Session in memory answers from its published facts; an
+    /// unloading or absent one is read from the store.
+    ///
+    /// The query asks for the activity kinds descending, and rows whose kind
+    /// is activity but whose message is host-injected are skipped, so the
+    /// read walks only as far as the candidate run that trails the answer.
+    async fn latest_activity(
+        &self,
+        id: &str,
+        through: u64,
+    ) -> dim_agent_runtime::Result<Option<Arc<dim_agent_types::AgentEvent>>> {
+        let mut to = through;
+        loop {
+            if to == 0 {
+                return Ok(None);
+            }
+            let query = |from_sequence: Option<u64>| TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                include_publishing: false,
+                from_event: None,
+                from_sequence,
+                order_by: TimelineQueryOrderBy::Sequence,
+                direction: TimelineQueryDirection::Descending,
+                kinds: crate::storage::ACTIVITY_KINDS
+                    .iter()
+                    .map(|kind| (*kind).into())
+                    .collect(),
+                flags: Vec::new(),
+                event_id: None,
+                predicate: None,
+                limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT)
+                    .expect("an activity page keeps at least one event"),
+                offset: 0,
+            };
+            let events = match self.session(id) {
+                Some((_, session)) => match session.query("main", query(Some(to))).await {
+                    Ok(page) => Some(page.events),
+                    // Released under the read: the store holds every event
+                    // it published (idle unload D8).
+                    Err(_) if session.is_unloading() => None,
+                    Err(error) => return Err(error),
+                },
+                None => None,
+            };
+            let events = if let Some(events) = events {
+                events
+            } else {
+                let store = self
+                    .session_store
+                    .as_ref()
+                    .ok_or_else(|| AgentError::Closed(id.into()))?;
+                let key = TimelineKey {
+                    session_id: id.into(),
+                    branch_id: "main".into(),
+                };
+                store
+                    .timeline_store()
+                    .query(&key, &query(None), 1, to)
+                    .await?
+                    .events
+            };
+            if let Some(event) = events
+                .iter()
+                .find(|event| crate::storage::activity(&event.kind))
+            {
+                return Ok(Some(event.clone()));
+            }
+            let Some(last) = events.last() else {
+                return Ok(None);
+            };
+            to = last.sequence.saturating_sub(1);
+        }
     }
 
     pub(crate) async fn prepare_session(
@@ -1443,16 +1559,17 @@ impl AgentIndex {
             let boundary =
                 dim_agent_capabilities::history::validate_context_boundary_in(session, "main", at)
                     .await?;
-            let prefix = session.context("main", at).await?;
-            Ok::<_, AgentError>((boundary, prefix))
+            let mut rest = RestPoint::default();
+            chain_through(session, at, &mut rest).await?;
+            Ok::<_, AgentError>((boundary, rest))
         }
         .await;
         if session.is_closing() {
             return Err(AgentError::Closed(source.into()));
         }
-        let (boundary, prefix) = checked?;
+        let (boundary, rest) = checked?;
         boundary
-            .and_then(|()| rest_point(&prefix.events))
+            .and_then(|()| rest.check())
             .map_err(AgentError::InvalidInput)?;
         let version = self
             .version_of(source)
@@ -1466,8 +1583,18 @@ impl AgentIndex {
             .host
             .agent
             .create_prepared_session(id.clone(), config, prepare);
-        self.admit(&id, &usage.host.agent_id, version, creation)
-            .await
+        let fork = self
+            .admit(&id, &usage.host.agent_id, version, creation)
+            .await?;
+        self.ctx
+            .get()
+            .expect("AgentsPlugin apply sets its context")
+            .parallel(SessionRestored {
+                agent_id: usage.host.agent_id.clone(),
+                session_id: id,
+            })
+            .await?;
+        Ok(fork)
     }
     /// `agent.create`: one more Agent, a peer of every other. A requested
     /// profile comes from outside the process and may only select provided
@@ -1687,7 +1814,8 @@ impl AgentIndex {
     }
 }
 
-/// Whether a fork whose `main` holds `events` starts no work when it loads
+/// Whether a fork whose `main` holds the prefix folded here starts no work
+/// when it loads
 /// ([S5c §6.2](../../../docs/design/appserver/session-deletion-and-fork.md#62-the-cut)).
 /// The reload rules that start work read these facts: Loop and InputQueue
 /// start a turn for an open turn's work or for a Queue or Steer input not
@@ -1698,27 +1826,38 @@ impl AgentIndex {
 /// the cut. This reads only their public facts;
 /// a capability whose reload rule comes to start work from other facts
 /// adds them here, so a fork keeps starting nothing.
-fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String> {
-    use dim_agent_capabilities::workspace_tools::background::WAKE_RESULT_TAG;
-    use dim_agent_types::{ExecStatus, InputMode, InterruptScope};
-    let mut turn = false;
-    let mut interrupted_at = 0;
-    let mut closing = false;
-    let mut inputs: BTreeMap<&str, Option<u64>> = BTreeMap::new();
-    let mut tasks = BTreeSet::new();
-    let mut wakes = BTreeSet::new();
-    for event in events {
+#[derive(Default)]
+struct RestPoint {
+    turn: bool,
+    interrupted_at: u64,
+    closing: bool,
+    /// Inputs not yet consumed, and the sequence each was applied at.
+    inputs: BTreeMap<String, Option<u64>>,
+    tasks: BTreeSet<String>,
+    wakes: BTreeSet<String>,
+}
+
+impl RestPoint {
+    /// Folds one page of the prefix.
+    fn page(&mut self, events: &[Arc<dim_agent_types::AgentEvent>]) {
+        for event in events {
+            self.event(event);
+        }
+    }
+    fn event(&mut self, event: &dim_agent_types::AgentEvent) {
+        use dim_agent_capabilities::workspace_tools::background::WAKE_RESULT_TAG;
+        use dim_agent_types::{ExecStatus, InputMode, InterruptScope};
         match &event.kind {
-            EventKind::TurnStart(_) => turn = true,
-            EventKind::TurnEnd(_) => turn = false,
-            EventKind::BranchStart(_) | EventKind::BranchResume(_) => closing = false,
+            EventKind::TurnStart(_) => self.turn = true,
+            EventKind::TurnEnd(_) => self.turn = false,
+            EventKind::BranchStart(_) | EventKind::BranchResume(_) => self.closing = false,
             EventKind::StopInterrupt(data) => {
-                interrupted_at = event.sequence;
-                closing |= data.scope == InterruptScope::Branch;
+                self.interrupted_at = event.sequence;
+                self.closing |= data.scope == InterruptScope::Branch;
             }
             EventKind::InputMessage(data) => {
                 if data.effective_mode() != InputMode::Append {
-                    inputs.insert(&event.id, None);
+                    self.inputs.insert(event.id.clone(), None);
                 }
                 if let Some(ended) = event
                     .tags
@@ -1726,47 +1865,50 @@ fn rest_point(events: &[Arc<dim_agent_types::AgentEvent>]) -> Result<(), String>
                     .flatten()
                     .find_map(|tag| tag.strip_prefix(WAKE_RESULT_TAG))
                 {
-                    wakes.remove(ended);
+                    self.wakes.remove(ended);
                 }
             }
             EventKind::InputApplied(data) => {
-                if let Some(applied) = inputs.get_mut(data.input_id.as_str()) {
+                if let Some(applied) = self.inputs.get_mut(data.input_id.as_str()) {
                     *applied = Some(event.sequence);
                 }
             }
             EventKind::InputConsumed(data) => {
-                inputs.remove(data.input_id.as_str());
+                self.inputs.remove(data.input_id.as_str());
             }
             EventKind::InputDeleted(data) => {
-                inputs.remove(data.input_id.as_str());
+                self.inputs.remove(data.input_id.as_str());
             }
             EventKind::ExecStarted(data) => {
-                tasks.insert(data.task_id.as_str());
+                self.tasks.insert(data.task_id.clone());
             }
             EventKind::ExecEnded(data) => {
-                tasks.remove(data.task_id.as_str());
-                if data.status != ExecStatus::Cancelled && !closing {
-                    wakes.insert(event.id.as_str());
+                self.tasks.remove(data.task_id.as_str());
+                if data.status != ExecStatus::Cancelled && !self.closing {
+                    self.wakes.insert(event.id.clone());
                 }
             }
             _ => {}
         }
     }
-    let cause = if turn {
-        "a turn is open"
-    } else if inputs
-        .values()
-        .any(|applied| applied.is_none_or(|sequence| sequence > interrupted_at))
-    {
-        "an input is waiting to be consumed"
-    } else if !tasks.is_empty() {
-        "a background task is running"
-    } else if !wakes.is_empty() {
-        "a background task has not woken the branch"
-    } else {
-        return Ok(());
-    };
-    Err(format!("the fork position is not a rest point: {cause}"))
+    fn check(&self) -> Result<(), String> {
+        let cause = if self.turn {
+            "a turn is open"
+        } else if self
+            .inputs
+            .values()
+            .any(|applied| applied.is_none_or(|sequence| sequence > self.interrupted_at))
+        {
+            "an input is waiting to be consumed"
+        } else if !self.tasks.is_empty() {
+            "a background task is running"
+        } else if !self.wakes.is_empty() {
+            "a background task has not woken the branch"
+        } else {
+            return Ok(());
+        };
+        Err(format!("the fork position is not a rest point: {cause}"))
+    }
 }
 
 /// Owns every Agent subtree: the process assembly entry.

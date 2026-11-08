@@ -6,6 +6,15 @@
 
 use std::path::PathBuf;
 
+/// The first message the invocation supplied (`-p`), with the images it
+/// attached: text and images are already validated and loaded at the CLI
+/// boundary, so the interface only submits them.
+#[derive(Clone)]
+pub struct Initial {
+    pub text: String,
+    pub images: Vec<crate::images::Attached>,
+}
+
 /// What the composition root tells the UI about its surroundings.
 #[derive(Clone)]
 pub struct Env {
@@ -15,6 +24,8 @@ pub struct Env {
     pub workspace: String,
     /// Start in the fullscreen interface instead of scrollback.
     pub fullscreen: bool,
+    /// The first message to submit once the first frame is drawn.
+    pub initial: Option<Initial>,
 }
 
 /// A path with the user's home directory written `~`.
@@ -55,6 +66,7 @@ pub mod plugins_panel;
 pub mod progress;
 pub mod prompts;
 pub mod providers_panel;
+pub mod queue_panel;
 pub mod render;
 pub mod rows;
 pub mod runtime_panel;

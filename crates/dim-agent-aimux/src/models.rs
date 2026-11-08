@@ -1,8 +1,8 @@
 use crate::config::{ModelConfigFile, ProviderKind};
-use dim_agent_capabilities::context_model::window_facts;
+use dim_agent_capabilities::context_model::{output_allowance, window_facts};
 use dim_agent_capabilities::host::{ContextModel, HostError, HostFuture, ResolveContextModel};
 use dim_agent_runtime::ModelId;
-use dim_agent_types::{ModelConfig, ModelRequest};
+use dim_agent_types::{ModelCapabilities, ModelCapabilitySnapshot, ModelConfig, ModelRequest};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +16,7 @@ pub(crate) struct Model {
     pub preset: Option<String>,
     pub context_window: u64,
     pub max_output_tokens: u64,
+    pub output_allowance: u64,
 }
 
 /// Validated development catalog; credentials are resolved for each request.
@@ -71,9 +72,11 @@ impl AimuxModels {
                         "compatible.preset requires openai-compatible",
                     ));
                 }
-                aimux_providers::provider_registry_entry(preset).ok_or_else(|| {
-                    HostError::failed(format!("Unknown compatible preset: {preset}"))
-                })?;
+                if !crate::driver::compatible_preset(preset) {
+                    return Err(HostError::failed(format!(
+                        "Unknown compatible preset: {preset}"
+                    )));
+                }
             }
             let mut models = HashMap::new();
             for entry in provider.models {
@@ -123,7 +126,14 @@ impl AimuxModels {
                     )));
                 }
                 let mut request = ModelRequest::new(&provider.id, &entry.id, Vec::new());
-                request.config = Some(entry.config.clone());
+                let allowance = output_allowance(context_window, max_output_tokens);
+                let mut defaults = entry.config;
+                defaults.max_tokens = Some(
+                    defaults
+                        .max_tokens
+                        .map_or(allowance as f64, |max| max.min(allowance as f64)),
+                );
+                request.config = Some(defaults.clone());
                 crate::request::convert(&request, &provider.kind, preset.as_deref())?;
                 models.insert(
                     entry.id,
@@ -131,11 +141,12 @@ impl AimuxModels {
                         base_url: provider.base_url.clone(),
                         headers: provider.headers.clone(),
                         api_key_env: provider.api_key_env.clone(),
-                        defaults: entry.config,
+                        defaults,
                         kind: provider.kind,
                         preset: preset.clone(),
                         context_window,
                         max_output_tokens,
+                        output_allowance: allowance,
                     },
                 );
             }
@@ -154,6 +165,48 @@ impl AimuxModels {
 
     pub fn default_model(&self) -> &ModelId {
         &self.default_model
+    }
+
+    /// The environment variable names this catalog reads provider credentials
+    /// from, sorted and deduplicated across every model.
+    pub fn api_key_envs(&self) -> std::collections::BTreeSet<String> {
+        self.providers
+            .values()
+            .flat_map(|models| models.values())
+            .filter_map(|model| model.api_key_env.clone())
+            .collect()
+    }
+
+    /// The models this configuration serves, by provider and then model id:
+    /// what the `selectableModels` read answers. The file declares the two
+    /// limits and no other capability, so every entry carries the text
+    /// defaults and those limits.
+    pub(crate) fn selectable(&self) -> Vec<ModelCapabilitySnapshot> {
+        let mut entries: Vec<(&str, &str, &Model)> = self
+            .providers
+            .iter()
+            .flat_map(|(provider, models)| {
+                models
+                    .iter()
+                    .map(move |(model, entry)| (provider.as_str(), model.as_str(), entry))
+            })
+            .collect();
+        entries.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        entries
+            .into_iter()
+            .map(|(provider_id, model_id, model)| ModelCapabilitySnapshot {
+                target: ModelId {
+                    provider_id: provider_id.to_owned(),
+                    model_id: model_id.to_owned(),
+                },
+                capabilities: ModelCapabilities::with_limits(
+                    model.context_window,
+                    model.max_output_tokens,
+                ),
+                reasoning: None,
+                service_tier: None,
+            })
+            .collect()
     }
 
     pub(crate) fn get(&self, provider: &str, model: &str) -> Result<&Model, HostError> {
@@ -178,9 +231,53 @@ impl ResolveContextModel for AimuxModels {
             let model = self.get(&request.provider_id, &request.model_id)?;
             Ok(window_facts(
                 model.context_window,
-                model.max_output_tokens,
+                model.output_allowance as f64,
                 &request,
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn api_key_envs_are_the_sorted_unique_names_the_catalog_reads() {
+        let config: ModelConfigFile = serde_json::from_value(json!({
+            "defaultModel": {"providerId": "local", "modelId": "one"},
+            "providers": [
+                {
+                    "id": "local",
+                    "kind": "openai-compatible",
+                    "apiKeyEnv": "LOCAL_KEY",
+                    "baseUrl": "https://example.test/v1",
+                    "models": [
+                        {"id": "one", "contextWindow": 128000, "maxOutputTokens": 4096,
+                         "config": {"maxTokens": 4096}},
+                        {"id": "two", "contextWindow": 128000, "maxOutputTokens": 4096,
+                         "config": {"maxTokens": 4096}}
+                    ]
+                },
+                {
+                    "id": "other",
+                    "kind": "openai-compatible",
+                    "apiKeyEnv": "OTHER_KEY",
+                    "baseUrl": "https://example.test/v1",
+                    "models": [
+                        {"id": "two", "contextWindow": 128000, "maxOutputTokens": 4096,
+                         "config": {"maxTokens": 4096}}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+        let models = AimuxModels::from_config(config).unwrap();
+        assert_eq!(
+            models.api_key_envs(),
+            BTreeSet::from(["LOCAL_KEY".to_owned(), "OTHER_KEY".to_owned()])
+        );
     }
 }

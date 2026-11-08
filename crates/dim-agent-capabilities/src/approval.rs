@@ -11,7 +11,9 @@ use crate::{
     host::HostError,
     permission::{Decision, Permission},
 };
-use dim_agent_runtime::{AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, Names, Timeline};
+use dim_agent_runtime::{
+    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, rebuild_facts,
+};
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData,
     ApprovalRespondData, BranchSource, EventKind,
@@ -353,18 +355,32 @@ impl DynPlugin for ApprovalPlugin {
                 closing.close();
                 Ok(())
             })?;
-            let owner = service.clone();
+            let rebuild = service.clone();
+            let live = service.clone();
+            let timeline = service.timeline.clone();
             dispatcher
-                .follow(ctx, "Approval", &["approval/respond"], move |delivery| {
-                    let result = match delivery {
-                        Delivery::Replay(events) => owner.rebuild(&events),
-                        Delivery::Live(event) => {
-                            owner.consume(&event);
-                            Ok(())
-                        }
-                    };
-                    Box::pin(async { result })
-                })
+                .consume(
+                    ctx,
+                    "Approval".into(),
+                    ["approval/respond"].map(String::from).to_vec(),
+                    Arc::new(move || {
+                        let rebuild = rebuild.clone();
+                        let timeline = timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &["approval/request", "approval/respond", "approval/cancelled"],
+                            )
+                            .await?;
+                            rebuild.rebuild(&reply.events)?;
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| {
+                        live.consume(&event);
+                        Box::pin(async { Ok(()) })
+                    }),
+                )
                 .await?;
             ctx.provide_at(self.approval.clone(), service)?;
             Ok(Effect::Done)

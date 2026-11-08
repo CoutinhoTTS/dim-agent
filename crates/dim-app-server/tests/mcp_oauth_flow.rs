@@ -1671,3 +1671,74 @@ async fn scope_moves_keep_the_oauth_record_and_the_sign_in_state() {
     assert_eq!(daemon.store(), record);
     daemon.close().await;
 }
+
+/// #952: authorization discovery and the authorization URL use the endpoint
+/// with its references expanded, while the stored entry keeps the text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oauth_discovery_uses_the_expanded_url() {
+    let servers = Servers::start().await;
+    let resource = servers.resource.clone();
+    unsafe {
+        std::env::set_var("MCP_TEST_952_OAUTH_URL", resource.url());
+    }
+    let daemon = Daemon::start(&[(
+        "docs",
+        json!({"type":"http","url":"${MCP_TEST_952_OAUTH_URL}"}),
+    )])
+    .await;
+    let mut client = daemon.client().await;
+    let started = client.ok("mcp.auth.start", user("docs")).await;
+    assert_eq!(started["resource"], resource.url());
+    assert_eq!(started["issuer"], servers.authority.base());
+    let url = url::Url::parse(started["authorizationUrl"].as_str().unwrap()).unwrap();
+    let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(query["resource"], resource.url());
+    let stored: Value =
+        serde_json::from_slice(&std::fs::read(daemon.home.join("mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        stored["mcpServers"]["docs"]["url"],
+        "${MCP_TEST_952_OAUTH_URL}"
+    );
+    daemon.close().await;
+    servers.stop.cancel();
+}
+
+/// #952: a project stdio entry that shadows a user OAuth entry carries no
+/// sign-in status; the status belongs to the winning entry, not the id.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shadowing_entry_does_not_show_the_shadowed_sign_in_status() {
+    let servers = Servers::start().await;
+    let (resource, authority) = (servers.resource.clone(), servers.authority.clone());
+    let daemon = Daemon::start(&[("docs", json!({"type":"http","url":resource.url()}))]).await;
+    std::fs::write(
+        daemon.work.join(".mcp.json"),
+        json!({"mcpServers":{"docs":{"type":"stdio","command":"shadow-server"}}}).to_string(),
+    )
+    .unwrap();
+    let mut client = daemon.client().await;
+
+    client
+        .sign_in(&authority, user("docs"), "code-shadow-secret")
+        .await;
+    assert_eq!(
+        client.catalog_auth(json!({}), "docs").await,
+        json!({"status":"authorized"})
+    );
+
+    let catalog = client.ok("mcp.catalog", json!({"cwd":daemon.work})).await;
+    let row = catalog["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|server| server["id"] == "docs")
+        .unwrap();
+    assert_eq!(row["source"], "project");
+    assert_eq!(row["transport"], "stdio");
+    assert!(
+        row["auth"].is_null(),
+        "the shadowed user entry's sign-in status leaked onto the winning entry: {row}"
+    );
+
+    daemon.close().await;
+    servers.stop.cancel();
+}

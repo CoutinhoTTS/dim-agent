@@ -24,7 +24,10 @@ const DETAIL_MIN = 320
 const DETAIL_MAX = 720
 
 /** Layout state remembered in this browser. */
+type ExtensionSelection = { pluginName: string; panelId: string }
+
 type Persisted = {
+  extension?: ExtensionSelection
   sidebarCollapsed: boolean
   collapsedWorkspaces: string[]
   lastSessionId: string | undefined
@@ -47,6 +50,7 @@ function readPersisted(): Persisted {
       collapsedWorkspaces: Array.isArray(stored.collapsedWorkspaces) ? stored.collapsedWorkspaces.filter((item): item is string => typeof item === "string") : [],
       lastSessionId: typeof stored.lastSessionId === "string" ? stored.lastSessionId : undefined,
       detailOpen: stored.detailOpen === true,
+      extension: stored.extension !== null && typeof stored.extension === "object" && "pluginName" in stored.extension && "panelId" in stored.extension && typeof stored.extension.pluginName === "string" && typeof stored.extension.panelId === "string" ? { pluginName: stored.extension.pluginName, panelId: stored.extension.panelId } : undefined,
       detailWidth: width,
     }
   } catch {
@@ -63,6 +67,7 @@ export const useUiStore = defineStore("ui", () => {
   const drawerOpen = ref(false)
   const shellWidth = ref(typeof window !== "undefined" && window.innerWidth > 0 ? window.innerWidth : 1200)
   const shellMode = computed<ShellMode>(() => shellWidth.value < 720 ? "compact" : shellWidth.value < 960 ? "regular" : "wide")
+  const extension = ref(persisted.extension)
   const detailOpen = ref(persisted.detailOpen)
   const detailWidth = ref(persisted.detailWidth)
   const detailExpanded = ref(false)
@@ -72,13 +77,14 @@ export const useUiStore = defineStore("ui", () => {
   const newLine = ref<NewLineRequest | undefined>()
   const endingLine = ref<EndLineRequest | undefined>()
 
-  watch([sidebarCollapsed, collapsedWorkspaces, lastSessionId, detailOpen, detailWidth], () => {
+  watch([sidebarCollapsed, collapsedWorkspaces, lastSessionId, detailOpen, detailWidth, extension], () => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         sidebarCollapsed: sidebarCollapsed.value,
         collapsedWorkspaces: collapsedWorkspaces.value,
         lastSessionId: lastSessionId.value,
         detailOpen: detailOpen.value,
+        extension: extension.value,
         detailWidth: detailWidth.value,
       }))
     } catch {
@@ -107,19 +113,21 @@ export const useUiStore = defineStore("ui", () => {
   }
 
   function openLines(sessionId: string): void {
+    extension.value = undefined
     detailOpen.value = true
     detailFocused.value = true
     activeLineTab.value = { ...activeLineTab.value, [sessionId]: undefined }
   }
 
   function toggleLines(sessionId: string): void {
-    if (detailOpen.value && activeLineTab.value[sessionId] === undefined) {
+    if (detailOpen.value && extension.value === undefined && activeLineTab.value[sessionId] === undefined) {
       detailOpen.value = false
       detailFocused.value = false
     } else openLines(sessionId)
   }
 
   function openLine(sessionId: string, branchId: string): void {
+    extension.value = undefined
     const tabs = lineTabs.value[sessionId] ?? []
     if (!tabs.includes(branchId)) lineTabs.value = { ...lineTabs.value, [sessionId]: [...tabs, branchId] }
     activeLineTab.value = { ...activeLineTab.value, [sessionId]: branchId }
@@ -128,6 +136,7 @@ export const useUiStore = defineStore("ui", () => {
   }
 
   function activateLine(sessionId: string, branchId: string): void {
+    extension.value = undefined
     if (!(lineTabs.value[sessionId] ?? []).includes(branchId)) {
       openLine(sessionId, branchId)
       return
@@ -152,6 +161,7 @@ export const useUiStore = defineStore("ui", () => {
   }
 
   function approvalKeyboard(sessionId: string, branchId: string, approvals: readonly { branchId: string }[]): boolean {
+    if (extension.value !== undefined && detailOpen.value && detailFocused.value) return false
     return approvalKeyboardBranch(approvals, {
       detailOpen: detailOpen.value,
       detailExpanded: detailExpanded.value,
@@ -189,7 +199,7 @@ export const useUiStore = defineStore("ui", () => {
   return {
     sidebarCollapsed, lastSessionId, drawerOpen, shellWidth, shellMode, setShellWidth,
     isWorkspaceExpanded, toggleWorkspace,
-    detailOpen, detailWidth, detailExpanded, detailFocused, lineTabs, activeLineTab, newLine, endingLine,
+    extension, detailOpen, detailWidth, detailExpanded, detailFocused, lineTabs, activeLineTab, newLine, endingLine,
     setDetailWidth, openLines, toggleLines, openLine, activateLine, closeLineTab, closeDetail,
     approvalKeyboard,
     requestNewLine, closeNewLine, requestEndLine, closeEndLine, resetSessionTabs,

@@ -2,6 +2,7 @@
 //! the `plugin.*` methods and the loader rows they command.
 use super::session_typescript::{fixture, start, submit, when_served};
 use super::*;
+use dim_agent_runtime::testing::chain_events;
 use std::path::{Path, PathBuf};
 
 pub(super) fn home() -> PathBuf {
@@ -104,6 +105,81 @@ fn plugins_entries(home: &Path) -> Vec<String> {
             .collect(),
         Err(_) => vec![],
     }
+}
+
+/// The record `plugins.json` holds.
+fn record(home: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(home.join("plugins.json")).unwrap()).unwrap()
+}
+
+/// The directory the record names for `id`.
+fn recorded_dir(home: &Path, id: &str) -> PathBuf {
+    let record = record(home);
+    let entry = record["installed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == id)
+        .unwrap_or_else(|| panic!("{id} in {record}"));
+    PathBuf::from(entry["dir"].as_str().unwrap())
+}
+
+/// The name of every directory under `<home>/plugins/<id>`, sorted.
+fn copies(home: &Path, id: &str) -> Vec<String> {
+    match std::fs::read_dir(home.join("plugins").join(id)) {
+        Ok(entries) => {
+            let mut names: Vec<String> = entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The last path component of `dir`.
+fn name_of(dir: &Path) -> String {
+    dir.file_name().unwrap().to_string_lossy().into_owned()
+}
+
+/// `<commit>+<16 lowercase hex>`: one acquisition's own directory (§3.2).
+fn acquisition_name(name: &str) -> bool {
+    let Some((commit, suffix)) = name.split_once('+') else {
+        return false;
+    };
+    commit.len() >= 7
+        && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && suffix.len() == 16
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// A Git repository holding the `git-notes` skills plugin, committed once.
+fn git_notes_repo(home: &Path) -> PathBuf {
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        repo.join("dim-plugin.json"),
+        r#"{"name":"git-notes","skills":"skills"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(repo.join("skills")).unwrap();
+    std::fs::write(repo.join("skills/one.md"), "one").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "one"]);
+    repo
+}
+
+/// One more commit in `repo`; returns its hash.
+fn second_commit(repo: &Path) -> String {
+    std::fs::write(repo.join("skills/two.md"), "two").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "two"]);
+    git(repo, &["rev-parse", "HEAD"])
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -299,11 +375,10 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     std::fs::write(repo.join("skills/one.md"), "one").unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "one"]);
-    let first = git(&repo, &["rev-parse", "HEAD"]);
     let url = format!("ssh://fixture{}", repo.display());
     let installed = call(&mut client, "plugin.install", json!({"source":{"git":url}})).await;
     assert_eq!(installed["result"]["id"], "git-notes", "{installed}");
-    let first_dir = home.join("plugins/git-notes").join(&first);
+    let first_dir = recorded_dir(&home, "git-notes");
     assert!(first_dir.join("dim-plugin.json").is_file());
     std::fs::write(repo.join("skills/two.md"), "two").unwrap();
     git(&repo, &["add", "-A"]);
@@ -312,12 +387,14 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     let updated = call(&mut client, "plugin.update", json!({"id":"git-notes"})).await;
     assert_eq!(updated["result"]["commit"], second.as_str(), "{updated}");
     assert!(
-        home.join("plugins/git-notes")
-            .join(&second)
+        recorded_dir(&home, "git-notes")
             .join("skills/two.md")
             .is_file()
     );
-    assert!(!first_dir.exists());
+    assert!(
+        first_dir.join("skills/one.md").is_file(),
+        "a replaced copy stays until the next start: {first_dir:?}"
+    );
     let local = call(&mut client, "plugin.update", json!({"id":"notes"})).await;
     assert_eq!(app_error(&local), "not_updatable", "{local}");
     let pinned = call(
@@ -377,7 +454,11 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert!(reply.get("error").is_some(), "{reply}");
     assert!(kept.join("dim-plugin.json").is_file());
     assert!(kept.join("abcdef1234").is_dir());
-    assert!(home.join("plugins/git-notes").join(&second).is_dir());
+    assert!(recorded_dir(&home, "git-notes").is_dir());
+    assert!(
+        !first_dir.exists(),
+        "the next start deletes the replaced copy: {first_dir:?}"
+    );
     assert_ok(
         &call(
             &mut client,
@@ -397,14 +478,245 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     );
     assert_ok(&call(&mut client, "permission.rules", json!({})).await);
 
+    let removed = recorded_dir(&home, "git-notes");
     assert_ok(&call(&mut client, "plugin.remove", json!({"id":"git-notes"})).await);
-    assert!(!home.join("plugins/git-notes").exists());
+    assert!(
+        removed.is_dir(),
+        "remove leaves the copy until the next start: {removed:?}"
+    );
     assert_ok(&call(&mut client, "plugin.remove", json!({"id":"notes"})).await);
     assert!(source.join("dim-plugin.json").is_file());
     assert_ok(&call(&mut client, "plugin.remove", json!({"id":"kept"})).await);
     assert!(kept.join("dim-plugin.json").is_file());
     let builtin = call(&mut client, "plugin.remove", json!({"id":"builtin"})).await;
     assert_eq!(app_error(&builtin), "not_removable", "{builtin}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.2 step 4: a Git acquisition renames into `<id>/<commit>+<16 lowercase
+/// hex>`, drawn for that acquisition; an update draws its own directory
+/// instead of replacing the one in use.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_git_acquisition_gets_its_own_suffixed_directory() {
+    ssh_stand_in();
+    let home = home();
+    let config = config(&home);
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let repo = git_notes_repo(&home);
+    let url = format!("ssh://fixture{}", repo.display());
+    assert_ok(&call(&mut client, "plugin.install", json!({"source":{"git":url}})).await);
+    let id_dir = home.join("plugins/git-notes").canonicalize().unwrap();
+    let first = recorded_dir(&home, "git-notes");
+    assert_eq!(first.parent(), Some(id_dir.as_path()), "{first:?}");
+    assert!(acquisition_name(&name_of(&first)), "{first:?}");
+
+    let second = second_commit(&repo);
+    let updated = call(&mut client, "plugin.update", json!({"id":"git-notes"})).await;
+    assert_eq!(updated["result"]["commit"], second.as_str(), "{updated}");
+    let next = recorded_dir(&home, "git-notes");
+    assert_ne!(first, next, "an update draws its own directory");
+    assert!(acquisition_name(&name_of(&next)), "{next:?}");
+    assert!(first.join("skills/one.md").is_file(), "{first:?}");
+    assert!(next.join("skills/two.md").is_file(), "{next:?}");
+    assert_eq!(copies(&home, "git-notes").len(), 2);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.1 step 3, §7: the next start deletes the copies no entry refers to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_next_start_deletes_the_copies_no_entry_names() {
+    ssh_stand_in();
+    let home = home();
+    let config = config(&home);
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let repo = git_notes_repo(&home);
+    let url = format!("ssh://fixture{}", repo.display());
+    assert_ok(&call(&mut client, "plugin.install", json!({"source":{"git":url}})).await);
+    let first = recorded_dir(&home, "git-notes");
+    second_commit(&repo);
+    assert_ok(&call(&mut client, "plugin.update", json!({"id":"git-notes"})).await);
+    let next = recorded_dir(&home, "git-notes");
+    assert_ne!(first, next);
+    assert!(first.is_dir() && next.is_dir());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _, _) = start(config).await;
+    let client = Client::new_version(&server, false, 3).await;
+    assert!(!first.exists(), "the replaced copy is gone: {first:?}");
+    assert!(next.is_dir(), "{next:?}");
+    assert_eq!(copies(&home, "git-notes"), vec![name_of(&next)]);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.6, §7: remove leaves the copy in place until the next start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_keeps_the_copy_until_the_next_start() {
+    ssh_stand_in();
+    let home = home();
+    let config = config(&home);
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let repo = git_notes_repo(&home);
+    let url = format!("ssh://fixture{}", repo.display());
+    assert_ok(&call(&mut client, "plugin.install", json!({"source":{"git":url}})).await);
+    let copy = recorded_dir(&home, "git-notes");
+    assert_ok(&call(&mut client, "plugin.remove", json!({"id":"git-notes"})).await);
+    assert!(copy.is_dir(), "remove leaves the copy: {copy:?}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(
+        list["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["name"] != "git-notes"),
+        "{list}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _, _) = start(config).await;
+    let client = Client::new_version(&server, false, 3).await;
+    assert!(!copy.exists(), "the next start deletes it: {copy:?}");
+    assert!(!home.join("plugins/git-notes").exists());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §2.2: a record written before suffixes names its directory without one.
+/// Nothing migrates it, and the cleanup keeps the directory it names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_from_before_suffixes_still_loads() {
+    let home = home();
+    let config = config(&home);
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let dir = home.join("plugins/legacy").join(commit);
+    std::fs::create_dir_all(dir.join("skills")).unwrap();
+    std::fs::write(
+        dir.join("dim-plugin.json"),
+        r#"{"name":"legacy","skills":"skills"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("skills/one.md"), "one").unwrap();
+    let dir = dir.canonicalize().unwrap();
+    std::fs::write(
+        home.join("plugins.json"),
+        json!({
+            "version": 2,
+            "installed": [{
+                "id": "legacy",
+                "name": "legacy",
+                "source": {"git": "https://example.invalid/legacy.git", "commit": commit},
+                "dir": dir,
+                "kinds": ["skills"],
+            }],
+            "names": {"legacy": {"use": "legacy"}},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let legacy = item(&list, "legacy");
+    assert_eq!(legacy["use"], "legacy", "{legacy}");
+    assert_eq!(legacy["off"], false, "{legacy}");
+    assert!(dir.join("skills/one.md").is_file(), "the cleanup keeps it");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _, _) = start(config).await;
+    let client = Client::new_version(&server, false, 3).await;
+    assert!(dir.join("skills/one.md").is_file());
+    assert_eq!(
+        record(&home)["installed"][0]["dir"],
+        json!(dir),
+        "nothing migrates it"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §7: the startup cleanup deletes a copy no entry names when its name has
+/// one of the two copy shapes, and keeps a name the path rule refuses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cleanup_deletes_only_a_copy_shaped_directory() {
+    let home = home();
+    let config = config(&home);
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let ghost = home.join("plugins/ghost");
+    let acquisition = ghost.join(format!("{commit}+0123456789abcdef"));
+    let bare = ghost.join(commit);
+    let refused = ghost.join(format!("{commit}+ZZZZZZZZZZZZZZZZ"));
+    for dir in [&acquisition, &bare, &refused] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let (server, _, _) = start(config).await;
+    let client = Client::new_version(&server, false, 3).await;
+    assert!(!acquisition.exists(), "a copy no entry names is deleted");
+    assert!(!bare.exists(), "a bare key no entry names is deleted too");
+    assert!(
+        refused.exists(),
+        "a name the path rule refuses is not deleted: {refused:?}"
+    );
+    assert_eq!(copies(&home, "ghost"), vec![name_of(&refused)]);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §7, G8: the cleanup runs once per process. Reloading the PluginManager
+/// row deletes no copy; the next start does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reloading_the_plugin_manager_row_keeps_a_replaced_copy() {
+    ssh_stand_in();
+    let home = home();
+    let config = config(&home);
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let repo = git_notes_repo(&home);
+    let url = format!("ssh://fixture{}", repo.display());
+    assert_ok(&call(&mut client, "plugin.install", json!({"source":{"git":url}})).await);
+    let first = recorded_dir(&home, "git-notes");
+    second_commit(&repo);
+    assert_ok(&call(&mut client, "plugin.update", json!({"id":"git-notes"})).await);
+    let next = recorded_dir(&home, "git-notes");
+    assert_ne!(first, next);
+
+    let loader = server.service::<rutis_loader::Loader>().unwrap();
+    loader.restart("PluginManager").await.unwrap();
+    assert!(
+        first.is_dir(),
+        "a reload of the row deletes no copy: {first:?}"
+    );
+    assert!(next.is_dir());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _, _) = start(config).await;
+    let client = Client::new_version(&server, false, 3).await;
+    assert!(!first.exists(), "the next start deletes it: {first:?}");
+    assert!(next.is_dir());
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -508,7 +820,7 @@ async fn last_tool_text(server: &RunningServer, session: &str) -> String {
 /// The text of the last tool result in `session` and whether it is an error.
 async fn last_tool_result(server: &RunningServer, session: &str) -> (String, bool) {
     let session = server.agent().unwrap().get_session(session).unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let result = history
         .iter()
         .rev()
@@ -850,37 +1162,93 @@ async fn running(client: &mut Client, names: &[&str]) -> Value {
     }
 }
 
-/// Acceptance 1 and 10: the default configuration file loads the default
-/// plugins, and a default plugin's Settings source is there while it runs.
+/// Acceptance 1 and 10: the default configuration loads no process plugin,
+/// and Workflow runs only once it is installed and enabled, with its
+/// Settings source there while it runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
-async fn node_default_plugins_load_and_their_settings_follow_them() {
+async fn node_workflow_runs_only_when_enabled_and_its_settings_follow_it() {
     let home = home();
     let mut config = config(&home);
+    let workflow_settings = home.join("workflow.json");
+    let workflow_runs = home.join("workflow/runs.json");
+    let settings_bytes = b"{\"definitions\":{},\"projectEnabled\":{}}\n";
+    let runs_bytes = br#"{"version":1,"text":"{\"version\":2,\"runs\":[]}"}"#;
+    std::fs::create_dir_all(workflow_runs.parent().unwrap()).unwrap();
+    std::fs::write(&workflow_settings, settings_bytes).unwrap();
+    std::fs::write(&workflow_runs, runs_bytes).unwrap();
     let mut parts = fixture();
     parts.rows.clear();
+    let workflow = parts.anchor.parent().unwrap().join("plugins/workflow");
     config.plugin_defaults = Some(parts.anchor.with_file_name("default-plugins.json"));
     config.session_typescript = Some(parts);
-    let (server, _requests, _) = start(config).await;
+    let (server, _requests, _) = start(config.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let defaults = ["goal", "workflow", "scheduler"];
-    let list = running(&mut client, &defaults).await;
-    for name in defaults {
-        assert_eq!(item(&list, name)["use"], "default", "{list}");
-    }
+    // No process plugin runs by default: `web` and `Agents` are built in,
+    // and Workflow is absent until it is installed.
+    let list = call(&mut client, "plugin.list", json!({})).await;
     assert_eq!(item(&list, "web")["use"], "builtin", "{list}");
     assert_eq!(item(&list, "Agents")["use"], "builtin", "{list}");
+    assert!(
+        list["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["name"] != "workflow"),
+        "{list}"
+    );
+    let absent = client.rpc("workflow.status", json!({})).await;
+    assert_eq!(absent["error"]["code"], -32601, "{absent}");
+    assert_eq!(std::fs::read(&workflow_settings).unwrap(), settings_bytes);
+    assert_eq!(std::fs::read(&workflow_runs).unwrap(), runs_bytes);
 
-    let read = json!({"source": "goal", "scope": "user"});
+    // Installed without being enabled, Workflow stays absent across a
+    // restart and leaves its files alone.
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source":{"path":workflow},"enable":false}),
+        )
+        .await,
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, _requests, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "workflow")["use"].is_null(), "{list}");
+    let absent = client.rpc("workflow.status", json!({})).await;
+    assert_eq!(absent["error"]["code"], -32601, "{absent}");
+    assert_eq!(std::fs::read(&workflow_settings).unwrap(), settings_bytes);
+    assert_eq!(std::fs::read(&workflow_runs).unwrap(), runs_bytes);
+
+    // Enabling the installed plugin runs it, and its Settings source
+    // follows it.
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.enable",
+            json!({"name":"workflow","use":"workflow"}),
+        )
+        .await,
+    );
+    let list = running(&mut client, &["workflow"]).await;
+    assert_eq!(item(&list, "workflow")["use"], "workflow", "{list}");
+    assert_ok(&call(&mut client, "workflow.status", json!({})).await);
+
+    let read = json!({"source": "workflow", "scope": "user"});
     assert_ok(&call(&mut client, "settings.read", read.clone()).await);
-    assert_ok(&call(&mut client, "plugin.disable", json!({"name": "goal"})).await);
+    assert_ok(&call(&mut client, "plugin.disable", json!({"name": "workflow"})).await);
     let gone = client.rpc("settings.read", read.clone()).await;
     assert_eq!(app_error(&gone), "settings_unknown_source", "{gone}");
-    assert_ok(&call(&mut client, "plugin.enable", json!({"name": "goal"})).await);
-    running(&mut client, &["goal"]).await;
+    assert_ok(&call(&mut client, "plugin.enable", json!({"name": "workflow"})).await);
+    running(&mut client, &["workflow"]).await;
     assert_ok(&call(&mut client, "settings.read", read).await);
 
-    // §6 `config`: goal's Settings source through the `plugin` tool.
+    // §6 `config`: the enabled plugin's Settings source through the `plugin` tool.
     select_fixture_model(&mut client).await;
     let tools = json!(["plugin"]);
     let mut params = create(tools.clone());
@@ -888,38 +1256,45 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
     let created = client.rpc("session.create", params).await;
     assert_ok(&created);
     let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
-    let shown = plugin_reply(&mut client, &server, &session, "config goal").await;
+    let shown = plugin_reply(&mut client, &server, &session, "config workflow").await;
     let source = &shown["sources"][0];
-    assert_eq!(source["source"], "goal", "{shown}");
-    assert_eq!(source["document"]["maxContinuations"], 20, "{shown}");
+    assert_eq!(source["source"], "workflow", "{shown}");
+    assert_eq!(source["document"]["max_concurrent_runs"], 4, "{shown}");
     assert_eq!(
-        source["schema"]["properties"]["maxContinuations"]["maximum"],
-        1000
+        source["schema"]["properties"]["max_concurrent_runs"]["maximum"],
+        9007199254740991_u64
     );
-    let set = "config goal set maxContinuations 5";
+    let set = "config workflow set max_concurrent_runs 5";
     let updated = plugin_reply(&mut client, &server, &session, set).await;
-    assert_eq!(updated["document"]["maxContinuations"], 5, "{updated}");
-    let read = json!({"source": "goal", "scope": "user"});
+    assert_eq!(updated["document"]["max_concurrent_runs"], 5, "{updated}");
+    let read = json!({"source": "workflow", "scope": "user"});
     let stored = call(&mut client, "settings.read", read).await;
     assert_eq!(
-        stored["result"]["document"]["maxContinuations"], 5,
+        stored["result"]["document"]["max_concurrent_runs"], 5,
         "{stored}"
     );
     let (refused, error) = plugin(
         &mut client,
         &server,
         &session,
-        "config goal set maxContinuations 0",
+        "config workflow set max_concurrent_runs 0",
     )
     .await;
-    assert!(error && refused.contains("maxContinuations"), "{refused}");
+    assert!(
+        error && refused.contains("max_concurrent_runs"),
+        "{refused}"
+    );
 
     // A `writeOnly` member (web's search key and proxy) is a secret toward
     // the agent: never returned, never written through the tool.
     let read = json!({"source": "web", "scope": "user"});
     let current = call(&mut client, "settings.read", read.clone()).await;
+    assert_eq!(
+        current["result"]["document"]["proxyDns"], false,
+        "{current}"
+    );
     let secret = "dim-test-secret-key";
-    let document = json!({"allowPrivateHosts": [], "proxy": "http://user:pass@127.0.0.1:9",
+    let document = json!({"allowPrivateHosts": [], "proxy": "http://user:pass@127.0.0.1:9", "proxyDns": false,
         "searchService": {"kind": "brave", "apiKey": secret}});
     assert_ok(
         &call(
@@ -954,6 +1329,14 @@ async fn node_default_plugins_load_and_their_settings_follow_them() {
         let (refused, error) = plugin(&mut client, &server, &session, set).await;
         assert!(error && refused.contains("write-only"), "{set}: {refused}");
     }
+    let (refused, error) = plugin(
+        &mut client,
+        &server,
+        &session,
+        "config web set proxyDns true",
+    )
+    .await;
+    assert!(error && refused.contains("/proxyDns"), "{refused}");
     let stored = call(&mut client, "settings.read", read).await;
     assert_eq!(stored["result"]["document"], document, "{stored}");
     drop(client);
@@ -1369,7 +1752,7 @@ async fn plugin_content_reaches_sessions_through_its_owners() {
     let catalog = client.rpc("mcp.catalog", json!({})).await;
     assert_eq!(
         catalog["result"]["servers"],
-        json!([{"id":"kit:docs","source":"plugin","enabled":true,"transport":"stdio"}]),
+        json!([{"id":"kit:docs","source":"plugin","enabled":true,"transport":"stdio","referencedVariables":[],"unsetVariables":[]}]),
         "{catalog}"
     );
     let entry = client
@@ -2123,6 +2506,56 @@ async fn plugin_hooks_follow_the_hooks_owner() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// #951: a plugin's MCP document is one unit; one broken entry refuses the
+/// whole document, so its valid sibling registers nothing either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_mcp_document_with_one_broken_entry_registers_nothing() {
+    let home = home();
+    let mut config = config(&home);
+    config.unix_path = Some(home.join("ipc/server.sock"));
+    let server = serve(product_builder(), config).await.unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_fixture_model(&mut client).await;
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let absent = json!({"command": "dim-test-absent-mcp-server"});
+    let source = home.join("src/mixed");
+    write_content_plugin(&source, "mixed", &["mixed"], json!({"good": absent}));
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert!(installed["result"].get("refused").is_none(), "{installed}");
+    assert_eq!(mcp_ids(&mut client).await, ["mixed:good"]);
+
+    write_content_plugin(
+        &source,
+        "mixed",
+        &["mixed"],
+        json!({"good": absent, "bad": {"command": ""}}),
+    );
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"mixed"})).await;
+    let refused = reloaded["result"]["refused"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{reloaded}"));
+    assert!(
+        refused.iter().any(|item| item["kind"] == "mcp"),
+        "{reloaded}"
+    );
+    assert!(
+        mcp_ids(&mut client).await.is_empty(),
+        "a refused plugin document registered an entry"
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "mixed")["refused"][0]["kind"], "mcp", "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// §3.7: a content file PluginManager cannot read — not JSON, or a directory
 /// in its place — is its own refusal, not only the reply's: `plugin.list`
 /// shows it right after the install and after a restart, while a reload of
@@ -2256,6 +2689,135 @@ async fn plugin_broken_manifest_runs_none_of_its_content() {
     assert!(reloaded["result"].get("refused").is_none(), "{reloaded}");
     assert_eq!(mcp_ids(&mut client).await, ["kit:tool"]);
     assert_eq!(plugin_skill_ids(&mut client).await, ["plugin:kit:kit"]);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §A.2: a refusal whose cause has a static reason reaches the client
+/// with that reason, in the mutation reply and in `plugin.list`; a
+/// refusal without one keeps the generic message at the client boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refusal_named_from_the_closed_set_reaches_the_client() {
+    let home = home();
+    let config = config(&home);
+    let source = home.join("src/kit");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("mcp.json"), r#"{"servers": {}}"#).unwrap();
+    std::fs::write(
+        source.join("dim-plugin.json"),
+        json!({"name": "kit", "mcp": "mcp.json"}).to_string(),
+    )
+    .unwrap();
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let installed = call(
+        &mut client,
+        "plugin.install",
+        json!({"source":{"path":source}}),
+    )
+    .await;
+    assert_eq!(
+        installed["result"]["refused"][0],
+        json!({"kind": "mcp", "error": "MCP document must contain an mcpServers object"}),
+        "{installed}"
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"][0],
+        json!({"kind": "mcp", "error": "MCP document must contain an mcpServers object"}),
+        "{list}"
+    );
+
+    // A document-shape cause with a static reason: the client reads the
+    // owner's reason, never the `reason` member that carries it inside.
+    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": 5}"#).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"][0],
+        json!({"kind": "mcp", "error": "mcpServers must be a JSON object"}),
+        "{reloaded}"
+    );
+    assert!(!reloaded.to_string().contains("\"reason\""), "{reloaded}");
+
+    // A content file that is not JSON is PluginManager's own refusal, for
+    // both kinds: the client reads its static reason, never the path, in
+    // the mutation reply and in `plugin.list`.
+    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": {},}"#).unwrap();
+    std::fs::write(source.join("hooks.json"), r#"{"hooks": {},}"#).unwrap();
+    std::fs::write(
+        source.join("dim-plugin.json"),
+        json!({"name": "kit", "mcp": "mcp.json", "hooks": "hooks.json"}).to_string(),
+    )
+    .unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"],
+        json!([
+            {"kind": "mcp", "error": "the file is not valid JSON"},
+            {"kind": "hooks", "error": "the file is not valid JSON"},
+        ]),
+        "{reloaded}"
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        json!([
+            {"kind": "mcp", "error": "the file is not valid JSON"},
+            {"kind": "hooks", "error": "the file is not valid JSON"},
+        ]),
+        "{list}"
+    );
+    assert!(!reloaded.to_string().contains("mcp.json"), "{reloaded}");
+    assert!(!reloaded.to_string().contains("hooks.json"), "{reloaded}");
+    assert!(
+        !reloaded.to_string().contains(home.to_str().unwrap()),
+        "{reloaded}"
+    );
+    let refused = item(&list, "kit")["refused"].to_string();
+    assert!(!refused.contains("mcp.json"), "{list}");
+    assert!(!refused.contains("hooks.json"), "{list}");
+    assert!(!refused.contains(home.to_str().unwrap()), "{list}");
+
+    // A refusal whose cause carries no static reason keeps the generic
+    // message at the client, in the mutation reply and in `plugin.list`:
+    // a broken MCP entry refuses the document with the entry's own error.
+    std::fs::write(source.join("mcp.json"), r#"{"mcpServers": {"leaky": 5}}"#).unwrap();
+    std::fs::write(source.join("hooks.json"), r#"{"hooks": {}}"#).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"],
+        json!([{"kind": "mcp", "error": "Plugin content was refused"}]),
+        "{reloaded}"
+    );
+    assert!(!reloaded.to_string().contains("leaky"), "{reloaded}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        json!([{"kind": "mcp", "error": "Plugin content was refused"}]),
+        "{list}"
+    );
+    assert!(!list.to_string().contains("leaky"), "{list}");
+
+    // A content path that resolves to a directory passes `Manifest::read`
+    // and fails the read itself: the client reads that reason, not the path.
+    std::fs::remove_file(source.join("mcp.json")).unwrap();
+    std::fs::create_dir(source.join("mcp.json")).unwrap();
+    let reloaded = call(&mut client, "plugin.reload", json!({"name":"kit"})).await;
+    assert_eq!(
+        reloaded["result"]["refused"],
+        json!([{"kind": "mcp", "error": "the file could not be read"}]),
+        "{reloaded}"
+    );
+    assert!(!reloaded.to_string().contains("mcp.json"), "{reloaded}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(
+        item(&list, "kit")["refused"],
+        json!([{"kind": "mcp", "error": "the file could not be read"}]),
+        "{list}"
+    );
+    assert!(!list.to_string().contains("mcp.json"), "{list}");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

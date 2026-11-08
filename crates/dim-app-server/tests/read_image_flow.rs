@@ -11,6 +11,7 @@ use dim_agent_capabilities::{
     host_platform::{HostPlatform, ShellStatus},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{testing::MinimalHost, *};
 use dim_agent_types::*;
 use serde_json::json;
@@ -159,7 +160,7 @@ async fn read_image_reaches_a_vision_model_and_becomes_text_for_others() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             stored_image(&history),
             "vision={vision}: the stored tool result keeps the image"
@@ -305,7 +306,7 @@ async fn an_offloaded_read_result_registers_its_output_path() {
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let output_path = history
         .iter()
         .find_map(|event| match &event.kind {

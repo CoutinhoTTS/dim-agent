@@ -352,7 +352,6 @@ End of turn. Open one: open=<id>.
 
 无。考虑过但不需要：
 
-- 门面上的分页或过滤历史读取：选取、key 是否生效以及关联都本来就需要整个固定前缀，而 `Branch::history(Some(head))` 已经返回它；
 - 按分支的工具声明（§7）；
 - 在 ToolExecutor 中按 schema 检查工具输入：处理函数像 `wait` 一样自己检查参数（§5.2）；
 - 为运行时块标签提供类型化的访问方法：标签和属性从 `context_block` 生产者已经写出的块文本中读取，不需要新类型。

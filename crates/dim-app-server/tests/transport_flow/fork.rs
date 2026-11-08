@@ -3,6 +3,7 @@
 use super::deletion::{Store, eventually, session, turn};
 use super::*;
 use dim_agent_runtime::Session;
+use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_types::AgentEvent;
 
 /// Kinds that would mean the fork ran work on its own.
@@ -38,7 +39,7 @@ fn forked(reply: &Value) -> String {
     reply["result"]["sessionId"].as_str().unwrap().to_owned()
 }
 async fn history(session: &Session, branch: &str) -> Vec<Arc<AgentEvent>> {
-    session.history(branch, None).await.unwrap()
+    chain_events(session, branch, ..).await.unwrap()
 }
 fn keys(events: &[Arc<AgentEvent>]) -> Vec<&str> {
     events.iter().map(|event| event.kind.key()).collect()
@@ -110,14 +111,13 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
             .rpc("session.idle", json!({"sessionId":sid,"branchId":steered}))
             .await,
     );
-    let mut calls = 0;
-    while calls == 0 {
-        calls = keys(&history(&source, &running).await)
-            .into_iter()
-            .filter(|key| *key == "step/tool-call")
-            .count();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !keys(&history(&source, &running).await).contains(&"step/tool-call") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the running child starts its tool before the fork");
     let at = source.sequence("main").unwrap();
     let after = branch(&mut client, &sid, at, "hello").await;
     assert_ok(&client.rpc("session.submit", json!({"sessionId":sid,"branchId":steered,"text":"steer after the cut","mode":"steer"})).await);
@@ -153,7 +153,7 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let prefix = source.history("main", Some(at)).await.unwrap();
+    let prefix = chain_events(&source, "main", ..=at).await.unwrap();
     let encode = |events: &[Arc<AgentEvent>]| -> Vec<Value> {
         events
             .iter()
@@ -165,7 +165,17 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     assert_eq!(tail[0].kind.key(), "session/forked");
     assert_eq!(tail[1].kind.key(), "branch/resume");
     assert_eq!(failed_creations(tail), children, "{:?}", keys(tail));
-    assert_eq!(tail.len(), 2 + children.len(), "{:?}", keys(tail));
+    assert_eq!(
+        tail.iter()
+            .filter(|event| {
+                !matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_none())
+                    && !matches!(event.kind, EventKind::InputApplied(_))
+            })
+            .count(),
+        2 + children.len(),
+        "the fork only initializes state: {:?}",
+        keys(tail)
+    );
     assert_eq!(fork.branches().len(), 1, "only main is active in the fork");
 
     let rows = |sql: &str| count(&store, sql, [&fid, &sid]);
@@ -294,6 +304,47 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
     server.join().await.unwrap();
 }
 
+/// A branch's cut is at most its parent's published head: `session.branch_create`
+/// checks it before any read and creates nothing when the cut is a future one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_branch_create_at_a_future_sequence_is_refused() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let mut params = create(json!(["wait", "branch"]));
+    params["interactive"] = json!(false);
+    let sid = forked(&client.rpc("session.create", params).await);
+    turn(&mut client, &sid, "hello").await;
+    let head = agent.get_session(&sid).unwrap().sequence("main").unwrap();
+    let branches = |store: &Store| -> i64 {
+        store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM timeline_branches WHERE session_id=?1",
+                [&sid],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let before = branches(&store);
+    let refused = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":sid,"parentBranchId":"main","at":head+1,"prompt":"child"}),
+        )
+        .await;
+    let (code, message) = error(&refused);
+    assert_eq!(code, "session_invalid_input", "{message}");
+    assert!(message.contains("future"), "{message}");
+    assert_eq!(
+        branches(&store),
+        before,
+        "a refused creation adds no branch"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Acceptance 6: cuts that are beyond the head, inside a batch, outside a
 /// context boundary or not a rest point, unknown sources and other
 /// protocols are refused and create nothing. The inputs D1 lets rest at a
@@ -323,7 +374,11 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
         (head + 1, "future"),
         (position("step/tool-call"), "without results"),
         (
-            position("input/message"),
+            events
+                .iter()
+                .find(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_some()))
+                .unwrap()
+                .sequence,
             "an input is waiting to be consumed",
         ),
         (position("turn/start"), "a turn is open"),
@@ -832,7 +887,7 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
     )
     .await;
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !keys(&source.local(&child, ..).await.unwrap()).contains(&"exec/started") {
+        while !keys(&branch_events(&source, &child, ..).await.unwrap()).contains(&"exec/started") {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -900,7 +955,7 @@ async fn a_fork_waits_for_background_work_and_keeps_preset_and_model() {
         0
     );
     assert!(
-        !keys(&source.local(&child, ..).await.unwrap()).contains(&"exec/ended"),
+        !keys(&branch_events(&source, &child, ..).await.unwrap()).contains(&"exec/ended"),
         "the source's task still runs"
     );
     turn(&mut client, &fid, "in the fork").await;

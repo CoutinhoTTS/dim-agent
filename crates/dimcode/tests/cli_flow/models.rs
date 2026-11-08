@@ -2,6 +2,34 @@
 //! public wire (cli-commands.md "The Models area").
 use super::*;
 
+#[test]
+fn models_reports_account_discovery_failure_instead_of_an_empty_list() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let providers = wire.read("provider.list");
+        wire.reply(&providers, json!({"providers":[]}));
+        let accounts = wire.read("account.providers");
+        wire.send(json!({"jsonrpc":"2.0","id":accounts["id"],"error":{
+            "code":-32000,"message":"Account discovery is unavailable","data":{"appError":"account_unavailable"}}}));
+        wire.hold();
+    });
+    let mut terminal = Terminal::resume_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("account.providers: Account discovery is unavailable");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 fn hello(wire: &mut Wire) {
     wire.hello(&[
         "provider.management",
@@ -604,7 +632,6 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -681,7 +708,7 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -692,7 +719,7 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
     terminal.raw(b"\x12");
     terminal.until("Refreshed the models.");
     terminal.until("management read failed");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -716,6 +743,104 @@ fn capabilities() -> Value {
 fn picker_catalog() -> Value {
     json!({"catalog": {"version": 3, "disabledModelIds": [], "models": [
         {"id": "flash", "name": "Flash", "capabilities": capabilities()}]}})
+}
+
+#[test]
+fn picker_and_limit_declaration_read_the_same_catalog() {
+    let snapshot = json!({"catalog":{"version":7,"disabledModelIds":["disabled"],"models":[
+        {"id":"ready","name":"Ready","zdr":true,"capabilities":capabilities()},
+        {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared",
+            "missingLimits":["maxOutputTokens"],
+            "capabilities":dim_agent_types::CatalogCapabilities {
+                context_window: Some(128_000), ..Default::default()
+            }},
+        {"id":"disabled","name":"Disabled","missingLimits":["contextWindow","maxOutputTokens"],
+            "capabilities":dim_agent_types::CatalogCapabilities::default()},
+        {"id":"blocked","name":"Blocked","unavailableReason":"provider_unavailable",
+            "missingLimits":["contextWindow","maxOutputTokens"],
+            "capabilities":dim_agent_types::CatalogCapabilities::default()}
+    ]}});
+    for tui in [true, false] {
+        let home = Home::new();
+        let mut snapshot = snapshot.clone();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            if tui {
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                );
+                wire.no_context();
+                let accounts = wire.read("account.providers");
+                wire.reply(&accounts, json!([]));
+                let providers = wire.read("provider.list");
+                wire.reply(
+                    &providers,
+                    json!({"providers":[{
+                    "providerId":"fixture","displayName":"Fixture","enabled":true}]}),
+                );
+                let accounts = wire.read("account.providers");
+                wire.reply(&accounts, json!([]));
+            }
+            let catalog = wire.read("provider.catalog");
+            assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+            wire.reply(&catalog, snapshot.clone());
+            if tui {
+                wire.hold();
+            } else {
+                let edit = wire.read("provider.models.edit");
+                assert_eq!(
+                    edit["params"],
+                    json!({"providerId":"fixture","expectedVersion":7,
+                    "modelId":"narrow","edit":{"maxOutputTokens":8000}})
+                );
+                wire.reply(&edit, json!({"version":8}));
+                snapshot["catalog"]["version"] = json!(8);
+                snapshot["catalog"]["models"][1]["missingLimits"] = json!([]);
+                snapshot["catalog"]["models"][1]["unavailableReason"] = Value::Null;
+                snapshot["catalog"]["models"][1]["capabilities"]["maxOutputTokens"] = json!(8000);
+                let catalog = wire.read("provider.catalog");
+                wire.reply(&catalog, snapshot);
+            }
+        });
+        if tui {
+            let mut terminal = Terminal::resume_tui(home.command());
+            terminal.until("test / model");
+            terminal.write(b"/models\r");
+            terminal.until("Fixture / ready");
+            terminal.until("ZDR");
+            terminal.until("Fixture: 1 model needs a window");
+            home.kill(&terminal);
+            terminal.wait();
+        } else {
+            let output = home
+                .command()
+                .args([
+                    "models",
+                    "fixture",
+                    "--set-missing-limits",
+                    "--context-window",
+                    "64000",
+                    "--max-output-tokens",
+                    "8000",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                "ready\tReady\tavailable\nnarrow\tNarrow\tavailable\ndisabled\tDisabled\tdisabled\nblocked\tBlocked\tunavailable\n"
+            );
+        }
+        daemon.join().unwrap();
+    }
 }
 
 /// `provider.management` for the picker's Provider: a catalog model, an
@@ -797,7 +922,6 @@ fn tui_models_area_opens_and_toggles_a_model() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -854,7 +978,7 @@ fn tui_models_area_opens_and_toggles_a_model() {
     // 24 rows; the panel is the same at any size.
     let mut command = home.command();
     sized(&mut command, 100, 32);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -875,7 +999,7 @@ fn tui_models_area_opens_and_toggles_a_model() {
     terminal.raw(b"\x1b");
     terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -889,7 +1013,6 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -945,7 +1068,7 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -968,7 +1091,7 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
     terminal.until("Disabled Tuned.");
     terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -981,7 +1104,6 @@ fn tui_models_area_keeps_the_panel_on_a_refused_write() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1030,7 +1152,7 @@ fn tui_models_area_keeps_the_panel_on_a_refused_write() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -1050,7 +1172,7 @@ fn tui_models_area_keeps_the_panel_on_a_refused_write() {
     // The panel still has its list: the next key moves within it.
     terminal.raw(b"\x1b[A");
     terminal.until("tuned");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
@@ -1089,7 +1211,6 @@ fn tui_models_area_rereads_after_a_conflict() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1158,7 +1279,7 @@ fn tui_models_area_rereads_after_a_conflict() {
     });
     let mut command = home.command();
     command.env_remove("VISUAL").env("EDITOR", &script);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -1174,7 +1295,7 @@ fn tui_models_area_rereads_after_a_conflict() {
     terminal.until("Your text is kept in");
     terminal.raw(b"\x05");
     terminal.until("Saved Flash v4.");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     // The second editor was handed the current document, not the stale
@@ -1218,7 +1339,6 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
     let (shown, wait_shown) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1286,7 +1406,7 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
     });
     let mut command = home.command();
     command.env_remove("VISUAL").env("EDITOR", &script);
-    let mut terminal = Terminal::launch_tui(command);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
@@ -1309,7 +1429,7 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
     terminal.until("Flash v4");
     terminal.raw(b"\x05");
     terminal.until("Saved Flash v4.");
-    terminal.signal(libc::SIGKILL);
+    home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
     // The next editor was handed the current document, not the stale draft.

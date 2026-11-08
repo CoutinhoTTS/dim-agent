@@ -45,7 +45,8 @@ with its existing owner; management never writes another owner's state.
 | --- | --- |
 | `managementMethods`, process, namespace `provider` | Local v3 Desktop/CLI and trusted process callers; §3 extends this existing namespace |
 | Provider module boundary `stored_selection` (Rust) | Native data-boundary consumers such as Migration; §3.7 adds one pure function over an admitted record, not an RPC, host port or management method |
-| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by Provider | In-process owners that route by model capability (Modality); §3.6 adds one read, not a management method or RPC method |
+| Provider host port `SelectableModelsHost` (core `dim-agent-capabilities`), provided by the profile's model owner (Provider, or the configured model file) | In-process owners that route by model capability (Modality) and the `agent` tool's `models` action; §3.6 adds two reads, not a management method or RPC method |
+| Provider host port `ModalityConnectionHost` (core `dim-agent-capabilities`), provided by the profile's model owner | Modality's process adapters for image generation, editing and enhancement; §3.6 defines one per-call resolution, not a management method or RPC method |
 | Existing `account`, `account.codex`, `account.grok` namespaces | Existing account operations; no new account method, event or managed host capability |
 | `ProviderConnectionResolver`, `ModelSelectionHost` | Provider implements catalog/route decisions through existing types; no new core port |
 | `auxiliaryModel.complete` | Existing caller-selected S4 contract, unchanged |
@@ -57,6 +58,61 @@ service or registry is added. The [managed-provider boundary](../../architecture
 continues to exclude private account implementations and credentials from this repository.
 
 ## 3. Management contract
+
+### Session-local startup connections
+
+[Model startup](../model-startup.md) adds a separate admission to the existing
+protected-local `session.create` and `session.model.update` entries, not a
+Provider-management write. `startup` contains optional `connection`,
+`contextWindow`, `maxOutputTokens` and `autoCompactWindow`. Connection fields are
+`apiFormat`, `baseUrl`, optional `apiKey` or `authToken`, and optional `headers`
+(a name/value map). A compaction window is a positive integer or `"auto"`.
+Remote entries reject this admission. Ordinary creation stays unchanged.
+
+Provider admits the connection and model together. It uses the existing protocol
+driver and bundled descriptor projection; a configured target keeps its catalog
+descriptor. A direct connection prefers an exact model declaration in its
+protocol's native catalog before generic descriptor matching, so a generic
+gateway entry cannot hide native effort declarations. Explicit capacity
+declarations apply to this adoption only and may
+complete missing catalog limits without making a disabled or otherwise
+unavailable model selectable. Effort and tier still require model declarations.
+Startup execution and preference-only updates use the validated adopted
+capacities, not the persisted catalog's missing limits. Ordinary selections
+still require catalog declarations. Current availability, disablement
+and route checks still apply; no capacity is written back to the catalog.
+A bare model ID first uses the effective Provider if it offers that exact ID;
+otherwise exactly one available Provider must offer it. Ambiguity is an error.
+An individual catalog failure does not exclude healthy Providers from that
+search; cancellation still stops it. An explicitly named Provider retains its
+own error rather than falling back to another Provider. If the search finds no
+match, its unavailable-model diagnostic includes the first catalog error, if any.
+
+Provider retains credentials and all header values only in memory, under an
+opaque source UUID. The adopted non-secret declaration contains that UUID,
+protocol, normalized base URL, authentication kind and sorted header names.
+URL user info, query and fragment are rejected. Source lookup requires the whole
+declaration to match and never falls back to another Provider or account.
+Header names use the HTTP case-insensitive grammar. Header values trim leading
+and trailing space and tab before HTTP validation; internal whitespace and
+colons are preserved. Duplicate canonical names and generated-auth conflicts
+are rejected, matching the CLI's text-to-map admission.
+Failed admission/creation releases unclaimed bindings. Sessions sharing a source
+retain it independently; final business close releases it after requests settle.
+Idle unload retains ownership; restore reinstates its close observer, and deletion
+of an unloaded Session releases its ownership. Provider unload drops all bindings.
+The product assembly declares the Session-directory dependency used for these
+lifecycle notifications; standalone Provider assemblies do not require it.
+Forks retain sources from their adopted branch snapshots before returning,
+including a model adopted after the source Session's creation.
+
+After process restart, a recorded source is unbound until the caller explicitly
+supplies a connection. A matching protocol, normalized URL, auth kind and header
+name set rebinds missing sources in that Session, including parent-cut branches.
+Credential/header values may rotate, but a live source is never overwritten:
+already running branches and members retain their captured connection. A changed
+destination adopts a new source on main only. No Provider record, saved
+preference, workspace selection, account lease or secret file is created.
 
 ### 3.1 Read models
 
@@ -351,6 +407,18 @@ workspace that built a value through `ModelCapabilities::default()` or
 that also sets another field keeps the struct literal and takes that constructor
 as its base.
 
+The two declared limits are facts, not a request allowance. Provider derives the
+adopted output allowance as `max(1, min(declared maxOutputTokens, 131,072,
+contextWindow / 2))` (`dim-agent-capabilities::context_model::output_allowance`),
+so a declaration at or above the window is accepted and still leaves at least half
+the window as input budget. Every adoption writes that value to the configuration's
+`maxTokens`: the catalog read, static and managed selections, startup overrides and
+the model-file profile; the auxiliary target reads the same value.
+`capabilities.maxOutputTokens` keeps the declared fact. A stored
+`context/configured` configuration whose `maxTokens` is absent or above the rule is
+repaired when a request is built from it; the stored fact is not rewritten, so a
+Session adopted before this rule resumes and compacts normally.
+
 On the wire, `ProviderModel.capabilities` in `provider.catalog` and
 `models[].model.capabilities` in `provider.management` carry `contextWindow` and
 `maxOutputTokens` as optional numbers: an absent key is the undeclared value, and
@@ -439,23 +507,27 @@ stored entry does not mark it, and only a limit no source declares is deleted.
 ### 3.6 Selectable models for process owners
 
 A process owner that routes work by model capability cannot keep its own copy of
-Provider's availability rules. Provider owns one side-effect-free read of the
-models it would serve, with the identifiers and declared capabilities a routing
-decision needs. This read is a process host port, not a management method: it is
-not on the `provider` namespace, is not served over RPC, and does not change
-`provider.catalog`.
+the availability rules of the models it routes to. The port below has one provider
+per profile — Provider in the product profile, the configured model profile
+(`dim-agent-aimux`) from its model file — and each provider owns
+side-effect-free reads of the models it would serve, with the identifiers and
+declared capabilities a routing decision needs. This section defines the port and
+Provider's rules; the configured profile's rule is that page's. The read is a
+process host port, not a management method: it is not on the `provider` namespace,
+is not served over RPC, and does not change `provider.catalog`.
 
 **Why a port rather than a method on `ProviderService`.** A consumer plugin lives
 in its own crate, and `xtask check` rejects a dependency on `dim-app-server`, the
 composition layer, so the consumer cannot name `ProviderService`. The port and its
 data type live in `dim-agent-capabilities`, which Provider and the consumer both
-depend on; registering it as a process name lets the consumer declare
-`Keyed<SelectableModelsHost>` and the catalog resolve it. The dependency points
-from the extension to the core, as [ADR 002 D3](../../adr/002-plugin-scope.md)
-requires, and Provider keeps the implementation, the catalog and the rules.
+depend on; registering it as a process name lets a consumer name the port and
+the catalog resolve it, and the dependency points from the extension to the core,
+as [ADR 002 D3](../../adr/002-plugin-scope.md) requires. Each provider keeps its
+implementation, its catalog and its rules.
 
 **Contract (language-neutral).** A process host port, no instance key, provided
-by Provider: operation `selectableModels`, asynchronous, request `{}`, reply
+by Provider in the product profile and by the configured model profile from its
+model file: operation `selectableModels`, asynchronous, request `{}`, reply
 `{models: ModelCapabilitySnapshot[]}`. The element is the existing
 `ModelCapabilitySnapshot` — `{target: {providerId, modelId}, capabilities:
 ModelCapabilities, reasoning?, serviceTier?}` — not a new model type: it already
@@ -465,7 +537,24 @@ limits (§3.5), so the existing `capability_snapshot` conversion always succeeds
 The caller passes its cancellation token; cancelling it cancels the read and
 returns `Cancelled`.
 
-**Rules it applies.** The candidates are the providers default resolution
+**Second operation: `selectableForModality`.** The same port carries one more
+process read, for non-conversational uses (Modality §9.2): operation
+`selectableForModality`, asynchronous, request `{}`, reply
+`{models: ModalityModelSnapshot[]}` with each element
+`{target: {providerId, modelId}, operations: string[]}`. `operations` holds the
+`<category>.<operation>` ids the model's catalog entry declares in
+`metadata.raw.modalityCapabilities`, in that entry's order; a model that
+declares none is omitted. The read applies the same provider, account, model,
+route, credential and status rules as `selectableModels`, without its
+text-modality, chat-kind and declared-text-limit requirements: a model without
+a `text` modality, a non-chat model and a model with `limits_undeclared`
+remain candidates when they declare a modality operation, while an unavailable
+status, a disabled Provider or model, a missing route, a signed-out account and
+a missing static credential still exclude them. It carries no reason field: the
+consumer derives availability from the options and explains a persisted
+default that is no longer selectable from its own snapshot.
+
+**Rules Provider applies.** The candidates are the providers default resolution
 considers: every account provider the managed package advertises and every static
 provider `provider.list` returns. Each model comes from the same per-provider
 catalog read as `provider.catalog` (`catalog_for`), so bundled substitution,
@@ -476,11 +565,23 @@ is not in `disabledModelIds`. That reason already covers every exclusion: a mode
 with `ModelStatus::Unavailable`, a model that declares no `text` modality, a
 non-chat model on a driver other than `new-api-router`, a disabled Provider
 record, a model with no route, a signed-out account, a missing static credential,
-and an undeclared limit (`limits_undeclared`). The read adds no second predicate.
+and an undeclared limit (`limits_undeclared`). The read adds no second predicate:
+it reads the one selection already applies. The modality read is that same rule
+minus the three requirements above, and both catalog builders derive an entry's
+conversational and modality reasons from one classification of the entry, so a
+new exclusion reason states its class once and the two reads cannot drift apart.
 A model appears only if `select`, `configuration`, `apply_preferences`, the
 per-request check and `auxiliaryModel` accept it at the same read. Execution
 remains authoritative: a later write can make a model unselectable, and the
 consumer passes the ID back to Provider, which re-checks.
+
+**Rules the configured profile applies.** Its candidates are every provider and
+model entry of the model file, ordered by provider and then model id. The file
+requires both limits, so each entry is returned with them; it declares no other
+capability, so entries carry the text defaults. That profile has no account,
+route, disable or preference input, and the read adds no such test: the file's
+validation and its rule are its own page's
+([aimux](../../../crates/dim-agent-aimux/README.md)).
 
 This read is not [#560](https://github.com/arcships/dim/issues/560)'s validation
 contract. That contract (§3.7) takes an admitted persisted static record and an explicit
@@ -506,14 +607,24 @@ read returns no per-provider error list. A caller that needs a provider's
 diagnostic uses `provider.list` or `provider.management`.
 
 **Consumers.** Modality computes each operation's options and its automatic
-default from this read: it intersects these IDs with the operations its collected
-adapters declare and reports "no adapter for the configured model" when the
-configured model is absent. It does not call `provider.catalog` and keeps no
-availability predicate of its own. The reply carries IDs and capabilities only,
-not a display name: a client that renders an option joins the ID with the model
-list of `provider.catalog` or `provider.management`, and Modality copies no name.
+default from these reads. For a category an adapter serves, the candidates are
+both reads deduplicated, the execution-selectable models first and the modality
+read's after, each in its read's order, and an operation keeps those a collected
+adapter serves for it; a media model execution rejects therefore stays an option
+where an adapter serves it, and a selectable model that declares no operation
+stays one too. An operation no adapter serves takes the modality read's models
+whose entry declares that operation id, and `image.understand` takes the
+selectable models with `vision`. It reports "no adapter for the configured
+model" when the configured model is absent. It does not call `provider.catalog`
+and keeps no availability predicate of its own. The reply carries IDs and
+capabilities only, not a display name: a client that renders an option joins the
+ID with the model list of `provider.catalog` or `provider.management`, and
+Modality copies no name.
 Provider gains no per-consumer key, setting or filter: the read has no input, so a
-caller that wants one provider filters the reply.
+caller that wants one provider filters the reply. Collaboration's `agent` tool
+reads the same reply for its `models` action and hands the IDs to the leader's
+model, and keeps no rule of its own either
+([Collaboration](../plugins/Collaboration.md#7-the-models-a-member-can-run)).
 
 **What does not change.** `provider.catalog`, `provider.management`,
 `provider.select`, model selection, adoption, preferences and their errors; the
@@ -523,7 +634,11 @@ non-chat rules. The read adds no state, cache, notification, crate or module.
 
 **Rust binding.** The port is defined in `crates/dim-agent-capabilities/src/host.rs`
 beside `ModelSelectionHost`. Provider provides it in `ProviderPlugin::apply`, and
-the App Server catalog registers it as the Rust-only name `selectableModelsHost`
+the configured model profile (`dim-agent-aimux`) provides it from the entries of
+its model file, so both deployments answer the same reads; that profile declares
+no modality operation, so its `selectableForModality` read answers none
+([aimux](../../../crates/dim-agent-aimux/README.md)). The App Server catalog
+registers it as the Rust-only name `selectableModelsHost`
 (no cross-language binding before
 [#4](https://github.com/arcships/dim/issues/4)):
 
@@ -533,17 +648,91 @@ pub trait SelectableModels: Send + Sync + 'static {
         &self,
         cancel: CancellationToken,
     ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>>;
+    fn selectable_for_modality(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Vec<ModalityModelSnapshot>>;
 }
 pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
 ```
 
-The owner implementation is `ProviderService::selectable_models`; `ProductResolver`
-delegates to it. A consumer declares `Keyed<SelectableModelsHost>` in its `Deps`;
-no consumer reads `ProviderService` directly. A non-Rust consumer reaches the port
-by name when the runtime-services-by-name requirement
+The owner implementations are `ProviderService::selectable_models` and
+`ProviderService::selectable_modality_models`; `ProductResolver` delegates to
+both. A consumer that needs the read declares
+`Keyed<SelectableModelsHost>` in its `Deps` and gates on it (Modality). A consumer
+that must load without Provider reads the name when it is provided and gates
+nothing (Collaboration's `models` action); it takes a snapshot at load, so a
+Provider reload does not reload it. No consumer reads `ProviderService` directly.
+A non-Rust consumer reaches the port by name when the runtime-services-by-name requirement
 ([#4](https://github.com/arcships/dim/issues/4)) is delivered; that requirement is
 raised once in [Modality §9](../plugins/Modality.md#9-requirements-raised-to-mechanism-owners)
 and is not raised again here.
+
+**Connection contract: `resolveModalityConnection`.** The same owner resolves the
+connection one non-conversational call uses, so an adapter holds no Provider
+credential and reads no Provider record. It is a second process host port beside
+`ProviderConnectionResolver`, not a management method: operation
+`resolveModalityConnection`, asynchronous, request `{target: {providerId,
+modelId}, operation: string}`, reply `{connection, protocol, model, realtime}`.
+
+`connection` is the existing `ResolvedModelConnection` a chat call to the same
+model would get — the connection facts, the failure policy and, on a managed
+account, the credential recovery — so an adapter runs the same one-recovery rule
+execution does. `protocol` is the route the catalog carries for the model, and
+`model` is the id a request sends. Both ports run one resolution: it resolves the
+static or managed record, builds the catalog, selects and leases the managed
+credential in one place, and only the selectability rule and the request facts
+differ. The chat path's temporary startup connection and adopted capability
+snapshot do not apply; the caller passes a catalog identity and an operation.
+
+**Rules.** It applies exactly the rules of the `selectableForModality` read —
+provider, account, model, route, credential and status — and additionally
+requires the model's catalog entry to declare `operation` in its
+`metadata.raw.modalityCapabilities`. A model that fails any of these is refused
+before any network call: the availability cases with the reason execution reports
+for that model, and an undeclared operation as an invalid request that names it.
+The read and the connection cannot disagree, because they share the catalog and
+its selection predicate. The managed account's credential lease reads the same
+rule: it refuses only a reason that excludes every use, so a media model the
+catalog marks as non-chat still leases for this call. That boundary rule reads
+the stored reason together with the entry's status: an `unavailable` status
+excludes every use whatever reason was stored, so a record an older projection
+wrote for such a model is listed by neither read and leases nothing.
+
+**Realtime declaration.** An entry that serves a realtime operation declares the
+transport it speaks in `metadata.raw.realtime: {protocol, path}`. Provider parses
+it into `RealtimeDeclaration` and carries it on the connection reply as
+`realtime`; an entry that declares none replies `null`, and the configured model
+profile replies `null` for every target, because a model file has no catalog
+entry. The operation is still declared in `metadata.raw.modalityCapabilities`
+with every other one, so a model that lists `realtime.voice` without a transport
+resolves a connection whose `realtime` is `null`: Modality refuses that model's
+`open` before any network call instead of guessing a URL. `protocol` is the
+adapter's name for the wire protocol it accepts, and `path` is appended to the
+route's base URL by that adapter.
+
+**Credential rule and lifetime.** The connection lives for that one call. Provider
+never persists it, never returns it to a client and never writes it to a task
+record, result, diagnostic or error. Its `Debug` prints the model, the route, the
+base URL, header names and whether a credential is present, and never a header
+value, bearer or key; `ModelConnection` implements no `Debug` today, so no other
+connection formats one. A managed account's connection carries the same
+`RecoverModelConnection` a chat call gets. `recovery::invoke` is the chat
+execution path over `ModelHost`, a `ModelRequest` and a `ModelStream`, so an
+adapter cannot reuse it as is; it runs the rule itself: map a provider rejection
+into the `HostError` the recovery interprets, ask `rejection` with the current
+phase, then `recover` once and retry on a recoverable rejection, or
+`finish_rejected` on a terminal one.
+
+**Rust binding.** The port is `ResolveModalityConnection` and
+`ModalityConnectionHost` in `dim-agent-capabilities`, with `ModalityTarget`
+carrying the model identity and the operation. Provider provides it in
+`ProviderPlugin::apply`, and the configured model profile provides it from its
+model file, whose entries declare no operation and therefore answer every target
+with the declaration refusal. The App Server catalog registers the Rust-only name
+`modalityConnectionHost`. The reply reuses `ResolvedModelConnection` and
+`ModelProtocol` and adds `RealtimeDeclaration`, the entry's declared transport;
+it adds no credential type.
 
 ### 3.7 Offline validation of a stored selection
 
@@ -825,7 +1014,7 @@ formats retain their existing rejection and byte-preservation rules.
 | Credential, base URL, headers, proxy, timeout | Current connection is resolved on the next request; already-issued I/O uses its admitted connection |
 | Descriptor/capability edits or saved preferences | Adopted snapshot stays unchanged; changes apply on the next explicit adoption, preferences only when passed |
 | Disable/delete Provider or model | Next request/adoption fails unavailable/not found; no forced switch or cross-owner reference rewrite |
-| A limit declared, or its source removed | An adopted Session keeps its snapshot. With a limit undeclared, the next request fails before credentials or network I/O and names the missing limits; after both are declared, selecting the model adopts them (§3.5) |
+| A limit declared, or its source removed | An adopted Session keeps its snapshot. With a limit undeclared, the next request fails before credentials or network I/O and names the missing limits; after both are declared, selecting the model adopts them (§3.5). The request output allowance is re-derived from the kept snapshot at every request, never from a stored value above the rule |
 | Effective route change from refresh or an endpoint override | A different adopted route stamp fails with a diagnostic to select the model again. An unstamped Session uses the current route on its next request; either edit can break protocol-bound history or lose effort/tier options mapped for the old protocol |
 
 For static New API selection, Provider stamps the chosen `ModelProtocol` string
@@ -911,7 +1100,7 @@ not reported. Source bytes remain unchanged.
 | Models/routes | Real calls to user-added builtin/custom models; create with probe defaults, then add/edit/enable/delete manual and template entries that survive refresh without becoming default overrides; an endpoint-only edit of an unmodified default keeps `source:"default"` and its descriptor follows refresh; any existing descriptor override is unchanged; reset keeps the route override and clear keeps the descriptor override; explicit/profile/default selections get stamps, untargeted F3 and Collaboration inherit preserve absence; inherit copies without creation-time resolution and checks a present stamp at the first request; changed routes from refresh and endpoint overrides reject mismatched stamps, reselection restores effort/tier; unstamped Sessions keep working while their route is unchanged, and both route-change risks are exercised; resolve refresh collisions by user-model deletion |
 | Probe | Unsaved discovery, current-record draft merge without a version check, validated new host with stored credential, failure/timeout/unload without writes, stale reply discarded, no client-cancel claim |
 | Preferences | Independent set/clear and restart; empty/unsupported values use typed errors while malformed patches use boundary errors; exact target with preferences; unavailable target fails without fallback; untargeted F3 and consumer choices unchanged |
-| Model limits | A probed model the descriptor leaves without a limit is listed with `missingLimits`, refused by selection, adoption and preferences, and becomes selectable with its declared window in the adopted snapshot after the CLI declares both; a bundled match stays declared; a managed model without limits keeps its reason instead of a substitute window; the model-file profile still refuses an entry that lacks either value |
+| Model limits | A probed model the descriptor leaves without a limit is listed with `missingLimits`, refused by selection, adoption and preferences, and becomes selectable with its declared window in the adopted snapshot after the CLI declares both; a bundled match stays declared; a managed model without limits keeps its reason instead of a substitute window; the model-file profile still refuses an entry that lacks either value; an output declared at or above the window is accepted, the adopted configuration carries the derived allowance, and the snapshot keeps the declaration |
 | Selectable read | The read equals the set `select`/`configuration` accept at the same snapshot for the same providers; a disabled model, a disabled Provider, an unavailable model, a model with no `text` modality, a non-chat model on another driver, a route-less model and a signed-out account are absent while their Provider still answers; each returned `capabilities.modalities` equals the catalog model's declared set; a model with an undeclared limit is absent rather than making the read fail; managed and static providers both appear; a mock endpoint receives no request; a write changes the next read and not an earlier reply; cancelling the token and Provider close use the existing errors |
 | Stored selection | For one admitted static record and bundled catalog, `stored_selection` accepts exactly the model IDs `select`/`configuration` accept and returns the same protocol and adopted capabilities; fixed drivers and New API explicit, inferred, unsupported and ambiguous routes; missing, disabled, unavailable, non-text, disabled-Provider, missing-credential and undeclared-limit models are refused; an account-owned record is refused; a mock endpoint receives no request; the Migration provider/selection flow and `provider.import_legacy` report the same outcomes through the shared contract |
 | Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |

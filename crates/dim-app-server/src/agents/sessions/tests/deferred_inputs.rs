@@ -133,6 +133,13 @@ impl dim_agent_runtime::TimelineStore for DeferredInputs {
     ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
         self.inner.head(key)
     }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.inner.batch_end(key, sequence)
+    }
     fn append(
         &self,
         key: dim_agent_runtime::TimelineKey,

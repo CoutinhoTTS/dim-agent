@@ -19,10 +19,20 @@ pub struct RecoverySnapshot {
     pub state: String,
 }
 
+/// The event a projection resumes at: the event it names and where that event
+/// sits in the branch chain. A chain read begins at the event the id names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumePoint {
+    pub branch_id: String,
+    #[serde(with = "crate::safe_integer")]
+    pub sequence: u64,
+    pub event_id: String,
+}
+
 /// Internal projection state immediately before replaying `resume`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectionCheckpoint {
-    pub resume: TimelinePosition,
+    pub resume: ResumePoint,
     pub state: ProjectionCheckpointState,
 }
 

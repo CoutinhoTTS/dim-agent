@@ -1,4 +1,6 @@
 use super::*;
+use dim_agent_capabilities::history::read_context_in;
+use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -824,8 +826,7 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
             .await;
         let admitted = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if let Some(event) = session
-                    .history("main", None)
+                if let Some(event) = chain_events(&session, "main", ..)
                     .await
                     .unwrap()
                     .into_iter()
@@ -861,8 +862,7 @@ async fn reconnect_locates_a_published_submission_without_resubmitting() {
             .await;
         assert_eq!(absent["result"], json!({"status":"unknown"}));
         let inputs = || async {
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -934,8 +934,8 @@ async fn fixed_history_pages_share_live_projection_and_advance_across_filtered_r
         assert_ok(&created);
         let sid = created["result"]["sessionId"].as_str().unwrap();
         let session = agent.get_session(sid).unwrap();
-        let initial = session.sequence("main").unwrap();
         assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+        let initial = session.sequence("main").unwrap();
         assert_ok(
             &client
                 .rpc(
@@ -961,16 +961,6 @@ async fn fixed_history_pages_share_live_projection_and_advance_across_filtered_r
             .await;
         assert_ok(&first);
         let through = first["result"]["through"].as_u64().unwrap();
-        let expected: Vec<_> = client
-            .notices
-            .iter()
-            .filter(|notice| {
-                notice["method"] == "session.event"
-                    && notice["params"]["branchId"] == "main"
-                    && notice["params"]["event"]["sequence"].as_u64().unwrap() <= through
-            })
-            .map(|notice| notice["params"]["event"].clone())
-            .collect();
         let second = client
             .rpc(
                 "session.submit",
@@ -1015,6 +1005,17 @@ async fn fixed_history_pages_share_live_projection_and_advance_across_filtered_r
             "filtered pages must advance without visible events"
         );
         assert_eq!(page["nextAfter"], through);
+        let expected: Vec<_> = client
+            .notices
+            .iter()
+            .filter(|notice| {
+                notice["method"] == "session.event"
+                    && notice["params"]["branchId"] == "main"
+                    && notice["params"]["event"]["sequence"].as_u64().unwrap() > initial
+                    && notice["params"]["event"]["sequence"].as_u64().unwrap() <= through
+            })
+            .map(|notice| notice["params"]["event"].clone())
+            .collect();
         let live_part: Vec<_> = all
             .iter()
             .filter(|event| event["sequence"].as_u64().unwrap() > initial)
@@ -1383,7 +1384,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
                         "<dim-state source=\"dim/skills/list\" cleared=\"true\"></dim-state>".into()
                     }
                 };
-                let events = session.history("main", None).await.unwrap();
+                let events = chain_events(session, "main", ..).await.unwrap();
                 let delivered = events.iter().rev().find_map(|event| match &event.kind {
                     EventKind::InputMessage(data) => data.blocks.iter().find_map(|block| {
                         let dim_agent_types::InputBlock::Raw { text, .. } = block;
@@ -1494,7 +1495,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     assert_ok(&catalog);
     assert_eq!(
         catalog["result"]["servers"],
-        json!([{"id":"docs","source":"project","enabled":false,"transport":"stdio"}])
+        json!([{"id":"docs","source":"project","enabled":false,"transport":"stdio","referencedVariables":[],"unsetVariables":[]}])
     );
     assert!(!catalog.to_string().contains("private-secret"));
     let revision = catalog["result"]["projectRevision"].clone();
@@ -1862,8 +1863,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     );
     assert_eq!(client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":policy["result"]["policy"]})).await["error"]["data"]["appError"], "permission_conflict");
     async fn project_rule(session: &dim_agent_runtime::Session) -> (String, String) {
-        let context = session
-            .context("main", session.sequence("main").unwrap())
+        let context = read_context_in(session, "main", session.sequence("main").unwrap())
             .await
             .unwrap();
         let system = serde_json::to_string(
@@ -1903,8 +1903,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             )
             .await,
     );
-    let context = session
-        .context("main", session.sequence("main").unwrap())
+    let context = read_context_in(&session, "main", session.sequence("main").unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -2032,7 +2031,23 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         .await;
     assert_ok(&prompt_only);
     assert_ok(&client.rpc("session.agent.update", json!({"sessionId":sid,"branchId":"main","agentId":prompt_only["result"]["agentId"]})).await);
-    assert_eq!(adopted(), before);
+    let mut recorded = adopted();
+    assert_eq!(
+        recorded
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.agent_id.as_deref()),
+        Some(prompt_only["result"]["agentId"].as_str().unwrap()),
+        "a profile without a model records itself on the configuration it keeps"
+    );
+    recorded.metadata.as_mut().unwrap().agent_id = before
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.agent_id.clone());
+    assert_eq!(
+        recorded, before,
+        "the adopted model and preferences are kept"
+    );
     assert_ok(&client.rpc("session.prompt.refresh", branch.clone()).await);
     assert!(
         session
@@ -2571,6 +2586,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
             name: "echo".into(),
             arguments: "{\"text\":\"he".into(),
         }],
+        retry: None,
     };
     let updates = 200;
     for count in 1..=updates {
@@ -2599,6 +2615,29 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         other.notice("session.model.progress").await["params"],
         last["params"]
     );
+
+    cell.set(ModelProgress {
+        turn_id: Some("turn-1".into()),
+        request_id: Some("request-1".into()),
+        retry: Some(dim_agent_runtime::RetryProgress {
+            attempt: 2,
+            max_attempts: 8,
+            retry_at_ms: 1_700_000_000_000,
+            kind: dim_agent_types::ModelFailureKind::ServerError,
+            reason: Some("fixture rejection".into()),
+        }),
+        ..Default::default()
+    });
+    let retrying = json!({"attempt":2,"maxAttempts":8,"retryAtMs":1_700_000_000_000u64,
+        "kind":"server_error","reason":"fixture rejection"});
+    assert_eq!(
+        client.notice("session.model.progress").await["params"]["retry"],
+        retrying
+    );
+    assert_eq!(
+        other.notice("session.model.progress").await["params"]["retry"],
+        retrying
+    );
     cell.set(ModelProgress::default());
     assert_eq!(
         client.notice("session.model.progress").await["params"],
@@ -2608,7 +2647,16 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         other.notice("session.model.progress").await["params"],
         empty
     );
-    assert_eq!(session.sequence("main").unwrap(), head);
+    let appended = dim_agent_runtime::testing::branch_events(&session, "main", head + 1..)
+        .await
+        .unwrap();
+    assert!(
+        appended.iter().all(|event| {
+            matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_none())
+                || matches!(event.kind, EventKind::InputApplied(_))
+        }),
+        "model progress does not persist facts: {appended:?}"
+    );
 
     let mut legacy = Client::new_version(&server, false, 2).await;
     let created = legacy.rpc("session.create", create(json!([]))).await;
@@ -2814,6 +2862,9 @@ async fn mcp_save_refuses_a_leftover_overlay_and_remove_cleans_it() {
         removed["error"]["data"]["appError"], "mcp_unknown_server",
         "removing an entry that is already absent deletes the leftover record"
     );
+    // The remove deleted the record, which the project revision covers.
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
     assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"command":"newcmd","args":["new-arg"],"enabled":false}})).await);
     let saved = client
         .rpc(
@@ -2847,6 +2898,8 @@ async fn mcp_save_refuses_a_leftover_overlay_and_remove_cleans_it() {
     );
     let removed = client.rpc("mcp.remove", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"]})).await;
     assert_eq!(removed["error"]["data"]["appError"], "mcp_unknown_server");
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
     assert_ok(&client.rpc("mcp.save", json!({"source":"project","id":"gh","cwd":project,"expectedVersion":catalog["result"]["projectRevision"],"configuration":{"type":"http","url":"https://example.test/mcp","enabled":false}})).await);
     let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
     assert_ok(&catalog);
@@ -3177,7 +3230,7 @@ async fn mcp_app_methods_are_session_built_ins_that_json_rpc_serves() {
         "no endpoint in a reply"
     );
 
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         events.iter().all(|event| !matches!(
             event.kind,
@@ -3194,5 +3247,651 @@ async fn mcp_app_methods_are_session_built_ins_that_json_rpc_serves() {
     server.join().await.unwrap();
     stop.cancel();
     server_task.await.unwrap().unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #951: a move names an entry, not a broken row: a broken source answers
+/// invalid config, a broken destination conflicts, and nothing moves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_move_refuses_broken_sources_and_destinations() {
+    let home =
+        std::path::PathBuf::from("/tmp").join(format!("dm-move-broken-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    std::fs::write(
+        home.join("mcp.json"),
+        json!({"mcpServers":{
+            "broken-user": {"type": "ws", "url": "wss://broken.test"},
+            "clash": {"command": "echo"}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".mcp.json"),
+        json!({"mcpServers":{
+            "broken-project": {"command": ""},
+            "clash": {"type": "ws", "url": "wss://clash.test"}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    let user_revision = catalog["result"]["userRevision"].clone();
+    let project_revision = catalog["result"]["projectRevision"].clone();
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    assert!(
+        !servers
+            .iter()
+            .any(|server| server["id"] == "broken-user" || server["id"] == "broken-project")
+    );
+    assert!(servers.iter().any(|server| server["id"] == "clash"));
+    let invalid = catalog["result"]["invalid"].as_array().unwrap();
+    assert!(
+        invalid
+            .iter()
+            .any(|entry| entry["id"] == "broken-user" && entry["source"] == "user")
+    );
+    assert!(
+        invalid
+            .iter()
+            .any(|entry| entry["id"] == "broken-project" && entry["source"] == "project")
+    );
+
+    for (id, from, to, expected) in [
+        ("broken-user", "user", "project", "mcp_invalid_config"),
+        ("broken-project", "project", "user", "mcp_invalid_config"),
+        ("clash", "user", "project", "mcp_move_conflict"),
+    ] {
+        let refused = client
+            .rpc(
+                "mcp.move",
+                json!({"id":id,"from":from,"to":to,"cwd":project,
+        "expectedFromVersion": if from == "user" { user_revision.clone() } else { project_revision.clone() },
+        "expectedToVersion": if to == "user" { user_revision.clone() } else { project_revision.clone() }}),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], expected,
+            "{id} {from}->{to}: {refused}"
+        );
+    }
+    let after = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&after);
+    assert_eq!(after["result"]["userRevision"], user_revision);
+    assert_eq!(after["result"]["projectRevision"], project_revision);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #951: over the RPC path too, `null` in an optional member means absent;
+/// the saved entry loads as a server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_save_reads_null_optional_members_as_absent() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-null-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let before = client.rpc("mcp.catalog", json!({"cwd":home})).await;
+    assert_ok(&before);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":"nullable","expectedVersion":before["result"]["userRevision"],
+        "configuration":{"type":"http","url":"https://example.invalid/mcp","enabled":null,"auth":null,"oauth":null}}),
+            )
+            .await,
+    );
+    let before = client.rpc("mcp.catalog", json!({"cwd":home})).await;
+    assert_ok(&before);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":"nullable-command","expectedVersion":before["result"]["userRevision"],
+        "configuration":{"type":null,"command":"never-start-this-fixture","enabled":null,"auth":null,"oauth":null}}),
+            )
+            .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":home})).await;
+    assert_ok(&catalog);
+    assert!(
+        catalog["result"]["invalid"].as_array().unwrap().is_empty(),
+        "{catalog}"
+    );
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    let nullable = servers
+        .iter()
+        .find(|entry| entry["id"] == "nullable")
+        .unwrap();
+    assert_eq!(nullable["transport"], "http");
+    let command = servers
+        .iter()
+        .find(|entry| entry["id"] == "nullable-command")
+        .unwrap();
+    assert_eq!(command["transport"], "stdio");
+    let db = rusqlite::Connection::open(home.join("native/dimcode.sqlite")).unwrap();
+    let stored: String = db
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source='user/mcp'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: Value = serde_json::from_str(&stored).unwrap();
+    for member in ["auth", "oauth", "enabled"] {
+        assert!(
+            stored["mcpServers"]["nullable"].get(member).is_none(),
+            "{member}: {stored}"
+        );
+        assert!(
+            stored["mcpServers"]["nullable-command"]
+                .get(member)
+                .is_none(),
+            "{member}: {stored}"
+        );
+    }
+    assert_eq!(stored["mcpServers"]["nullable"]["type"], "http");
+    assert!(
+        stored["mcpServers"]["nullable-command"]
+            .get("type")
+            .is_none(),
+        "{stored}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #951: a document decodes entry by entry. A broken entry is reported in
+/// `invalid` with its field and expected kind, never a value, and is not a
+/// server; it is removable and replaceable, while an edit, enable, test or
+/// inspect is refused with its error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_broken_entries_are_reported_and_managed_entry_by_entry() {
+    let home = std::path::PathBuf::from("/tmp").join(format!("dm-broken-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let marker = "qzfvr-ptlma-w8xke-3d1s";
+    let user_file = json!({"mcpServers": {
+        "keep": {"command": "legacy-server", "args": ["--flag"], "future": {"keep": true}},
+        "stream": {"type": "streamable-http", "url": "https://stream.test/mcp"},
+        "broken": {"type": "ws", "url": "wss://broken.test"},
+        "mover": {"command": "move-server", "env": {"TOKEN": "private"}}
+    }});
+    let project_file = json!({"mcpServers": {
+        "project-keep": {"type": "sse", "url": "https://project.test/sse"},
+        "project-broken": {"type": "http", "url": "https://broken.test/mcp",
+                            "headers": {"Authorization": {"leak": marker}}}
+    }});
+    std::fs::write(home.join("mcp.json"), user_file.to_string()).unwrap();
+    std::fs::write(project.join(".mcp.json"), project_file.to_string()).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    assert!(servers.iter().any(|server| server["id"] == "keep"));
+    assert!(servers.iter().any(|server| server["id"] == "project-keep"));
+    let stream = servers
+        .iter()
+        .find(|server| server["id"] == "stream")
+        .unwrap();
+    assert_eq!(stream["transport"], "http");
+    assert!(
+        !servers
+            .iter()
+            .any(|server| server["id"] == "broken" || server["id"] == "project-broken")
+    );
+    let invalid = catalog["result"]["invalid"].as_array().unwrap();
+    let broken = invalid
+        .iter()
+        .find(|entry| entry["id"] == "broken")
+        .unwrap();
+    assert_eq!(broken["source"], "user");
+    assert!(
+        broken["error"]
+            .as_str()
+            .unwrap()
+            .contains("field type must be http or sse")
+    );
+    let project_broken = invalid
+        .iter()
+        .find(|entry| entry["id"] == "project-broken")
+        .unwrap();
+    assert_eq!(project_broken["source"], "project");
+    assert!(
+        project_broken["error"]
+            .as_str()
+            .unwrap()
+            .contains("field headers.Authorization must be a string")
+    );
+    assert!(
+        !catalog.to_string().contains(marker),
+        "a reply repeated a value"
+    );
+    let user_revision = catalog["result"]["userRevision"].clone();
+    let project_revision = catalog["result"]["projectRevision"].clone();
+
+    for id in ["broken", "project-broken"] {
+        let source = if id == "broken" { "user" } else { "project" };
+        let revision = if source == "user" {
+            user_revision.clone()
+        } else {
+            project_revision.clone()
+        };
+        for method in ["mcp.configuration", "mcp.inspect", "mcp.test"] {
+            let refused = client
+                .rpc(method, json!({"source":source,"id":id,"cwd":project}))
+                .await;
+            assert_eq!(
+                refused["error"]["data"]["appError"], "mcp_invalid_config",
+                "{method} did not refuse the broken entry"
+            );
+        }
+        let refused = client
+            .rpc(
+                "mcp.update",
+                json!({"source":source,"id":id,"cwd":project,
+                       "expectedVersion":revision,
+                       "patch":{"command":"other"}}),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], "mcp_invalid_config",
+            "mcp.update did not refuse the broken entry"
+        );
+        let refused = client
+            .rpc(
+                "mcp.set_enabled",
+                json!({"source":source,"id":id,"cwd":project,
+                       "expectedVersion":revision,
+                       "enabled":true}),
+            )
+            .await;
+        assert_eq!(
+            refused["error"]["data"]["appError"], "mcp_invalid_config",
+            "mcp.set_enabled did not refuse the broken entry"
+        );
+    }
+
+    // A save replaces the broken entry with a valid definition.
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"user","id":"broken","cwd":project,
+        "expectedVersion":catalog["result"]["userRevision"],
+        "configuration":{"type":"http","url":"https://replacement.test/mcp"}}),
+            )
+            .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    let saved = servers
+        .iter()
+        .find(|server| server["id"] == "broken")
+        .unwrap();
+    assert_eq!(saved["transport"], "http");
+    assert!(
+        !catalog["result"]["invalid"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "broken")
+    );
+
+    // A broken project entry takes no overlay. Its kept record belongs to
+    // the entry a move created and a save replaces, so the save deletes it
+    // at the generation it read and the new entry starts without withheld
+    // values.
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.move",
+                json!({"id":"mover","from":"user","to":"project","cwd":project,
+        "expectedFromVersion":catalog["result"]["userRevision"],
+        "expectedToVersion":catalog["result"]["projectRevision"]}),
+            )
+            .await,
+    );
+    let mut rewritten = project_file.clone();
+    rewritten["mcpServers"]["mover"] = json!({"type": "ws", "url": "wss://mover.test"});
+    std::fs::write(project.join(".mcp.json"), rewritten.to_string()).unwrap();
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    for id in ["project-broken", "mover"] {
+        assert!(
+            catalog["result"]["invalid"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["id"] == id),
+            "{id} is not reported as broken"
+        );
+    }
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.save",
+                json!({"source":"project","id":"mover","cwd":project,
+        "expectedVersion":catalog["result"]["projectRevision"],
+        "configuration":{"command":"other"}}),
+            )
+            .await,
+    );
+    let catalog = client.rpc("mcp.catalog", json!({"cwd":project})).await;
+    assert_ok(&catalog);
+    assert!(
+        !catalog["result"]["invalid"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == "mover")
+    );
+    assert!(
+        catalog["result"]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|server| server["id"] == "mover")
+    );
+    let configuration = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source":"project","id":"mover","cwd":project}),
+        )
+        .await;
+    assert_ok(&configuration);
+    assert_eq!(configuration["result"]["secretsInUserScope"], false);
+    assert_ok(
+        &client
+            .rpc(
+                "mcp.remove",
+                json!({"source":"project","id":"project-broken","cwd":project,
+        "expectedVersion":catalog["result"]["projectRevision"]}),
+            )
+            .await,
+    );
+    let persisted: Value =
+        serde_json::from_slice(&std::fs::read(project.join(".mcp.json")).unwrap()).unwrap();
+    assert!(persisted["mcpServers"].get("project-broken").is_none());
+    assert_eq!(
+        persisted["mcpServers"]["project-keep"],
+        project_file["mcpServers"]["project-keep"]
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #952: management reads name the variables an entry references, and the
+/// names that are unset, without returning an expanded value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_catalog_names_referenced_and_unset_variables_without_expanding_them() {
+    let home = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("dm-expansion-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let user_file = json!({"mcpServers": {
+        "docs": {"type": "http", "url": "https://${MCP_952_HOST}/mcp",
+                 "headers": {"Authorization": "Bearer ${MCP_952_TOKEN}"}},
+        "local": {"command": "node", "args": ["--flag=${MCP_952_FLAG}"],
+                  "env": {"VALUE": "${MCP_952_VALUE:-fallback}"}}
+    }});
+    std::fs::write(home.join("mcp.json"), user_file.to_string()).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let catalog = client.rpc("mcp.catalog", json!({"cwd": project})).await;
+    assert_ok(&catalog);
+    let servers = catalog["result"]["servers"].as_array().unwrap();
+    let docs = servers
+        .iter()
+        .find(|server| server["id"] == "docs")
+        .unwrap();
+    assert_eq!(
+        docs["referencedVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    assert_eq!(
+        docs["unsetVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    let local = servers
+        .iter()
+        .find(|server| server["id"] == "local")
+        .unwrap();
+    assert_eq!(
+        local["referencedVariables"],
+        json!(["MCP_952_FLAG", "MCP_952_VALUE"])
+    );
+    assert_eq!(local["unsetVariables"], json!(["MCP_952_FLAG"]));
+    let configuration = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source": "user", "id": "docs", "cwd": project}),
+        )
+        .await;
+    assert_ok(&configuration);
+    assert_eq!(
+        configuration["result"]["configuration"]["referencedVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    assert_eq!(
+        configuration["result"]["configuration"]["unsetVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    assert!(
+        configuration["result"]["configuration"]["endpoint"]
+            .as_str()
+            .unwrap()
+            .contains("${MCP_952_HOST}"),
+        "the configuration view did not keep the reference as written"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// #952: one entry's configuration view keeps a reference as written instead
+/// of rejecting the entry because its URL is not yet a URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_configuration_keeps_a_variable_reference_as_written() {
+    let home = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("dm-expansion-view-{}", uuid::Uuid::new_v4()));
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let user_file = json!({"mcpServers": {
+        "docs": {"type": "http", "url": "https://${MCP_952_HOST}/mcp",
+                 "headers": {"Authorization": "Bearer ${MCP_952_TOKEN}"}},
+        "template": {"type": "http", "url": "${MCP_952_URL}/mcp"}
+    }});
+    std::fs::write(home.join("mcp.json"), user_file.to_string()).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let configuration = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source": "user", "id": "docs", "cwd": project}),
+        )
+        .await;
+    assert_ok(&configuration);
+    assert_eq!(
+        configuration["result"]["configuration"]["endpoint"],
+        "https://${MCP_952_HOST}"
+    );
+    assert_eq!(
+        configuration["result"]["configuration"]["referencedVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    assert_eq!(
+        configuration["result"]["configuration"]["unsetVariables"],
+        json!(["MCP_952_HOST", "MCP_952_TOKEN"])
+    );
+    let template = client
+        .rpc(
+            "mcp.configuration",
+            json!({"source": "user", "id": "template", "cwd": project}),
+        )
+        .await;
+    assert_ok(&template);
+    assert_eq!(
+        template["result"]["configuration"]["endpoint"],
+        "${MCP_952_URL}/mcp"
+    );
+    assert_eq!(
+        template["result"]["configuration"]["referencedVariables"],
+        json!(["MCP_952_URL"])
+    );
+    assert_eq!(
+        template["result"]["configuration"]["unsetVariables"],
+        json!(["MCP_952_URL"])
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// `provider.catalog` is a public `provider.*` reply. The App Server's own
+/// rule for non-conversational use decides what `modality.*` offers, and it
+/// must not ride the reply; the rule itself still excludes the entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_catalog_does_not_publish_the_modality_rule() {
+    let home = std::env::temp_dir().join(format!("dim-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let native = home.join("native");
+    std::fs::create_dir_all(&native).unwrap();
+    let (server, _) = launch_with_agent(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(native),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    const PROVIDER: &str = "00000000-0000-4000-8000-000000000051";
+    // Disabled, so the entry is `provider_unavailable`: the same rule the
+    // App Server derives its own modality reason from, which makes that
+    // reason Some for this entry.
+    let created = client
+        .rpc(
+            "provider.create",
+            json!({"providerId":PROVIDER,"displayName":"media",
+                "connection":{"driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1",
+                    "auth":{"type":"anonymous"}},
+                "models":[{"modelId":"media-image","displayName":"media-image","status":"active",
+                    "capabilities":{"modalities":["image"],"toolCalling":false,"streaming":true,
+                        "structuredOutput":false,"vision":false,"audio":false,"reasoning":false},
+                    "metadata":{"raw":{"type":"image-generation",
+                        "modalityCapabilities":["image.generate"]}}}],
+                "enabled":false}),
+        )
+        .await;
+    assert_ok(&created);
+    let reply = client
+        .rpc("provider.catalog", json!({"providerId": PROVIDER}))
+        .await;
+    assert_ok(&reply);
+    let entry = reply["result"]["catalog"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "media-image")
+        .unwrap();
+    assert_eq!(
+        entry["unavailableReason"], "provider_unavailable",
+        "the entry is unavailable to a modality use too: {entry}"
+    );
+    assert!(
+        entry.get("modalityUnavailableReason").is_none(),
+        "the provider reply carries no modality rule: {entry}"
+    );
+    let capabilities = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&capabilities);
+    let generate = capabilities["result"]["categories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|category| category["category"] == "image")
+        .unwrap()["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["operation"] == "generate")
+        .unwrap();
+    assert!(
+        !generate["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["providerId"] == PROVIDER && option["modelId"] == "media-image"),
+        "the unavailable entry is not a modality option: {generate}"
+    );
+    let refused = client
+        .rpc(
+            "modality.configure",
+            json!({"expectedRevision": capabilities["result"]["revision"],
+                "category":"image","operation":"generate",
+                "model":{"providerId":PROVIDER,"modelId":"media-image"}}),
+        )
+        .await;
+    assert_eq!(
+        refused["error"]["data"]["appError"], "modality_invalid_selection",
+        "the rule still refuses the entry: {refused}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

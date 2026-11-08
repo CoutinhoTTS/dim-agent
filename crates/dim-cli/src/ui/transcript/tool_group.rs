@@ -354,6 +354,33 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
     for item in &items {
         append_summary(&mut summary, item);
     }
+    let mut programs: Vec<(String, usize)> = Vec::new();
+    for item in &items {
+        let call = item.call();
+        if matches!(call.name.as_str(), "exec" | "execute" | "bash")
+            && let Some(program) = call.string("command").and_then(command_program)
+        {
+            if let Some((_, count)) = programs.iter_mut().find(|(name, _)| *name == program) {
+                *count += 1;
+            } else {
+                programs.push((program, 1));
+            }
+        }
+    }
+    if !programs.is_empty() {
+        let names = programs
+            .into_iter()
+            .map(|(name, count)| {
+                if count == 1 {
+                    name
+                } else {
+                    format!("{name} ×{count}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        header.push(span(format!(" · {names}"), Tone::Muted));
+    }
     let mut collapsed = vec![header_line(0, mark, header)];
     let now = now_ms();
     for item in &items {
@@ -1374,6 +1401,39 @@ fn counted(count: usize, (one, other): Noun) -> String {
         t(one).to_owned()
     } else {
         tf(other, &[("count", &count.to_string())])
+    }
+}
+
+fn command_program(command: &str) -> Option<String> {
+    let line = first_line(Some(command));
+    let mut chars = line.trim_start().chars().peekable();
+    loop {
+        let mut word = String::new();
+        let mut quote = None;
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\'' | '"' if quote == Some(ch) => quote = None,
+                '\'' | '"' if quote.is_none() => quote = Some(ch),
+                '\\' if quote != Some('\'')
+                    && chars
+                        .peek()
+                        .is_some_and(|next| next.is_whitespace() || matches!(next, '\'' | '"')) =>
+                {
+                    word.push(chars.next()?);
+                }
+                ch if quote.is_none() && (ch.is_whitespace() || "|;&<>".contains(ch)) => break,
+                ch => word.push(ch),
+            }
+        }
+        if word.is_empty() || quote.is_some() {
+            return None;
+        }
+        if !word.contains('=') {
+            return Some(word.rsplit(['/', '\\']).next()?.to_owned());
+        }
+        while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+            chars.next();
+        }
     }
 }
 

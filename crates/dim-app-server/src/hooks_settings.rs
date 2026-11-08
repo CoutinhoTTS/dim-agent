@@ -13,7 +13,7 @@ use dim_agent_capabilities::{
         HookGroup, HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost,
         HookSourcesSnapshot, HooksDocument, ReadHookSources, entries,
     },
-    methods::{Interruption, MethodDecl, RpcError, params, reply},
+    methods::{Interruption, MethodCall, MethodDecl, RpcError, params, reply},
 };
 use dim_agent_runtime::{AgentBuilder, Feature, Names};
 use rutis::Ctx;
@@ -417,8 +417,10 @@ fn reader(
 /// `hooks-plugins`.
 pub struct HooksService {
     settings: Arc<SettingsService>,
-    /// Why the last registration of a plugin was refused, by plugin id.
-    refused: Mutex<BTreeMap<String, String>>,
+    /// Why the last registration of a plugin was refused, by plugin id: the
+    /// raw error, and its static reason when the cause has one
+    /// (PluginManager A.2).
+    refused: Mutex<BTreeMap<String, (String, Option<&'static str>)>>,
 }
 impl HooksService {
     /// Adds or replaces the hook document of `plugin` (a plugin id, §3.7),
@@ -459,7 +461,7 @@ impl HooksService {
         };
         let mut refused = self.refused.lock().unwrap();
         match &result {
-            Err(error) => refused.insert(plugin, error.to_string()),
+            Err(error) => refused.insert(plugin, (error.to_string(), error.reason())),
             Ok(()) => refused.remove(&plugin),
         };
         result
@@ -476,8 +478,11 @@ impl HooksService {
         self.set_plugin(plugin, None, cancel).await
     }
 
-    /// Why Hooks refused the last document `plugin` registered.
-    pub fn plugin_refusal(&self, plugin: &str) -> Option<String> {
+    /// Why Hooks refused the last document `plugin` registered: the raw
+    /// error, and its static reason when the cause has one (PluginManager
+    /// A.2). Both under one lock, so a registration between two reads cannot
+    /// pair one cause's error with another's reason.
+    pub fn plugin_refusal(&self, plugin: &str) -> Option<(String, Option<&'static str>)> {
         self.refused.lock().unwrap().get(plugin).cloned()
     }
 
@@ -588,7 +593,12 @@ impl DynPlugin for HooksSettingsPlugin {
                         MethodDecl::new(name, name != "hooks.catalog", Interruption::Report)
                     })
                     .collect(),
-                Arc::new(move |method, value, stopping, _| {
+                Arc::new(move |call, stopping, _| {
+                    let MethodCall {
+                        method,
+                        params: value,
+                        ..
+                    } = call;
                     let settings = settings.clone();
                     let reader = reader.clone();
                     Box::pin(async move {

@@ -17,26 +17,28 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [PromptSuggestion](PromptSuggestion.md) | `PromptSuggestionSettings` in App Server: the `prompt-suggestion` Settings source | observes the completed turn's events, `session.suggestion.request` and `session.suggestion.respond`, the offer in flight and the shown offer; no events | — | P1; [#943](https://github.com/arcships/dim/issues/943) |
 | [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:objective` and `goal:status` blocks, continuation | P2 |
 | [Pursuit](Pursuit.md) (evaluator judge mode of Goal) | — | `judge` on `session.goal.set` | completion requests decided by evaluator branches; conclusion inputs and Goal's outcomes | M2; #422 |
+| [ModelRecovery](ModelRecovery.md) | — | — | the disposer registered with the Loop's port; the handover input it writes | [#1210](https://github.com/arcships/dim/issues/1210) |
 | [Web](Web.md) | — | `web_search`, `web_fetch` tools | — | P2; optional package |
 | [ContextCompaction](ContextCompaction.md) (supplements to Loop and ContextPreparation) | — | `ContextModelHost`, summary `CompactionStrategyHost`, `session.context.*` | `context/compact` command and compaction step in Loop; K-turn cut and usage query in ContextPreparation | P2 |
 | [Prompt](Prompt.md) | — | `guideEntries`: the input guide's frame, the entries in force and their composition | `Prompt`: the System its publisher adopts carries the composition over the entries in force, and a host-prepared request carries the same composition, placed by Loop | #548 |
 | [PromptSources](PromptSources.md) | — | the named sources, their policy texts at the factory configuration, and the state and rule entries | — | #548 |
-| [EnvironmentClients](EnvironmentClients.md) | App Server read-only `sessionClientsHost` presence (Connection and UiHost) | presence snapshots as `<dim-state>` inputs | branch open and `ClientsChanged` | #1019 |
-| [EnvironmentSettings](EnvironmentSettings.md) | — (reads each setting module's read port) | settings snapshots as `<dim-state>` inputs | one snapshot at branch open and on a Settings change | #1020 |
+| [EnvironmentClients](EnvironmentClients.md) | App Server read-only `sessionClientsHost` presence (Connection and UiHost) | — | presence snapshots as `<dim-state>` inputs at branch open and on `ClientsChanged` | #1019 |
+| [EnvironmentSettings](EnvironmentSettings.md) | — (reads each setting module's read port) | — | settings snapshots as `<dim-state>` inputs at branch open and on a Settings change | #1020 |
 | [ClientView](ClientView.md) | per-connection viewed-line record in App Server | — | — | #1021, deferred for model state |
-| [AgentSettings](AgentSettings.md) | — | one `settings` tool: `list`, `get`, `set` | — | #1022 |
+| [AgentSettings](AgentSettings.md) | — | one `settings` tool: `list`, `get` | — | #1022 |
 | [Recall](Recall.md) | — | `recall` tool (tells the model its branch's history: turns, a turn, one thing in full, search) | — | M2; #129 |
 | [Hooks](Hooks.md) | `HooksSettings` in App Server: sources `hooks` (user), `hooks-projects` and `hooks-plugins`, the project file `.dimcode/hooks.json` read through FileStorage, `hooks.*` methods and plugin registration | hook catalog, runner, a submit check registered with `submitChecks` for the user-input entries (`UserPromptSubmit`) | tool advice, permission requests, post-tool (`PostToolUse`, `PostToolUseFailure`), Stop and Session-start hooks | M1; #755, #756, #757, #758 |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
-| [Collaboration](Collaboration.md) | member relations and temporary agents | `agent` tool, reports and messages; the two markers' guide entries | the delegation's facts, wake inputs and settlement | #551 |
+| [Collaboration](Collaboration.md) | member relations and temporary agents | `agent` tool, including the `models` action that lists the models a new member can run; reports and messages; the two markers' guide entries | the delegation's facts, wake inputs and settlement | #551 |
 | [ExternalAgent](ExternalAgent.md) | external conversations, Collaboration member kind `external-agent`; bridge row per node | — (delegation and decisions are Collaboration's) | — | P3 |
 | [AcpGateway](AcpGateway.md) | client-host plugin: ACP/RPC connections, requests and cleanup; outside the daemon | — | — | #436; PR #441; [acceptance](../acp-gateway-acceptance.md) |
 | [TemporaryMcp](TemporaryMcp.md) | registered by the existing MCP feature | temporary bindings, MCP server children and tools; no settings writes | — | #436 |
 | [Tui](Tui.md) | — (client tree in the CLI process: `DaemonLink`, `Tui`, `WebHold`; not daemon plugins) | — | — | P1 |
 | [RemoteGateway](RemoteGateway.md) | remote entry, devices | — | — | P3 |
 | [Modality](Modality.md) | tasks, realtime connections | — | — | P3 |
+| [light-ocr](LightOcr.md) | optional plugin: the `ocrHelper` description and the out-of-process helper, supplying Modality's `local/pp-ocr` target | — | — | P3; [#1158](https://github.com/arcships/dim/issues/1158) |
 | [Skills](Skills.md) (installation) | existing SkillsCatalog: preview of a local or Git source, selective installation into the user root, update and confirmed removal of loose Skills | — (discovery, enablement and the `skill` tool already belong to the Skills capability) | — | #740 |
 | [PluginManager](PluginManager.md) | plugin configuration (`plugins.json`), install, loader rows of plugin code, content registration | `PluginTools` (`plugin` tool) | — | M1 |
 | [RuntimeManager](RuntimeManager.md) | the Node and Python runtimes of plugin code: pinned download, verification, start; `runtime.*` | — | — | M1 (#476) |
@@ -45,6 +47,6 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 
 | Scope | Parts |
 | --- | --- |
-| Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source) in the daemon; AcpGateway in its client host process; ClientView (the connection's viewed line) |
+| Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source), light-ocr in the daemon; AcpGateway in its client host process; ClientView (the connection's viewed line) |
 | Session parts | Questions, ShellInput, Attachments, SessionTitle, PromptSuggestion, Goal, Web, Recall, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), SettingsTool (the one `settings` tool, registered by ExecutionSettings in v1) |
-| Branch parts | Goal (with Pursuit), Hooks, Prompt, EnvironmentClientsBranch (registered by Connection), SettingsSnapshotBranch (registered by Settings) |
+| Branch parts | Goal (with Pursuit), ModelRecovery, Hooks, Prompt, EnvironmentClientsBranch (registered by Connection), SettingsSnapshotBranch (registered by ExecutionSettings) |

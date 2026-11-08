@@ -17,7 +17,7 @@ Settings 为不是用 Rust 写的插件提供业务来源。这类插件在启�
 仅限用户的字段（§3.1）。随后 Settings 在 JSON 文档上提供三样东西：
 
 - 进程服务 `settings`，供所有者使用：`register`、`read`、`update`（按 revision 做 CAS）和 `projects`；
-- 客户端管理方法 `settings.read` 和 `settings.update`；
+- 客户端管理方法 `settings.read`、`settings.update`、`settings.sources` 和 `settings.projects`；
 - 与 S8a 相同的 rutis 事件 `settings.changed` 和 `settings.project_authorized`。它们的载荷改为
   可序列化。没有 `subscribe(source)`。
 
@@ -42,7 +42,8 @@ Settings 不赋予任何字段特殊含义，只有一个例外：schema 带 JSO
   评论）。Settings 不保留自己的监听通道。
 - 不向客户端通用地开放 Rust 来源（`mcp`、`mcp-projects`、`mcp-plugins`、`skills`、`permission`）。它们的校验是
   Rust 代码，Settings 无法拿来校验客户端传来的 JSON。
-- 不提供来源发现方法，不做设置界面。见 §10。
+- 来源发现就是 `settings.sources`（§4.3）：本地连接可以列出已声明的来源及其 schema，从不列出其文档。
+  仍然不做设置界面。
 - 不提供密钥存储、凭据服务或字段名规则（§1.2）。唯一的标记是 schema 的 `writeOnly` 注解。
 - MCP 的内联 token、`env` 和 `headers` 保持原样（ADR 004 D4）。
 
@@ -89,6 +90,7 @@ Settings 不赋予任何字段特殊含义，只有一个例外：schema 带 JSO
  |   在 settings/projects 上发出 settings.project_authorized               |
  +------^-------------------------------^----------------------------------+
         | register/read/update/projects | settings.read / settings.update
+        |                               | settings.sources / settings.projects
         |                               |
   TypeScript 所有者（rutis 运行时行）   Rpc  <--  本地客户端
 ```
@@ -178,6 +180,7 @@ Settings 在内存中保存已登记的来源（声明已编译），各自保�
 | `Scope` | `"user"` 或 `{"project": <root>}`。`root` 是 Settings 在本进程内分配的项目根编号（`SettingsScope::Project`）。它不是持久标识，从不持久化 |
 | `Snapshot` | `{revision: string, document: object}` |
 | `Error` | `{code, message}` |
+| `Sources` | `settings.sources` 的回复（§4.3）：`{dialect: string, sources: [{source, schema, scopes, userOnly, writeOnly}]}`。`dialect` 精确等于 `https://json-schema.org/draft/2020-12/schema`，即每个 `schema` 编译所用的 draft（§3.1）。`schema` 是登记时的 schema 原样，含 `default` 成员。`scopes` 是 `["user"]`，或来源声明了项目文件时的 `["user", "project"]`。`userOnly` 是登记的指针列表。`writeOnly` 提示 schema 根本身或经 `properties` 可达的成员标了 `writeOnly: true`。根上的 `writeOnly` 计入该提示，但不是被隐藏的成员：去值（§1.2）只去掉经 `properties` 到达的成员，因此这样的来源列出 `writeOnly: true`，却不隐藏任何成员。两条规则都不扫描 `items`、`$defs` 或 `anyOf`，其余情况由客户端自己读 `schema`。任何条目都不带文档、文件名或所有者 |
 
 ### 4.2 服务 `settings`（所有者路径）
 
@@ -213,11 +216,32 @@ Settings 在内存中保存已登记的来源（声明已编译），各自保�
 | --- | --- | --- | --- |
 | `settings.read` | `{source, scope}` | `{revision, document}` | 参数无效（作用域错误）、`settings_unknown_source`、`settings_failed` |
 | `settings.update` | `{source, scope, expectedRevision, document}` | `{revision, document}` | 参数无效（作用域错误、违反 schema）、`settings_unknown_source`、`settings_conflict`、`settings_unsynced`、`settings_failed` |
+| `settings.sources` | `{}` | `{dialect, sources: [...]}`（`Sources`，§4.1） | 参数无效 |
+| `settings.projects` | `{}` | `{projects: [{root, cwd}]}`：当前已授权的项目根，与服务 `projects` 的回答相同（§4.2） | 参数无效 |
 
 - 只服务已登记的声明来源。Rust 来源（例如 `mcp`）返回 `settings_unknown_source`，仍由其所有者的方法
   修改。
 - 客户端写入可以改仅限用户的字段。除此之外与所有者路径没有区别。
 - `closed` 映射为现有的可重试 reloading 错误。
+- `settings.sources` 按来源名顺序列出每个已登记的声明来源，从不列 Rust 来源；空登记是空的
+  `sources` 数组，不是错误。条目是去掉文件名和所有者的声明（§4.1）。`schema` 成员原样往返
+  所有者登记的内容；显示元数据（如果所有者加了）就是 schema 自己的 `title`/`description` 注解。
+- 客户端经公开方法在这里读声明，而不是去读插件的包或清单（§9，§4 第 7 条：只经公开接口）。
+  agent 侧的对应物仍是 `plugin` 工具的 `config` 命令，它额外返回用户文档，并把 `writeOnly`
+  成员去掉后列在 `writeOnlySet` 里（PluginManager §6）。
+- `schedule` 不是声明的来源。`ScheduleDocument` 是 Rust 的 `BusinessDocument`，经
+  `settings.register::<ScheduleDocument>` 登记，由它自己的 `validate()` 校验，由 `schedule.*`
+  提供，在所有 `settings.*` 路径上都是 `settings_unknown_source`。Rust 来源保留自己类型化的
+  方法，不属于 schema 驱动的表面；`settings.sources` 只列声明的来源，因此从不列出它。
+- `settings.sources` 从不提供给已配对设备（§4.3 开头），也不在 Web 入口的允许清单里，因此
+  Web 入口回答 `unknown_method`（§11 第 7–8 条）：发现与命名空间的其余部分一样只限本地。
+- `settings.projects` 是客户端在传 `{project: root}` 之前需要的读取：它回答与服务 `projects`
+  （§4.2）相同的 `{projects: [{root, cwd}]}`，按 cwd 顺序；同样不提供给已配对设备，也不在 Web
+  入口的允许清单里（`unknown_method`）。**`root` 是进程内的编号**（§4.1）：它只在守护进程本次
+  运行期间有效，不是持久身份；客户端在重连到重启后的守护进程时重新读 `settings.projects`，
+  从不保存 root。进程运行期间列表只增不减——同一 cwd 再次授权不新增条目、也不发事件（§4.4）
+  ——因此没有事件或推送承载它，客户端在打开项目作用域表单时读取。本进程未授权的
+  `{project: root}` 是参数无效，与没有项目作用域的来源得到相同的回答。
 
 ### 4.4 事件
 
@@ -270,6 +294,7 @@ impl SettingsService {
     /// 登记 `D`（或一份声明），直到拥有 `ctx` 的插件卸载。
     pub fn register<D: BusinessDocument>(&self, ctx: &Ctx) -> rutis::Result<()>;
     pub fn register_declared(&self, ctx: &Ctx, declaration: SourceDeclaration) -> rutis::Result<()>;
+    pub fn declarations(&self) -> Vec<SourceDeclaration>;
     pub async fn read_declared(&self, source: &str, scope: SettingsScope,
                                cancel: &CancellationToken) -> Result<SettingsSnapshot<Value>>;
     pub async fn update_declared(self: &Arc<Self>, source: &str, scope: SettingsScope,
@@ -278,6 +303,8 @@ impl SettingsService {
 }
 ```
 
+- `declarations()` 是 `settings.sources`（§4.3）背后的登记级列表：每个已登记的声明来源按名字排序，
+  从不列 Rust 来源。与 `declared_by` 不同，它不按登记光纤过滤。
 - 两种登记都是拥有 `ctx` 的插件的副作用，在它卸载时撤回，并在同一份登记状态下检查（§3.1）。
   `register_declared` 用 `jsonschema` 编译 schema。进程级所有者在 `apply` 中登记：Mcp（`mcp`、
   `mcp-projects`、`mcp-plugins`）、SkillsCatalog（`skills`）、PermissionRules（`permission`）、
@@ -294,10 +321,18 @@ impl SettingsService {
   不写入此来源。
 - 文件和原生路径与 `BusinessDocument` 共用，按来源名而不是 `D::NAMESPACE` 取键。CAS、gate、
   lease、unsynced 情形和 `publish` 保持不变。
-- `SettingsError` 新增 `UnknownSource`、`UserOnlyField(pointer)`、`InvalidScope` 和
-  `Document(message)`。写入的文档违反 schema 或不是对象时为 `Document`，带校验器的
-  消息（实例路径，从不带值）；客户端路径把它映射为参数无效。已持久化的文档违反 schema 时仍为
-  `Invalid`（`invalid_document` / `settings_failed`）。
+- `SettingsError` 新增 `UnknownSource`、`UserOnlyField(pointer)`、`InvalidScope`、
+  `Document(message)` 和 `DocumentShape { reason, position }`。写入的文档违反 schema 或不是
+  对象时为 `Document`，带校验器的消息（实例路径，从不带值）。`DocumentShape` 是 `McpSettings`
+  整体拒绝一个 MCP 文档时使用的形式——不是对象、没有 `mcpServers` 对象、`mcpServers` 不是
+  对象、服务器条目 id 为空、文件不是 JSON：所有者的静态 `reason`（客户端可以看到），以及文档
+  从字节读入时出错的位置 `position`。它的 `Display` 与同一文本作为 `Document` 打印时逐字节
+  相同。其他所有者没有采用它：HooksSettings 以 `Invalid("invalid hook document")` 拒绝 hook
+  文档，默认的 `BusinessDocument` 解码或声明式来源无法解析已持久化的文件时为
+  `Invalid("invalid settings document")`。`reason()` 报告 `Invalid` 与 `DocumentShape` 的静态消息，
+  其余变体（包括 `Document`）返回 `None`，因为它们的文本是任意文本。客户端路径把 `Document`
+  和 `DocumentShape` 都映射为参数无效。已持久化的文档违反 schema 时仍为 `Invalid`
+  （`invalid_document` / `settings_failed`）。
 - `settings` 服务是 `host_key("settings")` 下的 `HostDispatch`，装配把 `settings`
   登记到 `ServiceCatalog`，与现在的 `pluginFiles` 相同。回复使用 `sessions` 的
   信封：`{ok: true, value}` 或 `{ok: false, error: {code, message}}`。
@@ -395,7 +430,7 @@ impl SettingsService {
 | Rpc | 不变；像分派任何所有者的命名空间一样分派新命名空间 |
 | Timeline、Dispatcher、rutis、loader | 不变 |
 
-新增的公开内容：`settings` 服务（含 `register`）、`settings` 管理命名空间（两个方法），
+新增的公开内容：`settings` 服务（含 `register`）、`settings` 管理命名空间（三个方法），
 以及两个现有事件的 JSON 形态。每一项都是必需的：让非 Rust 所有者读写自己的来源并获知变更，
 让客户端编辑它。
 
@@ -421,7 +456,7 @@ F2 留待决定是否把它的方法并入 `settings.read/update`。决定保留
 | §4 第 4 条（核心不带业务含义） | Settings 按声明的 schema 校验，不点名任何所有者 |
 | §4 第 5 条（批次） | 没有 Timeline 写入 |
 | §4 第 6 条（上下文） | 不进入模型上下文。工具看到哪些设置由其所有者决定 |
-| §4 第 7 条（只经公开接口） | 所有者用 `settings` 服务；客户端用管理方法 |
+| §4 第 7 条（只经公开接口） | 所有者用 `settings` 服务；客户端用管理方法，且经 `settings.sources` 读声明，从不读插件包 |
 | §4 第 8 条（基础设施不变） | 不改 Timeline、Dispatcher、事件信封、rutis、loader、Agent 装配或 Session 门面。按现状使用现有的 `HostDispatch`、`ServiceCatalog`、`managementMethods` 和 rutis 事件 |
 | §4 第 9 条（只有需要的事实进 Timeline） | 不新增事件；设置不是 Timeline 事实 |
 | ADR 002 D1（作用域） | Settings 是进程插件；来源的生命周期长于 Session |
@@ -442,8 +477,10 @@ F2 留待决定是否把它的方法并入 `settings.read/update`。决定保留
 3. ~~**运行中安装的包。**~~ 已定下：来源由插件自己在运行时登记（§3.1），因此安装、替换或移除插件
    不会重载 Settings。
 4. ~~**产品中由哪个插件提供 `credentials`。**~~ 随该服务一并撤销：每个所有者自己处理密钥（§1.2）。
-5. **设置界面的来源发现。** 通用的 `/settings` 页面需要声明的来源及其 schema（例如一个
-   `settings.sources` 方法）。S8b 没有需求要求它；随 CLI 设置设计决定。
+5. ~~**设置界面的来源发现。**~~ 已于 2026-11-05 定下：发现就是 `settings.sources`（§4.3），一个只提供给本地
+   连接的管理方法，列出每个声明的来源、它的 schema 和作用域，从不带文档。原问题是通用的
+   `/settings` 页面是否需要声明的来源及其 schema（例如一个 `settings.sources` 方法）；S8b 没有需求，
+   于是它一直随 CLI 设置设计留着，直到现在。
 6. **Rust 来源的仅限用户字段。** 目前没有 Rust 所有者代其工具写自己的来源。若将来有（Scheduler、
    Workflow），它需要在其 `BusinessDocument` 上声明仅限用户的字段。随该所有者的设计决定。
 
@@ -465,7 +502,16 @@ TypeScript 行）：
    格式错误，使登记的行失败。来源在所有者登记时出现，所有者卸载后为 `unknown_source`，其文档留在
    home 中。
 6. ~~经共享 `credentials` 存储解析凭据引用。~~ 已撤销（§1.2）。
-7. 已配对设备的连接得不到 `settings.read`。
+7. 已配对设备的连接得不到 `settings.read` 或 `settings.sources`。
+8. 已认证的 Web 入口连接对 `settings.sources` 得到 `unknown_method`，但仍能获得允许清单内的
+   `settings.read`（对 `model-log`）。
+9. 什么都没登记时 `settings.sources` 回复 `{dialect, sources: []}`；已登记的声明来源列出其 schema
+   原样、作用域、仅限用户的指针和 `writeOnly` 提示；从不列 Rust 来源；声明来源的所有者一卸载，
+   它的条目就消失，同时 `settings.read` 重新回答 `settings_unknown_source`。
+10. 什么都没授权时 `settings.projects` 回复 `{projects: []}`；`session.create` 授权某个根后，
+    列表出现该根及其规范 cwd，且该根可用于 `settings.read` 的 `{project: root}`；同一 cwd 第二次
+    授权不新增条目；本进程从未授权的根是参数无效；客户端经 `hooks.catalog` 为一个没有 Session
+    的 cwd 授权的根同样被列出。守护进程在同一 home 上重启后，列表重新为空。
 
 ## 12. 实现状态
 
@@ -480,11 +526,14 @@ TypeScript 行）：
   ADR 004 D4 的边界）。这是唯一新增的插件行；§2 图中的 `managementMethods settings` 位于这一部分。
   §9 中 ADR 002 D2 的回答对它同样成立，与 PermissionRules 一样：它是 Settings 数据的客户端路径，
   不是接线模块。
-- `SettingsError` 除两个指定变体外还有 `InvalidScope` 和 `Document(message)`，使客户端路径能区分
-  参数无效与已持久化文档的失败。
+- `SettingsError` 除两个指定变体外还有 `InvalidScope`、`Document(message)` 和
+  `DocumentShape { reason, position }`，使客户端路径能区分参数无效与已持久化文档的失败；
+  `reason()` 报告 `Invalid` 与 `DocumentShape` 背后的静态消息，`DocumentShape` 的 `Display`
+  仍是 `Document` 打印的逐字节文本。
 - 服务回复的信封与 `sessions` 相同。
 
-§11 验收中由 Rust 流程测试（`settings_flow.rs`、`provider_flow.rs`）覆盖的部分，所有者经 `settings` 服务的 `HostDispatch` 调用：第 1–5 条和第 7 条。
+§11 验收中由 Rust 流程测试覆盖的部分，所有者经 `settings` 服务的 `HostDispatch` 调用：第 1–5 条和第 9 条在
+`settings_flow.rs`，第 7–8 条在 `transport_flow/settings_methods.rs`，即已配对设备连接与 Web 入口连接。
 
 **第 2 部分（S8b-2）。** 已在 C4 路径上实现：
 

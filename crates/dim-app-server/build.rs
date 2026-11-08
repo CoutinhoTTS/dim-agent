@@ -28,6 +28,8 @@ fn main() {
     let web = manifest.join("../../web").canonicalize().unwrap();
     for input in [
         "src",
+        "licenses",
+        "../NOTICE",
         "index.html",
         "vite.config.ts",
         "tsconfig.json",

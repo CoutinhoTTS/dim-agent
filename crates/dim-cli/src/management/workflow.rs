@@ -212,7 +212,7 @@ pub async fn apply(
     let mut note = None;
     match action {
         ManagementAction::List | ManagementAction::Reload => {}
-        ManagementAction::Toggle { id, enabled } => {
+        ManagementAction::Toggle { id, enabled, .. } => {
             toggle(client, id, *enabled, cwd).await?;
         }
         ManagementAction::Add { document } => {
@@ -230,6 +230,7 @@ pub async fn apply(
             id,
             expected_revision,
             document,
+            ..
         } => {
             let Some(id) = id else {
                 return Err(Failure::Refused(
@@ -240,7 +241,9 @@ pub async fn apply(
             // "Saved {name}." from the read that follows, which holds it.
             save(client, id, expected_revision, document, cwd).await?;
         }
-        ManagementAction::Run { id, document, seed } => {
+        ManagementAction::Run {
+            id, document, seed, ..
+        } => {
             let (name, run_id) =
                 start(client, id, document.as_ref(), seed.as_ref(), cwd, line).await?;
             note = Some(tf(
@@ -248,7 +251,7 @@ pub async fn apply(
                 &[("name", &name), ("run_id", &run_id)],
             ));
         }
-        ManagementAction::Inspect { id } => return inspect(client, id, cwd).await,
+        ManagementAction::Inspect { id, .. } => return inspect(client, id, cwd).await,
         // `management::supported` refuses a kind this area does not offer
         // before the adapter runs.
         ManagementAction::Remove { .. } => {
@@ -619,6 +622,7 @@ pub(super) fn view(listing: &Listing, available: &[ActionKind], cwd: &str) -> Ma
             &heading,
             ManagementEntry {
                 id: id_of(entry),
+                source: None,
                 label: entry.name.clone(),
                 detail: detail_lines(entry, Path::new(cwd)),
                 enabled: Some(entry.enabled),

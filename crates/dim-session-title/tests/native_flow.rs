@@ -2,6 +2,7 @@
 mod support;
 use axum::{Router, routing::post};
 use dim_agent_capabilities::{adapters::MockTools, defaults};
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_types::EventKind;
 use dim_app_server::{ServerConfig, serve};
@@ -294,8 +295,7 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
     titled(&mut client, &id, "First conversation", "auto").await;
     let session = agent.get_session(&id).unwrap();
     assert!(
-        !session
-            .local("main", ..)
+        !branch_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()
@@ -307,7 +307,7 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
         .await
         .unwrap();
     idle(&mut client, &id).await;
-    let before_rename = session.local("main", ..).await.unwrap();
+    let before_rename = branch_events(&session, "main", ..).await.unwrap();
     let renamed = when_served(
         &mut client,
         "session.rename",
@@ -322,8 +322,7 @@ async fn native_session_title_generation_rename_settings_restore_fork_and_close(
             .iter()
             .map(|event| &event.id)
             .collect::<Vec<_>>(),
-        session
-            .local("main", ..)
+        branch_events(&session, "main", ..)
             .await
             .unwrap()
             .iter()

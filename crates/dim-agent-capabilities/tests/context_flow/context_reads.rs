@@ -1,36 +1,41 @@
 use super::*;
+use dim_agent_runtime::TimelineQueryScope;
+use dim_agent_runtime::testing::{chain_events, timeline_events};
 use rutis::host::CtxHost;
 use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
 
-/// A memory store that counts whole-branch reads, records the range of every
-/// event read and can fail, pause or defer chosen calls.
+/// A memory store that counts whole-branch reads and by-id queries, records
+/// the range of every event read and can fail, pause or defer chosen calls.
 #[derive(Default)]
 pub(super) struct CountContextReads {
     memory: MemoryTimelineStore,
     /// Reads that asked for the whole branch: a `read` or `read_segments`
-    /// range with an open end, which the policy path issues to find an event's
-    /// position. The streaming path reads bounded batches and never does.
+    /// range with an open end. No path issues one.
     reads: AtomicUsize,
+    /// By-id queries: the policy path looks up a compaction cut's position,
+    /// and the streaming path does not.
+    pub(super) positions: AtomicUsize,
     attempts: AtomicUsize,
-    earliest_read: std::sync::atomic::AtomicU64,
     /// Each segment of every `read` and `read_segments`, in call order.
     pub(super) ranges: std::sync::Mutex<Vec<(String, RangeInclusive<u64>)>>,
+    /// The branch and bounds of every query read, in call order, beside
+    /// `ranges` because a rebuild reads through the query.
+    pub(super) queries: std::sync::Mutex<Vec<(String, RangeInclusive<u64>)>>,
     /// The branch, cursor and number of events of every `read_page`, in
     /// call order.
     pub(super) pages: std::sync::Mutex<Vec<(String, u64, usize)>>,
-    /// The window, event count and turn-start count of every `policy_order`,
-    /// in call order.
-    pub(super) policy_orders: std::sync::Mutex<Vec<(RangeInclusive<u64>, usize, usize)>>,
+    /// The kinds of every query, in call order.
+    pub(super) query_kinds: std::sync::Mutex<Vec<Vec<String>>>,
     /// Fails the given occurrence of a read of this branch and range with a
     /// storage error, counted from when it is set.
     pub(super) fail_range: std::sync::Mutex<Option<ReadOccurrence>>,
     /// Holds the given occurrence of a read of this branch and range:
     /// signals `entered`, then waits for `release`.
     pub(super) hold_range: std::sync::Mutex<Option<ReadOccurrence>>,
-    /// The branch and cursor of every context page read, in call order.
-    pub(super) context_pages: std::sync::Mutex<Vec<(String, u64)>>,
+    /// Every page a context fold read, in call order.
+    pub(super) context_pages: std::sync::Mutex<Vec<ContextPageRead>>,
     fail_at: AtomicUsize,
     reject_at: AtomicUsize,
     pause_at: AtomicUsize,
@@ -44,6 +49,16 @@ pub(super) struct CountContextReads {
 }
 /// A branch, a range and which read of it, counted from 1.
 pub(super) type ReadOccurrence = (String, RangeInclusive<u64>, usize);
+
+/// One page a context fold read: the branch it read, where it began, the skip
+/// it asked for, and where it ended.
+#[derive(Clone, Debug)]
+pub(super) struct ContextPageRead {
+    pub branch: String,
+    pub from: u64,
+    pub offset: u64,
+    pub last: Option<u64>,
+}
 
 tokio::task_local! {
     /// While set, also receives each segment that a read made by the task
@@ -162,20 +177,8 @@ impl ModelDriver for CancelThenEcho {
     }
 }
 impl CountContextReads {
-    /// Records a read of `range` of `branch`, then fails or holds it when it
-    /// is the occurrence set for that.
-    async fn record(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
-        self.earliest_read
-            .fetch_min(*range.start(), Ordering::SeqCst);
-        if *range.end() == u64::MAX {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-        }
-        self.ranges
-            .lock()
-            .unwrap()
-            .push((branch.to_owned(), range.clone()));
-        let _ = TASK_READS
-            .try_with(|reads| reads.borrow_mut().push((branch.to_owned(), range.clone())));
+    /// Fails or holds the occurrence set for a read of `range` of `branch`.
+    async fn gate(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
         let due = |slot: &std::sync::Mutex<Option<ReadOccurrence>>| {
             let mut slot = slot.lock().unwrap();
             let Some((read, range_set, occurrence)) = slot.as_mut() else {
@@ -199,6 +202,20 @@ impl CountContextReads {
             self.release.notified().await;
         }
         Ok(())
+    }
+    /// Records a read of `range` of `branch`, then fails or holds it when it
+    /// is the occurrence set for that.
+    async fn record(&self, branch: &str, range: &RangeInclusive<u64>) -> Result<()> {
+        if *range.end() == u64::MAX {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.ranges
+            .lock()
+            .unwrap()
+            .push((branch.to_owned(), range.clone()));
+        let _ = TASK_READS
+            .try_with(|reads| reads.borrow_mut().push((branch.to_owned(), range.clone())));
+        self.gate(branch, range).await
     }
 }
 impl TimelineStore for CountContextReads {
@@ -229,6 +246,13 @@ impl TimelineStore for CountContextReads {
     }
     fn head<'a>(&'a self, key: &'a TimelineKey) -> dim_agent_runtime::BoxFuture<'a, Result<u64>> {
         self.memory.head(key)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
     }
     fn append(
         &self,
@@ -288,25 +312,6 @@ impl TimelineStore for CountContextReads {
             Ok(page)
         })
     }
-    fn policy_order<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        turns: RangeInclusive<u64>,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::PolicyOrder>> {
-        Box::pin(async move {
-            let order = self
-                .memory
-                .policy_order(key, turns.clone(), through)
-                .await?;
-            let turn_starts = order.events.iter().filter(|event| event.turn_start).count();
-            self.policy_orders
-                .lock()
-                .unwrap()
-                .push((turns, order.events.len(), turn_starts));
-            Ok(order)
-        })
-    }
     fn read_segments<'a>(
         &'a self,
         session_id: &'a str,
@@ -317,23 +322,6 @@ impl TimelineStore for CountContextReads {
                 self.record(branch, range).await?;
             }
             self.memory.read_segments(session_id, segments).await
-        })
-    }
-    fn read_context_page<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        after: u64,
-        limit: usize,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<Vec<StoredEvent>>> {
-        Box::pin(async move {
-            self.context_pages
-                .lock()
-                .unwrap()
-                .push((key.branch_id.clone(), after));
-            self.memory
-                .read_context_page(key, after, limit, through)
-                .await
         })
     }
     fn trace<'a>(
@@ -402,8 +390,93 @@ impl TimelineStore for CountContextReads {
         from: u64,
         through: u64,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        self.memory.query(key, query, from, through)
+        Box::pin(async move {
+            if query.event_id.is_some() {
+                self.positions.fetch_add(1, Ordering::SeqCst);
+            }
+            self.queries
+                .lock()
+                .unwrap()
+                .push((key.branch_id.clone(), from..=through));
+            self.query_kinds.lock().unwrap().push(query.kinds.clone());
+            self.gate(&key.branch_id, &(from..=through)).await?;
+            let page = self.memory.query(key, query, from, through).await?;
+            if query.flags.len() == 2 {
+                self.context_pages.lock().unwrap().push(ContextPageRead {
+                    branch: key.branch_id.clone(),
+                    from,
+                    offset: query.offset,
+                    last: page.positions.last().map(|position| position.sequence),
+                });
+            }
+            Ok(page)
+        })
     }
+}
+
+/// `/usage` reads what the branch has published: a fact that holds its
+/// sequence but is not published yet is not a read point the policy refuses,
+/// and the usage is answered while it is in flight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn usage_reads_the_published_head_while_a_fact_is_in_flight() {
+    let (publication, mut publications) =
+        tokio::sync::mpsc::unbounded_channel::<DeferredPublication>();
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let in_flight = Arc::new(tokio::sync::Notify::new());
+    let held_publication = {
+        let (hold, in_flight) = (hold.clone(), in_flight.clone());
+        tokio::spawn(async move {
+            while let Some((_, publish, result)) = publications.recv().await {
+                while hold.load(Ordering::SeqCst) {
+                    in_flight.notify_one();
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                publish(result);
+            }
+        })
+    };
+    let store = Arc::new(CountContextReads {
+        publication: Some(publication),
+        ..CountContextReads::default()
+    });
+    let mut builder = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(900.),
+            ..Context::default()
+        },
+    );
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    hold.store(true, Ordering::SeqCst);
+    session.interrupt("main", "usage read".into()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), in_flight.notified())
+        .await
+        .expect("a fact is in flight");
+    let preparation = session
+        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+        .unwrap();
+    let usage = preparation.usage(CancellationToken::new()).await;
+    hold.store(false, Ordering::SeqCst);
+    assert!(
+        !matches!(
+            usage,
+            Err(dim_agent_capabilities::context_preparation::ContextOpError::Read(_))
+        ),
+        "an in-flight fact made the usage a refused read: {usage:?}"
+    );
+    agent.close().await.unwrap();
+    held_publication.abort();
 }
 
 #[tokio::test]
@@ -434,10 +507,13 @@ async fn recovery_reads_a_fixed_committed_prefix_before_publication() {
             .unwrap();
         let through = timeline.committed();
         timeline.append(input()).unwrap();
-        let recovered = tokio::time::timeout(Duration::from_secs(1), timeline.local(..=through))
-            .await
-            .unwrap()
-            .unwrap();
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(1),
+            timeline_events(&timeline, TimelineQueryScope::Branch, ..=through),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(
             recovered
                 .iter()
@@ -448,7 +524,7 @@ async fn recovery_reads_a_fixed_committed_prefix_before_publication() {
         );
         assert_eq!(timeline.sequence(), 0, "recovery must not need publication");
         assert!(matches!(
-            timeline.local(..=2).await,
+            timeline.batch_end(2).await,
             Err(AgentError::InvalidInput(_))
         ));
         let (_, publish, result) = publications.recv().await.unwrap();
@@ -549,7 +625,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
             }
             tokio::task::yield_now().await;
         }
-        assert!(session.history("main", None).await.unwrap().iter().all(|event| {
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().all(|event| {
             !matches!(event.kind, EventKind::ModelOutputEnd(_))
         }), "the external history must not expose the unpublished terminal");
 
@@ -562,7 +638,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
                 result => { result.unwrap(); break; }
             }
         }
-        let first_turn = session.history("main", None).await.unwrap();
+        let first_turn = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
             first_turn
                 .iter()
@@ -587,7 +663,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event| {
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| {
             event.sequence > through
                 && matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after reload"))
         }));
@@ -651,7 +727,7 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
         let mut stop = tokio::spawn(async move { stopping.stop("main", "user stop".into()).await });
         let end = ends.recv().await.unwrap();
         assert_eq!(old_loop.state().phase, LoopPhase::Stopping);
-        assert!(!session.history("main", None).await.unwrap().iter()
+        assert!(!chain_events(&session, "main", ..).await.unwrap().iter()
             .any(|event| matches!(event.kind, EventKind::TurnEnd(_))));
         reload.restart().await;
         loop {
@@ -666,11 +742,11 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
         assert!(premature.is_err(), "stop returned before turn/end {end} publication: {premature:?}");
         let returned = stop.await.unwrap().unwrap();
         assert!(returned >= end, "stop returned {returned} before turn/end {end}");
-        assert_eq!(session.history("main", None).await.unwrap().iter()
+        assert_eq!(chain_events(&session, "main", ..).await.unwrap().iter()
             .filter(|event| matches!(event.kind, EventKind::TurnEnd(_))).count(), 1);
         session.submit("after stop".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter()
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter()
             .any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after stop"))));
         agent.close().await.unwrap();
         publication_task.abort();
@@ -702,7 +778,7 @@ async fn either_context_read_failure_ends_the_turn_and_allows_the_next_input() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let failed = session.history("main", None).await.unwrap();
+        let failed = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             !failed
                 .iter()
@@ -726,7 +802,7 @@ async fn either_context_read_failure_ends_the_turn_and_allows_the_next_input() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let recovered = session.history("main", None).await.unwrap();
+        let recovered = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             recovered
                 .iter()
@@ -770,25 +846,35 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
             .unwrap();
         for input in ["x".repeat(1_500), "next".into(), "third".into()] {
             let before = store.reads.load(Ordering::SeqCst);
+            let positions = store.positions.load(Ordering::SeqCst);
             session
                 .submit(input, InputMode::Queue, "main")
                 .await
                 .unwrap();
             session.idle("main").await.unwrap();
-            // With a compaction policy in force every model step reads the
-            // whole branch to locate the compaction it finds; without one the
-            // context is only ever streamed in bounded batches.
+            // With a compaction policy in force every model step looks up the
+            // position of the compaction it finds; without one the context is
+            // only ever streamed in bounded batches. Neither reads the whole
+            // branch.
             let reads = store.reads.load(Ordering::SeqCst) - before;
+            assert_eq!(
+                reads, 0,
+                "policy={policy}; a model step read the whole branch"
+            );
+            let positions = store.positions.load(Ordering::SeqCst) - positions;
             if policy {
-                assert!(reads >= 1, "policy=true; a model step read no full context");
+                assert!(
+                    positions >= 1,
+                    "policy=true; a model step looked up no cut position"
+                );
             } else {
                 assert_eq!(
-                    reads, 0,
-                    "policy=false; the streaming path read the full context"
+                    positions, 0,
+                    "policy=false; the streaming path looked up a cut position"
                 );
             }
         }
-        let history = session.history("main", None).await.unwrap();
+        let history = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
             history
                 .iter()
@@ -837,15 +923,21 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
                 )
                 .await
                 .unwrap();
-                store.earliest_read.store(u64::MAX, Ordering::SeqCst);
+                store.context_pages.lock().unwrap().clear();
                 let (recovered, _) = renderer
                     .rendered_context(&timeline, timeline.sequence())
                     .await
                     .unwrap();
                 assert!(recovered.checkpoint.is_some());
                 assert_eq!(
-                    store.earliest_read.load(Ordering::SeqCst),
-                    checkpoint.resume.sequence
+                    store
+                        .context_pages
+                        .lock()
+                        .unwrap()
+                        .first()
+                        .map(|page| page.from),
+                    Some(checkpoint.resume.sequence),
+                    "the fold begins at the resume event"
                 );
                 dim_agent_runtime::core::close_timeline(&timeline)
                     .await
@@ -912,7 +1004,7 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
             .unwrap();
         session.idle("main").await.unwrap();
     }
-    let history = session.history("main", None).await.unwrap();
+    let history = chain_events(&session, "main", ..).await.unwrap();
     let compactions: Vec<_> = history
         .iter()
         .filter(|event| {
@@ -963,7 +1055,7 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
     let timeline = Timeline::restore(Ctx::root().unwrap(), key, vec![], store.clone())
         .await
         .unwrap();
-    store.earliest_read.store(u64::MAX, Ordering::SeqCst);
+    store.context_pages.lock().unwrap().clear();
     let (recovered, restored) = renderer
         .rendered_context(&timeline, timeline.sequence())
         .await
@@ -973,11 +1065,21 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
         "the restore resumes from a checkpoint"
     );
     assert_eq!(
-        store.earliest_read.load(Ordering::SeqCst),
-        checkpoint.resume.sequence
+        store
+            .context_pages
+            .lock()
+            .unwrap()
+            .first()
+            .map(|page| page.from),
+        Some(checkpoint.resume.sequence),
+        "the fold begins at the resume event"
     );
-    let full = project_context_history(&timeline.context(timeline.sequence()).await.unwrap())
-        .expect("the full replay renders");
+    let full = project_context_history(
+        &replay_context(&timeline, timeline.sequence())
+            .await
+            .unwrap(),
+    )
+    .expect("the full replay renders");
     assert_eq!(
         restored
             .iter()
@@ -1029,8 +1131,7 @@ async fn stop_is_dispatched_while_either_context_read_is_waiting() {
         let mut dispatch = session.dispatch_watch("main").unwrap();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
-                let interrupt = session
-                    .history("main", None)
+                let interrupt = chain_events(&session, "main", ..)
                     .await
                     .unwrap()
                     .iter()
@@ -1053,7 +1154,7 @@ async fn stop_is_dispatched_while_either_context_read_is_waiting() {
             .unwrap()
             .unwrap()
             .unwrap();
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             !events
                 .iter()
@@ -1125,8 +1226,7 @@ async fn configure_context_read_failure_keeps_the_previous_state_and_allows_retr
             Err(AgentError::Storage(message)) if message.contains("injected context read failure")));
         assert!(session.failure().is_none());
         assert!(
-            !session
-                .history("main", None)
+            !chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1144,7 +1244,7 @@ async fn configure_context_read_failure_keeps_the_previous_state_and_allows_retr
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        assert!(session.history("main", None).await.unwrap().iter().any(|event|
+        assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event|
             matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after configure retry"))));
         agent.close().await.unwrap();
     }
@@ -1211,7 +1311,7 @@ async fn concurrent_system_adoptions_include_previous_unpublished_updates() {
         .expect("publication and dispatch must settle both configure calls");
         assert_eq!(alpha.unwrap(), ConfigureOutcome::Adopted);
         assert_eq!(beta.unwrap(), ConfigureOutcome::Adopted);
-        let events = session.history("main", None).await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
         let prompts: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.kind {
@@ -1373,7 +1473,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
     store.release.notify_one();
     let prepare = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.history("main", None).await.unwrap();
+            let events = chain_events(&session, "main", ..).await.unwrap();
             if let Some(event) = events
                 .iter()
                 .find(|event| matches!(event.kind, EventKind::ContextPrepare(_)))
@@ -1392,7 +1492,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
         .unwrap()
         .unwrap();
     session.idle("main").await.unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let interrupt = events
         .iter()
         .find(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
@@ -1501,8 +1601,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             .unwrap();
         held.notified().await;
         assert!(
-            !session
-                .history("main", None)
+            !chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1518,8 +1617,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
             .await
             .unwrap();
         assert!(
-            session
-                .history("main", None)
+            chain_events(&session, "main", ..)
                 .await
                 .unwrap()
                 .iter()
@@ -1568,7 +1666,7 @@ async fn a_steer_during_the_context_read_ends_the_request_before_it_is_handed_ov
         .await
         .unwrap()
         .unwrap();
-    let events = session.history("main", None).await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
     let starts: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.kind {
@@ -1604,10 +1702,9 @@ async fn a_steer_during_the_context_read_ends_the_request_before_it_is_handed_ov
     agent.close().await.unwrap();
 }
 
-/// A preparation that stays below the threshold reads only the policy
-/// anchors: its order carries one turn start per segment, not the branch's
-/// past turns, so the metadata it builds does not grow with the stored
-/// history (#914).
+/// A preparation that stays below the threshold reads no turn order and no
+/// cut window: its estimate takes one page per fact it compares against, so
+/// what it reads does not grow with the stored history (#914).
 #[tokio::test]
 async fn a_below_threshold_preparation_reads_no_growing_turn_order() {
     let store = Arc::new(CountContextReads::default());
@@ -1625,41 +1722,234 @@ async fn a_below_threshold_preparation_reads_no_growing_turn_order() {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
-    let mut per_turn: Vec<Vec<(RangeInclusive<u64>, usize, usize)>> = Vec::new();
+    let mut per_turn: Vec<Vec<Vec<String>>> = Vec::new();
     for index in 0..12 {
-        let before = store.policy_orders.lock().unwrap().len();
+        let before = store.query_kinds.lock().unwrap().len();
         session
             .submit(format!("turn {index}"), InputMode::Queue, "main")
             .await
             .unwrap();
         session.idle("main").await.unwrap();
-        let calls = store.policy_orders.lock().unwrap()[before..].to_vec();
-        assert!(!calls.is_empty(), "the preparation reads the policy order");
+        let calls = store.query_kinds.lock().unwrap()[before..].to_vec();
         per_turn.push(calls);
     }
-    for (window, events, turn_starts) in per_turn.iter().flatten() {
-        assert!(
-            window.is_empty(),
-            "a below-threshold preparation reads no turn window: {window:?}"
-        );
-        assert!(
-            *turn_starts <= 1,
-            "the anchors keep one turn start per segment, not every turn: {turn_starts} of {events}"
-        );
+    for calls in &per_turn {
+        for kinds in calls {
+            assert!(
+                !kinds.iter().any(|kind| kind == "turn/start"),
+                "a below-threshold preparation reads no turn order: {kinds:?}"
+            );
+        }
     }
-    let size = |calls: &[(RangeInclusive<u64>, usize, usize)]| {
-        calls
-            .iter()
-            .map(|(_, events, _)| *events)
-            .max()
-            .unwrap_or(0)
-    };
     assert_eq!(
-        size(&per_turn[0]),
-        size(&per_turn[per_turn.len() - 1]),
-        "the policy metadata of a turn does not grow with the stored history: {per_turn:?}"
+        per_turn[0].len(),
+        per_turn[per_turn.len() - 1].len(),
+        "the reads of a turn do not grow with the stored history: {per_turn:?}"
     );
     agent.close().await.unwrap();
+}
+
+/// An ancestor's pages cost the page: each begins at the event the previous
+/// one ended at, read by id, and never re-selects the prefix with a growing
+/// skip. The fold's projection is the one the full render gives.
+#[tokio::test]
+async fn an_ancestor_fold_continues_from_the_event_its_page_ended_at() {
+    let store = Arc::new(CountContextReads::default());
+    store
+        .create_session("fold", &SessionConfig::default())
+        .await
+        .unwrap();
+    let parent = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "fold".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    let mut facts = Vec::new();
+    for index in 0..6 {
+        let input = parent
+            .append(
+                EventKind::InputMessage(InputMessageData::text(format!("parent {index}"), None))
+                    .into(),
+            )
+            .unwrap();
+        facts.push(input.clone());
+        facts.push(
+            parent
+                .append(
+                    EventKind::InputConsumed(InputConsumedData {
+                        input_id: input.id.clone(),
+                    })
+                    .into(),
+                )
+                .unwrap(),
+        );
+    }
+    let cut = parent.sequence();
+    parent
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: BranchSource::Host {
+                    operation_id: "test-branch".into(),
+                },
+                branch: "child".into(),
+                prompt: "child".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let child = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "fold".into(),
+            branch_id: "child".into(),
+        },
+        vec![("main".into(), cut)],
+        store.clone(),
+    );
+    for index in 0..2 {
+        let input = child
+            .append(
+                EventKind::InputMessage(InputMessageData::text(format!("child {index}"), None))
+                    .into(),
+            )
+            .unwrap();
+        child
+            .append(
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: input.id.clone(),
+                })
+                .into(),
+            )
+            .unwrap();
+    }
+    let through = child.sequence();
+    let renderer = HistoryRenderer::default();
+    let (_, full) = renderer.rendered_context(&child, through).await.unwrap();
+    store.context_pages.lock().unwrap().clear();
+    let streamed = renderer.rendered_stream(&child, through, 2).await.unwrap();
+    assert_eq!(streamed.history, full);
+    let pages: Vec<_> = store
+        .context_pages
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|page| page.branch == "main")
+        .cloned()
+        .collect();
+    assert!(
+        pages.len() > 1,
+        "the ancestor prefix is read in more than one page: {pages:?}"
+    );
+    assert!(
+        pages.iter().all(|page| page.offset == 0),
+        "an ancestor page starts at an event, not at a growing skip: {pages:?}"
+    );
+    assert_eq!(
+        pages.first().map(|page| page.from),
+        facts.first().map(|event| event.sequence),
+        "the first ancestor page begins at the branch's first fact: {pages:?}"
+    );
+    for pair in pages.windows(2) {
+        assert_eq!(
+            Some(pair[1].from),
+            pair[0].last,
+            "an ancestor page begins at the event the previous one ended at: {pages:?}"
+        );
+    }
+    dim_agent_runtime::core::close_timeline(&child)
+        .await
+        .unwrap();
+    dim_agent_runtime::core::close_timeline(&parent)
+        .await
+        .unwrap();
+}
+
+/// A streamed context resumes at the event its checkpoint names
+/// ([ADR 020](../../../../docs/adr/020-timeline-read-convergence.md) D5): the
+/// fold reads the chain from that event, never from the chain's start, and its
+/// projection is the one the full render gives.
+#[tokio::test]
+async fn a_streamed_context_resumes_at_the_event_its_checkpoint_names() {
+    use super::checkpoint_projection::completed;
+
+    let store = Arc::new(CountContextReads::default());
+    store
+        .create_session("resume", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "resume".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    let append = |kind: EventKind| timeline.append(kind.into()).unwrap();
+    let first = append(EventKind::InputMessage(InputMessageData::text(
+        "first", None,
+    )));
+    append(EventKind::InputConsumed(InputConsumedData {
+        input_id: first.id.clone(),
+    }));
+    let cut = append(EventKind::TurnStart(TurnStartData {
+        turn_id: "turn-1".into(),
+    }));
+    let kept = append(EventKind::InputMessage(InputMessageData::text(
+        "kept", None,
+    )));
+    append(EventKind::InputConsumed(InputConsumedData {
+        input_id: kept.id.clone(),
+    }));
+    let through = timeline.sequence();
+    let renderer = HistoryRenderer::default();
+    let fact = append(completed(&cut.id, "summary", through, vec![]));
+    let saved = renderer
+        .snapshot(
+            &replay_context(&timeline, through).await.unwrap(),
+            &cut.id,
+            &fact,
+        )
+        .unwrap();
+    timeline.save_snapshot(saved).await.unwrap();
+    let resume = timeline
+        .checkpoint(
+            fact.sequence,
+            renderer.checkpoint_interpreter,
+            renderer.decode_checkpoint,
+        )
+        .await
+        .unwrap()
+        .expect("the checkpoint is usable")
+        .resume;
+    assert!(resume.sequence > 1, "the resume is inside the branch");
+
+    let (_, full) = renderer
+        .rendered_context(&timeline, fact.sequence)
+        .await
+        .unwrap();
+    store.context_pages.lock().unwrap().clear();
+    let streamed = renderer
+        .rendered_stream(&timeline, fact.sequence, 8)
+        .await
+        .unwrap();
+    assert_eq!(streamed.history, full);
+    let pages = store.context_pages.lock().unwrap().clone();
+    assert_eq!(
+        pages.first().map(|page| page.from),
+        Some(resume.sequence),
+        "the fold begins at the resume event: {pages:?}"
+    );
+    assert!(
+        pages.iter().all(|page| page.from >= resume.sequence),
+        "{pages:?}"
+    );
 }
 
 /// A boundary check after a completed compaction folds only the events after
@@ -1778,7 +2068,7 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
         end.sequence,
     ] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &timeline.context(at).await.unwrap(),
+            &replay_context(&timeline, at).await.unwrap(),
         );
         let actual = dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
             .await
@@ -1795,14 +2085,12 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
     );
     let pages = store.context_pages.lock().unwrap().clone();
     assert_eq!(
-        pages
-            .first()
-            .map(|(branch, after)| (branch.as_str(), *after)),
-        Some(("main", cut.sequence - 1)),
+        pages.first().map(|page| (page.branch.as_str(), page.from)),
+        Some(("main", cut.sequence)),
         "{pages:?}"
     );
     assert!(
-        pages.iter().all(|(_, after)| *after >= cut.sequence - 1),
+        pages.iter().all(|page| page.from >= cut.sequence),
         "{pages:?}"
     );
 
@@ -1826,11 +2114,11 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
     );
     let pages = store.context_pages.lock().unwrap().clone();
     assert_eq!(
-        pages.first().map(|(_, after)| *after),
-        Some(consumed.sequence - 1),
+        pages.first().map(|page| page.from),
+        Some(consumed.sequence),
         "{pages:?}"
     );
-    assert_eq!(pages.last().map(|(_, after)| *after), Some(0), "{pages:?}");
+    assert_eq!(pages.last().map(|page| page.from), Some(1), "{pages:?}");
 
     let batch = timeline
         .append_batch_registered(
@@ -1841,11 +2129,23 @@ async fn a_cut_after_a_compaction_reads_only_its_tail_and_keeps_the_verdict() {
             |_| Ok(()),
         )
         .unwrap();
+    store.ranges.lock().unwrap().clear();
     assert!(matches!(
         dim_agent_capabilities::history::validate_context_boundary_at(&timeline, batch[0].sequence)
             .await,
         Err(AgentError::InvalidInput(message)) if message.contains("inside an atomic batch")
     ));
+    assert!(
+        store.ranges.lock().unwrap().is_empty(),
+        "the batch-edge check reads the stored row, not the event"
+    );
+    assert_eq!(
+        dim_agent_capabilities::history::validate_context_boundary_at(&timeline, batch[1].sequence)
+            .await
+            .unwrap(),
+        Ok(()),
+        "the batch's last sequence ends it and may be a cut"
+    );
 }
 
 /// A stored cut that names a later event, or lies beyond `through`, is ignored:
@@ -1901,13 +2201,12 @@ async fn a_malformed_compaction_cut_replays_the_segment_and_keeps_the_verdict() 
 
     for at in [open.sequence + 1, turn.sequence] {
         let expected = dim_agent_capabilities::history::validate_context_boundary(
-            &timeline.context(at).await.unwrap(),
+            &replay_context(&timeline, at).await.unwrap(),
         );
         assert!(
             expected.is_err(),
             "the full prefix leaves the model output open at {at}"
         );
-        assert_eq!(timeline.compaction_cut(at).await.unwrap(), None, "{at}");
         assert_eq!(
             dim_agent_capabilities::history::validate_context_boundary_at(&timeline, at)
                 .await

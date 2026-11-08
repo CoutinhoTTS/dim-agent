@@ -15,6 +15,7 @@ use dim_agent_capabilities::{
     methods::{MethodProvider, RpcError, SessionMethods},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig, testing::MinimalHost};
 use dim_agent_types::EventKind;
 use dim_app_server::{
@@ -232,14 +233,13 @@ async fn a_put_stores_a_session_file_the_model_reads_without_approval() {
         )
         .await;
     assert!(idle.get("error").is_none(), "{idle}");
-    let history = server
-        .agent()
-        .unwrap()
-        .get_session(&sid)
-        .unwrap()
-        .history("main", None)
-        .await
-        .unwrap();
+    let history = chain_events(
+        &server.agent().unwrap().get_session(&sid).unwrap(),
+        "main",
+        ..,
+    )
+    .await
+    .unwrap();
     assert!(
         !history
             .iter()
@@ -442,7 +442,7 @@ impl Contract {
 }
 /// One `attachment.put` admitted under the calling load's token `stopping`.
 async fn put(
-    methods: &MethodProvider,
+    methods: &Arc<MethodProvider>,
     session: &str,
     stopping: CancellationToken,
 ) -> Result<Value, RpcError> {
@@ -450,6 +450,7 @@ async fn put(
         .accept(
             "attachment.put".into(),
             json!({"sessionId": session, "text": "pasted"}),
+            None,
             stopping,
             |_| {},
         )

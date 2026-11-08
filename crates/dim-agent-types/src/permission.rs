@@ -28,7 +28,61 @@ pub struct PermissionPolicy {
     pub disallowed_tools: Vec<String>,
 }
 
+impl PermissionPolicy {
+    /// The launch cap (sessions service §6.1): the lower preset, the union of
+    /// the disallowed tools, and only the allowed tools both sides allow
+    /// unconditionally. It is never wider than either side.
+    pub fn cap(&self, bound: &PermissionPolicy) -> PermissionPolicy {
+        fn allows(policy: &PermissionPolicy, tool: &String) -> bool {
+            policy.preset == PermissionPreset::FullAccess || policy.allowed_tools.contains(tool)
+        }
+        let mut disallowed_tools = Vec::new();
+        for tool in self.disallowed_tools.iter().chain(&bound.disallowed_tools) {
+            if !disallowed_tools.contains(tool) {
+                disallowed_tools.push(tool.clone());
+            }
+        }
+        let mut allowed_tools = Vec::new();
+        for tool in self.allowed_tools.iter().chain(&bound.allowed_tools) {
+            if allows(self, tool)
+                && allows(bound, tool)
+                && !disallowed_tools.contains(tool)
+                && !allowed_tools.contains(tool)
+            {
+                allowed_tools.push(tool.clone());
+            }
+        }
+        PermissionPolicy {
+            preset: std::cmp::min_by_key(self.preset, bound.preset, |preset| preset.rank()),
+            allowed_tools,
+            disallowed_tools,
+        }
+    }
+
+    /// Whether capping this policy by `bound` changes nothing; tool lists are
+    /// compared as sets.
+    pub fn within(&self, bound: &PermissionPolicy) -> bool {
+        let capped = self.cap(bound);
+        let same = |left: &[String], right: &[String]| {
+            left.iter().all(|name| right.contains(name))
+                && right.iter().all(|name| left.contains(name))
+        };
+        self.preset == capped.preset
+            && same(&self.allowed_tools, &capped.allowed_tools)
+            && same(&self.disallowed_tools, &capped.disallowed_tools)
+    }
+}
+
 impl PermissionPreset {
+    /// The order `read-only < workspace-write < full-access`.
+    pub fn rank(self) -> u8 {
+        match self {
+            PermissionPreset::ReadOnly => 0,
+            PermissionPreset::WorkspaceWrite => 1,
+            PermissionPreset::FullAccess => 2,
+        }
+    }
+
     pub fn file_access(self) -> FileAccess {
         match self {
             PermissionPreset::ReadOnly => FileAccess::ReadOnly,

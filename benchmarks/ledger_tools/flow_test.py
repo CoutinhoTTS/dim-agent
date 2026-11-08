@@ -118,11 +118,13 @@ class LedgerFlowTest(unittest.TestCase):
         store cannot be rewritten to fix that."""
         for record in (run(outcome="pass"), run(k=1, outcome="screen")):
             for name in ("invalid_reason", "l2_exit_code", "settle_error",
-                         "runner_dirty"):
+                         "runner_dirty", "gate_armed"):
                 self.assertNotIn(name, record.to_dict())
         # And a record that has them round-trips through the store unchanged.
         broken = run(outcome="invalid", invalid_reason="l2_failed", l2_exit_code=124)
         self.assertEqual(RunRecord.from_dict(broken.to_dict()).digest, broken.digest)
+        armed = run(outcome="pass", gate_armed=True)
+        self.assertEqual(RunRecord.from_dict(armed.to_dict()).digest, armed.digest)
 
     def test_a_k1_run_that_could_not_be_scored_records_invalid(self) -> None:
         """`invalid` is not a judgement, so the k rule has no business barring it.
@@ -141,6 +143,21 @@ class LedgerFlowTest(unittest.TestCase):
         cost hours of machine time."""
         with self.assertRaises(SchemaError):
             run(k=3, outcome="screen").validate()
+
+    def test_observed_is_a_conclusive_outcome_and_names_a_disarmed_gate(self) -> None:
+        """`observed` is the honest verdict of a conclusive run whose gate was
+        wired to nothing: measured, conclusive in form, deciding nothing."""
+        record = run(outcome="observed")
+        record.validate()
+        self.assertTrue(record.conclusive)
+        self.assertTrue(record.measured)
+        self.assertFalse(record.gate_armed)
+        with self.assertRaises(SchemaError):
+            run(k=1, outcome="observed").validate()
+        # An armed gate that breached nothing records `pass`; observed with an
+        # armed gate is a contradiction no writer should produce.
+        with self.assertRaises(SchemaError):
+            run(outcome="observed", gate_armed=True).validate()
 
     def test_conclusive_is_derived_not_declared(self) -> None:
         self.assertFalse(run(k=1, outcome="screen").conclusive)
@@ -224,10 +241,33 @@ class LedgerFlowTest(unittest.TestCase):
         self.assertEqual(report.l2_escape.denominator, 0)
         self.assertIsNone(report.l2_escape.rate)
 
-        judged = [run(run_id="r2", k=3, outcome="pass", covers=(SHA_A,))]
+        judged = [run(run_id="r2", k=3, outcome="pass", covers=(SHA_A,),
+                      gate_armed=True)]
         report = health(merges, screens + judged, regressed_commits={SHA_A})
         self.assertEqual((report.l2_escape.numerator, report.l2_escape.denominator),
                          (1, 1))
+
+    def test_a_pass_without_an_armed_gate_clears_nothing(self) -> None:
+        """Before gate_armed existed, `pass` also covered runs compared against a
+        gate wired to nothing. Read under the current rule those records are what
+        they always were: measurements, not clearances — the merges they covered
+        go back to waiting, which is the honest account.
+
+        `observed` is the same measurement recorded honestly: covered, because
+        the run exercised the code; not cleared, because nothing gated it.
+        """
+        merges = [merge(SHA_A, verdict="invisible")]
+        disarmed_pass = run(run_id="r2", k=3, outcome="pass", covers=(SHA_A,))
+        report = health(merges, [disarmed_pass], regressed_commits={SHA_A})
+        self.assertEqual(report.l2_escape.denominator, 0)
+
+        observed = run(run_id="r3", k=3, outcome="observed", covers=(SHA_A,))
+        observed.validate()
+        report = health(merges, [observed], regressed_commits={SHA_A})
+        # Covered: the window was exercised, so L1 is off the hook for it.
+        self.assertEqual(report.l1_false_negative.denominator, 0)
+        # Not cleared: nothing was armed, so nothing was affirmed.
+        self.assertEqual(report.l2_escape.denominator, 0)
 
     def test_an_invisible_merge_inside_a_tested_window_is_not_l1s_fault(self) -> None:
         """L2 runs against the window head, so an invisible merge's code was in the

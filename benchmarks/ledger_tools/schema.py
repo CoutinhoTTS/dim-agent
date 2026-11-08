@@ -45,7 +45,12 @@ L1Trigger = Literal["path_rule", "agent", "fail_open", "oversize"]
 #: a verdict. Note what it claims that `invalid` does not: that a measurement
 #: exists. A screen whose job could not be scored is not a screen — it is a run
 #: with nothing in it, and `invalid` is the only thing it may be recorded as.
-RunOutcome = Literal["pass", "fail", "invalid", "screen"]
+#:
+#: `observed` is conclusive and measured but decides nothing: it ran against a
+#: gate wired to nothing (or had no comparison at all, as a baseline does), so
+#: there is nothing to breach and nothing to clear. `pass` is only constructible
+#: from an armed gate that did not breach; see `gate_armed`.
+RunOutcome = Literal["pass", "fail", "invalid", "screen", "observed"]
 
 #: Why a run is `invalid`, recorded because the four are not interchangeable and
 #: only one of them is about the measurement being absent.
@@ -231,6 +236,12 @@ class RunRecord:
     #: ledger says which of its records were measured with a ruler nobody can
     #: reconstruct. A baseline may not be one at all — see `validate`.
     runner_dirty: bool = False
+    #: Whether the comparison that decided this run had an armed (blocking)
+    #: criterion at all. `pass` is only constructible with one: a run measured
+    #: against a gate wired to nothing is `observed`, not `pass`, and metrics
+    #: refuses to count it as clearance. Records from before the field existed
+    #: read as False — the honest reading, since no gate was armed then either.
+    gate_armed: bool = False
     #: 0.0 on a run that never produced a report to compute it from. Read it
     #: against `measured`: on an unmeasured run it is a default, not an
     #: observation of a healthy infrastructure.
@@ -298,6 +309,7 @@ class RunRecord:
                             ("l2_exit_code", self.l2_exit_code),
                             ("settle_error", self.settle_error),
                             ("runner_dirty", self.runner_dirty or None),
+                            ("gate_armed", self.gate_armed or None),
                             ("disputed", list(self.disputed) or None)):
             if value is not None:
                 material[name] = value
@@ -330,7 +342,7 @@ class RunRecord:
         if set(self.covers) & set(self.unjudged):
             raise SchemaError("a commit cannot be both covered and unjudged")
 
-        if self.outcome not in ("pass", "fail", "invalid", "screen"):
+        if self.outcome not in ("pass", "fail", "invalid", "screen", "observed"):
             raise SchemaError(f"unknown outcome {self.outcome!r}")
         # `invalid` is exempt, and the exemption is the point: the k rule is about
         # judgements, not about measurements. `invalid` decides nothing — it says
@@ -347,6 +359,16 @@ class RunRecord:
             raise SchemaError(
                 f"a k={self.k} run is conclusive; `screen` would discard a result "
                 "that was paid for"
+            )
+        # `observed` exists because a gate wired to nothing must not read as a
+        # verdict. The converse — armed and clean — is what `pass` requires, and
+        # that is enforced where the comparison lives (record_run); enforced here
+        # it would re-try every historical `pass` written before the field
+        # existed, and the audit re-validates records it cannot rewrite.
+        if self.outcome == "observed" and self.gate_armed:
+            raise SchemaError(
+                "an armed gate that passed nothing to breach records `pass`, "
+                "not `observed`"
             )
         if self.outcome == "fail" and not self.breaches:
             raise SchemaError("a failing run must name the criteria it breached")
@@ -409,6 +431,7 @@ class RunRecord:
             settle_error=data.get("settle_error"),
             disputed=tuple(data.get("disputed", ())),
             runner_dirty=bool(data.get("runner_dirty", False)),
+            gate_armed=bool(data.get("gate_armed", False)),
             infra_rate=float(data.get("infra_rate", 0.0)),
             recorded_at=data.get("recorded_at", ""),
         )

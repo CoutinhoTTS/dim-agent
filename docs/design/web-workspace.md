@@ -102,8 +102,9 @@ For development against the repository checkout, and for a build that must carry
 | Item | Rule |
 | --- | --- |
 | Version | `hello` v3 with `clientKind: "web"`; v1/v2 → `protocol_version` |
-| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
+| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3 and read-only discovery methods below. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
 | Model list | The read-only management methods `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Managed Provider discovery follows §4.2. Switching uses the Session method `session.model.update` |
+| UI directory | UiExtensions contributes `ui.extensions.list`, which is explicitly allowlisted and advertised in `hello.features` while available. Connection forwards `ui.extensions.changed` over the reliable control channel; clients refetch the directory on this notice. No other contributed management method becomes reachable |
 
 Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` only in protected profiles). Execution Session methods become reachable from the web entry; this is the same widening RemoteGateway records as E3, limited here to loopback connections authenticated by the local user's token.
 
@@ -121,7 +122,7 @@ Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` onl
 
 `dimcode web [--port N] [--no-open]` connects to (or spawns) the daemon, calls `web.open`, prints where the workspace is in the welcome panel's box and opens the sign-in URL with `browser::open`. With `--no-open`, `DIMCODE_OAUTH_MANUAL=1` or no browser, it prints the full sign-in URL under the box instead; it is the local user's own terminal. It then stays in the foreground holding the entry until Ctrl+C or SIGTERM; its exit removes that holder and closes the entry only when the daemon switch is also off (§2.1). If the daemon stops first, it reports that and exits. Piped output is plain lines. `dimcode web --off` clears the daemon switch and exits; it does not disconnect a foreground holder.
 
-`/web` in the TUI toggles the daemon switch and stays in the terminal. While the entry is open it opens the browser and reports that it is on; when no browser took the sign-in link, it prints that link instead. The Session keeps running. `/web` again turns the switch off, leaving the entry open if `dimcode web` is still holding it. This works in the daemon-owned leaf because the TUI is not the holder and does not hand the terminal to another process.
+`/web` in the TUI toggles the daemon switch and stays in the terminal. The command menu describes this as turning the Web interface on or off. Enabling the entry opens the browser and reports its URL without the sign-in fragment; when no browser took the sign-in link, it prints that full link instead. The Session keeps running. `/web` again turns the switch off, leaving the entry open if `dimcode web` is still holding it. This works in the daemon-owned leaf because the TUI is not the holder and does not hand the terminal to another process.
 
 ```
 ╭──────────────────────────────────────────────────────────────╮
@@ -157,6 +158,13 @@ The frontend directory is fixed when the daemon starts (§2.4); a daemon started
 | Lines | Right detail panel with a Lines tree and one tab per opened line; each tab folds that line's own history and sends, stops, approves and ends on its `branchId` (§4.1) |
 | i18n | `en` and `zh-CN` |
 
+Session labels in the sidebar, chat header, browser title and archived-session
+list prefer the owner's title, then `preview`, then the surface's untitled
+fallback. Title metadata from `session.summaries` and SessionStore title notices
+is reconciled by `titleRevision`, including explicit clears; an older directory
+reply cannot replace a newer title. After reconnect, re-attach before reading
+the directory, following the [Session notice window](appserver/session-notices.md#5-rpc-forwarding).
+
 Features outside the settings scope with no v3 backend are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, rename, goal, workflows, subagent panes, directory picker and git branch menu. Settings and saved-session management follow §4.3.
 
 ### 4.1 Lines and branch
@@ -183,7 +191,28 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 | Errors | `branch_missing`, `branch_ended`, `input_blocked`, an invalid cut and a disabled Branch tool are shown at the action that raised them; an ended line is read-only |
 | State | Line tabs are per Session and live in `stores/ui.ts`; the tree is rebuilt from facts on reload and reconnect. No line list method or storage format is added |
 
-**Not in this phase:** session fork, a drawn DAG, compare/adopt, per-line model selection and questions (`ask_user`). Each needs its own client design.
+**Not in this phase:** session fork, a drawn DAG, compare/adopt and per-line model selection. Each needs its own client design.
+
+#### Questions
+
+A waiting `ask_user` call shows one question at a time, with question steps,
+Previous/Next controls and a final review for multi-question calls. Changing steps
+preserves selections and custom text. Single and multiple choices both require an
+explicit Next action; Enter in the answer field advances rather than submitting
+an incomplete call. Only the final Send answers action submits the entire call
+through `session.question.respond`. Decline still declines the whole call. Rejected
+answers preserve the draft; successful answers stay disabled until their result
+settles. Long content scrolls inside the current question, keeping navigation
+visible. The same prompt serves main and child lines.
+
+```text
+ Dim has a question              Awaiting answer
+ [1. Database] [2. Features] [Review]
+ Which database?
+ ( ) SQLite   ( ) PostgreSQL
+ [Type your own answer]
+ [Decline]                  [Previous] [Next]
+```
 
 ### 4.2 Model discovery and slash commands
 
@@ -221,6 +250,7 @@ commands are handled locally rather than submitted as model input.
 | `model` | `/permissions` | Open the composer's permission selector (below). Listed where the Session serves `session.permission.get` and `session.permission.update` |
 | `session` | `/lines` | Open the existing Session lines panel |
 | `session` | `/new` | Navigate to the existing new-Session page, seeded with the current Session's working directory |
+| `session` | `/scheduled` | Open Scheduled tasks when the connection admits `schedule.list`; `/schedule` is an alternate. The current Session's `cwd` seeds creation, not the list's workspace filter |
 
 `/compact`, `/usage`, `/fork`, `/goal` and `/effort` belong to the main Session composer; a line composer does not list them, because the Session-wide cut and compaction are decided on main. `/rename` is not listed: the App Server does not serve `session.rename` yet (the SessionTitle design).
 
@@ -311,6 +341,7 @@ authorization attempt rather than starting another login.
 │ Plugins              │ connection / login / models / preferences  │
 │ Skills               │                                            │
 │ Permissions          │                                            │
+│ Scheduled tasks      │                                            │
 │ Archived sessions    │                                            │
 │ Diagnostics          │                                            │
 └──────────────────────┴────────────────────────────────────────────┘
@@ -353,16 +384,95 @@ optional account feature must not prevent identity or usage from loading.
 | Appearance | Language, system/light/dark theme and text size, applied immediately |
 | Agent defaults | Persisted model and supported execution defaults; no accidental mutation of an active Session |
 | Modality | Operation defaults for image generation, editing, enhancement and understanding from `modality.capabilities`, written with `modality.configure` and its snapshot revision; understanding's Session consumer is a requirement on Agent/Prompt |
-| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal and user↔project scope migration; secret fields stay omitted from edits and a move never writes them into `.mcp.json` |
+| MCP | List, add/edit transports, enable/disable, test, authentication/sign-out, confirmed removal, user↔project scope migration and import of a standard `mcpServers` file through the owner's confirmed preview; secret fields stay omitted from edits, a move never writes them into `.mcp.json`, and no import value is rendered |
 | Plugins | List, enable/disable, installation/update/removal and the owner's typed settings surfaces |
-| Skills | List, enable/disable, source installation, update and confirmed removal |
-| Permissions | Default execution/network settings and command-rule management, with confirmation for privilege increases. The Execution card reads `host.execution.backend` and shows the owner's sandbox-backend reason when the host has none; the browser never infers the platform |
+| Skills | Manage already installed skills: search, inspect details, enable/disable and reload discovery; choose user scope or an existing workspace without entering filesystem paths. Source installation and plugin-package controls are not part of this page |
+| Permissions | Process isolation and user-scope command-rule management (exact/prefix allow/deny; project scope, patterns and per-rule ask are rejected, [§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds)), with confirmation for privilege increases. The isolation card follows [the CLI isolation choices](cli-commands.md#process-isolation-settings), reads `host.execution.backend` and shows the owner's reason when the host has none; the browser never infers the platform |
+| Scheduled tasks | List, create/edit, pause/resume, run now, recent runs and confirmed deletion through the [Scheduler management contract](plugins/Scheduler.md#a3-management-methods); no raw Settings document access |
 | Archived sessions | Search, restore/open and confirmed permanent deletion |
 | Diagnostics | Safe version, protocol, connection and metadata with refresh, the model-request recording switch, and the start-up rule for process logs instead of a log-mode control ([logging controls](#diagnostics-the-legacy-logging-controls)) |
 
 Use the current owner's semantics when old terminology no longer describes the
 system, and document the mapping. Reuse existing Settings, MCP, PluginManager,
 Skills and Session owners rather than adding parallel browser-only state.
+
+#### Settings scope
+
+Scope selectors offer the user configuration and known Session workspaces, with
+the host path identifying each workspace. They do not ask for browser-local paths.
+Agent's scope applies only to the default model for new Sessions; collaboration
+policy and the command shell remain user-wide. MCP's workspace adds that project's
+servers to the catalog, not a working-directory override for any server. Skills'
+workspace includes project discovery. Saved sessions instead has an all-workspace
+filter; it never changes configuration. Switching configuration scope confirms
+discarding unsaved edits, and a cancelled or failed load keeps the previous scope.
+
+Process isolation is one choice: Off, Sandboxed without network, or Sandboxed
+with network. Off preserves the stored, inactive network flag; confirmed reset
+writes the owner's defaults (both flags off). Writes use the revision actually
+displayed; a conflict preserves the draft and requires an explicit reload rather
+than automatically retrying. Unsupported server methods are errors, not inferred
+defaults. The setting affects new host commands, not existing processes or
+persistent shells, and does not change a Session's permission preset.
+
+#### Skills interaction
+
+The Skills page reads `skills.catalog`, changes individual skills through
+`skills.set_enabled`, and rescans through `skills.refresh` before reading the
+catalog again. Scope selection uses the existing Session workspace directory;
+without a workspace it shows user skills. A row shows its name, description and
+enabled or shadowed state. Paths and declared tools are collapsed details, not
+editable directory settings. Search and scope survive a reload; discovery issues,
+failed writes and empty or unmatched lists remain distinguishable. Installation
+APIs stay with the Skills owner; package installation and activation stay on Plugins.
+
+```text
+ Skills                         [Reload skills]
+ [User skills / workspace]      [Search skills]
+ name                 Enabled       [Disable]
+ description
+ > Details
+```
+
+#### Scheduled tasks interaction
+
+The list starts across all workspaces, with search, status and workspace filters.
+The `cwd` route parameter supplies only the new-task workspace default;
+`workspace` is the explicit list filter. Creation preselects the current workspace
+and offers paths from known Sessions and scheduled tasks, plus a typed host path.
+All Schedule selectors use the same custom keyboard-operated dropdown rather
+than system select styling; workspace and model choices also support search.
+
+The basic plan is Once or Repeat, with daily/weekly repetition and time to the
+minute. Advanced options distinguish enable-anchored intervals from wall-clock
+Cron; they are not duplicate frequency choices. A nonexistent browser-local
+minute is rejected; a repeated minute requires an explicit UTC offset. That
+disambiguation field belongs only to Once, never Repeat or an advanced plan.
+An unknown write outcome blocks resubmission; the operator checks the task list
+and run history before leaving or discarding the draft. Reloading a new-task
+form is not evidence that an interrupted create failed.
+
+#### Permissions: legacy rule kinds
+
+The legacy CLI Web's Permissions page also offered project/workspace scope,
+wildcard or regular expression matching and an `ask` decision. The
+[command-rule design](appserver/permission-command-rules.md#101-legacy-rule-kinds)
+rejects all three; this page shows the owner's one list and no placeholder for
+them.
+
+| Legacy surface | Current contract | On this page |
+| --- | --- | --- |
+| Project or workspace scope | One user-scope `permission` source; a project file is not read | No scope selector; the page says the rules are user-level and apply to every Session |
+| Wildcard, glob or regular expression | Word-wise `exact`/`prefix`; `*` is a literal word; deny wins regardless of specificity | No pattern field, preview or parser; the form says matching is by words |
+| `ask` decision, including `defaultAction` | `allow` or `deny`; an unmatched command follows the Session preset, and asking is the preset's decision alone ([ADR 018](../adr/018-permission-is-the-preset.md)) | No Ask choice in the rule row; the preset is the only tool-approval control |
+
+**Known losses and replacements.** Per-workspace lists and pattern shortcuts are
+gone with replacements: one user list and exact or prefix rules. Asking for one
+command under a preset that otherwise runs is also gone, and after
+[ADR 018](../adr/018-permission-is-the-preset.md) it has no replacement: asking is
+the preset's decision alone. Nothing is browser-only: the page reads and writes
+`permission.rules`/`permission.set_rules` at the Settings revision, reports a
+conflict without retrying, and keeps no rule it has not saved.
 
 #### MCP scope migration
 
@@ -401,8 +511,68 @@ the move blindly because the destination id would answer `mcp_move_conflict`.
 └──────────────────────────────────────────────────────────┘
 ```
 
-Only `mcp.move` is added to the MCP page's admitted methods; no secret value is
-read from the owner or stored in the browser.
+Beyond the catalog and entry methods, `mcp.move`, `mcp.import.sources`,
+`mcp.import.preview` and `mcp.import.apply` are the MCP page's added methods; no
+secret value is read from the owner or stored in the browser, and no document
+from another client's store reaches it.
+
+#### MCP import
+
+The MCP page imports a standard `mcpServers` document, the shape other MCP
+clients write, from a local file, or from one known store of another local
+client (Discover, below). For a file the browser reads its text and sends it
+with `mcp.import.preview` for the selected scope — the user source, or the
+workspace's project source when the scope selector names one (`cwd` included);
+a discovered store sends `from` in place of that text.
+The page decodes nothing itself: the owner's preview supplies each entry's id,
+status (`identical`, `changed`, `conflict` or `invalid`), transport, changed
+field names with their JSON kinds, members the decoder keeps unused or drops,
+and the entry's error. The owner caps each entry's field-name lists, so the page
+states how many names the cap left out rather than showing a partial list as
+complete. The page shows the unknown top-level members and never renders a
+value, because the reply carries none. For a project preview it states that the
+workspace file receives each entry's public skeleton, while arguments,
+environment and header values, the bearer token, a URL with userinfo, path,
+query or fragment, hidden OAuth fields and unknown members go to the user-scope
+`mcp-secrets` record, as a move into project does.
+
+Each previewed entry that decodes has an action: Import, Skip, Replace the
+existing entry, or Import under a new id with a new-id field. The defaults match
+the CLI: `changed` and `identical` import, `conflict` and `invalid` skip.
+`--only` restricts the default selection, and `--replace` or `--rename` — or
+this page's explicit action — selects the id it names whether or not `--only`
+lists it; a `conflict` or `invalid` entry only comes in through such an action.
+An `invalid` entry shows no action control, because the owner refuses every
+resolution but Skip for it, and says in its row that it cannot decode and can
+only be skipped. Rename needs a nonempty new id before Apply is enabled.
+
+Apply sends `mcp.import.apply` with the previewed input — the file text as
+`document`, or the store id as `from` together with the preview's
+`sourceRevision` as `expectedSourceRevision` — its `revision` as
+`expectedVersion`, and one resolution per entry. On success the page drops the
+preview, rereads `mcp.catalog` and states that imported and replaced entries
+start disabled: a user entry is written with `enabled: false`, and a project
+entry's enablement record is withdrawn before the write. On
+`mcp_settings_conflict` the page says the source changed, that no entry was imported and that an
+entry the import would have replaced may now be disabled; it keeps the preview and offers Preview
+again, which re-previews the same document; it never retries the apply. The owner codes
+(`mcp_import_conflict`, `mcp_import_partial`, `mcp_invalid_config`) are shown as the owner's
+message, and the preview stays open for a different selection; after a partial import a new
+preview reports the written ids as conflicts, which a Replace rewrites together with their
+records.
+
+#### MCP discovery
+
+Discover sits beside Import from file…. It calls `mcp.import.sources` with the
+selected scope (`cwd` for a project scope) and lists each known store of another
+local client: its id, client, scope, display path, state and entry count, or the
+owner's message for a store that is `unreadable` or `malformed`. No value, entry
+id or document from a store reaches the page. A `ready` row offers Preview,
+which opens the same import preview with `from` in place of `document`; the
+apply sends that `from` and the preview's `sourceRevision` as
+`expectedSourceRevision`. A row that is not `ready` offers no Preview. The page
+never asks for or holds a store's text, never polls and never watches a store;
+opening Discover again is the refresh, and changing the scope closes it.
 
 #### Diagnostics: the legacy logging controls
 
@@ -547,6 +717,27 @@ WebSocket clients gain no management access. Advertised methods must use the sam
 filter as dispatch so the UI cannot mistake a blocked method for an available one.
 Only `modality.capabilities` and `modality.configure` are admitted from the
 `modality` namespace; task and realtime methods remain unavailable.
+Only `schedule.list`, `schedule.save`, `schedule.delete`, `schedule.set_enabled`,
+`schedule.run_now` and `schedule.history` are admitted from `schedule`, and only
+when its owner registers them. Additional methods require a separate admission
+review; the `schedule` Settings source is not exposed through `settings.*`.
+
+The Scheduler read audit covers the complete owner replies, not just fields
+rendered by the page:
+
+| Reply | Data exposed and admission basis |
+| --- | --- |
+| `schedule.list` | Jobs: name, prompt, host cwd, schedule/time zone, enablement and anchor, mode, model/profile/Session ids, requested policy, captured cap, origin, revision, next window, schedule error and latest run. These are the authenticated operator's task definitions and owner-computed state, not Provider connection records or credentials |
+| `schedule.history` and `schedule.run_now` | Run/job ids, window, deadline and timestamps, state/detail, Session id and origin, effective policy, input-event/submission ids and report destination. These identify execution and authority, not authentication tokens; the run-now reply is acceptance, not completion |
+| `schedule.save` and `schedule.set_enabled` | The saved job above; save additionally returns old/new origin, cap, effective policy and report destination. These disclose the authority transition so the operator can judge future execution; they contain no credential-store fields |
+| `schedule.delete` | Deleted job id only |
+
+Names, prompts, paths and run details can contain sensitive user content; this
+admission does not declare arbitrary text public or automatically redact it.
+They remain within the authenticated Web entry and transient page state, not
+browser persistence or diagnostics. Model/profile ids are references, not reads
+of Provider secrets or profile contents. No reply exposes API keys, OAuth
+tokens, secret headers or a generic Settings document.
 
 Audit every added read for secret-bearing fields before enabling it. Return only
 owner-provided safe projections; any missing safe projection is a requirement for
@@ -608,9 +799,68 @@ defaults, archive flags or copied credentials cannot substitute for owner behavi
 | --- | --- | --- |
 | [Modality](plugins/Modality.md) | Model capability declarations do not select or execute image generation, editing, enhancement or understanding tasks | Typed per-operation defaults with owner-computed options, effective automatic resolution and actionable reasons; `modality.capabilities`/`modality.configure` consumed by task dispatch; save persists before success; exactly those two methods admitted on the Web entry. Understanding's Session consumer is the Agent/Prompt requirement in Modality §9.4. |
 | [Session catalog](appserver/session-catalog.md) | A saved Session is not necessarily archived; reopening it cannot represent restore | Durable archive classification with search, restore and confirmed deletion; commit classification before publishing the new catalog view |
-| Skills | Plugin packages do not cover manifest-free skill repositories or selective installation | Owner-managed repository preview, selected installation and loose-skill update/removal, with explicit overwrite confirmation and catalog publication after persistence |
 | MCP | User and project sources have independent revisions, and safe projections deliberately hide credentials | `mcp.move` reads the complete entry internally, checks both source revisions, keeps withheld values in the user-scope `mcp-secrets` overlay instead of `.mcp.json`, starts a project destination disabled, and reports a partial move as an error recovered by direction (remove destination and retry, or remove source); exactly `mcp.move` is admitted for the control. |
 
 Legacy permission patterns and tracing behavior do not override the current
-[command-rule design](appserver/permission-command-rules.md) or accepted ADR 016.
-Any change to those contracts requires separate design alignment.
+[command-rule design](appserver/permission-command-rules.md) or accepted ADR 016;
+the Permissions page follows
+[§10.1](appserver/permission-command-rules.md#101-legacy-rule-kinds). A change to
+either contract requires separate design alignment.
+
+## Client UI extensions
+
+The [client UI contract](client-ui-extensions.md) owns the manifest, mount
+boundary, bound capabilities and resource semantics. The Web adapter adds the
+exact read method `ui.extensions.list` to its management allowlist and subscribes
+to `ui.extensions.changed` on the reliable control channel before hello completes.
+It reads the directory after hello and refreshes on each invalidation; reconnect
+clears stale directory and panel state before binding again.
+
+Authenticated resource routes share this listener:
+
+| Route | Owner |
+| --- | --- |
+| `/api/ui/extensions/{generation}/{path}` | UiExtensions snapshot |
+| `/api/ui/sessions/{sessionId}/resources/{id}` | Session UiResources |
+
+These routes stay the Web host's byte-stream entry; `ui.extensions.read` is not
+on the Web entry's management allowlist, so a browser reads both kinds of
+resources through these routes, while a client without a byte-stream entry uses
+the protocol page reads ([client UI extensions §6](client-ui-extensions.md#6-静态与动态资源)).
+`session.ui.resources.read` is an ordinary Session method and is therefore
+served to the entry as well, but the Web host keeps the HTTP route for its byte
+stream.
+
+Both routes preserve Host checking and cookies, reject an explicit foreign
+Origin or cross-site fetch, and allow same-origin GET without an Origin header.
+There is no resource SPA fallback. MIME and `nosniff` remain explicit; CSP and
+CORS are unchanged. Snapshot replies use private revalidation and ETags; Session
+files use private no-store. GET supports a single byte range, including suffix
+and open-ended ranges. HEAD ignores Range. Unsatisfiable ranges return 416 and
+the total length; multiple ranges and unknown units return the full file.
+Bounded producers apply backpressure and release file reads on disconnect or
+owner withdrawal. Active content from Session files is downloaded as octet-stream.
+
+AppShell places the selected extension in the existing Lines detail region.
+The UI store persists only its stable selection and existing size. Each panel
+component owns its ShadowRoot and mount lifetime; the connection store owns
+catalog synchronization and the chat store owns Session activity. Compact mode
+uses a native modal dialog with a host-owned close button, Escape handling and
+focus restoration. Panel keyboard events stay within the panel.
+
+The extension menu checks placement, declared capabilities and discovered
+Session methods before selection. Unavailable entries stay visible with their
+reason and cannot be selected. Session methods are refreshed when the binding
+or directory changes and when the menu gains focus; mounting rechecks them.
+
+```text
+Extensions:
+  Activity
+  Preview — Unavailable method: session.preview.open [disabled]
+Wide:    [Conversation] | [Extension title] [Lines] [Close]
+                       | [Bound line selector]
+                       | [Plugin ShadowRoot]
+Compact: [Modal title] [Close]
+         [Bound line selector]
+         [Plugin ShadowRoot]
+```

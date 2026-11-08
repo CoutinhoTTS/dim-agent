@@ -238,7 +238,9 @@ pub async fn apply(
             })
         }
         ManagementAction::Reload => reload(client, provider_id).await,
-        ManagementAction::Toggle { id, enabled } => toggle(client, provider_id, id, *enabled).await,
+        ManagementAction::Toggle { id, enabled, .. } => {
+            toggle(client, provider_id, id, *enabled).await
+        }
         ManagementAction::Save { id, .. } => match id {
             Some(id) => edit(client, provider_id, id, action).await,
             None => Err(Failure::Refused(
@@ -246,8 +248,8 @@ pub async fn apply(
             )),
         },
         ManagementAction::Add { document } => add(client, provider_id, document).await,
-        ManagementAction::Remove { id } => remove(client, provider_id, id).await,
-        ManagementAction::Inspect { id } => detail(client, provider_id, id).await,
+        ManagementAction::Remove { id, .. } => remove(client, provider_id, id).await,
+        ManagementAction::Inspect { id, .. } => detail(client, provider_id, id).await,
         ManagementAction::Run { .. } => Err(Failure::Refused(
             t("Models have no run operation.").to_owned(),
         )),
@@ -653,6 +655,7 @@ fn entry(
     }
     ManagementEntry {
         id: model.entry.model_id.clone(),
+        source: None,
         label: model.entry.display_name.clone(),
         detail: detail_lines(model),
         // Every model has an on/off state, including an unavailable static

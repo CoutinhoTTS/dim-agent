@@ -100,12 +100,14 @@ impl SubmitMode {
     }
 }
 
-/// What `/resume` lists: the launch workspace, the same directory in its
-/// repository's worktrees, or every workspace.
+/// What `/resume` lists: the local scope — exactly the launch workspace, or
+/// the same directory in its repository's worktrees once git answers — or
+/// every workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionsScope {
-    Workspace,
-    Repository(Vec<String>),
+    /// The local scope: exactly the launch workspace (`None`), or the git
+    /// set (`Some`), which may hold one entry.
+    Local(Option<Vec<String>>),
     All,
 }
 
@@ -259,6 +261,7 @@ pub enum Command {
     },
     /// Produce the `/usage` report.
     Usage,
+    Export(crate::export::Format),
     /// `/compact`: ask the shown line to compact its context.
     Compact,
     /// `/rename`: set the shown Session's manual title, or clear it when
@@ -386,12 +389,21 @@ impl Area {
 }
 
 /// What a management request asks of its area's owner.
+///
+/// An action that names one entry carries the source its row reports beside
+/// the id, so an area whose owner lists two entries of one id acts on the
+/// row the user chose rather than searching for a source itself. `source` is
+/// `None` for an area whose owner reports no source; those areas ignore it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ManagementAction {
     /// Read the area.
     List,
     /// Enable or disable one entry, and report the area again.
-    Toggle { id: String, enabled: bool },
+    Toggle {
+        id: String,
+        source: Option<String>,
+        enabled: bool,
+    },
     /// Re-read the area, or ask its owner to rescan it.
     Reload,
     /// Replace the area's document, or one entry's, if it is still at
@@ -400,17 +412,19 @@ pub enum ManagementAction {
         /// The entry whose document this is, for an area whose documents are
         /// per entry; `None` writes the area's own document.
         id: Option<String>,
+        source: Option<String>,
         expected_revision: String,
         document: serde_json::Value,
     },
     /// Create an entry from `document`.
     Add { document: serde_json::Value },
     /// Remove one entry.
-    Remove { id: String },
+    Remove { id: String, source: Option<String> },
     /// Perform the area's named operation on one entry, with the input
     /// document the editor left when the entry carries one.
     Run {
         id: String,
+        source: Option<String>,
         /// The parameters the operation takes; `None` sends it at once.
         document: Option<serde_json::Value>,
         /// The input document the editor was opened with, `None` when the
@@ -420,7 +434,7 @@ pub enum ManagementAction {
         seed: Option<serde_json::Value>,
     },
     /// Read one entry's detail, in place of the list.
-    Inspect { id: String },
+    Inspect { id: String, source: Option<String> },
 }
 
 /// One request to a management area, carrying the area and what it asks.
@@ -468,6 +482,11 @@ pub struct ManagementGroup {
 pub struct ManagementEntry {
     /// The id the owner's actions take.
     pub id: String,
+    /// The source the owner reported for the entry, when it reports one:
+    /// every action taken on this row carries it, so the client never has to
+    /// search a catalog for the source of an id. `None` for an area whose
+    /// entries are unique on their own.
+    pub source: Option<String>,
     pub label: String,
     /// What the entry says about itself, a line each, shown for the entry the
     /// panel has selected.
@@ -1035,9 +1054,11 @@ pub enum RenameReply {
 #[allow(dead_code)]
 pub enum Update {
     /// A queued input the TUI withdrew (`Command::InputControl` with action
-    /// `withdraw`) is deleted: its text goes back into the draft.
-    Withdrawn {
-        input_id: String,
+    /// `withdraw`) is deleted: its complete content goes back into the draft.
+    Withdrawn(dim_agent_types::UserInput),
+    Exported {
+        format: crate::export::Format,
+        path: std::path::PathBuf,
     },
     /// The session's adopted configuration: `provider / model`, and the
     /// reasoning effort it sends when it carries one, label the status line.
@@ -1080,17 +1101,25 @@ pub enum Update {
         session_id: String,
         kind: SwitchKind,
     },
+    /// The Session's Skills as the palette lists them: enabled and not
+    /// shadowed. An empty list when the daemon has no catalog.
+    Skills(Vec<crate::management::skills::Entry>),
     /// The stored sessions, or why they could not be listed.
     Sessions {
         id: String,
         paged: bool,
         result: Result<(Vec<SessionItem>, Option<String>), String>,
     },
-    /// The workspaces the picker may offer as its repository scope: more than
-    /// one, found once per picker open.
+    /// The workspaces the picker's local scope may list: the launch
+    /// workspace and the same relative directory in every worktree of its git
+    /// repository, found once per picker open. The set may hold one entry.
     RepositoryWorkspaces(Vec<String>),
     /// A command failed without ending the session.
     Notice(String),
+    /// A submission could not be sent because no Session could be started
+    /// for it; the message says why. The interface restores the invocation's
+    /// first message, or reports it when a newer draft holds the composer.
+    SubmitNotSent(String),
     /// A newer version the user has not skipped, once per start.
     Upgrade(crate::update::Offer),
     /// What installing the offered version came to.
@@ -1192,8 +1221,8 @@ pub enum Update {
         text: String,
         warning: bool,
     },
-    /// The Web entry switch after `/web`; `url` is present while the entry
-    /// is open and carries its sign-in fragment.
+    /// The Web entry switch after `/web`; `url` includes its sign-in
+    /// fragment only when the browser could not be launched.
     Web {
         enabled: bool,
         open: bool,
@@ -1201,6 +1230,10 @@ pub enum Update {
     },
     /// The session cannot continue.
     Failed(String),
+    /// Startup failed; show the error and exit nonzero, except that an
+    /// invocation's first message stays in the draft and the interface
+    /// continues.
+    StartupFailed(String),
     /// The App Server asked this interface to leave (`ui.shutdown`); the
     /// Session goes on without it.
     Shutdown {

@@ -21,6 +21,7 @@ tracing.workspace = true
 uuid.workspace = true
 sha2 = "0.10"
 async-stream = "0.3"
+async-trait = "0.1"
 url = "2"
 http = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -30,15 +31,3 @@ dim-agent-runtime = { workspace = true, features = ["testing"] }
 axum = { workspace = true, features = ["json"] }
 futures = "0.3"
 wiremock = "0.6"
-
-[[test]]
-name = "aimux_native_contract"
-path = "../../vendor/aimux/aimux-providers/tests/openai_native_contract_test.rs"
-
-[[test]]
-name = "aimux_native_protocol_metadata"
-path = "../../vendor/aimux/aimux-providers/tests/native_protocol_metadata_test.rs"
-
-[[test]]
-name = "aimux_bedrock_native_flow"
-path = "../../vendor/aimux/aimux-providers/tests/bedrock_native_flow_test.rs"

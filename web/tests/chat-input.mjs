@@ -18,8 +18,8 @@ registerHooks({
       const source = `export const ${name}=()=>globalThis.chatInputStores.${store}; export const workspaceName=x=>x`
       return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true }
     }
-    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:key=>key})", shortCircuit: true }
-    if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>({params:{}});export const useRouter=()=>({push:async()=>{}});export const RouterLink={render:()=>null}", shortCircuit: true }
+    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const createI18n=()=>({global:{t:key=>key,locale:{value:\"en\"},setLocaleMessage(){},availableLocales:[]}});export const useI18n=()=>({t:key=>key})", shortCircuit: true }
+    if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>({params:{}});export const useRouter=()=>({push:async to=>globalThis.chatInputNavigations.push(to)});export const RouterLink={render:()=>null}", shortCircuit: true }
     if (specifier.endsWith(".vue") && !components.test(specifier)) return { url: "data:text/javascript,export default {render:()=>null}", shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
       if (specifier.startsWith(".") && !/\.(ts|vue)$/.test(specifier)) return next(`${specifier}.ts`, context)
@@ -42,7 +42,7 @@ const { readNotification } = await import("../src/rpc/read.ts")
 const { RpcError } = await import("../src/rpc/client.ts")
 const node = (type, text = "") => ({
   type, text, children: [], props: {}, parent: undefined, style: {}, value: "", scrollHeight: 40,
-  addEventListener() {}, focus() {}, getRootNode() { return {} },
+  addEventListener() {}, focus() {}, scrollTo() {}, getRootNode() { return {} },
   setSelectionRange(start) { this.selectionStart = start },
   showModal() { this.props.open = true }, close() { this.props.open = false },
 })
@@ -68,6 +68,7 @@ const text = (element) => (element.type === "comment" ? "" : element.text) + ele
 const button = (root, label) => all(root).find((element) => element.type === "button" && (text(element) === label || element.props["aria-label"] === label))
 const flush = async () => { for (let i = 0; i < 8; i++) { await Promise.resolve(); await nextTick() } }
 const click = (element) => element.props.onClick({ stopPropagation() {} })
+const submitQuestion = (root) => all(root).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} })
 const question = (branchId, callId, multiSelect = false) => ({
   branchId, requestId: "batch", callId,
   questions: [{ id: "1", question: `Choose ${callId}`, options: [{ label: "Alpha" }, { label: "Beta" }], multiSelect, allowCustom: true }],
@@ -75,6 +76,7 @@ const question = (branchId, callId, multiSelect = false) => ({
 
 function mount(t, branchId, questions = [], component, stores = {}) {
   const replies = [], submissions = []
+  globalThis.chatInputNavigations = []
   const view = reactive({
     status: "ready", rows: [], running: true, stopping: false, sessionRunning: true,
     approvals: [], questions, methods: ["attachment.put", "session.files.search"], queued: [],
@@ -184,6 +186,47 @@ test("permission changes refresh live presets and conflicts without retrying or 
 })
 
 for (const branchId of ["main", "worker"]) {
+  test(`${branchId}: questions advance individually and retain edits through review and retry`, async (t) => {
+    const ask = question(branchId, "steps")
+    ask.questions.push({ id: "2", header: "Features", question: "Choose features", options: [{ label: "Audit" }, { label: "Export" }], multiSelect: true, allowCustom: true })
+    const { root, replies } = mount(t, branchId, [ask])
+    const inputs = () => all(root).filter((element) => element.type === "input")
+    assert.equal(all(root).filter((element) => element.type === "fieldset").length, 1)
+    assert.doesNotMatch(text(root), /Choose features/)
+    assert.equal(button(root, "question.next").props.disabled, true)
+    inputs()[1].props.onChange()
+    await submitQuestion(root); await flush()
+    assert.match(text(root), /Choose features/)
+    assert.doesNotMatch(text(root), /Choose steps/)
+    assert.equal(replies.length, 0)
+    inputs()[0].props.onChange()
+    inputs()[1].props.onChange()
+    inputs()[2].props.onInput({ target: { value: "  Backups  " } })
+    await flush()
+    await click(button(root, "question.previous")); await flush()
+    assert.equal(inputs()[1].props.checked, true, "the first answer survives navigation")
+    inputs()[2].props.onInput({ target: { value: "PostgreSQL" } })
+    await submitQuestion(root); await flush()
+    assert.equal(inputs()[0].props.checked, true)
+    assert.equal(inputs()[1].props.checked, true)
+    assert.equal(inputs()[2].props.value, "  Backups  ")
+    await submitQuestion(root); await flush()
+    assert.equal(all(root).filter((element) => element.type === "fieldset").length, 0)
+    assert.match(text(root), /PostgreSQL/)
+    assert.match(text(root), /Audit, Export, Backups/)
+    globalThis.chatInputStores.chat.answerQuestion = async () => { throw new RpcError(-32602, "Retry this answer", "invalid_params") }
+    await submitQuestion(root); await flush()
+    assert.match(text(root), /Retry this answer/)
+    assert.equal(button(root, "question.submit").props.disabled, false)
+    globalThis.chatInputStores.chat.answerQuestion = async (sessionId, ask, answers) => { replies.push({ sessionId, branch: ask.branchId, answers }) }
+    await submitQuestion(root); await flush()
+    assert.deepEqual(replies, [{ sessionId: "session", branch: branchId, answers: [
+      { questionId: "1", selected: [], custom: "PostgreSQL" },
+      { questionId: "2", selected: ["Audit", "Export"], custom: "Backups" },
+    ] }])
+    assert.equal(button(root, "question.submit").props.disabled, true)
+  })
+
   test(`${branchId}: all calls of a question batch can be answered before settlement`, async (t) => {
     const { root, view, replies } = mount(t, branchId, [question(branchId, "first"), question(branchId, "second"), question("elsewhere", "hidden")])
     const cards = () => all(root).filter((element) => element.type === "article")
@@ -192,7 +235,7 @@ for (const branchId of ["main", "worker"]) {
       all(card).find((element) => element.props.type === "radio").props.onChange()
       await flush()
       assert.equal(button(card, "question.submit").props.disabled, false)
-      await click(button(card, "question.submit"))
+      await submitQuestion(card)
       await flush()
       assert.equal(button(card, "question.submit").props.disabled, true)
     }
@@ -303,7 +346,7 @@ test("single-choice answers switch between options and custom text; multiple-cho
     custom.props.onInput({ target: { value: "Gamma" } })
     if (mode === "option") option.props.onChange()
     await flush()
-    await click(button(root, "question.submit"))
+    await submitQuestion(root)
     assert.deepEqual(replies[0].answers, [{ questionId: "1", selected: mode === "custom" ? [] : ["Alpha"], ...(mode === "option" ? {} : { custom: "Gamma" }) }])
   }
 })
@@ -313,6 +356,30 @@ test("explicitly disabled attachments leave the clipboard's native paste behavio
   const field = all(root).find((element) => element.type === "textarea")
   field.props.onPaste({ clipboardData: { files: [{ type: "image/png" }] }, preventDefault() { assert.fail("attachments are disabled") } })
   assert(!all(root).some((element) => element.type === "img"))
+})
+
+test("schedule commands navigate only when admitted and not escaped", async t => {
+  for (const command of ["/schedule", "/scheduled"]) {
+    for (const [admitted, escaped] of [[true, false], [true, true], [false, false]]) {
+      const { root, submissions } = mount(t, "main", [], undefined, { connection: { supports: method => admitted && method === "schedule.list" } })
+      const field = all(root).find(element => element.type === "textarea")
+      field.props.onFocus()
+      field.props["onUpdate:modelValue"](command)
+      await flush()
+      const key = key => field.props.onKeydown({ key, preventDefault() {}, stopPropagation() {} })
+      if (escaped) key("Escape")
+      await flush()
+      key("Enter")
+      await flush()
+      if (admitted && !escaped) {
+        assert.deepEqual(globalThis.chatInputNavigations, [{ name: "settings-scheduled" }])
+        assert.deepEqual(submissions, [])
+      } else {
+        assert.deepEqual(globalThis.chatInputNavigations, [])
+        assert.equal(submissions[0].value, command)
+      }
+    }
+  }
 })
 
 test("files picked with overlapping names keep their own paths in the submitted message", async (t) => {

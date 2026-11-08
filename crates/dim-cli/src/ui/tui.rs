@@ -20,12 +20,14 @@ use crate::model::view::{
     CompactionState, LineState, LineView, RowKind, SideLine, TaskTarget, ViewRow, ViewSnapshot,
 };
 use crate::ui::Env;
+use crate::ui::Initial;
 use crate::ui::approvals_panel::ApprovalsPanel;
 use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
 use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
 use crate::ui::i18n::{self, t, tf};
 use crate::ui::language_panel::LanguagePanel;
 use crate::ui::lines_panel::{LinesPanel, short_id};
+use crate::ui::list_panel::{Event as ListEvent, Item, ListPanel};
 use crate::ui::management_panel::ManagementPanel;
 use crate::ui::models_panel::ModelsPanel;
 use crate::ui::oauth_view::OauthView;
@@ -35,6 +37,7 @@ use crate::ui::prompts::{
     AskUserPrompt, Effect, EffortPrompt, ExitConfirm, ExitReason, PermissionPrompt, WriteTarget,
 };
 use crate::ui::providers_panel::ProvidersPanel;
+use crate::ui::queue_panel::QueuePanel;
 use crate::ui::render::fullscreen::Document;
 use crate::ui::render::fullscreen::MouseOutcome;
 use crate::ui::render::markdown::MarkdownRenderer;
@@ -270,6 +273,7 @@ fn run_terminal(
         cwd_key,
     );
     app.fullscreen = full.is_some();
+    app.initial = surroundings.initial;
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
@@ -306,8 +310,10 @@ fn run_terminal(
             title.forget();
             dirty = true;
         }
-        if app.shutdown.is_some() && !dirty {
-            break 0;
+        if let Some(code) = app.exit_code
+            && !dirty
+        {
+            break code;
         }
         if app.revealing() {
             dirty = true;
@@ -433,8 +439,8 @@ fn run_terminal(
         }
         let due = last_frame.is_none_or(|at| now.duration_since(at) >= FRAME_INTERVAL)
             && !terminal.writing();
-        if dirty && due {
-            let size = terminal.size();
+        if dirty && due && resize.is_none() {
+            let size = current;
             let frame = app.frame(size);
             let bytes = match &mut full {
                 Some(full) => full.render(&frame, size, &app.palette, &app),
@@ -456,14 +462,21 @@ fn run_terminal(
                 dirty = true;
             }
         }
-        let wait = match (dirty, last_frame) {
+        let wait = match (dirty && resize.is_none(), last_frame) {
             (true, Some(at)) if !terminal.writing() => {
                 FRAME_INTERVAL.saturating_sub(now.duration_since(at))
             }
             _ if app.running() => FRAME_INTERVAL,
             _ => SESSION_POLL,
         };
-        match terminal.next_event(wait) {
+        // The first message waits for the first frame so it follows the
+        // banner, then enters the interface as the submission event.
+        let next = if app.initial.is_some() && last_frame.is_some() {
+            Wait::Event(InputEvent::Submit)
+        } else {
+            terminal.next_event(wait)
+        };
+        match next {
             Wait::Lost => {
                 let code = terminal.lost();
                 app.host.shutdown();
@@ -841,9 +854,7 @@ struct App {
     /// The adopted model and its reasoning effort, once the session exists.
     label: Option<ModelLabel>,
     failure: Option<String>,
-    /// The App Server asked this interface to leave: one more frame shows
-    /// why, then the interface exits and the Session carries on.
-    shutdown: Option<String>,
+    exit_code: Option<i32>,
     failure_committed: bool,
     planner: StreamPlanner,
     commits: CommitState,
@@ -892,6 +903,12 @@ struct App {
     /// The second their running time was last drawn for.
     card_second: u64,
     session_id: String,
+    /// The invocation's first message, submitted once the first frame is
+    /// drawn.
+    initial: Option<Initial>,
+    /// A submitted first message no Session has taken yet: a refusal puts
+    /// it back into the draft.
+    unsent: Option<Initial>,
     permission_policy: dim_agent_types::PermissionPolicy,
     /// The main branch's context use.
     context: Option<ContextReading>,
@@ -960,7 +977,7 @@ struct App {
     /// ([`Self::command_entry_open`]).
     command_entry: bool,
     /// The workspace's git branch for the banner and composer.
-    branch: String,
+    branch: Option<String>,
     git_head: Option<PathBuf>,
     git_checked: Instant,
     /// The shell-mode command running, at most one.
@@ -995,9 +1012,6 @@ struct App {
     /// The entry a management action the panel sent names, with the label the
     /// panel showed then: the panel may close before the reply lands.
     management_named: Option<(Area, ManagementAction, Option<String>)>,
-    /// Queued messages withdrawn for the draft, by input id, until the host
-    /// confirms each withdrawal; a confirmed one goes into the draft.
-    recovering: Vec<(String, String)>,
     /// The message the Session offered for the turn its composer belongs to.
     suggestion: Option<Suggestion>,
     /// The `prompt-suggestion` switch as last read or written; none until a
@@ -1182,6 +1196,8 @@ enum Prompt {
     Tasks(TasksPanel),
     Lines(Box<LinesPanel>),
     Timeline(Box<TimelinePanel>),
+    Queue(QueuePanel),
+    Export(ListPanel),
     Fork(ForkAsk),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
@@ -1232,7 +1248,7 @@ impl App {
             snapshot: None,
             label: None,
             failure: None,
-            shutdown: None,
+            exit_code: None,
             failure_committed: false,
             planner: StreamPlanner::new(),
             commits: CommitState::default(),
@@ -1256,6 +1272,8 @@ impl App {
             message_blocks: Vec::new(),
             card_second: 0,
             session_id: String::new(),
+            initial: None,
+            unsent: None,
             permission_policy: dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
@@ -1287,7 +1305,7 @@ impl App {
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
-            branch: branch.unwrap_or_else(|| t("Not available").into()),
+            branch,
             git_head,
             git_checked: Instant::now(),
             shell: None,
@@ -1304,7 +1322,6 @@ impl App {
             fork_draft: None,
             management_edits: Vec::new(),
             management_named: None,
-            recovering: Vec::new(),
             suggestion: None,
             suggestion_setting: None,
             suggestion_methods: false,
@@ -1520,7 +1537,7 @@ impl App {
     /// Sends the oldest queued message in as steering (Ctrl+S, and Enter on an
     /// empty draft).
     fn steer(&mut self) {
-        if let Some((id, _)) = self.queued().into_iter().next() {
+        if let Some(id) = self.queued().into_iter().next() {
             self.host.send(Command::InputControl {
                 input_id: id,
                 action: "steer",
@@ -1542,8 +1559,8 @@ impl App {
 
     /// Withdraws the newest queued message into the draft (Shift+Left).
     fn recall_newest_queued(&mut self) {
-        if let Some((id, text)) = self.queued().pop() {
-            self.withdraw(id, text);
+        if let Some(id) = self.queued().pop() {
+            self.withdraw(id);
         }
     }
 
@@ -1551,32 +1568,31 @@ impl App {
     /// withdrawals reach the session before its stop, so no queued message
     /// starts the next run.
     fn recall_all_queued(&mut self) {
-        for (id, text) in self.queued() {
-            self.withdraw(id, text);
+        for id in self.queued() {
+            self.host.send(Command::InputControl {
+                input_id: id,
+                action: "withdraw",
+            });
         }
     }
 
-    fn withdraw(&mut self, id: String, text: String) {
-        self.recovering.push((id.clone(), text));
+    fn withdraw(&mut self, id: String) {
+        if self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .queued
+                .iter()
+                .any(|input| input.id == id && !input.recallable)
+        }) {
+            self.notices.push(
+                t("Messages with attachments stay queued; use /queue to steer or delete them")
+                    .into(),
+            );
+            return;
+        }
         self.host.send(Command::InputControl {
             input_id: id,
             action: "withdraw",
         });
-    }
-
-    /// Puts a withdrawn message into the draft after the text already there,
-    /// once the session confirmed the withdrawal.
-    fn restore_withdrawn(&mut self, input_id: &str) {
-        let Some(at) = self.recovering.iter().position(|(id, _)| id == input_id) else {
-            return;
-        };
-        let (_, text) = self.recovering.remove(at);
-        let draft = self.composer.text();
-        if draft.trim().is_empty() {
-            self.set_draft(&text);
-        } else {
-            self.set_draft(&format!("{draft}\n{text}"));
-        }
     }
 
     fn set_notice(&mut self, text: impl Into<String>) {
@@ -1633,6 +1649,8 @@ impl App {
             | Some(Prompt::Isolation(_))
             | Some(Prompt::Lines(_))
             | Some(Prompt::Timeline(_))
+            | Some(Prompt::Queue(_))
+            | Some(Prompt::Export(_))
             | Some(Prompt::Fork(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
@@ -1685,16 +1703,20 @@ impl App {
     /// Time-driven changes: the pulse of a running turn, notice and arm
     /// expiry. True when the screen needs a frame.
     fn tick(&mut self) -> bool {
+        self.tick_at(Instant::now())
+    }
+
+    /// [`Self::tick`] at `now`, so a test crosses a poll without waiting.
+    fn tick_at(&mut self, now: Instant) -> bool {
         self.sync_sessions();
         self.sync_task_details();
-        let now = Instant::now();
         let mut changed = false;
         if now.duration_since(self.git_checked) >= GIT_BRANCH_POLL {
             self.git_checked = now;
             if let Some(branch) = self.git_head.as_deref().and_then(git_branch)
-                && branch != self.branch
+                && self.branch.as_ref() != Some(&branch)
             {
-                self.branch = branch;
+                self.branch = Some(branch);
                 changed = true;
             }
         }
@@ -1784,14 +1806,15 @@ impl App {
 
     /// Queued inputs, oldest first: submitted while a turn was already
     /// running, without their `input/applied` yet.
-    fn queued(&self) -> Vec<(String, String)> {
+    fn queued(&self) -> Vec<String> {
         self.snapshot
             .as_ref()
             .map(|snapshot| {
                 snapshot
                     .queued
                     .iter()
-                    .map(|input| (input.id.clone(), input.text.clone()))
+                    .filter(|input| input.held)
+                    .map(|input| input.id.clone())
                     .collect()
             })
             .unwrap_or_default()
@@ -1799,7 +1822,17 @@ impl App {
 
     fn apply(&mut self, update: Update) {
         match update {
-            Update::Withdrawn { input_id } => self.restore_withdrawn(&input_id),
+            Update::Withdrawn(input) => {
+                self.dismiss_suggestion();
+                self.composer.restore(input);
+            }
+            Update::Exported { format, path } => self.notices.push(tf(
+                "Exported {format}: {path}",
+                &[
+                    ("format", format.label()),
+                    ("path", &crate::sanitize::safe(&path.display().to_string())),
+                ],
+            )),
             Update::Ready(configuration) => {
                 self.label = Some(ModelLabel::new(&configuration));
             }
@@ -1834,6 +1867,13 @@ impl App {
                     }
                 }
                 if let Some(Prompt::Timeline(panel)) = &mut self.prompt {
+                    if panel.current(&snapshot) {
+                        panel.set_rows(&snapshot);
+                    } else {
+                        self.prompt = None;
+                    }
+                }
+                if let Some(Prompt::Queue(panel)) = &mut self.prompt {
                     if panel.current(&snapshot) {
                         panel.set_rows(&snapshot);
                     } else {
@@ -1909,7 +1949,32 @@ impl App {
                     &[("count", &count.to_string())],
                 ));
             }
-            Update::Switched { session_id, kind } => self.switch_session(session_id, kind),
+            Update::Switched { session_id, kind } => {
+                if !session_id.is_empty() {
+                    self.unsent = None;
+                }
+                self.switch_session(session_id, kind)
+            }
+            Update::Skills(entries) => {
+                self.composer.set_skills(
+                    entries
+                        .into_iter()
+                        .filter(|entry| {
+                            // A name with whitespace cannot be referenced
+                            // (Skills §9), so it is not offered.
+                            entry.enabled
+                                && entry.shadowed_by.is_none()
+                                && !entry.name.chars().any(char::is_whitespace)
+                        })
+                        .map(|entry| crate::ui::composer::palette::Skill {
+                            name: entry.name,
+                            description: entry.description,
+                            display_name: None,
+                            display_description: None,
+                        })
+                        .collect(),
+                );
+            }
             Update::Sessions { id, paged, result } => {
                 if let Some(Prompt::Sessions(panel)) = &mut self.prompt {
                     panel.page(&id, paged, result);
@@ -2250,6 +2315,9 @@ impl App {
                 }
             }
             Update::Models(models) => {
+                if let Err(error) = &models {
+                    self.set_notice(error.clone());
+                }
                 if let Some(Prompt::Models(panel)) = &mut self.prompt {
                     panel.set_models(models);
                 }
@@ -2344,7 +2412,7 @@ impl App {
                 }
             }
             Update::Notice(text) => {
-                self.notices.push(text);
+                self.notices.push(t(&text).to_owned());
             }
             Update::Upgrade(offer) => {
                 self.upgrade = Some(UpgradeDialog::new(offer));
@@ -2366,15 +2434,31 @@ impl App {
                     .remove(&(branch_id.clone(), request_id.clone()));
             }
             Update::Failed(message) => {
+                self.restore_unsent();
                 self.failure = Some(message);
                 self.run_started = None;
+            }
+            Update::SubmitNotSent(message) => {
+                self.notices.push(message);
+                self.restore_unsent();
+            }
+            Update::StartupFailed(message) => {
+                self.failure = Some(message);
+                // A first message the invocation supplied has no Session
+                // to take it: keep it in the draft and stay, rather than
+                // exiting nonzero with nothing sent.
+                if self.initial.is_some() || self.unsent.is_some() {
+                    self.restore_unsent();
+                } else {
+                    self.exit_code = Some(1);
+                }
             }
             Update::Shutdown { reason } => {
                 self.notices.push(tf(
                     "The App Server closed this interface: {reason}",
                     &[("reason", &reason)],
                 ));
-                self.shutdown = Some(reason);
+                self.exit_code = Some(0);
             }
         }
     }
@@ -2394,6 +2478,7 @@ impl App {
 
     fn handle_input(&mut self, event: InputEvent) -> Outcome {
         let key = match event {
+            InputEvent::Submit => return self.submit_initial(),
             InputEvent::Paste(text) => {
                 if self.command_entry_open() {
                     self.paste(text);
@@ -2483,6 +2568,16 @@ impl App {
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Lines(p) => p.handle_key(key),
                 Prompt::Timeline(p) => p.handle_key(key),
+                Prompt::Queue(p) => p.handle_key(key),
+                Prompt::Export(p) => match p.handle_key(key) {
+                    ListEvent::Pick(format) => Effect::Export(if format == "markdown" {
+                        crate::export::Format::Markdown
+                    } else {
+                        crate::export::Format::Json
+                    }),
+                    ListEvent::Close => Effect::Close,
+                    ListEvent::None | ListEvent::Refresh => Effect::None,
+                },
                 Prompt::Fork(p) => p.handle_key(key),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
@@ -2618,6 +2713,21 @@ impl App {
             _ => {}
         }
         match self.composer.handle_key(key) {
+            ComposerOutcome::Command { name, args } => return self.run_command(&name, &args),
+            outcome => {
+                self.dispatch_composer(outcome, mode);
+            }
+        }
+        if self.suggestion.is_some() && !self.composer.is_empty() {
+            self.dismiss_suggestion();
+        }
+        Outcome::Continue
+    }
+
+    /// What a composer outcome does, the same for Enter and for the
+    /// invocation's first message.
+    fn dispatch_composer(&mut self, outcome: ComposerOutcome, mode: SubmitMode) -> Outcome {
+        match outcome {
             ComposerOutcome::Submit(text) if self.line_draft.is_some() => {
                 self.open_line(&text);
             }
@@ -2666,10 +2776,54 @@ impl App {
             ComposerOutcome::Rejected(reason) => self.set_notice(reason),
             ComposerOutcome::Handled | ComposerOutcome::Pass => {}
         }
-        if self.suggestion.is_some() && !self.composer.is_empty() {
-            self.dismiss_suggestion();
-        }
         Outcome::Continue
+    }
+
+    /// Sends the invocation's first message as its first typed one: the text
+    /// becomes the draft and the images its tokens, then the composer
+    /// submits them through the same outcome the Enter key produces. A
+    /// submission no Session takes leaves the message unsent so a refusal
+    /// can put it back into the draft.
+    fn submit_initial(&mut self) -> Outcome {
+        let Some(initial) = self.initial.take() else {
+            return Outcome::Continue;
+        };
+        self.composer.set_draft(&initial.text);
+        for image in &initial.images {
+            let _ = self.composer.attach_image(image.clone());
+        }
+        // A failed session has taken the connection: the message is not
+        // sent, and stays a draft the user can carry to a restart.
+        if self.failure.is_some() {
+            return Outcome::Continue;
+        }
+        let outcome = self.composer.submit();
+        let submitted = matches!(
+            outcome,
+            ComposerOutcome::Submit(_) | ComposerOutcome::SubmitDraft { .. }
+        ) && self.line_draft.is_none();
+        if submitted && self.session_id.is_empty() {
+            self.unsent = Some(initial);
+        }
+        self.dispatch_composer(outcome, SubmitMode::Queue)
+    }
+
+    /// Puts a first message no Session took back into the draft, unless the
+    /// user has started another one: that newer draft wins, and the loss of
+    /// the first message is reported so it is not silent.
+    fn restore_unsent(&mut self) {
+        let Some(initial) = self.unsent.take() else {
+            return;
+        };
+        if !self.composer.is_empty() {
+            self.notices
+                .push(t("The first message was not sent; your new draft was kept.").to_owned());
+            return;
+        }
+        self.composer.set_draft(&initial.text);
+        for image in initial.images {
+            let _ = self.composer.attach_image(image);
+        }
     }
 
     /// A terminal paste, which is also how a terminal delivers a file
@@ -2904,7 +3058,7 @@ impl App {
                 &[("id", &line_name(lines, &draft.parent))],
             );
         }
-        let workspace = workspace_label(&self.branch);
+        let workspace = workspace_label(self.branch.as_deref());
         match &self.snapshot {
             Some(snapshot) if !snapshot.focus.is_empty() && snapshot.focus != "main" => {
                 format!(
@@ -3103,6 +3257,13 @@ impl App {
                 });
             }
             Effect::Notice(text) => self.set_notice(text),
+            Effect::InputControl { input_id, action } => {
+                self.host.send(Command::InputControl { input_id, action });
+            }
+            Effect::Export(format) => {
+                self.prompt = None;
+                self.host.send(Command::Export(format));
+            }
             Effect::FocusLine(line) => {
                 self.prompt = None;
                 self.host.send(Command::FocusLine(line));
@@ -3620,6 +3781,7 @@ impl App {
             match block {
                 Block::ToolGroup(group) => group.detail = detail,
                 Block::Compaction { expanded, .. } => *expanded = detail == Detail::Expanded,
+                Block::Error { expanded, .. } => *expanded = detail != Detail::Collapsed,
                 _ => {}
             }
         }
@@ -3828,16 +3990,23 @@ impl App {
                     WriteTarget::Create => ManagementAction::Add { document },
                     WriteTarget::Area { revision } => ManagementAction::Save {
                         id: None,
+                        source: None,
                         expected_revision: revision.clone(),
                         document,
                     },
-                    WriteTarget::Entry { id, revision } => ManagementAction::Save {
+                    WriteTarget::Entry {
+                        id,
+                        source,
+                        revision,
+                    } => ManagementAction::Save {
                         id: Some(id.clone()),
+                        source: source.clone(),
                         expected_revision: revision.clone(),
                         document,
                     },
-                    WriteTarget::Run { id } => ManagementAction::Run {
+                    WriteTarget::Run { id, source } => ManagementAction::Run {
                         id: id.clone(),
+                        source: source.clone(),
                         document: Some(document),
                         seed: seed.clone(),
                     },
@@ -4002,6 +4171,26 @@ impl App {
                 self.host.send(Command::Compact);
                 Outcome::Continue
             }
+            "export" => {
+                let mut panel = ListPanel::new(
+                    "Export session",
+                    t("Enter export · Esc cancel"),
+                    "",
+                    "",
+                    "",
+                    false,
+                )
+                .without_filter();
+                panel.set_items(
+                    Ok(vec![
+                        Item::new("markdown", "Markdown (.md)", ""),
+                        Item::new("json", "JSON (.json)", ""),
+                    ]),
+                    Some("markdown"),
+                );
+                self.open_prompt(Prompt::Export(panel));
+                Outcome::Continue
+            }
             "rename" => {
                 let title = args.trim();
                 let title = if title == "--clear" {
@@ -4067,6 +4256,13 @@ impl App {
                 if let Some(snapshot) = &self.snapshot {
                     let panel = TimelinePanel::new(snapshot);
                     self.open_prompt(Prompt::Timeline(Box::new(panel)));
+                }
+                Outcome::Continue
+            }
+            "queue" => {
+                if let Some(snapshot) = &self.snapshot {
+                    let panel = QueuePanel::new(snapshot);
+                    self.open_prompt(Prompt::Queue(panel));
                 }
                 Outcome::Continue
             }
@@ -4259,7 +4455,11 @@ impl App {
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         let mut frame = Frame::default();
         if !self.banner_committed {
-            let text = banner(cols, &self.palette, &self.branch);
+            let text = banner(
+                cols,
+                &self.palette,
+                self.branch.as_deref().unwrap_or(t("Not available")),
+            );
             self.record(Block::Banner);
             frame.commits.push(text);
             self.banner_committed = true;
@@ -4390,10 +4590,20 @@ impl App {
             } else {
                 format!("dimcode --resume {}", self.session_id)
             };
-            frame.commits.push(pad_block(&[tf(
-                "Disconnected; draft kept. Exit and run: {command}",
-                &[("command", &resume)],
-            )]));
+            let block = Block::Status {
+                text: tf(
+                    "Disconnected; draft kept. Exit and run: {command}",
+                    &[("command", &resume)],
+                ),
+                tone: Tone::Muted,
+            };
+            frame.commits.push(chunk(&render_block(
+                &block,
+                width,
+                &self.palette,
+                &self.markdown,
+            )));
+            self.record(block);
         }
 
         let mut live = tail;
@@ -4432,7 +4642,11 @@ impl App {
                 .map(|input| {
                     (
                         input.id.clone(),
-                        input.display.as_deref().unwrap_or(&input.text).to_owned(),
+                        format!(
+                            "{} · {}",
+                            t(if input.held { "Held" } else { "Incorporating" }),
+                            input.display.as_deref().unwrap_or(&input.text)
+                        ),
                     )
                 })
                 .collect();
@@ -4506,6 +4720,37 @@ impl App {
             let started = self.run_started.unwrap_or_else(Instant::now);
             let elapsed = started.elapsed();
             let beat = (elapsed.as_millis() / PULSE.as_millis()) as usize;
+            let retry = self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.retry.as_ref());
+            if let Some(retry) = retry {
+                let seconds = crate::projection::retry_seconds(retry.retry_at_ms);
+                let reason = crate::projection::failure_phrase(retry.kind, retry.reason.as_deref());
+                if seconds == 0 {
+                    return format!(
+                        "{} {}",
+                        FRAMES[beat % FRAMES.len()],
+                        tf(
+                            "Waiting for the provider · {reason} · Esc stops",
+                            &[("reason", &reason)]
+                        )
+                    );
+                }
+                return format!(
+                    "{} {}",
+                    FRAMES[beat % FRAMES.len()],
+                    tf(
+                        "Retrying {attempt}/{max} in {seconds} s · {reason} · Esc stops",
+                        &[
+                            ("attempt", &retry.attempt.to_string()),
+                            ("max", &retry.max_attempts.to_string()),
+                            ("seconds", &seconds.to_string()),
+                            ("reason", &reason),
+                        ]
+                    )
+                );
+            }
             let thinking = self.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.rows.iter().any(|row| {
                     row.kind == RowKind::Thinking && row.streaming && !row.text.trim().is_empty()
@@ -4656,6 +4901,8 @@ impl App {
                         | Prompt::Upgrade(_)
                         | Prompt::Fork(_)
                         | Prompt::Timeline(_)
+                        | Prompt::Queue(_)
+                        | Prompt::Export(_)
                 )
             );
         if !replaced {
@@ -4680,6 +4927,8 @@ impl App {
             Some(Prompt::Tasks(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Lines(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Timeline(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Queue(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Export(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width, height)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width, height)),
@@ -4718,6 +4967,8 @@ impl App {
                         Some(Prompt::Timeline(prompt)) => {
                             Some(prompt.render(list_width, budget, p))
                         }
+                        Some(Prompt::Queue(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Export(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Fork(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Models(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Providers(prompt)) => {
@@ -4766,6 +5017,8 @@ impl App {
                 Some(prompt.render(outer, panel_rows, p, &self.markdown))
             }
             Some(Prompt::Timeline(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Queue(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Export(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Fork(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -5347,9 +5600,11 @@ impl App {
         let index = id.checked_sub(self.dropped);
         match index.and_then(|index| self.history.get_mut(index)) {
             Some(Block::ToolGroup(group)) => group.detail = group.detail.next(),
-            Some(Block::Thinking { expanded, .. } | Block::Compaction { expanded, .. }) => {
-                *expanded = !*expanded
-            }
+            Some(
+                Block::Thinking { expanded, .. }
+                | Block::Compaction { expanded, .. }
+                | Block::Error { expanded, .. },
+            ) => *expanded = !*expanded,
             _ => return false,
         }
         self.mark_rewritten(id);
@@ -5555,7 +5810,11 @@ impl App {
     fn render_source(&self, source: &Block, cols: usize) -> String {
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         match source {
-            Block::Banner => banner(cols, &self.palette, &self.branch),
+            Block::Banner => banner(
+                cols,
+                &self.palette,
+                self.branch.as_deref().unwrap_or(t("Not available")),
+            ),
             block => chunk(&render_block(block, width, &self.palette, &self.markdown)),
         }
     }
@@ -5831,8 +6090,9 @@ const QUEUE_ROWS: usize = 5;
 
 /// The queue strip's hint, and its form when messages are not shown. Every
 /// `/name` it can draw is a command in the table.
-const QUEUE_HINT: &str = "shift+← edit last · ctrl+s steer now";
-const QUEUE_HINT_MORE: &str = "+{count} more · shift+← edit last · ctrl+s steer now";
+const QUEUE_HINT: &str = "/queue manage · shift+← edit last · ctrl+s steer now";
+const QUEUE_HINT_MORE: &str =
+    "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now";
 
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
@@ -6156,11 +6416,15 @@ fn line_name(lines: &[LineView], line: &str) -> String {
 
 /// The working directory, `~` for the home, and the git branch: what the
 /// prompt box writes in its bottom border.
-fn workspace_label(branch: &str) -> String {
+fn workspace_label(branch: Option<&str>) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    format!("{} ({branch})", crate::ui::tilde(&cwd))
+    let cwd = crate::ui::tilde(&cwd);
+    match branch {
+        Some(branch) => format!("{cwd} ({branch})"),
+        None => cwd,
+    }
 }
 
 fn git_head(cwd: &str) -> Option<PathBuf> {
@@ -6195,7 +6459,12 @@ fn git_branch(head: &std::path::Path) -> Option<String> {
 /// Its margin and padding are the welcome box's, so the two line up.
 fn goodbye_panel(resume: Option<&str>) -> Vec<String> {
     let margin = " ".repeat(MARGIN);
-    let mut body = vec![t("Bye!").to_owned()];
+    let mut body = vec![
+        t("Bye!").to_owned(),
+        String::new(),
+        t("Feedback or ideas? Join us on Discord:").to_owned(),
+        "https://discord.gg/ds35K3TadP".to_owned(),
+    ];
     if let Some(session_id) = resume {
         body.extend([
             String::new(),
@@ -6529,6 +6798,7 @@ mod tests {
                             heading: "user".into(),
                             entries: vec![ManagementEntry {
                                 id: "cleanup".into(),
+                                source: None,
                                 label: "cleanup".into(),
                                 detail: vec!["Runs first.".into()],
                                 enabled: Some(true),
@@ -6825,6 +7095,7 @@ mod tests {
                 heading: "user".into(),
                 entries: vec![ManagementEntry {
                     id: "review-and-fix".into(),
+                    source: None,
                     label: "review-and-fix".into(),
                     detail: vec!["Runs the review first.".into()],
                     enabled: Some(true),
@@ -7119,6 +7390,28 @@ mod tests {
     #[test]
     fn composer_tracks_git_switches_in_repositories_and_worktrees() {
         let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        for fullscreen in [false, true] {
+            let mut app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                root.path().join("home"),
+                root.path().to_string_lossy().into_owned(),
+            );
+            app.fullscreen = fullscreen;
+            let frame = app.frame((160, 30));
+            let cwd = crate::ui::tilde(&std::env::current_dir().unwrap().display().to_string());
+            let row = frame
+                .live
+                .iter()
+                .find(|row| row.contains(&cwd))
+                .expect("the composer shows the working directory without Git");
+            assert!(
+                !row.contains(&format!("{cwd} (")),
+                "a workspace without Git must show only its path: {row}"
+            );
+        }
         let repo = root.path().join("repo");
         let linked = root.path().join("linked");
         std::fs::create_dir(&repo).unwrap();
@@ -7164,7 +7457,6 @@ mod tests {
         );
         let nested = repo.join("nested");
         std::fs::create_dir(&nested).unwrap();
-        let theme = test_theme();
         let mut apps = Vec::new();
         for (cwd, expected) in [(&nested, "original"), (&linked, "linked-original")] {
             for fullscreen in [false, true] {
@@ -7966,6 +8258,7 @@ mod tests {
 
         let row = |kind, text: &str, tool: Option<&str>| {
             std::sync::Arc::new(ViewRow {
+                failure: None,
                 row_id: text.into(),
                 kind,
                 text: text.into(),
@@ -8199,9 +8492,14 @@ mod tests {
             )
         );
         let count = sent.borrow().len();
-        std::thread::sleep(std::time::Duration::from_millis(1050));
-        assert!(app.tick(), "an acquiring row is read again");
+        let now = Instant::now() + Duration::from_millis(1050);
+        assert!(app.tick_at(now), "an acquiring row is read again");
         assert_eq!(last(&sent), "list", "the rows are read once a second");
+        assert_eq!(sent.borrow().len(), count + 1);
+        assert!(
+            !app.tick_at(now + Duration::from_millis(150)),
+            "a read inside the second waits"
+        );
         assert_eq!(sent.borrow().len(), count + 1);
         app.apply(Update::Runtimes {
             result: None,
@@ -8344,6 +8642,7 @@ mod tests {
                 .iter()
                 .map(|(id, text)| {
                     std::sync::Arc::new(ViewRow {
+                        failure: None,
                         row_id: (*id).into(),
                         kind: RowKind::AssistantMessage,
                         text: (*text).into(),
@@ -8452,16 +8751,13 @@ mod tests {
                         .take_while(|row| {
                             !row.contains("Callback URL") && !row.contains("Restart device login")
                         })
-                        .map(|row| {
-                            row.trim()
-                                .strip_prefix('│')
-                                .expect("the link keeps the left dialog border")
-                                .strip_suffix('│')
-                                .expect("the link keeps the right dialog border")
-                                .trim()
-                        })
+                        .map(|row| row.trim())
                         .collect::<Vec<_>>()
                         .join("\n");
+                    assert!(
+                        !selected.contains(['│', '|']),
+                        "Native selection must not include dialog borders: {selected}"
+                    );
                     if shortened && !mode.starts_with("device") {
                         let prefix = selected.replace('\n', "");
                         assert!(prefix.ends_with('…'));
@@ -8720,6 +9016,7 @@ mod tests {
         drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
             session_id: "s1".into(),
             rows: vec![std::sync::Arc::new(ViewRow {
+                failure: None,
                 row_id: "r1".into(),
                 kind: RowKind::UserMessage,
                 text: "line work".into(),
@@ -8780,6 +9077,61 @@ mod tests {
         }
     }
 
+    /// The palette lists the Session's enabled, unshadowed Skills, and a row
+    /// completes its marker without sending.
+    #[test]
+    fn the_palette_lists_enabled_unshadowed_skills() {
+        use crate::management::skills::Entry;
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        let entry = |name: &str, enabled: bool, shadowed_by: Option<&str>| Entry {
+            id: format!("user:{name}"),
+            source: Some("user".into()),
+            name: name.into(),
+            description: format!("About {name}"),
+            file_path: format!("/home/.agents/skills/{name}/SKILL.md"),
+            enabled,
+            shadowed_by: shadowed_by.map(str::to_owned),
+        };
+        app.apply(Update::Skills(vec![
+            entry("commit", true, None),
+            entry("deploy", false, None),
+            entry("shadowed", true, Some("user:shadowed")),
+            entry("two words", true, None),
+        ]));
+        typed(&mut app, "/comm");
+        assert!(matches!(app.handle(key(KeyCode::Enter)), Outcome::Continue));
+        assert_eq!(app.composer.text(), "$skill: commit ");
+        assert!(
+            sent.borrow().is_empty(),
+            "the marker is a draft, not a message"
+        );
+        app.composer.clear();
+        typed(&mut app, "/dep");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/dep",
+            "a disabled Skill is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/sha");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/sha",
+            "a shadowed Skill is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/two");
+        app.handle(key(KeyCode::Tab));
+        assert_eq!(
+            app.composer.text(),
+            "/two",
+            "a name with whitespace cannot be referenced and is not offered"
+        );
+    }
+
     /// A resumed session of `count` user messages `ask N`, each cut at `N`.
     fn resume_asks(drawn: &mut Drawn, count: usize) {
         drawn
@@ -8788,6 +9140,7 @@ mod tests {
         let rows = (0..count)
             .map(|n| {
                 std::sync::Arc::new(ViewRow {
+                    failure: None,
                     row_id: format!("u{n}"),
                     kind: RowKind::UserMessage,
                     text: format!("ask {n}"),
@@ -8825,6 +9178,7 @@ mod tests {
     /// gives it.
     fn message(pending: bool) -> std::sync::Arc<ViewRow> {
         std::sync::Arc::new(ViewRow {
+            failure: None,
             display: None,
             row_id: "u1".into(),
             kind: RowKind::UserMessage,
@@ -8851,6 +9205,7 @@ mod tests {
     /// The status row a cancelled turn settles after a stop.
     fn stopped() -> std::sync::Arc<ViewRow> {
         std::sync::Arc::new(ViewRow {
+            failure: None,
             display: None,
             row_id: "stopped-1".into(),
             kind: RowKind::Status,
@@ -9470,6 +9825,7 @@ mod tests {
         snapshot.focus = "main".into();
         drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
         drawn.app.composer.clear();
+        let before = sent.borrow().len();
         let _ = drawn
             .app
             .handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
@@ -9477,16 +9833,11 @@ mod tests {
                 Modifiers::SHIFT,
             )));
         assert!(drawn.app.composer.is_empty());
-        assert!(
-            matches!(sent.borrow().last(), Some(Command::InputControl { input_id, action: "withdraw" }) if input_id == "queued-image")
-        );
-        drawn.app.apply(Update::Withdrawn {
-            input_id: "queued-image".into(),
-        });
-        assert_eq!(drawn.app.composer.text(), "look [Image #7]");
-        drawn.key(KeyCode::Enter);
-        assert!(
-            matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == "look [Image #7]")
+        assert_eq!(sent.borrow().len(), before);
+        assert!(drawn.app.notices.last().unwrap().contains("stay queued"));
+        assert_eq!(
+            drawn.app.snapshot.as_ref().unwrap().queued[0].id,
+            "queued-image"
         );
     }
 
@@ -9505,6 +9856,40 @@ mod tests {
         let draft = drawn.app.line_draft.as_ref().expect("a line draft");
         assert_eq!((draft.parent.as_str(), draft.at), ("main", 2));
         assert_eq!(drawn.app.composer.text(), "ask 2");
+    }
+
+    /// Editing a message that loaded a Skill prefills the operator's own text,
+    /// so resending does not carry the block and load the Skill twice.
+    #[test]
+    fn editing_a_message_that_loaded_a_skill_prefills_the_operators_text_only() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        let mut projection = crate::projection::Projection::default();
+        let event: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "input-1", "sequence": 1, "create_at": 1,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [
+                {"type": "text", "text": "check the build"},
+                {"type": "text", "text": "<dim-skill name=\"checkin\">\nSkill: checkin\nDescription: D\nFile: /x/SKILL.md\n\nInstructions:\nBODY\n</dim-skill>"},
+            ]}, "mode": "queue"},
+        }))
+        .unwrap();
+        projection.apply("main", &event);
+        let applied: crate::wire::Event = serde_json::from_value(serde_json::json!({
+            "id": "applied-1", "sequence": 2, "create_at": 2,
+            "type": "input", "name": "applied", "data": {"input_id": "input-1"},
+        }))
+        .unwrap();
+        projection.apply("main", &applied);
+        let mut snapshot = projection.snapshot();
+        snapshot.session_id = "s1".into();
+        snapshot.focus = "main".into();
+        snapshot.history_complete = true;
+        drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+        drawn.draw();
+        drawn.app.run_command("timeline", "");
+        drawn.key(KeyCode::Up);
+        drawn.key(KeyCode::Char('e'));
+        assert_eq!(drawn.app.composer.text(), "check the build");
     }
 
     /// Entering fullscreen lays out only the shown Session's transcript,
@@ -9819,6 +10204,7 @@ mod tests {
                 provider_id: "relay".into(),
                 model_id: "reasoner".into(),
                 model_preferences: None,
+                capability_snapshot: None,
             }));
             press(&mut app, KeyCode::Char(' '));
             let answer = selection(&app);
@@ -9873,6 +10259,7 @@ mod tests {
                         provider_id: "relay".into(),
                         model_id: "other".into(),
                         model_preferences: None,
+                        capability_snapshot: None,
                     }));
                 }
                 let before = sent.borrow().len();
@@ -9929,6 +10316,8 @@ mod tests {
                     id: (*id).into(),
                     text: (*text).into(),
                     display: None,
+                    held: true,
+                    recallable: true,
                 })
                 .collect(),
             ..ViewSnapshot::default()
@@ -9978,6 +10367,33 @@ mod tests {
                 _ => "other".into(),
             })
             .collect()
+    }
+
+    /// Tab in the palette only completes, so repeating it never runs a
+    /// command and never exits, in either layout.
+    #[test]
+    fn repeated_tab_in_the_palette_only_completes() {
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            assert!(matches!(
+                app.handle(key(KeyCode::Char('/'))),
+                Outcome::Continue
+            ));
+            for _ in 0..3 {
+                assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+                assert_eq!(app.composer.text(), "/new");
+            }
+            assert!(sent.borrow().is_empty(), "Tab ran nothing");
+
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            app.fullscreen = fullscreen;
+            typed(&mut app, "/ke");
+            assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
+            assert_eq!(app.composer.text(), "/keys");
+            assert!(sent.borrow().is_empty(), "the key bindings did not open");
+        }
     }
 
     /// During a run Enter queues the draft, and Ctrl+S steers a draft that is
@@ -10076,12 +10492,16 @@ mod tests {
             ["withdraw:a", "withdraw:b", "stop"]
         );
         assert!(app.composer.is_empty());
-        app.apply(Update::Withdrawn {
-            input_id: "a".into(),
-        });
-        app.apply(Update::Withdrawn {
-            input_id: "b".into(),
-        });
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "second".into(),
+            }],
+        }));
         assert_eq!(app.composer.text(), "first\nsecond");
     }
 
@@ -10096,9 +10516,11 @@ mod tests {
         )));
         assert_eq!(describe(&sent.borrow()), ["withdraw:b"]);
         assert!(app.composer.is_empty());
-        app.apply(Update::Withdrawn {
-            input_id: "b".into(),
-        });
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "second".into(),
+            }],
+        }));
         assert_eq!(app.composer.text(), "second");
     }
 
@@ -10662,6 +11084,7 @@ mod tests {
                     area: Area::Hooks,
                     action: ManagementAction::Save {
                         id: None,
+                        source: None,
                         expected_revision: "user:1".into(),
                         document: serde_json::json!({}),
                     },
@@ -10755,6 +11178,7 @@ mod tests {
                 area: Area::Scheduled,
                 action: ManagementAction::Run {
                     id: "job-1".into(),
+                    source: None,
                     document: None,
                     seed: None,
                 },
@@ -10830,6 +11254,7 @@ mod tests {
                         heading: "user".into(),
                         entries: vec![ManagementEntry {
                             id: "user:commit".into(),
+                            source: None,
                             label: "commit".into(),
                             detail: Vec::new(),
                             enabled: Some(true),
@@ -10850,6 +11275,7 @@ mod tests {
             area: Area::Skills,
             action: ManagementAction::Toggle {
                 id: "user:commit".into(),
+                source: None,
                 enabled: false,
             },
         };
@@ -10888,6 +11314,7 @@ mod tests {
         );
         let row = |id: &str, label: &str| ManagementEntry {
             id: id.into(),
+            source: None,
             label: label.into(),
             detail: Vec::new(),
             enabled: Some(true),
@@ -10925,6 +11352,7 @@ mod tests {
                 },
                 action: ManagementAction::Toggle {
                     id: "other".into(),
+                    source: None,
                     enabled: false,
                 },
             },
@@ -10968,6 +11396,7 @@ mod tests {
                 area: Area::Scheduled,
                 action: ManagementAction::Run {
                     id: "job-1".into(),
+                    source: None,
                     document: None,
                     seed: None,
                 },
@@ -11127,6 +11556,7 @@ mod tests {
                     area: Area::Skills,
                     action: ManagementAction::Run {
                         id: "job-1".into(),
+                        source: None,
                         document: Some(serde_json::json!({"target": "edited"})),
                         seed: Some(serde_json::json!({"target": "src"})),
                     },
@@ -11155,7 +11585,10 @@ mod tests {
             app.write_draft(
                 ManagementDraft {
                     area: Area::Skills,
-                    target: WriteTarget::Run { id: "job-1".into() },
+                    target: WriteTarget::Run {
+                        id: "job-1".into(),
+                        source: None,
+                    },
                     draft,
                     seed: Some(serde_json::json!({"target": "src"})),
                 },
@@ -11173,6 +11606,7 @@ mod tests {
                 area: Area::Skills,
                 action: ManagementAction::Run {
                     id,
+                    source,
                     document: Some(document),
                     seed: Some(seed),
                 },
@@ -11204,6 +11638,7 @@ mod tests {
                 &Area::Skills,
                 &WriteTarget::Entry {
                     id: "job-1".into(),
+                    source: None,
                     revision: "1".into(),
                 },
             )
@@ -11211,14 +11646,148 @@ mod tests {
             "an edit never reopens a run's draft"
         );
         let (target, kept, seed) = app
-            .kept_draft(&Area::Skills, &WriteTarget::Run { id: "job-1".into() })
+            .kept_draft(
+                &Area::Skills,
+                &WriteTarget::Run {
+                    id: "job-1".into(),
+                    source: None,
+                },
+            )
             .expect("the run key reopens the draft");
-        assert_eq!(target, WriteTarget::Run { id: "job-1".into() });
+        assert_eq!(
+            target,
+            WriteTarget::Run {
+                id: "job-1".into(),
+                source: None,
+            }
+        );
         assert_eq!(
             seed,
             Some(serde_json::json!({"target": "src"})),
             "the kept draft keeps the seed it was opened with, not the edited text"
         );
         assert_eq!(kept.path(), path.as_path());
+    }
+
+    fn drawn_text(drawn: &mut Drawn) -> String {
+        use crate::ui::render::panel::strip_escapes;
+        strip_escapes(&drawn.app.reflow_history(100).join("\n"))
+            + &strip_escapes(&drawn.app.frame(drawn.size).live.join("\n"))
+            + &strip_escapes(&drawn.emu.rows_text().join("\n"))
+    }
+
+    fn retry_at(offset_ms: i64) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        now.saturating_add_signed(offset_ms)
+    }
+
+    #[test]
+    fn the_working_line_shows_a_running_retry() {
+        use crate::model::view::RetryView;
+        use dim_agent_types::ModelFailureKind;
+        let mut drawn = Drawn::new((160, 40), None, true);
+        drawn
+            .app
+            .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            focus: "main".into(),
+            history_complete: true,
+            retry: Some(RetryView {
+                attempt: 3,
+                max_attempts: 8,
+                retry_at_ms: retry_at(60_000),
+                kind: ModelFailureKind::ServerError,
+                reason: Some("The server is overloaded".into()),
+            }),
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        let shown = drawn_text(&mut drawn);
+        assert!(
+            shown.contains("Retrying 3/8 in 60 s · The provider reported a server error: The server is overloaded · Esc stops"),
+            "{shown}"
+        );
+
+        // The countdown never goes below zero.
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            focus: "main".into(),
+            history_complete: true,
+            retry: Some(RetryView {
+                attempt: 2,
+                max_attempts: 8,
+                retry_at_ms: 0,
+                kind: ModelFailureKind::Network,
+                reason: None,
+            }),
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        let shown = drawn_text(&mut drawn);
+        assert!(
+            shown.contains(
+                "Waiting for the provider · Could not reach the provider, or the connection dropped · Esc stops"
+            ),
+            "{shown}"
+        );
+
+        // Clearing the retry brings the working line back.
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            focus: "main".into(),
+            history_complete: true,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        let shown = drawn_text(&mut drawn);
+        assert!(!shown.contains("Retrying"), "{shown}");
+        assert!(shown.contains("working…"), "{shown}");
+    }
+
+    #[test]
+    fn an_error_rows_details_join_the_tools_cycle() {
+        use crate::model::view::FailureDetail;
+        use dim_agent_types::ModelFailureKind;
+        let mut error = (*message(false)).clone();
+        error.row_id = "error-1".into();
+        error.kind = RowKind::Error;
+        error.text = "The provider reported a server error: The server is overloaded. Try again later or choose another model.".into();
+        error.tone = Some(crate::model::view::RowTone::Danger);
+        error.failure = Some(FailureDetail {
+            kind: ModelFailureKind::ServerError,
+            status: Some(503),
+            provider_code: Some("overloaded".into()),
+            request_id: Some("req-provider".into()),
+            attempts: 3,
+            waited_ms: 4200,
+            retry_after_ms: Some(60_000),
+            cause: vec!["upstream 503".into()],
+        });
+        let mut drawn = attached();
+        show(&mut drawn, vec![error.into()]);
+        let collapsed = drawn_text(&mut drawn);
+        assert!(!collapsed.contains("kind: server_error"), "{collapsed}");
+        drawn.app.run_command("tools", "");
+        drawn.draw();
+        let expanded = drawn_text(&mut drawn);
+        for line in [
+            "kind: server_error",
+            "status: 503",
+            "provider code: overloaded",
+            "request id: req-provider",
+            "tried 3 times over 4.2 s",
+            "the provider asked to wait 60 s",
+            "cause:",
+            "upstream 503",
+        ] {
+            assert!(expanded.contains(line), "{line:?} missing: {expanded}");
+        }
     }
 }

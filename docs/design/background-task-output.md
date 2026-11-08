@@ -31,14 +31,15 @@ Existing alternatives do not supply a client read:
 
 Expose the existing preview through the existing WorkspaceTools Session part.
 No output event stream, file-read endpoint, new Capability or core mechanism is
-needed. This contract does not settle member controls (#263), recently ended
-task retention, full-file browsing, or Workflow task presentation.
+needed. This contract settles paged reading of a task's registered output file;
+it does not settle member controls (#263), recently ended task retention,
+export, or Workflow task presentation.
 
 ## 2. Client method
 
 WorkspaceTools registers the leaf namespace **`session.exec.output`** with the
-Session's `sessionMethods` from its `apply`; it declares one method of the same
-name:
+Session's `sessionMethods` from its `apply`; it declares the tail method of the
+same name below and the sibling `session.exec.output.page` after it:
 
 ```json
 {
@@ -60,7 +61,8 @@ The response uses exec's existing sanitized tail-preview rule: the last 2,000
 lines within its 50 KiB budget, including its existing terminal-newline behavior.
 It is a snapshot of captured output, not the entire file or a promise that the
 process has flushed its own buffers. The UI labels it as a tail preview.
-There is no caller-supplied path, byte range, cursor, size limit or subscription.
+The tail reply takes no caller-supplied path, byte range, cursor, size limit or
+subscription.
 
 The leaf namespace matters: the Session's method table refuses, at
 registration, a namespace that contains an exact built-in. `session.exec` would
@@ -70,8 +72,30 @@ unchanged.
 
 Each call resolves the named branch through WorkspaceTools' existing
 `TreeCommands`, then asks that branch's BackgroundExec for the active task's
-capture. No Session part retains branch business state. A task id from another
-branch or Session cannot select an output file.
+capture. No Session part retains branch business state.
+
+**Task identity.** Every request resolves `taskId` inside the branch it names:
+`sessionId` admits the Session, `branchId` selects that Session's branch, and
+the task must be one that branch started. The built-in `exec` mints
+`exec-<uuid>` per call, which does not repeat within a Session in practice, but
+no owner guarantees a Session-unique id; the contract key is `(sessionId,
+branchId, taskId)`, and a task id this branch did not start is
+`exec_task_unknown` even when another branch or Session has it. The same key
+holds for `session.exec.stop` and `session.exec.output.page`.
+
+Command completion remains authoritative through `exec/ended`. Its
+`structuredContent` carries the final `preview` and `previewTruncated` beside
+`outputBytes`, `outputTruncated` and `outputPath`: `preview` is the same
+sanitized tail the live read shows (the last 2,000 lines within 50 KiB, with
+the existing terminal-newline behavior), and `previewTruncated` says those
+bounds left something out — bytes outside the captured tail buffer, or a
+sanitized tail the rule cut. Both are computed from the same settled capture as
+the result's model-readable `Preview:` section; a command that printed
+nothing carries `preview: ""`. A recovered end — a task whose
+owner restarted — carries neither member, because its final output is unknown
+and its file stays readable through `session.exec.output.page`. The members
+are additive `structuredContent` fields: no event, method, feature entry or
+fixture changes.
 
 | Condition | Result |
 | --- | --- |
@@ -90,6 +114,47 @@ refreshing without marking the task failed or ended. After receiving the real
 terminal event, it displays the existing final result. A read failure does not
 stop the command or change its task status.
 
+### Sibling method: the paged full output
+
+Alongside the tail, the same `session.exec.output` namespace declares
+`session.exec.output.page {sessionId, branchId, taskId, cursor?, limit?}`, which
+reads the task's registered output file (`exec/started.outputPath`) by byte
+cursor and answers `{text, bytes, nextCursor?, truncated}`. A page is bounded:
+`limit` rejects 0, defaults to 1 MiB, and clamps to 4 MiB; `text` is sanitized
+exactly like the preview; and a page ends on a character boundary, so a
+character the limit splits is served whole — at the start of the next page when
+the cut falls after other characters, and in the page itself when the budget
+cuts the very first character, so a page carries at most `limit` plus three
+bytes and consumes at least one character while the file has one.
+
+A client walks the file by served bytes, not by `nextCursor`: the next offset is
+always `cursor + bytes`, where `bytes` is the file bytes this page consumed
+(sanitization can make `text` shorter). `nextCursor` is present only when the
+read found at least `limit` bytes — the page was full — and it equals that same
+offset, so the client may continue immediately; a shorter page carries no
+`nextCursor` even while the task is still writing, and that is not the end of
+the walk. `bytes == 0` means the cursor is caught up or ended: the file has
+ended at or before it, or a running task has not written the bytes at the cursor
+yet, and the client retries the same cursor later. A client-supplied cursor
+inside a character answers the same empty page; a cursor the method handed out
+never sits inside one. The file is append-only, so a cursor the method handed
+out always names a byte that never changes, and rereading it returns the same
+bytes.
+
+`truncated` is `exec/ended`'s
+`outputTruncated`, the live capture's flag while the task runs, and the file's
+size at the 64 MiB cap only for a task whose owner restarted (no flag exists
+there). The method opens the path the branch's own `exec/started` fact
+registers — never a client-supplied path — so a task id from another branch or
+Session cannot select a file; a task whose file was cleaned answers
+`exec_output_unavailable`, distinct from the tail's `exec_task_unknown`, and an
+unknown task answers `exec_task_unknown` saying no such task is known on the
+branch, since an ended task's file is still readable there. The
+`session.exec.output` tail keeps its preview rule and its
+`exec_task_unknown` once the live capture is cleared. This paged read is the
+full-file browsing §1 settles; it does not settle a daemon-hosted open/export
+method, retention, or member controls.
+
 ## 3. Ownership and lifecycle
 
 The active capture is an existing I/O resource. BackgroundExec's task record
@@ -99,8 +164,19 @@ The table also retains ended/replayed tasks, so table membership does not imply
 live output. The handle is released after the supervisor's terminal append attempt
 settles, including on write failure; do not release it between process settlement
 and that append. The read must not extend the existing resource cleanup lifetime.
-Use the capture's existing synchronization, with no new lock or second output
-buffer. Release the task-table guard before awaiting the capture read.
+The tail read uses the capture's existing synchronization, with no new lock or
+second output buffer. The page's byte read takes no capture lock: it opens the
+registered file itself and reads from the cursor, so it never waits on the
+pump's write. A running task's page does take that same lock once per call, the
+one the tail read already uses, only to copy the capture's `truncated` flag —
+held for the copy, never across the file read — so a page can hold the pump up
+only for that copy. That is safe because the file is append-only — a page only
+reads bytes at or past its cursor — and a task is registered only after its
+file exists (`ensure_file` runs before `exec/started`), so a known task's
+`exec/started` always names its own file; a concurrent write can only extend
+the file past the cursor, and a file removed later answers
+`exec_output_unavailable`. Release the task-table guard before awaiting either
+read.
 
 Register the method on WorkspaceTools' original context after its cleanup is
 registered. C1 owns method admission and unload settlement. The read is finite,
@@ -157,6 +233,7 @@ the CLI's existing localization and theme paths.
 | Owner | Change |
 | --- | --- |
 | WorkspaceTools / BackgroundExec | Finite active-capture read, C1 declaration on the existing Session part and leaf namespace registration; no new plugin |
+| WorkspaceTools / exec | The background `exec/ended` result gains `preview` and `previewTruncated` in `structuredContent`, computed by the shared bounded-tail rule |
 | Rpc | Existing C1 routing and Session admission only; no custom handler |
 | CLI | Existing tasks projection, command detail and refresh lifetime; stop remains `session.exec.stop` |
 

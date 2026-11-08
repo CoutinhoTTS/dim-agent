@@ -8,6 +8,7 @@ use dim_agent_capabilities::{
     shell_session::ShellSessionPlugin,
     workspace_tools::WorkspaceToolsConfig,
 };
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{Session, SessionConfig};
 use dim_agent_types::{ApprovalCallData, InputMode, PermissionPolicy, PermissionPreset};
 use dim_app_server::storage::SessionStore;
@@ -164,8 +165,7 @@ async fn run(session: &Session, name: &str, input: Value) -> ToolResult {
         .await
         .unwrap()
         .unwrap();
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()

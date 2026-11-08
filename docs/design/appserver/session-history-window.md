@@ -18,12 +18,14 @@ and is served by `Connection::history`
 1. It pins `through`: the request's value, or the branch's published head. A
    value beyond the branch's dispatched position fails `invalid`; the call then
    waits until the branch dispatches up to `through`.
-2. It reads `Session::local_page(branch, after, limit, through)`
-   ([agent.rs:530](../../../crates/dim-agent-runtime/src/agent.rs#L530)), which
-   rejects a `through` beyond the published head, then calls the store's
-   `read_page` ([timeline_store.rs:156](../../../crates/dim-agent-runtime/src/timeline_store.rs#L156),
-   SQLite [storage/timeline.rs:2623](../../../crates/dim-app-server/src/storage/timeline.rs#L2623)).
-   `after` must end a batch. `limit` is required and must be positive; the v3
+2. It reads the page through `AgentIndex::history_page`
+   ([agents.rs](../../../crates/dim-app-server/src/agents.rs)): the call acquires
+   the Session first, so a Session that unloaded is loaded again before the
+   read; a live line pages through the branch's query and the store's
+   `batch_end`, and a line that has ended goes through `TreeCommands.page` at
+   its fixed head. The client protocol has no page read of stored facts for a
+   Session the process does not hold (ADR 021 D3).
+   `after` and `through` must end a batch. `limit` is required and must be positive; the v3
    method sets no upper bound today, and clients send 256 or 512. A page takes
    `limit` events and then runs to the end of that batch, so it can exceed
    `limit`; it never passes `through`.
@@ -108,12 +110,12 @@ turn consumed.
 | D3 | The window is `(windowStart - 1, through]`: the newest turn at or below `through` together with the `input/message` events that turn consumed (§4.2); with no `turn/start` the window starts at the branch start | Start at `turn/start` only | The prompting input precedes the turn start, and clients render it as their user row (§1.2). A window from `turn/start` gives a turn without its prompt. A fixed number of events before the turn start is arbitrary: a queued input can be much older |
 | D4 | A `latestTurn` page is the newest part of the window, bounded by `HISTORY_TURN_LIMIT` (4,096 raw events) and aims for `HISTORY_TURN_BYTES` (4 MiB of encoded visible events); when the window is larger the reply is its newest part and `nextBefore` names the cursor for the rest. Trimming happens on batch boundaries and never splits a batch, so one batch above 4 MiB is returned whole. A batch above the transport frame (`MAX_FRAME_BYTES` minus headroom, [outbound.rs:6](../../../crates/dim-app-server/src/outbound.rs#L6)) cannot be sent and the call fails `history_too_large` | An event-count bound alone, no bound, or splitting a batch | Events have no size bound: 4,096 events of large tool results can exceed the 16 MiB frame and kill the connection. 4 MiB is a target that bounds ordinary replies, and 4,096 events makes the measured 1,956- and 3,122-event turns one reply and the 6,862-event turn two. A batch is the Timeline's atomic unit, so trimming inside one would break the fold; the only hard error is a batch the transport cannot frame |
 | D5 | `before` adds backward paging: the page ends at the last batch end at or below `before - 1`, and starts at a batch start, so `after = from - 1` reads the same page forward | Read the newest page as `after = head - N`, as [#276](https://github.com/arcships/dim/issues/276) suggested | `after` must end a batch; `head - N` need not, and when it does not the read fails with "cursor is inside an atomic batch", so the client has to search for a boundary. A backward page has to walk batches from their ends |
-| D6 | The turn start and the prompting input are store lookups through one derived partial index, not a scan and not state rebuilt during restore | Fold the newest turn start and the consumed inputs during restore validation; keep them in process memory; or take a native format version | [#601](https://github.com/arcships/dim/issues/601) makes a re-acquired Session skip validation, so a value rebuilt there would be missing exactly when the read is cheap. Process memory would be dropped on unload. The lookups are single statements, independent of the turn's size. The index changes no row and no decode, so it is created at open rather than as a format step (§5.1) |
+| D6 | The turn start and the prompting input are selected reads through one derived partial index, not a scan and not state rebuilt during restore | Fold the newest turn start and the consumed inputs during restore validation; keep them in process memory; or take a native format version | [#601](https://github.com/arcships/dim/issues/601) makes a re-acquired Session skip validation, so a value rebuilt there would be missing exactly when the read is cheap. Process memory would be dropped on unload. Each read is a selection by kind from the pinned watermark down, independent of the turn's size ([ADR 020](../../adr/020-timeline-read-convergence.md) D6). The index changes no row and no decode, so it is created at open rather than as a format step (§5.1) |
 | D7 | A whole-history read keeps using forward paging; the window is opt-in | Replace `after`-paging with backward paging | Clients that show scrollback (CLI, web, export) read from the start and need no window; replacing the direction would change every one of them and the export's fixed-prefix rule |
 | D8 | `sessions.history` (the process service) does not gain the fields | Mirror the fields in both reads | It has no consumer that opens a thread; the fields are a client read. Adding them would advertise a contract nothing uses, and the service can adopt the read when a consumer needs it |
 | D9 | All new request and reply fields are optional; a request without them keeps today's meaning, limits and errors | A protocol version bump | The wire stays v3; replies only gain fields, and request decoding is strict only for fields the client sends. A client learns the feature from `hello.features` (`session.history.latestTurn`), so it never sends the fields to an older daemon that would reject them as unknown |
 | D10 | The first page of a window is the newest part, and the client backfills towards the turn start | The oldest part, so the client folds forward while live events arrive | A thread opens to show the newest content; the oldest part would show the turn's beginning and hide the running output. Live events after the pin arrive as `session.event` either way, and `session.model.progress` keys the open blocks |
-| D11 | The forward mode keeps today's contract, including its unlimited `limit`; only `latestTurn` adds a bound | Apply the 4,096-event and 4 MiB bound to every `after` read | Existing clients and the export page with their own limits; changing their accepted requests would break callers without reducing any measured cost |
+| D11 | The forward mode keeps today's contract, including its unlimited `limit`; a forward reply is bounded by the same encoded-byte budget as a window, and a short page is not the end — `done` is. A trimmed page keeps its oldest whole batches within 4 MiB and `nextAfter` is its last returned sequence, so every client continues as it does today | Apply the 4,096-event and 4 MiB bound to every `after` read, or bound only windows | Existing clients page with their own limits; changing their accepted requests would break callers. But events have no size bound, so an ordinary forward page of large tool results can exceed the 16 MiB frame and kill the connection: bounding the reply, not the request, closes that hole for every caller, and a trimmed page is what clients already handle — they continue on `nextAfter` and stop on `done` |
 | D12 | If the pin is the `turn/start` itself and the turn's first request is not committed at `through`, the window starts at the newest `input/message` at or below the turn start; a later read with a new pin can start earlier | Wait for the first request before replying; keep no prompt; treat it as an error | Waiting would make a pinned read depend on events above the pin. The fallback keeps the prompting input in the window. A new pin may legitimately produce an earlier window start, and the same pin keeps every candidate at or below it, so the reply is stable |
 
 ## 4. Contract
@@ -127,7 +129,7 @@ turn consumed.
 | `after?` | Unchanged forward cursor: exclusive, must end a batch. Absent in a window read (rejected there); default 0 otherwise |
 | `before?` | Backward cursor: exclusive upper bound. The page ends at the last batch end at or below `before - 1` and never above `through`. Must be at least 1 and at most `through`. Mutually exclusive with `after`; accepted with and without `latestTurn` (without it, the window is the whole branch). Absent on the first window page, where the top is `through` |
 | `latestTurn?` | `true` selects the turn window (§4.2). Mutually exclusive with `after`. `false` behaves as absent. It requires the native Session store, like `session.catalog` |
-| `limit?` | Raw events per page before the page runs to its batch boundary. Without `latestTurn`: positive, no upper bound (unchanged), default 256 when absent. With `latestTurn`: 1 to 4096, default 4096. The encoded-byte budget of §4.4 can make the page shorter in both window modes |
+| `limit?` | Raw events per page before the page runs to its batch boundary. Without `latestTurn`: positive, no upper bound (unchanged), default 256 when absent. With `latestTurn`: 1 to 4096, default 4096. The encoded-byte budget of §4.4 can make the page shorter in every mode, forward included; a short page is not the end |
 
 A `latestTurn` read is newest-first. A read with `before` and without `latestTurn`
 is newest-first over the branch. A read with neither is today's forward read.
@@ -195,8 +197,17 @@ the event and byte limits like any other window.
   raw rows and not the envelope. A batch is kept whole; the page never ends
   inside one, so a single batch above 4 MiB is returned whole and can make the
   reply larger than the target. Only a batch above the transport frame fails
-  `history_too_large` (§4.5); the client can still read that turn with forward
-  paging (§1.1).
+  `history_too_large` (§4.5), and it fails in both directions: no
+  `session.history` page can carry it, so a client reads the resource itself
+  (`session.exec.output.page` for terminal output) or the export. A client
+  walking forward cannot get past such a batch: every retry from the same
+  `after` answers `history_too_large` again. That is still better than an
+  over-frame reply, which closed the connection.
+- A forward page is bounded from the other end: it keeps its oldest whole
+  batches within the byte target and always at least the first, so `nextAfter`
+  always advances. A trimmed page is a short page with `done` false — a short
+  page is not the end; `done` is — and the client continues on `nextAfter`
+  exactly as it does today.
 - A page is batch-complete at both ends. Forward: it takes `limit` events and
   runs to the end of that batch. Backward: it takes up to `limit` events
   downward from the top and runs to the start of the batch that holds the oldest
@@ -238,7 +249,7 @@ the existing `-32602 invalid_params`.
 | 9 | `through` is inside a batch | storage error (unchanged) |
 | 10 | `after` is above `through`, or `after` is inside a batch | `invalid` (unchanged) |
 | 11 | `before` is above `through` | `invalid` |
-| 12 | the newest batch of a window page encodes to more than the transport frame minus 64 KiB | `-32000 history_too_large`: the reply cannot be framed |
+| 12 | the first batch of a history page — the newest of a window, the oldest of a forward read — encodes to more than the transport frame minus 64 KiB | `-32000 history_too_large`: the reply cannot be framed |
 
 Every other combination is accepted: `latestTurn` with or without `through`;
 `latestTurn` with or without `before`; `before` with or without `latestTurn`;
@@ -255,7 +266,7 @@ The method's error contract, including the new `history_too_large`:
 | `session_build_failed` | -32000 | acquiring the Session failed while restoring it | report it; a retry may succeed after the cause is fixed |
 | `service_reloading` | -32000 | the Agents index, or a capability the restore needs, is reloading | retry |
 | `session_invalid_input` | -32000 | the branch does not exist | correct the branch |
-| `history_too_large` | -32000 | the newest batch of a window page alone encodes to more than the transport frame minus 64 KiB, so the reply cannot be framed | read that turn with forward paging (§1.1); no retry of the same window helps |
+| `history_too_large` | -32000 | the first batch of a history page alone encodes to more than the transport frame minus 64 KiB, so the reply cannot be framed | read the batch's own resource (for terminal output, `session.exec.output.page`) or the export; a forward walk cannot get past the batch, and every retry from the same `after` answers `history_too_large` again — but the connection stays open, unlike an over-frame reply |
 | none | -32603 | a storage failure or a reply encoding failure; opaque, with a server message | retry, and report if it repeats |
 
 `session.history` returns no other `appError`. The existing `session.submit`
@@ -302,44 +313,50 @@ Consequences:
 
 ### 5.2 Queries
 
-- Turn start:
-  `SELECT max(sequence) FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND kind='turn/start' AND sequence<=?3`.
-- Newest input before the turn, the window's floor:
-  `SELECT max(sequence) FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND kind='input/message' AND sequence<=?3`.
-- First request: forward from `T` on the primary key until the first
-  `step/model-start` at or below `through`, collecting the `input/consumed` ids
-  before it. A few events, not a scan of the turn.
-- Input messages: each `input_id` is an event id, so its sequence comes from
-  `timeline_events_by_id`, which already exists
-  ([sqlite.rs:86](../../../crates/dim-app-server/src/storage/sqlite.rs#L86)).
-  `SessionStore::read_events` performs the same lookup today
-  ([storage/timeline.rs:1257](../../../crates/dim-app-server/src/storage/timeline.rs#L1257)).
-- Backward page: rows are read from the primary key
-  `(session_id, branch_id, sequence)` downward from the top, whole batches, so
-  the read does not use `timeline_events_by_end`, which v25 removed
-  ([#596](https://github.com/arcships/dim/issues/596)). The row model already
-  allows a physical row to hold several events (`last_sequence`); the page
-  respects row boundaries and returns events in ascending order.
+The anchors are selections over the branch's facts, so they are the Timeline
+query ([plugin contract §5.4](../plugin-contract.md#54-the-event-query)) over
+this branch, each with the kind named and `through` as the start of its read:
+
+- Turn start: `turn/start`, newest first, one event.
+- Newest input before the turn, the window's floor: `input/message`, newest
+  first from `T`, one event.
+- First request: `step/model-start`, oldest first from `T`, one event at or
+  below `through`.
+- Consumed inputs: `input/consumed`, oldest first from `T` up to the first
+  request, then each `input_id`, which is an event id, as one `input/event_id`
+  read. A few events, not a scan of the turn.
+
+The backward page is the loaded branch's own read too: the Timeline query
+returns the events of `window_start..=through` ascending, and `batch_end` fixes
+both ends — the greatest batch edge at or below `before - 1` and the start of
+the batch holding the oldest taken event ([ADR 021](../../adr/021-reads-follow-the-state-owner.md) D1).
+The read does not use `timeline_events_by_end`, which v25 removed
+([#596](https://github.com/arcships/dim/issues/596)). The row model already
+allows a physical row to hold several events (`last_sequence`); the query
+returns events in ascending order, and the page is whole batches at both ends
+(§4.4).
 
 ### 5.3 Where the reads live
 
-Both reads are persistence reads of the Session's own branch, next to the store
-reads the App Server already has for Collaboration and summaries: `read_page`
-([storage/timeline.rs:1010](../../../crates/dim-app-server/src/storage/timeline.rs#L1010)),
-`read_events`
-([storage/timeline.rs:1257](../../../crates/dim-app-server/src/storage/timeline.rs#L1257))
-and `read_tool_use_starts`
-([storage/timeline.rs:1293](../../../crates/dim-app-server/src/storage/timeline.rs#L1293)).
-The window is not a Timeline mechanism: it names a turn fact, a message lookup
-and a sequence range, and it is reached from `Connection::history` through
-`AgentIndex`, as `read_tool_use_starts` is
-([agents.rs:670](../../../crates/dim-app-server/src/agents.rs#L670)). The window
-requires the native store: a host without one (`ServerConfig.database_path:
-None`) advertises no `session.history.latestTurn` and answers a window request
+The anchors and the page are served by the owner of the line's facts: while the
+line is open, the branch's Timeline, which `Connection::history` already has the
+loaded Session for — each anchor is a kind selection and the page is a range
+selection, both through `Session::query`, with `Session::batch_end` for the
+page's ends. An ended line's Timeline is gone, so its anchors and its page are
+the tree's read at the fixed head it owns: `TreeCommands::query` for both
+directions and `TreeCommands::batch_end` for the page's ends
+([ADR 021](../../adr/021-reads-follow-the-state-owner.md) D2,
+[timeline read ownership §2](../timeline-read-ownership.md#2-owners-and-their-reads)).
+A line that ends while its window is read is served by the tree: the owner is
+chosen when the read starts, and an answer of `BranchEnded` re-runs the same
+request through the tree at the fixed head.
+The App Server has no store read on this path. The window requires the native store: a host without one
+(`ServerConfig.database_path: None`) advertises no
+`session.history.latestTurn` and answers a window request
 `invalid`, as `session.catalog` is advertised only with a database path. No
-second paging implementation is added. Both the forward and the backward page
-are paging reads, so neither rebuilds the request bodies of `context/prepare`
-and `model/call`; those records do not reach the reply
+second paging implementation is added. The query rebuilds the requests of the
+rows it returns ([ADR 020](../../adr/020-timeline-read-convergence.md) D6);
+those records do not reach the reply
 ([request delta storage §7.5](request-delta-storage.md#75-reads-that-do-not-use-request-bodies)).
 
 The runtime, the Session facade and `sessions.history` are untouched;
@@ -393,8 +410,8 @@ window pages, as it already does after forward pages.
 | --- | --- |
 | [#601](https://github.com/arcships/dim/issues/601) skips full revalidation when the stored head is unchanged | Independent and complementary. The window's anchors come from indexes, so a skipped validation does not remove them; [#601](https://github.com/arcships/dim/issues/601) removes the restore scan before the read, and this design removes the client scan after it |
 | [#713](https://github.com/arcships/dim/issues/713) profiles the cold first `session.attach` | Independent. The read stays after attach and acquires the Session like every Session method; if attach already restored it, the window is served from the loaded branch. If #713 later bounds the first attach, the window contract does not change |
-| [#588](https://github.com/arcships/dim/issues/588) / [#596](https://github.com/arcships/dim/issues/596) read-path audit | The backward page reads the primary key (§5.2) and does not depend on the removed `by_end` index. The two lookups add partial indexes; they do not change how history pages are read |
-| [Restore-scoped shared read](restore-shared-read.md) | The window reads after publication, when the opening's copy is released; it is an ordinary committed-history read |
+| [#588](https://github.com/arcships/dim/issues/588) / [#596](https://github.com/arcships/dim/issues/596) read-path audit | The backward page is a range query (§5.2) and does not depend on the removed `by_end` index. The two anchors add partial indexes; they do not change how history pages are read |
+| [Restore-scoped shared read](restore-shared-read.md) | The window reads committed facts only; the Timeline reads the store on every read, with no opening copy ([ADR 021](../../adr/021-reads-follow-the-state-owner.md) D6) |
 | [Idle unload](idle-unload.md) | Unchanged: `session.history` acquires the Session, and a read during an unload waits for the restore and then serves the window |
 | [sessions service](sessions-service.md#67-history) | Unchanged (D8) |
 | `session.catalog`, `session.summaries`, `session.event` | Unchanged; none reads the indexes |
@@ -423,13 +440,12 @@ window pages, as it already does after forward pages.
 ## 10. Requirements raised to mechanism owners
 
 None. The design was checked against [§4 rule 8](../../architecture/rust-agent/principles.md#4-通过时间线扩展行为):
-the App Server already reads the Session's store for its own views
-(`read_page`, `read_events`, `read_tool_use_starts`), and the window needs only
-reads over the store's existing tables plus one index. A Timeline facade read
-(`Session::local_page_before`) was considered and rejected: it would add a
-protocol view's needs to the runtime's public read contract, while the window
-also needs the App Server's event-id and kind lookups, and `sessions.history`
-does not need the mode (D8).
+the anchors are the Timeline query the contract already fixes, and the page is
+the App Server's own read of the Session's store (`read_page`, `read_events`,
+`read_tool_use_starts`) over the existing tables plus one index. A Timeline
+facade read with an end bound (`Session::local_page_before`) was considered and
+rejected: the query carries no end and no batch edges, which are what the page
+needs, and `sessions.history` does not need the mode (D8).
 
 ## 11. Acceptance
 
@@ -468,7 +484,10 @@ The implementation in this change carries these.
 9. **Byte bound.** A turn whose newest part encodes to more than 4 MiB is
    trimmed on batch boundaries, and its second page continues without a gap; a
    single batch above 4 MiB is returned whole, and only a batch above the
-   transport frame replies `history_too_large`.
+   transport frame replies `history_too_large`. A forward page of large facts
+   is bounded the same way from its own start: the reply stays under the
+   frame, `done` is false, and paging with `nextAfter` reaches the same events
+   in the same order.
 10. **Measurement.** A flow test builds turns of about 1,900, 3,100 and 6,900
     events and reports, for each, the number of `session.history` requests the
     client needs for the whole turn, the encoded reply bytes and the call

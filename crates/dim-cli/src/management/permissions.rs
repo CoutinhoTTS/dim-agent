@@ -64,7 +64,7 @@ pub async fn apply(client: &mut Client, action: &ManagementAction) -> Result<Ans
     match action {
         ManagementAction::List | ManagementAction::Reload => read(client).await,
         ManagementAction::Add { document } => add(client, document).await,
-        ManagementAction::Remove { id } => remove(client, id).await,
+        ManagementAction::Remove { id, .. } => remove(client, id).await,
         ManagementAction::Toggle { .. }
         | ManagementAction::Save { .. }
         | ManagementAction::Run { .. }
@@ -155,6 +155,7 @@ pub(super) fn view(rules: &Rules, actions: &[ActionKind]) -> ManagementView {
             t("user"),
             ManagementEntry {
                 id: id.clone(),
+                source: None,
                 label: id,
                 detail: detail(rule),
                 // A rule has a decision, not an on/off state.

@@ -44,7 +44,7 @@ test('packed plugin service types compile the author guide and enforce the publi
     .replace("'../../npm/plugin.js'", "'dimcode/plugin'"));
   const calls = path.join(directory, 'calls.mts');
   writeFileSync(calls, `
-import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolRegistry, ToolExecute, ToolResult, SessionMethods, SessionMethodHandler, ManagementMethods, MethodHandler, MethodDeclaration, SessionConfig, SessionBroadcast, BranchEvent, Delivery, Services, AgentErrorThrown, MethodReply } from 'dimcode/plugin';
+import type { Settings, SettingsResult, Sessions, WorkflowFiles, WorkflowFileEntry, WorkflowFilesErrorThrown, SessionPermissions, PermissionState, PermissionPolicy, SessionsErrorThrown, SessionMetadata, SessionMetadataResult, AuxiliaryModel, AuxiliaryReply, FileScope, FileResult, ToolRegistry, ToolExecute, ToolResult, SessionMethods, SessionMethodHandler, ManagementMethods, MethodHandler, MethodDeclaration, SessionConfig, SessionBroadcast, BranchEvent, Services, AgentErrorThrown, MethodReply, CallChannel, CallChannelError } from 'dimcode/plugin';
 declare const settings: Settings;
 declare const sessions: Sessions;
 declare const permissions: SessionPermissions;
@@ -162,6 +162,20 @@ void sessionHandler({ callId: 'call', method: 'session.example.echo', params: { 
   Promise.resolve(), () => {});
 // @ts-expect-error a Session method call names its Session.
 void sessionHandler({ callId: 'call', method: 'session.example.echo', params: {} }, Promise.resolve(), () => {});
+void handler({ callId: 'call', method: 'example.status', params: [1, true],
+  origin: { connectionId: 'connection' } }, Promise.resolve(), () => {});
+const notificationOrigin: MethodDeclaration = { name: 'example.status', mutating: false,
+  interruption: 'report', progress: false, notifications: ['example.changed'] };
+void notificationOrigin;
+declare const channel: CallChannel;
+const notification = await channel.notify({
+  connectionId: 'connection', callId: 'call', method: 'example.changed', params: { step: 'done' } });
+const closedConnection: void = await channel.closed({ connectionId: 'connection' });
+void notification; void closedConnection;
+// @ts-expect-error a notification names its call, the declared method and JSON params.
+void channel.notify({ connectionId: 'connection', method: 'example.changed' });
+const channelCode: 'undeclared' | 'gone' | 'too_large' = (undefined as unknown as CallChannelError).code;
+void channelCode;
 const result: ToolResult = { content: [{ type: 'text', text: 'handle: owned-id' }],
   structuredContent: { handle: 'owned-id' }, backgroundTask: { taskId: 'task', wakePolicy: 'manual' },
   blobRefs: [{ blobId: 'blob', sessionId: 'session', kind: 'text', path: '/files/result' }],
@@ -202,15 +216,14 @@ void branch.dispatcher.listen('counter', ['input/message'], async event => {
   const data: Record<string, unknown> = event.data;
   void sequence; void data;
 });
-await branch.dispatcher.consume('counter', ['input/message'], async (delivery: Delivery) => {
-  const events: BranchEvent[] = 'replay' in delivery ? delivery.replay : [delivery.live];
-  void events;
-});
-// @ts-expect-error the handler takes the replay or one live event, not a bare event.
-void branch.dispatcher.consume('counter', ['input/message'], (event: BranchEvent) => { void event; });
+void branch.dispatcher.consume('counter', ['input/message'],
+  async () => 1n,
+  async event => { void (event.sequence as number | bigint) });
 const cutoff: number | bigint = await branch.dispatcher.committed();
-const own: BranchEvent[] = await branch.dispatcher.local(0n, cutoff);
-void branch.dispatcher.history(cutoff);
+const own: Awaited<ReturnType<Services['timeline']['query']>> = await branch.timeline.query({
+  scope: 'branch', include_publishing: true, from_sequence: 1n, order_by: 'sequence',
+  direction: 'ascending', limit: 1n, offset: 0n,
+});
 void branch.treeCommands.input('main', { blocks: [{ type: 'raw', text: 'source marker' }], mode: 'queue' });
 void branch.treeCommands.create('main', cutoff, { prompt: 'child', source: { kind: 'host', operation_id: 'create-id' } }, cancelled);
 const info = await branch.treeCommands.info('main');
@@ -232,6 +245,31 @@ void branch.treeCommands.create('main', 0, { prompt: 'child', source: { kind: 'h
 // @ts-expect-error sequence values must retain their number | bigint type.
 const lossyCut: number = cutoff;
 `);
+  const uiFixture = path.join(directory, 'ui.mts');
+  writeFileSync(uiFixture, `
+import type { PanelError, PanelModule, PanelServices, TimelinePage } from 'dimcode/ui';
+const isClosedBinding = (error: PanelError): boolean => error.name === 'PanelError' && error.code === 'binding_closed';
+void isClosedBinding;
+import type { UiResources, PublishFile, ResourceRef } from 'dimcode/plugin';
+declare const resources: UiResources;
+const input: PublishFile = { path: '/workspace/report.txt', mediaType: 'text/plain' };
+const reference: ResourceRef = await resources.publishFile(input);
+await resources.withdraw(reference);
+const panel: PanelModule<Required<PanelServices>> = {
+  mount(root, context) {
+    const link = document.createElement('a');
+    link.href = context.services.resources.url(reference);
+    root.append(link);
+    void context.services.session.history?.read({ limit: 10 }).then((page: TimelinePage) => page.events[0]?.data);
+    // @ts-expect-error panels cannot access a transport or arbitrary RPC.
+    context.call('session.close', {});
+    // @ts-expect-error panels cannot publish server files.
+    context.services.resources.publishFile(input);
+    return () => link.remove();
+  },
+};
+void panel;
+`);
   const compiler = path.join(root, 'runtime/node_modules/typescript/bin/tsc');
   const declarations = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
@@ -239,6 +277,6 @@ const lossyCut: number = cutoff;
   assert.equal(declarations.status, 0, declarations.stdout + declarations.stderr);
   const checked = spawnSync(process.execPath, [compiler,
     '--strict', '--noEmit', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
-    ...files, calls, branchFixture, partRow, permissionsFixture, workflowFixture], { encoding: 'utf8' });
+    ...files, calls, branchFixture, partRow, permissionsFixture, workflowFixture, uiFixture], { encoding: 'utf8' });
   assert.equal(checked.status, 0, checked.stdout + checked.stderr);
 });

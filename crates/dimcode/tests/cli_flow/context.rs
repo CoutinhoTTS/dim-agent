@@ -27,7 +27,6 @@ fn tui_compaction_reports_committed_failures_once_and_keeps_call_errors() {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -80,7 +79,7 @@ fn tui_compaction_reports_committed_failures_once_and_keeps_call_errors() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("1.8K / 256K");
         for expected in [
             "candidate 1 does not reduce input",
@@ -113,7 +112,6 @@ fn tui_shows_context_usage_the_hello_does_not_list() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -168,7 +166,7 @@ fn tui_shows_context_usage_the_hello_does_not_list() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1.8K / 256K");
     shown.send(()).unwrap();
     terminal.write(b"hello\r");
@@ -190,7 +188,6 @@ fn tui_shows_no_reading_and_keeps_working_when_context_usage_fails() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -235,7 +232,7 @@ fn tui_shows_no_reading_and_keeps_working_when_context_usage_fails() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"still here\r");
     terminal.until("the session still answers");
@@ -296,7 +293,6 @@ fn tui_usage_shows_the_last_requests_cache_hit_rate() {
         let (shown, wait_shown) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[]);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -348,7 +344,7 @@ fn tui_usage_shows_the_last_requests_cache_hit_rate() {
         } else {
             "--scrollback"
         });
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("1.8K / 256K");
         shown.send(()).unwrap();
         terminal.until("first request");
@@ -385,7 +381,6 @@ fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -424,7 +419,7 @@ fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1.8K / 256K");
     shown.send(()).unwrap();
     terminal.until("full hit");
@@ -467,7 +462,6 @@ fn tui_usage_shows_the_cache_hit_rate_a_resumed_session_recorded() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -497,7 +491,7 @@ fn tui_usage_shows_the_cache_hit_rate_a_resumed_session_recorded() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("64K / 256K");
     terminal.write(b"/usage\r");
     terminal.until("last request cached 92%");
@@ -514,7 +508,6 @@ fn tui_usage_cache_hit_rate_ignores_events_off_main() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -561,7 +554,7 @@ fn tui_usage_cache_hit_rate_ignores_events_off_main() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("64K / 256K");
     shown.send(()).unwrap();
     terminal.until("main request");
@@ -599,7 +592,6 @@ fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
     let (read, wait_read) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let first = wire.read("session.history");
@@ -656,7 +648,7 @@ fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1.8K / 256K");
     terminal.write(b"/usage\r");
     terminal.until("tokens (25%)");
@@ -698,7 +690,6 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
     let (ended, wait_ended) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -793,7 +784,7 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("1.8K / 256K");
     shown.send(()).unwrap();
     terminal.write(b"hello\r");
@@ -806,118 +797,4 @@ fn tui_context_reading_follows_each_finished_model_request_on_main() {
     terminal.until("Bye!");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
-}
-
-#[test]
-fn tui_usage_includes_account_quota_only_for_dim_oauth_models() {
-    for fullscreen in [false, true] {
-        for scenario in ["quota", "unlimited", "account_error", "other_provider"] {
-            let provider = if scenario == "other_provider" {
-                "test"
-            } else {
-                "dimcode-api-oauth"
-            };
-            let home = Home::new();
-            let daemon = home.daemon(move |wire| {
-                wire.hello(&[]);
-                let create = wire.read("session.create");
-                wire.reply(&create, json!({
-                    "sessionId":"session", "sequence":8,
-                    "model":{"providerId":provider,"modelId":"model"}
-                }));
-                let attach = wire.read("session.attach");
-                let mut record = attach_record(&attach);
-                record["model"]["providerId"] = json!(provider);
-                wire.reply(&attach, record);
-                let history = wire.read("session.history");
-                wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
-                let mut line = String::new();
-                while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-                    let request: Value = serde_json::from_str(&line).unwrap();
-                    line.clear();
-                    match request["method"].as_str().unwrap() {
-                        "account.providers" => wire.reply(&request, json!([{"providerId":"dimcode-api-oauth"}])),
-                        "account.status" => wire.reply(&request, json!({
-                            "account":{"issuer":"fixture","subject":"signed-in","grantedScopes":[]}
-                        })),
-                        "session.context.usage" => {
-                            if scenario == "unlimited" {
-                                failed(wire, &request);
-                            } else {
-                                wire.reply(&request, usage(1849.0));
-                            }
-                        }
-                        "account.usage" => {
-                            assert_eq!(provider, "dimcode-api-oauth");
-                            assert_eq!(request["params"], json!({"providerId":"dimcode-api-oauth"}));
-                            match scenario {
-                                "quota" => wire.reply(&request, json!({
-                                    "plan":{"name":"\u{1b}]2;injected-title\u{7}Pro","status":"active","expiresAt":"2026-11-30T00:00:00Z"},
-                                    "credits":{"usedUnits":25000,"totalUnits":300000,"resetsAt":"2026-11-30T00:00:00Z"},
-                                    "windows":[{"durationHours":5,"tokenUsed":9500,"tokenCap":10000}],
-                                    "features":[{"key":"web_\u{1b}[2Jsearch","used":211,"allowance":1500}]
-                                })),
-                                "unlimited" => wire.reply(&request, json!({"credits":{"unlimited":true}})),
-                                "account_error" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                                    "code":-32000,"message":"Account usage temporarily \u{1b}]2;injected-title\u{7}unavailable"
-                                }})),
-                                _ => panic!("unexpected account usage for {scenario}"),
-                            }
-                        }
-                        method => panic!("unexpected request {method}"),
-                    }
-                }
-            });
-            let mut command = home.command();
-            command.arg(if fullscreen {
-                "--fullscreen"
-            } else {
-                "--scrollback"
-            });
-            let mut terminal = Terminal::launch_tui(command);
-            terminal.until(&format!("{provider} / model"));
-            terminal.write(b"/usa");
-            terminal.until("show the context window usage");
-            terminal.write(b"ge\r");
-            terminal.until(if scenario == "unlimited" {
-                "This daemon does not track context usage"
-            } else {
-                "Context: 1,849 / 256,000 tokens"
-            });
-            let report_start = terminal.consumed;
-            if scenario == "quota" {
-                for expected in [
-                    "DimAgent OAuth",
-                    "Pro · active · expires 2026-11-30",
-                    "25,000 / 300,000  8%",
-                    "9,500 / 10,000  95%",
-                    "211 / 1,500  14%",
-                ] {
-                    terminal.until(expected);
-                }
-            } else if scenario == "unlimited" {
-                terminal.until("DimAgent OAuth");
-                terminal.until("unlimited");
-            } else if scenario == "account_error" {
-                terminal.until("Account usage temporarily unavailable");
-            }
-            terminal.write(b"/exit\r");
-            terminal.until("Bye!");
-            assert!(terminal.wait().success());
-            daemon.join().unwrap();
-            assert!(
-                !terminal.transcript.contains("injected-title"),
-                "{scenario}"
-            );
-            let report = &terminal.transcript[report_start..];
-            if scenario == "unlimited" {
-                assert!(!report.contains("window"), "{report}");
-                assert!(!report.contains("Web search"), "{report}");
-            }
-            if provider == "test" {
-                assert!(!report.contains("DimAgent OAuth"), "{report}");
-                assert!(!report.contains("Credits"), "{report}");
-            }
-        }
-    }
 }

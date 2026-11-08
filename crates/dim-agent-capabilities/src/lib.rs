@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod agent_loop;
 pub mod approval;
+pub mod auxiliary_model;
 pub(crate) mod branch_input;
 pub mod context_block;
 pub mod context_methods;
@@ -8,6 +9,7 @@ pub mod context_model;
 mod context_policy;
 pub mod context_preparation;
 pub mod defaults;
+pub mod environment_clients;
 pub mod exec_stop;
 pub mod execution_settings;
 pub mod file_access;
@@ -43,6 +45,7 @@ pub mod timeline_tree;
 pub mod tool_binding;
 pub mod tool_executor;
 pub mod tool_registry;
+pub mod toolchain;
 pub mod wait;
 pub mod workspace_tools;
 
@@ -111,9 +114,13 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::ModelHost>(catalog, None);
     register::<host::ProviderConnectionResolver>(catalog, None);
     register::<host::ModelSelectionHost>(catalog, None);
+    register::<host::CredentialVariablesHost>(catalog, None);
     register::<host::SessionFilesHost>(catalog, None);
+    register::<workspace_tools::mentions::MentionIndex>(catalog, None);
     register::<skill_settings::SkillSettingsHost>(catalog, None);
+    register::<environment_clients::SessionClientsHost>(catalog, None);
     register::<execution_settings::ExecutionSettingsHost>(catalog, None);
+    register::<toolchain::ToolchainSourceHost>(catalog, None);
     register::<skills::SkillsCatalog>(catalog, None);
 }
 impl PublicService for approval::Approval {}
@@ -125,6 +132,7 @@ impl PublicService for shell_session::ShellSession {}
 impl PublicService for dyn exec_stop::ExecStop {}
 impl PublicService for workspace_tools::file_reads::FileReads {}
 impl PublicService for timeline_tree::BranchLine {}
+impl PublicService for timeline_tree::TreeCommands {}
 impl PublicService for wait::Wait {}
 impl PublicService for skills::SkillsBranch {}
 impl PublicService for prompt::Prompt {}

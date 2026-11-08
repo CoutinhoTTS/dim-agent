@@ -1,5 +1,27 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "队列",
+        "Export session" => "导出会话",
+        "Enter steer · x delete held · Esc close" => "Enter steer · x 删除暂存消息 · Esc 关闭",
+        "No queued messages." => "队列中没有消息。",
+        "Held · awaiting application" => "暂存中 · 等待应用",
+        "Incorporating · awaiting model consumption" => "纳入中 · 等待模型读取",
+        "Held" => "暂存中",
+        "Incorporating" => "纳入中",
+        "Enter export · Esc cancel" => "Enter 导出 · Esc 取消",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "带附件的消息会留在队列中；使用 /queue 对其执行 steer 或删除"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue 管理 · shift+← 编辑最后一条 · ctrl+s 立即 steer"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "还有 {count} 条 · /queue 管理 · shift+← 编辑最后一条 · ctrl+s 立即 steer"
+        }
+        "steer or delete queued messages" => "对队列消息执行 steer 或删除",
+        "export this conversation" => "导出此对话",
+        "That message has already left the queue." => "该消息已离开队列。",
+        "Exported {format}: {path}" => "已导出 {format}：{path}",
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 输出/中断成员 · x 停止命令 · Esc 关闭"
         }
@@ -262,13 +284,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "按 Ctrl+C 停止 Web 工作区。",
         "To resume this session:" => "恢复此会话：",
 
-        "session" => "会话",
-        "run" => "运行",
-        "view" => "视图",
-        "model" => "模型",
-        "extensions" => "扩展",
-        "app" => "应用",
-        "skill" => "技能",
         "start a new session" => "开始新会话",
         "show or set the reasoning effort" => "查看或设置推理强度",
         "show or set the priority service tier (on|off)" => "查看或设置优先服务层级（on|off）",
@@ -277,7 +292,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "列出 MCP 服务器，登录或退出（login|logout ID）"
         }
         "resume a previous session" => "恢复之前的会话",
-        "open this session in the browser" => "在浏览器中打开此会话",
+        "turn the web interface on or off" => "开启或关闭 Web 界面",
         "show the context window usage" => "显示上下文窗口用量",
         "interrupt the run" => "中断运行",
         "steer with the next queued message" => "用下一条队列消息 steer",
@@ -304,6 +319,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "Esc 关闭",
         "Suggestions" => "建议",
         "Skills" => "技能",
+        "Skill loaded: {name}" => "已加载技能：{name}",
         "Commands" => "命令",
         "Command Palette" => "命令面板",
         "No matches" => "无匹配项",
@@ -486,6 +502,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "钉住的输入",
         "digest" => "清单",
         "summary" => "摘要",
+        "The first message was not sent; your new draft was kept." => {
+            "首条消息未发送；已保留你的新草稿。"
+        }
+        "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server 仍是 {server}，因为其他客户端正在使用它；这个 {client} 客户端也使用它。等它们结束后运行 `dimcode daemon stop`，下次启动就会运行 {client}。"
+        }
+        "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server 仍是 {server}，因为其他客户端正在使用它（连接：{connections}，已附加会话：{attached}，运行中的轮次：{running}）；这个 {client} 客户端也使用它。等它们结束后运行 `dimcode daemon stop`，下次启动就会运行 {client}。"
+        }
+        "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
+            "正在把本地库从格式 v{from} 升级到 v{to}；大库可能需要一段时间。"
+        }
         _ => return None,
     })
 }

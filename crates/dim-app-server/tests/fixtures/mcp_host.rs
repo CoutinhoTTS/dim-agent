@@ -39,6 +39,21 @@ impl std::ops::Deref for Directory {
     }
 }
 
+/// Provides the process value MCP needs for reference expansion. A fixture
+/// host reads no provider credential from the environment.
+pub fn provide_credentials(root: &Ctx) {
+    struct NoCredentials;
+    impl dim_agent_capabilities::host::CredentialVariables for NoCredentials {
+        fn credential_variables(&self) -> std::collections::BTreeSet<String> {
+            std::collections::BTreeSet::new()
+        }
+    }
+    root.provide(dim_agent_capabilities::host::CredentialVariablesHost(
+        std::sync::Arc::new(NoCredentials),
+    ))
+    .unwrap();
+}
+
 pub struct Host {
     view: rutis::host::FiberView,
 }

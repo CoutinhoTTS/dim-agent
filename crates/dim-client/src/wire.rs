@@ -20,6 +20,9 @@ pub struct Event {
 pub struct Configuration {
     pub provider_id: String,
     pub model_id: String,
+    /// The adopted model's capability declaration, including temporary routes.
+    #[serde(default)]
+    pub capability_snapshot: Option<Box<ModelCapabilitySnapshot>>,
     /// The effective preferences the adopted configuration sends; absent when
     /// it carries none.
     #[serde(default)]
@@ -214,6 +217,22 @@ pub struct Progress {
     /// `thinking_offset` characters of the request's `step/thinking` deltas.
     pub thinking: String,
     pub thinking_offset: u64,
+    /// The retry this request is waiting to make, while it sleeps.
+    pub retry: Option<RetryProgress>,
+}
+/// A retry a request is waiting for, shown while it sleeps.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryProgress {
+    /// The attempt about to run, at least 2.
+    pub attempt: u8,
+    /// The total cap on attempts.
+    pub max_attempts: u8,
+    /// Unix milliseconds at which the attempt starts.
+    pub retry_at_ms: u64,
+    pub kind: ModelFailureKind,
+    /// The failure's bounded reason.
+    pub reason: Option<String>,
 }
 
 #[derive(Deserialize)]

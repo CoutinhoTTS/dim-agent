@@ -10,6 +10,7 @@ use dim_agent_capabilities::{
         StrategyDiagnostics, StrategyOutcome,
     },
 };
+use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use std::{
@@ -116,7 +117,7 @@ pub async fn compact_now(session: &Session) -> (u64, Vec<Arc<AgentEvent>>) {
         .unwrap();
     let events = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let events = session.local("main", ..).await.unwrap();
+            let events = branch_events(session, "main", ..).await.unwrap();
             if events.iter().any(|event| {
                 matches!(
                     &event.kind,

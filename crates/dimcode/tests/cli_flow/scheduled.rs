@@ -1056,7 +1056,6 @@ fn tui_scheduled_panel_lists_and_manages_jobs() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1115,7 +1114,7 @@ fn tui_scheduled_panel_lists_and_manages_jobs() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/scheduled\r");
@@ -1182,7 +1181,6 @@ fn tui_scheduled_panel_edits_and_creates_jobs() {
         let (shown, wait_shown) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1242,7 +1240,7 @@ fn tui_scheduled_panel_edits_and_creates_jobs() {
                 line.clear();
             }
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/scheduled\r");
@@ -1279,7 +1277,6 @@ fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
         let (shown, wait_shown) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1327,7 +1324,7 @@ fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
                 line.clear();
             }
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/scheduled\r");
@@ -1354,7 +1351,6 @@ fn tui_scheduled_panel_reports_a_conflict_on_remove() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1392,7 +1388,7 @@ fn tui_scheduled_panel_reports_a_conflict_on_remove() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/scheduled\r");
@@ -1425,7 +1421,6 @@ fn tui_scheduled_panel_shows_every_key_and_confirmation_at_80_columns() {
         let (shown, wait_shown) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1467,7 +1462,7 @@ fn tui_scheduled_panel_shows_every_key_and_confirmation_at_80_columns() {
             command.arg("--fullscreen");
         }
         sized(&mut command, 80, 24);
-        let mut terminal = Terminal::launch_tui(command);
+        let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/scheduled\r");
@@ -1524,7 +1519,6 @@ fn tui_scheduled_panel_keeps_the_users_text_when_a_create_is_refused() {
         let (shown, wait_shown) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             hello(wire);
-            wire.created();
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
             let history = wire.read("session.history");
@@ -1565,7 +1559,7 @@ fn tui_scheduled_panel_keeps_the_users_text_when_a_create_is_refused() {
                 line.clear();
             }
         });
-        let mut terminal = Terminal::launch_tui(edit_command(&home, &script, fullscreen));
+        let mut terminal = Terminal::resume_tui(edit_command(&home, &script, fullscreen));
         terminal.until("test / model");
         shown.send(()).unwrap();
         terminal.write(b"/scheduled\r");
@@ -1611,7 +1605,6 @@ fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1672,7 +1665,7 @@ fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    let mut terminal = Terminal::resume_tui(edit_command(&home, &script, false));
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/scheduled\r");
@@ -1738,7 +1731,6 @@ fn scheduled_draws_a_job_name_on_one_line() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1766,7 +1758,7 @@ fn scheduled_draws_a_job_name_on_one_line() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/scheduled\r");
@@ -1808,7 +1800,6 @@ fn tui_scheduled_panel_reports_an_unreadable_create_reply_as_applied() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         hello(wire);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1846,7 +1837,7 @@ fn tui_scheduled_panel_reports_an_unreadable_create_reply_as_applied() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(edit_command(&home, &script, false));
+    let mut terminal = Terminal::resume_tui(edit_command(&home, &script, false));
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/scheduled\r");
@@ -1887,7 +1878,6 @@ fn tui_scheduled_panel_says_when_the_daemon_cannot_manage_it() {
     let (shown, wait_shown) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);
-        wire.created();
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -1910,7 +1900,7 @@ fn tui_scheduled_panel_says_when_the_daemon_cannot_manage_it() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::launch_tui(home.command());
+    let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     shown.send(()).unwrap();
     terminal.write(b"/scheduled\r");

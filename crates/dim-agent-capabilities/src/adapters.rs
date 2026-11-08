@@ -12,6 +12,17 @@ use tokio_util::sync::CancellationToken;
 pub const MAX_MOCK_OUTPUT_BYTES: usize = 1024 * 1024;
 
 pub struct EchoModel;
+impl EchoModel {
+    /// Selects the latest mock command or tool result, skipping runtime state and rules.
+    pub fn last_message(request: &ModelRequest) -> Option<&Message> {
+        request.messages.iter().rev().map(AsRef::as_ref).find(|message: &&Message| {
+            message.role != Role::User || !match &message.content {
+                MessageContent::Text(text) => crate::context_block::is_state_or_rule(text),
+                MessageContent::Parts(parts) => matches!(parts.as_slice(), [MessagePart::Text { text, .. }] if crate::context_block::is_state_or_rule(text)),
+            }
+        })
+    }
+}
 impl ModelDriver for EchoModel {
     fn invoke(
         &self,
@@ -25,11 +36,8 @@ impl ModelDriver for EchoModel {
             let mut chunks = vec![Ok(ModelChunk::MessageStart {
                 message_id: id.clone(),
             })];
-            let last = request.messages.last();
-            let text = last
-                .map(|message| message_text(message))
-                .transpose()?
-                .unwrap_or_default();
+            let last = Self::last_message(&request);
+            let text = last.map(message_text).transpose()?.unwrap_or_default();
             let text = delegated_message_body(&text).unwrap_or(text);
             let reason = if last.is_some_and(|message| message.role == Role::User)
                 && text.starts_with("tool:")
@@ -229,7 +237,10 @@ impl PrepareModel for DefaultPrepareModel {
         settings.system = (!self.config.system_prompt.is_empty())
             .then(|| SystemPrompt::Text(self.config.system_prompt.clone()));
         settings.tools = Some(available_tools.to_vec());
-        settings.config = self.config.model.config.clone();
+        settings.config = crate::context_model::adopted_config(
+            settings.capability_snapshot.as_ref(),
+            self.config.model.config.as_ref(),
+        );
         settings.metadata = self.config.model.metadata.clone();
         Ok(settings)
     }

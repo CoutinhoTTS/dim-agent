@@ -1,5 +1,31 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "Fila",
+        "Export session" => "Exportar sessão",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter orientar · x eliminar mensagem retida · Esc fechar"
+        }
+        "No queued messages." => "Não há mensagens em fila.",
+        "Held · awaiting application" => "Retida · a aguardar aplicação",
+        "Incorporating · awaiting model consumption" => {
+            "A incorporar · a aguardar processamento pelo modelo"
+        }
+        "Held" => "Retida",
+        "Incorporating" => "A incorporar",
+        "Enter export · Esc cancel" => "Enter exportar · Esc cancelar",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "As mensagens com anexos permanecem em fila; use /queue para orientar ou eliminá-las"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue gerir · shift+← editar a última · ctrl+s orientar já"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count} mais · /queue gerir · shift+← editar a última · ctrl+s orientar já"
+        }
+        "steer or delete queued messages" => "orientar com mensagens em fila ou eliminá-las",
+        "export this conversation" => "exportar esta conversa",
+        "That message has already left the queue." => "Essa mensagem já saiu da fila.",
+        "Exported {format}: {path}" => "Exportado em {format}: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter saída/interromper membro · x parar comando · Esc fechar"
@@ -313,14 +339,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "To resume this session:" => "Para retomar esta sessão:",
 
-        // composer/commands.rs: categories
-        "session" => "sessão",
-        "run" => "execução",
-        "view" => "vista",
-        "model" => "modelo",
-        "extensions" => "extensões",
-        "app" => "aplicação",
-        "skill" => "competência",
         // composer/commands.rs: descriptions
         "start a new session" => "iniciar nova sessão",
         "show or set the reasoning effort" => "ver ou definir o esforço de raciocínio",
@@ -334,7 +352,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "listar servidores MCP, iniciar ou terminar sessão (login|logout ID)"
         }
         "resume a previous session" => "retomar uma sessão anterior",
-        "open this session in the browser" => "abrir esta sessão no navegador",
+        "turn the web interface on or off" => "ativar ou desativar a interface web",
         "show the context window usage" => "ver uso da janela de contexto",
         "interrupt the run" => "interromper a execução",
         "steer with the next queued message" => "orientar com a próxima mensagem em fila",
@@ -368,6 +386,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc fechar",
         "Suggestions" => "Sugestões",
         "Skills" => "Competências",
+        "Skill loaded: {name}" => "Competência carregada: {name}",
         "Commands" => "Comandos",
         "Command Palette" => "Paleta de comandos",
         "No matches" => "Sem resultados",
@@ -572,6 +591,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "entradas fixadas",
         "digest" => "compêndio",
         "summary" => "resumo",
+        "The first message was not sent; your new draft was kept." => {
+            "A primeira mensagem não foi enviada; o seu novo rascunho foi mantido."
+        }
+        "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "O App Server continua a ser {server} porque outros clientes o estão a utilizar; este cliente {client} também o utiliza. Execute `dimcode daemon stop` quando terminarem; o próximo arranque executa {client}."
+        }
+        "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "O App Server continua a ser {server} porque outros clientes o estão a utilizar (ligações: {connections}, sessões associadas: {attached}, turnos em execução: {running}); este cliente {client} também o utiliza. Execute `dimcode daemon stop` quando terminarem; o próximo arranque executa {client}."
+        }
+        "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
+            "A atualizar o armazenamento local do formato v{from} para v{to}; isto pode demorar algum tempo num armazenamento grande."
+        }
         _ => return None,
     })
 }

@@ -26,7 +26,7 @@ dependency is not necessarily a plugin with the same name.
 | --- | --- | --- | --- |
 | [Skills](Skills.md) | SkillsCatalog | Skills, SkillContent (SkillContentInstances) | SkillsBranch |
 | [PromptSources](PromptSources.md) | — | PromptRegistry, PromptSources | PromptSourcesBranch |
-| [WorkspaceTools](WorkspaceTools.md) | — | WorkspaceTools | FileReads, BackgroundExec |
+| [WorkspaceTools](WorkspaceTools.md) | WorkspaceToolsOwner | WorkspaceTools | FileReads, BackgroundExec |
 | [Wait](Wait.md) | — | Wait | WaitBranch |
 | [Recall](Recall.md) | — | Recall | — |
 | [TimelineTree](TimelineTree.md) | — | TimelineTree | TreeTimeline |
@@ -50,7 +50,7 @@ dependency is not necessarily a plugin with the same name.
 
 App Server optional plugins are outside this local-execution profile. [Web](../../../design/plugins/Web.md) provides `web_search` and `web_fetch` through a Session part its `web` process row registers; it adds no service to the assembly recorded here.
 
-Process infrastructure rows are also outside this local-execution index. `UiHost` owns UI leaves: per leaf, a `UiLeaf` plugin whose life is the rutis session with the interactive `dimcode` process. Its contract is [Tui design §3.6](../../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) and its current assembly is in the generated [App Server services](../generated/app-server/services.md). The leaf runs its own `Tui` in the CLI's client tree; it is not a local-execution capability. The language runtimes' connection rows, `session-node` and `py`, are process infrastructure too: each starts its runtime and mounts the rutis session its foreign rows run on ([How Dim uses rutis A.4](../../../design/rutis-usage.md#a4-runtimes-and-sessions)).
+Process infrastructure rows are also outside this local-execution index. [UiExtensions and UiResources](../../client-ui-extensions.md) own client UI content and Session file publications. `UiHost` owns UI leaves: per leaf, a `UiLeaf` plugin whose life is the rutis session with the interactive `dimcode` process. Its contract is [Tui design §3.6](../../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) and its current assembly is in the generated [App Server services](../generated/app-server/services.md). The leaf runs its own `Tui` in the CLI's client tree; it is not a local-execution capability. The language runtimes' connection rows, `session-node` and `py`, are process infrastructure too: each starts its runtime and mounts the rutis session its foreign rows run on ([How Dim uses rutis A.4](../../../design/rutis-usage.md#a4-runtimes-and-sessions)).
 
 ## Reading and maintaining these pages
 

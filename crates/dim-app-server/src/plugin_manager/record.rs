@@ -12,7 +12,7 @@ use std::{
 
 /// The manifest file at a plugin directory's root.
 pub const MANIFEST: &str = "dim-plugin.json";
-const RECORD_VERSION: u32 = 1;
+const RECORD_VERSION: u32 = 2;
 
 /// `<home>/plugins.json` (§2.2): configuration only.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -66,6 +66,7 @@ pub enum Kind {
     Skills,
     Mcp,
     Hooks,
+    Ui,
 }
 
 impl Record {
@@ -82,13 +83,23 @@ impl Record {
             }
             Err(error) => return Err(unreadable(path, error)),
         };
-        let record: Self =
+        let mut record: Self =
             serde_json::from_slice(&bytes).map_err(|error| unreadable(path, error))?;
-        if record.version != RECORD_VERSION {
+        if record.version != 1 && record.version != RECORD_VERSION {
             return Err(unreadable(
                 path,
                 format!("unknown version {}", record.version),
             ));
+        }
+        if record.version == 1 {
+            if record
+                .installed
+                .iter()
+                .any(|entry| entry.kinds.contains(&Kind::Ui))
+            {
+                return Err(unreadable(path, "UI content requires record version 2"));
+            }
+            record.version = RECORD_VERSION;
         }
         Ok(record)
     }
@@ -96,6 +107,37 @@ impl Record {
     /// Writes atomically: a temporary file in the same directory, synced
     /// through its own writable handle, renamed over `path` (§2.2).
     pub fn write(&self, path: &Path) -> std::io::Result<()> {
+        let existing = match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(bytes) = existing {
+            let current: Self = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
+            if !matches!(current.version, 1 | RECORD_VERSION) {
+                return Err(std::io::Error::other("unknown plugin record version"));
+            }
+            if current.version == 1 {
+                let backup = path.with_extension("json.v1.backup");
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&backup)
+                {
+                    Ok(mut file) => {
+                        if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+                            drop(file);
+                            let _ = std::fs::remove_file(&backup);
+                            return Err(error);
+                        }
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::AlreadyExists
+                            && std::fs::read(&backup)? == bytes => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         let directory = path.parent().expect("plugins.json has a directory");
         let temporary = directory.join(format!(".plugins.json.{}", uuid::Uuid::new_v4()));
         let result = (|| {
@@ -170,6 +212,7 @@ pub struct Manifest {
     pub skills: Option<PathBuf>,
     pub mcp: Option<PathBuf>,
     pub hooks: Option<PathBuf>,
+    pub ui: Option<crate::ui_extensions::manifest::Package>,
 }
 
 /// The rutis row fields of a plugin's code, with `entry` resolved.
@@ -193,6 +236,7 @@ struct ManifestFile {
     skills: Option<String>,
     mcp: Option<String>,
     hooks: Option<String>,
+    ui: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -256,6 +300,11 @@ impl Manifest {
             skills: path(file.skills, "skills")?,
             mcp: path(file.mcp, "mcp")?,
             hooks: path(file.hooks, "hooks")?,
+            ui: file.ui.map(|value| {
+                crate::ui_extensions::manifest::Package::read(dir, value).unwrap_or_else(
+                    |message| crate::ui_extensions::manifest::Package::Rejected { message },
+                )
+            }),
         })
     }
 
@@ -265,6 +314,7 @@ impl Manifest {
             (self.skills.is_some(), Kind::Skills),
             (self.mcp.is_some(), Kind::Mcp),
             (self.hooks.is_some(), Kind::Hooks),
+            (self.ui.is_some(), Kind::Ui),
         ]
         .into_iter()
         .filter_map(|(present, kind)| present.then_some(kind))

@@ -2,7 +2,7 @@
 
 状态：提议中。范围：部件、App Server 或 TypeScript 插件从 Timeline 读取事件的全部方式，其中哪些会被事件查询（[ADR 019](../../adr/019-event-query.md)、[插件契约 §5.4](plugin-contract.md#54-the-event-query)）取代，以及还剩什么。本文是审计，加上 [ADR 020](../../adr/020-timeline-read-convergence.md) 提议的决策；决策在该 ADR 被接受后生效。语言：中文。English: [English](../../design/timeline-read-entries.md)。
 
-基线：`origin/main` 的 `514225777`。调用点不含测试和示例。下面每一行都是从源码读出来的，不是沿用早先的计划。
+基线：`origin/main` 的 `514225777`。调用点不含测试和示例。下面每一行都是在该基线上从源码读出来的，因此其中点名的 TypeScript 路径（含 Goal 的 `runtime/plugins/goal/branch.ts`）是移植前的快照。
 
 ## 1. 入口
 
@@ -24,9 +24,6 @@
 | `context` | :1099 | `history.rs:246`、`:267`、`:440`、`branch.rs:166`、`agent.rs:525`、`agents.rs:1446` |
 | `context_with_checkpoint` | :1322 | `history.rs:243`、`:262` |
 | `checkpoint` | :1258 | `history.rs:178`、`:292`、`timeline.rs:1328` |
-| `policy_facts` | :1104 | `context_policy.rs:1145`、`context_preparation.rs:550`、`:782` |
-| `policy_order` | :1140 | `context_policy.rs:511`、`:584`、`history.rs:289` |
-| `policy_window` | :1196 | `context_policy.rs:1062` |
 | `trace(sequence)` | :1401 | 无；只有门面 `branch.rs:190` 和 `agent.rs:660` 能到达它 |
 
 ### 1.2 其他对象上的同名读
@@ -44,10 +41,8 @@
 
 | 读 | 定义 | 调用方 |
 | --- | --- | --- |
-| `SessionStore::read_page` | `storage/timeline.rs:1258` | `collaboration.rs:1106`、`:2232` |
 | `TimelineStore::read_page`，由 TimelineTree 部件自己调用 | `timeline_store.rs:229` | `timeline_tree.rs:425`、`:668`（也在 `TreeTimeline::page` :180 之后） |
 | `Session::local_page` 直接读存储端口 | `agent.rs:562-585` | `agents.rs:677`、`:1007`、`connection/tree.rs:227`、`agents/sessions.rs:616` |
-| `read_page_without_request_bodies` | :1271 | `agents.rs:634`，经 `Agents::read_page` |
 | `read_page_before` | :1409 | `agents.rs:763`、`connection/tree.rs:209` |
 | `read_events` | :1539 | `agents.rs:688`、`collaboration.rs:1151` |
 | `turn_window` | :1304 | `agents.rs:746`、`connection/tree.rs:197` |
@@ -60,7 +55,6 @@
 
 ### 1.6 存储端口（`timeline_store.rs`）
 
-`head` :207、`read` :215、`read_page` :229、`event_by_id` :283、`read_context` :319、`read_kind_page` :373、`read_page_without_request_bodies` :437、`query` :464、`read_segments` :471、`policy_facts` :478、`policy_order` :591、`policy_window` :634、`trace` :694、`latest_snapshot` :710。SQLite 实现在 `storage/timeline.rs:3507-4119`。
 
 ### 1.7 依赖图
 
@@ -102,10 +96,10 @@ flowchart LR
   Disp -->|local, history, follow replay| TL
   recall -->|page_cursor, page| Branch
   ctxm -->|local| Branch
-  hist -->|context, checkpoint, stored_context_page_in, policy_order, event_position| TL
+  hist -->|context, checkpoint, stored_context_page_in, event_position| TL
   hist -->|context_page, compaction_cut, local| Agent
-  prep -->|stored_context_page_in, policy_facts, event_by_id| TL
-  pol -->|local, policy_order, policy_window, policy_facts| TL
+  prep -->|stored_context_page_in, event_by_id| TL
+  pol -->|local| TL
   perm -->|ancestor_events_of_kind| TL
   reads -->|local| TL
   tree -->|local| TL
@@ -150,7 +144,6 @@ flowchart LR
 | 裁剪点校验（`history.rs:981`） | 某个序号是否是一次原子写入的末尾 | `local(through..=through)`；落在批内时存储报错 | 不涉及事件内容，只涉及批结构；查询给不了 |
 | 回忆（`recall.rs:184`） | 几种类型的事件，由新到旧，折叠，够答案就停 | `page_cursor` 和 `page` | 倒序分页加提前停止 |
 | 协作重建（`collaboration.rs:2726`） | 尚未处理的审批输入，以及每条 `collaboration/result` 和它的序号 | `local(..=committed())`，遍历两遍 | 四种类型，不需要整个分支。它读到 `committed()` |
-| 对端会话读取（`collaboration.rs:1106`） | 另一个会话从 `after` 起的一页事件，加按编号取的调用事件 | `SessionStore::read_page`、`read_events` | 分页和按编号读。这是 App Server 读另一个会话，不是部件读自己的 Timeline |
 | 分支工具默认起点（`timeline_tree.rs:2291`） | 本轮第一次 `tool-use` 之前的 `model/start`，序号减一 | `parent.local(..)`，整个父分支 | 两条事件，按 `turn_id` 和 `request_id` 匹配。谓词只有一个等值，所以其中一个匹配留给调用方 |
 | fork 校验与前缀（`agents.rs:1446`） | 切点是否合法，以及切点之前的上下文 | `validate_context_boundary_in` 和 `context` | 折叠前缀是投影的工作；批检查同上 |
 | 历史窗口（`connection/tree.rs:197`） | 最新一轮的起点，以及窗口内的一页倒序事件 | `turn_window` 和 `read_page_before` | 倒序分页，加最新一条 `turn/start` |
@@ -195,7 +188,7 @@ flowchart LR
 - 两个部件只需要最后一条事件（Permission、Wait）。六个折叠未闭合配对。三个累积。
 - 部件会折叠自己没有订阅的类型（Approval、ToolExecutor、ModelProvider、ContextPreparation、Loop），所以它的读取选择必须按它的 rebuild 来写，不能照抄 follow 的 key。
 - 重放把整段分支前缀一直交到已分配位置，不做过滤。这段前缀的解码在 Loading 阶段是共用的（[restore-shared-read](appserver/restore-shared-read.md)），降低了成本，没有减小体量。
-- 热窗口保留事件直到它们被分发，而不只是直到被发布。重建要在存储读之后补上的尾巴，是尚未分发的事件。
+- 热窗口保留事件直到它们被分发，而不只是直到被发布。查询读到发布头为止，所以重建要在它之后补上的尾巴，是本分支已写入、尚未发布的事件；已发布、尚未分发的事件在存储里，查询读得到。
 
 未核实：每个未闭合配对能否跨 turn，也就是从最近一个 turn/start 起读是否足够；Loop rebuild 的后半段；打开期间未分发尾巴有多长。
 
@@ -355,7 +348,7 @@ flowchart LR
 
 ### 7.4 迁移之后删除的读
 
-在 Timeline、Branch、Agent 和 Dispatcher 上：history、local、page、page_cursor、context、context_with_checkpoint、event_by_id、event_position、compaction_cut、ancestor_events_of_kind、stored_page、stored_local、trace、stored_context_page 及其 _in 形式，以及各自迁移落地之后的 policy 读。然后 xtask types 和 xtask graph 重新生成生成文件，其中其余内容不得变化。
+在 Timeline、Branch、Agent 和 Dispatcher 上：history、local、page、page_cursor、context、context_with_checkpoint、event_by_id、event_position、compaction_cut、ancestor_events_of_kind、stored_page、stored_local、trace、stored_context_page 及其 _in 形式，。然后 xtask types 和 xtask graph 重新生成生成文件，其中其余内容不得变化。
 
 ### 7.5 未决定
 
@@ -373,9 +366,9 @@ flowchart LR
 
 - 取消重放。Dispatcher 只投递实时事件；它不再读历史。
 - 重建用的历史用查询读，限定在该部件折叠的类型上（§2.3）。
-- 还必须看到已写入但尚未分发的事实的部件，通过一个 Timeline 读补上未分发的尾巴。热窗口就是那个队列（§7.6）；部件不直接碰它。
+- 还必须看到已写入、尚未发布的事实的部件，通过一个 Timeline 读补上尾巴。热窗口就是那个队列（§7.6）；部件不直接碰它。
 - 没有这个需要的部件，用查询和它的订阅重建。
-- 交接，按目前的设计：订阅并挂起实时事件，取截点，读历史和尾巴到截点，再放出截点之上被挂起的事件。尚未对照现有的订阅机制核对。
+- 交接：订阅并挂起实时事件，取截点 `S`，读历史和尾巴到截点，再放出截点之上被挂起的事件、丢掉其余的。查询自身在发布头截止，所以发布头到 `S` 之间的事实来自尾巴；读已经返回的、不大于 `S` 的事实要丢掉而不是放出，这样每个序号只折叠一次。已对照现有订阅机制，用“把分支每条事实恰好折叠一次”的流程测试核对过。
 - 批末尾检查放在存储端口上。
 - 每个消费方是否需要在途事实仍待确定：goal、文件读取、协作重建。各自在自己的迁移开始时决定。
 - 检查点存 resume 的事件编号，调用方用 from_event 续读（建议；需要格式决定，ADR 020 D5）。

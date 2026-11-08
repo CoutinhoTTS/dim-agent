@@ -574,3 +574,49 @@ impl Default for ToolResult {
         Self::text("")
     }
 }
+
+impl ToolResult {
+    /// The effects a read page carries for this result: each declared effect
+    /// shortened by [`ToolEffect::shortened`], and `None` when the result
+    /// declared none.
+    pub fn shortened_effects(&self) -> Option<Vec<ToolEffect>> {
+        self.effects
+            .as_ref()
+            .filter(|effects| !effects.is_empty())
+            .map(|effects| effects.iter().map(ToolEffect::shortened).collect())
+    }
+}
+
+/// Characters of a command a read page or the compaction digest keeps before
+/// the cut is marked (ContextCompaction §5.10).
+const SHORTENED_COMMAND_CHARS: usize = 200;
+
+impl ToolEffect {
+    /// The effect as a reader sees it: a command keeps its first
+    /// [`SHORTENED_COMMAND_CHARS`] characters, counted before escaping, and a
+    /// longer one is cut there and marked with a trailing `…`; a path stays
+    /// verbatim, an exact identifier. The cut is ContextCompaction §5.10's
+    /// rule for the digest and the timeline branches design's rule for a read
+    /// page. The digest calls this, and both read pages call it through
+    /// [`ToolResult::shortened_effects`], so the three cannot drift.
+    pub fn shortened(&self) -> ToolEffect {
+        match self {
+            ToolEffect::CommandRun {
+                command,
+                exit_code,
+                signal,
+            } => {
+                let command = match command.char_indices().nth(SHORTENED_COMMAND_CHARS) {
+                    Some((index, _)) => format!("{}…", &command[..index]),
+                    None => command.clone(),
+                };
+                ToolEffect::CommandRun {
+                    command,
+                    exit_code: *exit_code,
+                    signal: signal.clone(),
+                }
+            }
+            other => other.clone(),
+        }
+    }
+}

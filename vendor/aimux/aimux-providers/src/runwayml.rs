@@ -8,25 +8,29 @@
 //!
 //! Authentication is a `Bearer` token and every request must carry the
 //! `X-Runway-Version: 2024-11-06` header.
+//!
+//! [`create_runwayml`] takes [`RunwaymlProviderSettings`], validates the base URL, fixes
+//! the provider name and returns a [`RunwaymlProvider`]. The credential is not read
+//! there: it is loaded for every request, from the setting or from `RUNWAYML_API_SECRET`.
+//! [`runwayml()`] is the default instance; it reads nothing and cannot fail.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use aimux_core::error::{AiMuxError, ApiCallError};
-use aimux_core::provider::Provider;
 use aimux_core::video_model::{
-    VideoCallOptions, VideoData, VideoFile, VideoFileData, VideoFrameType, VideoModel,
-    VideoOperationStart, VideoOperationStatus, VideoPollConfig, VideoResponse, VideoResult,
+    VideoCallOptions, VideoData, VideoFile, VideoFrameType, VideoModel, VideoOperationStart,
+    VideoOperationStatus, VideoResponse, VideoResult,
 };
-use aimux_provider_utils::{HttpRequest, load_api_key, without_trailing_slash};
+use aimux_provider_utils::{FetchFunction, HeaderMapOpt, Resolvable, validate_base_url};
+
+use crate::shared::EndpointConfig;
+use aimux_provider_utils::{Credential, ProviderHeaders};
 
 const PROVIDER_NAME: &str = "runwayml";
-const DEFAULT_BASE_URL: &str = "https://api.dev.runwayml.com";
-const ENV_VAR: &str = "RUNWAYML_API_SECRET";
 const RUNWAY_VERSION: &str = "2024-11-06";
 
 /// RunwayML returns errors as a flat `{"error": "<message>"}` object.
@@ -45,91 +49,116 @@ fn runwayml_failed_response_handler() -> aimux_provider_utils::ResponseHandler<A
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
-/// Configuration for the RunwayML provider.
-#[derive(Debug, Clone)]
-pub struct RunwaymlConfig {
-    pub api_key: String,
-    pub base_url: String,
-    pub headers: Option<HashMap<String, String>>,
-    /// Interval between task-status polls. Defaults to 2 seconds.
-    pub poll_interval: Duration,
-    /// Maximum total time to wait for a task to finish. Defaults to 300 seconds.
-    pub timeout: Duration,
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.dev.runwayml.com";
+pub(crate) const API_KEY_ENV_VAR: &str = "RUNWAYML_API_SECRET";
+const DEFAULT_NAME: &str = "runwayml";
+
+/// Settings of [`create_runwayml`].
+///
+/// Every field is optional. Nothing here is evaluated when the provider is
+/// created except `base_url` and `name`; `api_key` and `headers` are
+/// evaluated on every request.
+#[derive(Clone, Default)]
+pub struct RunwaymlProviderSettings {
+    /// Base URL for the API calls. Default `https://api.dev.runwayml.com`; a
+    /// trailing slash is removed.
+    pub base_url: Option<String>,
+    /// The API key. `None` loads `RUNWAYML_API_SECRET` when a request is made and
+    /// fails that request with `AiMuxError::LoadApiKey` if it is unset. An
+    /// explicit value is used as given, `""` included: it never falls back to
+    /// the environment. A [`Resolvable::Future`] is awaited once, an
+    /// [`Resolvable::AsyncFn`] on every request.
+    pub api_key: Option<Resolvable<String>>,
+    /// Extra headers on every request. A `None` value removes the header,
+    /// including the credential. Per-call headers win over these.
+    pub headers: Option<HeaderMapOpt>,
+    /// The provider name, the prefix of the `provider()` strings (`"{name}.video"`).
+    /// Default `"runwayml"`. The providerOptions key stays `runwayml`.
+    pub name: Option<String>,
+    /// The transport: a mock, a signing decorator, a proxy-aware client.
+    /// `None` uses the process default, resolved per request.
+    pub fetch: Option<FetchFunction>,
 }
 
-impl RunwaymlConfig {
-    pub fn new(api_key: impl Into<String>) -> Self {
-        Self {
-            api_key: api_key.into(),
-            base_url: DEFAULT_BASE_URL.to_string(),
-            headers: None,
-            poll_interval: Duration::from_secs(2),
-            timeout: Duration::from_secs(300),
-        }
-    }
-
-    #[must_use]
-    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = without_trailing_slash(&url.into());
-        self
-    }
-
-    #[must_use]
-    pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
-        self.headers = Some(headers);
-        self
-    }
-
-    /// Override the interval between status polls.
-    #[must_use]
-    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
-        self.poll_interval = interval;
-        self
-    }
-
-    /// Override the maximum time to wait for a task to finish.
-    #[must_use]
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-
-    /// Create from the `RUNWAYML_API_SECRET` environment variable.
-    ///
-    /// # Errors
-    ///
-    /// Returns `AiMuxError::InvalidArgument` when the environment variable is not
-    /// set.
-    pub fn from_env() -> Result<Self, AiMuxError> {
-        let api_key = load_api_key(None, ENV_VAR, "RunwayML")?;
-        Ok(Self::new(api_key))
+impl std::fmt::Debug for RunwaymlProviderSettings {
+    /// Never prints the key or header values.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunwaymlProviderSettings")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key)
+            .field(
+                "headers",
+                &self.headers.as_ref().map(std::collections::HashMap::len),
+            )
+            .field("name", &self.name)
+            .field("fetch", &self.fetch.is_some())
+            .finish()
     }
 }
 
-// ── Provider ────────────────────────────────────────────────────────────────
+/// Create a RunwayML provider.
+///
+/// # Errors
+///
+/// Returns `AiMuxError::invalid_argument` when `base_url` is not an `http(s)`
+/// URL with a host. That is the only way this fails: the key is loaded per
+/// request, not here.
+pub fn create_runwayml(settings: RunwaymlProviderSettings) -> Result<RunwaymlProvider, AiMuxError> {
+    let base_url = match settings.base_url.as_deref() {
+        Some(url) => validate_base_url(url)?,
+        None => DEFAULT_BASE_URL.to_string(),
+    };
+    Ok(RunwaymlProvider {
+        name: settings.name.unwrap_or_else(|| DEFAULT_NAME.to_string()),
+        base_url,
+        headers: ProviderHeaders::bearer(
+            Credential::explicit_or_env(settings.api_key, API_KEY_ENV_VAR, "RunwayML"),
+            vec![("X-Runway-Version".to_string(), RUNWAY_VERSION.to_string())],
+            settings.headers,
+        ),
+        fetch: settings.fetch,
+    })
+}
 
+/// The default provider: `create_runwayml` with default settings, created on
+/// first use. Creating it reads nothing from the environment and cannot fail;
+/// a missing key surfaces from the first request instead.
+pub fn runwayml() -> &'static RunwaymlProvider {
+    static DEFAULT: OnceLock<RunwaymlProvider> = OnceLock::new();
+    DEFAULT.get_or_init(|| {
+        create_runwayml(RunwaymlProviderSettings::default())
+            .expect("default RunwayML settings are always valid")
+    })
+}
+
+/// A RunwayML provider. Cheap to clone the models out of; it holds no HTTP
+/// client.
 pub struct RunwaymlProvider {
-    config: RunwaymlConfig,
+    name: String,
+    base_url: String,
+    headers: ProviderHeaders,
+    fetch: Option<FetchFunction>,
 }
 
 impl RunwaymlProvider {
-    #[must_use]
-    pub fn new(config: RunwaymlConfig) -> Self {
-        Self { config }
+    fn model_config(&self, method: &str) -> EndpointConfig {
+        EndpointConfig::fixed(
+            format!("{}.{method}", self.name),
+            self.base_url.clone(),
+            self.headers.clone(),
+            self.fetch.clone(),
+            None,
+        )
     }
 
-    /// Create a video generation model instance for the given model ID.
+    /// A video model (e.g. `"gen4_turbo"`); `provider()` is `"{name}.video"`.
     #[must_use]
     pub fn video(&self, model_id: &str) -> RunwaymlVideoModel {
-        RunwaymlVideoModel::new(model_id.to_string(), self.config.clone())
+        RunwaymlVideoModel::from_config(model_id.to_string(), self.model_config("video"))
     }
 }
 
-impl Provider for RunwaymlProvider {
-    fn name(&self) -> &str {
-        PROVIDER_NAME
-    }
-}
+crate::impl_single_modality_provider!(RunwaymlProvider, video_model, |p, id| p.video(id));
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -138,12 +167,7 @@ impl Provider for RunwaymlProvider {
 fn video_file_to_prompt_image(file: &VideoFile) -> String {
     match file {
         VideoFile::Url { url, .. } => url.clone(),
-        VideoFile::File { data, .. } => match data {
-            VideoFileData::Base64(s) => s.clone(),
-            VideoFileData::Binary(bytes) => {
-                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
-            }
-        },
+        VideoFile::File { data, .. } => aimux_provider_utils::convert_to_base64(data).into_owned(),
     }
 }
 
@@ -167,40 +191,19 @@ struct RunwaymlTaskDetailsResponse {
 /// A RunwayML video generation model — implements [`VideoModel`].
 pub struct RunwaymlVideoModel {
     model_id: String,
-    config: RunwaymlConfig,
+    config: EndpointConfig,
 }
 
 impl RunwaymlVideoModel {
-    #[must_use]
-    pub fn new(model_id: String, config: RunwaymlConfig) -> Self {
+    pub(crate) fn from_config(model_id: String, config: EndpointConfig) -> Self {
         Self { model_id, config }
-    }
-
-    fn build_headers(&self, extra: Option<&HashMap<String, String>>) -> HashMap<String, String> {
-        let mut headers = HashMap::new();
-        headers.insert(
-            "Authorization".to_string(),
-            format!("Bearer {}", self.config.api_key),
-        );
-        headers.insert("X-Runway-Version".to_string(), RUNWAY_VERSION.to_string());
-        if let Some(ref config_headers) = self.config.headers {
-            for (k, v) in config_headers {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        if let Some(extra) = extra {
-            for (k, v) in extra {
-                headers.insert(k.clone(), v.clone());
-            }
-        }
-        headers
     }
 }
 
 #[async_trait]
 impl VideoModel for RunwaymlVideoModel {
     fn provider(&self) -> &str {
-        PROVIDER_NAME
+        &self.config.provider
     }
 
     fn model_id(&self) -> &str {
@@ -209,13 +212,6 @@ impl VideoModel for RunwaymlVideoModel {
 
     fn max_videos_per_call(&self) -> Option<u32> {
         Some(1)
-    }
-
-    fn poll_config(&self) -> VideoPollConfig {
-        VideoPollConfig {
-            interval: self.config.poll_interval,
-            timeout: self.config.timeout,
-        }
     }
 
     async fn do_start(
@@ -256,19 +252,18 @@ impl VideoModel for RunwaymlVideoModel {
             body.insert("ratio".to_string(), json!(ar.to_string()));
         }
 
-        let headers = self.build_headers(options.headers.as_ref());
-        let header_list: Vec<(String, String)> = headers.into_iter().collect();
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
 
         let submit_path = if is_image_to_video {
             "/v1/image_to_video"
         } else {
             "/v1/text_to_video"
         };
-        let submit_url = format!("{}{submit_path}", self.config.base_url);
+        let submit_url = exchange.url(submit_path);
 
         // Submit the task.
         let resp = aimux_provider_utils::post_json_to_api(
-            HttpRequest::new(submit_url, header_list, options),
+            exchange.request(submit_url, options),
             Value::Object(body),
             aimux_provider_utils::create_json_response_handler(),
             runwayml_failed_response_handler(),
@@ -283,7 +278,7 @@ impl VideoModel for RunwaymlVideoModel {
             warnings: Vec::new(),
             provider_metadata: None,
             response: VideoResponse {
-                timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                timestamp: Some(aimux_core::Timestamp::now()),
                 model_id: Some(self.model_id.clone()),
                 headers: Some(response_headers),
             },
@@ -299,17 +294,16 @@ impl VideoModel for RunwaymlVideoModel {
             .get("task_id")
             .and_then(Value::as_str)
             .ok_or_else(|| {
-                AiMuxError::InvalidArgument(format!(
+                AiMuxError::invalid_argument(format!(
                     "{PROVIDER_NAME} operation reference is missing task_id"
                 ))
             })?;
 
-        let headers = self.build_headers(options.headers.as_ref());
-        let header_list: Vec<(String, String)> = headers.into_iter().collect();
-        let poll_url = format!("{}/v1/tasks/{}", self.config.base_url, task_id);
+        let exchange = self.config.exchange(options.headers.as_ref()).await?;
+        let poll_url = exchange.url(&format!("/v1/tasks/{task_id}"));
 
         let resp = aimux_provider_utils::get_from_api(
-            HttpRequest::new(poll_url.clone(), header_list, options),
+            exchange.request(poll_url.clone(), options),
             aimux_provider_utils::create_json_response_handler::<RunwaymlTaskDetailsResponse>(),
             runwayml_failed_response_handler(),
         )
@@ -327,7 +321,7 @@ impl VideoModel for RunwaymlVideoModel {
                         .output
                         .filter(|o| !o.is_empty())
                         .ok_or_else(|| {
-                            AiMuxError::InvalidResponseData(format!(
+                            AiMuxError::invalid_response_data(format!(
                                 "{PROVIDER_NAME} task {task_id} succeeded without output"
                             ))
                         })?;
@@ -345,7 +339,7 @@ impl VideoModel for RunwaymlVideoModel {
                     warnings: Vec::new(),
                     provider_metadata: None,
                     response: VideoResponse {
-                        timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                        timestamp: Some(aimux_core::Timestamp::now()),
                         model_id: Some(self.model_id.clone()),
                         headers: Some(response_headers),
                     },
@@ -357,11 +351,11 @@ impl VideoModel for RunwaymlVideoModel {
                 status_code: Some(200),
                 provider_code: Some(status_str.clone()),
                 response_body,
+                origin: aimux_core::ApiCallErrorOrigin::HttpResponse,
                 ..ApiCallError::new(
                     format!("{PROVIDER_NAME} task {task_id} failed with status {status_str}"),
                     poll_url,
                     serde_json::json!({}),
-                    aimux_core::ApiCallErrorOrigin::HttpResponse,
                 )
             }))),
             // PENDING / THROTTLED / RUNNING / unknown — keep polling.

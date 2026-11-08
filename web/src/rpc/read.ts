@@ -20,14 +20,18 @@ import type {
   EventContent,
   HelloResult,
   HistoryPage,
+  ModelFailure,
   ModelId,
+  ModelRetryProgress,
   ModelUpdateResult,
   Notification,
   ProviderCatalog,
+  ProviderPresentation,
   ProviderSummary,
   RawBlock,
   SessionEvent,
   SessionSummary,
+  SessionTitle,
   ToolResult,
   UserInput,
   WithdrawResult,
@@ -87,6 +91,61 @@ function modelId(value: unknown, at: string): ModelId {
   return { providerId: str(source, "providerId", at), modelId: str(source, "modelId", at) }
 }
 
+/** A provider's own wording for a failure; absent when the host supplied none. */
+function readPresentation(value: unknown, at: string): ProviderPresentation | undefined {
+  if (value === undefined || value === null) return undefined
+  const source = obj(value, at)
+  const serverMessage = optStr(source, "serverMessage", at)
+  const requestId = optStr(source, "requestId", at)
+  const action = optStr(source, "action", at)
+  return {
+    source: str(source, "source", at),
+    reason: str(source, "reason", at),
+    ...(serverMessage === undefined ? {} : { serverMessage }),
+    ...(requestId === undefined ? {} : { requestId }),
+    ...(action === undefined ? {} : { action }),
+  }
+}
+
+/** Why a model request failed; absent on events written before the fact existed. */
+function readModelFailure(value: unknown, at: string): ModelFailure | undefined {
+  if (value === undefined || value === null) return undefined
+  const source = obj(value, at)
+  const status = source.status === undefined || source.status === null ? undefined : num(source, "status", at)
+  const providerCode = optStr(source, "providerCode", at)
+  const requestId = optStr(source, "requestId", at)
+  const reason = optStr(source, "reason", at)
+  const retryAfterMs = source.retryAfterMs === undefined || source.retryAfterMs === null ? undefined : num(source, "retryAfterMs", at)
+  const cause = source.cause === undefined || source.cause === null ? [] : arr(source.cause, `${at}.cause`).map((frame, index) => {
+    if (typeof frame !== "string") fail(`${at}.cause[${index}]`, "a string")
+    return frame
+  })
+  return {
+    kind: str(source, "kind", at),
+    ...(status === undefined ? {} : { status }),
+    ...(providerCode === undefined ? {} : { providerCode }),
+    ...(requestId === undefined ? {} : { requestId }),
+    ...(reason === undefined ? {} : { reason }),
+    cause,
+    attempts: num(source, "attempts", at),
+    waitedMs: num(source, "waitedMs", at),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+  }
+}
+
+/** The retry a model request is waiting to make; absent when none is pending. */
+function readRetryProgress(value: unknown, at: string): ModelRetryProgress | undefined {
+  if (value === undefined || value === null) return undefined
+  const source = obj(value, at)
+  const reason = optStr(source, "reason", at)
+  return {
+    attempt: num(source, "attempt", at),
+    maxAttempts: num(source, "maxAttempts", at),
+    retryAtMs: num(source, "retryAtMs", at),
+    kind: str(source, "kind", at),
+    ...(reason === undefined ? {} : { reason }),
+  }
+}
 
 export function readHello(value: unknown): HelloResult {
   const source = obj(value, "hello")
@@ -138,12 +197,21 @@ export function readForkedSessionId(value: unknown): string {
   return str(obj(value, "session.fork"), "sessionId", "session.fork")
 }
 
+function readSessionTitle(source: Json, at: string): SessionTitle {
+  const title = source.title === null ? null : str(source, "title", at)
+  const titleSource = source.titleSource
+  if (titleSource !== null && titleSource !== "auto" && titleSource !== "manual") fail(`${at}.titleSource`, "auto, manual or null")
+  if ((title === null) !== (titleSource === null)) fail(`${at}.titleSource`, "null exactly when title is null")
+  return { title, titleSource, titleRevision: num(source, "titleRevision", at) }
+}
+
 export function readSummaries(value: unknown): SessionSummary[] {
   return arr(value, "session.summaries").map((item, index) => {
     const at = `session.summaries[${index}]`
     const source = obj(item, at)
     const preview = optStr(source, "preview", at)
     return {
+      ...readSessionTitle(source, at),
       sessionId: str(source, "sessionId", at),
       cwd: str(source, "cwd", at),
       model: modelId(source.model, `${at}.model`),
@@ -198,7 +266,7 @@ function readPreset(value: unknown, at: string): PermissionPreset {
   return fail(at, "a permission preset")
 }
 
-function readPermissionPolicy(value: unknown, at: string): PermissionPolicy {
+export function readPermissionPolicy(value: unknown, at: string): PermissionPolicy {
   const policy = obj(value, at)
   const list = (key: string) => arr(policy[key], `${at}.${key}`).map((item, index) => {
     if (typeof item !== "string") fail(`${at}.${key}[${index}]`, "a string")
@@ -335,6 +403,38 @@ export function readWithdrawResult(value: unknown): WithdrawResult {
   fail(`${at}.status`, "deleted or notHeld")
 }
 
+const SKILL_BLOCK = '<dim-skill name="'
+
+/** A loaded Skill's block names it after the marker (Skills §9). */
+function loadedSkill(text: string): string | undefined {
+  if (!text.startsWith(SKILL_BLOCK)) return undefined
+  const end = text.indexOf('"', SKILL_BLOCK.length)
+  if (end < 0) return undefined
+  return text.slice(SKILL_BLOCK.length, end)
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&amp;", "&")
+}
+
+/**
+ * The operator's own text of a message and the Skills its blocks loaded: a
+ * text block after the first that starts with the marker is a loaded Skill,
+ * shown as one line and never as its instructions.
+ */
+function userText(blocks: unknown, at: string): { text: string; skills: string[] } {
+  const text: string[] = []
+  const skills: string[] = []
+  arr(blocks, at).forEach((item, index) => {
+    const block = obj(item, `${at}[${index}]`)
+    if (block.type !== "text" || typeof block.text !== "string") return
+    const skill = index === 0 ? undefined : loadedSkill(block.text)
+    if (skill === undefined) text.push(block.text)
+    else skills.push(skill)
+  })
+  return { text: text.join("\n"), skills }
+}
+
 function textOf(blocks: unknown, at: string): string {
   return arr(blocks, at).flatMap((item, index) => {
     const block = obj(item, `${at}[${index}]`)
@@ -395,7 +495,8 @@ function content(type: string, name: string, data: Json, at: string): EventConte
         return { kind: "source-input", text, blocks, ...(mode === undefined ? {} : { mode }) }
       }
       const user = obj(data.user, `${at}.user`)
-      return { kind: "input", text: textOf(user.content, `${at}.user.content`), user: readUserInput(user, `${at}.user`), blocks }
+      const { text, skills } = userText(user.content, `${at}.user.content`)
+      return { kind: "input", text, user: readUserInput(user, `${at}.user`), skills: skills.length === 0 ? undefined : skills, blocks }
     }
     case "input/applied":
       return { kind: "input-applied", inputId: str(data, "input_id", at) }
@@ -474,8 +575,17 @@ function content(type: string, name: string, data: Json, at: string): EventConte
         }),
       }
     case "step/model-output-end": {
-      const error = str(data, "status", at) === "failed" ? str(data, "error", at) : undefined
-      return { kind: "model-end", requestId: str(data, "request_id", at), ...(error === undefined ? {} : { error }) }
+      const failed = str(data, "status", at) === "failed"
+      const error = failed ? str(data, "error", at) : undefined
+      const presentation = failed ? readPresentation(data.presentation, `${at}.presentation`) : undefined
+      const failure = failed ? readModelFailure(data.failure, `${at}.failure`) : undefined
+      return {
+        kind: "model-end",
+        requestId: str(data, "request_id", at),
+        ...(error === undefined ? {} : { error }),
+        ...(presentation === undefined ? {} : { presentation }),
+        ...(failure === undefined ? {} : { failure }),
+      }
     }
     case "context/configured":
       return { kind: "context-configured", model: { providerId: str(data, "provider_id", at), modelId: str(data, "model_id", at) } }
@@ -589,6 +699,8 @@ export function readMemberApproval(value: unknown): MemberApprovalDetail {
 export function readNotification(method: string, value: unknown): Notification | undefined {
   const params = obj(value ?? {}, method)
   switch (method) {
+    case "ui.extensions.changed":
+      return { method, revision: num(params, "revision", method) }
     case "session.event":
       return {
         method,
@@ -606,6 +718,7 @@ export function readNotification(method: string, value: unknown): Notification |
       }
     case "session.model.progress": {
       const requestId = optStr(params, "requestId", method)
+      const retry = readRetryProgress(params.retry, `${method}.retry`)
       return {
         method,
         progress: {
@@ -616,6 +729,7 @@ export function readNotification(method: string, value: unknown): Notification |
           textOffset: num(params, "textOffset", method),
           thinking: str(params, "thinking", method),
           thinkingOffset: num(params, "thinkingOffset", method),
+          ...(retry === undefined ? {} : { retry }),
         },
       }
     }
@@ -630,6 +744,9 @@ export function readNotification(method: string, value: unknown): Notification |
         requestId: str(params, "requestId", method),
       }
     case "session.notice": {
+      if (params.source === "SessionStore" && params.kind === "title") {
+        return { method: "session.title", sessionId: str(params, "sessionId", method), data: readSessionTitle(obj(params.data, `${method}.data`), `${method}.data`) }
+      }
       if (params.source !== "Collaboration" || params.kind !== "memberApprovalEnded") return undefined
       const data = obj(params.data, method)
       return { method: "memberApprovalEnded", sessionId: str(params, "sessionId", method), branchId: str(data, "branchId", method), approvalId: str(data, "approvalId", method) }
@@ -641,4 +758,63 @@ export function readNotification(method: string, value: unknown): Notification |
     default:
       return undefined
   }
+}
+
+export function readExtensions(value: unknown): import("../../../npm/ui").ExtensionDirectory {
+  const source = obj(value, "ui.extensions.list")
+  return {
+    revision: num(source, "revision", "ui.extensions.list"),
+    extensions: arr(source.extensions, "extensions").map(value => {
+      const extension = obj(value, "extension")
+      return {
+        pluginName: str(extension, "pluginName", "extension"),
+        generation: str(extension, "generation", "extension"),
+        panels: arr(extension.panels, "panels").map(value => {
+          const panel = obj(value, "panel")
+          const title = obj(panel.title, "title")
+          const translations = title.translations === undefined ? undefined : obj(title.translations, "translations")
+          return {
+            id: str(panel, "id", "panel"),
+            title: { default: str(title, "default", "title"), translations: translations === undefined ? undefined : Object.fromEntries(Object.entries(translations).map(([key]) => [key, str(translations, key, "translations")])) },
+            icon: optStr(panel, "icon", "panel"),
+            entry: str(panel, "entry", "panel"),
+            placement: str(panel, "placement", "panel"),
+            requires: arr(panel.requires, "requires").map(value => typeof value === "string" ? value : fail("requires", "strings")),
+            methods: arr(panel.methods, "methods").map(value => {
+              const method = obj(value, "method")
+              const scope = method.scope
+              if (scope !== "session" && scope !== "branch") fail("scope", "session or branch")
+              return { name: str(method, "name", "method"), scope }
+            }),
+          }
+        }),
+      }
+    }),
+    errors: arr(source.errors, "errors").map(value => {
+      const error = obj(value, "error")
+      return { pluginName: str(error, "pluginName", "error"), message: str(error, "message", "error") }
+    }),
+  }
+}
+
+function readAgentEvent(value: unknown): import("./protocol").AgentEvent {
+  const event = obj(value, "event")
+  return {
+    id: str(event, "id", "event"), sequence: num(event, "sequence", "event"), create_at: num(event, "create_at", "event"),
+    type: str(event, "type", "event"), name: str(event, "name", "event"), data: obj(event.data, "event.data") as import("./protocol").JsonObject,
+    ...(event.tags === undefined ? {} : { tags: arr(event.tags, "event.tags").map(tag => typeof tag === "string" ? tag : fail("event.tags", "strings")) }),
+    ...(event.context_render === undefined ? {} : { context_render: bool(event, "context_render", "event") }),
+    ...(event.context_state === undefined ? {} : { context_state: bool(event, "context_state", "event") }),
+  }
+}
+
+export function readTimelinePage(value: unknown): import("./protocol").TimelinePage {
+  const page = obj(value, "session.history")
+  return { events: arr(page.events, "events").map(readAgentEvent), through: num(page, "through", "history"), nextAfter: num(page, "nextAfter", "history"), done: bool(page, "done", "history") }
+}
+export function readSubmit(value: unknown): import("./protocol").SubmitResult {
+  return { event: readAgentEvent(obj(value, "session.submit").event) }
+}
+export function readInterrupt(value: unknown): import("./protocol").InterruptResult {
+  return { sequence: num(obj(value, "session.stop"), "sequence", "session.stop") }
 }

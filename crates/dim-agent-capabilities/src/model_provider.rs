@@ -1,6 +1,8 @@
 mod images;
 mod recovery;
-pub use recovery::{Consume, invoke as invoke_with_recovery};
+pub use recovery::{
+    Consume, MAX_ATTEMPTS, RetryObserver, RetryWaiting, WAIT_BUDGET, invoke as invoke_with_recovery,
+};
 
 use crate::{
     context_preparation::ContextPreparation,
@@ -9,8 +11,8 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Delivery, Dispatcher, ModelProgress, Names, StateCell,
-    Timeline, TimelineIdentity,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, ModelProgress, Names, StateCell, Timeline,
+    TimelineIdentity, rebuild_facts,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
@@ -45,6 +47,25 @@ struct ModelState {
     closed: bool,
 }
 
+/// The terminal fact's durable failure: the host facts, including the attempt
+/// count the recovery loop recorded.
+fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
+    ModelFailure {
+        kind: facts.kind,
+        status: facts.status,
+        provider_code: facts.provider_code,
+        request_id: facts.request_id,
+        reason: facts.reason,
+        cause: facts.cause,
+        attempts: facts.attempts.max(1),
+        waited_ms: u64::try_from(facts.waited.as_millis()).unwrap_or(u64::MAX),
+        retry_after_ms: facts
+            .retry_after_stop
+            .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
+        retry_forbidden: facts.retry_forbidden,
+    }
+}
+
 pub struct ModelProvider {
     state: Mutex<ModelState>,
     tasks: TaskTracker,
@@ -72,8 +93,17 @@ impl ModelProvider {
                 message,
                 budget,
                 presentation,
+                model,
                 ..
             }) => {
+                let facts = model.unwrap_or_else(|| {
+                    let mut facts = ModelFailureFacts::unknown(Some(message.clone()));
+                    if let Some(chain) = &call.failure_chain {
+                        facts.attempts = chain.attempts;
+                        facts.waited = std::time::Duration::from_millis(chain.waited_ms);
+                    }
+                    Box::new(facts)
+                });
                 tracing::error!(
                     session_id = %self.identity.session_id,
                     branch_id = %self.identity.branch_id,
@@ -82,12 +112,18 @@ impl ModelProvider {
                     provider_id = %call.request.provider_id,
                     model_id = %call.request.model_id,
                     error = %message,
+                    failure_kind = ?facts.kind,
+                    status = facts.status,
+                    provider_code = facts.provider_code.as_deref(),
+                    attempts = facts.attempts,
+                    waited_ms = facts.waited.as_millis(),
                     "Model request failed"
                 );
                 ModelOutputOutcome::Failed {
                     error: message,
                     budget,
                     presentation: presentation.map(|value| *value),
+                    failure: Some(Box::new(model_failure(*facts))),
                 }
             }
         };
@@ -202,6 +238,7 @@ impl ModelProvider {
                 recovery::invoke(
                     &self.host,
                     &request,
+                    call.failure_chain.as_ref(),
                     resolved,
                     &cancel,
                     &mut output,
@@ -354,30 +391,50 @@ impl DynPlugin for ModelProviderPlugin {
             let owner = service.clone();
             let failures = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
+            let read = owner.clone();
+            let read_timeline = owner.timeline.clone();
             dispatcher
-                .follow(
+                .consume(
                     ctx,
-                    "ModelProvider",
-                    &[
+                    "ModelProvider".into(),
+                    [
                         "model/call",
                         "stop/interrupt",
                         "step/model-start",
                         "input/applied",
                         "turn/start",
                         "turn/end",
-                    ],
-                    move |delivery| {
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    Arc::new(move || {
+                        let read = read.clone();
+                        let timeline = read_timeline.clone();
+                        Box::pin(async move {
+                            let reply = rebuild_facts(
+                                &timeline,
+                                &[
+                                    "model/call",
+                                    "step/tool-use-start",
+                                    "step/tool-use",
+                                    "step/model-output-end",
+                                    "step/model-start",
+                                    "input/applied",
+                                    "stop/interrupt",
+                                    "turn/start",
+                                    "turn/end",
+                                ],
+                            )
+                            .await?;
+                            read.rebuild(&mut read.state.lock().unwrap(), &reply.events)?;
+                            Ok(reply.through)
+                        })
+                    }),
+                    Arc::new(move |event| {
                         let owner = owner.clone();
                         let failures = failures.clone();
                         let lifecycle = lifecycle.clone();
                         Box::pin(async move {
-                            let event = match delivery {
-                                Delivery::Replay(events) => {
-                                    return owner
-                                        .rebuild(&mut owner.state.lock().unwrap(), &events);
-                                }
-                                Delivery::Live(event) => event,
-                            };
                             if let EventKind::StopInterrupt(data) = &event.kind {
                                 let mut state = owner.state.lock().unwrap();
                                 state.interrupted = Some(data.reason.clone());
@@ -463,7 +520,7 @@ impl DynPlugin for ModelProviderPlugin {
                             });
                             Ok(())
                         })
-                    },
+                    }),
                 )
                 .await?;
             ctx.provide_at(self.progress.clone(), service.progress.clone())?;

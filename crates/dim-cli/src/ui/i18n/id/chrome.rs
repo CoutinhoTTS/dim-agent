@@ -1,5 +1,31 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "Antrean",
+        "Export session" => "Ekspor sesi",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter steer · x hapus pesan tertahan · Esc tutup"
+        }
+        "No queued messages." => "Tidak ada pesan dalam antrean.",
+        "Held · awaiting application" => "Ditahan · menunggu penerapan",
+        "Incorporating · awaiting model consumption" => {
+            "Sedang dimasukkan · menunggu pemrosesan oleh model"
+        }
+        "Held" => "Ditahan",
+        "Incorporating" => "Sedang dimasukkan",
+        "Enter export · Esc cancel" => "Enter ekspor · Esc batal",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "Pesan dengan lampiran tetap dalam antrean; gunakan /queue untuk steer atau menghapusnya"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue kelola · shift+← edit terakhir · ctrl+s steer kini"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count} lagi · /queue kelola · shift+← edit terakhir · ctrl+s steer kini"
+        }
+        "steer or delete queued messages" => "steer atau hapus pesan dalam antrean",
+        "export this conversation" => "ekspor percakapan ini",
+        "That message has already left the queue." => "Pesan itu sudah keluar dari antrean.",
+        "Exported {format}: {path}" => "{format} diekspor: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter output / interupsi anggota · x stop perintah · Esc tutup"
@@ -303,14 +329,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C untuk menghentikan workspace Web.",
         "To resume this session:" => "Lanjutkan sesi ini:",
 
-        // composer/commands.rs: categories
-        "session" => "sesi",
-        "run" => "run",
-        "view" => "tampilan",
-        "model" => "model",
-        "extensions" => "ekstensi",
-        "app" => "aplikasi",
-        "skill" => "skill",
         // composer/commands.rs: descriptions
         "start a new session" => "mulai sesi baru",
         "show or set the reasoning effort" => "lihat/atur tingkat penalaran",
@@ -322,7 +340,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "daftar server MCP, masuk/keluar (login|logout ID)"
         }
         "resume a previous session" => "lanjutkan sesi sebelumnya",
-        "open this session in the browser" => "buka sesi ini di browser",
+        "turn the web interface on or off" => "aktifkan atau nonaktifkan antarmuka web",
         "show the context window usage" => "lihat pemakaian jendela konteks",
         "interrupt the run" => "interupsi run",
         "steer with the next queued message" => "steer dengan pesan antrean berikutnya",
@@ -352,6 +370,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc tutup",
         "Suggestions" => "Saran",
         "Skills" => "Skill",
+        "Skill loaded: {name}" => "Skill dimuat: {name}",
         "Commands" => "Perintah",
         "Command Palette" => "Palet Perintah",
         "No matches" => "Tak ada hasil",
@@ -556,6 +575,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "input yang dipatok",
         "digest" => "digest",
         "summary" => "ringkasan",
+        "The first message was not sent; your new draft was kept." => {
+            "Pesan pertama tidak terkirim; draf baru Anda dipertahankan."
+        }
+        "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server masih {server} karena klien lain sedang memakainya; klien {client} ini juga memakainya. Jalankan `dimcode daemon stop` setelah mereka selesai; mulai berikutnya akan menjalankan {client}."
+        }
+        "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server masih {server} karena klien lain sedang memakainya (koneksi: {connections}, sesi terlampir: {attached}, giliran berjalan: {running}); klien {client} ini juga memakainya. Jalankan `dimcode daemon stop` setelah mereka selesai; mulai berikutnya akan menjalankan {client}."
+        }
+        "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
+            "Memutakhirkan penyimpanan lokal dari format v{from} ke v{to}; ini bisa memakan waktu pada penyimpanan besar."
+        }
         _ => return None,
     })
 }

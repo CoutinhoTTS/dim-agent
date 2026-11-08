@@ -5,7 +5,7 @@ import { Projection, type TimelineRow } from "../projection"
 import { Lines, type LineView } from "../lines"
 import { ConnectionLost, RpcError } from "../rpc/client"
 import type { Goal, GoalCall } from "../goal"
-import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type Notification, type PendingQuestion, type PermissionPreset, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type UserInput, type WithdrawResult } from "../rpc/protocol"
+import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type ModelRetryProgress, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type UserInput, type WithdrawResult } from "../rpc/protocol"
 import { readRevision, readRules } from "../rpc/general-settings"
 import { ProtocolError, readAck, readAttachmentPath, readBranchCreate, readCompactResult, readConfigurationOutcome, readContextUsage, readFileCandidates, readForkedSessionId, readHistory, readModelUpdate, readMemberApproval, readPermissionState, readPermissionVersion, readSessionMethods, readWithdrawResult } from "../rpc/read"
 import { useConnectionStore } from "./connection"
@@ -36,6 +36,8 @@ export type SessionView = {
   /** Whether main runs, and whether it is stopping. */
   running: boolean
   stopping: boolean
+  /** The retry main's current model request is waiting to make, while it sleeps. */
+  retry: ModelRetryProgress | undefined
   /** Whether any line of this session runs: the header and sidebar badge. */
   sessionRunning: boolean
   /** Pending approvals of every branch, oldest first. */
@@ -60,6 +62,8 @@ export type SessionView = {
 
 type BranchStream = {
   projection: Projection
+  after: number
+  progress: ModelProgress | undefined
   syncing: boolean
   done: boolean
   error: string
@@ -87,7 +91,7 @@ const HISTORY_TIMEOUT_MS = 60_000
 const PUBLISH_INTERVAL_MS = 16
 
 function stream(): BranchStream {
-  return { projection: new Projection(), syncing: false, done: false, error: "", queued: [] }
+  return { projection: new Projection(), after: 0, progress: undefined, syncing: false, done: false, error: "", queued: [] }
 }
 
 function idleState(): { running: boolean; stopping: boolean } {
@@ -119,6 +123,7 @@ export const useChatStore = defineStore("chat", () => {
       rows: [],
       running: stored?.running ?? false,
       stopping: false,
+      retry: undefined,
       sessionRunning: stored?.running ?? false,
       approvals: [],
       questions: [],
@@ -149,27 +154,29 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** After a reconnect: attach again and fetch every line's history after its last applied event. */
-  function resync(): void {
-    for (const channel of channels.values()) {
-      if (channel.view.status !== "closed") void sync(channel)
-    }
+  async function resync(): Promise<void> {
+    await Promise.all([...channels.values()].filter(channel => channel.view.status !== "closed").map(sync))
   }
 
   async function sync(channel: Channel): Promise<void> {
     if (channel.syncing) return
     const { view } = channel
     channel.syncing = true
+    channel.view.status = "loading"
+    channel.states.clear()
     channel.queued = []
     view.approvals = []
     channel.main.syncing = true
     channel.main.done = false
     channel.main.error = ""
     channel.main.queued = []
+    channel.main.progress = undefined
     for (const [id, branch] of channel.branches) {
       branch.syncing = true
       branch.done = false
       branch.error = ""
       branch.queued = []
+      branch.progress = undefined
       if (!channel.historyQueue.includes(id)) channel.historyQueue.push(id)
     }
     try {
@@ -202,13 +209,17 @@ export const useChatStore = defineStore("chat", () => {
       }
     } finally {
       channel.syncing = false
-      channel.main.syncing = false
+      channel.main.syncing = !channel.main.done || channel.main.error !== ""
+      if (channel.main.syncing) {
+        for (const notification of channel.queued) applyNotification(channel, notification)
+      }
       channel.queued = []
       publish(channel)
     }
   }
 
   function receive(notification: Notification): void {
+    if (notification.method === "ui.extensions.changed") return
     const sessionId = notification.method === "session.model.progress"
       ? notification.progress.sessionId
       : notification.method === "approval.request" ? notification.request.sessionId : notification.sessionId
@@ -229,6 +240,8 @@ export const useChatStore = defineStore("chat", () => {
         const stream = ensureBranch(channel, branchId)
         if (stream.syncing) {
           channel.lines.apply(branchId, notification.event)
+          const content = notification.event.content
+          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use") && content.requestId === stream.progress?.requestId)) stream.progress = undefined
           stream.queued.push(notification.event)
         } else {
           applyEvent(channel, branchId, notification.event)
@@ -238,6 +251,7 @@ export const useChatStore = defineStore("chat", () => {
       case "session.model.progress": {
         const branchId = notification.progress.branchId
         const stream = ensureBranch(channel, branchId)
+        stream.progress = notification.progress
         if (stream.syncing) break
         stream.projection.progress(notification.progress)
         changed(channel)
@@ -292,6 +306,9 @@ export const useChatStore = defineStore("chat", () => {
     channel.lines.apply(branchId, event)
     const stream = ensureBranch(channel, branchId)
     if (!stream.projection.apply(event)) return
+    stream.after = Math.max(stream.after, event.sequence)
+    const applied = event.content
+    if (applied.kind === "turn-end" || ((applied.kind === "model-end" || applied.kind === "tool-use") && applied.requestId === stream.progress?.requestId)) stream.progress = undefined
     if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
     if (branchId === MAIN_BRANCH && event.content.kind === "permission-changed") channel.view.permission = event.content.policy
     changed(channel)
@@ -318,7 +335,7 @@ export const useChatStore = defineStore("chat", () => {
     branch.syncing = true
     branch.error = ""
     branch.done = false
-    let after = branch.projection.cursor
+    let after = branch.after
     let through: number | undefined
     for (let attempt = 0; ; attempt++) {
       try {
@@ -337,14 +354,21 @@ export const useChatStore = defineStore("chat", () => {
           for (const event of page.events) {
             channel.lines.apply(branchId, event)
             branch.projection.apply(event)
+            const content = event.content
+            if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use") && content.requestId === branch.progress?.requestId)) branch.progress = undefined
             if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
           }
           after = page.nextAfter
+          branch.after = after
           if (page.done) break
         }
         const queued = branch.queued
         branch.queued = []
         for (const event of queued) applyEvent(channel, branchId, event)
+        if (branch.progress !== undefined) {
+          branch.projection.progress(branch.progress)
+          branch.progress = undefined
+        }
         branch.done = true
         branch.syncing = false
         changed(channel)
@@ -354,7 +378,6 @@ export const useChatStore = defineStore("chat", () => {
           await new Promise((resolve) => setTimeout(resolve, 100))
           continue
         }
-        branch.syncing = false
         if (error instanceof ConnectionLost) {
           branch.done = false
           branch.error = ""
@@ -409,11 +432,8 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function anyRunning(channel: Channel): boolean {
-    if (stateOf(channel, MAIN_BRANCH).running) return true
-    for (const id of channel.branches.keys()) {
-      if (stateOf(channel, id).running) return true
-    }
-    return false
+    const ended = new Set(channel.lines.views().filter(line => line.state.kind.startsWith("ended") || line.state.kind === "creation-failed").map(line => line.id))
+    return [...channel.states].some(([id, state]) => !ended.has(id) && (state.running || state.stopping))
   }
 
   function changed(channel: Channel): void {
@@ -429,6 +449,7 @@ export const useChatStore = defineStore("chat", () => {
     view.lastTurnEnd = channel.main.projection.lastTurnEnd
     view.running = main.running
     view.stopping = main.stopping
+    view.retry = channel.main.progress?.retry
     view.sessionRunning = anyRunning(channel)
     view.model = channel.main.projection.model ?? useSessionsStore().byId.get(view.sessionId)?.model
     view.lines = channel.lines.views()

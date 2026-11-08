@@ -4,10 +4,10 @@
 
 use crate::{
     Result,
-    args::Options,
     client::Client,
     input::Input,
-    mcp::{Capture, Started, catalog_report, error, session_report, target},
+    management::mcp,
+    mcp::{Capture, Started, catalog_report, error, session_report},
     sanitize::safe,
 };
 use serde::Deserialize;
@@ -19,8 +19,8 @@ use std::{
 use tokio::{io::AsyncWriteExt, time::Instant};
 use url::Url;
 
-pub async fn list(client: &mut Client, options: &Options) -> Result<()> {
-    let (rows, notes) = catalog_report(client, options).await?;
+pub async fn list(client: &mut Client, cwd: &str) -> Result<()> {
+    let (rows, notes) = catalog_report(client, cwd).await?;
     print_report(rows, notes);
     Ok(())
 }
@@ -72,13 +72,14 @@ async fn hidden(input: &mut Input, prompt: &str) -> Result<Option<String>> {
 
 pub async fn sign_in(
     client: &mut Client,
-    options: &Options,
+    cwd: &str,
     input: &mut Input,
     id: &str,
+    source: Option<&str>,
     no_browser: bool,
     secret: bool,
 ) -> Result<i32> {
-    let (params, interrupted) = settle(target(client, options, id), None).await?;
+    let (params, interrupted) = settle(mcp::target_params(client, cwd, id, source), None).await?;
     if interrupted {
         restart(id);
         return Ok(130);
@@ -226,12 +227,17 @@ fn restart(id: &str) {
     eprintln!("Stopped waiting. Run mcp login {id:?} to start again.");
 }
 
-pub async fn sign_out(client: &mut Client, options: &Options, id: &str) -> Result<i32> {
+pub async fn sign_out(
+    client: &mut Client,
+    cwd: &str,
+    id: &str,
+    source: Option<&str>,
+) -> Result<i32> {
     #[derive(Deserialize)]
     struct LoggedOut {
         revoked: bool,
     }
-    let params = target(client, options, id).await?;
+    let params = mcp::target_params(client, cwd, id, source).await?;
     let (result, _) = settle(client.typed::<LoggedOut>("mcp.auth.logout", params), None).await?;
     let result = result.map_err(error)?;
     println!("Signed out of {id:?}. Revoked: {}.", result.revoked);
@@ -240,8 +246,13 @@ pub async fn sign_out(client: &mut Client, options: &Options, id: &str) -> Resul
 
 /// Closes the entry's live connections. It writes no configuration, and the
 /// entry reconnects on next use.
-pub async fn disconnect(client: &mut Client, options: &Options, id: &str) -> Result<i32> {
-    let params = target(client, options, id).await?;
+pub async fn disconnect(
+    client: &mut Client,
+    cwd: &str,
+    id: &str,
+    source: Option<&str>,
+) -> Result<i32> {
+    let params = mcp::target_params(client, cwd, id, source).await?;
     client.rpc("mcp.disconnect", params).await?;
     println!("Disconnected {}.", safe(id));
     Ok(0)
@@ -256,7 +267,7 @@ pub async fn session_status(client: &mut Client, session: &str) -> Result<()> {
 
 pub async fn command(
     client: &mut Client,
-    options: &Options,
+    cwd: &str,
     input: &mut Input,
     session: &str,
     text: &str,
@@ -267,17 +278,19 @@ pub async fn command(
         .expect("MCP command")
         .trim();
     if rest.is_empty() || rest == "list" {
-        list(client, options).await?;
+        list(client, cwd).await?;
         return session_status(client, session).await;
     }
-    let (action, mut id) = rest.split_once(char::is_whitespace).ok_or(
-        "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|disconnect ID|enable ID|disable ID]",
-    )?;
-    id = id.trim_start();
+    const USAGE: &str = "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|disconnect ID|enable ID|disable ID] [--source SOURCE]";
+    let (action, rest) = rest.split_once(char::is_whitespace).ok_or(USAGE)?;
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let (source, words) = crate::mcp::take_source(&words)?;
+    let id = words.join(" ");
     match action {
         "login" => {
             let mut no_browser = false;
             let mut secret = false;
+            let mut id = id.as_str();
             loop {
                 let (flag, tail) = id.split_once(char::is_whitespace).unwrap_or((id, ""));
                 match flag {
@@ -288,37 +301,33 @@ pub async fn command(
                 id = tail.trim_start();
             }
             if id.is_empty() || id.split_whitespace().any(|word| word.starts_with("--")) {
-                return Err("Usage: /mcp login [--no-browser] [--client-secret] ID".into());
+                return Err(
+                    "Usage: /mcp login [--no-browser] [--client-secret] ID [--source SOURCE]"
+                        .into(),
+                );
             }
-            sign_in(client, options, input, id, no_browser, secret).await?;
+            sign_in(client, cwd, input, id, source, no_browser, secret).await?;
             Ok(())
         }
         "logout" if !id.is_empty() && !id.split_whitespace().any(|word| word.starts_with("--")) => {
-            sign_out(client, options, id).await?;
+            sign_out(client, cwd, &id, source).await?;
             Ok(())
         }
         "disconnect"
             if !id.is_empty() && !id.split_whitespace().any(|word| word.starts_with("--")) =>
         {
-            disconnect(client, options, id).await?;
+            disconnect(client, cwd, &id, source).await?;
             Ok(())
         }
         "enable" | "disable"
             if !id.is_empty() && !id.split_whitespace().any(|word| word.starts_with("--")) =>
         {
-            let state = crate::management::mcp::set_enabled(
-                client,
-                options.workspace().as_str(),
-                id,
-                action == "enable",
-            )
-            .await?;
+            let state =
+                crate::management::mcp::set_enabled(client, cwd, &id, source, action == "enable")
+                    .await?;
             print_report(vec![state.sentence()], state.notes);
             Ok(())
         }
-        _ => Err(
-            "Usage: /mcp [list|login [--no-browser] [--client-secret] ID|logout ID|disconnect ID|enable ID|disable ID]"
-                .into(),
-        ),
+        _ => Err(USAGE.into()),
     }
 }

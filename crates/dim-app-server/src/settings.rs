@@ -42,6 +42,15 @@ pub enum SettingsError {
     /// instance path, never the value.
     #[error("invalid settings document: {0}")]
     Document(String),
+    /// A document-shape refusal: the owner's static reason, which a client
+    /// may see ([`SettingsError::reason`]), and the source position when
+    /// the document was read from bytes. The Display keeps the text the
+    /// same refusal had as [`SettingsError::Document`].
+    #[error("invalid settings document: {reason}{position}", position = render_position(*position))]
+    DocumentShape {
+        reason: &'static str,
+        position: Option<(usize, usize)>,
+    },
     /// An owner write changes the user-only field at this JSON Pointer.
     #[error("settings field {0} is changed only by the user")]
     UserOnlyField(String),
@@ -62,6 +71,32 @@ impl From<FileStorageError> for SettingsError {
             FileStorageError::Cancelled => Self::Cancelled,
             FileStorageError::Closed => Self::Closed,
             error => Self::Storage(error),
+        }
+    }
+}
+/// The ` at line L column C` suffix of a document-shape refusal, empty
+/// when the document was already a parsed value.
+fn render_position(position: Option<(usize, usize)>) -> String {
+    match position {
+        Some((line, column)) => format!(" at line {line} column {column}"),
+        None => String::new(),
+    }
+}
+impl SettingsError {
+    /// A document-shape refusal: `reason` is the owner's static message,
+    /// and `position` is where the document broke when it was read from
+    /// bytes.
+    pub const fn shape(reason: &'static str, position: Option<(usize, usize)>) -> Self {
+        Self::DocumentShape { reason, position }
+    }
+    /// The static, credential-safe reason of a refusal (PluginManager A.2):
+    /// `Invalid`'s message or a document-shape reason. `None` for every
+    /// other error, `Document` included, whose text is arbitrary.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Invalid(reason) => Some(*reason),
+            Self::DocumentShape { reason, .. } => Some(*reason),
+            _ => None,
         }
     }
 }
@@ -95,6 +130,12 @@ pub trait BusinessDocument: Default + Serialize + DeserializeOwned + Send + Sync
     const NAMESPACE: &'static str;
     const USER_FILE: &'static str;
     const PROJECT_FILE: Option<&'static str> = None;
+    /// Decodes a document that exists. A source whose entries decode one by
+    /// one overrides this; the default refuses the whole document.
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|_| SettingsError::Invalid("invalid settings document"))
+    }
     fn validate(&self) -> Result<()>;
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -119,8 +160,7 @@ impl<D: BusinessDocument> Format for Typed<D> {
     }
     fn decode(&self, bytes: Option<&[u8]>) -> Result<D> {
         let document: D = match bytes {
-            Some(bytes) => serde_json::from_slice(bytes)
-                .map_err(|_| SettingsError::Invalid("invalid settings document"))?,
+            Some(bytes) => D::decode(bytes)?,
             None => D::default(),
         };
         document.validate()?;
@@ -211,6 +251,18 @@ impl SettingsService {
             .all()
             .iter()
             .filter(|registered| registered.value.owner == owner)
+            .filter_map(|registered| match &registered.value.kind {
+                Kind::Declared(declared) => Some(declared.declaration().clone()),
+                Kind::Rust(_) => None,
+            })
+            .collect()
+    }
+    /// The declarations of every registered JSON Schema source, by source
+    /// name, for the client's `settings.sources` listing.
+    pub fn declarations(&self) -> Vec<SourceDeclaration> {
+        self.sources
+            .all()
+            .iter()
             .filter_map(|registered| match &registered.value.kind {
                 Kind::Declared(declared) => Some(declared.declaration().clone()),
                 Kind::Rust(_) => None,

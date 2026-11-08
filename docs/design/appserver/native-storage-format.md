@@ -1,6 +1,6 @@
 # Rust 会话存储格式
 
-The current native format is **v33**, with worktree directory and Session usage records, source-owned `settings_documents`,
+The current native format is **v34**, with a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
@@ -9,11 +9,11 @@ omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, a delegation's Agent owner and
 member leader, a Session's creation origin, Session file grants, command output
 ownership and the two context reading switches on timeline events. Startup
-requires the exact v33 SQL schema and a single
-format marker of 33 before writable PRAGMAs, or the exact v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
+requires the exact v34 SQL schema and a single
+format marker of 34 before writable PRAGMAs, or the exact v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v33 one step after
-another ([#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
+which the same startup transaction upgrades in place to v34 one step after
+another ([#1099 v34 decision](#1099-v34-格式决定), [#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
@@ -26,17 +26,17 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v33, and v16 request rows stay readable as written.
+valid in v34, and v16 request rows stay readable as written.
 除格式自身的 SQL 外，每次打开都接受派生索引：`timeline_history_anchors`
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
 [latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
 `timeline_policy_turns`（`(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'`，
-[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)）与事件查询的
+已无读者，删除它要作为格式步骤）与事件查询的
 `timeline_events_by_kind`（`(session_id, branch_id, kind, sequence, event_id)`，按 kind
 读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
 `CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
 `timeline_events` 重新推导，读同一份事件不因它们有无而不同，因此不属于格式：启动门禁的
-精确结构比较忽略这些名字，格式标记不变（当前 v33）；其余任何多余对象仍按原规则拒绝。代价是早于
+精确结构比较忽略这些名字，格式标记不变（当前 v34）；其余任何多余对象仍按原规则拒绝。代价是早于
 该变更的二进制不认识这些名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
 索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
@@ -58,18 +58,26 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 的最小通道：一个私有文件、首行带 PID，CLI 只校验并打印它，不解析日志，也不复制
 业务内容。
 
+**升级进度。** 格式升级可能远长于启动等待。升级事务运行期间，存储 owner 在同一位置
+原子改写进度说明，首行是 `dimcode-startup-progress v1 pid=<pid>`，正文是
+`store-upgrade from=<from> to=<to> progress=<n>`：`n` 每次重写递增。SQLite 的进度回调
+最多每秒报告一次，每个升级步骤完成时再报告一次；库新建或已是最新格式时不写。进度
+说明让 CLI 区分“仍在升级”和“卡住”，不含业务内容或凭据，成功打开时与遗留说明一起
+删除。只认失败首行的旧版 CLI 读到进度说明时按“没有说明”处理，退回通用错误文本；
+CLI 等待规则见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+
 “本构建认识的形状”指当前格式的表和索引集合，或某个升级步骤起点的集合：结构完全相符时
 先看标记是否等于该版本，再看是否需要升级。结构不相符时按可读的单一标记分类，下表四行
 互斥。
 
 | 情形 | 判据 | 说明的结论 |
 | --- | --- | --- |
-| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 33） | 本构建读不了这个更新格式的库 |
+| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 34） | 本构建读不了这个更新格式的库 |
 | 标记与结构不符 | 结构是本构建认识的形状（当前格式或某个升级起点），但标记行不是该版本的唯一值 | 标记和结构不一致；不诊断为“降级” |
 | 无法识别 | 结构不是本构建认识的形状，且可读的单一标记在本构建接受的范围内（`MIN_FORMAT ≤ version ≤ FORMAT`，已移除的 v14 除外），或没有可读的单一标记 | 结构无法识别；读出标记时一并给出 |
 | 过旧或不再准入 | 结构不是本构建认识的形状，且可读的单一标记低于 `MIN_FORMAT`，或为已移除的 v14 | 该格式不再被这个构建读取 |
 
-正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 33），不写字面量）。
+正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 34），不写字面量）。
 更新格式：
 
 ```text
@@ -124,10 +132,10 @@ Cannot open native store <path>.
 `v<marker> (schema is v<schema>)`，否则写 `v<schema> (format marker is missing or ambiguous)`；
 结构不相符时，读出单一标记写 `v<marker>`，读不出则只写 `unrecognized`。
 
-- **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写说明。成功打开（含升级成功）时，存储 owner 删除遗留说明；删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
+- **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写失败说明；格式升级期间写进度说明，成功打开（含升级成功）时存储 owner 删除遗留说明，删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
 - **位置**：说明是库的同级文件，不是新数据库格式，也不是 `daemon.log` 的一部分。CLI 启动的守护进程使用 `<native home>/dimcode.sqlite`，所以 CLI 读取 `<native home>/dimcode.sqlite.startup`。直接以 `--database` 启动的守护进程把说明写在它的库旁，CLI 的启动路径不读取。
 - **不自动恢复**：不删除、重建、降级、重置标记或复制库；`--home PATH` 只建立另一个环境。终端说明只给兼容构建和 `--home` 两条路；开发说明继续使用 `./dev` 的隔离 home。
-- **验证**：`storage_flow` 用一次性库覆盖全部分支：v34 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v32 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v33 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+- **验证**：`storage_flow` 用一次性库覆盖全部分支：v35 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v32 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v34 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。慢升级的测试让每个进度回调多花 200 ms，使 v13→v34 的升级超出 1 s 的启动不活动上限：升级仍完成，运行期间存在进度说明，成功后说明被删除；去掉进度报告时该测试以 `initialization timed out` 失败。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
 
 ## SQLite 运行参数与空间回收
 
@@ -147,13 +155,34 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 
 删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构后执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和。`VACUUM` 重写整个库，需要约等于库大小的临时空间；守护进程持锁时该命令拒绝执行，也不升级或创建库。
 
-## Current v33 tables
+### `storage.report` 与维护边界
+
+`storage.report {}` → `{databaseBytes, walBytes, reclaimableBytes}`，三个都是整数。前两项是库文件与 WAL 当前的字节数；`reclaimableBytes` 是空闲页（`freelist_count × page_size`），也就是一次离线 `VACUUM` 会还回去的空间。协议不暴露页大小、页数或空闲页数，它们是存储引擎的内部。`StorageMethods` 注册命名空间 `storage`，建立在 `SqliteStorage` 提供的服务之上，与 `SettingsMethods` 建立在 Settings 之上同形；所以没有原生存储的宿主根本不注册这一行，该名字就是 `unknown_method`；正在关闭的库以 `storage_unavailable` 作答，说明它已关闭。
+
+压缩仍然只有离线入口，客户端按这个次序编排：`daemon.shutdown` → `dimcode --home <home> daemon vacuum`（它自己解析该 home 的库）→ 重新启动。持锁的库继续以既有错误拒绝（`another process owns the SQLite database`）。不能在守护进程服务 Session 时就地 `VACUUM`：它重写整个库、需要约等于库大小的临时空间，任何一个持页的读者都会让它失败，而守护进程常驻四个只读连接，期间所有 Session 停写。
+
+**不提供跨 owner 的 `scan`／`clean`。** 读由拥有状态的部件作答（[ADR 021](../../adr/021-reads-follow-the-state-owner.md) D1、D5）：这样一个扫描会去遍历 RuntimeManager 的 `<home>/runtimes`、PluginManager 的 `<home>/plugins`、model-log 与每个插件的 `pluginFiles` 目录，正是 ADR 021 Context 描述的"同一份规则两处实现"；而且它做不全——用 `--database` 启动时守护进程没有 home，`pluginFiles` 根也可能是宿主显式命名的目录。删除别人的数据同样不行：别的 owner 的状态由它自己的类型化写操作改（[设计规则 §4 第 1、7 条](../../architecture/rust-agent/principles.md)），[Session 清理 §5.1](session-deletion-and-fork.md#51-cleanup-by-age-or-count) 已在更小的场景里否决过服务端的 `session.cleanup`。`expectedRevision` 也没有对象：App Server 不给"类别清单"编版本。
+
+每个类别由它自己的 owner 答复：
+
+| 类别 | owner 的答复 |
+| --- | --- |
+| Session 行、Session 文件、命令输出 | `session.summaries` + `session.delete` 由客户端组合（[§5.1](session-deletion-and-fork.md#51-cleanup-by-age-or-count)）；Session 文件由 SessionStore 的 sweep 清扫，命令输出在删除提交前移除 |
+| 库内空闲页 | `storage.report` 读出，离线 `daemon vacuum` 回收 |
+| 插件 clone 与 `.staging` | PluginManager 的启动清理；remove 故意不删目录 |
+| 插件私有文件 | 每个插件自己的保留策略（例如 Modality 的 30 天、200 个终态任务） |
+| 不再使用的运行时版本 | RuntimeManager 的旧版本清理（[RuntimeManager](../plugins/RuntimeManager.md#0-implementation-boundary) §0 的 Later 行） |
+| legacy home | 不是 App Server 的状态：Migration 只在导入时临时加载，导入后保留来源 |
+
+**验证**：`transport_flow` 的 `storage_report_counts_the_pages_the_offline_vacuum_returns` 建一个 Session 再删除，`reclaimableBytes > 0`；停机跑 `--vacuum` 后重启，`reclaimableBytes == 0` 且 `databaseBytes` 变小。`storage_report_needs_native_storage` 在没有原生存储的 profile 上得到 `unknown_method`，`hello.features` 也不列它。
+
+## Current v34 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 33)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 34)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -175,7 +204,7 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 | `agents.is_default` | `INTEGER` | 否 | — | `CHECK(is_default IN (0, 1))`；唯一的 1 由 `agents_default_unique` 保证至多一个，至少一个由目录校验保证 |
 | `agents.owner_session_id` | `TEXT` | 是 | — | 外键到 `agent_sessions(session_id)`；非空表示该 leader Session 拥有这个私有 Agent，NULL 表示公开 Agent；写入后不变 |
 | `session_catalog.session_id` | `TEXT` | No | — | Primary key, foreign key to `agent_sessions`; one row from creation |
-| `session_catalog.updated_at_ms` | `INTEGER` | No | — | Last committed `main` event time, or creation time for an empty Session |
+| `session_catalog.updated_at_ms` | `INTEGER` | No | — | Time of the newest Session-activity event on `main` (issue #1099), or creation time for a Session with none |
 | `session_catalog.preview` | `TEXT` | Yes | — | First user text in the batch-complete preview window |
 | `session_catalog.cwd` | `TEXT` | No | — | Creation configuration workspace |
 | `agent_sessions.session_id` | `TEXT` | 否 | — | 主键，原 Session ID |
@@ -344,21 +373,21 @@ Completed compaction facts contain source through, `retain_from` (the Timeline
 event id of the first event kept verbatim), `replacement`, `strategy`, baseline
 and diagnostics, not snapshots. Disposable snapshots commit separately without
 affecting fact durability. `RecoverySnapshot={sequence,event_id,interpreter,state}`;
-the default `dim/context-projection/v3` interpreter encodes `{payload,sha256}`,
+the default `dim/context-projection/v4` interpreter encodes `{payload,sha256}`,
 with the complete ProjectionCheckpoint JSON string below as payload. SQLite
 continues to treat state as opaque TEXT; the snapshot change needed no new database format.
 
-摘要算法为 SHA-256：先写入 UTF-8 `dim/recovery-snapshot/v1` 和一个 NUL，再写入 sequence 的 8 字节大端编码，随后依次写入 event_id、interpreter、payload；每个字符串先写入 UTF-8 字节长度的 8 字节大端编码，再写入原始字节。sha256 保存小写十六进制。解释器在解码 payload 前校验摘要，覆盖 resume、全部状态及锚点身份。旧 v1 无校验快照及按条目 ID 记录切点的 v2 快照直接绕过，不通过补算摘要升级；v3 不接受裸检查点或缺失摘要。历史事实及摘要文本不受影响。
+摘要算法为 SHA-256：先写入 UTF-8 `dim/recovery-snapshot/v1` 和一个 NUL，再写入 sequence 的 8 字节大端编码，随后依次写入 event_id、interpreter、payload；每个字符串先写入 UTF-8 字节长度的 8 字节大端编码，再写入原始字节。sha256 保存小写十六进制。解释器在解码 payload 前校验摘要，覆盖 resume、全部状态及锚点身份。旧 v1 无校验快照、按条目 ID 记录切点的 v2 快照，以及 resume 不带事件 ID 的 v3 快照直接绕过，不通过补算摘要升级；v4 不接受裸检查点或缺失摘要。历史事实及摘要文本不受影响。
 
 `HistoryRenderer` 同时拥有 `encode_checkpoint` 和 `decode_checkpoint`，自定义格式必须成对提供并管理自己的 interpreter 标识。完整性校验检测编码后发生的损坏，不是认证或生产者语义证明：可信 builder 必须生成与完整事实重放等价的状态，并通过差分测试验证。已知 builder 语义缺陷需要修复并更换解释器版本，不能给错误状态重算摘要。有效快照仍只读取恢复位置以后的事实，不在每次读取时重复完整重放。
 
-候选查询只选择相同 interpreter 且 sequence 不大于固定 through 的最新快照，并连接事件锚点验证 ID 与序号，不读取事件种类或内容；孤立或元数据不匹配的快照被忽略。锚点能否承载状态由快照所有者的解码回调判断：默认解释器只接受自己完成的 compaction 事实，且其 `retain_from` 与状态一致、through 早于锚点（#130）。Session 恢复不校验可选 state；缺失、不兼容、损坏、越界或锚点不符的快照回退事实重放，replacement 仍保留。运行时在裁剪前校验解码后的 resume 属于固定祖先链和 source through。`Timeline.context` 默认完整重放；加速显式调用 `context_with_checkpoint`，默认能力使用 `history::read_context`。事实或必需引用损坏仍失败并保留原字节。回滚先删除 snapshots 再删除 events。
+候选查询只选择相同 interpreter 且 sequence 不大于固定 through 的最新快照，并连接事件锚点验证 ID 与序号，不读取事件种类或内容；孤立或元数据不匹配的快照被忽略。锚点能否承载状态由快照所有者的解码回调判断：默认解释器只接受自己完成的 compaction 事实，且其 `retain_from` 与状态一致、through 早于锚点（#130）。Session 恢复不校验可选 state；缺失、不兼容、损坏、越界或锚点不符的快照回退事实重放，replacement 仍保留。运行时在裁剪前按 `resume.event_id` 定位该事件并校验 resume 属于固定祖先链和 source through；按 ID 查不到时使用记录的位置。投影的所有者默认从祖先链起点完整折叠（`history::replay_context`），默认能力用 `history::read_context` 先取 `Timeline::checkpoint` 选出的快照再从 `resume` 起折叠。事实或必需引用损坏仍失败并保留原字节。回滚先删除 snapshots 再删除 events。
 
 ```text
 ProjectionCheckpoint = {
-  resume: { branch_id: string, sequence: integer },
+  resume: { branch_id: string, sequence: integer, event_id: string },
   state: {
-    compacted_through: string,
+    retain_from: string,
     prompts: { entries: PromptEntry[], revision: PromptReference | null,
       system_revision: PromptReference | null, system: string,
       turns: string[], tasks: PromptScope[] },
@@ -378,13 +407,36 @@ ProjectionCheckpoint = {
 
 ### 读取校验
 
-读取时先解析 `Row` 和运行时事件，再按 `(session_id, hash)` 查请求引用的内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取或恢复校验中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核。`ListReferences` 从 `list` 向首个节点遍历：每个节点须是 `kind=node`、hash 匹配、正文可解析为 `{parent,message}`，遍历恰好经过 `length` 个节点，最后一个的 `parent` 为 `null`，其余都有父节点。同一次读取保留上一个由列表重建的事件请求及其各消息的节点地址，遍历遇到与它同位置的同一节点即停止，其余前缀取自该请求；共用节点已在重建该请求时复核。遍历每加载至多 256 个节点释放一次连接，下一次持有从中断处继续。随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；缺失或损坏的节点以 "missing request content"、"request content hash mismatch" 或 "request list length mismatch" 明确失败，不得通过默认值把损坏请求还原为空请求或部分请求。不使用请求正文的读取（历史分页、摘要、上下文投影、协作）不还原这两类记录中的请求，也不加载或校验其内容行，只校验记录种类与引用形状相符（[请求增量存储 §7.5](request-delta-storage.md#75-不使用请求正文的读取)）；因此损坏的节点不会让这些读取失败；首次或目录变化后的完整恢复校验、导出与每个使用请求的读取仍会失败（[恢复校验复用](restore-validation.md)）。
+读取时先解析 `Row` 和运行时事件，再按 `(session_id, hash)` 查请求引用的内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核。`ListReferences` 从 `list` 向首个节点遍历：每个节点须是 `kind=node`、hash 匹配、正文可解析为 `{parent,message}`，遍历恰好经过 `length` 个节点，最后一个的 `parent` 为 `null`，其余都有父节点。同一次读取保留上一个由列表重建的事件请求及其各消息的节点地址，遍历遇到与它同位置的同一节点即停止，其余前缀取自该请求；共用节点已在重建该请求时复核。遍历每加载至多 256 个节点释放一次连接，下一次持有从中断处继续。随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；缺失或损坏的节点以 "missing request content"、"request content hash mismatch" 或 "request list length mismatch" 明确失败，不得通过默认值把损坏请求还原为空请求或部分请求。不使用请求正文的读取（历史分页、摘要、上下文投影、协作）不还原这两类记录中的请求，也不加载或校验其内容行，只校验记录种类与引用形状相符（[请求增量存储 §7.5](request-delta-storage.md#75-不使用请求正文的读取)）；因此损坏的节点不会让这些读取失败；导出与每个使用请求的读取仍会失败。恢复校验同样不加载请求正文：它按记录引用的 hash 校验内容行存在，并对每个 `node` 行只读出 `parent` 字段、校验父节点存在（只读 hash 与 parent，不读正文），引用或父节点缺失时以 "missing request content" 拒绝恢复；内容行存在但正文损坏时恢复通过，由加载它的读取失败。导出在写第一行前保留完整校验：重建并复核每个请求正文的 hash，正文损坏时以 "request content hash mismatch" 拒绝且不写出任何行（[恢复校验复用](restore-validation.md)）。
 
 ## 格式版本
 
 `agent_store_format.version` 同时标识 SQL 结构、持久化 JSON 和内容寻址规则。已发布格式发生不兼容变化时，必须定义新版本及读取或转换路径。保持版本的条件是旧读取器能正确解释新值、旧写入器不会重写丢失新值，且存储不变量不变。纯运行时重构不改变格式版本。
 
 首版定稿前的开发库兼容范围由上层持久化设计明确，不预设下一版本或迁移字段；S5a 的 Session 文件、S5b 的标题元数据、#193 的请求列表、#2 的扩展事件、#364 的挂载列表、#427 的分支结束事件、#527 的工具效果和清单条目、#580 的工具 schema、#556 的目录投影、#555 的 System 来源与 #596 的冗余索引移除各自的格式决定见下文。
+
+### #1002 格式决定
+
+[#1002](https://github.com/arcships/dim/issues/1002)（[ADR 020](../adr/020-timeline-read-convergence.md) D5）的格式决定：**不改格式**，v33 不变，不迁移；只升检查点解释器，并改 `ProjectionCheckpoint.resume` 的形状。
+
+- **只改可丢弃快照的 payload**：`resume` 从 `{branch_id, sequence}` 变为 `{branch_id, sequence, event_id}`，`event_id` 是该 resume 点的 Timeline 事件 ID。读取按 `event_id`（`from_event`）定位该事件并从此处续读祖先链，记录的位置只在按 ID 查不到该事件时使用。SQL 结构、`timeline_snapshots` 的列、其余持久化 JSON、内容寻址与事实字节都不变。
+- **不改版本**：`timeline_snapshots.state` 对 SQLite 是不透明 `TEXT`，快照是可丢弃的派生缓存，标识它编码的是 `interpreter` 而不是存储版本。旧读取器不解析 `state`，旧写入器不重写已有快照行，存储不变量不变，因此保持版本的条件都成立。
+- **解释器升版**：默认解释器从 `dim/context-projection/v3` 升到 `dim/context-projection/v4`。v3 的 payload 没有 `event_id`，且摘要覆盖 payload，不能给旧行重算摘要。
+- **旧快照**：v3 及更早的快照不被选中（候选查询按 `interpreter` 过滤）、不转换、不回填，随 Session 删除或回滚消失；读取回退完整事实重放，completed 事实与 replacement 不受影响。
+- **resume 落在合并输出行**：没有保留条目时 `projection_checkpoint` 回退到上下文的最后一个事件，其种类不受限，可能是位于合并 `output` 行内的 `step/text` 或 `step/thinking`，这些行的 `timeline_events.event_id` 为 NULL。读取按 ID 经查询查找该事件（ID 选择会检查合并行内的记录），查不到时用记录的位置；两条路径都从同一事件开始重放，结果与完整重放一致。
+- **验证**：`storage_flow.rs` 的 `a_resume_inside_a_merged_output_row_restores_the_full_context` 在一次性库中让两个增量合并成一行，核对 resume 落在该行的第二个事件上、恢复的上下文等于完整重放；`a_v3_snapshot_is_bypassed_and_left_as_stored` 核对 v3 快照不被选中且行字节不变；`timeline_flow.rs` 的 `a_checkpoint_resumes_at_the_event_its_id_names` 与 `a_resume_id_the_store_does_not_hold_keeps_the_recorded_position` 核对按 ID 续读与按位置兜底。既有快照命中、缺失、损坏、摘要不符、越界回退事实重放的流程测试不变并通过。
+
+### #1099 v34 格式决定
+
+[客户端 Session 目录](session-catalog.md#32-order-cursor-and-paging)（#1099）的格式决定：升级到 **v34**，从 v33 原地升级。这是一次只改数据的一步：不加表、列、索引，也不改持久化 JSON。
+
+- **规则**：`session_catalog.updated_at_ms` 是该 Session `main` 上最新一条活动事件的 `create_at`，没有活动事件时取 `agent_sessions.created_at_ms`。活动是 Session 自己的活动：带用户部分的 `input/message`、`turn/end`、`branch/create`（父分支记下分支 prompt）与 `session/forked`；其余一切都是家事事件——宿主注入的 `input/message`（没有用户部分）、`branch/resume`、`branch/start`、`branch/ended`、`branch/end`、`branch/create-failed`、每一类 `context`/`prompt`/`model`/`step`/`tool`/`approval`/`stop`/`exec`/`permission`/`collaboration` 事件，以及扩展事件——不移动这一行。判断只此一处，SQL 过滤与各写入方都从同一份种类表构造（[目录 §3.2](session-catalog.md#32-order-cursor-and-paging)）。
+- **为什么修**：v23 起这列跟着"最后一次提交的最后一个事件"走。`session.attach`/恢复写入的 `branch/resume`、分支生命周期事件、配置与压缩批次，都会在没有用户活动时把 Session 抬到最前；恢复选择面板于是把"只是被恢复过"的 Session 排在用户刚说过话的 Session 前面。活动事件才是列表要回答的次序。
+- **读取或转换路径**：在现有的 `IMMEDIATE` 启动准入事务内，对结构恰为 v33、标记相符的库执行 `catalog::backfill`：每个 Session 已有的行保留（v23 起创建即写行），`refresh` 按本条规则重写 `updated_at_ms`，行缺失的 Session 以创建时间补写；不触碰任何其他行。更早的受支持格式先执行既有各步，再执行本步。失败回滚，整库不变。
+- **写入方**：写 `main` 批次的同一事务只在批次含活动事件时更新这一行，写该批次最新一条活动事件的 `create_at`；只含家事事件的批次不碰这一行（热路径不加读）。`session.fork` 在分叉事务内写 `session/forked`（活动），`refresh` 与回填同一规则，`0` 处分叉取创建时间。没有原生存储的守护进程经 `AgentIndex::session_summary` 用同一谓词对已装载 Session 求最新活动事件，两条列表不会给出不同答案（[目录 §3.3](session-catalog.md#33-sessionsummaries)）。
+- **回填代价**：`refresh` 为每个 Session 在 `main` 上按 `(session_id, branch_id, sequence)` 主键倒序读，直到第一条活动事件，候选的 `input/message` 体上各做一次 `json_extract`——不是旧的"读最后一行"。预览仍未决定的少数 Session 再走 v23 的预览窗口。一次性库上（2,300 个 Session，各 5 条活动与 5 条家事事件，约 2% 已有预览）整步约 0.25 秒，每个 Session 的行都重算；只在升级的那次启动支付。
+- **单向**：v33 守护进程以现有"unsupported SQLite schema … preserved"错误拒绝 v34 库；不降级。升级日志沿用 S5a 的那一行：`Upgraded native store <path> from format v33 to v34; earlier dimcode versions cannot open it.`
+- **验证**：`storage_flow.rs` 的一次性 v33 库核对结构、标记与其余行逐行不变，`updated_at_ms` 被重写为最新活动事件的 `create_at`（尾部的 `branch/resume` 不再抬高它），没有活动事件的 Session 落在创建时间（`a_v33_store_recomputes_the_catalog_activity_time_on_upgrade`）；`upgrades_in_place_once` 各版本仍逐行核对。`transport_flow` 核对用户消息、完成的 turn 与非零处分叉都移动这一行，恢复（`branch/resume`）不移动，`session.summaries` 与 `session.catalog` 就同一值作答（`catalog_activity_time_follows_user_activity_not_housekeeping`、`an_unload_writes_nothing_and_the_restore_only_resumes` 与目录流程测试）。
 
 ### S5a v15 格式决定
 
@@ -703,13 +755,13 @@ ProjectionCheckpoint = {
 
 - **新增一张表与两个索引**：`session_catalog(session_id TEXT NOT NULL PRIMARY KEY REFERENCES agent_sessions(session_id), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms >= 0), preview TEXT, cwd TEXT NOT NULL)`，索引 `session_catalog_by_activity(updated_at_ms DESC, session_id)` 与局部索引 `session_catalog_with_preview(updated_at_ms DESC, session_id) WHERE preview IS NOT NULL`。`agent_store_format` 的约束改为 `CHECK (version = 23)`。
   - 每个 Session 至多一行，从创建起与 `agent_sessions` 一一对应；写入、回滚与删除见下面的规则。
-  - `updated_at_ms` 是该 Session `main` 上最后一次提交的最后一个事件的 `create_at`。
+  - `updated_at_ms` 是该 Session `main` 上最新一条活动事件的 `create_at`：活动是 Session 自己的活动——带用户部分的 `input/message`、`turn/end`、`branch/create`（父分支记下分支 prompt）与 `session/forked`——其余事件都是家事事件，不移动这一行；没有活动事件的 Session 停在 `created_at_ms`。[#1099 v34 格式决定](#1099-v34-格式决定) 按本规则重写既有行，并取代本节"最后一次提交的最后一个事件"的写法。
   - `preview` 是窗口里第一条带用户部分的 `input/message` 的文字：各文本块以换行连接，超过 120 个字符时截到 120 个字符并以 `…` 结尾。窗口是 `main` 上起始于前 256 个事件内的各个批次，与今天的读取一样按批次完整——承载第 256 个事件的批次整批读入，因此该批次里紧接 256 之后的用户输入也在窗口内。该消息的文字为空（例如只有图片）时为 NULL，之后的消息不再填它；窗口里没有这样的消息时也为 NULL。决定一旦做出，包括决定为 NULL，就不再改变。
   - `cwd` 是 `agent_sessions.config` 的工作目录。目录查询按工作区过滤并回复它，所以不必为每个 Session 解码配置 JSON。
   - `session_catalog_by_activity` 服务按活动时间的键集分页；`session_catalog_with_preview` 服务只要非空预览的读取，因此前面有多少没有预览的行都不影响那条读取的代价。
 - **创建即写行**：`session.create` 在写 `agent_sessions` 的同一事务里写下这一行：`updated_at_ms` 为 `created_at_ms`，`preview` 为 NULL，`cwd` 取自创建的配置。因此新 Session 从创建那一刻起就按目录列出，与今天的 `session.summaries` 相同：创建时间、没有预览。
-- **同一事务写入**：SessionStore 在提交 `main` 每个批次的同一个写入事务里写这一行，写下该批次的最后一个事件，因此这一行与事件不会有一半可见。`updated_at_ms` 跟着批次走；`preview` 只在仍未决定时按上面的规则写入，之后的批次只更新 `updated_at_ms`。实时写入没有单独的规则：一个批次带用户消息、该消息在上面按批次完整的窗口内、且窗口里没有更早的带用户部分的 `input/message` 时，它写入 `preview`（文字为空时写 NULL）。这个判断用与回填相同的窗口读一次已提交事件——读取的批次止于第 256 个事件所在的批次；Session 的 `main` 事件不足 256 个时，止于它最后一个已提交批次——且只在 `preview` 仍为 NULL 时发生；因此回填行与实时行逐列相同。
-- **删除、回滚与分叉**：删除与创建回滚在 S5c 的同一事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内写新行，与按 F 的事件回填逐列相同：`updated_at_ms` 是该事务写入的最后一个事件的 `create_at`——`0` 以外的分叉就是 `at + 1` 处那条 `session/forked`，其 `create_at` 是分叉当时的时刻；`0` 处分叉不写事件，取创建时间——`preview` 是同一按批次完整的窗口里第一条用户输入的文字或 NULL，`0` 处分叉为 NULL。
+- **同一事务写入**：SessionStore 在提交 `main` 每个批次、且批次里含有活动事件的同一个写入事务里写这一行，写下该批次最新一条活动事件的 `create_at`；只含家事事件的批次不碰这一行。因此这一行与事件不会有一半可见。`preview` 只在仍未决定时按上面的规则写入，之后的批次只更新 `updated_at_ms`。实时写入没有单独的规则：一个批次带用户消息、该消息在上面按批次完整的窗口内、且窗口里没有更早的带用户部分的 `input/message` 时，它写入 `preview`（文字为空时写 NULL）。这个判断用与回填相同的窗口读一次已提交事件——读取的批次止于第 256 个事件所在的批次；Session 的 `main` 事件不足 256 个时，止于它最后一个已提交批次——且只在 `preview` 仍为 NULL 时发生；因此回填行与实时行逐列相同。
+- **删除、回滚与分叉**：删除与创建回滚在 S5c 的同一事务里、在 `agent_sessions` 之前删除这一行；分叉在分叉事务内写新行，与按 F 的事件回填逐列相同：`updated_at_ms` 是该事务写入的最新一条活动事件的 `create_at`——`0` 以外的分叉就是 `at + 1` 处那条 `session/forked`，其 `create_at` 是分叉当时的时刻；`0` 处分叉不写事件，取创建时间——`preview` 是同一按批次完整的窗口里第一条用户输入的文字或 NULL，`0` 处分叉为 NULL。
 - **不记分类**：本步不记录子 Session 或创建来源。[#557](https://github.com/arcships/dim/issues/557) 的分类字段连同它自己的格式决定一起加入，与上文不记分叉来源相同。
 - **不能留在 v22**：启动要求精确的 SQL 结构，v22 的守护进程会拒绝多出表和索引的库，不满足"旧读取器能正确解释新值"的保持条件。
 - **读取或转换路径**：在现有的启动准入事务（`IMMEDIATE`，写入型 PRAGMA 之前）内处理：
@@ -718,17 +770,17 @@ ProjectionCheckpoint = {
   - 标记相符的 v21、v20、v19、v18、v17、v16、v15 或 v13 库，在同一事务内先走已有各步，再走本步，直接成为 v23。
   - 恰为 v23 的库直接打开。
   - 其他库（标记不符的 v22 结构、升级到一半的库、更旧的格式、分支专用 v14、未知结构）照旧拒绝并保留。
-- **回填的一次性代价**：回填为每个 Session 读一次 `main`：最后一个已提交批次给出 `updated_at_ms`，起始于前 256 个事件内的批次里找第一条用户输入作为 `preview`；没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL 预览，与创建时写下的一行相同。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。
+- **回填的一次性代价**：回填为每个 Session 读一次 `main`：按上面的活动规则取最新一条活动事件给出 `updated_at_ms`，没有活动事件的 Session 得到 `created_at_ms`；起始于前 256 个事件内的批次里找第一条用户输入作为 `preview`，找不到时得到 NULL 预览，都与创建时写下的一行相同。这与今天一次完整目录读同阶——导入 Session 的最后一个批次是完整的 `context/compaction`，本步把它解码一次。按 #556 的测量，2,300 个导入 Session 的库上约 3 秒，2.3 GB 的库上超过 20 秒；它只在升级的那次启动支付，此后的目录读不再解码任何事件。[#1099 v34 格式决定](#1099-v34-格式决定) 复用这段预览回填与缺行补写，`updated_at_ms` 改取最新一条活动事件，代价见该节。
 - **单向**：不做备份，与之前各步相同。旧守护进程以现有的"unsupported SQLite schema … preserved"错误在启动时拒绝升级后的库。
 - **升级日志**：沿用 S5a 的那一行：`Upgraded native store <path> from format v22 to v23; earlier dimcode versions cannot open it.`
 - **验证**：
   - 用 v22 结构和完整记录示例构建一次性 v22 库，升级后核对结构恰为 v23、标记为 23、业务行逐行不变，`session_catalog` 每个 Session 一行且与事件一致，没有已提交 `main` 批次的 Session 得到 `created_at_ms` 与 NULL。
   - v21、v20、v19、v18、v17、v16、v15、v13 库一次升级到 v23。
   - 标记不符或升级到一半的结构被拒绝并保留。
-  - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最后一个事件走，`preview` 不被覆盖。
+  - 回填写出与继续提交写出的行逐列相同：升级后同一批事件再提交，`updated_at_ms` 跟着最新一条活动事件走，`preview` 不被覆盖。
   - 预览的窗口与最终性：承载第 256 个事件的批次里紧接 256 之后的用户输入升级后即为预览；第一条用户消息在起始于 256 之后的批次里的 Session 升级后没有预览，此后的批次也不写它；第一条用户消息只有图片的 Session 保持 NULL，之后的消息不填它。
   - `session.create` 写下的一行有创建时间与 NULL 预览，创建回滚后没有这一行。
-  - 删除与分叉在各自的事务内维护这一行；非零处分叉的一行以该事务最后写入的 `session/forked` 的 `create_at` 为 `updated_at_ms`，`0` 处分叉的一行为创建时间与 NULL。
+  - 删除与分叉在各自的事务内维护这一行；非零处分叉的一行以该事务写入的最新一条活动事件——`at + 1` 处的 `session/forked`——的 `create_at` 为 `updated_at_ms`，`0` 处分叉的一行为创建时间与 NULL。
   - `withPreview` 的读取按 `EXPLAIN QUERY PLAN` 使用 `session_catalog_with_preview`，前面有多少无预览的行都不改变它的代价。
   - 从不打开用户已有的库。
 
@@ -769,7 +821,7 @@ ProjectionCheckpoint = {
 | v27 `agents_by_owner` | `(owner_session_id)` | 删除 owner 时定位它拥有的 Agent；启动时找出无成员或失去 owner 的私有 Agent |
 | v27 `agent_sessions_by_leader` | `(leader_session_id)` | 装载时重建 Team 关系 |
 | 派生（不占格式号）`timeline_history_anchors` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')` | 最新回合边界与回合提示输入的查找（[latest-turn 窗口](session-history-window.md)） |
-| 派生（不占格式号）`timeline_policy_turns` | `(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'` | 压缩裁剪点的轮次开始查找：`event_id` 在索引内，读轮次开始不访问表行（[上下文读取开关与裁剪点 §5](context-read-and-compaction.md#5-策略的位置)） |
+| 派生（不占格式号）`timeline_policy_turns` | `(session_id, branch_id, kind, sequence, event_id) WHERE kind = 'turn/start'` | 无读者：它只服务已删除的 `policy_order`。删除派生索引要作为格式步骤，所以保留它的创建与启动门禁的豁免 |
 | 派生（不占格式号）`timeline_events_by_kind` | `(session_id, branch_id, kind, sequence, event_id)` | 按 kind 的事件查询与它的事件 id（[ADR 019](../../adr/019-event-query.md) D4） |
 | v12 主键 `timeline_snapshots` | `(session_id, branch_id, interpreter, sequence)` | 兼容 interpreter，`sequence<=through ORDER BY sequence DESC LIMIT 1`；连接事件锚点 |
 | v15 主键 `session_files` | `(file_id)` | put 的两次事务与放弃、清扫按文件定点更新和删除 |
@@ -797,15 +849,15 @@ ProjectionCheckpoint = {
 | `timeline_events_context` | `(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1` | 只取渲染器或 checkpoint 折叠消费的行（v32；v31 的两个部分索引各取其一） |
 | `timeline_events_positions` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')` | 策略定位：轮次开始与压缩边界（v31） |
 
-正向页的 `after` 与 `through` 须为批次边界；上下文页（`stored_context_page`）例外：游标是事件序号，落在合并行内部时从覆盖它的物理行开始读、再按序号过滤，见 [读取边界](context-read-and-compaction.md#4-读取边界)。`limit` 为目标事件数，末批超出时完整返回。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放读连接；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
+正向页的 `after` 与 `through` 须为批次边界。事件查询的起点是事件序号，落在合并行内部时从覆盖它的物理行开始读、再按序号过滤，且页按事件数截断、不与原子批次对齐（[插件契约 §5.4](../plugin-contract.md#54-the-event-query)），见 [读取边界](context-read-and-compaction.md#4-读取边界)。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放读连接；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v33）
+## 完整记录示例（v34）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
-The example retains an old `dim/context-projection/v1` snapshot: the default v3
+The example retains an old `dim/context-projection/v1` snapshot: the default v4
 interpreter bypasses that unchecked cache and restores from facts. Existing v13
 databases needed no migration for this snapshot interpreter change. `s1` owns
 one Session file, stored at `<db>.session-files/<file_id>/<name>`; its name and
@@ -814,7 +866,7 @@ current manual title.
 
 ```json
 {
-  "agent_store_format": [{"version": 33}],
+  "agent_store_format": [{"version": 34}],
   "session_catalog": [{"session_id":"s1","updated_at_ms":1008,"preview":"Hi","cwd":"/work"}],
   "settings_documents": [],
   "providers": [],
@@ -955,7 +1007,7 @@ current manual title.
   ],
   "timeline_snapshots": [{"session_id": "s1", "branch_id": "main", "sequence": 3,
     "interpreter": "dim/context-projection/v1", "event_id": "e3",
-    "state": "{\"resume\":{\"branch_id\":\"main\",\"sequence\":2},\"state\":{\"retain_from\":\"e2\",\"prompts\":{\"entries\":[],\"revision\":null,\"system_revision\":null,\"system\":\"\",\"turns\":[],\"tasks\":[]},\"delivered\":[],\"inputs\":[[\"e1\",{\"user\":{\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}}]],\"configuration\":null,\"output\":[],\"open_tools\":[],\"output_open\":false}}"
+    "state": "{\"resume\":{\"branch_id\":\"main\",\"sequence\":2,\"event_id\":\"e2\"},\"state\":{\"retain_from\":\"e2\",\"prompts\":{\"entries\":[],\"revision\":null,\"system_revision\":null,\"system\":\"\",\"turns\":[],\"tasks\":[]},\"delivered\":[],\"inputs\":[[\"e1\",{\"user\":{\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}}]],\"configuration\":null,\"output\":[],\"open_tools\":[],\"output_open\":false}}"
   }],
   "session_files": [{"file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90", "node": null, "writer": null}],
   "session_file_owners": [{"session_id": "s1", "file_id": "0b4e7d2c-5a1f-4c3e-9f6a-2d8b1e7c4a90"}],

@@ -22,7 +22,7 @@ export class RpcError extends Error {
   }
 }
 
-/** The request could not complete because the socket closed or timed out. */
+/** The request could not complete because the socket closed. */
 export class ConnectionLost extends Error {
   override name = "ConnectionLost"
 }
@@ -85,7 +85,7 @@ export class RpcClient {
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        reject(new ConnectionLost(`${method} timed out`))
+        reject(new Error(`${method} timed out; the outcome is unknown`))
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer })
       socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }))

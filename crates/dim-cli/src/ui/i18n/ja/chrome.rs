@@ -1,5 +1,31 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Queue" => "キュー",
+        "Export session" => "セッションをエクスポート",
+        "Enter steer · x delete held · Esc close" => {
+            "Enter steer · x 保留中のメッセージを削除 · Esc 閉じる"
+        }
+        "No queued messages." => "キューにメッセージはありません。",
+        "Held · awaiting application" => "保留中 · 適用待ち",
+        "Incorporating · awaiting model consumption" => "取り込み中 · モデルの読み取り待ち",
+        "Held" => "保留中",
+        "Incorporating" => "取り込み中",
+        "Enter export · Esc cancel" => "Enter エクスポート · Esc キャンセル",
+        "Messages with attachments stay queued; use /queue to steer or delete them" => {
+            "添付ファイル付きのメッセージはキューに残ります。/queue で steer または削除してください"
+        }
+        "/queue manage · shift+← edit last · ctrl+s steer now" => {
+            "/queue 管理 · shift+← 最後を編集 · ctrl+s 今すぐ steer"
+        }
+        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
+            "+{count} 件 · /queue 管理 · shift+← 最後を編集 · ctrl+s 今すぐ steer"
+        }
+        "steer or delete queued messages" => "キューのメッセージを steer または削除",
+        "export this conversation" => "この会話をエクスポート",
+        "That message has already left the queue." => {
+            "そのメッセージはすでにキューから外れています。"
+        }
+        "Exported {format}: {path}" => "{format} をエクスポートしました: {path}",
         // tui.rs
         "Enter output / interrupt member · x stop command · Esc close" => {
             "Enter 出力/メンバー中断 · x コマンド停止 · Esc 閉じる"
@@ -287,14 +313,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C で Web ワークスペースを停止。",
         "To resume this session:" => "セッションの再開：",
 
-        // composer/commands.rs: categories
-        "session" => "セッション",
-        "run" => "実行",
-        "view" => "表示",
-        "model" => "モデル",
-        "extensions" => "拡張",
-        "app" => "アプリ",
-        "skill" => "スキル",
         // composer/commands.rs: descriptions
         "start a new session" => "新規セッションを開始",
         "show or set the reasoning effort" => "推論強度を表示・設定",
@@ -306,7 +324,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "MCP サーバー一覧・サインイン/アウト（login|logout ID）"
         }
         "resume a previous session" => "過去のセッションを再開",
-        "open this session in the browser" => "セッションをブラウザで開く",
+        "turn the web interface on or off" => "Web インターフェースをオン・オフ",
         "show the context window usage" => "コンテキスト使用量を表示",
         "interrupt the run" => "実行を中断",
         "steer with the next queued message" => "次のキューメッセージで steer",
@@ -334,6 +352,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "esc close" => "esc 閉じる",
         "Suggestions" => "候補",
         "Skills" => "スキル",
+        "Skill loaded: {name}" => "スキル読み込み：{name}",
         "Commands" => "コマンド",
         "Command Palette" => "コマンドパレット",
         "No matches" => "一致なし",
@@ -536,6 +555,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "pinned inputs" => "固定された入力",
         "digest" => "ダイジェスト",
         "summary" => "要約",
+        "The first message was not sent; your new draft was kept." => {
+            "最初のメッセージは送信されませんでした。新しい下書きは保持されています。"
+        }
+        "The App Server is still {server} because other clients are using it; this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server はまだ {server} です。他のクライアントが使用中のため、この {client} クライアントもそれを使います。終わったら `dimcode daemon stop` を実行してください。次回の起動では {client} が動きます。"
+        }
+        "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
+            "App Server はまだ {server} です。他のクライアントが使用中です（接続: {connections}、アタッチ中のセッション: {attached}、実行中のターン: {running}）。この {client} クライアントもそれを使います。終わったら `dimcode daemon stop` を実行してください。次回の起動では {client} が動きます。"
+        }
+        "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
+            "ローカルストアをフォーマット v{from} から v{to} にアップグレードしています。大きなストアでは時間がかかることがあります。"
+        }
         _ => return None,
     })
 }

@@ -1,5 +1,5 @@
 use crate::{host::*, steer::REPLACED_BY_STEER};
-use dim_agent_runtime::{ModelProgress, StateCell, Timeline, ToolProgress};
+use dim_agent_runtime::{ModelProgress, RetryProgress, StateCell, Timeline, ToolProgress};
 use dim_agent_types::*;
 use futures_util::StreamExt;
 use std::{
@@ -500,6 +500,20 @@ impl Output {
     }
 }
 
+impl crate::model_provider::RetryObserver for Output {
+    fn waiting(&mut self, retry: Option<crate::model_provider::RetryWaiting<'_>>) {
+        self.show(|progress| {
+            progress.retry = retry.map(|retry| RetryProgress {
+                attempt: retry.attempt,
+                max_attempts: retry.max_attempts,
+                retry_at_ms: retry.retry_at_ms,
+                kind: retry.kind,
+                reason: retry.reason.map(str::to_owned),
+            });
+        });
+    }
+}
+
 pub(crate) async fn consume_output(
     stream: ModelStream,
     output: &mut Output,
@@ -685,7 +699,19 @@ async fn parse_output(
                         message: message.clone(),
                         budget: None,
                         kind: HostErrorKind::Other,
-                        model: None,
+                        model: Some(Box::new(ModelFailureFacts {
+                            kind: ModelFailureKind::OutputLimit,
+                            reason: Some(message.clone()),
+                            status: None,
+                            provider_code: None,
+                            request_id: None,
+                            cause: Vec::new(),
+                            retry_after: None,
+                            attempts: 1,
+                            waited: Duration::ZERO,
+                            retry_after_stop: None,
+                            retry_forbidden: false,
+                        })),
                         presentation: Some(Box::new(ProviderPresentation {
                             source: request.provider_id.clone(),
                             reason: "max_tokens".into(),

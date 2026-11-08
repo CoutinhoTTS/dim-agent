@@ -1,6 +1,6 @@
-//! The rows of the palette and the list panels:
-//! category, label, detail and key in columns shared by every row, under a
-//! panel title. Panels and the palette draw through these.
+//! The rows of the palette and the list panels: label, detail and key in
+//! columns shared by every row, under a panel title. Panels and the palette
+//! draw through these.
 
 use crate::ui::commands::Command;
 use crate::ui::i18n::t;
@@ -22,13 +22,11 @@ pub enum Kind {
     Skill(String),
 }
 
-/// One palette row: category, label (bold), detail,
-/// and the key that runs it at the right edge.
+/// One palette row: label (bold), detail, and the key that runs it at the
+/// right edge.
 #[derive(Debug, Clone)]
 pub struct Row {
     pub kind: Kind,
-    /// Right-aligned in a column of its own; empty in plain lists.
-    pub category: String,
     pub label: String,
     pub detail: String,
     pub key: Option<String>,
@@ -78,8 +76,6 @@ pub fn title(text: &str, inner: usize, p: &Palette) -> String {
 /// nothing shifts while scrolling.
 #[derive(Debug, Clone, Copy)]
 pub struct Columns {
-    /// The right-aligned category column; 0 in plain lists.
-    category: usize,
     /// Where details start, counted from the label.
     label: usize,
 }
@@ -93,20 +89,13 @@ impl Columns {
                 .max()
                 .unwrap_or(0)
         };
-        let category = widest(&|r| Some(display_width(&r.category)));
         let label = widest(&|r| (!r.detail.is_empty()).then(|| display_width(&r.label)));
         let command = widest(&|r| match r.kind {
             Kind::Command(command) => Some(display_width(command.name) + 1 + DETAIL_GAP),
             _ => None,
         });
-        let category = if command == 0 {
-            category
-        } else {
-            category.min(inner.saturating_sub(ROW_INDENT + DETAIL_GAP + command))
-        };
-        let room = inner.saturating_sub(ROW_INDENT + category + DETAIL_GAP);
+        let room = inner.saturating_sub(ROW_INDENT);
         Self {
-            category,
             label: (label + DETAIL_GAP).min((room / 2).max(command).min(room).max(1)),
         }
     }
@@ -119,9 +108,9 @@ impl Columns {
 
 const UNAVAILABLE: &str = " (unavailable)";
 
-/// One row in the shared columns: category (faint, right-aligned), label (bold),
-/// detail (faint), key (keybind colour, at the right edge). An unavailable
-/// row is faint throughout; the selected row sits on an accent bar.
+/// One row in the shared columns: label (bold), detail (faint), key (keybind
+/// colour, at the right edge). An unavailable row is faint throughout; the
+/// selected row sits on an accent bar.
 pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &Palette) -> String {
     if !row.selectable() {
         return paint(
@@ -133,27 +122,14 @@ pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &
             },
         );
     }
-    let category = if columns.category == 0 {
-        String::new()
-    } else {
-        let text = truncate_cells(&row.category, columns.category);
-        format!(
-            "{}{text}{}",
-            " ".repeat(columns.category - display_width(&text)),
-            " ".repeat(DETAIL_GAP)
-        )
-    };
     let key = row
         .key
         .as_deref()
         .map(|key| format!("{}{key}", " ".repeat(DETAIL_GAP)))
-        .filter(|key| {
-            ROW_INDENT + display_width(&category) + display_width(&row.label) + display_width(key)
-                <= inner
-        })
+        .filter(|key| ROW_INDENT + display_width(&row.label) + display_width(key) <= inner)
         .unwrap_or_default();
     let room = inner
-        .saturating_sub(ROW_INDENT + display_width(&category) + display_width(&key))
+        .saturating_sub(ROW_INDENT + display_width(&key))
         .max(1);
     let mut label = row.label.clone();
     let mut detail = row.detail.clone();
@@ -186,11 +162,7 @@ pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &
             truncate_cells(&format!("{}{detail}", " ".repeat(gap)), available)
         }
     };
-    let used = ROW_INDENT
-        + display_width(&category)
-        + display_width(&label)
-        + display_width(&detail)
-        + display_width(&key);
+    let used = ROW_INDENT + display_width(&label) + display_width(&detail) + display_width(&key);
     let fill = " ".repeat(inner.saturating_sub(used));
     let part = |text: &str, fg: &str, bold: bool| {
         paint(
@@ -211,9 +183,8 @@ pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &
         (&p.text, &p.muted, &p.keybind)
     };
     format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}",
         part(IDLE_MARKER, text, false),
-        part(&category, faint, false),
         part(&label, text, true),
         part(&format!("{detail}{fill}"), faint, false),
         part(&key, keyed, true),

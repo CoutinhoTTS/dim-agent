@@ -1,7 +1,11 @@
 //! `dimcode plugin`: PluginManager's `plugin.*` methods (PluginManager §6).
 
 use crate::model::session::PluginAction;
-use crate::{Result, client::Client, sanitize::safe};
+use crate::{
+    Result,
+    client::Client,
+    sanitize::{safe, safe_line},
+};
 use dim_client::Message;
 use serde_json::{Value, json};
 
@@ -111,7 +115,68 @@ pub async fn run(client: &mut Client, method: &str, params: Value) -> Result<i32
     } else {
         println!("{}", summary(method, &result));
     }
+    if method == "plugin.install" {
+        report_unrunnable_hooks(client, &result).await;
+    }
     Ok(0)
+}
+
+/// After a successful `plugin.install`, reads `hooks.catalog` and prints
+/// the installed plugin's hook handlers whose state is not `ok` — the
+/// events and handler kinds Dim does not run — with one line pointing to
+/// `Hooks.md` Appendix G. A daemon that does not advertise `hooks.catalog`
+/// is not asked, and a read that fails reports that the handlers could not
+/// be checked without failing the install.
+async fn report_unrunnable_hooks(client: &mut Client, result: &Value) {
+    let Some(id) = result["id"].as_str() else {
+        return;
+    };
+    if !client.supports(&["hooks.catalog"]) {
+        return;
+    }
+    let catalog = match read_catalog(client).await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            eprintln!(
+                "The installed plugin's hook handlers could not be checked: {}",
+                safe_line(&error.to_string())
+            );
+            return;
+        }
+    };
+    let source = format!("plugin:{id}");
+    let mut lines = Vec::new();
+    for entry in catalog["hooks"].as_array().into_iter().flatten() {
+        if entry["source"].as_str() == Some(source.as_str())
+            && entry["state"].as_str() != Some("ok")
+        {
+            lines.push(format!(
+                "  {} {}",
+                safe_line(entry["event"].as_str().unwrap_or("-")),
+                safe_line(entry["state"].as_str().unwrap_or("-"))
+            ));
+        }
+    }
+    if !lines.is_empty() {
+        println!("Hook handlers that will not run:");
+        for line in lines {
+            println!("{line}");
+        }
+        println!("See Hooks.md Appendix G for the events Dim runs and the differences.");
+    }
+}
+
+/// The reply to `hooks.catalog`, read past any notices.
+async fn read_catalog(client: &mut Client) -> Result<Value> {
+    let request = client.send("hooks.catalog", json!({})).await?;
+    loop {
+        match client.next().await? {
+            Message::Response { id, result } if id == request => {
+                return result.map_err(Into::into);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn text(value: &Value) -> String {

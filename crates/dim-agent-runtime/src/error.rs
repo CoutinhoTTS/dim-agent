@@ -26,6 +26,10 @@ pub enum AgentError {
     /// before branches accepted each id once; nothing was written.
     #[error("more than one input has submission id {0}")]
     AmbiguousSubmission(String),
+    /// A batch's submission ids are partly committed on the branch and partly
+    /// not; nothing was written. The message lists the uncommitted ids.
+    #[error("some inputs of the batch have committed on the branch and some have not: {0}")]
+    PartialSubmission(String),
     #[error("{component}: {message}")]
     Fault { component: String, message: String },
     #[error("framework: {0}")]
@@ -135,6 +139,11 @@ pub fn panic_message(value: Box<dyn std::any::Any + Send>) -> String {
 impl From<rutis::Error> for AgentError {
     fn from(error: rutis::Error) -> Self {
         Self::Framework(Arc::new(error.into_kind()))
+    }
+}
+impl From<rutis::host::CallError> for AgentError {
+    fn from(error: rutis::host::CallError) -> Self {
+        Self::from(rutis::Error::from(error))
     }
 }
 impl From<Arc<rutis::host::ErrorKind>> for AgentError {

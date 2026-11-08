@@ -4,10 +4,12 @@ use super::config::{
     self, McpPluginServers, McpProjectEnablement, McpSecrets, McpServerSettings, McpSettings,
 };
 use super::{
-    McpAuth, McpConnection, McpError, McpSource, Result,
+    McpAuth, McpConnection, McpError, McpSource, Result, daemon_environment,
     server::{McpRuntime, McpServer, McpServerError, McpServerPlugin, McpServerState},
+    source_revision, sources_in_precedence,
 };
 use crate::settings::{SettingsScope, SettingsService};
+use dim_agent_capabilities::host::{CredentialVariables, CredentialVariablesHost};
 use dim_agent_runtime::{
     Modules, Names, SessionLifecycle, SessionLoader, SessionPhase, StateCell,
     names::ServiceCatalog, register_part,
@@ -217,17 +219,20 @@ impl Publication {
 
 pub struct McpPublication {
     settings: Key<SettingsService>,
+    credentials: Key<CredentialVariablesHost>,
 }
 struct Worker {
     port: Arc<Publication>,
     commands: mpsc::Receiver<Command>,
     released: watch::Receiver<()>,
     settings_changed: watch::Receiver<()>,
+    credentials: Arc<dyn CredentialVariables>,
 }
 impl McpPublication {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
+            credentials: names.key()?,
         })
     }
     /// Registers the process row, keyed from `catalog`, and returns its name.
@@ -256,6 +261,7 @@ impl Worker {
     async fn run(mut self, settings: Arc<SettingsService>, stop: CancellationToken) -> Result<()> {
         let mut projection = Projection {
             port: self.port.clone(),
+            credentials: self.credentials.clone(),
             sources: BTreeMap::new(),
             generations: BTreeMap::new(),
             disconnected: BTreeMap::new(),
@@ -337,11 +343,12 @@ impl DynPlugin for McpPublication {
         "McpPublication"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.settings.erase()]
+        vec![self.settings.erase(), self.credentials.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let settings = ctx.require_at(&self.settings)?;
+            let credentials = ctx.require_at(&self.credentials)?;
             let (commands, receiver) = mpsc::channel(64);
             let (released, releases) = watch::channel(());
             let port = Arc::new(Publication {
@@ -354,6 +361,7 @@ impl DynPlugin for McpPublication {
                 commands: receiver,
                 released: releases,
                 settings_changed: config::settings_changes(ctx)?,
+                credentials: credentials.0.clone(),
             };
             ctx.provide_as::<Publication>(port)?;
             let stop = ctx.cancellation_token();
@@ -394,6 +402,7 @@ struct Generation {
 }
 struct Projection {
     port: Arc<Publication>,
+    credentials: Arc<dyn CredentialVariables>,
     sources: BTreeMap<McpSource, Source>,
     generations: BTreeMap<String, Generation>,
     disconnected: BTreeMap<(McpSource, String), String>,
@@ -403,9 +412,27 @@ struct Projection {
 impl Projection {
     /// The entry no longer exists enabled. A known entry that is disabled is
     /// withdrawn even while its source is unreadable: the user's decision does
-    /// not depend on the project file. A missing entry is withdrawn only when
-    /// its source was read.
-    fn withdrawn(&self, generation: &Generation) -> bool {
+    /// not depend on the project file or on the withheld records. A missing
+    /// entry is withdrawn only when its source was read.
+    fn withdrawn(
+        &self,
+        generation: &Generation,
+        projects: &[(usize, std::path::PathBuf)],
+        enablement: &McpProjectEnablement,
+    ) -> bool {
+        // A project entry runs only while the user's record names it, and that
+        // record is readable whenever the disable is: the source may be
+        // unreadable, so its last `current` state is not consulted here.
+        if let McpSource::Project(root) = generation.source
+            && !projects.iter().any(|(project, workspace)| {
+                *project == root
+                    && workspace
+                        .to_str()
+                        .is_some_and(|workspace| enablement.contains(workspace, &generation.id))
+            })
+        {
+            return true;
+        }
         self.sources.get(&generation.source).is_some_and(|source| {
             match source.current.get(&generation.id) {
                 Some(config) => !enabled(config),
@@ -435,11 +462,10 @@ impl Projection {
         };
         let secrets_unreadable = secrets.is_err();
         let secrets = secrets.unwrap_or_default();
-        for source in [McpSource::User, McpSource::Plugins].into_iter().chain(
-            projects
-                .into_iter()
-                .map(|(root, _)| McpSource::Project(root)),
-        ) {
+        for source in [McpSource::User, McpSource::Plugins]
+            .into_iter()
+            .chain(projects.iter().map(|(root, _)| McpSource::Project(*root)))
+        {
             if secrets_unreadable && matches!(source, McpSource::Project(_)) {
                 let intent = self.sources.entry(source).or_insert_with(|| Source {
                     revision: String::new(),
@@ -455,11 +481,11 @@ impl Projection {
                 Some(scope) => settings
                     .read::<McpSettings>(scope, cancel)
                     .await
-                    .map(|snapshot| (snapshot.revision, snapshot.document.mcp_servers)),
+                    .map(|snapshot| (snapshot.revision, snapshot.document.into_parts().0)),
                 None => settings
                     .read::<McpPluginServers>(SettingsScope::User, cancel)
                     .await
-                    .map(|snapshot| (snapshot.revision, snapshot.document.entries().collect())),
+                    .map(|snapshot| (snapshot.revision, snapshot.document.entries())),
             };
             let (revision, servers) = match read {
                 Ok(read) => read,
@@ -488,40 +514,64 @@ impl Projection {
                     continue;
                 }
             };
+            let workspace = match source.scope() {
+                Some(scope @ SettingsScope::Project(_)) => config::workspace(settings, scope).ok(),
+                _ => None,
+            };
+            // A project source is served from `.mcp.json` and the workspace's
+            // withheld records, so its applied token names both (D5, D23). An
+            // `appliedRevision` over the document alone would never match the
+            // catalog's `projectRevision` once a record exists, and a client
+            // holding both would read the source as not applied. An unresolved
+            // workspace keeps the document revision, as `read_source_revision`
+            // does when the records cannot be read.
+            let revision = match (source.scope(), &workspace) {
+                (Some(scope @ SettingsScope::Project(_)), Some(workspace)) => {
+                    source_revision(scope, &revision, &secrets.overlays(workspace))
+                }
+                _ => revision,
+            };
             self.disconnected
                 .retain(|(owner, _), disconnected| *owner != source || *disconnected == revision);
             let configured = servers.keys().cloned().collect();
             let mut current = BTreeMap::new();
             let mut error = None;
-            let workspace = match source.scope() {
-                Some(scope @ SettingsScope::Project(_)) => config::workspace(settings, scope).ok(),
-                _ => None,
-            };
             let project_unresolved = matches!(source, McpSource::Project(_)) && workspace.is_none();
             if project_unresolved {
                 error = Some("MCP configuration could not be resolved");
             }
-            for (id, mut config) in servers {
+            let protected = self.credentials.credential_variables();
+            for (id, config) in servers {
                 if project_unresolved {
                     continue;
                 }
-                if let Some(workspace) = &workspace
-                    && let Some(secret) = secrets.get(workspace, &id)
-                    && config::merge_secret(&mut config, secret).is_err()
-                {
-                    error = Some("MCP configuration could not be resolved");
-                    continue;
-                }
-                let config = match source.scope() {
-                    Some(scope) => config::effective(settings, scope, &id, config, &enablement),
-                    None => Ok(config),
+                let secret = workspace
+                    .as_ref()
+                    .and_then(|workspace| secrets.get(workspace, &id));
+                let origin = match source {
+                    McpSource::User => config::Origin::User,
+                    McpSource::Plugins => config::Origin::Plugin,
+                    McpSource::Project(_) => config::Origin::Workspace { overlay: secret },
                 };
-                let Ok(config) = config else {
+                let expansion = config::connected(
+                    settings,
+                    config,
+                    config::Connection {
+                        scope: source.scope(),
+                        id: &id,
+                        secret,
+                        origin,
+                        enablement: &enablement,
+                        environment: &daemon_environment,
+                        protected: &protected,
+                    },
+                );
+                let Ok(expansion) = expansion else {
                     error = Some("MCP configuration could not be resolved");
                     continue;
                 };
                 if !self.disconnected.contains_key(&(source, id.clone())) {
-                    current.insert(id, config);
+                    current.insert(id, expansion.configuration);
                 }
             }
             let degraded = (unreadable && matches!(source, McpSource::Project(_)))
@@ -546,7 +596,7 @@ impl Projection {
             .generations
             .iter()
             .filter(|(_, g)| {
-                let withdrawn = self.withdrawn(g);
+                let withdrawn = self.withdrawn(g, &projects, &enablement);
                 if withdrawn {
                     g.withdrawn.store(true, Ordering::SeqCst);
                 }
@@ -572,6 +622,7 @@ impl Projection {
             .map(|(source, intent)| {
                 let inactive = intent.current.iter().any(|(id, configuration)| {
                     enabled(configuration)
+                        && !unresolved_url(configuration)
                         && McpServerPlugin::new(id, configuration.clone(), Key::of()).is_err()
                 }) || self.application_failed.keys().any(
                     |(_, failed_source, id)| {
@@ -624,10 +675,7 @@ impl Projection {
             return Err(McpError::Closed);
         }
         let mut selected = None;
-        for source in [McpSource::User, McpSource::Plugins]
-            .into_iter()
-            .chain(project.map(McpSource::Project))
-        {
+        for source in sources_in_precedence(project) {
             let intent =
                 self.sources
                     .get(&source)
@@ -765,6 +813,15 @@ fn enabled(config: &McpServerSettings) -> bool {
         }
     }
 }
+/// A remote URL that still names an unset reference cannot be judged before
+/// a connection expands it: the source stays applied and only the entry's
+/// connection reports the failure (D19).
+fn unresolved_url(settings: &McpServerSettings) -> bool {
+    matches!(
+        settings,
+        McpServerSettings::Remote { url, .. } if !config::unresolved(url).is_empty()
+    )
+}
 fn connection(port: &Publication, generation: &Generation) -> Arc<McpConnection> {
     Arc::new(McpConnection {
         service: generation.service.clone(),
@@ -784,6 +841,13 @@ mod tests {
         time::Duration,
     };
     use tokio::sync::Notify;
+
+    struct NoCredentials;
+    impl CredentialVariables for NoCredentials {
+        fn credential_variables(&self) -> BTreeSet<String> {
+            BTreeSet::new()
+        }
+    }
 
     #[derive(Default)]
     struct Faults {
@@ -852,6 +916,8 @@ mod tests {
             )
             .unwrap();
             let root = Ctx::root().unwrap();
+            root.provide(CredentialVariablesHost(Arc::new(NoCredentials)))
+                .unwrap();
             let faults = Arc::new(Faults::default());
             let catalog = crate::catalog();
             let mut builtins = Modules::new();

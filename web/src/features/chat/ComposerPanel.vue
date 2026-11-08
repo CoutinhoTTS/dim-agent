@@ -7,6 +7,7 @@ import type { DraftAttachments, FileCandidate, ImageBlock, ModelId, PermissionPr
 import { linkMentions, mentionTrigger, type FileMention, type MentionTrigger } from "../../mentions"
 import { useModelsStore } from "../../stores/models"
 import { useSessionsStore } from "../../stores/sessions"
+import { useConnectionStore } from "../../stores/connection"
 import ComposerModelMenu from "./ComposerModelMenu.vue"
 import ComposerPermissionMenu from "./ComposerPermissionMenu.vue"
 import { quoteInto } from "./quote"
@@ -59,6 +60,7 @@ const router = useRouter()
 
 const models = useModelsStore()
 const sessions = useSessionsStore()
+const connection = useConnectionStore()
 const field = ref<HTMLTextAreaElement>()
 const modelMenu = ref<InstanceType<typeof ComposerModelMenu>>()
 const permissionMenu = ref<InstanceType<typeof ComposerPermissionMenu>>()
@@ -102,6 +104,7 @@ const availableCommands = computed(() => ([
   { category: "model", name: "permissions", available: props.permission !== undefined && props.variant !== "panel" },
   { category: "session", name: "lines", available: props.openLines !== undefined },
   { category: "session", name: "new", available: true },
+  { category: "session", name: "scheduled", available: connection.supports("schedule.list") },
 ] as const).filter((command) => command.available))
 const commandPrefix = computed(() => /^\/[a-z]*$/i.test(text.value) ? text.value.slice(1).toLowerCase() : undefined)
 const matches = computed(() => {
@@ -245,6 +248,10 @@ async function submit(): Promise<void> {
     return
   }
   const message = text.value
+  if (!dismissed.value && connection.supports("schedule.list") && /^\/schedule(?:d)?\s*$/i.test(message)) {
+    await runCommand("scheduled")
+    return
+  }
   const branchCommand = !dismissed.value && /^\/branch(?:\s+([\s\S]*))?$/i.exec(message)
   if (branchCommand && !branchCommand[1]?.trim()) {
     await runCommand("branch")
@@ -324,7 +331,10 @@ async function runCommand(name: typeof availableCommands.value[number]["name"]):
   if (argument) field.value?.focus()
   else if (name === "models") modelMenu.value?.open()
   else if (name === "lines") props.openLines?.()
-  else if (name === "new") {
+  else if (name === "scheduled") {
+    const cwd = typeof route.params.sessionId === "string" ? sessions.byId.get(route.params.sessionId)?.cwd : undefined
+    await router.push({ name: "settings-scheduled", ...(cwd === undefined ? {} : { query: { cwd } }) })
+  } else if (name === "new") {
     try {
       const cwd = typeof route.params.sessionId === "string" ? sessions.byId.get(route.params.sessionId)?.cwd : undefined
       await router.push({ name: "chat-new", ...(cwd === undefined ? {} : { query: { cwd } }) })

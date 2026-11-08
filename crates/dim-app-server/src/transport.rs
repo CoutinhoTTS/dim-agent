@@ -1,6 +1,6 @@
 use crate::{
     ServerConfig, ServerError,
-    connection::{Connection, ConnectionHub, Entry},
+    connection::{ClientIdentity, Connection, ConnectionHub, Entry},
     control::ServerControl,
     outbound::MAX_FRAME_BYTES,
     protocol::*,
@@ -15,6 +15,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use dim_agent_capabilities::environment_clients::{ClientChannel, DeclaredClientKind};
 use dim_agent_capabilities::methods::RpcError;
 use dim_agent_runtime::Names;
 use futures_util::{
@@ -648,10 +649,43 @@ async fn run_connection(
                     if (1..=PROTOCOL_VERSION).contains(&params.protocol_version)
                         && (entry != Entry::Web || params.protocol_version == PROTOCOL_VERSION) =>
                 {
+                    // An idle shutdown that found the daemon idle has decided
+                    // to close it; the handshake is refused instead of joining
+                    // a daemon that is leaving. Before the decision, this
+                    // connection is counted by it.
+                    let _admitted = match hub.admit() {
+                        Ok(admitted) => admitted,
+                        Err(error) => {
+                            let _ = connection
+                                .sender
+                                .send(Outbound::result(request.id, Err(error)), false);
+                            break;
+                        }
+                    };
+                    let declared = match &params.client_kind {
+                        ClientKind::Cli => DeclaredClientKind::Cli,
+                        ClientKind::Web => DeclaredClientKind::Web,
+                        ClientKind::Other => DeclaredClientKind::Other,
+                    };
+                    connection
+                        .client
+                        .set(ClientIdentity {
+                            channel: ClientChannel::declared(
+                                declared,
+                                params.client_name.as_deref(),
+                            ),
+                            label: params.client_name.clone(),
+                        })
+                        .ok();
                     let instance = hub
                         .with_rpc(|rpc| {
                             if rpc.stopping.is_cancelled() {
                                 return Err(RpcError::reloading());
+                            }
+                            if params.protocol_version == PROTOCOL_VERSION && entry != Entry::Bare {
+                                connection.follow_ui_extensions(&rpc.ctx).map_err(|error| {
+                                    RpcError::service("service_unavailable", error.to_string())
+                                })?;
                             }
                             let instance = rpc.index.server_instance_id().to_owned();
                             connection
@@ -687,34 +721,45 @@ async fn run_connection(
                                 daemon_profile: hub.config().daemon_profile.clone(),
                                 features: (params.protocol_version >= 3).then(|| {
                                     let trusted = entry != Entry::Bare;
-                                    let mut features = if trusted
-                                        || !hub.config().protected_profile()
-                                    {
-                                        let mut methods =
-                                            vec!["session.summaries", "daemon.shutdown.completed"];
-                                        if hub.config().database_path.is_some() {
-                                            methods.push("session.catalog");
-                                            methods.push("session.catalog.cancel");
-                                            methods.push("session.catalog.origins");
-                                            methods.push("session.catalog.workspaces");
-                                        }
-                                        methods
-                                    } else {
-                                        vec![]
-                                    };
+                                    let mut features =
+                                        if trusted || !hub.config().protected_profile() {
+                                            let mut methods = vec![
+                                                "session.summaries",
+                                                "daemon.shutdown.completed",
+                                                "daemon.shutdown.ifIdle",
+                                            ];
+                                            if hub.config().database_path.is_some() {
+                                                methods.push("session.catalog");
+                                                methods.push("session.catalog.cancel");
+                                                methods.push("session.catalog.origins");
+                                                methods.push("session.catalog.workspaces");
+                                                methods.push("session.catalog.includeClosed");
+                                            }
+                                            methods
+                                        } else {
+                                            vec![]
+                                        };
                                     if hub.config().session_execution
                                         && (trusted || !hub.config().protected_profile())
                                     {
                                         features.extend([
                                             "session.history",
+                                            "session.branches",
+                                            "session.submit",
+                                            "session.stop",
+                                            "session.keys",
                                             "session.input_lookup",
                                             "session.create",
                                             "session.delete",
                                             "session.model.progress",
                                             "session.methods",
+                                            "session.branch_create",
                                             "session.branch_end",
                                             "session.create.origin",
                                         ]);
+                                        if local && hub.config().product_home.is_some() {
+                                            features.push("session.create.modelFromSession");
+                                        }
                                         if hub.config().database_path.is_some() {
                                             features.push("session.fork");
                                             features.push("session.history.latestTurn");

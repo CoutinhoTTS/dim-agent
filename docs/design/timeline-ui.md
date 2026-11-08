@@ -175,8 +175,8 @@ A user message is written, applied and then consumed. The client draws the row f
 
 | State | Fact | The model has read it | Drawn as |
 | --- | --- | --- | --- |
-| queued | `input/message`, InputQueue holds it | no | the queue strip above the composer, while the line runs |
-| applied | `input/applied`, waiting for Loop's next request | no | a pending message row |
+| queued | `input/message`, InputQueue holds it | no | the queue strip above the composer, labelled `Held` |
+| applied | `input/applied`, waiting for Loop's next request | no | a pending message row and the queue strip, labelled `Incorporating`, including after a stop |
 | consumed | `input/consumed`, in the request that carries it | yes | a user message row |
 
 A pending row keeps its text and its cut, and draws in the muted colour without the band. In fullscreen the row is committed where the message was said, and `input/consumed` redraws that block in place; leaving fullscreen settles a committed pending row first, because scrollback cannot take the hint back. Scrollback is append-only, so there a row that can still change stays in the live tail (as a streaming answer and a running tool group do) and enters scrollback once it settles, in the user colour. The tail is drawn after everything committed, so a pending row stays there only while it is the newest: when a later row settles first — an applied input that outlives a stop — the message is committed in Timeline order in the user colour, and scrollback cannot take the hint back. A message waiting for the next request therefore reads as unanswered wherever the drawing can still change it:

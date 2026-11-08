@@ -4,7 +4,8 @@
 
 use dim_agent_capabilities::{
     defaults,
-    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
+    environment_clients::{SessionClientsHost, SessionClientsSource},
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost, ExecutionSettingsSource},
     history::HistoryRenderer,
     host::*,
     host_platform::{
@@ -18,6 +19,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -384,6 +386,11 @@ pub struct Options {
     /// capability, as a host whose profile takes them by name does: the
     /// catalog plugin registers them either way.
     pub require_without_install: bool,
+    /// A client-presence source, provided at the root when present.
+    pub clients: Option<Arc<dyn SessionClientsSource>>,
+    /// The execution switches, provided to HostPlatform and the root when
+    /// present; the settings tool and snapshot parts are registered with it.
+    pub execution: Option<Arc<dyn ExecutionSettingsSource>>,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -396,14 +403,54 @@ impl Default for Options {
             probe: None,
             instructions: None,
             require_without_install: false,
+            clients: None,
+            execution: None,
         }
     }
 }
 
 /// The product profile: PromptSources and Skills with scripted hosts.
+struct EnvironmentPartsPlugin {
+    parts: Key<PartRegistry>,
+    clients: bool,
+    execution: bool,
+}
+impl EnvironmentPartsPlugin {
+    fn new(names: &Names<'_>, clients: bool, execution: bool) -> rutis::Result<Self> {
+        Ok(Self {
+            parts: names.key()?,
+            clients,
+            execution,
+        })
+    }
+}
+impl DynPlugin for EnvironmentPartsPlugin {
+    fn name(&self) -> &str {
+        "EnvironmentParts"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.parts.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let parts = ctx.require_at(&self.parts)?;
+            if self.clients {
+                dim_agent_capabilities::environment_clients::register_parts(ctx, &parts)?;
+            }
+            if self.execution {
+                dim_agent_capabilities::execution_settings::prompt::register_parts(ctx, &parts)?;
+            }
+            Ok(Effect::Done)
+        })
+    }
+}
+
 pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let mut host = platform(&dirs.home);
     host.timezone = Some(options.timezone.into());
+    if let Some(execution) = options.execution.clone() {
+        host = host.with_execution_settings(ExecutionSettingsHost(execution));
+    }
     let settings = options.settings.clone();
     let model = Arc::new(ScriptedModel::default());
     let gate = Arc::new(Gate::default());
@@ -433,6 +480,14 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         Arc::new(move || today.lock().unwrap().clone()),
         std::time::Duration::from_millis(10),
     );
+    let (clients, execution) = (options.clients.is_some(), options.execution.is_some());
+    if clients || execution {
+        builder.plugin(move |names| {
+            Ok(Box::new(EnvironmentPartsPlugin::new(
+                names, clients, execution,
+            )?))
+        });
+    }
     if options.require_without_install {
         for part in ["Skills", "SkillsBranch"] {
             builder.require_part(part);
@@ -462,9 +517,17 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         );
     }
     builder.plugin(|names| Ok(Box::new(SkillsCatalogPlugin::new(names)?)));
+    let clients = options.clients.clone();
+    let execution = options.execution.clone();
     let agent = MinimalHost::start_with(&builder, move |root, _| {
         root.provide_as::<HostPlatform>(Arc::new(host))?;
         root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(settings)))?;
+        if let Some(clients) = clients {
+            root.provide_as::<SessionClientsHost>(Arc::new(SessionClientsHost(clients)))?;
+        }
+        if let Some(execution) = execution {
+            root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost(execution)))?;
+        }
         Ok(())
     })
     .await
@@ -494,8 +557,7 @@ pub fn system_text(prompt: &SystemPrompt) -> String {
 
 /// Every model request of `branch`, oldest first.
 pub async fn requests(session: &Session) -> Vec<Arc<ModelRequest>> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -531,8 +593,7 @@ pub fn request_text(request: &ModelRequest) -> String {
 
 /// The input messages of `main`, oldest first.
 pub async fn inputs(session: &Session) -> Vec<InputMessageData> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -564,8 +625,7 @@ pub fn state_value(input: &InputMessageData, source: &str) -> Option<Option<Stri
 
 /// Tool results of `main`, oldest first.
 pub async fn tool_results(session: &Session) -> Vec<ToolResult> {
-    session
-        .history("main", None)
+    chain_events(session, "main", ..)
         .await
         .unwrap()
         .iter()
@@ -680,6 +740,28 @@ impl HoldingStore {
     pub fn release_read(&self) {
         self.gate.add_permits(1);
     }
+    /// Whether this read is the one the flow holds, and arms nothing after it.
+    fn held(&self, branch: &str) -> bool {
+        let mut selected = self.read_branch.lock().unwrap();
+        let Some((_, skip)) = selected.as_mut().filter(|(held, _)| held == branch) else {
+            return false;
+        };
+        if *skip > 1 {
+            *skip -= 1;
+            return false;
+        }
+        *selected = None;
+        true
+    }
+    /// Parks the read after saying so, until the flow releases it.
+    async fn enter_held_read(&self) {
+        self.read_entered.notify_one();
+        self.gate
+            .acquire()
+            .await
+            .expect("the read gate stays open")
+            .forget();
+    }
     /// The segments read since the last call, by branch.
     pub fn take(&self) -> Vec<(String, std::ops::RangeInclusive<u64>)> {
         std::mem::take(&mut *self.reads.lock().unwrap())
@@ -708,6 +790,9 @@ impl TimelineStore for HoldingStore {
     }
     fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
         self.memory.head(key)
+    }
+    fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
+        self.memory.batch_end(key, sequence)
     }
     fn append(
         &self,
@@ -746,32 +831,13 @@ impl TimelineStore for HoldingStore {
         id: &'a str,
         segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
     ) -> BoxFuture<'a, Result<Vec<Vec<StoredEvent>>>> {
-        let hold = {
-            let mut selected = self.read_branch.lock().unwrap();
-            let mut hold = false;
-            if let Some((branch, skip)) = selected.as_mut()
-                && segments.iter().any(|(read, _)| read == branch)
-            {
-                if *skip <= 1 {
-                    hold = true;
-                } else {
-                    *skip -= 1;
-                }
-            }
-            if hold {
-                *selected = None;
-            }
-            hold
-        };
+        let hold = segments
+            .iter()
+            .fold(false, |held, (branch, _)| self.held(branch) || held);
         self.reads.lock().unwrap().extend(segments.iter().cloned());
         Box::pin(async move {
             if hold {
-                self.read_entered.notify_one();
-                self.gate
-                    .acquire()
-                    .await
-                    .expect("the read gate stays open")
-                    .forget();
+                self.enter_held_read().await;
             }
             self.memory.read_segments(id, segments).await
         })
@@ -790,6 +856,16 @@ impl TimelineStore for HoldingStore {
         from: u64,
         through: u64,
     ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        self.memory.query(key, query, from, through)
+        let hold = self.held(&key.branch_id);
+        self.reads
+            .lock()
+            .unwrap()
+            .push((key.branch_id.clone(), from..=through));
+        Box::pin(async move {
+            if hold {
+                self.enter_held_read().await;
+            }
+            self.memory.query(key, query, from, through).await
+        })
     }
 }

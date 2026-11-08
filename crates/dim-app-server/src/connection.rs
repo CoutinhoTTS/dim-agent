@@ -2,27 +2,35 @@ use crate::{
     ServerConfig,
     agents::{AgentIndex, DeleteOutcome, SessionUse},
     control::ServerControl,
-    outbound::{Frame, Sender},
+    outbound::{Admission, Frame, Sender},
     protocol::*,
     skills_management::skills_error,
 };
 use dim_agent_capabilities::{
-    methods::{Accepted, RpcError},
+    methods::{Accepted, CallSite, CallerConnection, Callers, NotifyError, RpcError},
     permission::{Permission, PermissionState, PermissionUpdateError},
     skills::SkillsBranch,
     workspace_tools::background::{BackgroundExec, TaskError},
 };
-use dim_agent_runtime::{AgentError, Names, Session};
+use dim_agent_runtime::{
+    AgentError, Names, Session, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
+};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;
 mod tree;
+mod ui_extensions;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
+use rutis_bridge::session::{
+    Error as BridgeError, HostDispatch, Reply as BridgeReply, Value as BridgeValue, caller_row,
+};
+use serde::de::DeserializeOwned;
+use serde_json::Map;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock, Weak,
         atomic::{AtomicU64, Ordering},
@@ -33,6 +41,13 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const MAX_REQUESTS: usize = 64;
 const CONTROL_RESERVE: usize = 8;
+
+/// The channel a connection declared at `hello`, for presence only.
+#[derive(Clone, Debug)]
+pub(crate) struct ClientIdentity {
+    pub channel: dim_agent_capabilities::environment_clients::ClientChannel,
+    pub label: Option<String>,
+}
 
 /// The entry a connection was accepted on; it decides which methods Rpc serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +66,8 @@ pub(crate) struct Connection {
     pub version: OnceLock<u32>,
     /// The protocol instance this connection completed hello with.
     pub instance: OnceLock<String>,
+    /// The channel declared by `hello`; informational, never durable.
+    pub client: OnceLock<ClientIdentity>,
     pub entry: Entry,
     hub: Arc<ConnectionHub>,
     pub closed: CancellationToken,
@@ -58,8 +75,10 @@ pub(crate) struct Connection {
     pub shutdown_reply: Mutex<Option<RequestId>>,
     ids: Mutex<HashMap<RequestId, Option<CancellationToken>>>,
     attachments: Mutex<HashMap<String, Attachment>>,
+    /// Serializes attach, detach and finish so one retirement per connection
+    /// is in flight and the window an attachment lives in is private.
+    transitions: tokio::sync::Mutex<()>,
     next_attachment: AtomicU64,
-    subscriptions: TaskTracker,
 }
 struct Inflight {
     connection: Arc<Connection>,
@@ -74,6 +93,147 @@ impl Drop for Inflight {
             .remove(&self.id);
     }
 }
+
+/// The plain writer and close signal of one client connection (methods
+/// contract A.2): what a foreign notification whose call has finished uses.
+/// It holds the connection weakly, so a kept handle does not keep it alive.
+pub(crate) struct DirectConnection {
+    id: String,
+    connection: Weak<Connection>,
+    closed: CancellationToken,
+    unloading: CancellationToken,
+}
+impl DirectConnection {
+    fn new(connection: &Arc<Connection>, unloading: &CancellationToken) -> Arc<Self> {
+        Arc::new(Self {
+            id: connection.id.clone(),
+            connection: Arc::downgrade(connection),
+            closed: connection.closed.clone(),
+            unloading: unloading.clone(),
+        })
+    }
+    /// The encoded frame, after the connection check and encoded once through
+    /// the sender's admission, without queueing it: a call's sink holds it
+    /// until its reply.
+    fn frame(
+        &self,
+        method: &str,
+        params: serde_json::Map<String, Value>,
+    ) -> Result<Frame, NotifyError> {
+        let Some(connection) = self.connection.upgrade() else {
+            return Err(NotifyError::Gone);
+        };
+        if self.closed.is_cancelled() || self.unloading.is_cancelled() {
+            return Err(NotifyError::Gone);
+        }
+        connection
+            .sender
+            .hold(Outbound::message(method.to_owned(), params))
+            .map_err(|admission| match admission {
+                Admission::TooLarge => NotifyError::TooLarge,
+                Admission::Full => NotifyError::Gone,
+            })
+    }
+    fn write(&self, frame: Frame) -> Result<(), NotifyError> {
+        let Some(connection) = self.connection.upgrade() else {
+            return Err(NotifyError::Gone);
+        };
+        if connection.sender.push(frame) {
+            Ok(())
+        } else {
+            Err(NotifyError::Gone)
+        }
+    }
+}
+impl CallerConnection for DirectConnection {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Map<String, Value>,
+    ) -> Result<(), NotifyError> {
+        self.write(self.frame(method, params)?)
+    }
+    fn closed(&self) -> BoxFuture<'static, ()> {
+        let (closed, unloading) = (self.closed.clone(), self.unloading.clone());
+        Box::pin(async move {
+            tokio::select! {
+                _ = closed.cancelled() => {}
+                _ = unloading.cancelled() => {}
+            }
+        })
+    }
+}
+
+/// The calling connection of one admitted call (methods contract A.2):
+/// `callChannel.notify` and `closed` for the provider that serves it.
+///
+/// Every notification is written after the reply of the call that produced
+/// its `Caller`: one sent while the call runs is encoded once and admitted by
+/// the connection's sender here, then goes out right after the reply, in
+/// order. It is a reliable frame: a call holding more than the connection's
+/// reliable allowance is a slow consumer and the connection closes, while a
+/// notification over the frame limit is `TooLarge` and the connection stays
+/// open.
+pub(crate) struct CallSink {
+    direct: Arc<DirectConnection>,
+    state: Mutex<CallState>,
+}
+enum CallState {
+    /// Frames sent before the reply was written, in order: encoded and
+    /// holding their room already.
+    Held(Vec<Frame>),
+    /// The reply is written; later frames go straight to the connection.
+    Released,
+}
+impl CallSink {
+    fn new(connection: &Arc<Connection>, unloading: &CancellationToken) -> Arc<Self> {
+        Arc::new(Self {
+            direct: DirectConnection::new(connection, unloading),
+            state: Mutex::new(CallState::Held(Vec::new())),
+        })
+    }
+    fn direct(&self) -> Arc<DirectConnection> {
+        self.direct.clone()
+    }
+    /// The reply is written: everything held follows it, in order. A
+    /// notification sent from here on is written directly.
+    fn release(&self) {
+        let mut state = self.state.lock().expect("held notifications");
+        if let CallState::Held(frames) = &mut *state {
+            for frame in frames.drain(..) {
+                let _ = self.direct.write(frame);
+            }
+        }
+        *state = CallState::Released;
+    }
+}
+impl CallerConnection for CallSink {
+    fn id(&self) -> &str {
+        self.direct.id()
+    }
+    fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Map<String, Value>,
+    ) -> Result<(), NotifyError> {
+        let frame = self.direct.frame(method, params)?;
+        let mut state = self.state.lock().expect("held notifications");
+        match &mut *state {
+            CallState::Held(frames) => frames.push(frame),
+            CallState::Released => {
+                drop(state);
+                self.direct.write(frame)?;
+            }
+        }
+        Ok(())
+    }
+    fn closed(&self) -> BoxFuture<'static, ()> {
+        self.direct.closed()
+    }
+}
 impl Connection {
     pub fn new(
         hub: Arc<ConnectionHub>,
@@ -85,6 +245,7 @@ impl Connection {
             id: uuid::Uuid::new_v4().to_string(),
             version: OnceLock::new(),
             instance: OnceLock::new(),
+            client: OnceLock::new(),
             entry,
             closed,
             sender,
@@ -92,8 +253,8 @@ impl Connection {
             hub,
             ids: Mutex::new(HashMap::new()),
             attachments: Mutex::new(HashMap::new()),
+            transitions: tokio::sync::Mutex::new(()),
             next_attachment: AtomicU64::new(1),
-            subscriptions: TaskTracker::new(),
         });
         connection
             .hub
@@ -109,15 +270,52 @@ impl Connection {
             .expect("attachments")
             .contains_key(id)
     }
+    /// The channel `hello` declared; `unknown` before hello or for an
+    /// unrecognized `other` client.
+    pub fn channel(&self) -> dim_agent_capabilities::environment_clients::ClientChannel {
+        self.client.get().map_or(
+            dim_agent_capabilities::environment_clients::ClientChannel::Unknown,
+            |identity| identity.channel,
+        )
+    }
+    pub fn label(&self) -> Option<String> {
+        self.client
+            .get()
+            .and_then(|identity| identity.label.clone())
+    }
     pub async fn finish(&self) {
         self.closed.cancel();
+        // The connection closed: no call of any row can name it again.
+        let _ = self
+            .hub
+            .with_rpc(|rpc| rpc.callers.close_connection(&self.id));
         if self.entry == Entry::Local {
             self.hub.web.release(&self.hub, &self.id).await;
         }
         self.hub.ui.release(&self.id);
-        self.attachments.lock().expect("attachments").clear();
-        self.subscriptions.close();
-        self.subscriptions.wait().await;
+        self.hub.ui.finished(&self.id);
+        // Every attachment settles before the connection ends: a detached
+        // connection leaves no listener, task or usage behind for the
+        // Session's next attach.
+        let _transition = self.transitions.lock().await;
+        let (sessions, attachments): (Vec<String>, Vec<Attachment>) = {
+            let mut attachments = self.attachments.lock().expect("attachments");
+            let sessions = attachments.keys().cloned().collect();
+            (
+                sessions,
+                attachments
+                    .drain()
+                    .map(|(_, attachment)| attachment)
+                    .collect(),
+            )
+        };
+        for session in sessions {
+            self.hub.notify_clients(&session);
+        }
+        for attachment in attachments {
+            attachment.retire().await;
+        }
+        drop(_transition);
         self.hub
             .connections
             .lock()
@@ -147,10 +345,20 @@ impl Connection {
                     }
                     let rpc = rpc.clone();
                     let progress = this.progress(&id, &method);
+                    let sink = CallSink::new(&this, &rpc.unloading);
+                    let site = CallSite {
+                        connection: sink.clone(),
+                        direct: sink.direct(),
+                        callers: rpc.callers.clone(),
+                        closed: this.closed.clone(),
+                    };
                     rpc.commands.clone().spawn(async move {
-                        match this.session_method(&rpc, method, params, progress).await {
+                        match this
+                            .session_method(&rpc, method, params, site, progress)
+                            .await
+                        {
                             Ok((accepted, usage)) => {
-                                this.answer(id, guard, accepted).await;
+                                this.answer(id, guard, accepted, sink).await;
                                 drop(usage);
                             }
                             Err(error) => {
@@ -171,15 +379,23 @@ impl Connection {
                     return Err(RpcError::reloading());
                 }
                 let progress = this.progress(&id, &method);
+                let sink = CallSink::new(&this, &rpc.unloading);
+                let site = CallSite {
+                    connection: sink.clone(),
+                    direct: sink.direct(),
+                    callers: rpc.callers.clone(),
+                    closed: this.closed.clone(),
+                };
                 let accepted = crate::methods::dispatch(
                     &rpc.management,
                     &rpc.loader,
                     method,
                     params,
+                    Some(site),
                     rpc.unloading.clone(),
                     progress,
                 )?;
-                rpc.commands.spawn(this.answer(id, guard, accepted));
+                rpc.commands.spawn(this.answer(id, guard, accepted, sink));
                 return Ok(());
             }
             let rpc = rpc.clone();
@@ -199,19 +415,36 @@ impl Connection {
             let _ = self.sender.send(Outbound::result(id, Err(error)), false);
         }
     }
-    /// Sends an admitted contributed call's reply on this connection. The id
-    /// is the client's again once answered. An interrupted operation may still
+    /// Sends an admitted contributed call's reply on this connection, then
+    /// releases the call's held notifications behind it. The id is the
+    /// client's again once answered. An interrupted operation may still
     /// commit: the calling load's unload waits for it, so the next load reads
     /// its outcome.
-    async fn answer(self: Arc<Self>, id: RequestId, guard: Inflight, accepted: Accepted) {
-        let result = accepted
-            .reply
+    async fn answer(
+        self: Arc<Self>,
+        id: RequestId,
+        guard: Inflight,
+        accepted: Accepted,
+        sink: Arc<CallSink>,
+    ) {
+        let Accepted {
+            reply,
+            settled,
+            registration,
+        } = accepted;
+        let result = reply
             .await
             .unwrap_or_else(|_| Err(RpcError::wire(-32603, "Method operation failed")))
             .map(Reply::Contributed);
         let _ = self.sender.send(Outbound::result(id, result), false);
+        sink.release();
+        // The reply is written: the foreign call no longer holds
+        // notifications, so its index entry ends here, not at handler return.
+        if let Some(registration) = registration {
+            registration.finish();
+        }
         drop(guard);
-        let _ = accepted.settled.await;
+        let _ = settled.await;
     }
     /// The progress sink of contributed call `id` (methods contract A.2):
     /// `management.progress {id, method, data}` on this connection only, best
@@ -243,6 +476,7 @@ impl Connection {
         rpc: &RpcService,
         method: String,
         params: Value,
+        site: CallSite,
         progress: impl Fn(Value) + Send + Sync + 'static,
     ) -> Result<(Accepted, SessionUse), RpcError> {
         let session_id = params
@@ -259,7 +493,8 @@ impl Connection {
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
         }
-        let accepted = provider.accept(method, params, rpc.unloading.clone(), progress)?;
+        let accepted =
+            provider.accept(method, params, Some(site), rpc.unloading.clone(), progress)?;
         Ok((accepted, usage))
     }
     /// The connection's entry decides what it may call before any method is
@@ -403,6 +638,8 @@ impl Connection {
                 call,
                 Call::InputLookup(_)
                     | Call::History(_)
+                    | Call::Branches(_)
+                    | Call::Keys(_)
                     | Call::Summaries(_)
                     | Call::Catalog(_)
                     | Call::CatalogCancel(_)
@@ -443,6 +680,7 @@ impl Connection {
             }
             Call::InputLookup(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::History(p) => (Some(&p.session_id), Some(&p.branch_id)),
+            Call::Keys(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Stop(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Idle(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::ApprovalRespond(p) => (Some(&p.session_id), Some(&p.branch_id)),
@@ -472,6 +710,7 @@ impl Connection {
                 }
                 (Some(&p.session_id), None)
             }
+            Call::Branches(p) => (Some(&p.session_id), None),
             Call::BranchCreate(p) => {
                 if self.protocol_version() < 2 {
                     return Err(RpcError::app(
@@ -615,6 +854,8 @@ impl Connection {
             Call::Submit(p) => Some(&p.session_id),
             Call::InputLookup(p) => Some(&p.session_id),
             Call::History(p) => Some(&p.session_id),
+            Call::Branches(p) => Some(&p.session_id),
+            Call::Keys(p) => Some(&p.session_id),
             Call::Stop(p) => Some(&p.session_id),
             Call::Idle(p) => Some(&p.session_id),
             Call::ApprovalRespond(p) => Some(&p.session_id),
@@ -661,7 +902,6 @@ impl Connection {
                 .get(id)
                 .map(|a| a.delivery.clone())
         });
-        let include_closed = matches!(&call, Call::Summaries(params) if params.include_closed);
         Some(match call {
             Call::Hello(_) => Err(RpcError::invalid("hello has already completed")),
             Call::Ping => Ok(Reply::Ping(PingResult {
@@ -670,6 +910,34 @@ impl Connection {
                 server_version: SERVER_VERSION,
             })),
             Call::Shutdown(params) => {
+                if params.if_idle && !params.force {
+                    // The decision is atomic with hello and attach admission:
+                    // an admission either ran before it and is counted or is
+                    // refused as shutting down, so no client joins a daemon
+                    // this call is closing.
+                    let busy = {
+                        let mut admission = self.hub.idle_decision();
+                        if admission.closing_for_idle {
+                            return Some(Err(RpcError::invalid("Shutdown already requested")));
+                        }
+                        let connections = self.hub.count_except(&self.id);
+                        let attached_sessions = self.hub.attached_sessions();
+                        let running = rpc.index.running_sessions();
+                        if connections > 0 || attached_sessions > 0 || running > 0 {
+                            Some((connections, attached_sessions, running))
+                        } else {
+                            admission.closing_for_idle = true;
+                            None
+                        }
+                    };
+                    if let Some((connections, attached_sessions, running)) = busy {
+                        return Some(Err(RpcError::daemon_busy(
+                            connections,
+                            attached_sessions,
+                            running,
+                        )));
+                    }
+                }
                 if !params.force {
                     let mut reply = self.shutdown_reply.lock().expect("shutdown reply");
                     if reply.is_some() {
@@ -715,7 +983,7 @@ impl Connection {
                     .expect("catalog reads have cancellation");
                 match rpc
                     .index
-                    .session_catalog(params, None, self.protocol_version(), false, cancel)
+                    .session_catalog(params, None, self.protocol_version(), cancel)
                     .await
                 {
                     Ok(mut page) => {
@@ -734,7 +1002,10 @@ impl Connection {
                     Err(error) => Err(RpcError::from(error)),
                 }
             }
-            Call::Summaries(Summaries { agent_id, .. }) => {
+            Call::Summaries(Summaries {
+                agent_id,
+                include_closed,
+            }) => {
                 if let Some(agent_id) = agent_id.as_deref()
                     && let Some(reason) = rpc.index.unavailable_agent(agent_id)
                 {
@@ -751,11 +1022,11 @@ impl Connection {
                                 Catalog {
                                     with_internal: true,
                                     with_acp_sessions: true,
+                                    include_closed,
                                     ..Catalog::default()
                                 },
                                 agent_id,
                                 self.protocol_version(),
-                                include_closed,
                                 cancel,
                             )
                             .await
@@ -852,16 +1123,27 @@ impl Connection {
                     .map(Err);
             }
             Call::Detach(params) => {
-                self.attachments
+                // The attachment settles before the reply: its listener,
+                // tasks and usage are gone when the client learns the detach
+                // happened, so a count read now is the count after the work.
+                let _transition = self.transitions.lock().await;
+                let retired = self
+                    .attachments
                     .lock()
                     .expect("attachments")
                     .remove(&params.session_id);
                 self.hub.ui.detach(&self.id, &params.session_id);
+                self.hub.notify_clients(&params.session_id);
+                if let Some(retired) = retired {
+                    retired.retire().await;
+                }
                 Ok(Reply::empty())
             }
             Call::Submit(params) => self.submit(rpc, params).await,
             Call::InputLookup(params) => self.input_lookup(rpc, params).await,
             Call::History(params) => self.history(rpc, params).await,
+            Call::Branches(params) => self.branches(rpc, params).await,
+            Call::Keys(params) => self.keys(rpc, params).await,
             Call::Stop(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
                     let branch = params.branch_id.as_deref().unwrap_or("main");
@@ -1147,57 +1429,115 @@ impl Connection {
                 if p.branch_id != "main" {
                     return Err(RpcError::invalid("Model updates only support main"));
                 }
-                let model = match (p.provider_id, p.model_id) {
-                    (Some(provider_id), Some(model_id)) => {
-                        if provider_id.trim().is_empty() || model_id.trim().is_empty() {
-                            return Err(RpcError::invalid("Model target must not be empty"));
-                        }
-                        rpc.model_selection(
-                            Some(dim_agent_types::ModelId {
-                                provider_id,
-                                model_id,
-                            }),
-                            Some(PathBuf::from(&session.config().cwd)),
-                            p.model_preferences.values(),
-                        )
-                        .await?
+                let mut startup_admission = None;
+                let mut model = if let Some(startup) = p.startup {
+                    if self.entry != Entry::Local || rpc.config.product_home.is_none() {
+                        return Err(RpcError::invalid(
+                            "Model startup requires the protected-local product entry",
+                        ));
                     }
-                    (None, None) => {
-                        if p.model_preferences.is_empty() {
-                            return Err(RpcError::invalid("Supply at least one model preference"));
+                    if p.model_preferences.clears_reasoning()
+                        || p.model_preferences.clears_service_tier()
+                    {
+                        return Err(RpcError::invalid(
+                            "Startup preferences accept set values only",
+                        ));
+                    }
+                    let state = session
+                        .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&p.branch_id)?
+                        .ok_or_else(RpcError::reloading)?;
+                    let current = state
+                        .configuration
+                        .ok_or_else(|| RpcError::invalid("No model configuration is adopted"))?;
+                    let provider = rpc
+                        .ctx
+                        .get::<crate::provider::ProviderService>()
+                        .ok_or_else(RpcError::reloading)?;
+                    let admission = provider
+                        .startup_configuration(
+                            crate::protocol::ModelSelection {
+                                provider: p.provider_id,
+                                model_id: p.model_id,
+                            },
+                            Path::new(&session.config().cwd),
+                            p.model_preferences.values(),
+                            startup,
+                            Some(&current),
+                            &rpc.unloading,
+                        )
+                        .await
+                        .map_err(provider_error)?;
+                    let model = admission.model.clone();
+                    startup_admission = Some(admission);
+                    model
+                } else {
+                    match (p.provider_id, p.model_id) {
+                        (Some(provider_id), Some(model_id)) => {
+                            if provider_id.trim().is_empty() || model_id.trim().is_empty() {
+                                return Err(RpcError::invalid("Model target must not be empty"));
+                            }
+                            rpc.model_selection(
+                                Some(dim_agent_types::ModelId {
+                                    provider_id,
+                                    model_id,
+                                }),
+                                Some(PathBuf::from(&session.config().cwd)),
+                                p.model_preferences.values(),
+                            )
+                            .await?
                         }
-                        if rpc.config.product_home.is_none() {
-                            return Err(provider_error(
-                                dim_agent_capabilities::host::HostError::failed(
-                                    "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",
-                                ),
-                            ));
-                        }
-                        let state = session
-                            .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(
-                                &p.branch_id,
-                            )?
-                            .ok_or_else(RpcError::reloading)?;
-                        let current = state.configuration.ok_or_else(|| {
+                        (None, None) => {
+                            if p.model_preferences.is_empty() {
+                                return Err(RpcError::invalid(
+                                    "Supply at least one model preference",
+                                ));
+                            }
+                            if rpc.config.product_home.is_none() {
+                                return Err(provider_error(
+                                    dim_agent_capabilities::host::HostError::failed(
+                                        "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",
+                                    ),
+                                ));
+                            }
+                            let state = session
+                                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(
+                                    &p.branch_id,
+                                )?
+                                .ok_or_else(RpcError::reloading)?;
+                            let current = state.configuration.ok_or_else(|| {
                             RpcError::invalid(
                                 "No model configuration is adopted; supply providerId and modelId",
                             )
                         })?;
-                        let provider = rpc
-                            .ctx
-                            .get::<crate::provider::ProviderService>()
-                            .ok_or_else(RpcError::reloading)?;
-                        provider
-                            .apply_preferences(&current, &p.model_preferences, &rpc.unloading)
-                            .await
-                            .map_err(provider_error)?
-                    }
-                    _ => {
-                        return Err(RpcError::invalid(
-                            "providerId and modelId must appear together",
-                        ));
+                            let provider = rpc
+                                .ctx
+                                .get::<crate::provider::ProviderService>()
+                                .ok_or_else(RpcError::reloading)?;
+                            provider
+                                .apply_preferences(&current, &p.model_preferences, &rpc.unloading)
+                                .await
+                                .map_err(provider_error)?
+                        }
+                        _ => {
+                            return Err(RpcError::invalid(
+                                "providerId and modelId must appear together",
+                            ));
+                        }
                     }
                 };
+                // A model selection replaces the model, not the profile the
+                // branch adopted: the record names the profile whose prompt
+                // the branch runs, so it carries over until another adoption.
+                if let Some(agent_id) = session
+                    .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&p.branch_id)?
+                    .and_then(|state| state.configuration)
+                    .and_then(|configuration| configuration.metadata)
+                    .and_then(|metadata| metadata.agent_id)
+                {
+                    let mut metadata = model.metadata.take().unwrap_or_default();
+                    metadata.agent_id = Some(agent_id);
+                    model.metadata = Some(metadata);
+                }
                 let id = dim_agent_types::ModelId {
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),
@@ -1205,16 +1545,21 @@ impl Connection {
                 let outcome = session
                     .configure(
                         dim_agent_runtime::ConfigureUpdate {
-                            model: Some(model),
+                            model: Some(model.clone()),
                             ..Default::default()
                         },
                         &p.branch_id,
                     )
                     .await?;
-                Reply::ModelUpdate(ModelUpdateResult {
-                    model: id,
-                    outcome: configuration_outcome(outcome)?,
-                })
+                let outcome = configuration_outcome(outcome)?;
+                if startup_admission.is_some() {
+                    rpc.ctx
+                        .get::<crate::provider::ProviderService>()
+                        .ok_or_else(RpcError::reloading)?
+                        .retain_startup(session, &model)
+                        .map_err(provider_error)?;
+                }
+                Reply::ModelUpdate(ModelUpdateResult { model: id, outcome })
             }
             Call::PromptRefresh(p) => {
                 if p.branch_id != "main" {
@@ -1234,6 +1579,28 @@ impl Connection {
         })
     }
     async fn create(&self, rpc: &RpcService, params: Create) -> Result<Reply, RpcError> {
+        if (params.startup.is_some() || params.model_from_session.is_some())
+            && (self.entry != Entry::Local || rpc.config.product_home.is_none())
+        {
+            return Err(RpcError::invalid(
+                "Model startup requires the protected-local product entry",
+            ));
+        }
+        if params.model_from_session.is_some()
+            && (params.model.is_some()
+                || params.startup.is_some()
+                || params.model_preferences.is_some())
+        {
+            return Err(RpcError::invalid(
+                "modelFromSession cannot be combined with model, startup or modelPreferences",
+            ));
+        }
+        let source = if let Some(id) = &params.model_from_session {
+            self.authorize(rpc, id)?;
+            Some(rpc.index.acquire(id).await?)
+        } else {
+            None
+        };
         let cwd = session_cwd(&params.cwd).await?;
         if params
             .tools
@@ -1261,12 +1628,78 @@ impl Connection {
         })?;
         let mut config = crate::agents::session_config(&host.profile, &rpc.config.session_defaults);
         config.cwd = cwd.clone();
-        if !rpc.index.selects_models() && params.model_preferences != Default::default() {
+        let mut startup_admission = None;
+        let preferences = params.model_preferences.unwrap_or_default();
+        if !rpc.index.selects_models() && preferences != Default::default() {
             return Err(RpcError::invalid(
                 "Model preferences require the product provider",
             ));
         }
-        if rpc.index.selects_models() {
+        if let Some(source) = &source {
+            let adopted = source
+                .session
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")?
+                .and_then(|state| state.configuration.clone())
+                .ok_or_else(|| RpcError::invalid("Source Session has no adopted model"))?;
+            config.model = dim_agent_types::ModelSelection {
+                provider_id: adopted.provider_id,
+                model_id: adopted.model_id,
+                capability_snapshot: adopted.capability_snapshot,
+                config: adopted.config,
+                metadata: adopted
+                    .metadata
+                    .map(|metadata| dim_agent_types::RequestMetadata {
+                        startup: metadata.startup,
+                        extensions: {
+                            let mut extensions = metadata.extensions;
+                            extensions.remove("requestId");
+                            extensions
+                        },
+                        ..Default::default()
+                    }),
+            };
+            if let Some(connection) = config
+                .model
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.startup.as_ref())
+                .and_then(|startup| startup.connection.as_ref())
+            {
+                rpc.ctx
+                    .get::<crate::provider::ProviderService>()
+                    .ok_or_else(RpcError::reloading)?
+                    .startup_connection(connection)
+                    .map_err(provider_error)?;
+            }
+        } else if let Some(startup) = params.startup {
+            let provider = rpc
+                .ctx
+                .get::<crate::provider::ProviderService>()
+                .ok_or_else(RpcError::reloading)?;
+            let target = params.model.unwrap_or_else(|| {
+                host.profile
+                    .model
+                    .clone()
+                    .map(|model| crate::protocol::ModelSelection {
+                        provider: Some(model.provider_id),
+                        model_id: Some(model.model_id),
+                    })
+                    .unwrap_or_default()
+            });
+            let admission = provider
+                .startup_configuration(
+                    target,
+                    Path::new(&cwd),
+                    preferences,
+                    startup,
+                    None,
+                    &rpc.unloading,
+                )
+                .await
+                .map_err(provider_error)?;
+            config.model = admission.model.clone();
+            startup_admission = Some(admission);
+        } else if rpc.index.selects_models() {
             if params
                 .model
                 .as_ref()
@@ -1295,7 +1728,7 @@ impl Connection {
                         })
                         .or_else(|| host.profile.model.clone()),
                     Some(cwd.into()),
-                    params.model_preferences,
+                    preferences,
                 )
                 .await?;
         } else if let Some(model) = params.model {
@@ -1339,6 +1772,24 @@ impl Connection {
             .create_session(&host, config, self.protocol_version(), None, origin)
             .await
             .map_err(RpcError::from)?;
+        if startup_admission.is_some() || source.is_some() {
+            let retained = rpc
+                .ctx
+                .get::<crate::provider::ProviderService>()
+                .ok_or_else(RpcError::reloading)
+                .and_then(|provider| {
+                    provider
+                        .retain_startup(&session, &session.config().model)
+                        .map_err(provider_error)
+                });
+            if let Err(error) = retained {
+                rpc.index
+                    .delete(session.id())
+                    .await
+                    .map_err(RpcError::from)?;
+                return Err(error);
+            }
+        }
         rpc.index.retain_versions();
         Ok(Reply::Create(CreateResult {
             session_id: session.id().to_owned(),
@@ -1427,12 +1878,31 @@ pub(crate) struct ConnectionHub {
     config: Arc<ServerConfig>,
     pub control: Arc<ServerControl>,
     connections: Mutex<HashMap<String, Weak<Connection>>>,
+    /// Serializes an idle-shutdown decision with hello and attach admission:
+    /// an admission runs before the decision and is counted, or sees it and
+    /// is refused as shutting down.
+    admission: Mutex<IdleAdmission>,
+    /// Emits a client-change fact for a Session whose presence a branch observes.
+    client_emitter: Mutex<Option<rutis::Ctx>>,
     pub tasks: TaskTracker,
     pub shutdown_requests: TaskTracker,
     closing: CancellationToken,
     rpc: RwLock<Option<Arc<RpcService>>>,
     pub web: crate::web_entry::WebEntry,
     pub ui: Arc<crate::ui_host::UiHost>,
+    /// Feature `testing`: holds the next subscription's `follow` task.
+    #[cfg(feature = "testing")]
+    follow_hold: Mutex<Option<Arc<crate::FollowHold>>>,
+    /// Feature `testing`: fails the next attach before it registers its
+    /// listener.
+    #[cfg(feature = "testing")]
+    fail_attach_before_registration: std::sync::atomic::AtomicBool,
+}
+/// What [`ConnectionHub::admission`] serializes: once an idle shutdown has
+/// found the daemon idle, no hello or attach may join it.
+#[derive(Default)]
+pub(crate) struct IdleAdmission {
+    closing_for_idle: bool,
 }
 impl ConnectionHub {
     fn new(
@@ -1444,12 +1914,18 @@ impl ConnectionHub {
             web: crate::web_entry::WebEntry::new(config.web_assets.clone()),
             ui,
             connections: Mutex::new(HashMap::new()),
+            admission: Mutex::new(IdleAdmission::default()),
+            client_emitter: Mutex::new(None),
             tasks: TaskTracker::new(),
             shutdown_requests: TaskTracker::new(),
             closing: CancellationToken::new(),
             rpc: RwLock::new(None),
             control,
             config,
+            #[cfg(feature = "testing")]
+            follow_hold: Mutex::new(None),
+            #[cfg(feature = "testing")]
+            fail_attach_before_registration: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub fn config(&self) -> &ServerConfig {
@@ -1520,6 +1996,51 @@ impl ConnectionHub {
     fn count(&self) -> usize {
         self.connections.lock().expect("connection index").len()
     }
+    /// Live connections other than `requester`.
+    pub(crate) fn count_except(&self, requester: &str) -> usize {
+        self.connections
+            .lock()
+            .expect("connection index")
+            .keys()
+            .filter(|id| id.as_str() != requester)
+            .count()
+    }
+    /// Sessions with a client attached, on any connection: the requester's
+    /// own attachment keeps the daemon too, because a concurrent attach is
+    /// either counted here or refused as shutting down.
+    pub(crate) fn attached_sessions(&self) -> usize {
+        let connections = self.connections.lock().expect("connection index");
+        let mut sessions = std::collections::HashSet::new();
+        for connection in connections.values() {
+            let Some(connection) = connection.upgrade() else {
+                continue;
+            };
+            sessions.extend(
+                connection
+                    .attachments
+                    .lock()
+                    .expect("attachments")
+                    .keys()
+                    .cloned(),
+            );
+        }
+        sessions.len()
+    }
+    /// Admits a hello or attach: refused once an idle shutdown has decided to
+    /// close the daemon. Holding the guard makes the admission and that
+    /// decision see each other.
+    pub(crate) fn admit(&self) -> Result<std::sync::MutexGuard<'_, IdleAdmission>, RpcError> {
+        let admission = self.admission.lock().expect("admission");
+        if admission.closing_for_idle {
+            return Err(RpcError::wire(-32603, "Server is shutting down"));
+        }
+        Ok(admission)
+    }
+    /// The idle-shutdown decision, with hello and attach admission held out
+    /// while it counts and commits.
+    pub(crate) fn idle_decision(&self) -> std::sync::MutexGuard<'_, IdleAdmission> {
+        self.admission.lock().expect("admission")
+    }
     fn attached_clients(&self, session: &str) -> usize {
         self.connections
             .lock()
@@ -1528,6 +2049,77 @@ impl ConnectionHub {
             .filter_map(Weak::upgrade)
             .filter(|conn| conn.is_attached(session))
             .count()
+    }
+    /// Holds the next subscription's `follow` task until `release`, so a test
+    /// can keep a retirement in flight. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_follow(&self) -> Arc<crate::FollowHold> {
+        let hold = Arc::new(crate::FollowHold::default());
+        *self.follow_hold.lock().expect("follow hold") = Some(hold.clone());
+        hold
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_follow_hold(&self) -> Option<Arc<crate::FollowHold>> {
+        self.follow_hold.lock().expect("follow hold").take()
+    }
+    /// Feature `testing`: the next attach fails before it registers its
+    /// listener.
+    #[cfg(feature = "testing")]
+    pub(crate) fn fail_next_attach_before_registration(&self) {
+        self.fail_attach_before_registration
+            .store(true, Ordering::SeqCst);
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_attach_failure_before_registration(&self) -> bool {
+        self.fail_attach_before_registration
+            .swap(false, Ordering::SeqCst)
+    }
+    fn set_client_emitter(&self, ctx: rutis::Ctx) {
+        *self.client_emitter.lock().expect("client emitter") = Some(ctx);
+    }
+    /// Announces that `session`'s client counts may have changed.
+    pub(crate) fn notify_clients(&self, session: &str) {
+        let emitter = self.client_emitter.lock().expect("client emitter").clone();
+        let Some(ctx) = emitter else {
+            return;
+        };
+        let _ = ctx.emit(
+            dim_agent_capabilities::environment_clients::ClientsChanged {
+                name: dim_agent_capabilities::environment_clients::clients_changes(session),
+                session_id: session.to_owned(),
+            },
+        );
+    }
+    /// The attached connections of one Session. A UI leaf's own connection
+    /// is `tui`; it is not counted again under its declared kind.
+    pub(crate) fn client_presences(
+        &self,
+        session: &str,
+    ) -> Vec<dim_agent_capabilities::environment_clients::ClientPresence> {
+        use dim_agent_capabilities::environment_clients::{ClientChannel, ClientPresence};
+        let connections: Vec<_> = self
+            .connections
+            .lock()
+            .expect("connection index")
+            .values()
+            .filter_map(Weak::upgrade)
+            .filter(|conn| conn.is_attached(session))
+            .filter(|conn| !self.ui.is_disposing(&conn.id))
+            .collect();
+        connections
+            .into_iter()
+            .map(|connection| {
+                let channel = if self.ui.is_leaf_connection(&connection.id) {
+                    ClientChannel::Tui
+                } else {
+                    connection.channel()
+                };
+                ClientPresence {
+                    channel,
+                    label: connection.label(),
+                }
+            })
+            .collect()
     }
     /// Asks every connection to close and waits for its reader and writer.
     /// Connections created after this call start already closed.
@@ -1542,6 +2134,8 @@ pub(crate) struct ConnectionPlugin {
     config: Arc<ServerConfig>,
     control: Key<ServerControl>,
     ui: Key<crate::ui_host::UiHost>,
+    clients: Key<dim_agent_capabilities::environment_clients::SessionClientsHost>,
+    parts: Key<dim_agent_runtime::PartRegistry>,
 }
 impl ConnectionPlugin {
     pub fn new(names: &Names<'_>, config: Arc<ServerConfig>) -> rutis::Result<Self> {
@@ -1549,7 +2143,19 @@ impl ConnectionPlugin {
             config,
             control: names.key()?,
             ui: names.key()?,
+            clients: names.key()?,
+            parts: names.key()?,
         })
+    }
+}
+/// The presence host over the connection and UI registries.
+struct HubClients(Arc<ConnectionHub>);
+impl dim_agent_capabilities::environment_clients::SessionClientsSource for HubClients {
+    fn presences(
+        &self,
+        session_id: &str,
+    ) -> Vec<dim_agent_capabilities::environment_clients::ClientPresence> {
+        self.0.client_presences(session_id)
     }
 }
 impl DynPlugin for ConnectionPlugin {
@@ -1557,19 +2163,30 @@ impl DynPlugin for ConnectionPlugin {
         "Connection"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![self.control.erase(), self.ui.erase()]
+        vec![self.control.erase(), self.ui.erase(), self.parts.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let control = ctx.require_at(&self.control)?;
             let ui = ctx.require_at(&self.ui)?;
+            let parts = ctx.require_at(&self.parts)?;
             let hub = Arc::new(ConnectionHub::new(self.config.clone(), control, ui));
+            hub.set_client_emitter(ctx.clone());
             let owner = hub.clone();
             ctx.effect(move || async move {
                 owner.close().await;
                 Ok(())
             })?;
-            ctx.provide_as::<ConnectionHub>(hub)?;
+            ctx.provide_as::<ConnectionHub>(hub.clone())?;
+            dim_agent_capabilities::environment_clients::register_parts(ctx, &parts)?;
+            ctx.provide_at(
+                self.clients.clone(),
+                Arc::new(
+                    dim_agent_capabilities::environment_clients::SessionClientsHost(Arc::new(
+                        HubClients(hub),
+                    )),
+                ),
+            )?;
             Ok(Effect::Done)
         })
     }
@@ -1593,6 +2210,9 @@ pub(crate) struct RpcService {
     pub stopping: CancellationToken,
     pub control: Arc<ServerControl>,
     pub config: Arc<ServerConfig>,
+    /// The callers the providers of this process recorded, by row instance
+    /// and connection id: what `callChannel` serves to other languages.
+    pub callers: Arc<Callers>,
     /// Session MCP follow/refresh availability, not a host management service.
     /// The actual owners are acquired from the Session and followed across reload.
     pub mcp: Option<()>,
@@ -1645,6 +2265,7 @@ pub(crate) struct RpcPlugin {
     control: Key<ServerControl>,
     loader: Key<rutis_loader::Loader>,
     management: Key<crate::methods::ManagementMethods>,
+    callers: Key<Callers>,
 }
 impl RpcPlugin {
     pub fn new(names: &Names<'_>, config: Arc<ServerConfig>, root: Ctx) -> rutis::Result<Self> {
@@ -1657,6 +2278,7 @@ impl RpcPlugin {
             control: names.key()?,
             loader: names.key()?,
             management: names.key()?,
+            callers: names.key()?,
         })
     }
 }
@@ -1672,6 +2294,7 @@ impl DynPlugin for RpcPlugin {
             self.control.erase(),
             self.loader.erase(),
             self.management.erase(),
+            self.callers.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -1681,6 +2304,7 @@ impl DynPlugin for RpcPlugin {
             let control = ctx.require_at(&self.control)?;
             let loader = ctx.require_at(&self.loader)?;
             let management = ctx.require_at(&self.management)?;
+            let callers = ctx.require_at(&self.callers)?;
             let service = Arc::new(RpcService {
                 index,
                 ctx: self.root.clone(),
@@ -1689,6 +2313,7 @@ impl DynPlugin for RpcPlugin {
                 stopping: ctx.cancellation_token(),
                 control,
                 config: self.config.clone(),
+                callers,
                 mcp: self.config.local_execution().then_some(()),
                 commands: TaskTracker::new(),
                 unloading: CancellationToken::new(),
@@ -1708,6 +2333,9 @@ impl DynPlugin for RpcPlugin {
                 service.unloading.cancel();
                 service.commands.close();
                 service.commands.wait().await;
+                // This load admitted every call the index records; a new
+                // generation starts empty and records its own.
+                service.callers.clear();
                 Ok(())
             })?;
             handler.register(registered);
@@ -1723,4 +2351,144 @@ fn session_candidate(rpc: &RpcService, method: &str, params: &Value) -> bool {
     dim_agent_capabilities::methods::valid_name(method)
         && !rpc.management.holds(method)
         && params.get("sessionId").is_some()
+}
+
+/// The process row providing `callChannel` for parts of other languages
+/// (methods contract A.2) and the caller index Rpc records into. It depends
+/// on no other row, so a row that names `callChannel` does not reload when
+/// Rpc or the Agent index reloads.
+pub(crate) struct CallChannelPlugin {
+    callers: Key<Callers>,
+}
+impl CallChannelPlugin {
+    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            callers: names.key()?,
+        })
+    }
+}
+impl DynPlugin for CallChannelPlugin {
+    fn name(&self) -> &str {
+        "CallChannel"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        Vec::new()
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let callers = Arc::new(Callers::default());
+            ctx.provide_at(
+                rutis_bridge::session::host_key("callChannel"),
+                Arc::new(ForeignCallChannel {
+                    callers: callers.clone(),
+                }),
+            )?;
+            ctx.provide_at(self.callers.clone(), callers)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The process service `callChannel` (methods contract A.2): the
+/// notifications a row sends to a connection that called one of its
+/// namespaces, and the wait for that connection to close. Its calls end in
+/// the same `Caller` a Rust provider sends through.
+pub(crate) struct ForeignCallChannel {
+    pub callers: Arc<Callers>,
+}
+impl HostDispatch for ForeignCallChannel {
+    fn methods(&self) -> Option<Value> {
+        Some(serde_json::json!({ "notify": "async", "closed": "async" }))
+    }
+    fn invoke(&self, method: &str, args: BridgeValue) -> BridgeReply {
+        // Read the caller inside `invoke`: a future returned here runs later
+        // and no longer sees it.
+        let row = caller_row().ok_or_else(|| {
+            BridgeError::Value(
+                "callChannel needs the calling row's context: only a row of a language runtime can call it"
+                    .into(),
+            )
+        })?;
+        let instance = row.instance();
+        match method {
+            "notify" => {
+                let NotifyRequest {
+                    connection_id,
+                    call_id,
+                    method,
+                    params,
+                } = request(args)?;
+                let callers = self.callers.clone();
+                Ok(BridgeValue::future(async move {
+                    callers
+                        .notify(instance, &connection_id, &call_id, &method, params)
+                        .map(|()| serde_json::json!({}).into())
+                        .map_err(|error| failure(&method, &connection_id, error))
+                }))
+            }
+            "closed" => {
+                let ClosedRequest { connection_id } = request(args)?;
+                let closed = self
+                    .callers
+                    .closed(instance, &connection_id)
+                    .map_err(|error| failure("closed", &connection_id, error))?;
+                Ok(BridgeValue::future(async move {
+                    closed.await;
+                    Ok(BridgeValue::Undefined)
+                }))
+            }
+            _ => Err(BridgeError::no_method(
+                "callChannel",
+                method,
+                vec!["notify", "closed"],
+            )),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NotifyRequest {
+    connection_id: String,
+    call_id: String,
+    method: String,
+    #[serde(default)]
+    params: Map<String, Value>,
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClosedRequest {
+    connection_id: String,
+}
+
+/// One request object; anything else is the caller's programming error.
+fn request<T: DeserializeOwned>(args: BridgeValue) -> Result<T, BridgeError> {
+    let invalid = |detail: String| {
+        BridgeError::Value(format!("expected one callChannel request object: {detail}"))
+    };
+    let Value::Array(args) = args.json()? else {
+        return Err(invalid("not an argument list".into()));
+    };
+    let [request] = <[Value; 1]>::try_from(args)
+        .map_err(|args| invalid(format!("{} arguments", args.len())))?;
+    serde_json::from_value(request).map_err(|error| invalid(error.to_string()))
+}
+
+/// The service error a caller reads, carrying the contract's code.
+fn failure(method: &str, connection: &str, error: NotifyError) -> BridgeError {
+    BridgeError::binding(
+        error.code(),
+        match error {
+            NotifyError::Undeclared => format!(
+                "notification {method} is not declared by a namespace the calling row registered"
+            ),
+            // The index cannot tell a closed connection from one the row
+            // never received a call from: both leave no entry.
+            NotifyError::Gone => {
+                format!("connection {connection} is closed or was not served by this row")
+            }
+            NotifyError::TooLarge => format!("notification {method} exceeds the frame limit"),
+        },
+        None,
+    )
 }
