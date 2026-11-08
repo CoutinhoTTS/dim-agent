@@ -129,7 +129,6 @@ fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
     terminal.until("[Chat] Update cache");
     terminal.until("[ACP ] Editor conversation");
     terminal.until("[Agent] Inspect cache");
-    terminal.until("↑ chat");
     terminal.write(b"\x1b[27u");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");

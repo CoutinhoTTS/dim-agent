@@ -3895,7 +3895,6 @@ impl Worker {
                             updated_at: session.updated_at,
                             model: session.model.model_id,
                             origin: session.origin,
-                            parent_session_id: session.parent_session_id,
                         })
                         .collect(),
                     next_cursor,
@@ -4613,7 +4612,6 @@ struct SessionSummary {
     /// The creation origin, from a daemon that reports one (#557).
     #[serde(default)]
     origin: Option<String>,
-    parent_session_id: Option<String>,
 }
 
 fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {
