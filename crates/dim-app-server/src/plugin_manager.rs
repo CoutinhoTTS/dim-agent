@@ -1236,6 +1236,19 @@ impl Manager {
                     acquire::copy(shipped, &acquire::work_dir(&staging))?;
                     phase("check");
                     let manifest = acquire::manifest_of(&staging)?.require_version()?;
+                    // §3.2: an `{optional}` install is the plugin the
+                    // default configuration file ships under this name; a
+                    // manifest naming another would install under that name
+                    // and leave the entry uninstalled forever.
+                    if manifest.name != optional {
+                        return Err(PluginError::new(
+                            "name_changed",
+                            format!(
+                                "the shipped optional plugin {optional:?} names {:?}",
+                                manifest.name
+                            ),
+                        ));
+                    }
                     let id = self.new_id(params.id.as_deref(), &manifest)?;
                     self.dependencies(&manifest, &staging, phase, cancel)
                         .await?;

@@ -822,6 +822,48 @@ async fn an_optional_install_copies_its_directory_and_installs_its_dependencies(
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// §3.2: a shipped optional entry is the plugin its key names; a manifest
+/// naming another is refused, and nothing is installed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_optional_plugin_whose_manifest_names_another_is_refused() {
+    let home = home();
+    optional_plugin(&home.join("shipped"), "y", "1.0.0", false);
+    let fixture = FixtureNode::with("24.21.0", "true");
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"x": "shipped/y"})),
+        fixture.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let refused = call(
+        &mut client,
+        "plugin.install",
+        json!({"source": {"optional": "x"}}),
+    )
+    .await;
+    assert_eq!(app_error(&refused), "name_changed", "{refused}");
+    assert!(!home.join("plugins.json").exists(), "nothing is recorded");
+    // Only the directories startup itself makes (`.python`, and a staging
+    // parent a failure removes again) may remain.
+    let leftovers: Vec<String> = plugins_entries(&home)
+        .into_iter()
+        .filter(|entry| entry != ".python" && entry != ".staging")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let listed = item(&list, "x");
+    assert_eq!(listed["use"], Value::Null, "{list}");
+    assert_eq!(listed["off"], true, "{list}");
+    assert_eq!(listed["optional"], true, "{list}");
+    assert_eq!(listed["candidates"], json!([]), "{list}");
+    assert!(listed.get("status").is_none(), "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// §3.2 step 1, A.2: a name the default configuration file does not ship is
 /// `optional_not_found` before anything is acquired; the client sees the
 /// static description and nothing is created.
