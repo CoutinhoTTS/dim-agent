@@ -526,7 +526,7 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 7. `eventhub.sources`、`eventhub.subscriptions`、`eventhub.subscribe` 与 `eventhub.unsubscribe` 是管理方法，只能经允许管理方法的入口到达：它们不在 web 入口的 `WEB_MANAGEMENT_METHODS` 里，见 `crates/dim-app-server/src/protocol.rs:194`，而受保护配置下的裸入口回答 `local_transport_required`，见 `crates/dim-app-server/src/connection.rs:533-542`。每个 Session 32 条与整机 1024 条的上限回答 `limit_reached`。
 8. 订阅与发布都要求类型已声明 `unknown_type`；另一行的来源是 `duplicate_source`；来源卸载后失去其类型，而已存储的订阅保留。
 9. 删除目标 Session 无论已加载还是未加载，都经 `agent/session-deleted` 移除它的订阅；错过的通知留下一条 `session_closed` 的订阅并显示其失败。
-10. `events` 工具的 `subscribe` 与 `unsubscribe` 以 `persistent_configuration` 准入，`sources` 与 `list` 以 `session` 准入；工具拒绝另一个 Session 的 `subscriptionId`，携带 `dim-event` 标记的请求携带序号 130 的条目及其信任类别、无需回答与回复工具三组句子，见 [面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)。
+10. `events` 工具的 `subscribe` 与 `unsubscribe` 以 `persistent_configuration` 准入，`sources` 与 `list` 以 `session` 准入；工具拒绝另一个 Session 的 `subscriptionId`，携带 `dim-event` 标记的请求携带序号 130 的条目及其信任类别句与回复路径句，见 [面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)。
 11. 未安装 EventHub 时，生产方的可选读取什么也找不到，inject `eventHub` 的 TypeScript 行不装载，什么也不发布，宿主与它的 Session 与今天一样。
 12. 安装的状态挺过工厂重建：把内置 `eventhub` 行关闭再打开保留每一条声明，生产方只声明一次；关闭再打开之后的发布无需第二次声明即可投递。在 EventHub 第一次 `apply` 之前装载的生产方在 `eventhub/ready` 时声明，它的事件随之到达。
 13. 删除与订阅竞争：订阅持有 Session 锁期间到达的删除，在记录存储之后移除它，该 Session 不留下任何订阅。EventHub 关闭期间被删除的 Session 的已存储订阅，在下一次 `apply` 被移除；已关闭但仍可恢复的 Session 的订阅保留。
