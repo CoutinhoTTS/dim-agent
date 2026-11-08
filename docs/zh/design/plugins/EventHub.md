@@ -41,7 +41,7 @@ flowchart LR
 | EventHub 通知行 | 进程，每代一个 | `eventhub/ready` 通知；由进程部件在 `apply` 里创建的降级(子)行，不是 loader 行 |
 | EventHub Session 部件 | Session | 为它写出的标记登记的指南条目，经 `guideEntries` 登记；`events` 工具 |
 
-没有分支部件：EventHub 不折叠任何分支事实，也不持有任何分支状态。
+没有分支部件：EventHub 不折叠任何分支事实，也不持有任何分支状态。`events` 工具经进程部件声明的一个进程服务到达进程部件的订阅核心，见 [设计规则 §4 第 7 条](../../../architecture/rust-agent/principles.md)，而不是经共享状态；那个服务的名字由 `events` 工具自己的设计给出。
 
 EventHub 是一个内置原生插件，位于新 crate `crates/dim-event-hub`。产品装配像安装 Scheduler 那样安装它，即 `dim_agent_scheduler::install` 的同一位置 `crates/dimcode/src/main.rs:31`，并通过 `AgentBuilder::optional_plugin` 作为可选功能安装 `crates/dim-agent-runtime/src/assembly.rs:300-311`，所以缺少它所需服务的宿主仍能启动并打开 Session。它的插件行名为 `eventhub`，即 PluginManager 使用的行 id，因此 PluginManager 可以像关闭其他内置插件一样关闭它，见 [PluginManager §2](PluginManager.md)。关掉之后，生产方拿不到 `eventHub` 服务，其他一切不变。
 
@@ -125,6 +125,8 @@ GuideRecord {
 
 每次发布从第一次查找到最后一次投递，持有以该提交 id 为键的进程内锁，即 `eventhub:<source>:<eventId>`(即 2.5 的实例状态)。这把锁把按分支的保证延伸到文件(3.2)：正文超过上限时先按 id 在每条目标分支上查找，已经持有该输入的分支直接回答 `repeated: true`，不写文件。发布结束时释放锁，映射项随最后一个持有者消失。
 
+发布一旦持有它的事件锁，就在 EventHub 自己拥有的任务里运行到完成。丢弃回复的调用方或一次重载，都既不会停止它，也不会释放那把锁，所以用同一个 `id` 的重试会等它结束，然后找到该输入并回答 `repeated`。
+
 保证按分支成立：每个事件 id 一个输入；重试绝不为已持有该输入的分支再写文件；`truncated` 只由写出该输入的那次发布报告。
 
 `eventId` 在生产方给出 `id` 时就是它，至多 128 字节；否则是一个新的 UUID。它是这条事件对生产方、以及对模型的身份，模型在标记里读到它。
@@ -171,7 +173,7 @@ sequenceDiagram
 
 投递给一条被订阅的分支时，先按该分支与来源取出记录的指南，与当前声明对比(3.3)。二者不同时，它先在该 Session 的锁下把当前指南作为一条带键的 `append` 写出，然后写事件；仅由 `to` 到达的分支没有记录，也不写指南。
 
-以 `queue` 或 `steer` 到达的投递还会结束目标分支上正在进行的 wait(9.3)；`append` 投递不会，因为 append 从不唤醒工作。指南写入从不结束 wait。
+投递在分支上保持它模式的含义：`steer` 投递在下一个步骤到达正在运行的回合，并像任何 steer 一样结束正在进行的 `wait`；`queue` 投递等到回合结束；`append` 投递从不唤醒工作。分支处于 wait 而必须被唤醒的订阅者用 `steer` 订阅。
 
 ### 3.2 正文超过标记上限
 
@@ -216,7 +218,7 @@ sequenceDiagram
 
 - 监听进程通知 `agent/session-deleted {agentId, sessionId}`，在该 Session 的锁下(3.3)移除目标为该 Session 的每一条订阅。这条通知属于 §9.1 提出的需求。它仍是及时的路径。
 - 权威状态在 Agents 自己手里：该 id 是否有所有者或 SessionStore 记录，这也是 `acquire` 读取的东西(`crates/dim-app-server/src/agents.rs:832-843`)。§9.2 要求 Agents 提供 `sessions.exists {sessionId} → {exists}`，一次从不取得、也不恢复 Session 的读取：`false` 表示该 Session 已被删除，已关闭但仍可恢复的 Session 为 `true`。
-- EventHub 在两处读它：每次 `apply` 时，对已存储订阅指向的每个 Session，至多同时 8 次读取；以及一次投递以 `session_closed` 失败之后读一次。`false` 在它自己的锁下、以一个事务移除该 Session 的订阅；任何错误都保留它们。
+- EventHub 在两处读它：服务提供之后，在本代里，对已存储订阅指向的每个 Session，至多同时 8 次读取，重载结束这个任务；以及一次投递以 `session_closed` 失败之后读一次。`false` 在它自己的锁下、以一个事务移除该 Session 的订阅；任何错误都保留它们。
 - 因此，EventHub 关闭期间错过的通知会在下一次 `apply`、或第一次失败的投递上得到修复。在那之前投递给死订阅会失败 `session_closed`，`eventhub.subscriptions` 显示最近一次失败。那是修复路径的代价，而不是被遗留的死订阅。
 
 ## 4. 时序与冲突
@@ -251,20 +253,20 @@ sequenceDiagram
 
 | 接口 | 种类 | 用途 |
 | --- | --- | --- |
-| `eventHub` | 进程服务，无 key，见 [§3.1](../overview.md#31-合同形式) | 只有给生产方的 `declare` 与 `publish`，没有别的：生产方的行不能创建或移除另一个 Session 的订阅，而对客户端来说管理平面是唯一的授权入口，见 7。`events` 工具与 `eventhub.*` 方法调用进程部件自己的订阅核心，不经过这个服务 |
+| `eventHub` | 进程服务，无 key，见 [§3.1](../overview.md#31-合同形式) | 只有给生产方的 `declare` 与 `publish`，没有别的：生产方的行不能创建或移除另一个 Session 的订阅，而对客户端来说管理平面是唯一的授权入口，见 7。`events` 工具与 `eventhub.*` 方法调用进程部件自己的订阅核心，不经过这个服务；`events` 工具经进程部件声明的一个进程服务到达该核心，见 [设计规则 §4 第 7 条](../../../architecture/rust-agent/principles.md)，而不是经共享状态，那个服务的名字由 `events` 工具自己的设计给出 |
 | `eventhub.sources`、`eventhub.subscriptions`、`eventhub.subscribe`、`eventhub.unsubscribe` | `managementMethods`，命名空间 `eventhub` | 客户端读取目录、管理任意 Session 的订阅 |
 | `eventhub/ready` | 进程总线事件，无 key | 告诉在进程里 EventHub 第一次 `apply` 之前就已装载的生产方：`eventHub` 服务已提供且可读，现在声明，见 2.1 |
 | `events` | 向 `toolRegistry` 登记的工具，Session | 模型读取目录、管理自己 Session 的订阅 |
 | `dim-event`、`dim-event-guide` | EventHub 写出的原始块标记 | 事件与来源指南唯一的模型可见形式 |
 
-EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 id `eventhub:<source>:<eventId>`、`eventhub-guide:<subscriptionId>:<source>`、`eventhub-guide-retire:<subscriptionId>:<source>` 与 `eventhub-guide-refresh:<source>:<uuid>`、存储文件 `eventhub/subscriptions.json`、Session 文件名 `event.txt`，以及总线事件 `eventhub/ready`。
+EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前缀 `eventhub:`、提交 id `eventhub:<source>:<eventId>`、`eventhub-guide:<subscriptionId>:<source>`、`eventhub-guide-retire:<subscriptionId>:<source>` 与 `eventhub-guide-refresh:<source>:<uuid>`、存储文件 `eventhub/subscriptions.json`、Session 文件名 `event.txt`，以及总线事件 `eventhub/ready`。
 
 `eventHub` 服务是生产方唯一需要的名字。Rust 部件只在它存在时用 `ctx.get_at` 与进程 key 读取，Cordis 行同样用 `ctx.get` 读取，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字) 与 A.3；两者都不 inject 它。用 TypeScript SDK 的 `definePlugin` 写成的行则 inject 它，因为它读不到没有 inject 的名字，见 2.1。EventHub 不依赖任何生产方。
 
 ## 7. 安全
 
 - **事件是材料，从不是指令。** 事件以运行时写出的标记、在它自己的一条消息里到达模型，内容经过转义，没有用户内容，所以生产方的文字不会被读成操作者的话，见 [session access A.2](../contracts/session-access.md#a2-来源输入约定)。指南条目声明这条通道的信任类别，并说明事件内部的指令不约束模型。
-- **转义。** 每个属性值、标题与正文都用 Scheduler 报告同一个函数转义，见 `crates/dim-agent-scheduler/src/engine.rs:634-641`，所以 id 或标题无法打开或关闭一个标签。属性名受限，生产方属性里出现保留名 `source`、`type`、`id`、`file`、`bytes`、`truncated` 时以 `invalid_event` 拒绝，所以生产方伪造不了运行时自己的字段。
+- **转义。** 每个属性值、标题与正文都用 EventHub 与 Scheduler 共同调用的同一个函数转义，即 `dim_agent_types::markup::escaped`，所以 id 或标题无法打开或关闭一个标签。属性名受限，生产方属性里出现保留名 `source`、`type`、`id`、`file`、`bytes`、`truncated` 时以 `invalid_event` 拒绝，所以生产方伪造不了运行时自己的字段。
 - **写入输入不带来权限。** 被投递的事件不授予任何权限：它开启的轮次、这些轮次调用的工具，都由 Approval 与 Permission 按 Session 的策略准入，和其他任何输入一样，见 [session access §7](../contracts/session-access.md#7-安全)。
 - **订阅变更是配置。** `subscribe` 与 `unsubscribe` 改变未来的外部文字从哪进入 Session，所以 `events` 工具为这两个动作声明 `persistent_configuration`，`sources` 与 `list` 走定义的 `session` 风险；在绑定里风险是按调用计算的，见 `crates/dim-agent-capabilities/src/tool_registry.rs:54-58`，而 Permission 把未分类风险按预设分别按拒绝、询问、允许处理，见 `crates/dim-agent-capabilities/src/permission.rs:610-618,643-675`，与 Scheduler 的 `schedule` 工具相同，见 `crates/dim-agent-scheduler/src/session.rs:82,102`。
 - **管理平面。** `eventhub.*` 只向受保护的本地连接提供，这是 `managementMethods` 的规则，见 [方法 §3.2](../contracts/session-boundary.md#32-管理方法)。它能触达任意 Session，因此是宿主管理员面，不是 Session 作用域的面。
@@ -299,7 +301,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 i
 
 - **被什么挡住：** EventHub 必须移除被删除 Session 的订阅，而一个保留数据行的关闭不能移除它们。`session_closed` 同时回答这两种情况，见 `crates/dim-app-server/src/agents.rs:817-830` 与 [session access A.6](../contracts/session-access.md#a6-错误)；今天唯一的删除通知是 `agent/unloaded-session-deleted`，且只为未加载的 Session 发出，见 `crates/dim-app-server/src/agents.rs:97-109,1399-1415` 与 [插件契约 §5.3](../plugin-contract.md#53-总线事件)。
 - **考虑过的现有机制：** Session 广播的 `closed` 事件只说明一个 Session 关闭了，不说明它的数据行是否被移除，而 EventHub 不能因关闭而移除；用 `sessions.lookup` 轮询每个被订阅的 Session 时，对一个存在但从未收到输入的 Session 回答 `unknown`，区分不出已删除与可恢复，而且会引入 EventHub 设计明确排除的周期性读取者；`history` 对两种情况以同样的方式失败。
-- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次成功的删除，无论 Session 是否已加载。Collaboration 现有的通知保持原样。
+- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次成功的删除，无论 Session 是否已加载。Collaboration 现有的通知保持原样。两条删除通知都保留，直到 Collaboration 迁移到 `agent/session-deleted`；那次迁移是 Collaboration 的改动。
 - **对顺序、批次、中断、重载的影响：** 对 Timeline 没有影响；这条通知是总线事件，不是事实。错过的通知由 3.4 的对账修复，在下一次 `apply` 或第一次失败的投递上。
 - **所有者：** Agents，`crates/dim-app-server/src/agents.rs`；它自己的文档陈述这条通知，见 [Sessions 服务](../appserver/sessions-service.md) 与 [删除与分叉](../appserver/session-deletion-and-fork.md)。
 
@@ -309,18 +311,6 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 i
 - **需要什么：** `sessions.exists {sessionId} → {exists}`，位于 `sessions` 服务与宿主 dispatch 中，紧邻 `lookup`：一次从不取得、也不恢复 Session 的读取。`false` 表示该 Session 已被删除；已关闭但仍可恢复的 Session 为 `true`。回答它读取的正是 `acquire` 已经在读的东西：该 id 是否有所有者或 SessionStore 记录。
 - **对顺序、批次、中断与重载的影响：** 对 Timeline 没有影响；这次读取不写事件，也不取得任何东西，因此不恢复任何 Session。Agents 重载时回答 `reloading`，EventHub 把它当作错误并保留订阅。
 - **所有者：** Agents，`crates/dim-app-server/src/agents/sessions.rs`；它自己的文档陈述这个方法，见 [Sessions 服务](../appserver/sessions-service.md) 与 [session access](../contracts/session-access.md)。
-
-### 9.3 一条投递到达的事件会结束 wait
-
-- **被什么挡住：** 一旦 `events` 工具上线，“先订阅，再等下一条事件”就是自然的用法。在打开的回合里投递的 `queue` 输入会一直保留到回合结束(`crates/dim-agent-capabilities/src/input_queue.rs:183-186`)，而 Wait 只在带标签的后台任务通知、steer、stop 或超时时结束(`crates/dim-agent-capabilities/src/wait.rs:116-140`)，于是一条事件只会在 wait 超时之后才到达。完整评测实测：`operator-asked-to-act` 的一个 run 睡了两次 300 秒，而 CI 通知一直排队。
-- **需要什么：** Wait 把打开的回合里落到分支上的 EventHub 投递当作一次到达。
-  - **标记。** Wait 匹配 submission id 的前缀 `eventhub:`，这是由 Wait 持有的常量(`EVENT_SUBMISSION_PREFIX`)，EventHub 的 `submission_id` 使用它。标签无法承担这件事：输入的 tags 属于事件，而 `sessions.input` 没有承载它的请求字段。
-  - **哪些 wait。** `steer` 投递像任何 steer 一样结束每一个 wait。`queue` 投递结束不带 `taskId` 的 wait，不结束带 `taskId` 的。steer 排在最前，按到达顺序；任务与排队事件之间，先到的那个优先。
-  - **模式。** `queue` 或 `steer` 投递算数；`append` 投递不算(3.3)。指南输入的 submission id 以 `eventhub-guide` 开头，因此从不计数。
-  - **结果。** 结果要说明事件在哪里，因为排队的输入要等到回合结束：`queue` 为 `wait ended: event <source> <id>; it is queued and arrives when this turn ends`，`steer` 为 `wait ended: event <source> <id>`。结构化结果是 `{"reason": "event", "source", "eventId", "waitedMs"}`。
-  - **描述。** 工具描述把“一条事件投递到这条分支”列入 wait 结束的方式；该句子是协议(Wait.md 的 Model-facing texts)，流程测试断言它。
-- **对顺序、批次、中断与重载的影响：** 对 Timeline 没有影响。这次到达是一条普通的 `input/message`；EventHub 不保留 wait 状态，也不会被告知某个 wait 结束了。Wait 重载会像今天一样丢失尚未取走的到达。
-- **所有者：** Wait，`crates/dim-agent-capabilities/src/wait.rs`；它自己的文档陈述这个行为，见 [Wait.md](../../../architecture/rust-agent/plugins/Wait.md)。
 
 除此以外不向其他所有者提任何要求。指南条目使用 Prompt 已有的 `guideEntries` 合同，工具使用 `toolRegistry`，订阅使用 `pluginFiles` 与 `sessionFiles`，客户端使用 `managementMethods`。
 
@@ -333,6 +323,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、提交 i
 - **把 Collaboration、Scheduler 或 BackgroundExec 自己的输入搬到 EventHub 上。** 它们各自保留自己的路径；迁移由各自的所有者决定。
 - **客户端 UI。** 客户端经 `eventhub` 的方法读取与管理订阅；如何展示属于客户端自己。
 - **把 `eventhub.publish` 作为管理方法。** 发布属于生产方行，由它持有来源并接收回执。管理平面管理订阅，不管理生产方。
+- **用排队投递唤醒 wait。** 结束 wait 的排队事件仍然只会在回合结束后到达，所以必须被唤醒的订阅者用 `steer`。输入合同上的通用到达标记会由输入的所有者设计，EventHub 只会设置它。
 
 ## 附录 A. 接口细节
 

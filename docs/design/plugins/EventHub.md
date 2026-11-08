@@ -41,7 +41,7 @@ flowchart LR
 | EventHub announcer | Process, one per generation | the `eventhub/ready` notice; a child fiber the process part creates in its `apply`, not a loader row |
 | EventHub Session part | Session | the guide entry for its markers, registered through `guideEntries`; the `events` tool |
 
-There is no branch part: EventHub folds no branch fact and holds no branch state.
+There is no branch part: EventHub folds no branch fact and holds no branch state. The `events` tool reaches the process part's subscription core through a process service the process part declares ([design rules §4 rule 7](../../architecture/rust-agent/principles.md)), not through shared state; the tool's own design names that service.
 
 EventHub is a built-in native plugin in a new crate, `crates/dim-event-hub`. The product profile installs it the way it installs Scheduler (`dim_agent_scheduler::install`, `crates/dimcode/src/main.rs:31`), as an optional feature through `AgentBuilder::optional_plugin` (`crates/dim-agent-runtime/src/assembly.rs:300-311`), so a host without the services it needs still starts and opens Sessions. Its plugin row is named `eventhub`, the row id PluginManager uses, so PluginManager turns it off like any other built-in ([PluginManager §2](PluginManager.md)). Without it, producers get no `eventHub` service, and nothing else changes.
 
@@ -125,6 +125,8 @@ Every delivery of one event uses one `submissionId`, `eventhub:<source>:<eventId
 
 Every publish holds an in-process lock keyed by that submission id, `eventhub:<source>:<eventId>`, from its first lookup to its last delivery (2.5's instance state). The lock extends the per-branch guarantee to the file (3.2): a body over the limit first looks the id up on each target branch, and a branch that already holds the input is answered `repeated: true` without a file. The lock is released when the publish ends, and its map entry is dropped with the last holder.
 
+Once a publish holds its event lock, it runs to completion in a task EventHub owns. A caller that drops its reply, or a reload, neither stops it nor frees the lock, so a retry with the same `id` waits for it, then finds the input and answers `repeated`.
+
 The guarantee, per branch: one input per event id; a retry never writes a file for a branch that already holds that input; and `truncated` is reported only by the publish that wrote the input.
 
 `eventId` is the producer's `id` when it sends one, at most 128 bytes, and a fresh UUID otherwise. It is the event's identity for the producer and for the model, which reads it in the marker.
@@ -171,7 +173,7 @@ A branch is delivered once however many targets reach it. Its mode is the `to` e
 
 A delivery to a subscribed branch first checks the guide it recorded for that branch and source against the current declaration (3.3). When they differ it writes the current guide as one keyed `append`, under the Session's lock, and then the event; a branch reached only through `to` has no record and gets no guide write.
 
-A delivery with `queue` or `steer` also ends a wait running on the target branch (9.3); an `append` delivery does not, because append never wakes work. A guide write never ends one.
+A delivery keeps its mode's meaning on the branch: a `steer` delivery reaches the running turn at its next step and, like every steer, ends a running `wait`; a `queue` delivery waits for the turn to end; an `append` delivery never wakes work. A subscriber that must be woken while its branch waits subscribes with `steer`.
 
 ### 3.2 A body over the marker limit
 
@@ -216,7 +218,7 @@ A deleted Session answers `session_closed`, and a closed but restorable Session 
 
 - EventHub listens to the process notice `agent/session-deleted {agentId, sessionId}` and removes every subscription whose target is that Session, under that Session's lock (3.3). The notice requirement is §9.1. It stays the prompt path.
 - The authoritative state is Agents' own: whether the id has an owner or SessionStore records, which is what `acquire` reads (`crates/dim-app-server/src/agents.rs:832-843`). §9.2 asks Agents for `sessions.exists {sessionId} → {exists}`, a read that never acquires or restores: `false` means the Session was deleted, and a closed, restorable Session is `true`.
-- EventHub reads it in two places: at every `apply`, for each Session its stored subscriptions target, at most eight reads at a time; and once after a delivery fails `session_closed`. A `false` removes that Session's subscriptions in one transaction, under its lock; any error keeps them.
+- EventHub reads it in two places: once its service is provided, in the generation, for each Session its stored subscriptions target, at most eight reads at a time, and a reload ends that task; and once after a delivery fails `session_closed`. A `false` removes that Session's subscriptions in one transaction, under its lock; any error keeps them.
 - A notice missed while EventHub was off is therefore repaired at the next apply, or at the first failed delivery. A delivery to a dead subscription in between fails `session_closed`, and `eventhub.subscriptions` shows the last failure. That is the repair path's cost, not a lost subscription left behind.
 
 ## 4. Timing and conflicts
@@ -251,20 +253,20 @@ The marker is the only channel an event uses. Nothing is injected into a request
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `eventHub` | Process service, no key ([§3.1](../overview.md#31-contract-form)) | `declare` and `publish`, for producers, and nothing else: a producer row must not create or remove another Session's subscriptions, and the management plane is the only authorization for clients (7). The `events` tool and the `eventhub.*` methods call the process part's own subscription core, not the service |
+| `eventHub` | Process service, no key ([§3.1](../overview.md#31-contract-form)) | `declare` and `publish`, for producers, and nothing else: a producer row must not create or remove another Session's subscriptions, and the management plane is the only authorization for clients (7). The `events` tool and the `eventhub.*` methods call the process part's own subscription core, not the service; the `events` tool reaches that core through a process service the process part declares ([design rules §4 rule 7](../../architecture/rust-agent/principles.md)), not through shared state, and the tool's own design names that service |
 | `eventhub.sources`, `eventhub.subscriptions`, `eventhub.subscribe`, `eventhub.unsubscribe` | `managementMethods`, namespace `eventhub` | Clients read the catalog and manage any Session's subscriptions |
 | `eventhub/ready` | Process bus event, no key | Tells a producer that applied before EventHub's first apply in the process that the `eventHub` service is provided and readable, so it declares now (2.1) |
 | `events` | Tool registered with `toolRegistry` (Session) | The model reads the catalog and manages its own Session's subscriptions |
 | `dim-event`, `dim-event-guide` | Raw-block markers written by EventHub | The only model-visible form of an event and of a source's guide |
 
-Names EventHub owns: the marker elements, the key prefix `eventhub:guide:`, the submission ids `eventhub:<source>:<eventId>`, `eventhub-guide:<subscriptionId>:<source>`, `eventhub-guide-retire:<subscriptionId>:<source>` and `eventhub-guide-refresh:<source>:<uuid>`, the storage file `eventhub/subscriptions.json`, the Session file name `event.txt`, and the bus event `eventhub/ready`.
+Names EventHub owns: the marker elements, the key prefix `eventhub:guide:`, the id prefix `eventhub:`, the submission ids `eventhub:<source>:<eventId>`, `eventhub-guide:<subscriptionId>:<source>`, `eventhub-guide-retire:<subscriptionId>:<source>` and `eventhub-guide-refresh:<source>:<uuid>`, the storage file `eventhub/subscriptions.json`, the Session file name `event.txt`, and the bus event `eventhub/ready`.
 
 The `eventHub` service is the only name a producer needs. A Rust part reads it only if present with `ctx.get_at` and the process key, and a Cordis row does the same with `ctx.get`; neither injects it ([rutis usage §3.5](../rutis-usage.md#35-how-each-runtime-resolves-a-name), A.3). A row written with the TypeScript SDK's `definePlugin` injects it instead, because it cannot read a name it does not inject (2.1). EventHub depends on no producer.
 
 ## 7. Security
 
 - **Events are material, never instructions.** An event reaches the model as a runtime-written marker in its own message, escaped, with no user content, so a producer's text cannot read as the operator's words ([session access A.2](../contracts/session-access.md#a2-source-input-conventions)). The guide entry states the channel's trust class and says instructions inside an event do not bind the model.
-- **Escaping.** Every attribute value, the title and the body are escaped with the same function Scheduler's report uses (`crates/dim-agent-scheduler/src/engine.rs:634-641`), so an id or a title cannot open or close a tag. Attribute names are restricted, and the reserved names `source`, `type`, `id`, `file`, `bytes` and `truncated` are refused in a producer's attributes (`invalid_event`), so a producer cannot forge the runtime's own fields.
+- **Escaping.** Every attribute value, the title and the body are escaped with the one function EventHub and Scheduler both call, `dim_agent_types::markup::escaped`, so an id or a title cannot open or close a tag. Attribute names are restricted, and the reserved names `source`, `type`, `id`, `file`, `bytes` and `truncated` are refused in a producer's attributes (`invalid_event`), so a producer cannot forge the runtime's own fields.
 - **No authority from writing input.** A delivered event confers no authority: the turns it starts and the tools they call are admitted by Approval and Permission under the Session's policy, exactly as for any other input ([session access §7](../contracts/session-access.md#7-security)).
 - **Subscription changes are configuration.** `subscribe` and `unsubscribe` change where future external text enters a Session, so the `events` tool declares `persistent_configuration` for those two actions and the definition's `session` risk for `sources` and `list`; risk is per call in the binding (`crates/dim-agent-capabilities/src/tool_registry.rs:54-58`), and Permission treats an unclassified risk as deny, ask or allow by preset (`crates/dim-agent-capabilities/src/permission.rs:610-618,643-675`), as Scheduler's `schedule` tool does (`crates/dim-agent-scheduler/src/session.rs:82,102`).
 - **Management plane.** `eventhub.*` is served only on protected-local connections, the `managementMethods` rule ([methods §3.2](../contracts/session-boundary.md#32-management-method)). It reaches any Session, so it is a host-administrator surface, not a Session-scoped one.
@@ -299,7 +301,7 @@ The `eventHub` service is the only name a producer needs. A Rust part reads it o
 
 - **Blocked by:** EventHub must remove the subscriptions of a deleted Session, and a close that keeps its rows must not remove them. `session_closed` answers both (`crates/dim-app-server/src/agents.rs:817-830`; [session access A.6](../contracts/session-access.md#a6-errors)), and the only deletion notice today is `agent/unloaded-session-deleted`, emitted for an unloaded Session alone (`crates/dim-app-server/src/agents.rs:97-109,1399-1415`; [plugin contract §5.3](../plugin-contract.md#53-bus-events)).
 - **Existing mechanisms considered:** the Session broadcast's `closed` event says a Session closed, not whether its rows were removed, and EventHub must not remove on a close; polling each subscribed Session with `sessions.lookup` answers `unknown` for a Session that exists but took no input, so it cannot tell deleted from restorable, and it would add the periodic reader EventHub's design excludes; `history` fails the same way for both.
-- **Needed:** a host-internal process notice `agent/session-deleted {agentId, sessionId}`, emitted after SessionStore removed the rows, for every successful delete, loaded or not. Collaboration's existing notice stays as it is.
+- **Needed:** a host-internal process notice `agent/session-deleted {agentId, sessionId}`, emitted after SessionStore removed the rows, for every successful delete, loaded or not. Collaboration's existing notice stays as it is. Both delete notices stay until Collaboration moves to `agent/session-deleted`; that move is Collaboration's change.
 - **Effect on sequence, batch, interrupt, reload:** none on the Timeline; the notice is a bus event, not a fact. A missed notice is repaired by the reconciliation of 3.4, at the next `apply` or the first failed delivery.
 - **Owner:** Agents, `crates/dim-app-server/src/agents.rs`; its own documents state the notice ([Sessions service](../appserver/sessions-service.md), [deletion and fork](../appserver/session-deletion-and-fork.md)).
 
@@ -309,18 +311,6 @@ The `eventHub` service is the only name a producer needs. A Rust part reads it o
 - **Needed:** `sessions.exists {sessionId} → {exists}` in the `sessions` service and the host dispatch, beside `lookup`: a read that never acquires or restores a Session. `false` means the Session was deleted; a closed, restorable Session is `true`. Answering it reads what `acquire` already reads: whether the id has an owner or SessionStore records.
 - **Effect on sequence, batch, interrupt and reload:** none on the Timeline; the read writes no event and acquires nothing, so it restores nothing. An Agents reload answers `reloading`, which EventHub treats as an error and keeps the subscriptions.
 - **Owner:** Agents, `crates/dim-app-server/src/agents/sessions.rs`; its own documents state the method ([Sessions service](../appserver/sessions-service.md), [session access](../contracts/session-access.md)).
-
-### 9.3 Wait ends on a delivered event
-
-- **Blocked by:** "subscribe, then wait for the next event" is the natural pattern once the `events` tool ships. A `queue` input delivered in an open turn is held until the turn ends (`crates/dim-agent-capabilities/src/input_queue.rs:183-186`), and Wait ends only on a tagged background task notice, a steer, a stop or its timeout (`crates/dim-agent-capabilities/src/wait.rs:116-140`), so the event would arrive only after the wait's timeout. Measured in the full evaluation: one `operator-asked-to-act` run slept twice for 300 seconds while the CI notice sat queued.
-- **Needed:** Wait treats an EventHub delivery on a branch in an open turn as an arrival.
-  - **Marking.** Wait matches the submission id's prefix `eventhub:`, a constant (`EVENT_SUBMISSION_PREFIX`) that EventHub's `submission_id` uses. A tag cannot carry it: the input's tags belong to the event, and `sessions.input` has no request field for one.
-  - **Which waits.** A `steer` delivery ends every wait, as any steer does. A `queue` delivery ends a wait without `taskId` and not one with a `taskId`. Steers come first, in arrival order; between a task and a queued event, the earlier arrival wins.
-  - **Modes.** A `queue` or `steer` delivery counts; an `append` delivery does not (3.3). A guide input's submission id starts `eventhub-guide`, so it never counts.
-  - **The result.** It says where the event is, because a queued input waits for the turn end: `wait ended: event <source> <id>; it is queued and arrives when this turn ends` for `queue`, and `wait ended: event <source> <id>` for `steer`. The structured result is `{"reason": "event", "source", "eventId", "waitedMs"}`.
-  - **The description.** The tool's description lists an event delivered to this branch among the ways a wait ends; that sentence is protocol (Wait.md, Model-facing texts), and the flow test asserts it.
-- **Effect on sequence, batch, interrupt and reload:** none on the Timeline. The arrival is an ordinary `input/message`; EventHub keeps no wait state and is not told a wait ended. A reload of Wait loses pending arrivals, as it does today.
-- **Owner:** Wait, `crates/dim-agent-capabilities/src/wait.rs`; its own document states the behaviour ([Wait.md](../../architecture/rust-agent/plugins/Wait.md)).
 
 Nothing else is asked of another owner. The guide entry uses Prompt's existing `guideEntries` contract, the tool uses `toolRegistry`, subscriptions use `pluginFiles` and `sessionFiles`, and clients use `managementMethods`.
 
@@ -333,6 +323,7 @@ Nothing else is asked of another owner. The guide entry uses Prompt's existing `
 - **Moving Collaboration's, Scheduler's or BackgroundExec's own inputs onto EventHub.** Each keeps its own path; a migration is its owner's decision.
 - **A client UI.** Clients read and manage subscriptions through the `eventhub` methods; how a client shows them is the client's own.
 - **`eventhub.publish` as a management method.** Publishing belongs to a producer row, which holds a source and receives the receipt. The management plane manages subscriptions, not producers.
+- **Waking a wait on a queued delivery.** A queued event that ended a wait would still arrive only after the turn ends, so a subscriber that must be woken uses `steer`. A generic arrival marker on the input contract would be the input owner's design, and EventHub would only set it.
 
 ## Appendix A. Interface details
 
