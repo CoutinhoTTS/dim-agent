@@ -5,7 +5,7 @@ fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
-        wire.hello(&["session.methods"]);
+        wire.hello(&["session.methods", "session.branch.get"]);
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let methods = wire.read("session.methods");
@@ -46,6 +46,9 @@ fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue
             }
         }
         ready.send(()).unwrap();
+        let detail = wire.read("session.branch.get");
+        assert_eq!(detail["params"], json!({"sessionId":"session","branchId":"child-a"}));
+        wire.reply(&detail, json!({"branchId":"child-a","parentBranchId":"main","branchPoint":1,"state":"open","head":2,"purpose":"owner supplied purpose","cutMessages":0,"end":null}));
         let history = wire.read("session.history");
         assert_eq!(history["params"], json!({"sessionId":"session","branchId":"child-a","latestTurn":true,"limit":256}));
         wire.reply(&history, json!({"events":[fact("child-a-text",2,2000,"step","text",json!({
@@ -75,6 +78,8 @@ fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue
     terminal.until("saved transcript of child-a and live continuation");
     assert!(!terminal.transcript.contains("saved transcript of child-b"));
     assert!(!terminal.transcript.contains("saved transcript of child-c"));
+    terminal.write(b"/lines\r");
+    terminal.until("owner supplied purpose");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();

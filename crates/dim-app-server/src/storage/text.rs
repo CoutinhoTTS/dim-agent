@@ -190,6 +190,23 @@ pub(super) fn backfill(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Builds text candidates for a newly imported, unindexed Session. Call inside the transaction
+/// that inserts its events, before committing or exposing the Session.
+pub fn initialize_session_text_index(connection: &Connection, session: &str) -> Result<()> {
+    let mut statement = connection.prepare("SELECT branch_id,sequence,body FROM timeline_events WHERE session_id=?1 ORDER BY branch_id,sequence").map_err(error)?;
+    let mut rows = statement.query([session]).map_err(error)?;
+    while let Some(item) = rows.next().map_err(error)? {
+        row(
+            connection,
+            session,
+            &item.get::<_, String>(0).map_err(error)?,
+            super::timeline::read_sequence(item, 1).map_err(error)?,
+            &item.get::<_, String>(2).map_err(error)?,
+        )?;
+    }
+    Ok(())
+}
+
 /// Compiles one candidate-position insertion, or retains all rows for unsupported expressions.
 pub(super) fn candidates(
     scope: &TimelineReadScope,

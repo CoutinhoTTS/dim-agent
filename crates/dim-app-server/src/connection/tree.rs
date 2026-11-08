@@ -6,9 +6,8 @@ use dim_agent_capabilities::input_queue::{
 };
 use dim_agent_capabilities::timeline_tree::TreeCommands;
 use dim_agent_runtime::{
-    BranchDirectoryState, BranchOptions, QueryComparison, QueryFilter, QueryOperand, QueryOrder,
-    QueryOrderKey, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue,
-    TimelineQuery,
+    BranchOptions, QueryComparison, QueryFilter, QueryOperand, QueryOrder, QueryOrderKey,
+    QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, TimelineQuery,
 };
 use dim_agent_types::{BranchSource, InputBlock, InputMode};
 
@@ -363,28 +362,29 @@ impl Connection {
         params: Branches,
     ) -> Result<Reply, RpcError> {
         let session = self.session(rpc, &params.session_id)?;
+        Ok(Reply::Branches(wire::BranchesResult {
+            branches: session.directory().into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    pub(super) async fn branch_get(
+        &self,
+        rpc: &RpcService,
+        params: BranchRequest,
+    ) -> Result<Reply, RpcError> {
+        let session = self.session(rpc, &params.session_id)?;
         let tree = session
             .session_service::<TreeCommands>()
             .map_err(RpcError::from)?;
-        let mut branches = Vec::new();
-        for read in tree.directory_display().await.map_err(RpcError::from)? {
-            let entry = read.entry;
-            branches.push(wire::BranchDirectoryView {
-                branch: wire::BranchInfo::from(entry.info.clone()),
-                source: entry.info.source,
-                state: match entry.state {
-                    BranchDirectoryState::Open => "open",
-                    BranchDirectoryState::Ending => "ending",
-                    BranchDirectoryState::Ended => "ended",
-                },
-                purpose: read.purpose,
-                cut_messages: read.cut_messages,
-                end: read.end,
-                head: entry.head,
-                end_event: entry.end_event,
-            });
-        }
-        Ok(Reply::Branches(wire::BranchesResult { branches }))
+        let read = tree
+            .display(params.branch_id)
+            .await
+            .map_err(RpcError::from)?;
+        let mut entry = wire::BranchDirectoryView::from(read.entry);
+        entry.purpose = read.purpose;
+        entry.cut_messages = read.cut_messages;
+        entry.end = read.end;
+        Ok(Reply::BranchGet(entry))
     }
 
     pub(super) async fn end_branch(

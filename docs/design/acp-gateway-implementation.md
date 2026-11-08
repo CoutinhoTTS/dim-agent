@@ -153,7 +153,7 @@ new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Ses
 
 | 表面 | 首版 | 原生路径 / 缺口 |
 | --- | --- | --- |
-| `session/fork` | 条件可接，单独启用 SDK `unstable_session_fork` | 无锚点时固定 main head；有 Lody turnId 时定位该真实 turn 的 `turn/end` sequence。`session.fork {sessionId,at}` → 新 id → attach。原生 rest-point 检查决定能否 fork；活动 turn 内的切点失败，不偷偷改成早一点的切点 |
+| `session/fork` | 仅在原生同时声明 `session.fork` 与 `session.turn.get` 时提供；单独启用 SDK `unstable_session_fork` | 无锚点时固定 main head；有 Lody turnId 时定位该真实 turn 的 `turn/end` sequence。`session.fork {sessionId,at}` → 新 id → attach。原生 rest-point 检查决定能否 fork；活动 turn 内的切点失败，不偷偷改成早一点的切点 |
 | `providers/list` | 读取可复用；整组语义待选择 | `provider.management {}` → 安全可配置 Provider 投影；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
 | `providers/set` | 编辑可复用；共享设置或临时覆盖待选择 | `provider.management {providerId}` → 同版本 `provider.update` 是共享设置的路径；全量 headers、固定 driver/auth 和凭据归属须准确转换。临时覆盖另缺采用接口，见 §4.5 |
 | `providers/disable` | 禁用可复用；共享设置或临时覆盖待选择 | 同版本 `provider.update {patch:{enabled:false}}` 是持久化禁用，不是 CLI disconnect、delete、logout 或清除临时 override；不能混淆，见 §4.5 |

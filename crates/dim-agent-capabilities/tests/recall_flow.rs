@@ -3216,6 +3216,9 @@ async fn a_long_history_is_answered_from_bounded_pages_read_backwards() {
             json!({"about":"task", "before":before_of(&search)}),
             json!({"about":"missing_unique_qzxy"}),
             json!({"about":"missing_unique_qzxy", "tool":"missing_tool"}),
+            json!({"about":"called"}),
+            json!({"about":"while you were working"}),
+            json!({"about":"no result yet"}),
         ] {
             recall_is_the_whole_fold(&session, &reads, "main", arguments).await;
         }

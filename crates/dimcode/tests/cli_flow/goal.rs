@@ -296,6 +296,7 @@ fn line_goal_reports_owner_state_after_a_write() {
         "the command was released at the returned sequence: {}",
         terminal.transcript
     );
+    terminal.until("\n> ");
     terminal.write(b"/exit\n");
     assert!(terminal.wait().success());
     daemon.join().unwrap();

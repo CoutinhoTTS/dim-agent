@@ -1,6 +1,8 @@
 //! Version 2 product views of the Session broadcast; positions are branch sequences.
 use dim_agent_capabilities::session_broadcast::SessionNotice;
-use dim_agent_runtime::{BranchStatus, ModelProgress, TimelineInfo};
+use dim_agent_runtime::{
+    BranchDirectoryEntry, BranchDirectoryState, BranchStatus, ModelProgress, TimelineInfo,
+};
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, ApprovalDecision, BranchSource, EventKind, ModelFailureKind,
 };
@@ -29,7 +31,7 @@ impl From<TimelineInfo> for BranchInfo {
     }
 }
 
-/// One entry of `session.branches`: the directory record of one line.
+/// One branch directory record; `session.branch.get` also reads its display fields.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchDirectoryView {
@@ -45,6 +47,25 @@ pub struct BranchDirectoryView {
     /// The line's `branch/end` sequence; absent while open.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_event: Option<u64>,
+}
+
+impl From<BranchDirectoryEntry> for BranchDirectoryView {
+    fn from(entry: BranchDirectoryEntry) -> Self {
+        Self {
+            branch: entry.info.clone().into(),
+            source: entry.info.source,
+            state: match entry.state {
+                BranchDirectoryState::Open => "open",
+                BranchDirectoryState::Ending => "ending",
+                BranchDirectoryState::Ended => "ended",
+            },
+            purpose: None,
+            cut_messages: None,
+            end: None,
+            head: entry.head,
+            end_event: entry.end_event,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]

@@ -35,7 +35,10 @@ struct Source<'a> {
 }
 
 impl<'a> Source<'a> {
-    fn records(&self) -> impl DoubleEndedIterator<Item = Record<'a>> + use<'a> {
+    fn records(
+        &self,
+        after: Option<(usize, u64, bool)>,
+    ) -> impl DoubleEndedIterator<Item = Record<'a>> + use<'a> {
         let session = self.session;
         self.scope
             .segments
@@ -43,19 +46,32 @@ impl<'a> Source<'a> {
             .enumerate()
             .flat_map(move |(ordinal, segment)| {
                 let events = &session.branches[&segment.branch_id].events;
-                let from = usize::try_from(segment.from.saturating_sub(1))
+                let mut low = segment.from;
+                let mut high = segment.through;
+                if let Some((at, sequence, descending)) = after {
+                    match ordinal.cmp(&at) {
+                        Ordering::Equal if descending => {
+                            high = high.min(sequence.saturating_sub(1))
+                        }
+                        Ordering::Equal => low = low.max(sequence.saturating_add(1)),
+                        Ordering::Less if !descending => high = 0,
+                        Ordering::Greater if descending => high = 0,
+                        _ => (),
+                    }
+                }
+                let from = usize::try_from(low.saturating_sub(1))
                     .unwrap_or(usize::MAX)
                     .min(events.len());
-                let through = usize::try_from(segment.stored_through.min(segment.through))
+                let through = usize::try_from(segment.stored_through.min(high))
                     .unwrap_or(usize::MAX)
                     .min(events.len());
                 events[from.min(through)..through]
                     .iter()
                     .map(|record| &record.event)
-                    .chain(segment.tail.iter().filter(|event| {
-                        event.sequence >= segment.from
+                    .chain(segment.tail.iter().filter(move |event| {
+                        event.sequence >= low
                             && event.sequence > segment.stored_through
-                            && event.sequence <= segment.through
+                            && event.sequence <= high
                     }))
                     .map(move |event| Record {
                         event,
@@ -150,7 +166,7 @@ impl<'a> Evaluation<'a> {
                     return Ok(());
                 }
                 let mut groups: BTreeMap<Vec<Scalar>, (String, Vec<bool>)> = BTreeMap::new();
-                for record in self.source.records() {
+                for record in self.source.records(None) {
                     if record.event.kind.key() != "step/text" {
                         continue;
                     }
@@ -223,7 +239,7 @@ impl<'a> Evaluation<'a> {
                     }
                 }
                 let mut keys = BTreeSet::new();
-                for record in self.source.records() {
+                for record in self.source.records(None) {
                     let mut accepted = true;
                     for condition in &remaining {
                         if !self.matches(condition, record, None, None)? {
@@ -384,7 +400,7 @@ impl<'a> Evaluation<'a> {
                         .collect::<Result<Vec<_>>>()?;
                     join_key(values).is_some_and(|key| index.keys.contains(&key))
                 } else {
-                    for inner in self.source.records() {
+                    for inner in self.source.records(None) {
                         if self.matches(condition, inner, Some(record), None)? {
                             return Ok(true);
                         }
@@ -679,13 +695,37 @@ pub(super) fn execute<'a>(
         _ => None,
     };
     let ordered = !grouped && position_order.is_some();
+    let position_after = if ordered {
+        page.and_then(|page| page.after.as_ref())
+            .map(|cursor| {
+                let invalid =
+                    || AgentError::InvalidInput("invalid position in query cursor".into());
+                let [
+                    QueryValue::Value { value: ordinal },
+                    QueryValue::Value { value: sequence },
+                    ..,
+                ] = cursor.keys.as_slice()
+                else {
+                    return Err(invalid());
+                };
+                Ok((
+                    usize::try_from(ordinal.as_u64().ok_or_else(invalid)?)
+                        .map_err(|_| invalid())?,
+                    sequence.as_u64().ok_or_else(invalid)?,
+                    position_order == Some(TimelineQueryDirection::Descending),
+                ))
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let records: Box<dyn Iterator<Item = Record<'a>>> = if (ordered
         && position_order == Some(TimelineQueryDirection::Descending))
         || (single_pick && query.pick == Some(QueryPick::Last))
     {
-        Box::new(evaluation.source.records().rev())
+        Box::new(evaluation.source.records(position_after).rev())
     } else {
-        Box::new(evaluation.source.records())
+        Box::new(evaluation.source.records(position_after))
     };
     for record in records {
         if let Some(filter) = &query.filter

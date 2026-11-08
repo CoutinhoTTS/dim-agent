@@ -84,6 +84,14 @@ These are requirements for member-route support, separate from existing ordinary
 Older clients can continue ordinary tools; rich member-approval review requires the new query and
 corresponding client support. No frozen v1/v2 notification set or Approval envelope is extended.
 
+### Branch directory and selected-line details
+
+Clients discover identities and lifecycle state through the
+[branch directory](timeline-branches.md#14-clients), without history reads.
+CLI requests `session.branch.get` when a line is selected. Other lines remain
+listed by identity until their details are known; a failed detail read leaves
+the directory usable and reports the failure for that selection.
+
 ### Timeline block identity
 
 - A text/thinking block is identified by the `id` of its **first raw event**. Following same-kind events belong to that block until a durable event of the other kind (thinking for text, text for thinking) or a tool event starts the next block. Provider `TextEnd`/`ThinkingEnd` are not durable and do not split a block. Replay, history and storage preserve the event ids.
@@ -102,7 +110,9 @@ the page that reaches 100 transcript rows, after four pages, or at the branch
 start, whichever comes first. A transcript row is a user input, an assistant
 response or a tool call that the client actually renders, not a text delta or a
 hidden runtime input. Counting uses the projection's rules and stable identities. Atomic batches remain whole; the view
-keeps at most 300 initial rows after projection. An oversized batch follows the
+targets 300 initial rows by retaining whole wire pages. It always keeps the newest
+page and at least one page with transcript rows when the read found any. It never
+invents a cursor inside a batch. An oversized batch follows the
 history protocol's byte limit and error contract.
 
 The pages progress backwards; events within each page remain ascending. Clients

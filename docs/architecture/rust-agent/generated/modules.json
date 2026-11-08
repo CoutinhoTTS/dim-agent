@@ -23528,6 +23528,7 @@
         "path Call::Attach",
         "path Call::BranchCreate",
         "path Call::BranchEnd",
+        "path Call::BranchGet",
         "path Call::Branches",
         "path Call::Catalog",
         "path Call::CatalogCancel",
@@ -23971,11 +23972,7 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::contracts",
       "references": [
-        "path BranchDirectoryState::Ended",
-        "path BranchDirectoryState::Ending",
-        "path BranchDirectoryState::Open",
         "path BranchOptions",
-        "use dim_agent_runtime::BranchDirectoryState",
         "use dim_agent_runtime::BranchOptions"
       ]
     },
@@ -24074,6 +24071,7 @@
       "references": [
         "path BranchCreate",
         "path BranchEnd",
+        "path BranchRequest",
         "path Branches",
         "path History",
         "path InputLookup",
@@ -24082,6 +24080,7 @@
         "path Keys",
         "path Reply",
         "path Reply::BranchCreate",
+        "path Reply::BranchGet",
         "path Reply::Branches",
         "path Reply::History",
         "path Reply::InputLookup",
@@ -24103,8 +24102,7 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_app_server::tree_protocol",
       "references": [
-        "path wire::BranchDirectoryView",
-        "path wire::BranchInfo::from",
+        "path wire::BranchDirectoryView::from",
         "path wire::BranchesResult",
         "path wire::CreateResult",
         "path wire::HistoryResult",
@@ -27123,6 +27121,7 @@
       "to": "dim_app_server::tree_protocol",
       "references": [
         "path crate::tree_protocol::BarrierResult",
+        "path crate::tree_protocol::BranchDirectoryView",
         "path crate::tree_protocol::BranchesResult",
         "path crate::tree_protocol::CreateResult",
         "path crate::tree_protocol::HistoryResult",
@@ -29321,7 +29320,8 @@
       "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::text",
       "references": [
-        "mod text"
+        "mod text",
+        "use text::initialize_session_text_index"
       ]
     },
     {
@@ -30497,8 +30497,14 @@
       "from": "dim_app_server::tree_protocol",
       "to": "dim_agent_runtime::contracts",
       "references": [
+        "path BranchDirectoryEntry",
+        "path BranchDirectoryState::Ended",
+        "path BranchDirectoryState::Ending",
+        "path BranchDirectoryState::Open",
         "path ModelProgress",
         "path TimelineInfo",
+        "use dim_agent_runtime::BranchDirectoryEntry",
+        "use dim_agent_runtime::BranchDirectoryState",
         "use dim_agent_runtime::ModelProgress",
         "use dim_agent_runtime::TimelineInfo"
       ]
@@ -36274,6 +36280,7 @@
         "path EventContent::TurnEnd",
         "path Progress",
         "path dim_client::wire::BranchDirectory",
+        "path dim_client::wire::BranchEntry",
         "path dim_client::wire::MethodTable",
         "use crate::wire::Attached",
         "use crate::wire::Configuration",
@@ -46156,6 +46163,13 @@
         "path SqliteStorage::open_read_only",
         "path dim_app_server::storage::STORE_FORMAT",
         "use dim_app_server::storage::SqliteStorage"
+      ]
+    },
+    {
+      "from": "dim_migration::native",
+      "to": "dim_app_server::storage::text",
+      "references": [
+        "path dim_app_server::storage::initialize_session_text_index"
       ]
     },
     {

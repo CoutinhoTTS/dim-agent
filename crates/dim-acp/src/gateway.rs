@@ -700,6 +700,12 @@ impl Gateway {
                 );
             }
             "session/fork" if self.rpc.supports("session.fork") => {
+                if !self.rpc.supports("session.turn.get") {
+                    return reply.respond_with_error(Error::new(
+                        -32001,
+                        "App Server lacks session.turn.get required for ACP session/fork",
+                    ));
+                }
                 let args: acp::ForkSessionRequest = match params(request.params) {
                     Ok(args) => args,
                     Err(error) => return reply.respond_with_error(error),
@@ -1091,11 +1097,13 @@ impl Gateway {
                     Ok(methods) => {
                         self.auth_methods = methods;
                         self.initialized = true;
-                        let mut capabilities = json!({"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"sessionCapabilities":{"resume":{},"list":{},"close":{}},"_meta":{"lody":crate::lody::capabilities(self.rpc.supports("session.fork"))}});
+                        let mut capabilities = json!({"loadSession":true,"promptCapabilities":{"image":true,"embeddedContext":true},"sessionCapabilities":{"resume":{},"list":{},"close":{}},"_meta":{"lody":crate::lody::capabilities(self.rpc.supports("session.fork") && self.rpc.supports("session.turn.get"))}});
                         if self.mcp.supported() {
                             capabilities["mcpCapabilities"] = json!({"http":true,"sse":true});
                         }
-                        if self.rpc.supports("session.fork") {
+                        if self.rpc.supports("session.fork")
+                            && self.rpc.supports("session.turn.get")
+                        {
                             capabilities["sessionCapabilities"]["fork"] = json!({});
                         }
                         if self.rpc.supports("session.delete") {

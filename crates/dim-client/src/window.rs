@@ -8,8 +8,7 @@ use std::collections::{HashSet, VecDeque};
 pub struct Window {
     pub before: Option<u64>,
     pub through: Option<u64>,
-    pages: VecDeque<Vec<Event>>,
-    count: usize,
+    pages: VecDeque<(Option<u64>, Vec<Event>)>,
 }
 
 impl Window {
@@ -43,47 +42,47 @@ impl Window {
             .collect::<serde_json::Result<_>>()?;
         self.before = before;
         self.through = Some(page.through);
-        self.pages.push_front(events);
-        self.count += 1;
+        self.pages.push_front((page.next_before, events));
         let mut rows = HashSet::new();
-        for event in self.pages.iter().flatten() {
+        for event in self.pages.iter().flat_map(|(_, events)| events) {
             rows_of(event, |row| {
                 rows.insert(row);
             });
         }
-        Ok(self.before.is_none() || self.count >= 4 || rows.len() >= 100)
+        Ok(self.before.is_none() || self.pages.len() >= 4 || rows.len() >= 100)
     }
 
-    /// Releases the loaded events in forward order, retaining at most 300
-    /// transcript identities. The cursor remains available for an explicit
-    /// request for earlier content.
+    /// Releases whole wire pages in forward order, targeting 300 transcript
+    /// identities and always retaining the newest page. The cursor remains at
+    /// a server-provided batch boundary for explicit earlier reads.
     pub fn take(&mut self) -> Vec<Event> {
         let mut rows = HashSet::new();
-        let total = self.pages.iter().map(Vec::len).sum::<usize>();
-        let mut skip = 0;
-        for (index, event) in self
-            .pages
-            .iter()
-            .rev()
-            .flat_map(|page| page.iter().rev())
-            .enumerate()
-        {
-            rows_of(event, |row| {
-                rows.insert(row);
-            });
-            if rows.len() > 300 {
-                skip = total - index;
-                self.before = Some(event.sequence + 1);
+        let mut keep = 0;
+        for (_, events) in self.pages.iter().rev() {
+            let previous_rows = rows.len();
+            for event in events {
+                rows_of(event, |row| {
+                    rows.insert(row);
+                });
+            }
+            if previous_rows > 0 && rows.len() > 300 {
                 break;
             }
+            keep += 1;
         }
-        let events = std::mem::take(&mut self.pages)
+        let skip = self.pages.len() - keep;
+        if skip > 0 {
+            self.pages.drain(..skip);
+            self.before = self
+                .pages
+                .front()
+                .and_then(|(before, _)| *before)
+                .filter(|before| *before > 1);
+        }
+        std::mem::take(&mut self.pages)
             .into_iter()
-            .flatten()
-            .skip(skip)
-            .collect();
-        self.count = 0;
-        events
+            .flat_map(|(_, events)| events)
+            .collect()
     }
 }
 

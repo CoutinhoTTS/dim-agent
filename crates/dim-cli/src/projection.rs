@@ -1091,10 +1091,21 @@ impl Projection {
 
     /// The lines `main` recorded, without `main` itself (design §14).
     pub fn directory(&mut self, entry: &dim_client::wire::BranchEntry) {
-        if entry.branch_id == "main" || self.lines.iter().any(|line| line.id == entry.branch_id) {
+        if entry.branch_id == "main" {
             return;
         }
-        self.lines.push(LineView {
+        let previous = self
+            .lines
+            .iter()
+            .position(|line| line.id == entry.branch_id);
+        if previous.is_some()
+            && entry.purpose.is_none()
+            && entry.cut_messages.is_none()
+            && entry.end.is_none()
+        {
+            return;
+        }
+        let view = LineView {
             id: entry.branch_id.clone(),
             parent: entry.parent_branch_id.clone(),
             purpose: entry.purpose.clone().unwrap_or_default(),
@@ -1119,7 +1130,12 @@ impl Projection {
                         .try_into()
                         .expect("message count fits the client address space"),
                 }),
-        });
+        };
+        if let Some(index) = previous {
+            self.lines[index] = view;
+        } else {
+            self.lines.push(view);
+        }
     }
 
     pub fn line_views(&self) -> &[LineView] {

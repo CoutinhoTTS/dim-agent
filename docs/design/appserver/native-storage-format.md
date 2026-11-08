@@ -1038,6 +1038,12 @@ does not introduce Recall FTS tables or change text-search semantics.
 
 ## v36: property text candidates
 
+Offline import initializes the imported Session's text index inside the same
+transaction as its event rows and catalog. A target already at v36 does not
+rerun the format upgrade, so import must not rely on upgrade backfill. The
+Session becomes visible only after these writes commit together.
+
+
 v36 adds derived text-candidate metadata, a contentless FTS5 trigram index and bounded stream tails. It retains the v35 submission identity index. The public candidate semantics and indexed properties are owned by [Timeline property-query design §6C](../timeline-property-query.md#6c-文本候选查询与-fts5).
 
 The writer updates these tables in the same transaction as the corresponding Timeline batch. Physical output merging does not merge logical event identities in the index. Fork copies rebuild from their copied prefix; deleting a Session removes its text rows, postings and tails. None of these rows is an authoritative event or a replacement for event content.

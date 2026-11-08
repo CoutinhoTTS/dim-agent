@@ -1404,7 +1404,7 @@ fn lody_projection(version: u32) {
     let home = Home::new();
     let cwd = fs::canonicalize(&home.0).unwrap();
     let daemon = home.daemon(move |wire| {
-        let mut methods = METHODS.to_vec(); methods.push("session.fork"); wire.hello(&methods); wire.created();
+        let mut methods = METHODS.to_vec(); methods.extend(["session.fork", "session.turn.get"]); wire.hello(&methods); wire.created();
         let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
         let read = wire.read("session.history"); wire.reply(&read,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let facts = vec![
@@ -2575,6 +2575,46 @@ fn acp_load_resolves_an_orphan_result_by_request_and_call_without_extending_hist
     assert_eq!(updates[0]["sessionUpdate"], "tool_call");
     assert_eq!(updates[0]["rawInput"], json!({"text":"original arguments"}));
     assert_eq!(updates[1]["status"], "completed");
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_stdio_does_not_offer_fork_without_the_native_turn_read() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        let mut methods = METHODS.to_vec();
+        methods.push("session.fork");
+        wire.hello(&methods);
+        wire.hold();
+    });
+    let mut peer = Peer::start(&home);
+    peer.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    );
+    let initialized = peer.response(1);
+    assert!(
+        initialized["result"]["agentCapabilities"]["sessionCapabilities"]
+            .get("fork")
+            .is_none(),
+        "{initialized}"
+    );
+    peer.send(
+        2,
+        "session/fork",
+        json!({"sessionId":"source","cwd":home.0,"mcpServers":[]}),
+    );
+    let refused = peer.response(2);
+    assert_eq!(refused["error"]["code"], -32001);
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("session.turn.get"),
+        "{refused}"
+    );
     peer.close();
     daemon.join().unwrap();
 }

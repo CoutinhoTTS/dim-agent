@@ -481,6 +481,9 @@ WorkspaceTools 不变。
 
 **分支目录。** `session.branches {sessionId}`（v3，按与 `session.history` 相同的准入规则，在 `hello.features` 里与其他会话方法一起列出）为每条线回答一条记录：它的身份（`branchId`，有的话还有 `parentBranchId`、`branchPoint` 和 `createEvent`）、按 `TimelineInfo.source` 给出的 `source`、`state`（`open`、`ending` 或 `ended`）、`head`，处于结束中或已结束的线还有 `endEvent`。`main` 排第一，其余按 `branchId` 顺序。回复不分页：它随线的数量增长，而线的数量由 Session 自己的使用决定，不随历史增长。答案归 `TimelineTree`（`directory()`）；`branches()` 列出尚未结束的线（`open` 和 `ending`），供持有活动线的调用方使用。
 
+目录读取不访问历史，显示字段为空或省略。`session.branch.get {sessionId, branchId}`（v3，在 `hello.features` 单独声明）读取一条线的目录记录和显示详情：`purpose` 为创建提示的首行；`cutMessages` 为该分叉点继承的用户输入数，排除截止位置前已删除的输入；`end` 为可用的 `BranchEndData`。main 的前两项为空，没有可读结束事实时 `end` 为空。该读取由 TimelineTree 完成点查与固定前缀计数；未知分支和读取失败在本次详情调用中报错，不阻断目录列举，不写事实，也不重新打开结束的线。CLI 在选中一条线时才读取详情。
+
+
 `head` 有三条规则，决定客户端能用它做什么：
 
 - 已结束（`ended`）线的 `head` 和 `endEvent` 固定。客户端把 `head` 作为 `through` 传给 `session.history` 读这条线；`endEvent` 是这条线自己的 `branch/end` 序号，祖先结束级联到它时也一样。

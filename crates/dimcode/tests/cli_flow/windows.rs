@@ -128,7 +128,7 @@ fn line_windows_bound_sparse_history_and_apply_held_live_events_after_the_window
 }
 
 #[test]
-fn line_window_keeps_only_three_hundred_rows_of_one_large_atomic_batch() {
+fn line_window_keeps_one_large_atomic_batch_whole() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
@@ -154,16 +154,13 @@ fn line_window_keeps_only_three_hundred_rows_of_one_large_atomic_batch() {
     terminal.write(b"/exit\r");
     assert!(terminal.wait().success(), "{}", terminal.transcript);
     daemon.join().unwrap();
-    assert!(
-        !terminal.transcript.contains("row-100-body"),
-        "{}",
-        terminal.transcript
-    );
-    assert!(
-        terminal.transcript.contains("row-101-body"),
-        "{}",
-        terminal.transcript
-    );
+    for row in 1..=400 {
+        assert!(
+            terminal.transcript.contains(&format!("row-{row:03}-body")),
+            "the atomic batch lost row {row}: {}",
+            terminal.transcript
+        );
+    }
 }
 
 #[test]

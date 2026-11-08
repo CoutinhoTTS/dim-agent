@@ -4066,6 +4066,22 @@ impl Worker {
         self.focus = line;
         self.side = None;
         self.publish();
+        if self.focus != "main" && self.client.supports(&["session.branch.get"]) {
+            match self
+                .client
+                .typed::<dim_client::wire::BranchEntry>(
+                    "session.branch.get",
+                    json!({"sessionId":self.session_id,"branchId":self.focus}),
+                )
+                .await
+            {
+                Ok(entry) => {
+                    self.projection.directory(&entry);
+                    self.publish();
+                }
+                Err(error) => self.send(Update::Notice(format!("Branch details: {error}"))),
+            }
+        }
     }
 
     /// The transcript the screen shows: the focused line's, or `main`'s.

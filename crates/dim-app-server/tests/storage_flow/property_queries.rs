@@ -1519,3 +1519,151 @@ async fn input_anti_joins_seek_the_full_identity_index_as_history_grows() {
     );
     println!("input anti-join VM steps: {costs:?}");
 }
+
+#[tokio::test]
+async fn recall_text_relations_seek_candidates_across_position_pages() {
+    let mut costs = Vec::new();
+    for size in [128u64, 2048] {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        store
+            .create_session("properties", &SessionConfig::default())
+            .await
+            .unwrap();
+        let mut records = Vec::new();
+        for n in 0..size {
+            let at = 1 + n * 2;
+            records.push(record(
+                at,
+                EventKind::InputMessage(InputMessageData::text("uniqueneedle", None)),
+            ));
+            records.push(record(
+                at + 1,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: format!("event-{at}"),
+                }),
+            ));
+        }
+        append(&store, key("properties", "main"), records)
+            .await
+            .unwrap();
+        let mut query = fields(&["id"]);
+        query.filter = Some(QueryFilter::And {
+            conditions: vec![
+                eq("kind", json!("input/consumed")),
+                QueryFilter::Exists {
+                    condition: Box::new(QueryFilter::And {
+                        conditions: vec![
+                            eq("kind", json!("input/message")),
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field { path: "id".into() },
+                                comparison: QueryComparison::Eq,
+                                right: QueryOperand::Outer {
+                                    path: "data.input_id".into(),
+                                },
+                            },
+                            QueryFilter::TextCandidate {
+                                field: "data".into(),
+                                partition_by: vec![],
+                                terms: vec!["uniqueneedle".into()],
+                            },
+                        ],
+                    }),
+                },
+            ],
+        });
+        let mut measured = Vec::new();
+        for direction in [
+            TimelineQueryDirection::Ascending,
+            TimelineQueryDirection::Descending,
+        ] {
+            query.order_by = vec![QueryOrder {
+                key: QueryOrderKey::Position,
+                direction,
+            }];
+            let mut p = page(128);
+            let mut all = 0i64;
+            let mut first = 0;
+            let mut pages = 0;
+            loop {
+                store.record_query_statistics();
+                let r = store
+                    .query(&scope(size * 2), &query, Some(&p))
+                    .await
+                    .unwrap();
+                let stats = store.take_query_statistics();
+                let steps = stats.iter().map(|s| i64::from(s.vm_steps)).sum::<i64>();
+                all += steps;
+                if pages == 0 {
+                    first = steps;
+                }
+                let dim_agent_runtime::QueryOutput::Rows { rows } = &r.result else {
+                    panic!("Recall candidates")
+                };
+                assert_eq!(rows.len(), 128);
+                assert_eq!(
+                    rows[0].values[0],
+                    dim_agent_runtime::QueryValue::Value {
+                        value: json!(format!(
+                            "event-{}",
+                            if direction == TimelineQueryDirection::Descending {
+                                size * 2 - pages * 256
+                            } else {
+                                pages * 256 + 2
+                            }
+                        ))
+                    }
+                );
+                pages += 1;
+                let Some(next) = r.next else {
+                    break;
+                };
+                p.after = Some(next);
+            }
+            println!(
+                "Recall relation size={size} direction={direction:?} pages={pages} firstVM={first} totalVM={all}"
+            );
+            measured.push(first);
+        }
+        let Some(QueryFilter::And { conditions }) = &mut query.filter else {
+            unreachable!()
+        };
+        let QueryFilter::Exists { condition } = &mut conditions[1] else {
+            unreachable!()
+        };
+        let QueryFilter::And { conditions } = condition.as_mut() else {
+            unreachable!()
+        };
+        let QueryFilter::TextCandidate { terms, .. } = &mut conditions[2] else {
+            unreachable!()
+        };
+        *terms = vec!["absentwordxyz".into()];
+        store.record_query_statistics();
+        let result = store
+            .query(&scope(size * 2), &query, Some(&page(128)))
+            .await
+            .unwrap();
+        let dim_agent_runtime::QueryOutput::Rows { rows } = result.result else {
+            panic!("Recall candidates")
+        };
+        assert!(rows.is_empty());
+        assert!(result.next.is_none());
+        measured.push(
+            store
+                .take_query_statistics()
+                .iter()
+                .map(|s| i64::from(s.vm_steps))
+                .sum(),
+        );
+        costs.push(measured);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+    for (small, large) in costs[0].iter().zip(&costs[1]) {
+        assert!(
+            *large < *small * 20,
+            "16x more candidates must not produce quadratic membership work: {costs:?}"
+        );
+    }
+}

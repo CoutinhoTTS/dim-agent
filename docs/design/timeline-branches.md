@@ -485,7 +485,7 @@ The coordination text for `main` is judged with [§12.3](#123-evaluation-scenari
 - `x`, then `y`, ends the selected line, refused on `main`.
 - Questions and approvals carry the line's label, so two lines asking for the same thing are told apart (`(branch NAME)` on a question, `Permission on branch NAME` on an approval).
 - A message between `main` and a line reads as sent on the sender (its `branch` tool call) and as received on the receiver (`◂ from C`).
-- Switching the shown line starts another transcript under a boundary row (`line C`), as a session switch does, because terminal scrollback is append-only. Discovery retains task inventory and branch-history state, not a full transcript for every line. The first open, through `/lines` or a side view, retains that line's transcript and reads its history from `after:0` through the [existing task-history queue](background-task-list.md#2-discover-and-fold-tasks), including when discovery previously failed. An initial read already in progress from `after:0` can serve that open. Later opens reuse the retained transcript, which continues folding live events even while another line is shown.
+- Switching the shown line starts another transcript under a boundary row (`line C`), as a session switch does, because terminal scrollback is append-only. Discovery retains task inventory and branch-history state, not a full transcript for every line. The first open, through `/lines` or a side view, retains that line's [bounded transcript window](clients.md#opening-a-conversation-with-a-bounded-window), including when discovery previously failed. Owner-state reads recover actionable work outside the window. Selecting a line separately requests its display details below. Later opens reuse the retained transcript, which continues folding live events even while another line is shown.
 
 The panel is separate from the tasks panel, which lists background commands, members and Workflow runs: its `x` stops a task, and an end is permanent, so the two do not share keys.
 
@@ -517,13 +517,18 @@ line, `endEvent`. `main` comes first and the rest follow in `branchId` order. Th
 the number of lines, which a Session bounds by its own use, not with history. `TimelineTree` owns the answer
 (`directory()`); `branches()` lists the lines that have not ended (open and ending), for the callers that hold a live line.
 
-Each entry also carries `purpose` (the trimmed first prompt line, null for main),
-`cutMessages` (the number of user inputs in the inherited prefix at its branch
-point, excluding inputs deleted by that cutoff; null for main), and `end` (the
-existing `BranchEndData`, null without an available end fact). These display
-properties are read by identity and scalar queries, not by loading a transcript.
-An ended line inherited by a Session fork can have no own history; its fixed
-directory end identity still remains, even when `end` cannot be read there.
+The directory read performs no history I/O. Its display fields are null or absent.
+`session.branch.get {sessionId, branchId}` (v3, separately listed in
+`hello.features`) reads one line's directory record and display fields:
+`purpose` (the trimmed first prompt line, null for main), `cutMessages` (the
+number of user inputs in the inherited prefix at its branch point, excluding
+inputs deleted by that cutoff; null for main), and `end` (the existing
+`BranchEndData`, null without an available end fact). It reads point facts and
+counts the fixed inherited prefix through TimelineTree. A read failure is
+reported on this detail call and does not prevent directory listing; an unknown
+branch is an error. This read writes no facts and does not reopen an ended line. An ended line inherited by a Session fork can
+have no own history; its fixed directory end identity remains even when the
+`end` detail is unavailable.
 
 Three rules about `head` decide what a client may do with it:
 

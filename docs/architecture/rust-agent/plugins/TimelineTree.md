@@ -2,7 +2,8 @@
 
 The TimelineTree plugin registers TimelineTree in every Session and TreeTimeline in every branch.
 
-The Session directory display read also belongs to TimelineTree. It reads the
+The single-line display read also belongs to TimelineTree. The directory itself
+is read without history I/O; display details are requested separately. It reads the
 creation prompt and end fact by position, and counts user inputs at the inherited
 cutoff with a scalar query. Ended prefixes use the tree's stored branch chain;
 this does not widen the public own-line-only `TreeCommands.query` contract.

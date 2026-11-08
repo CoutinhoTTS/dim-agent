@@ -24,6 +24,7 @@ pub use sqlite::set_upgrade_report_delay;
 pub use sqlite::{
     FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, Vacuumed, vacuum_store,
 };
+pub use text::initialize_session_text_index;
 pub use timeline::{
     SessionStore, SessionStorePlugin, SqliteTimelineStore, TurnWindow, WorktreeUsage,
 };

@@ -172,6 +172,7 @@ struct Compiler<'a> {
     parameters: Vec<SqlValue>,
     alias: usize,
     position_after: Option<(u64, u64, bool)>,
+    relation_scope: bool,
     candidate_limit: Option<(u64, bool)>,
     text_candidates: Vec<(&'a QueryFilter, Option<String>)>,
     prefixes: Vec<&'a QueryFilter>,
@@ -253,6 +254,7 @@ impl<'a> Compiler<'a> {
             parameters: Vec::new(),
             alias: 0,
             position_after: None,
+            relation_scope: false,
             candidate_limit: None,
             text_candidates: Vec::new(),
             prefixes,
@@ -314,8 +316,9 @@ impl<'a> Compiler<'a> {
         } else {
             format!("{kind} IN ('context/prepare','model/call','context/compaction')")
         };
-        let selected =
-            format!("{sequence} IN (SELECT {position} FROM {table} WHERE ord={ordinal})");
+        let selected = format!(
+            "EXISTS(SELECT 1 FROM {table} hit WHERE hit.ord={ordinal} AND hit.{position}={sequence})"
+        );
         if indexed_only {
             selected
         } else {
@@ -490,7 +493,9 @@ impl<'a> Compiler<'a> {
                 let branch = self.bind(segment.branch_id.clone());
                 let mut from = segment.from;
                 let mut through = segment.through.min(segment.stored_through);
-                if let Some((at, sequence, descending)) = self.position_after {
+                if let Some((at, sequence, descending)) =
+                    self.position_after.filter(|_| !self.relation_scope)
+                {
                     match (index as u64).cmp(&at) {
                         std::cmp::Ordering::Equal if descending => {
                             through = through.min(sequence.saturating_sub(1))
@@ -1198,6 +1203,11 @@ fn sources<'a>(
         let statement = super::text::candidates(scope, field, partition_by, terms, &table);
         let supported = statement.is_some();
         if let Some((sql, parameters)) = statement {
+            connection
+                .execute_batch(&format!(
+                    "CREATE INDEX {table}_physical ON {table}(ord,physical)"
+                ))
+                .map_err(error)?;
             let mut statement = connection.prepare(&sql).map_err(error)?;
             statement
                 .execute(params_from_iter(&parameters))
@@ -1278,7 +1288,16 @@ fn sources<'a>(
     } else {
         roles
             .iter()
-            .map(|filter| compiler.physical_filter(filter, true).unwrap_or("1".into()))
+            .enumerate()
+            .map(|(index, filter)| {
+                let predicate = compiler.physical_filter(filter, true).unwrap_or("1".into());
+                if index == 0 && compiler.relation_scope && let Some((ordinal, sequence, descending)) = compiler.position_after {
+                    let ordinal = compiler.bind(ordinal as i64);
+                    let sequence = compiler.bind(sequence as i64);
+                    let (op, field) = if descending { ("<", "e.sequence") } else { (">", "e.last_sequence") };
+                    format!("({predicate}) AND (s.ord{op}{ordinal} OR (s.ord={ordinal} AND {field}{op}{sequence}))")
+                } else { predicate }
+            })
             .collect::<Vec<_>>()
             .join(" OR ")
     };
@@ -1635,6 +1654,7 @@ fn selected_properties(
         parameters: Vec::new(),
         alias: 0,
         position_after: None,
+        relation_scope: false,
         candidate_limit: None,
         text_candidates: Vec::new(),
         prefixes: Vec::new(),
@@ -1736,6 +1756,7 @@ pub(super) fn execute(
     if let Some(filter) = &query.filter {
         related_filters(filter, &mut related);
     }
+    compiler.relation_scope = !related.is_empty();
     let keys = sorting(query, &compiler);
     let after = after(
         &mut compiler,
@@ -1750,7 +1771,6 @@ pub(super) fn execute(
                 query.order_by.first().map(|order| &order.key),
                 Some(QueryOrderKey::Position)
             ))
-        && related.is_empty()
         && let Some(cursor) = page.and_then(|page| page.after.as_ref())
     {
         let [
