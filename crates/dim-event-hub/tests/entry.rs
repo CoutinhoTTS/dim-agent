@@ -15,5 +15,5 @@ fn the_entry_is_the_design_code_block() {
         .next()
         .unwrap();
     assert_eq!(dim_event_hub::ENTRY, block);
-    assert_eq!(dim_event_hub::ENTRY.len(), 1003);
+    assert_eq!(dim_event_hub::ENTRY.len(), 953);
 }

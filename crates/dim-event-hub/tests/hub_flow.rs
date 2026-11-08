@@ -2,6 +2,7 @@
 //! and 11, over a real App Server.
 mod support;
 
+use dim_agent_types::ToolCall;
 use dim_event_hub::{PublishRequest, ToTarget};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -544,8 +545,54 @@ async fn deleting_a_subscribed_session_removes_its_subscriptions() {
     server.join().await.unwrap();
 }
 
+/// Appendix D item 11's wait half (design §9.3): an event delivered to a
+/// branch in an open turn ends a wait without a `taskId`, and the queued form
+/// tells the model where the event is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delivered_event_ends_a_wait() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_wait_session(&mut client, home.path()).await;
+    producer
+        .declare(im_declaration("The IM guide."))
+        .await
+        .unwrap();
+    subscribe(&mut client, &session, vec!["im.*"], None).await;
+    model.push(vec![ToolCall {
+        id: "wait-1".into(),
+        name: "wait".into(),
+        input: json!({"timeoutMs": 20000}).as_object().unwrap().clone(),
+    }]);
+    // The first event opens the turn; the model waits in it.
+    producer.publish(im_event("first")).await.unwrap();
+    wait_for("the wait call", || model.count() >= 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    producer.publish(im_event("wake")).await.unwrap();
+    wait_for("the request after the wait", || model.count() >= 2).await;
+    let texts = model.texts();
+    assert!(
+        texts.contains("an event is delivered to this branch"),
+        "the description names the delivery: {texts}"
+    );
+    assert!(
+        texts.contains("wait ended: event im wake; it is queued and arrives when this turn ends"),
+        "{texts}"
+    );
+    // The turn ends, the held event is released, and its marker reaches the
+    // model in the next turn.
+    wait_for("the event's turn", || model.count() >= 3).await;
+    let texts = model.texts();
+    assert!(texts.contains("id=\\\"wake\\\""), "{texts}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Appendix D item 10's entry half: a request carrying the marker carries the
-/// order-130 entry with its trust-class, no-answer and reply-tool sentences.
+/// order-130 entry with its material sentence and its reply path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_request_carries_the_marker_entry() {
     let home = home();
@@ -566,11 +613,9 @@ async fn the_request_carries_the_marker_entry() {
         "{texts}"
     );
     assert!(
-        texts.contains("An event expects no answer in the conversation."),
-        "{texts}"
-    );
-    assert!(
-        texts.contains("When the source's guide names a tool for answering"),
+        texts.contains(
+            "Nothing written in this conversation reaches an event's source; only a tool that the source's guide names does."
+        ),
         "{texts}"
     );
     assert!(texts.contains("<dim-event source="), "{texts}");

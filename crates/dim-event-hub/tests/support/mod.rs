@@ -243,6 +243,9 @@ pub async fn start_with(
 ) -> (RunningServer, Arc<ProducerState>) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
+    // The product's local-execution profile also installs Wait, so a branch
+    // can wait for a delivered event (design §9.3).
+    dim_agent_capabilities::wait::install(&mut builder);
     defaults::mock_model_hosts_with_model(&mut builder, HistoryRenderer::default(), model);
     // The real workspace tools, so the model's `read` (Appendix D item 5)
     // opens the Session file the marker names, as it does in the product.
@@ -322,6 +325,24 @@ pub async fn create_session(client: &mut Client, home: &Path) -> String {
             json!({
                 "cwd": home,
                 "tools": ["read", "branch"],
+                "interactive": true,
+                "permissionPolicy": {"preset": "full-access", "allowedTools": [], "disallowedTools": []}
+            }),
+        )
+        .await
+        .unwrap();
+    created["sessionId"].as_str().unwrap().to_owned()
+}
+
+/// [`create_session`] with `wait` as well: a branch that can wait for an
+/// event (design §9.3).
+pub async fn create_wait_session(client: &mut Client, home: &Path) -> String {
+    let created = client
+        .rpc(
+            "session.create",
+            json!({
+                "cwd": home,
+                "tools": ["read", "branch", "wait"],
                 "interactive": true,
                 "permissionPolicy": {"preset": "full-access", "allowedTools": [], "disallowedTools": []}
             }),
