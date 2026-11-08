@@ -458,6 +458,7 @@ mod tests {
             error: None,
             waiting_for: vec![wait.into()],
             refused: Vec::new(),
+            optional: false,
         }
     }
 
