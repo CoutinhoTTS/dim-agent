@@ -51,6 +51,9 @@ pub struct Overrides {
     /// EventHub's guide entry for the markers in place of the shipped one
     /// (EventHub design A.6).
     pub eventhub_entry: Option<Arc<str>>,
+    /// The `events` tool's description in place of the shipped one (EventHub
+    /// design A.4).
+    pub eventhub_tool: Option<Arc<str>>,
 }
 
 /// What one run adds to the product assembly: the overrides above, the model
@@ -216,6 +219,9 @@ pub async fn serve_home(
     let mut event_hub = dim_event_hub::EventHubTexts::default();
     if let Some(entry) = &run.overrides.eventhub_entry {
         event_hub.entry = entry.to_string();
+    }
+    if let Some(tool) = &run.overrides.eventhub_tool {
+        event_hub.tool = tool.to_string();
     }
     dim_event_hub::install_with(&mut builder, event_hub);
     let mut texts = dim_goal::GoalTexts::default();

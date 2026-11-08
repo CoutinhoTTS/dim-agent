@@ -171,14 +171,20 @@
 //!   `guide` is the source's guide. The runner subscribes `main` to
 //!   `subscribe.types` after `calls` and before the message, with the
 //!   declaration done first, so the guide is written as the live
-//!   `eventhub:guide:<name>` block from the first turn. `replyTool` names
+//!   `eventhub:guide:<name>` block from the first turn. Without
+//!   `subscribe` the source starts unsubscribed, for a scenario where the
+//!   model subscribes itself through the `events` tool. `replyTool` names
 //!   an optional tool the row registers for the scenario's Session: it
 //!   takes `{messageId, text}`, records the call in the run's record and
 //!   answers `sent`. A declaration or a subscription that fails fails the
 //!   run, naming the source.
 //! - `events` publishes each event through the same service: `source`,
-//!   `type`, `id`, `title`, `body`, `attributes` and exactly one trigger,
-//!   `afterSeconds` or `whenToolCall`, under the steers' rule. Each receipt
+//!   `type`, `id`, `title`, `body`, `attributes` and exactly one trigger:
+//!   `afterSeconds` or `whenToolCall`, under the steers' rule, or
+//!   `afterSubscribedSeconds`, which publishes it that many seconds after
+//!   the first subscription naming its source exists — the model's own
+//!   `events` subscribe call, in a scenario whose source starts
+//!   unsubscribed (EventHub design A.4). Each receipt
 //!   goes in the run's record, and a receipt that is not `delivered` — no
 //!   deliveries, or one whose status is not `delivered` — fails the run,
 //!   naming the event. A run does not end while an event is still to be
@@ -361,6 +367,10 @@ const TEXTS: &[(&str, TextMember)] = &[
     (
         "eventhub/entry",
         TextMember::Rust(|overrides, text| overrides.eventhub_entry = Some(text)),
+    ),
+    (
+        "eventhub/tool",
+        TextMember::Rust(|overrides, text| overrides.eventhub_tool = Some(text)),
     ),
 ];
 
@@ -1376,8 +1386,10 @@ struct ScenarioFile {
     budget: Budget,
     probes: Vec<Probe>,
 }
-/// One source a scenario declares through the `eventHub` service and
-/// subscribes its Session's `main` branch to (EventHub design A.1, A.3).
+/// One source a scenario declares through the `eventHub` service, and
+/// optionally subscribes its Session's `main` branch to (EventHub design A.1,
+/// A.3). Without `subscribe` the source starts unsubscribed, for a scenario
+/// where the model subscribes through the `events` tool.
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Source {
@@ -1386,7 +1398,8 @@ pub(crate) struct Source {
     pub(crate) guide: String,
     /// The declaration's event types.
     pub(crate) types: Vec<SourceType>,
-    pub(crate) subscribe: Subscribed,
+    #[serde(default)]
+    pub(crate) subscribe: Option<Subscribed>,
     /// The tool name the runner registers for the Session, when the guide
     /// names one; the tool takes `{messageId, text}` and answers `sent`.
     #[serde(default)]
@@ -1425,6 +1438,15 @@ pub(crate) struct EventSpec {
     pub(crate) after_seconds: Option<f64>,
     #[serde(default)]
     pub(crate) when_tool_call: Option<String>,
+    /// Publish this many seconds after the first subscription naming the
+    /// event's source exists, so a scenario where the model subscribes
+    /// through the `events` tool can time the event (EventHub design A.4).
+    #[serde(default)]
+    pub(crate) after_subscribed_seconds: Option<f64>,
+    /// When the runner first saw a subscription naming the event's source:
+    /// the `afterSubscribedSeconds` clock, set by the runner, not the file.
+    #[serde(skip)]
+    pub(crate) subscribed_at: Option<Instant>,
     /// The mode the delivery arrives with: the subscription's, otherwise the
     /// event type's declared mode. It comes from the scenario's declarations,
     /// not from the receipt, which carries a mode for no delivery
@@ -1578,7 +1600,9 @@ fn into_scenario(
         if source.types.is_empty() {
             return Err(format!("source {}: declare at least one type", source.name));
         }
-        if source.subscribe.types.is_empty() {
+        if let Some(subscribe) = &source.subscribe
+            && subscribe.types.is_empty()
+        {
             return Err(format!(
                 "source {}: subscribe to at least one type",
                 source.name
@@ -1600,12 +1624,17 @@ fn into_scenario(
         }
     }
     for event in &mut raw.events {
-        match (&event.after_seconds, &event.when_tool_call) {
-            (Some(after), None) if *after > 0. => {}
-            (None, Some(trigger)) if !trigger.is_empty() => {}
+        match (
+            &event.after_seconds,
+            &event.when_tool_call,
+            &event.after_subscribed_seconds,
+        ) {
+            (Some(after), None, None) if *after > 0. => {}
+            (None, Some(trigger), None) if !trigger.is_empty() => {}
+            (None, None, Some(after)) if *after > 0. => {}
             _ => {
                 return Err(format!(
-                    "an event sets exactly one of afterSeconds (positive) and whenToolCall (non-empty): {}",
+                    "an event sets exactly one of afterSeconds (positive), whenToolCall (non-empty) and afterSubscribedSeconds (positive): {}",
                     event.id
                 ));
             }
@@ -1633,9 +1662,15 @@ fn into_scenario(
                 event.id, event.r#type, event.source
             ));
         };
-        // The mode the delivery arrives with: the subscription's, otherwise
-        // the event type's declared mode (EventHub design §3.1).
-        event.mode = source.subscribe.mode.unwrap_or(declared.mode);
+        // The mode the delivery arrives with: the scenario's subscription's,
+        // otherwise the event type's declared mode (EventHub design §3.1).
+        // A model-created subscription sets its own, which the receipt does
+        // not carry.
+        event.mode = source
+            .subscribe
+            .as_ref()
+            .and_then(|subscribe| subscribe.mode)
+            .unwrap_or(declared.mode);
     }
     if raw.probes.is_empty() {
         return Err("a scenario needs at least one probe".into());
@@ -2311,11 +2346,16 @@ async fn drive(
         }
     }
     for source in &scenario.sources {
+        let Some(subscribe) = &source.subscribe else {
+            // The scenario expects the model to subscribe through the
+            // `events` tool; the event trigger waits for that subscription.
+            continue;
+        };
         let mut params = json!({
-            "types": source.subscribe.types.clone(),
+            "types": subscribe.types.clone(),
             "target": {"sessionId": session, "branchId": "main"},
         });
-        if let Some(mode) = source.subscribe.mode {
+        if let Some(mode) = subscribe.mode {
             params["mode"] = json!(mode);
         }
         if let Err(error) = client.rpc("eventhub.subscribe", params).await {
@@ -2366,6 +2406,19 @@ async fn drive(
             }
         }
         match fire_events_due(producer, &mut events, started).await {
+            Ok(published) => {
+                if published {
+                    awaiting = true;
+                    last_event = Instant::now();
+                }
+            }
+            Err(error) => {
+                driven.stop = "error";
+                driven.error = Some(error);
+                return driven;
+            }
+        }
+        match fire_events_after_subscribe(client, producer, &mut events).await {
             Ok(published) => {
                 if published {
                     awaiting = true;
@@ -3085,6 +3138,77 @@ async fn fire_events_triggered(
     Ok(published)
 }
 
+/// Whether a subscription's `types` name `source`: an exact type of the
+/// source or its `<source>.*` pattern (EventHub design A.3).
+fn subscription_names_source(subscription: &Value, source: &str) -> bool {
+    subscription["types"].as_array().is_some_and(|types| {
+        types.iter().any(|pattern| {
+            pattern
+                .as_str()
+                .is_some_and(|pattern| match pattern.strip_suffix(".*") {
+                    Some(pattern_source) => pattern_source == source,
+                    None => pattern.split_once('.').map(|(source, _)| source) == Some(source),
+                })
+        })
+    })
+}
+
+/// Whether an `afterSubscribedSeconds` event is due: that many seconds after
+/// the runner first saw a subscription naming its source.
+fn subscribed_due(event: &EventSpec) -> bool {
+    event.after_subscribed_seconds.is_some_and(|after| {
+        event
+            .subscribed_at
+            .is_some_and(|at| at.elapsed().as_secs_f64() >= after)
+    })
+}
+
+/// Starts the clock of every `afterSubscribedSeconds` event whose source now
+/// has a subscription, and publishes the events whose clock has run out; it
+/// answers whether it published one. The scenario's own sources carry no
+/// subscription here: the model creates it through the `events` tool
+/// (EventHub design A.4).
+async fn fire_events_after_subscribe(
+    client: &mut Client,
+    producer: &ProducerState,
+    events: &mut [(EventSpec, bool)],
+) -> std::result::Result<bool, String> {
+    let needs_first = events.iter().any(|(event, fired)| {
+        !*fired && event.after_subscribed_seconds.is_some() && event.subscribed_at.is_none()
+    });
+    if needs_first {
+        let reply = client
+            .rpc("eventhub.subscriptions", json!({}))
+            .await
+            .map_err(|error| format!("eventhub.subscriptions failed: {error}"))?;
+        let subscriptions = reply["subscriptions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let now = Instant::now();
+        for (event, fired) in events.iter_mut() {
+            if *fired || event.after_subscribed_seconds.is_none() || event.subscribed_at.is_some() {
+                continue;
+            }
+            if subscriptions
+                .iter()
+                .any(|subscription| subscription_names_source(subscription, &event.source))
+            {
+                event.subscribed_at = Some(now);
+            }
+        }
+    }
+    let mut published = false;
+    for (event, fired) in events.iter_mut() {
+        if !*fired && subscribed_due(event) {
+            *fired = true;
+            producer.publish(event).await?;
+            published = true;
+        }
+    }
+    Ok(published)
+}
+
 /// The `session.submit` params. A mode names how `main` takes the input: a
 /// steer ends a wait and replaces a request that has produced no output yet,
 /// while the operator's first message carries no mode and is queued.
@@ -3179,6 +3303,14 @@ fn wait_time(
     for (event, fired) in events {
         if let (Some(after), false) = (event.after_seconds, *fired) {
             wait = wait.min(until(after));
+        }
+        // Before the first subscription the quiet period is the poll; after
+        // it, the clock is exact.
+        if let (Some(after), Some(at), false) =
+            (event.after_subscribed_seconds, event.subscribed_at, *fired)
+        {
+            let left = after - at.elapsed().as_secs_f64();
+            wait = wait.min(Duration::from_secs_f64(left.max(0.001)));
         }
     }
     wait.max(Duration::from_millis(10))
@@ -8790,6 +8922,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A scenario's source may start unsubscribed: the model subscribes
+    /// through the `events` tool, and the event fires `afterSubscribedSeconds`
+    /// after that subscription first exists, arriving on the branch with its
+    /// marker (EventHub design A.4).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_model_subscribes_through_the_tool_and_the_event_fires_after_that() {
+        const GUIDE: &str = "CI publishes a failure notice when a build breaks.";
+        const BODY: &str = "The build failed on the release branch.";
+        const DESCRIPTION: &str = "Subscribe only when the user asks you to follow events.";
+        /// The judge's verdict, the `events` subscribe call until its result
+        /// is in the request, a read of the workspace file until the event
+        /// arrives, and plain text after.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| {
+                if !text.contains("sub_") {
+                    return Some(tool_call(
+                        "events",
+                        &json!({"action": "subscribe", "types": ["ci.*"], "mode": "steer"})
+                            .to_string(),
+                    ));
+                }
+                (!text.contains(BODY)).then(|| tool_call("read", r#"{"path":"build.txt"}"#))
+            })
+        }
+        let fixture = Fixture::start(
+            "eventhub-tool",
+            answers,
+            json!({
+                "message": "Subscribe to CI failures, then read build.txt.",
+                "sources": [{
+                    "name": "ci",
+                    "guide": GUIDE,
+                    "types": [{
+                        "type": "ci.failure",
+                        "description": "A failed build.",
+                        "mode": "queue"
+                    }]
+                }],
+                "events": [{
+                    "source": "ci",
+                    "type": "ci.failure",
+                    "id": "f-1",
+                    "title": "The build failed",
+                    "body": BODY,
+                    "afterSubscribedSeconds": 1
+                }],
+                "budget": {"turns": 6, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[("build.txt", "build output\n")],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let record = run_arm(&fixture, &options, "current", &Overrides::default(), 0).await;
+        assert_eq!(record.error, None);
+        assert!(!record.failed);
+        assert_eq!(record.events.len(), 1, "one event was published");
+        let receipt = &record.events[0].receipt;
+        assert_eq!(
+            receipt["deliveries"][0]["status"],
+            json!("delivered"),
+            "{receipt}"
+        );
+        assert!(
+            receipt["deliveries"][0]["subscriptionIds"]
+                .as_array()
+                .is_some_and(|ids| !ids.is_empty()),
+            "the model's own subscription carried the event: {receipt}"
+        );
+        let requests = fixture.arm("current");
+        assert!(
+            requests.iter().any(|request| carried(request, DESCRIPTION)),
+            "the request offers the events tool with its description"
+        );
+        assert!(
+            requests.iter().any(|request| carried(
+                request,
+                "<dim-event source=\"ci\" type=\"ci.failure\" id=\"f-1\">"
+            )),
+            "the event's input carries the dim-event marker"
+        );
     }
 
     /// A candidate for a TypeScript plugin's text replaces that member of
