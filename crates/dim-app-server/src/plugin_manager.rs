@@ -1268,6 +1268,19 @@ impl Manager {
                     acquire::copy(shipped, &acquire::work_dir(&staging))?;
                     phase("check");
                     let manifest = acquire::manifest_of(&staging)?.require_version()?;
+                    // §3.2: an `{optional}` install is the plugin the
+                    // default configuration file ships under this name; a
+                    // manifest naming another would install under that name
+                    // and leave the entry uninstalled forever.
+                    if manifest.name != optional {
+                        return Err(PluginError::new(
+                            "name_changed",
+                            format!(
+                                "the shipped optional plugin {optional:?} names {:?}",
+                                manifest.name
+                            ),
+                        ));
+                    }
                     let id = self.new_id(params.id.as_deref(), &manifest)?;
                     self.dependencies(&manifest, &staging, phase, cancel)
                         .await?;
@@ -2138,7 +2151,14 @@ impl Manager {
         let record = self.state.record.lock().unwrap().clone();
         let mut items = Vec::new();
         for name in names(&record, &self.state.defaults, self.builtins()) {
-            let optional = self.state.defaults.optional.contains_key(&name);
+            // §3.6: the marker is the plugin's provenance: the name is in
+            // the shipped `optional` map, or an installed entry of the name
+            // came from an `{optional}` source, so a copy keeps it after a
+            // later release drops the name from the map.
+            let optional = self.state.defaults.optional.contains_key(&name)
+                || record.installed.iter().any(|entry| {
+                    entry.name == name && matches!(entry.source, Source::Optional { .. })
+                });
             // §3.6: an optional plugin that is not installed has its own
             // item, so a client can offer it; `off` is a report, not a
             // recorded state, and there is no status because nothing runs.
@@ -2182,12 +2202,26 @@ impl Manager {
                 if optional {
                     fields.insert("optional".into(), json!(true));
                 }
-                // §3.6: `update` appears only when the shipped version
-                // differs from the installed one, never merely because a
-                // copy exists. A shipped manifest that cannot be read, or
-                // names no version, offers none (§2.3).
-                if let Some(Use::Installed(id)) = &used
-                    && let Some(entry) = record.installed(id)
+                // §3.6: `update` follows the entry a re-acquisition would
+                // act on: the `{optional}` entry the name uses, else the
+                // name's last installed `{optional}` entry in record order,
+                // so an off name, or one using another candidate, still
+                // offers it. It appears only when the shipped version
+                // differs, never merely because a copy exists; a shipped
+                // manifest that cannot be read, or names no version,
+                // offers none (§2.3).
+                let update_entry = match &used {
+                    Some(Use::Installed(id)) => record
+                        .installed(id)
+                        .filter(|entry| matches!(entry.source, Source::Optional { .. })),
+                    _ => None,
+                }
+                .or_else(|| {
+                    record.installed.iter().rev().find(|entry| {
+                        entry.name == name && matches!(entry.source, Source::Optional { .. })
+                    })
+                });
+                if let Some(entry) = update_entry
                     && let Source::Optional {
                         optional: shipped_name,
                     } = &entry.source
