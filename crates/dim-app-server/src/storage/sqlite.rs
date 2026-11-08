@@ -9,14 +9,14 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, PoisonError,
+        Arc, Mutex, MutexGuard, PoisonError, TryLockError,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 34;
+pub const FORMAT: u32 = 36;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -55,7 +55,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 36))",
     ),
     (
         "settings_documents",
@@ -120,6 +120,22 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "timeline_events_by_id",
         "CREATE INDEX timeline_events_by_id ON timeline_events(session_id, event_id) WHERE event_id IS NOT NULL",
+    ),
+    (
+        "timeline_events_requests",
+        "CREATE INDEX timeline_events_requests ON timeline_events(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence)",
+    ),
+    (
+        "timeline_events_inputs",
+        "CREATE INDEX timeline_events_inputs ON timeline_events(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence)",
+    ),
+    (
+        "timeline_events_users",
+        "CREATE INDEX timeline_events_users ON timeline_events(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence)",
+    ),
+    (
+        "timeline_input_submissions",
+        "CREATE INDEX timeline_input_submissions ON timeline_events(session_id, branch_id, json_extract(body, '$.record.event.data.submission_id'), sequence) WHERE kind = 'input/message'",
     ),
     (
         "timeline_events_context",
@@ -213,7 +229,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 20] = [
+const UPGRADES: [(u32, &[&str]); 22] = [
     (
         13,
         &[
@@ -284,6 +300,20 @@ const UPGRADES: [(u32, &[&str]); 20] = [
     // `main`, and the step recomputes the derived `session_catalog`
     // column; the marker only.
     (33, &[]),
+    (34, &["timeline_input_submissions"]),
+    (
+        35,
+        &[
+            "timeline_events_requests",
+            "timeline_events_inputs",
+            "timeline_events_users",
+            "timeline_text",
+            "timeline_text_partition",
+            "timeline_text_fts",
+            "timeline_text_delete",
+            "timeline_text_tails",
+        ],
+    ),
 ];
 
 fn format_table(version: u32) -> String {
@@ -296,6 +326,7 @@ fn format_table(version: u32) -> String {
 fn schema_of(version: u32) -> Vec<(&'static str, String)> {
     SCHEMA
         .iter()
+        .chain(super::text::SCHEMA)
         .copied()
         .chain(
             LEGACY_INDEXES
@@ -364,7 +395,8 @@ fn schema(connection: &Connection) -> Result<Vec<(String, String)>> {
     let mut query = connection
         .prepare(&format!(
             "SELECT name, sql FROM sqlite_master \
-             WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ({placeholders}) ORDER BY name"
+             WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ({placeholders})
+               AND name NOT IN (SELECT name FROM pragma_table_list WHERE type='shadow' AND name LIKE 'timeline_text_fts_%') ORDER BY name"
         ))
         .map_err(storage)?;
     let objects = query
@@ -662,7 +694,8 @@ fn functions(connection: &Connection) -> Result<()> {
                     .map(|text| text.to_lowercase()))
             },
         )
-        .map_err(storage)
+        .map_err(storage)?;
+    super::query::register(connection)
 }
 struct Admission {
     closed: bool,
@@ -737,7 +770,7 @@ impl SqliteStorage {
         };
         let mut upgraded_from = None;
         if actual.is_empty() {
-            for (_, sql) in SCHEMA {
+            for (_, sql) in SCHEMA.iter().chain(super::text::SCHEMA) {
                 tx.execute_batch(sql).map_err(storage)?;
             }
             tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
@@ -806,11 +839,18 @@ impl SqliteStorage {
                         )
                         .map_err(storage)?;
                     }
-                    for (_, sql) in SCHEMA.iter().filter(|(name, _)| added.contains(name)) {
+                    for (_, sql) in SCHEMA
+                        .iter()
+                        .chain(super::text::SCHEMA)
+                        .filter(|(name, _)| added.contains(name))
+                    {
                         tx.execute_batch(sql).map_err(storage)?;
                     }
                     if *from == 22 {
                         super::catalog::backfill(&tx)?;
+                    }
+                    if *from == 35 {
+                        super::text::backfill(&tx)?;
                     }
                     if *from == 24 {
                         tx.execute_batch("DROP INDEX timeline_events_by_end")
@@ -831,6 +871,9 @@ impl SqliteStorage {
                 }
                 tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                     .map_err(storage)?;
+                if known_format(&schema(&tx)?) != Some(FORMAT) {
+                    return Err(storage("upgraded native store has an unexpected schema"));
+                }
                 upgraded_from = Some(version);
             }
         } else {
@@ -976,9 +1019,9 @@ impl SqliteStorage {
     }
     /// Runs a read on one of the read-only connections (#599). A read sees the
     /// last commit when its statement starts and does not wait for the
-    /// writer's transaction or fsync; each call takes the next connection in
-    /// turn, so calls with a long scan, such as the catalog, leave the others
-    /// free. The read-only export store's one connection serves both.
+    /// writer's transaction or fsync. An available reader is reused before
+    /// waiting for a busy reader; sequential reads reuse its page cache.
+    /// The read-only export store's one connection serves both.
     pub(crate) async fn run_read<T: Send + 'static>(
         self: &Arc<Self>,
         operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
@@ -1062,6 +1105,13 @@ impl SqliteStorage {
         if readers.connections.is_empty() {
             return None;
         }
+        for connection in &readers.connections {
+            match connection.try_lock() {
+                Ok(guard) => return Some(guard),
+                Err(TryLockError::Poisoned(error)) => return Some(error.into_inner()),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
         let index = readers.next.fetch_add(1, Ordering::Relaxed) % readers.connections.len();
         Some(
             readers.connections[index]
@@ -1076,7 +1126,7 @@ impl SqliteStorage {
     ) -> Result<T> {
         self.run_read(move |connection| {
             if cancel.is_cancelled() {
-                return Err(AgentError::Cancelled("session catalog".into()));
+                return Err(AgentError::Cancelled("storage read".into()));
             }
             let interrupt = cancel.clone();
             connection
@@ -1088,9 +1138,7 @@ impl SqliteStorage {
                 .map_err(storage)?;
             match result {
                 Err(panic) => std::panic::resume_unwind(panic),
-                Ok(_) if cancel.is_cancelled() => {
-                    Err(AgentError::Cancelled("session catalog".into()))
-                }
+                Ok(_) if cancel.is_cancelled() => Err(AgentError::Cancelled("storage read".into())),
                 Ok(result) => result,
             }
         })

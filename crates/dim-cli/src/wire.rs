@@ -11,30 +11,6 @@ pub struct Created {
     pub model: dim_agent_types::ModelId,
 }
 
-/// The record `session.attach` replies for the Session it opened. A server
-/// from before the record existed replies `{}`.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Attached {
-    #[serde(default)]
-    pub model: Option<dim_agent_types::ModelId>,
-    #[serde(default)]
-    pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
-    /// The adopted configuration's preferences; absent when it carries none.
-    #[serde(default)]
-    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
-    /// The Session's workspace; absent from servers older than the record.
-    #[serde(default)]
-    pub cwd: Option<String>,
-    /// The Session's stored title; absent from servers older than the title
-    /// fields, and `None` when it has none.
-    #[serde(default)]
-    pub title: Option<String>,
-    /// The title's revision; 0 on a server that reports none.
-    #[serde(default)]
-    pub title_revision: u64,
-}
-
 #[derive(Deserialize)]
 pub struct ProviderCatalogSnapshot {
     pub catalog: Option<ProviderCatalog>,

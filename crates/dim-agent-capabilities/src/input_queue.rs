@@ -1,17 +1,21 @@
+mod pending;
+
 use crate::{
     host::HostFuture,
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    AgentError, Dispatcher, InputSnapshot, Names, Registrations, Result, StateCell, Timeline,
-    rebuild_facts,
+    AgentError, Dispatcher, InputSnapshot, Names, QueryFilter, QueryOperand, QueryOutput,
+    QueryPage, QuerySelect, QuerySpec, QueryValue, Registrations, Result, StateCell, Timeline,
+    TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
+    num::NonZeroU64,
     sync::{Arc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
@@ -64,48 +68,15 @@ struct QueueState {
     starting: bool,
 }
 impl QueueState {
-    /// Folds one event; returns the decisions to write now, in order.
     fn step(&mut self, event: &AgentEvent) -> Vec<Decision> {
         match &event.kind {
-            EventKind::InputMessage(data) => {
-                if let Some(handover) = &data.handover {
-                    // A handover input is held for its own turn only; with
-                    // no such turn open it is dead on arrival.
-                    if self.turn.as_deref() != Some(handover.turn_id.as_str()) {
-                        return vec![Decision::Delete(event.id.clone())];
-                    }
-                    self.entries.push(Entry {
-                        id: event.id.clone(),
-                        kind: EntryKind::Handover {
-                            turn_id: handover.turn_id.clone(),
-                        },
-                    });
-                    return Vec::new();
-                }
-                let mode = data.effective_mode();
-                self.entries.push(Entry {
-                    id: event.id.clone(),
-                    kind: EntryKind::Input {
-                        mode,
-                        released: false,
-                    },
-                });
-                let held_queue = self.entries.iter().any(|entry| {
-                    matches!(
-                        &entry.kind,
-                        EntryKind::Input {
-                            mode: InputMode::Queue,
-                            released: false
-                        }
-                    ) && entry.id != event.id
-                });
-                match mode {
-                    InputMode::Queue if self.turn.is_some() || self.starting || held_queue => {
-                        Vec::new()
-                    }
-                    _ => self.release(&event.id),
-                }
-            }
+            EventKind::InputMessage(data) => self.input(
+                &event.id,
+                data.effective_mode(),
+                data.handover
+                    .as_ref()
+                    .map(|handover| handover.turn_id.as_str()),
+            ),
             EventKind::TurnStart(data) => {
                 self.turn = Some(data.turn_id.clone());
                 self.starting = false;
@@ -115,51 +86,82 @@ impl QueueState {
                 self.starting = false;
                 Vec::new()
             }
-            EventKind::TurnEnd(data) => {
-                self.turn = None;
-                let mut decisions = Vec::new();
-                self.entries.retain(|entry| {
-                    let ended = matches!(
-                        &entry.kind,
-                        EntryKind::Handover { turn_id } if *turn_id == data.turn_id
-                    );
-                    if ended {
-                        decisions.push(Decision::Delete(entry.id.clone()));
-                    }
-                    !ended
-                });
-                if let Some(next) = self.entries.iter().find(|entry| {
-                    matches!(
-                        &entry.kind,
-                        EntryKind::Input {
-                            mode: InputMode::Queue,
-                            released: false
-                        }
-                    )
-                }) {
-                    let next = next.id.clone();
-                    decisions.extend(self.release(&next));
-                }
-                decisions
-            }
+            EventKind::TurnEnd(data) => self.end_turn(&data.turn_id),
             EventKind::InputConsumed(data) => {
                 self.entries.retain(|entry| entry.id != data.input_id);
                 Vec::new()
             }
-            EventKind::InputWithdraw(data) => {
-                // An input is still unapplied unless this queue released it.
-                match self.entries.iter().position(|entry| {
-                    entry.id == data.input_id
-                        && !matches!(&entry.kind, EntryKind::Input { released: true, .. })
-                }) {
-                    Some(index) => {
-                        self.entries.remove(index);
-                        vec![Decision::Delete(data.input_id.clone())]
-                    }
-                    None => Vec::new(),
-                }
-            }
+            EventKind::InputWithdraw(data) => self.withdraw(&data.input_id),
             _ => Vec::new(),
+        }
+    }
+    fn input(&mut self, id: &str, mode: InputMode, handover: Option<&str>) -> Vec<Decision> {
+        if let Some(turn_id) = handover {
+            if self.turn.as_deref() != Some(turn_id) {
+                return vec![Decision::Delete(id.to_owned())];
+            }
+            self.entries.push(Entry {
+                id: id.to_owned(),
+                kind: EntryKind::Handover {
+                    turn_id: turn_id.to_owned(),
+                },
+            });
+            return Vec::new();
+        }
+        self.entries.push(Entry {
+            id: id.to_owned(),
+            kind: EntryKind::Input {
+                mode,
+                released: false,
+            },
+        });
+        let held_queue = self.entries.iter().any(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::Input {
+                    mode: InputMode::Queue,
+                    released: false
+                }
+            ) && entry.id != id
+        });
+        match mode {
+            InputMode::Queue if self.turn.is_some() || self.starting || held_queue => Vec::new(),
+            _ => self.release(id),
+        }
+    }
+    fn end_turn(&mut self, turn: &str) -> Vec<Decision> {
+        self.turn = None;
+        let mut decisions = Vec::new();
+        self.entries.retain(|entry| {
+            let ended = matches!(&entry.kind, EntryKind::Handover { turn_id } if turn_id == turn);
+            if ended {
+                decisions.push(Decision::Delete(entry.id.clone()));
+            }
+            !ended
+        });
+        if let Some(next) = self.entries.iter().find(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::Input {
+                    mode: InputMode::Queue,
+                    released: false
+                }
+            )
+        }) {
+            let next = next.id.clone();
+            decisions.extend(self.release(&next));
+        }
+        decisions
+    }
+    fn withdraw(&mut self, id: &str) -> Vec<Decision> {
+        match self.entries.iter().position(|entry| {
+            entry.id == id && !matches!(entry.kind, EntryKind::Input { released: true, .. })
+        }) {
+            Some(index) => {
+                self.entries.remove(index);
+                vec![Decision::Delete(id.to_owned())]
+            }
+            None => Vec::new(),
         }
     }
     /// Releases one input. One that drives a turn while none runs makes a
@@ -233,37 +235,161 @@ impl InputQueue {
         }
         Ok(deleted)
     }
-    /// Replays the same decisions; those the previous generation made but
-    /// did not write before it stopped are written now.
-    fn rebuild(&self, events: &[Arc<AgentEvent>]) -> Result<()> {
-        let owed = {
-            let mut state = self.state.lock().unwrap();
-            let mut decided = Vec::new();
-            let mut written = HashSet::new();
-            for event in events {
-                match &event.kind {
-                    EventKind::InputApplied(data) => {
-                        written.insert(data.input_id.clone());
-                    }
-                    EventKind::InputDeleted(data) => {
-                        written.insert(data.input_id.clone());
-                    }
-                    _ => {}
-                }
-                decided.extend(state.step(event));
-            }
-            self.publish(&state);
-            decided
-                .into_iter()
-                .filter(|decision| !written.contains(decision.input_id()))
-                .filter(|decision| match decision {
-                    Decision::Apply(id, _) => state.entries.iter().any(|entry| entry.id == *id),
-                    Decision::Delete(_) => true,
-                })
-                .collect::<Vec<_>>()
+    async fn rebuild(&self) -> Result<u64> {
+        let through = self.timeline.committed();
+        let mut request = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: [
+                        "input/message",
+                        "input/consumed",
+                        "input/withdraw",
+                        "input/applied",
+                        "input/deleted",
+                        "turn/start",
+                        "turn/end",
+                        "stop/interrupt",
+                    ]
+                    .map(serde_json::Value::from)
+                    .to_vec(),
+                }),
+                select: QuerySelect::Fields {
+                    fields: [
+                        "kind",
+                        "id",
+                        "data.mode",
+                        "data.user.content[].type",
+                        "data.input_id",
+                        "data.turn_id",
+                        "data.handover.turn_id",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                },
+                group_by: Vec::new(),
+                pick: None,
+                order_by: Vec::new(),
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(256).expect("a page contains queue transitions"),
+                after: None,
+            }),
         };
+        let mut state = QueueState::default();
+        let mut owed = Vec::<Decision>::new();
+        loop {
+            let reply = self.timeline.query(request.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("queue recovery selects transition fields")
+            };
+            for row in rows {
+                let Ok(
+                    [
+                        QueryValue::Value {
+                            value: serde_json::Value::String(kind),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::String(id),
+                        },
+                        mode,
+                        user,
+                        input,
+                        turn,
+                        handover,
+                    ],
+                ) = <[_; 7]>::try_from(row.values)
+                else {
+                    return Err(AgentError::fault(
+                        "InputQueue",
+                        "a queue transition has no kind or identity",
+                    ));
+                };
+                match kind.as_str() {
+                    "input/message" => {
+                        let mode = match mode {
+                            QueryValue::Missing if matches!(user, QueryValue::Missing) => {
+                                InputMode::Append
+                            }
+                            QueryValue::Missing => InputMode::Queue,
+                            QueryValue::Value { value } => {
+                                serde_json::from_value(value).map_err(|error| {
+                                    AgentError::fault("InputQueue", error.to_string())
+                                })?
+                            }
+                            QueryValue::Elements { .. } => unreachable!("an input mode is scalar"),
+                        };
+                        let handover = match &handover {
+                            QueryValue::Missing => None,
+                            QueryValue::Value { value } if value.is_null() => None,
+                            QueryValue::Value { value } => {
+                                Some(value.as_str().expect("handover turn identity"))
+                            }
+                            QueryValue::Elements { .. } => {
+                                unreachable!("handover turn identity is scalar")
+                            }
+                        };
+                        owed.extend(state.input(&id, mode, handover));
+                    }
+                    "turn/start" => {
+                        let QueryValue::Value { value: turn } = turn else {
+                            unreachable!("turn identity")
+                        };
+                        state.turn = Some(turn.as_str().expect("turn identity").to_owned());
+                        state.starting = false;
+                    }
+                    "turn/end" => {
+                        let QueryValue::Value { value: turn } = turn else {
+                            unreachable!("turn identity")
+                        };
+                        owed.extend(state.end_turn(turn.as_str().expect("turn identity")));
+                    }
+                    "stop/interrupt" => state.starting = false,
+                    "input/consumed" | "input/withdraw" | "input/applied" | "input/deleted" => {
+                        let QueryValue::Value {
+                            value: serde_json::Value::String(input_id),
+                        } = input
+                        else {
+                            return Err(AgentError::fault(
+                                "InputQueue",
+                                "a queue transition has no input identity",
+                            ));
+                        };
+                        match kind.as_str() {
+                            "input/consumed" => {
+                                state.entries.retain(|entry| entry.id != input_id);
+                                owed.retain(|decision| !matches!(decision, Decision::Apply(id, _) if *id == input_id));
+                            }
+                            "input/withdraw" => owed.extend(state.withdraw(&input_id)),
+                            _ => owed.retain(|decision| decision.input_id() != input_id),
+                        }
+                    }
+                    _ => unreachable!("queue recovery selects only queue transitions"),
+                }
+            }
+            let Some(next) = reply.next else {
+                break;
+            };
+            request
+                .page
+                .as_mut()
+                .expect("queue recovery is paged")
+                .after = Some(next);
+        }
+        owed.retain(|decision| match decision {
+            Decision::Apply(id, _) => state.entries.iter().any(|entry| entry.id == *id),
+            Decision::Delete(_) => true,
+        });
+        self.publish(&state);
+        *self.state.lock().unwrap() = state;
         self.write(owed)?;
-        Ok(())
+        Ok(through)
     }
     fn on_event(&self, event: Arc<AgentEvent>) -> Result<()> {
         let decisions = {
@@ -361,7 +487,6 @@ impl DynPlugin for InputQueuePlugin {
             });
             let owner = queue.clone();
             let read = queue.clone();
-            let read_timeline = queue.timeline.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -378,25 +503,7 @@ impl DynPlugin for InputQueuePlugin {
                     .to_vec(),
                     Arc::new(move || {
                         let read = read.clone();
-                        let timeline = read_timeline.clone();
-                        Box::pin(async move {
-                            let reply = rebuild_facts(
-                                &timeline,
-                                &[
-                                    "input/message",
-                                    "input/consumed",
-                                    "input/withdraw",
-                                    "input/applied",
-                                    "input/deleted",
-                                    "turn/start",
-                                    "turn/end",
-                                    "stop/interrupt",
-                                ],
-                            )
-                            .await?;
-                            read.rebuild(&reply.events)?;
-                            Ok(reply.through)
-                        })
+                        Box::pin(async move { read.rebuild().await })
                     }),
                     Arc::new(move |event| {
                         let owner = owner.clone();
@@ -584,16 +691,18 @@ impl DynPlugin for InputMethodsPlugin {
             methods.register(
                 ctx,
                 INPUT_METHODS,
-                vec![MethodDecl::new(
-                    "session.input.withdraw",
-                    true,
-                    Interruption::Report,
-                )],
+                vec![
+                    MethodDecl::new("session.input.withdraw", true, Interruption::Report),
+                    MethodDecl::new("session.input.pending", false, Interruption::Report),
+                ],
                 Arc::new(move |call, cancel, _| {
-                    let MethodCall { params: value, .. } = call;
+                    let MethodCall { method, params: value, .. } = call;
                     let tree = tree.clone();
                     let checks = checks.clone();
                     Box::pin(async move {
+                        if method == "session.input.pending" {
+                            return pending::read(&tree, value, &cancel).await;
+                        }
                         let p: WithdrawParams = params(value)?;
                         let queue = tree.get(&p.branch_id)?.service::<InputQueue>()?;
                         let mut steer = p.steer.map(|user| InputMessageData {

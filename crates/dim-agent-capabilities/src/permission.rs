@@ -19,9 +19,9 @@ use crate::{
     workspace_tools::files::{canonical_prefix, resolve_path},
 };
 use dim_agent_runtime::{
-    AgentError, Dispatcher, Names, Registration, Registrations, SessionConfig, SessionIdentity,
-    StateCell, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryScope,
+    AgentError, Dispatcher, Names, QueryComparison, QueryFilter, QueryOperand, QueryOutput,
+    QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Registration, Registrations,
+    SessionConfig, SessionIdentity, StateCell, Timeline, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,
@@ -535,26 +535,64 @@ impl Permission {
             .timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Chain,
+                from: None,
+                through: Some(self.timeline.committed()),
                 include_publishing: true,
-                from_event: None,
-                from_sequence: None,
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: vec!["permission/changed".into()],
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: NonZeroU64::MIN,
-                offset: 0,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::Compare {
+                        left: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        comparison: QueryComparison::Eq,
+                        right: QueryOperand::Value {
+                            value: "permission/changed".into(),
+                        },
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec![
+                            "data.policy".into(),
+                            "position.branch_id".into(),
+                            "position.sequence".into(),
+                        ],
+                    },
+                    group_by: Vec::new(),
+                    pick: Some(QueryPick::Last),
+                    order_by: Vec::new(),
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
             })
             .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("permission recovery selects the latest policy and position")
+        };
         let mut state = self.state.get();
-        if let Some((event, position)) = reply.events.first().zip(reply.positions.first())
-            && let EventKind::PermissionChanged(data) = &event.kind
-        {
-            state.policy = data.policy.clone();
-            if position.branch_id == self.timeline.branch_id() {
-                state.version = position.sequence;
+        if let Some(row) = rows.into_iter().next() {
+            let Ok(
+                [
+                    QueryValue::Value { value: policy },
+                    QueryValue::Value {
+                        value: serde_json::Value::String(branch_id),
+                    },
+                    QueryValue::Value {
+                        value: serde_json::Value::Number(sequence),
+                    },
+                ],
+            ) = <[_; 3]>::try_from(row.values)
+            else {
+                return Err(AgentError::fault(
+                    "Permission",
+                    "a policy change has no policy or position",
+                ));
+            };
+            state.policy = serde_json::from_value(policy)
+                .map_err(|error| AgentError::fault("Permission", error.to_string()))?;
+            if branch_id == self.timeline.branch_id() {
+                state.version = sequence
+                    .as_u64()
+                    .expect("policy versions are unsigned sequences");
             }
         }
         self.inner.lock().unwrap().written = state.version;

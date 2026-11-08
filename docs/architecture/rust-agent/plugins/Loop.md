@@ -13,7 +13,7 @@ exposes loop state without itself executing model or tool effects.
 | `S:CompactionStrategyHost` | The compaction strategy its manual step calls through ContextPolicy. |
 | `S:PrepareModelHost` | Prepare the request before context/model execution. |
 | `B:ToolBinding` | Pin and release request tool handlers. |
-| `B:Dispatcher` | Replay state, then consume step outcomes, inputs and interrupts. |
+| `B:Dispatcher` | Hand off restored state to live step outcomes, inputs and interrupts. |
 | `B:Timeline` | Commit turn/step transitions. |
 | `B:TimelineIdentity` | This branch's id selects the guide entries in force. |
 | `S:GuideEntries` | Compose the System it places on a host-prepared request. |
@@ -31,8 +31,14 @@ boundary, or at once with no turn, and starts no request or turn while the step
 runs (ContextCompaction §5.4). An interrupt cancels a running step and settles a
 pending command; reload settles both as `cancelled`. Preparation work is tracked; handlers
 schedule it without waiting for host I/O. Cleanup cancels and joins work.
-Replay reconstructs pending inputs/turns and coordinates settlement of orphaned
-requests rather than repeating external effects. Reload-settled tool results
+Recovery queries applied inputs without consumption, unsettled manual compaction
+commands/starts, the last interrupt and the last turn boundary at one committed
+cut. Only an open turn needs a paged read of its request control fields. Input
+selection keeps the entire branch range, including applications before that
+turn. Recovery holds identities, stages and owed settlements; it does not
+reconstruct request bodies or tool arguments. Undispatched completed calls are
+closed in the turn-end batch, in their original start order. Orphaned requests
+are settled without repeating external effects. Reload-settled tool results
 fail the turn. An idle append alone starts no turn. Domain-specific history must
 not become a second input-adoption path.
 

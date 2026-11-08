@@ -1,16 +1,21 @@
+pub mod read;
+
 use crate::{
     approval::{AdmitCall, Approval},
     host::*,
     tool_binding::ToolBinding,
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, TimelineIdentity, rebuild_facts,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, QueryComparison, QueryFilter,
+    QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Timeline,
+    TimelineIdentity, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::{
+    num::NonZeroU64,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
 };
@@ -112,19 +117,7 @@ impl DynPlugin for ToolExecutorPlugin {
                     let read = read.clone();
                     let timeline = read_timeline.clone();
                     Box::pin(async move {
-                        let reply = rebuild_facts(
-                            &timeline,
-                            &[
-                                "step/tool-call",
-                                "step/tool-result",
-                                "stop/interrupt",
-                                "turn/start",
-                                "turn/end",
-                            ],
-                        )
-                        .await?;
-                        rebuild(&mut read.state.lock().unwrap(), &timeline, &reply.events)?;
-                        Ok(reply.through)
+                        rebuild(&read,&timeline).await
                     })
                 }),
                 Arc::new(move |event| {
@@ -391,44 +384,187 @@ async fn execute(
 
 /// A committed batch without results was left by a reload and settles as
 /// not executed.
-fn rebuild(
-    state: &mut ToolState,
-    timeline: &Timeline,
-    events: &[Arc<AgentEvent>],
-) -> dim_agent_runtime::Result<()> {
-    let mut open = Vec::new();
-    for event in events {
-        match &event.kind {
-            EventKind::StopInterrupt(data) => state.interrupted = Some(data.reason.clone()),
-            EventKind::TurnStart(_) | EventKind::TurnEnd(_) => state.interrupted = None,
-            EventKind::ToolCall(batch) => open.push((event.id.clone(), batch.clone())),
-            EventKind::ToolResult(data) => {
-                open.retain(|(id, _)| data.call_event_id.as_ref() != Some(id))
+async fn rebuild(owner: &ToolExecutor, timeline: &Timeline) -> dim_agent_runtime::Result<u64> {
+    let through = timeline.committed();
+    let mut request = TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        from: None,
+        through: Some(through),
+        include_publishing: true,
+        query: QuerySpec {
+            filter: Some(QueryFilter::In {
+                value: QueryOperand::Field {
+                    path: "kind".into(),
+                },
+                values: vec![
+                    "stop/interrupt".into(),
+                    "turn/start".into(),
+                    "turn/end".into(),
+                ],
+            }),
+            select: QuerySelect::Fields {
+                fields: vec!["kind".into(), "data.reason".into()],
+            },
+            group_by: Vec::new(),
+            pick: Some(QueryPick::Last),
+            order_by: Vec::new(),
+        },
+        page: Some(QueryPage {
+            limit: NonZeroU64::new(256).expect("a page contains operations"),
+            after: None,
+        }),
+    };
+    let control = timeline.query(request.clone()).await?;
+    let QueryOutput::Rows { rows } = control.result else {
+        unreachable!("tool recovery selects control fields")
+    };
+    let interrupted = if let Some(row) = rows.into_iter().next() {
+        let mut values = row.values.into_iter();
+        match (values.next(), values.next()) {
+            (
+                Some(QueryValue::Value {
+                    value: serde_json::Value::String(kind),
+                }),
+                Some(reason),
+            ) => {
+                if kind == "stop/interrupt" {
+                    let QueryValue::Value {
+                        value: serde_json::Value::String(reason),
+                    } = reason
+                    else {
+                        return Err(AgentError::fault(
+                            "ToolExecutor",
+                            "an interrupt has no reason",
+                        ));
+                    };
+                    Some(reason)
+                } else {
+                    None
+                }
             }
-            _ => {}
+            _ => {
+                return Err(AgentError::fault(
+                    "ToolExecutor",
+                    "a control event has no kind",
+                ));
+            }
         }
-    }
-    for (call_event_id, batch) in open {
-        timeline.append(
-            EventKind::ToolResult(ToolResultData {
-                turn_id: batch.turn_id,
-                request_id: batch.request_id,
-                call_event_id: Some(call_event_id),
-                results: batch
-                    .calls
-                    .iter()
-                    .map(|call| ToolCallResult {
-                        call_id: call.id.clone(),
+    } else {
+        None
+    };
+    owner.state.lock().unwrap().interrupted = interrupted;
+    request.query.pick = None;
+    request.query.select = QuerySelect::Fields {
+        fields: vec![
+            "id".into(),
+            "data.turn_id".into(),
+            "data.request_id".into(),
+            "data.calls[].id".into(),
+        ],
+    };
+    request.query.filter = Some(QueryFilter::And {
+        conditions: vec![
+            QueryFilter::Compare {
+                left: QueryOperand::Field {
+                    path: "kind".into(),
+                },
+                comparison: QueryComparison::Eq,
+                right: QueryOperand::Value {
+                    value: "step/tool-call".into(),
+                },
+            },
+            QueryFilter::Not {
+                condition: Box::new(QueryFilter::Exists {
+                    condition: Box::new(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                comparison: QueryComparison::Eq,
+                                right: QueryOperand::Value {
+                                    value: "step/tool-result".into(),
+                                },
+                            },
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "data.call_event_id".into(),
+                                },
+                                comparison: QueryComparison::Eq,
+                                right: QueryOperand::Outer { path: "id".into() },
+                            },
+                        ],
+                    }),
+                }),
+            },
+        ],
+    });
+    loop {
+        let reply = timeline.query(request.clone()).await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("tool recovery selects operation fields")
+        };
+        for row in rows {
+            let Ok(
+                [
+                    QueryValue::Value {
+                        value: serde_json::Value::String(call_event_id),
+                    },
+                    QueryValue::Value {
+                        value: serde_json::Value::String(turn_id),
+                    },
+                    QueryValue::Value {
+                        value: serde_json::Value::String(request_id),
+                    },
+                    QueryValue::Elements { values: calls },
+                ],
+            ) = <[_; 4]>::try_from(row.values)
+            else {
+                return Err(AgentError::fault(
+                    "ToolExecutor",
+                    "a tool batch has invalid operation identities",
+                ));
+            };
+            let results = calls
+                .into_iter()
+                .map(|call| {
+                    let QueryValue::Value {
+                        value: serde_json::Value::String(call_id),
+                    } = call
+                    else {
+                        return Err(AgentError::fault(
+                            "ToolExecutor",
+                            "a tool call has no identity",
+                        ));
+                    };
+                    Ok(ToolCallResult {
+                        call_id,
                         result: reload_settled(ToolResult::error(format!(
                             "Tool was not executed: {CAPABILITY_RELOADING}"
                         ))),
                     })
-                    .collect(),
-            })
-            .into(),
-        )?;
+                })
+                .collect::<dim_agent_runtime::Result<Vec<_>>>()?;
+            timeline.append(
+                EventKind::ToolResult(ToolResultData {
+                    turn_id,
+                    request_id,
+                    call_event_id: Some(call_event_id),
+                    results,
+                })
+                .into(),
+            )?;
+        }
+        let Some(next) = reply.next else {
+            break;
+        };
+        request
+            .page
+            .as_mut()
+            .expect("operation queries are paged")
+            .after = Some(next);
     }
-    Ok(())
+    Ok(through)
 }
 
 /// The result of a call cancelled by a capability reload.

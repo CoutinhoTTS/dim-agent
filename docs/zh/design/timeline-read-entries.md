@@ -4,6 +4,8 @@
 
 基线：`origin/main` 的 `514225777`。调用点不含测试和示例。下面每一行都是在该基线上从源码读出来的，因此其中点名的 TypeScript 路径（含 Goal 的 `runtime/plugins/goal/branch.ts`）是移植前的快照。
 
+本文是该基线的历史审计，不代表当前查询 API。替代契约见 [Timeline 属性查询](../../design/timeline-property-query.md)，当前绑定见自动生成的 [branch-services.d.ts](../../../npm/branch-services.d.ts)。
+
 ## 1. 入口
 
 ### 1.1 `Timeline` 服务（`crates/dim-agent-runtime/src/core/timeline.rs`）

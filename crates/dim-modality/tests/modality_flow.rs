@@ -5021,6 +5021,7 @@ exit 1
 
 /// A stub that reads a file beside its plugin directory, outside any grant the
 /// description gives: under confinement the read fails and it exits 9.
+#[cfg(target_os = "macos")]
 fn leaking_stub(directory: &std::path::Path) -> std::path::PathBuf {
     let stub = directory.join("leak.sh");
     write_script(

@@ -120,3 +120,41 @@ async fn loopback_capture_rejects_other_paths_without_consuming_the_callback() {
     }
     accepted.await.unwrap();
 }
+
+#[test]
+fn conversation_windows_keep_atomic_pages_and_their_raw_cursors() {
+    use dim_client::{window::Window, wire::HistoryWindow};
+    let event = |at| json!({"id":format!("event-{at}"),"sequence":at,"create_at":at,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"message"}]}}});
+    let mut window = Window::default();
+    let empty: HistoryWindow = serde_json::from_value(
+        json!({"events":[],"through":302,"nextAfter":302,"nextBefore":302,"done":false}),
+    )
+    .unwrap();
+    assert!(!window.push(empty).unwrap());
+    let page: HistoryWindow = serde_json::from_value(json!({"events":(1..=301).map(event).collect::<Vec<_>>(),"through":302,"nextAfter":301,"nextBefore":1,"done":true})).unwrap();
+    assert!(window.push(page).unwrap());
+    assert_eq!(
+        window.take().len(),
+        301,
+        "one oversized atomic page stays complete"
+    );
+    assert!(window.before.is_none());
+    let mut window = Window::default();
+    let newest: HistoryWindow = serde_json::from_value(json!({"events":(351..=449).map(event).collect::<Vec<_>>(),"through":449,"nextAfter":449,"nextBefore":301,"done":false})).unwrap();
+    assert!(!window.push(newest).unwrap());
+    let older: HistoryWindow = serde_json::from_value(json!({"events":(1..=300).map(event).collect::<Vec<_>>(),"through":449,"nextAfter":300,"nextBefore":1,"done":true})).unwrap();
+    assert!(window.push(older).unwrap());
+    let events = window.take();
+    assert_eq!(events.len(), 99);
+    assert_eq!(events[0].sequence, 351);
+    assert_eq!(
+        window.params("session", "main")["before"],
+        301,
+        "the raw boundary can precede the first visible event"
+    );
+    let mut earlier = Window::earlier(window.before.unwrap(), window.through.unwrap());
+    let page: HistoryWindow = serde_json::from_value(json!({"events":(1..=300).map(event).collect::<Vec<_>>(),"through":449,"nextAfter":300,"nextBefore":1,"done":true})).unwrap();
+    assert!(earlier.push(page).unwrap());
+    assert_eq!(earlier.take().len(), 300);
+    assert!(earlier.before.is_none());
+}

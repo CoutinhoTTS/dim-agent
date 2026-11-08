@@ -609,7 +609,7 @@ async fn unloaded_and_damaged_sessions_are_deleted_by_id() {
     let connection = store.connection();
     connection
         .execute(
-            "UPDATE timeline_events SET body='{' WHERE session_id=?1 AND sequence=1",
+            "UPDATE timeline_events SET body='{}' WHERE session_id=?1 AND sequence=1",
             [&damaged],
         )
         .unwrap();

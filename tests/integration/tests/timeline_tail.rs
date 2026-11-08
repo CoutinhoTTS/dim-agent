@@ -54,6 +54,16 @@ impl Held {
     }
 }
 impl TimelineStore for Held {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        self.memory.query(scope, query, page)
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -132,15 +142,6 @@ impl TimelineStore for Held {
         interpreter: &'a str,
     ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         self.memory.latest_snapshot(key, through, interpreter)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
-        self.memory.query(key, query, from, through)
     }
 }
 
@@ -221,29 +222,19 @@ impl DynPlugin for TailPart {
                 };
                 let published = timeline.sequence();
                 let reply = timeline
-                    .query(TimelineQuery {
-                        scope: TimelineQueryScope::Branch,
-                        include_publishing: true,
-                        from_event: None,
-                        from_sequence: None,
-                        order_by: TimelineQueryOrderBy::Sequence,
-                        direction: TimelineQueryDirection::Ascending,
-                        kinds: Vec::new(),
-                        flags: Vec::new(),
-                        event_id: None,
-                        predicate: None,
-                        limit: std::num::NonZeroU64::new(4096).expect("a limit"),
-                        offset: 0,
-                    })
+                    .query(page(4096, true))
                     .await
                     .expect("the read that adds the tail");
+                let QueryOutput::Events { events } = reply.result else {
+                    panic!("handover selects events");
+                };
                 let mut rebuild = shared.lock().unwrap();
                 rebuild.covered = reply.through;
                 rebuild.published = published;
                 rebuild.read = true;
                 rebuild
                     .processed
-                    .extend(reply.events.iter().map(|event| event.sequence));
+                    .extend(events.iter().map(|row| row.event.sequence));
                 let staged = std::mem::take(&mut rebuild.staged);
                 rebuild.processed.extend(
                     staged
@@ -356,26 +347,35 @@ fn draft(kind: EventKind, id: &str) -> EventDraft {
     EventDraft::from(kind).with_id(id)
 }
 
-/// Two facts of this branch, published or with the branch's committed tail.
-fn page(offset: u64, include_publishing: bool) -> TimelineQuery {
+fn page(limit: u64, include_publishing: bool) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Branch,
         include_publishing,
-        from_event: None,
-        from_sequence: None,
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Ascending,
-        kinds: Vec::new(),
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: std::num::NonZeroU64::new(2).expect("a limit"),
-        offset,
+        from: None,
+        through: None,
+        query: QuerySpec {
+            filter: None,
+            select: QuerySelect::Events,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: std::num::NonZeroU64::new(limit).unwrap(),
+            after: None,
+        }),
     }
 }
 
+fn ids(reply: &TimelineQueryReply) -> Vec<&str> {
+    let QueryOutput::Events { events } = &reply.result else {
+        panic!("the selection returns events");
+    };
+    events.iter().map(|row| row.event.id.as_str()).collect()
+}
+
 #[tokio::test]
-async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
+async fn a_tail_cursor_continues_the_published_page_until_exhaustion() {
     let store = Arc::new(Held::default());
     store
         .create_session("tail", &SessionConfig::default())
@@ -398,72 +398,74 @@ async fn a_tail_page_continues_the_published_page_and_marks_the_end_short() {
         timeline.append(input(id).with_id(id)).unwrap();
     }
     let mut pages = Vec::new();
-    for offset in [0, 2, 4] {
-        let reply = timeline.query(page(offset, true)).await.unwrap();
+    let mut query = page(2, true);
+    loop {
+        let reply = timeline.query(query.clone()).await.unwrap();
         assert_eq!(reply.through, 5);
         pages.push(
-            reply
-                .events
-                .iter()
-                .map(|event| event.id.clone())
+            ids(&reply)
+                .into_iter()
+                .map(str::to_owned)
                 .collect::<Vec<_>>(),
         );
+        query.through = Some(reply.through);
+        query.page.as_mut().unwrap().after = reply.next;
+        if query.page.as_ref().unwrap().after.is_none() {
+            break;
+        }
     }
+    assert_eq!(pages, vec![vec!["1", "2"], vec!["3", "4"], vec!["5"]]);
+    let mut query = page(2, true);
+    query.query.order_by = vec![QueryOrder {
+        key: QueryOrderKey::Position,
+        direction: TimelineQueryDirection::Descending,
+    }];
+    let newest = timeline.query(query.clone()).await.unwrap();
+    assert_eq!(ids(&newest), ["5", "4"]);
+    query.through = Some(newest.through);
+    query.page.as_mut().unwrap().after = newest.next;
+    let descending = timeline.query(query).await.unwrap();
     assert_eq!(
-        pages,
-        vec![vec!["1", "2"], vec!["3", "4"], vec!["5"]],
-        "the tail continues the published page, and a short page ends the selection"
-    );
-    let descending = timeline
-        .query(TimelineQuery {
-            direction: TimelineQueryDirection::Descending,
-            offset: 2,
-            ..page(0, true)
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        descending
-            .events
-            .iter()
-            .map(|event| event.id.as_str())
-            .collect::<Vec<_>>(),
+        ids(&descending),
         ["3", "2"],
-        "a descending page starts in the tail and continues into the published facts"
+        "a descending cursor moves from the tail into published facts"
     );
     let started = timeline
         .query(TimelineQuery {
-            from_sequence: Some(4),
-            limit: std::num::NonZeroU64::new(2).expect("a limit"),
-            ..page(0, true)
+            from: Some(TimelinePosition {
+                branch_id: "main".into(),
+                sequence: 4,
+            }),
+            ..page(2, true)
         })
         .await
         .unwrap();
+    assert_eq!(ids(&started), ["4", "5"]);
+    let mut lookup = page(1, true);
+    lookup.query.filter = Some(QueryFilter::Compare {
+        left: QueryOperand::Field { path: "id".into() },
+        comparison: QueryComparison::Eq,
+        right: QueryOperand::Value { value: "5".into() },
+    });
+    let found = timeline.query(lookup).await.unwrap();
+    let QueryOutput::Events { events } = found.result else {
+        panic!("the identity query selects events");
+    };
     assert_eq!(
-        started
-            .events
-            .iter()
-            .map(|event| event.id.as_str())
-            .collect::<Vec<_>>(),
-        ["4", "5"],
-        "a start in the tail begins the read there"
+        events.len(),
+        1,
+        "the unpublished identity is found in the tail"
     );
     let from_tail_event = timeline
         .query(TimelineQuery {
-            from_event: Some("5".into()),
-            ..page(0, true)
+            from: Some(events[0].position.clone()),
+            through: Some(found.through),
+            ..page(2, true)
         })
         .await
         .unwrap();
-    assert_eq!(
-        from_tail_event
-            .events
-            .iter()
-            .map(|event| event.id.as_str())
-            .collect::<Vec<_>>(),
-        ["5"],
-        "an event id the published head does not hold is found in the tail"
-    );
+    assert_eq!(ids(&from_tail_event), ["5"]);
+    store.release();
 }
 
 #[tokio::test]
@@ -491,17 +493,7 @@ async fn one_selection_reads_to_either_bound() {
     }
     let published = timeline.sequence();
     let committed = timeline.committed();
-    let selection = TimelineQuery {
-        limit: std::num::NonZeroU64::new(16).expect("a limit"),
-        ..page(0, false)
-    };
-    let ids = |reply: &TimelineQueryReply| {
-        reply
-            .events
-            .iter()
-            .map(|event| event.id.clone())
-            .collect::<Vec<_>>()
-    };
+    let selection = page(16, false);
     let at_published = timeline.query(selection.clone()).await.unwrap();
     assert_eq!(ids(&at_published), vec!["1", "2", "3"]);
     assert_eq!(
@@ -527,110 +519,8 @@ async fn one_selection_reads_to_either_bound() {
     store.release();
 }
 
-/// The kinds each rebuilding part folds ([audit §2.3](../../../docs/design/timeline-read-entries.md#23-what-the-eleven-rebuilds-fold)):
-/// what its opening reads, which is not always the keys it consumes live.
-const REBUILDS: &[&[&str]] = &[
-    &["permission/changed"],
-    &["turn/start", "turn/end"],
-    &["approval/request", "approval/respond", "approval/cancelled"],
-    &[
-        "step/tool-call",
-        "step/tool-result",
-        "stop/interrupt",
-        "turn/start",
-        "turn/end",
-    ],
-    &[
-        "model/call",
-        "step/tool-use-start",
-        "step/tool-use",
-        "step/model-output-end",
-        "step/model-start",
-        "input/applied",
-        "stop/interrupt",
-        "turn/start",
-        "turn/end",
-    ],
-    &[
-        "context/prepare",
-        "model/call",
-        "step/model-output-end",
-        "context/compaction-start",
-        "context/compaction",
-        "stop/interrupt",
-        "step/model-start",
-        "input/applied",
-        "turn/start",
-        "turn/end",
-    ],
-    &[
-        "exec/started",
-        "exec/ended",
-        "stop/interrupt",
-        "input/message",
-    ],
-    &[
-        "input/message",
-        "input/consumed",
-        "input/withdraw",
-        "input/applied",
-        "input/deleted",
-        "turn/start",
-        "turn/end",
-        "stop/interrupt",
-    ],
-    &[
-        "branch/create",
-        "branch/create-failed",
-        "branch/ended",
-        "branch/end",
-        "input/message",
-        "input/applied",
-        "input/consumed",
-        "input/deleted",
-        "stop/interrupt",
-        "turn/end",
-        "step/tool-use",
-        "step/tool-result",
-    ],
-    &[
-        "stop/interrupt",
-        "input/message",
-        "input/consumed",
-        "input/deleted",
-        "turn/start",
-        "turn/end",
-        "step/tool-call",
-        "step/tool-result",
-        "context/configured",
-        "approval/request",
-        "approval/respond",
-        "approval/cancelled",
-    ],
-    &[
-        "input/applied",
-        "input/consumed",
-        "context/compact",
-        "context/compaction-start",
-        "context/compaction",
-        "stop/interrupt",
-        "turn/start",
-        "turn/end",
-        "step/model-start",
-        "context/prepare",
-        "step/tool-use-start",
-        "step/tool-use",
-        "step/model-output-end",
-        "step/tool-call",
-        "step/tool-result",
-    ],
-];
-
-/// The old replay read the branch through the committed head and folded every
-/// event; the new read selects the kinds a part folds and adds the unpublished
-/// tail. Both must hand a rebuild the same facts of those kinds, in order.
 #[tokio::test]
-async fn every_rebuild_selection_folds_what_the_replay_folded() {
+async fn property_pages_include_matching_unpublished_facts_at_the_same_cut() {
     let store = Arc::new(Held::default());
     store
         .create_session("fold", &SessionConfig::default())
@@ -705,17 +595,63 @@ async fn every_rebuild_selection_folds_what_the_replay_folded() {
     )
     .await
     .unwrap();
-    assert_eq!(replay.len(), 7, "the old replay read the whole branch");
-    for kinds in REBUILDS {
+    assert_eq!(
+        replay.len(),
+        7,
+        "the fixture contains published and unpublished facts"
+    );
+    for kinds in [
+        &["input/message"][..],
+        &["turn/end"],
+        &["input/message", "turn/start", "stop/interrupt"],
+        &["approval/request"],
+    ] {
         let expected: Vec<_> = replay
             .iter()
             .filter(|event| kinds.contains(&event.kind.key()))
             .map(|event| event.id.clone())
             .collect();
-        let reply = rebuild_facts(&timeline, kinds).await.unwrap();
-        let folded: Vec<_> = reply.events.iter().map(|event| event.id.clone()).collect();
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: kinds.iter().map(|kind| (*kind).into()).collect(),
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["id".into()],
+                },
+                group_by: vec![],
+                pick: None,
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: std::num::NonZeroU64::new(2).unwrap(),
+                after: None,
+            }),
+        };
+        let mut folded = Vec::new();
+        loop {
+            let reply = timeline.query(query.clone()).await.unwrap();
+            assert_eq!(reply.through, through, "{kinds:?}");
+            let QueryOutput::Rows { rows } = reply.result else {
+                panic!("selected id fields")
+            };
+            for row in rows {
+                let [QueryValue::Value { value }] = row.values.as_slice() else {
+                    panic!("an event id")
+                };
+                folded.push(value.as_str().unwrap().to_owned());
+            }
+            let Some(next) = reply.next else { break };
+            query.page.as_mut().unwrap().after = Some(next);
+        }
         assert_eq!(folded, expected, "{kinds:?}");
-        assert_eq!(reply.through, through, "{kinds:?}");
         for unpublished in ["5", "6", "7"] {
             let kind = replay
                 .iter()

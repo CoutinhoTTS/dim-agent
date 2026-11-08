@@ -47,7 +47,7 @@ Contracts are given in language-neutral form; the Rust form is [Appendix G](#app
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `QuestionsPlugin` | Session | `S:SessionConfig`, `S:ToolRegistry`, `S:SessionMethods` | Registers `ask_user` with `toolRegistry` and `session.question` (`session.question.respond`) with `sessionMethods` |
+| `QuestionsPlugin` | Session | `S:SessionConfig`, `S:ToolRegistry`, `S:SessionMethods`, `S:TreeCommands` | Registers `ask_user` with `toolRegistry` and `session.question` (`session.question.respond`, `session.question.pending`) with `sessionMethods` |
 
 Installation: the part is installed whenever the plugin is enabled; installation never reads `SessionConfig.interactive` ([session access §9.4](../contracts/session-access.md#94-optional-parts-per-enabled-plugin)), so every Session that mounts `ask_user` declares it whatever its `interactive` (a Session without a mount list mounts it, one with a list when the list names it), and a fork keeps the same tool set and prompt prefix.
 
@@ -62,7 +62,7 @@ Contracts depended on, all implemented on `main`:
 | `step/tool-call` and `step/tool-result` data contracts (both carry `request_id`) and their `session.event` forwarding, every branch, v2 and v3 ([tree_protocol.rs](../../../crates/dim-app-server/src/tree_protocol.rs)); `session.history` per branch; `session.stop {sessionId, branchId}` | Timeline, Rpc | Implemented |
 | Permission risk category `session` ([permission.rs](../../../crates/dim-agent-capabilities/src/permission.rs)) | Permission | Implemented |
 
-Contracts defined here: the `ask_user` tool (declaration, input schema, result text), `session.question.respond` and its errors, and the client rule that derives a pending question from history.
+Contracts defined here: the `ask_user` tool (declaration, input schema, result text), `session.question.respond`, `session.question.pending`, their errors, and the pending-question rule.
 
 ## 2. Data and state
 
@@ -87,7 +87,7 @@ What the Timeline already holds, and why nothing else is written:
 | Answer survives a crash before the batch settles | — | After a restart the turn is already `Failed` and the batch reload-settled ([single-tree](../../architecture/rust-agent/single-tree.md) reload rules); a durable answer would be read by nothing. The same window exists for every tool |
 | Interrupt, close, reload, restart outcome | ToolExecutor's `step/tool-result` | Owned by ToolExecutor |
 
-**Event declaration** ([ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)): Questions writes no events and its state and decisions depend on no event. It reads no history and has no Dispatcher subscription; ToolExecutor's cancel token is a service contract, not an event read. Clients depend on `step/tool-call` and `step/tool-result` through the pending-question rule (§3.2), which is a client contract, not a capability's.
+**Event declaration** ([ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2)): Questions writes no events and has no Dispatcher subscription. The pending read depends on `step/tool-call` and `step/tool-result`. The waiters still depend only on their tool execution and cancellation contracts; the read neither rebuilds nor changes them.
 
 **Dynamic events ([#2](https://github.com/arcships/dim/issues/2)):** decided on 2026-10-20 ([ADR 001](../../adr/001-harness-foundation.md#events-and-ownership-issue-2), [#233](https://github.com/arcships/dim/pull/233)). Questions writes no events, so it needs neither an extension event type nor the future dynamic protocol; the previous draft's R1 stays withdrawn.
 
@@ -118,7 +118,7 @@ sequenceDiagram
 
 ### 3.2 Clients, attach and several clients
 
-Pending questions are derived, not replayed: a client attaches (listener first), reads `session.history` per branch through head, and treats each `ask_user` call of a `step/tool-call` without a matching `step/tool-result` as pending; later events arrive live and merge by event identity. No Questions-specific replay or notification is added to Rpc, unlike `approval.request`.
+A client attaches first, then reads `session.question.pending` separately from the transcript window. It holds live events while the fixed-cut read is in flight, installs its question batches, then consumes held events above that cutoff. A batch result that arrives during loading closes the corresponding questions; old transcript events cannot reopen them. No Questions-specific notification is added to Rpc. A failed read leaves the inventory unavailable and retryable, not empty.
 
 ```text
 history + live session.event, one branch
@@ -136,7 +136,7 @@ A client keeps the call's `requestId` with its prompt and sends it back with the
 
 ### 3.4 Client protocol
 
-No new notification and one new Session method. All payloads are JSON-RPC over the existing connection.
+No new notification; both methods use the Session method registry. All payloads are JSON-RPC over the existing connection.
 
 The question arrives as the existing `session.event` notice carrying the `step/tool-call` event in its existing wire form (shown abbreviated):
 
@@ -159,6 +159,34 @@ The client answers with `session.question.respond`:
 ```
 
 `requestId` is the `request_id` of the `step/tool-call` that holds the call. A decline sends `"declined": true` and no `answers`. An error is the existing `MethodError` form with `error.data.appError` (A.3), for example `question_not_pending`. The prompt closes on the `session.event` notice of the `step/tool-result` whose `call_event_id` is `e41`; its `results[]` entry for `c1` carries the `ToolResult` (`content`, `structuredContent`, `isError`). `session.methods` lists `session.question.respond` in every Session where Questions is enabled.
+
+### 3.5 Pending-question read
+
+`session.question.pending {sessionId, branchId, through?, after?}` returns
+`{branchId, through, batches, next}`. `through` is the branch's published cutoff;
+every continuation supplies that same cutoff and the opaque `next` cursor as
+`after`. A page selects at most 128 unresolved tool batches in ascending branch
+position. It reads only that branch, not its inherited prefix. `next: null` ends
+the inventory at this cutoff.
+
+Each batch contains `eventId` (the `step/tool-call` identity), `sequence`,
+`requestId` and `calls` (only its `ask_user` calls, using the existing ToolCall
+shape, with complete input). Clients retain those batch identities when merging
+live results; call ids alone are not unique. A response accepted before the batch
+result commits does not remove the batch from this read: §2 and A12 define
+pending by the terminal fact, not by the private waiter table.
+
+The owner queries `step/tool-call` rows that contain an `ask_user` call and have
+no `step/tool-result` naming their event id. The first query selects identities
+and call names only. For each selected batch it reads the exact array positions
+of its question calls at the same cutoff; arguments of other tools are not read.
+The operation retains one page, has no history cache, and writes no facts.
+The query plan and indexes must bound database work as well as returned bodies;
+a small response alone is not performance acceptance.
+
+Unknown branches, invalid cutoffs or continuations, reload and storage errors use
+the existing facade/method errors. A continuation without its original cutoff is
+invalid. Cancellation releases the read without changing questions or waiters.
 
 ## 4. Timing and conflicts
 
@@ -257,13 +285,13 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 No business meaning in core | Timeline, Dispatcher, ToolExecutor and Rpc are unchanged and have no Questions case; Rpc dispatches the method through `sessionMethods`. |
 | §4.5 Atomic batches, ordered dispatch | Questions writes and consumes no events. The answer and the other results of its batch commit together in ToolExecutor's single `step/tool-result`. |
 | §4.6 Context only from handed-off events | Answers reach the model only through `step/tool-result` (AGENTS rule 10). |
-| §4.7 Public events and services only | Questions reacts only to the cancel token of its own call (the tool contract) and reads `SessionConfig`; it reads no other plugin's state. |
+| §4.7 Public events and services only | Questions reads its configuration and the public tool-call/result facts through the branch facade. It reads no private owner state. |
 | §4.8 Infrastructure unchanged | No change to Timeline, Dispatcher, envelope, assembly or facades; no requirement raised (§9). |
 | §4.9 Only facts later decisions use | No event is added; every omitted fact is justified in §2. Display before the batch settles would use a Session broadcast notice, not the Timeline (F1). |
 | §1 Capability and App Server boundary | The part is a Capability in its own crate; Rpc and the CLI hold no Questions logic beyond the client contract. |
 | ADR 002 D1 Scope | Tool, method and waiters are Session services; a waiter is the `ask_user` handler's own call, which the Session-scoped registered tool runs, so it has the same owner. Branch lifecycle reaches it through ToolExecutor's cancel token. |
 | ADR 002 D2 No wiring modules | Questions registers its tool with ToolRegistry and its namespace with `sessionMethods`; there is no adapter part. |
-| ADR 002 D3 Scope dependencies | The part depends only on the Session's `SessionConfig`; nothing core depends on Questions; a reload settles waiting calls, which is accepted. |
+| ADR 002 D3 Scope dependencies | The part declares its Session configuration, registries and branch facade provider; nothing core depends on Questions; a reload settles waiting calls, which is accepted. |
 | ADR 002 D4 Configuration | Not applicable: Questions has no configuration. `interactive` is Session creation data read at call time, not configuration of Questions. |
 | ADR 002 D5 Language-neutral contracts | Tool and method are given in neutral form (Appendix A); Appendix G is one binding. |
 | ADR 001 event declaration | Given in §2: writes none, depends on none. |
@@ -429,7 +457,7 @@ The CLI handles questions of every branch of the attached Session (A9). It reads
 | `Ctrl+C` while prompting | `session.stop` (turn); the call ends cancelled; exit code 130 as today |
 | EOF | `session.stop`; exit code 130 |
 | `exec` without terminal input and a question arrives | Print `Interactive answer required; stopping. Rerun in a terminal to answer it`, `session.stop`, exit code 3 (A8) |
-| Attach or resume | Listener first, then `session.history` per branch; derive pending calls, each named by `(branchId, requestId, callId)`; merge by event identity |
+| Attach or resume | Listener first, then `session.question.pending` per branch; merge held events above its fixed cutoff by batch and call identity |
 
 ## Appendix B. Full conflict table
 
@@ -484,7 +512,7 @@ Flow tests through RPC, tool calls and events:
 4. Two concurrent `respond`: one `{}`, one `question_not_pending`.
 5. Two `ask_user` plus a slow tool in one batch: answers held until the single `step/tool-result`; a respond after it returns `question_not_pending`.
 6. Questions part reload, and a crash or forced shutdown, while waiting: the batch is reload-settled, the turn fails, nothing is re-asked.
-7. Detach and re-attach: history yields the pending call; answering after re-attach works; a question on a child branch is answered with its `branchId`.
+7. Detach and re-attach: the pending read yields the old call even outside the transcript window; answering after re-attach works; a question on a child branch is answered with its `branchId`.
 8. The Timeline of a full ask-and-answer contains no Questions event.
 9. CLI: rendering, deferral, `Ctrl+C`, EOF, `exec` without terminal input exit code 3, `question_not_pending` resend, a child-branch question.
 10. Call ids reused across turns, two clients: client A answers turn 1's `c1`; turn 2 asks a different question, also as `c1`. Client B's late answer and late decline to turn 1's call (its `requestId`) return `question_not_pending`; turn 2's call keeps waiting, accepts its own answer, and the model reads that answer as turn 2's tool result.

@@ -769,6 +769,28 @@ impl HoldingStore {
 }
 
 impl TimelineStore for HoldingStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        let hold = self.held(&scope.key.branch_id);
+        self.reads.lock().unwrap().extend(
+            scope
+                .segments
+                .iter()
+                .map(|segment| (segment.branch_id.clone(), segment.from..=segment.through)),
+        );
+        Box::pin(async move {
+            if hold {
+                self.enter_held_read().await;
+            }
+            self.memory.query(scope, query, page).await
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -848,24 +870,5 @@ impl TimelineStore for HoldingStore {
         sequence: u64,
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
         self.memory.trace(key, sequence)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        let hold = self.held(&key.branch_id);
-        self.reads
-            .lock()
-            .unwrap()
-            .push((key.branch_id.clone(), from..=through));
-        Box::pin(async move {
-            if hold {
-                self.enter_held_read().await;
-            }
-            self.memory.query(key, query, from, through).await
-        })
     }
 }

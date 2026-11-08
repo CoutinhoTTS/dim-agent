@@ -15,21 +15,22 @@ struct TextPosition {
 pub struct Display {
     pub mcp_auth_required: HashSet<String>,
     pub model: Option<Configuration>,
-    /// The goal of the branch whose events this display folds.
-    pub goal: crate::goal::Fold,
+    pub model_through: u64,
     /// Local sequence of the last `permission/changed` of `main` already
     /// reported, by a record or by the command that wrote it.
     pub permission_seen: u64,
     pub json: bool,
     pub cursor: u64,
+    pub history_before: Option<u64>,
+    pub history_through: u64,
     pub failed: bool,
     pub muted: bool,
     interactive: bool,
     text_open: bool,
     requests: HashMap<String, TextPosition>,
-    tools: HashMap<String, String>,
+    tools: HashMap<(String, String), String>,
     finished: HashSet<String>,
-    completed_tools: HashSet<String>,
+    completed_tools: HashSet<(String, String)>,
     /// Requests that already showed output, for the incomplete prefix.
     showed: HashSet<String>,
     /// The `error` of a model failure already shown this turn: the turn's
@@ -45,10 +46,12 @@ impl Display {
         Self {
             mcp_auth_required: HashSet::new(),
             model: None,
-            goal: crate::goal::Fold::default(),
+            model_through: 0,
             permission_seen: 0,
             json,
             cursor: 0,
+            history_before: None,
+            history_through: 0,
             failed: false,
             muted: false,
             interactive,
@@ -158,15 +161,17 @@ impl Display {
         )
     }
     pub fn event(&mut self, event: Event, history: bool) -> Result<()> {
+        if let EventContent::Configuration(configuration) = &event.content
+            && event.sequence > self.model_through
+        {
+            self.model = Some(configuration.clone());
+            self.model_through = event.sequence;
+        }
         if event.sequence <= self.cursor {
             return Ok(());
         }
         self.cursor = event.sequence;
-        self.goal.apply(&event);
         match event.content {
-            EventContent::Configuration(data) => {
-                self.model = Some(data);
-            }
             EventContent::Input(data) if history => {
                 if let Some(user) = data.user {
                     let text = user
@@ -194,17 +199,19 @@ impl Display {
                 self.text(&data.delta.chars().skip(skip as usize).collect::<String>())?;
             }
             EventContent::ToolUse(data) => {
-                self.tools
-                    .insert(data.call.id.clone(), data.call.name.clone());
+                self.tools.insert(
+                    (data.request_id.clone(), data.call.id.clone()),
+                    data.call.name.clone(),
+                );
                 self.showed.insert(data.request_id.clone());
                 self.record(&format!("[tool] {}", data.call.name))?;
             }
             EventContent::ToolCompleted(data) => {
-                self.tool_result(data.call_id, data.result.is_error)?;
+                self.tool_result(&data.request_id, data.call_id, data.result.is_error)?;
             }
             EventContent::ToolResult(data) => {
                 for result in data.results {
-                    self.tool_result(result.call_id, result.result.is_error)?;
+                    self.tool_result(&data.request_id, result.call_id, result.result.is_error)?;
                 }
             }
             EventContent::ModelEnd(data) => {
@@ -266,11 +273,17 @@ impl Display {
         }
         Ok(())
     }
-    fn tool_result(&mut self, call_id: String, is_error: Option<bool>) -> Result<()> {
-        if !self.completed_tools.insert(call_id.clone()) {
+    fn tool_result(
+        &mut self,
+        request_id: &str,
+        call_id: String,
+        is_error: Option<bool>,
+    ) -> Result<()> {
+        let identity = (request_id.to_owned(), call_id.clone());
+        if !self.completed_tools.insert(identity.clone()) {
             return Ok(());
         }
-        let name = self.tools.remove(&call_id).unwrap_or(call_id);
+        let name = self.tools.remove(&identity).unwrap_or(call_id);
         self.record(&format!(
             "[{}] {name}",
             if is_error == Some(true) {

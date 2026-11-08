@@ -151,3 +151,13 @@ Content mappings are in plan §4.3; event projections are in §7. The existing C
 ### A.5 Client labels
 
 `session/new` records the Session's creation origin as `acp` ([Session classification](../appserver/session-classification.md)), so a picker can label it and its own "Show ACP sessions" preference can hide it. The gateway sends the origin only when the daemon advertises `session.create.origin`; it reads no connection label and keeps no private map, and a later attachment never changes the stored origin. The ordinary Session remains visible to other native clients. Earlier gateways marked nothing, and their Sessions read as `client` or `unknown`.
+
+### Bounded history metadata
+
+Initial load and resume follow the [client window contract](../clients.md#opening-a-conversation-with-a-bounded-window).
+When a prefix is omitted, their response includes
+`_meta["dim/history"] = { through, before, complete: false }`.
+`through` fixes the window head and `before` is its exclusive backward cursor.
+The client displays “earlier content not loaded”; an omitted prefix is not an empty history.
+The explicit `_lody/session/history/read` operation remains a full-history request.
+Configuration refresh reads the attach record and configuration owners without rereading the transcript.

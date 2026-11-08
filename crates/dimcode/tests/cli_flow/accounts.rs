@@ -31,10 +31,7 @@ fn described(id: &str, name: &str, namespace: &str, methods: &[&str], signed_in:
 }
 
 fn hello(wire: &mut Wire, extra: &[&str]) {
-    let hello = wire.read("hello");
-    let mut features = vec!["session.create", "session.history", "provider.list"];
-    features.extend(extra);
-    wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":features}));
+    wire.hello(extra);
 }
 
 #[test]

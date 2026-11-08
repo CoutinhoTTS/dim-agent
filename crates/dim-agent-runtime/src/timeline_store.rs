@@ -1,6 +1,4 @@
-use crate::{
-    BoxFuture, BranchRecord, Result, SessionConfig, TimelineQuery, TimelineQueryPage, TimelineTrace,
-};
+use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
 use dim_agent_types::{AgentEvent, RecoverySnapshot};
 use std::{ops::RangeInclusive, sync::Arc};
 
@@ -9,6 +7,44 @@ use std::{ops::RangeInclusive, sync::Arc};
 pub struct TimelineKey {
     pub session_id: String,
     pub branch_id: String,
+}
+
+/// A complete logical scope, captured by the Timeline before storage I/O.
+#[derive(Debug, Clone)]
+pub struct TimelineReadScope {
+    pub key: TimelineKey,
+    pub through: u64,
+    pub segments: Vec<TimelineReadSegment>,
+}
+
+impl TimelineReadScope {
+    /// Binds continuation data to logical facts, independently of tail persistence progress.
+    pub fn query_binding(&self, query: &crate::QuerySpec) -> Result<String> {
+        let intervals: Vec<_> = self
+            .segments
+            .iter()
+            .map(|segment| (&segment.branch_id, segment.from, segment.through))
+            .collect();
+        serde_json::to_string(&(
+            &self.key.session_id,
+            &self.key.branch_id,
+            self.through,
+            intervals,
+            query,
+        ))
+        .map_err(|error| crate::AgentError::InvalidInput(error.to_string()))
+    }
+}
+
+/// One inclusive branch interval. Stored events stop at `stored_through`;
+/// the tail supplies the remaining committed events without overlap.
+#[derive(Debug, Clone)]
+pub struct TimelineReadSegment {
+    pub branch_id: String,
+    pub from: u64,
+    pub through: u64,
+    pub stored_through: u64,
+    pub tail: Vec<Arc<AgentEvent>>,
 }
 
 /// One stored event and its atomic publication boundary.
@@ -39,6 +75,14 @@ pub type PublishCallback = Box<dyn FnOnce(Result<()>) + Send + 'static>;
 /// Each Session id has at most one live load per store; callers serialize
 /// closing and restoring that id, including when Agents share a store.
 pub trait TimelineStore: Send + Sync + 'static {
+    /// Computes a validated query over the complete fixed scope and its disjoint tail.
+    fn query<'a>(
+        &'a self,
+        scope: &'a TimelineReadScope,
+        query: &'a crate::QuerySpec,
+        page: Option<&'a crate::QueryPage>,
+    ) -> BoxFuture<'a, Result<crate::QueryResult>>;
+
     fn create_session<'a>(
         &'a self,
         session_id: &'a str,
@@ -132,33 +176,6 @@ pub trait TimelineStore: Send + Sync + 'static {
             Ok(records)
         })
     }
-    /// One per-branch read for [`TimelineQuery`] (ADR 019, plugin contract
-    /// §5.4): applies the read point, direction, kinds, flags, event id,
-    /// predicate, limit and offset to `key`'s branch and returns up to `limit`
-    /// matching facts, ordered by sequence in the query's direction, each with
-    /// its position.
-    ///
-    /// `query.scope` must be `TimelineQueryScope::Branch`. The Timeline
-    /// service composes the chain by reading each ancestor and then the
-    /// queried branch with this method, carrying the offset the earlier
-    /// segment did not use. Paging is skipping: `offset` matching facts are
-    /// passed over before the page, so a page shorter than the limit means the
-    /// selection is exhausted, and a page may end inside an atomic batch.
-    /// `skipped` is the number of matching facts the read passed over, at most
-    /// `offset`, so a caller can carry the rest into its next segment. The
-    /// query's `bound` is the service's: the cut arrives as `from` and
-    /// `through`.
-    ///
-    /// A read point past the branch's published head and any other scope are
-    /// invalid input. A kind, flag, id or data path the store does not know
-    /// selects no rows; it is not an error.
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<TimelineQueryPage>>;
     /// Decodes all segments in one read scope, sharing content across branches.
     fn read_segments<'a>(
         &'a self,

@@ -39,7 +39,7 @@ Each one maps onto Agents' existing Session creation and admission (`AgentIndex`
   `SessionConfig.permission_policy`.
 - **Input.** `input` writes `input/message` through `Session::input` and replies once the event is published. The
   branch accepts each `submissionId` once: a resubmission writes nothing and replies the first input's receipt.
-  `lookup` by `submissionId` reads the same index without writing.
+  `lookup` by `submissionId` queries the same input identities without writing.
 - **Exists.** `exists` answers whether a Session id still exists: `false` means it was deleted, and a closed,
   restorable Session is `true`. It never acquires or restores a Session, so it has no effect on idle unload and
   writes nothing.
@@ -242,10 +242,11 @@ Agents takes the branch's publication watch and calls `Session::input`, which va
 | The index unloads after admission | The admitted task's own outcome |
 
 **One input per `submissionId`.** The branch accepts each `submissionId` once (A.2). `Session::input` hands the
-input to the branch's Timeline, which checks the id and appends under its commit lock, so of concurrent inputs with one
-id exactly one is written. The check reads an index of the branch's own inputs by `submission_id`: the branch's build
-fills it from its restored history (the same copy of its own events the opening reads for its capabilities), and every
-later commit adds to it. A resubmission writes nothing; `Session::input` returns the committed input, and `input`
+input to the branch's Timeline. It queries at most two matching input identities at a fixed committed boundary,
+including accepted inputs awaiting publication, then acquires the commit lock. If the boundary changed, it releases
+the lock and repeats the query; otherwise it returns the existing input or commits the new one under that lock.
+Concurrent submissions therefore write once. Reads hold no commit lock and build no historical submission index
+([property query design](../timeline-property-query.md#23-不需要完整事件的业务查询)). A resubmission writes nothing; `Session::input` returns the committed input, and `input`
 replies its `{inputId, sequence}` once it is published, even while the first write is still unpublished. The id stays
 taken after the input is consumed or withdrawn. An id that several inputs share, written before branches accepted each
 id once, fails `ambiguous` and writes nothing. After `publication_unknown`, `reloading` or a lost reply, the caller
@@ -274,11 +275,11 @@ and no row check.
 `{sessionId, branchId, submissionId}` → `{status: "accepted", inputId, sequence}` or `{status: "unknown"}`; error
 `ambiguous`.
 
-`Session::lookup` reads the branch's index of `submission_id`s (§6.2). For an input it holds, it waits until that
-input is published and replies it; a branch that closes or fails first ends the call with that error. Otherwise it
-replies `unknown`. Every input committed before the call is in the index, so `unknown` is final for every write that
-returned before the lookup began, without waiting for other pending events or scanning pages. After a restart it is
-also correct: the unpublished tail was lost with the process, and the index is rebuilt from the restored history.
+`Session::lookup` queries the branch's input identities by `submission_id` at its committed boundary (§6.2).
+For a matching input it waits until that input is published and replies it; a branch that closes or fails first ends
+the call with that error. Otherwise it replies `unknown`. The query includes every input committed before the call,
+so `unknown` is final for every write that returned before lookup began, without waiting for unrelated publication.
+After a restart the same query reads restored facts; no submission index is rebuilt in memory.
 `ambiguous` answers only an id with several inputs written before branches accepted each id once. Rpc's
 `session.input_lookup` calls the same method, and its boundary keeps parsing its own parameters. The identity is a
 field of the input itself; no other record holds it ([below](#where-the-submission-identity-lives)).
@@ -341,14 +342,11 @@ Keeping it in the event meets the constraint #32 set, and needs no new mechanism
 | A separate event in the input's batch | A new event that carries the id | It is still in the Timeline, and adds an event where a field is enough (rule 9) |
 | The id in the input's raw blocks | The writer puts the id in its marker block, and `input/message` loses the field | Lookup would have to parse raw blocks, which [session access A.2](../contracts/session-access.md#a2-source-input-conventions) reserves to the producing plugin. Rpc input has no marker block, and the event format still changes |
 | The caller chooses the event id | The Timeline accepts a caller's id for `input/message` | The Timeline allocates ids. Ids are unique within a Session, so a repeated id would be rejected instead of replying the first input's receipt |
-| An index derived from the event body | An expression index on `json_extract(body, '$.record.event.data.submission_id')` over `input/message` rows, as `timeline_tool_use_starts` does. The SQL changes, so it needs its own format decision | Not needed now: the branch builds its in-memory index from the history it already reads when it opens. It is the reopen path if that read becomes costly, and the field stays in the event |
 
-Revisit when any of these becomes true:
+Submission lookup uses the storage-owned [v35 submission identity index](native-storage-format.md#v35-submission-identity-index). The identity stays in the event; the index is derived state.
 
-1. Opening a long branch costs too much, as measured locally, once it no longer reads its whole own history. Add the
-   derived index above; the field stays where it is.
-2. Committed events can be removed (retention or truncation). `unknown` would then no longer mean "never written", and
-   a removed id could be accepted again, so that design must say what survives the removal.
+Revisit if committed events can be removed (retention or truncation). `unknown` would then no longer mean "never written", and
+a removed id could be accepted again, so that design must say what survives the removal.
 
 ### 6.4 idle
 

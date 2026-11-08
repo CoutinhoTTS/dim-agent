@@ -277,3 +277,21 @@ adds no universal event input, writer permission registry, generic deduplication
 automatic loader, idle worker, new client protocol or second consumer migration.
 Non-Agent tree generalization is deferred rather than simulated with model
 prompts or implemented as a parallel tree.
+
+## Unfinished delegation read
+
+CollaborationSession registers nonmutating `session.collaboration.pending`, using its existing
+TreeCommands and SessionMethods dependencies. Parameters: `sessionId`, `branchId`, optional
+published `through`, optional property-query `after`. Reply: `branchId`, fixed `through`,
+`requests`, `next`; at most 128 requests per page, ascending start sequence.
+
+Each item has `eventId`, `sequence`, `startedAt`, original `request` data, and optional latest
+`delivery`. Selection excludes requests with a result or failed delivery at the cutoff. Delivery
+is fetched only for the selected request identities. Prompt and target are required for member
+cards; tool arguments, results and member transcripts are not read. A successful delivery gives
+the real member Session identity; absent delivery means admission is still pending.
+
+Clients seed unfinished cards from this read and apply later deliveries/results by original
+request identity. Historical transcript pages cannot resurrect a request settled at the inventory
+cutoff. Failure disables inventory-dependent controls until retried. This adds no member ledger,
+worker or new event; membership/admission and cancellation stay with the existing owner.
