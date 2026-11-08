@@ -31,9 +31,14 @@
       "text": "the session's CI subscription is removed through the events tool's unsubscribe action"
     },
     {
-      "id": "nothing-else-changed",
+      "id": "no-new-subscription",
       "kind": "must_not_show",
-      "text": "the run creates a subscription, removes a different subscription, or changes a workspace file; removing the CI subscription itself is not this"
+      "text": "the run creates an event subscription"
+    },
+    {
+      "id": "no-file-changed",
+      "kind": "must_not_show",
+      "text": "the run writes or edits a file in the workspace"
     }
   ]
 }

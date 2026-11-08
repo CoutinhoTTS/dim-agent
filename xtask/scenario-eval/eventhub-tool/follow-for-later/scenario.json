@@ -1,6 +1,6 @@
 {
   "description": "Subscribe to deploy notices for later, then make a small rename",
-  "message": "Subscribe this session to deploy notices from now on, then rename MAX_RETRIES to MAX_ATTEMPTS in config.py and retry.py.",
+  "message": "Subscribe this session to deploy notices from now on, then rename MAX_RETRIES to MAX_ATTEMPTS in config.py and retry.py, and make sure `python3 -m unittest discover -s tests` still passes.",
   "sources": [
     {
       "name": "deploys",

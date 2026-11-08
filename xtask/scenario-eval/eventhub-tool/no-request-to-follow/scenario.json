@@ -1,6 +1,6 @@
 {
   "description": "A small fix, with two sources declared and no request to follow either",
-  "message": "Fix capitalize_words in capitalize.py so it capitalizes the first letter of each word and leaves the rest of each word unchanged.",
+  "message": "Fix capitalize_words in capitalize.py so each word starts with a capital letter and the rest of the word is lowercase, and make `python3 -m unittest discover -s tests` pass.",
   "sources": [
     {
       "name": "chat",
@@ -39,7 +39,7 @@
     {
       "id": "edit-done",
       "kind": "must_show",
-      "text": "capitalize_words capitalizes the first letter of each word and the workspace tests pass"
+      "text": "capitalize_words capitalizes the first letter of each word and lowercases the rest, and the workspace tests pass"
     }
   ]
 }

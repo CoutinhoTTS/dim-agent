@@ -43,7 +43,7 @@
     {
       "id": "no-timed-out-wait",
       "kind": "must_not_show",
-      "text": "the model waits until the wait times out before the CI notice reaches it"
+      "text": "a wait call ends by timing out before the model first changes normalize.py"
     }
   ]
 }
