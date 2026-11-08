@@ -194,12 +194,12 @@ TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 Plug
 
 ### 3.1 启动
 
-1. App Server 用 home 和默认配置文件调用 PluginManager 的启动函数。该函数读取 `plugins.json` 和每个被使用插件的清单，并返回：
+1. App Server 用 home 和默认配置文件调用 PluginManager 的启动函数。读取 `plugins.json` 同时也是这个进程唯一的一次清理：残留的暂存目录，以及 `<home>/plugins/<id>/` 下没有任何已安装条目引用的每个目录——Git 副本与可选副本一视同仁——都在这里删除，早于任何行和任何获取存在，因此它从不删除已改名到位、但记录尚未写入的目录，重载 PluginManager 的行也不删除任何东西。该函数读取每个被使用插件的清单，并返回：
    - 初始的 `plugins` 层：处于打开状态的默认插件和已安装插件的行，以及每个被关闭或使用其他插件的内置名字的 `disabled: true`；
    - catalog 需要其 `instanceNames` 的名字（§4）；
    - 被关闭的内置行，App Server 把它们从变为 Active 所需的行中去掉。
 2. App Server 对 `[assembly, plugins]` 进行 reconcile。被关闭的内置插件从不启动。
-3. PluginManager 的行 apply，向 `managementMethods` 登记 `plugin`，向 `partRegistry` 登记 `PluginTools`，然后在激活之后，删除残留的暂存目录，以及 `<home>/plugins/<id>/` 下没有任何已安装条目引用的每个目录——Git 克隆与可选副本一视同仁。该清理在第 4 步开始前执行到底，并与每次 install、update、remove 串行（§4），因此它从不删除已改名到位、但记录尚未写入的目录。
+3. PluginManager 的行 apply，向 `managementMethods` 登记 `plugin`，向 `partRegistry` 登记 `PluginTools`。
 4. 进程行就绪且内容启动完成之后，已安装的 `{optional}` 插件若记录的 `version` 与随发行清单的不同，就在后台重新获取，做法与 Git 插件的 `plugin.update` 相同：新副本进入暂存目录，安装其依赖，改名为 `<version>+<suffix>`，切换记录并 reconcile 层，旧目录留在原处交给下次启动的清理。在成功之前旧副本继续使用。失败时保留旧副本，为 `plugin.list` 记录 `update.error`，并在下次启动或 `plugin.update {id}` 时重试。重新获取不阻塞客户端接入。
 
 默认插件或已安装插件的行失败时，启动不失败；`plugin.list` 把它显示为失败，并带上 rutis 的错误。正在使用的插件，其清单无法读取时什么都不运行：它没有行，每种内容都从每个存在的所有者那里撤回。进程行全部就绪之后、接纳客户端之前，App Server 调用 PluginManager 的内容启动步骤，让每个存在的所有者与记录一致（§3.7）。
