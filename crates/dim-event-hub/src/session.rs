@@ -18,6 +18,8 @@ use tokio_util::sync::CancellationToken;
 
 /// Refusals of a call the generation stopped before making (design A.4).
 const UNLOADING_BEFORE_CALL: &str = "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider.";
+/// The refusal of a call cancelled before it was made (design A.4).
+const CANCELLED_BEFORE_HANDOVER: &str = "events: cancelled before handover";
 /// The refusal of a call the generation may have made (design A.4).
 const UNLOADING_AFTER_CALL: &str = "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider.";
 
@@ -249,7 +251,7 @@ impl ToolHandler for EventsTool {
         &self,
         call: ToolCall,
         context: ToolExecutionContext,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
         Box::pin(async move {
             if self.closing.is_cancelled() {
@@ -263,6 +265,14 @@ impl ToolHandler for EventsTool {
                     )));
                 }
             };
+            // A call cancelled after it was parsed and before it was made is
+            // refused, as Scheduler's tool is (design A.4).
+            if self.closing.is_cancelled() {
+                return Ok(ToolResult::error(UNLOADING_BEFORE_CALL));
+            }
+            if cancel.is_cancelled() {
+                return Ok(ToolResult::error(CANCELLED_BEFORE_HANDOVER));
+            }
             let outcome = match args.action {
                 Action::Sources => self.sources(&args),
                 Action::Subscribe => {

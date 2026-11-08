@@ -410,7 +410,7 @@ schema 是封闭的，即 `additionalProperties: false`。动作不接收的参�
 
 成功就是回复的 JSON：`sources` 为 `{sources: [...]}`，`subscribe` 为 `{subscriptionId}`，`unsubscribe` 为 `{}`，`list` 为 `{subscriptions: [...]}`。拒绝的第一行是 `<code>: <message>`，码与 A.3 相同，且不含任何关于另一个 Session 订阅的信息。
 
-定义的 risk 是 `session`；处理函数的 `risk()` 对 `subscribe` 与 `unsubscribe` 回答 `persistent_configuration`，见 7。处理函数在调用前后各检查一次本代的取消，与 Scheduler 的工具相同：调用前是 "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider."；调用后是 "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider."。后者说明调用可能已经发生，所以模型先检查再重复。
+定义的 risk 是 `session`；处理函数的 `risk()` 对 `subscribe` 与 `unsubscribe` 回答 `persistent_configuration`，见 7。处理函数在调用前后各检查一次本代的取消，与 Scheduler 的工具相同：调用前是 "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider."；调用后是 "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider."。后者说明调用可能已经发生，所以模型先检查再重复。参数解析之后、调用之前，一次被取消的调用以自己的 token 回答 `events: cancelled before handover`，不发起任何调用。
 
 描述是 `EventHubTexts.tool`，由工厂配置携带，如同 `entry`，见 [面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)；代码里不再保留第二份：
 
@@ -466,7 +466,7 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 | "Subscribe only when the user asks you to follow events." | 策略：是否订阅 |
 | "If you will wait for an event within this turn, subscribe with `mode steer`." | 策略：让本轮内的 wait 结束的模式选择 |
 
-处理函数的两句收尾(A.4)同样是协议：每一句说明本代卸载对这次调用意味着什么，并随该机制改动，而不随描述改动。描述中的协议句子只随它们所描述的行为改动，并与断言它的流程测试落在同一次改动里；两句策略句子随承载它们的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 [§4](../model-prompts.md#4-协议与策略)。
+处理函数的两句收尾(A.4)同样是协议：每一句说明本代卸载对这次调用意味着什么，并随该机制改动，而不随描述改动。交接前被取消的那句话 `events: cancelled before handover` 也是协议：它说明调用没有发生，并随取消机制改动。描述中的协议句子只随它们所描述的行为改动，并与断言它的流程测试落在同一次改动里；两句策略句子随承载它们的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 [§4](../model-prompts.md#4-协议与策略)。
 
 ## 附录 B. 完整冲突表
 
