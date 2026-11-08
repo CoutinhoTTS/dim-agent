@@ -292,8 +292,8 @@ native reply、事件和 live progress 可以先后任意到达。先登记 subm
 ### 5.2 固定头与 live 合流
 
 1. 为同一 Session 的 new/load/resume/fork/history 操作同步建立一个准备槽位，再开始 await；并发 load 共用该槽位，不能创建两个消费者。失败清除槽位，关闭标志阻止迟到准备重新登记。
-2. attach 前登记接收路由；attach 后先缓存该 Session 的 live 事件和 notices。调用 `session.history {sessionId,branchId:"main",after:0,limit:256}` 固定返回的 through=H；后续页显式传 through=H，并使用原生 nextAfter 前进。不能因过滤后的 events 为空就提前结束。
-3. 按 sequence 折叠至 H，依据原生 done 结束；history 中删除的输入不渲染成有效用户消息，raw-only input 不渲染。Gateway 自己的 prompt 不重复 echo，其他客户端的真实 user input 可以投影。
+2. attach 前登记接收路由；attach 后先缓存该 Session 的 live 事件和 notices。首次准备使用 [客户端首屏窗口](clients.md#opening-a-conversation-with-a-bounded-window)：以 latestTurn 固定 through=H，再用 before 补足窗口。未结束任务、待答问题及委派等旧状态按该契约单独读取；不能靠全历史回放恢复。断线补读则从此前已消费游标继续。
+3. 将读到的窗口按 sequence 折叠；首屏停止条件由客户端窗口契约决定。history 中删除的输入不渲染成有效用户消息，raw-only input 不渲染。Gateway 自己的 prompt 不重复 echo，其他客户端的真实 user input 可以投影。
 4. 丢弃缓存中已折叠的 durable events，顺序消费 H 之后的部分；progress 用 request id 和 Unicode scalar offsets 与 committed text/thinking 合流。resume 不向 ACP 输出 H 以内的旧内容。load 的回放 updates 全部成功写出后才回复。
 5. Session notice 无 Timeline sequence。标题按 titleRevision 去重；非持久状态不可仅靠 history 恢复，重新查询公开元数据。所有 I/O、reply 和回放都检查连接 generation，旧 generation 不能写入新连接。
 

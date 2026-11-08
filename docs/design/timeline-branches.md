@@ -517,6 +517,14 @@ line, `endEvent`. `main` comes first and the rest follow in `branchId` order. Th
 the number of lines, which a Session bounds by its own use, not with history. `TimelineTree` owns the answer
 (`directory()`); `branches()` lists the lines that have not ended (open and ending), for the callers that hold a live line.
 
+Each entry also carries `purpose` (the trimmed first prompt line, null for main),
+`cutMessages` (the number of user inputs in the inherited prefix at its branch
+point, excluding inputs deleted by that cutoff; null for main), and `end` (the
+existing `BranchEndData`, null without an available end fact). These display
+properties are read by identity and scalar queries, not by loading a transcript.
+An ended line inherited by a Session fork can have no own history; its fixed
+directory end identity still remains, even when `end` cannot be read there.
+
 Three rules about `head` decide what a client may do with it:
 
 - An `ended` line's `head` and `endEvent` are fixed. The client passes `head` as `through` to `session.history` to

@@ -54,100 +54,104 @@ export type TimelineQueryScope =
   | /** The queried branch alone. */ "branch"
   | /** The branch chain: each ancestor up to its cut, root first, then the queried branch. */ "chain"
 
-/**
- * The key a read orders by; a chain read orders by chain position first, so
- * `sequence` is the sequence within an event's own branch.
- */
-export type TimelineQueryOrderBy = "sequence"
+export type QueryOperand =
+  | { kind: "field"; path: string }
+  | { kind: "outer"; path: string }
+  | { kind: "element"; path: string }
+  | { kind: "value"; value: unknown }
 
-/**
- * The end a page is taken from. A reply is always ordered by chain position
- * and then sequence, in this direction; the offset counts from that end.
- */
+export type QueryComparison = "eq" | "ne" | "lt" | "le" | "gt" | "ge"
+
+export type QueryFilter =
+  | { op: "compare"; left: QueryOperand; comparison: QueryComparison; right: QueryOperand }
+  | { op: "in"; value: QueryOperand; values: unknown[] }
+  | { op: "present"; value: QueryOperand }
+  | { op: "prefix"; value: QueryOperand; prefix: string }
+  | { op: "contains"; value: QueryOperand; text: string }
+  | /** A superset of rows whose partition's concatenated property contains every term after Unicode lowercasing. Missing partition keys never join different events. Consumers must verify their own text; this condition cannot be negated. */ { op: "text_candidate"; field: string; partition_by: string[]; terms: string[] }
+  | { op: "and"; conditions: QueryFilter[] }
+  | { op: "or"; conditions: QueryFilter[] }
+  | { op: "not"; condition: QueryFilter }
+  | { op: "exists"; condition: QueryFilter }
+  | { op: "any"; field: string; condition: QueryFilter }
+
+export type QuerySelect =
+  | { kind: "fields"; fields: string[] }
+  | { kind: "events" }
+  | { kind: "count" }
+  | { kind: "characters"; field: string }
+  | { kind: "exists" }
+
+export type QueryPick = "first" | "last"
+
+export type QueryOrderKey = { kind: "position" } | { kind: "field"; path: string } | { kind: "count" }
+
+/** Direction of one result ordering key. */
 export type TimelineQueryDirection =
-  | /** Oldest first: the page is the oldest matching facts, and `offset` starts it further along. */ "ascending"
-  | /** Newest first: the page is the newest matching facts, and `offset` starts it further back. */ "descending"
+  | /** Increasing key values; position order runs from root to branch. */ "ascending"
+  | /** Decreasing key values. */ "descending"
 
-/**
- * One of the envelope's two context flags a query may name. Naming either
- * returns the events that carry at least one named flag.
- */
-export type TimelineQueryFlag =
-  | /** The flag that puts an event in the rendered context. */ "render"
-  | /** The flag that puts an event in the projection's checkpoint state. */ "state"
-
-/** One equality against one JSON scalar of an event's data. */
-export interface TimelineQueryPredicate {
-  /**
-   * Field names inside the event's data joined by dots; no array indexing
-   * and no wildcards.
-   */
-  path: string
-  /** The JSON scalar the path must equal. */
-  value: unknown
+export interface QueryOrder {
+  key: QueryOrderKey
+  direction: TimelineQueryDirection
 }
 
-/**
- * One bounded read of a branch's facts: what it covers, how far it reaches,
- * what it accepts, and how much of the result it returns.
- */
+export interface QuerySpec {
+  filter?: QueryFilter | null
+  select: QuerySelect
+  group_by?: string[]
+  pick?: QueryPick | null
+  order_by?: QueryOrder[]
+}
+
+/** Missing properties and array projections retain their shape independently of JSON null. */
+export type QueryValue =
+  | { kind: "missing" }
+  | { kind: "value"; value: unknown }
+  | { kind: "elements"; values: QueryValue[] }
+
+/** Continuation data bound to the query and logical scope, without server-side state. */
+export interface QueryCursor {
+  binding: string
+  keys: QueryValue[]
+}
+
+export interface QueryPage {
+  limit: number | bigint
+  after?: QueryCursor | null
+}
+
+/** A property read at a fixed branch boundary (ADR 022). */
 export interface TimelineQuery {
   scope: TimelineQueryScope
-  /**
-   * The event the read begins at, named by its id; the event is included.
-   * At most one of this and `from_sequence` may be given.
-   */
-  from_event?: string | null
-  /**
-   * The sequence the read begins at; the event at it is included. At most
-   * one of this and `from_event` may be given.
-   */
-  from_sequence?: number | bigint | null
-  /** The key the reply is ordered by, with chain position first. */
-  order_by?: TimelineQueryOrderBy
-  /** The end a page is taken from; ascending is the default. */
-  direction?: TimelineQueryDirection
-  /**
-   * Whether the queried branch's own facts written above the published head
-   * belong to the read, up to the point the reply reports as `through`. An
-   * ancestor is read to its cut either way.
-   */
+  from?: { branch_id: string; sequence: number | bigint } | null
+  through?: number | bigint | null
   include_publishing?: boolean
-  /** Event kinds (`domain/name`) the read accepts; empty accepts every kind. */
-  kinds?: string[]
-  /**
-   * The context flags the read accepts; empty constrains nothing, and a
-   * non-empty set accepts events carrying at least one named flag.
-   */
-  flags?: TimelineQueryFlag[]
-  /** When named, only the event with this id. */
-  event_id?: string | null
-  /** One equality the event's data must satisfy. */
-  predicate?: TimelineQueryPredicate | null
-  /** How many matching events the page returns; nonzero by type. */
-  limit: number | bigint
-  /** How many matching events the read skips before the page. */
-  offset?: number | bigint
+  query: QuerySpec
+  page?: QueryPage | null
 }
 
-/**
- * The facts a query read, in chain order and then sequence, in the query's
- * direction, each with its position in the same order.
- */
+export interface QueryRow {
+  group: QueryValue[]
+  values: QueryValue[]
+}
+
+export interface QueryEvent {
+  group: QueryValue[]
+  position: { branch_id: string; sequence: number | bigint }
+  event: import('./plugin.js').BranchEvent
+}
+
+export type QueryOutput =
+  | { kind: "rows"; rows: QueryRow[] }
+  | { kind: "events"; events: QueryEvent[] }
+  | { kind: "count"; count: number | bigint }
+  | { kind: "exists"; exists: boolean }
+
 export interface TimelineQueryReply {
-  events: import('./plugin.js').BranchEvent[]
-  /**
-   * One position per event, in the same order: the branch the event was
-   * read from and its sequence there.
-   */
-  positions: ({ branch_id: string; sequence: number | bigint })[]
-  /**
-   * The sequence the read is cut at on the queried branch: what was
-   * published when it ran, or the committed head it asked for. No fact
-   * above it was read; an ancestor is read to its cut. A caller holding
-   * live events releases the ones above this sequence.
-   */
   through: number | bigint
+  result: QueryOutput
+  next?: QueryCursor | null
 }
 
 export interface BranchOptions {
@@ -183,9 +187,8 @@ export interface TreeCommands {
    */
   page(id: string, after: number | bigint, limit: number | bigint, through: number | bigint): Promise<import('./plugin.js').BranchEvent[]>
   /**
-   * Queries one line's own facts, forwarding to its Timeline while open
-   * and reading at the tree's fixed head after it ends. Chain scope is
-   * invalid; an ended line has no publishing tail.
+   * Computes properties of one line at a fixed cutoff. Chain scope is invalid.
+   * An ended line reads its persisted facts and has no publishing tail.
    * @throws {AgentErrorThrown}
    */
   query(id: string, query: TimelineQuery): Promise<TimelineQueryReply>
@@ -346,26 +349,8 @@ export interface Timeline {
   /** Pending events participate in idle/close accounting before publication. */
   hasPending(): Promise<boolean>
   /**
-   * One bounded read over this branch or over its chain ([ADR 019](../../../../docs/adr/019-event-query.md),
-   * [plugin contract §5.4](../../../../docs/design/plugin-contract.md#54-the-event-query)):
-   * the direction, kinds, flags, event id, predicate, limit and offset
-   * select the facts, and the reply is up to `limit` of them in chain order
-   * and then sequence, in the query's direction, each with its position. A
-   * chain read is each ancestor to its cut and then this branch, root first
-   * ascending and this branch first descending; the offset the earlier
-   * segment did not use moves to the next one, so paging is skipping and a
-   * page shorter than the limit means the selection is exhausted. The read
-   * never returns a fact above a branch's coverage: an ancestor to its cut,
-   * this branch to the published head, or to the committed head when the
-   * query asks for it, in which case this branch's own facts in
-   * `published+1..=through` are part of the same page.
-   *
-   * The reply's `through` is the cutoff the read took on this branch: the
-   * published head, or the committed head the query asked for, which is
-   * read when the call starts, so a write during the call stays out of the
-   * page. The published part and the tail are disjoint in sequence, so each
-   * fact is returned once. A caller that holds live events releases the ones
-   * above the cutoff ([ADR 020 D3](../../../../docs/adr/020-timeline-read-convergence.md)).
+   * Computes properties over one fixed branch or ancestry scope.
+   * The optional start must name a position inside that scope.
    * @throws {AgentErrorThrown}
    */
   query(query: TimelineQuery): Promise<TimelineQueryReply>
@@ -533,7 +518,7 @@ export interface UiResources {
 }
 
 /** What a method returning `Err(AgentError)` throws. */
-export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "BranchEnded" | "Storage" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "Fault" | "Framework" | "Multiple", undefined>
+export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "BranchEnded" | "Storage" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "PartialSubmission" | "Fault" | "Framework" | "Multiple", undefined>
 
 /** What a method returning `Err(ResourceError)` throws. */
 export type ResourceErrorThrown = RustError<"ResourceError", string, ResourceError>

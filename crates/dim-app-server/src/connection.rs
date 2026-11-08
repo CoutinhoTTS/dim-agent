@@ -12,9 +12,7 @@ use dim_agent_capabilities::{
     skills::SkillsBranch,
     workspace_tools::background::{BackgroundExec, TaskError},
 };
-use dim_agent_runtime::{
-    AgentError, Names, Session, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
-};
+use dim_agent_runtime::{AgentError, Names, Session, TimelineQueryDirection, TimelineQueryScope};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;

@@ -313,18 +313,16 @@ Consequences:
 
 ### 5.2 Queries
 
-The anchors are selections over the branch's facts, so they are the Timeline
-query ([plugin contract §5.4](../plugin-contract.md#54-the-event-query)) over
-this branch, each with the kind named and `through` as the start of its read:
+The anchors use the [property query](../timeline-property-query.md) at the
+same fixed `through`. Each selection returns positions, without event bodies:
 
-- Turn start: `turn/start`, newest first, one event.
-- Newest input before the turn, the window's floor: `input/message`, newest
-  first from `T`, one event.
-- First request: `step/model-start`, oldest first from `T`, one event at or
-  below `through`.
-- Consumed inputs: `input/consumed`, oldest first from `T` up to the first
-  request, then each `input_id`, which is an event id, as one `input/event_id`
-  read. A few events, not a scan of the turn.
+- Select the last `turn/start` at or below `through`.
+- Select the first `step/model-start` after that turn start, within the cutoff.
+- Select the earliest input whose id is named by an `input/consumed` between
+  the turn start and that first request. The relation is evaluated over the
+  whole branch range; the input may precede the turn. This is one correlated
+  selection, without a separate read for each consumed input.
+- If no such input exists, select the last input at or below the turn start.
 
 The backward page is the loaded branch's own read too: the Timeline query
 returns the events of `window_start..=through` ascending, and `batch_end` fixes

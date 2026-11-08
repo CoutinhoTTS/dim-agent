@@ -66,6 +66,17 @@ impl Branch {
     pub async fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
         self.0.input(data).await
     }
+    /// Appends validated inputs as one atomic batch, in the given order: the
+    /// events commit at contiguous sequences and publish together. Every
+    /// input is validated as [`Self::input`] validates one, and the batch is
+    /// admitted once; an invalid input writes nothing. A batch is never empty
+    /// and every input carries a submission id, the ids distinct: a batch the
+    /// branch already holds whole writes nothing and returns those inputs in
+    /// order, and one only partly held fails with
+    /// [`AgentError::PartialSubmission`] and writes nothing either.
+    pub async fn inputs(&self, inputs: Vec<InputMessageData>) -> Result<Vec<Arc<AgentEvent>>> {
+        self.0.inputs(inputs).await
+    }
     /// The published input with submission id `id`; `None` when the branch
     /// holds none. Every input committed before the call is found once it is
     /// published. Fails with [`AgentError::AmbiguousSubmission`] for an id
@@ -116,10 +127,8 @@ impl Branch {
     pub async fn batch_end(&self, sequence: u64) -> Result<()> {
         self.0.timeline().batch_end(sequence).await
     }
-    /// One bounded read of this branch's facts: the request selects them and
-    /// the reply carries each event's position. The read stops at what is
-    /// published: the branch's own committed tail belongs to the part that
-    /// folds it, through the branch's Timeline.
+    /// Computes the requested properties at a fixed published cutoff.
+    /// Reading committed but unpublished facts through this facade is invalid.
     pub async fn query(&self, query: TimelineQuery) -> Result<TimelineQueryReply> {
         if query.include_publishing {
             return Err(AgentError::InvalidInput(

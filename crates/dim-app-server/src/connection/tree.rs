@@ -5,8 +5,12 @@ use dim_agent_capabilities::input_queue::{
     append_blocks,
 };
 use dim_agent_capabilities::timeline_tree::TreeCommands;
-use dim_agent_runtime::{BranchDirectoryState, BranchOptions, TimelineQuery};
-use dim_agent_types::{BranchSource, EventKind, InputBlock, InputMode};
+use dim_agent_runtime::{
+    BranchDirectoryState, BranchOptions, QueryComparison, QueryFilter, QueryOperand, QueryOrder,
+    QueryOrderKey, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue,
+    TimelineQuery,
+};
+use dim_agent_types::{BranchSource, InputBlock, InputMode};
 
 impl Connection {
     /// Runs the Session's submit checks before writing operator input (Hooks
@@ -359,10 +363,13 @@ impl Connection {
         params: Branches,
     ) -> Result<Reply, RpcError> {
         let session = self.session(rpc, &params.session_id)?;
-        let branches = session
-            .directory()
-            .into_iter()
-            .map(|entry| wire::BranchDirectoryView {
+        let tree = session
+            .session_service::<TreeCommands>()
+            .map_err(RpcError::from)?;
+        let mut branches = Vec::new();
+        for read in tree.directory_display().await.map_err(RpcError::from)? {
+            let entry = read.entry;
+            branches.push(wire::BranchDirectoryView {
                 branch: wire::BranchInfo::from(entry.info.clone()),
                 source: entry.info.source,
                 state: match entry.state {
@@ -370,10 +377,13 @@ impl Connection {
                     BranchDirectoryState::Ending => "ending",
                     BranchDirectoryState::Ended => "ended",
                 },
+                purpose: read.purpose,
+                cut_messages: read.cut_messages,
+                end: read.end,
                 head: entry.head,
                 end_event: entry.end_event,
-            })
-            .collect();
+            });
+        }
         Ok(Reply::Branches(wire::BranchesResult { branches }))
     }
 
@@ -491,8 +501,6 @@ const HISTORY_TURN_BYTES: usize = 4 * 1024 * 1024;
 /// page above it fails `history_too_large`; a `session.keys` reply above it
 /// fails `keys_too_large`.
 const REPLY_FRAME_BYTES: usize = crate::outbound::MAX_FRAME_BYTES - 64 * 1024;
-/// Facts one page of the window's anchor read keeps.
-const TURN_WINDOW_PAGE: u64 = 256;
 /// Facts one page of the `session.keys` scan keeps.
 const KEYS_PAGE: u64 = 256;
 /// The most live keyed blocks one `session.keys` reply carries. The key is
@@ -541,122 +549,194 @@ async fn turn_window(
             window_start: 1,
         });
     }
-    let page = |kinds: Vec<String>,
-                direction: TimelineQueryDirection,
-                from: Option<u64>,
-                event_id: Option<String>| TimelineQuery {
+    let query = |filter, pick| TimelineQuery {
         scope: TimelineQueryScope::Branch,
+        from: None,
+        through: Some(through),
         include_publishing: false,
-        from_event: None,
-        from_sequence: from,
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction,
-        kinds,
-        flags: Vec::new(),
-        event_id,
-        predicate: None,
-        limit: std::num::NonZeroU64::new(TURN_WINDOW_PAGE).expect("a page keeps one event"),
-        offset: 0,
+        query: QuerySpec {
+            filter: Some(filter),
+            select: QuerySelect::Fields {
+                fields: vec!["position.sequence".into()],
+            },
+            group_by: vec![],
+            pick: Some(pick),
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: std::num::NonZeroU64::MIN,
+            after: None,
+        }),
     };
     let turned = tree
         .query(
             branch.to_owned(),
-            page(
-                vec!["turn/start".into()],
-                TimelineQueryDirection::Descending,
-                Some(through),
-                None,
+            query(
+                QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec!["turn/start".into()],
+                },
+                QueryPick::Last,
             ),
         )
         .await
         .map_err(history_error)?;
-    let Some(turn_start) = turned.events.first().map(|event| event.sequence) else {
+    let QueryOutput::Rows { rows } = turned.result else {
+        unreachable!("field selection returns rows")
+    };
+    let Some(row) = rows.first() else {
         return Ok(crate::storage::TurnWindow {
             turn_start: None,
             window_start: 1,
         });
     };
-    let first_step = tree
+    let [QueryValue::Value { value: start }] = row.values.as_slice() else {
+        unreachable!("turn start has a sequence")
+    };
+    let turn_start = start.as_u64().expect("event sequence is unsigned");
+    let step = tree
         .query(
             branch.to_owned(),
-            page(
-                vec!["step/model-start".into()],
-                TimelineQueryDirection::Ascending,
-                Some(turn_start.saturating_add(1)),
-                None,
+            query(
+                QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: vec!["step/model-start".into()],
+                        },
+                        QueryFilter::Compare {
+                            left: QueryOperand::Field {
+                                path: "position.sequence".into(),
+                            },
+                            comparison: QueryComparison::Gt,
+                            right: QueryOperand::Value {
+                                value: turn_start.into(),
+                            },
+                        },
+                    ],
+                },
+                QueryPick::First,
             ),
         )
         .await
-        .map_err(history_error)?
-        .events
-        .first()
-        .map(|event| event.sequence)
-        .filter(|sequence| *sequence <= through);
+        .map_err(history_error)?;
+    let QueryOutput::Rows { rows } = step.result else {
+        unreachable!("field selection returns rows")
+    };
     let mut window_start = turn_start;
     let mut consumed = false;
-    if let Some(first_step) = first_step {
-        let mut from = turn_start.saturating_add(1);
-        loop {
-            let reply = tree
-                .query(
-                    branch.to_owned(),
-                    page(
-                        vec!["input/consumed".into()],
-                        TimelineQueryDirection::Ascending,
-                        Some(from),
-                        None,
-                    ),
-                )
-                .await
-                .map_err(history_error)?;
-            let short = (reply.events.len() as u64) < TURN_WINDOW_PAGE;
-            let mut next = None;
-            for event in &reply.events {
-                if event.sequence >= first_step {
-                    break;
-                }
-                next = Some(event.sequence.saturating_add(1));
-                let EventKind::InputConsumed(data) = &event.kind else {
-                    unreachable!("the read selects consumed inputs")
-                };
-                let input = tree
-                    .query(
-                        branch.to_owned(),
-                        page(
-                            Vec::new(),
-                            TimelineQueryDirection::Ascending,
-                            None,
-                            Some(data.input_id.clone()),
-                        ),
-                    )
-                    .await
-                    .map_err(history_error)?;
-                if let Some(sequence) = input.events.first().map(|event| event.sequence) {
-                    window_start = window_start.min(sequence);
-                    consumed = true;
-                }
-            }
-            match next {
-                Some(next) if !short => from = next,
-                _ => break,
-            }
+    if let Some(row) = rows.first() {
+        let [QueryValue::Value { value: first_step }] = row.values.as_slice() else {
+            unreachable!("model start has a sequence")
+        };
+        let inputs = tree
+            .query(
+                branch.to_owned(),
+                query(
+                    QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["input/message".into()],
+                            },
+                            QueryFilter::Exists {
+                                condition: Box::new(QueryFilter::And {
+                                    conditions: vec![
+                                        QueryFilter::In {
+                                            value: QueryOperand::Field {
+                                                path: "kind".into(),
+                                            },
+                                            values: vec!["input/consumed".into()],
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "data.input_id".into(),
+                                            },
+                                            comparison: QueryComparison::Eq,
+                                            right: QueryOperand::Outer { path: "id".into() },
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "position.sequence".into(),
+                                            },
+                                            comparison: QueryComparison::Gt,
+                                            right: QueryOperand::Value {
+                                                value: turn_start.into(),
+                                            },
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "position.sequence".into(),
+                                            },
+                                            comparison: QueryComparison::Lt,
+                                            right: QueryOperand::Value {
+                                                value: first_step.clone(),
+                                            },
+                                        },
+                                    ],
+                                }),
+                            },
+                        ],
+                    },
+                    QueryPick::First,
+                ),
+            )
+            .await
+            .map_err(history_error)?;
+        let QueryOutput::Rows { rows } = inputs.result else {
+            unreachable!("field selection returns rows")
+        };
+        if let Some(row) = rows.first() {
+            let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
+                unreachable!("input has a sequence")
+            };
+            window_start = window_start.min(sequence.as_u64().expect("event sequence is unsigned"));
+            consumed = true;
         }
     }
     if !consumed {
         let newest = tree
             .query(
                 branch.to_owned(),
-                page(
-                    vec!["input/message".into()],
-                    TimelineQueryDirection::Descending,
-                    Some(turn_start),
-                    None,
+                query(
+                    QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["input/message".into()],
+                            },
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "position.sequence".into(),
+                                },
+                                comparison: QueryComparison::Le,
+                                right: QueryOperand::Value {
+                                    value: turn_start.into(),
+                                },
+                            },
+                        ],
+                    },
+                    QueryPick::Last,
                 ),
             )
             .await
             .map_err(history_error)?;
-        if let Some(sequence) = newest.events.first().map(|event| event.sequence) {
-            window_start = window_start.min(sequence);
+        let QueryOutput::Rows { rows } = newest.result else {
+            unreachable!("field selection returns rows")
+        };
+        if let Some(row) = rows.first() {
+            let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
+                unreachable!("input has a sequence")
+            };
+            window_start = window_start.min(sequence.as_u64().expect("event sequence is unsigned"));
         }
     }
     Ok(crate::storage::TurnWindow {
@@ -693,17 +773,8 @@ impl HistoryRead<'_> {
     }
 }
 
-/// The branch segment's live keyed blocks at `through` (keyed-blocks §3): one
-/// descending scan of the four kinds that runs from `through` down to the
-/// branch's opening. `input/deleted` is collected in the same pass; InputQueue
-/// writes it only for an input it still holds unapplied, so the deletion is
-/// always above the input it removes and the descending scan meets it first.
-/// A block is live only when its input is absent from that set, and a retire
-/// written by a deleted input never ends the key. The scan stops at the first
-/// opening (`branch/start` or `session/forked`) and discards everything below
-/// it: a fork's copied facts and a branch's inherited prefix are not the
-/// branch's own segment. Pages advance by sequence, never `offset` (ADR 019
-/// D2): the storage reader fetches `offset + limit` rows before skipping.
+/// The latest live blocks in this branch's own segment, excluding deleted inputs.
+/// The opening excludes the inherited prefix and a fork's copied facts.
 async fn scan_keys(
     read: &HistoryRead<'_>,
     branch: &str,
@@ -711,94 +782,178 @@ async fn scan_keys(
 ) -> Result<Vec<wire::KeyEntry>, RpcError> {
     let mut found: HashMap<String, (u64, usize, wire::KeyEntry)> = HashMap::new();
     let mut closed: HashSet<String> = HashSet::new();
-    let mut deleted: HashSet<String> = HashSet::new();
-    let mut from = through;
-    while from > 0 {
+    let opened = read
+        .query(
+            branch,
+            TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(through),
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["branch/start".into(), "session/forked".into()],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["position.sequence".into()],
+                    },
+                    group_by: vec![],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: std::num::NonZeroU64::MIN,
+                    after: None,
+                }),
+            },
+        )
+        .await
+        .map_err(history_error)?;
+    let QueryOutput::Rows { rows } = opened.result else {
+        unreachable!("field selection returns rows")
+    };
+    let from = rows.first().map(|row| {
+        let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
+            unreachable!("opening has a sequence")
+        };
+        dim_agent_types::TimelinePosition {
+            branch_id: branch.into(),
+            sequence: sequence.as_u64().expect("event sequence is unsigned"),
+        }
+    });
+    let mut after = None;
+    loop {
         let page = read
             .query(
                 branch,
                 TimelineQuery {
                     scope: TimelineQueryScope::Branch,
+                    from: from.clone(),
+                    through: Some(through),
                     include_publishing: false,
-                    from_event: None,
-                    from_sequence: Some(from),
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Descending,
-                    kinds: vec![
-                        "input/message".into(),
-                        "input/deleted".into(),
-                        "branch/start".into(),
-                        "session/forked".into(),
-                    ],
-                    flags: Vec::new(),
-                    event_id: None,
-                    predicate: None,
-                    limit: std::num::NonZeroU64::new(KEYS_PAGE).expect("a page keeps one event"),
-                    offset: 0,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: vec!["input/message".into()],
+                                },
+                                QueryFilter::Any {
+                                    field: "data.blocks".into(),
+                                    condition: Box::new(QueryFilter::Present {
+                                        value: QueryOperand::Element { path: "key".into() },
+                                    }),
+                                },
+                                QueryFilter::Not {
+                                    condition: Box::new(QueryFilter::Exists {
+                                        condition: Box::new(QueryFilter::And {
+                                            conditions: vec![
+                                                QueryFilter::In {
+                                                    value: QueryOperand::Field {
+                                                        path: "kind".into(),
+                                                    },
+                                                    values: vec!["input/deleted".into()],
+                                                },
+                                                QueryFilter::Compare {
+                                                    left: QueryOperand::Field {
+                                                        path: "data.input_id".into(),
+                                                    },
+                                                    comparison: QueryComparison::Eq,
+                                                    right: QueryOperand::Outer {
+                                                        path: "id".into(),
+                                                    },
+                                                },
+                                            ],
+                                        }),
+                                    }),
+                                },
+                            ],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: vec![
+                                "id".into(),
+                                "position.sequence".into(),
+                                "data.blocks".into(),
+                            ],
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![QueryOrder {
+                            key: QueryOrderKey::Position,
+                            direction: TimelineQueryDirection::Descending,
+                        }],
+                    },
+                    page: Some(QueryPage {
+                        limit: std::num::NonZeroU64::new(KEYS_PAGE).unwrap(),
+                        after,
+                    }),
                 },
             )
             .await
             .map_err(history_error)?;
-        let exhausted = (page.events.len() as u64) < KEYS_PAGE;
-        let mut done = false;
-        for event in &page.events {
-            match &event.kind {
-                EventKind::BranchStart(_) | EventKind::SessionForked(_) => {
-                    done = true;
-                    break;
+        let QueryOutput::Rows { rows } = page.result else {
+            unreachable!("field selection returns rows")
+        };
+        for row in rows {
+            let [
+                QueryValue::Value {
+                    value: serde_json::Value::String(id),
+                },
+                QueryValue::Value { value: sequence },
+                QueryValue::Value { value: blocks },
+            ] = row.values.as_slice()
+            else {
+                unreachable!("keyed input has id, sequence and blocks")
+            };
+            let sequence = sequence.as_u64().expect("event sequence is unsigned");
+            let blocks: Vec<InputBlock> = serde_json::from_value(blocks.clone())
+                .expect("input blocks follow their event contract");
+            for (index, block) in blocks.iter().enumerate().rev() {
+                let InputBlock::Raw {
+                    text,
+                    key: Some(key),
+                    retire,
+                } = block
+                else {
+                    continue;
+                };
+                if found.contains_key(key) {
+                    continue;
                 }
-                EventKind::InputDeleted(data) => {
-                    deleted.insert(data.input_id.clone());
+                if *retire {
+                    closed.insert(key.clone());
+                    continue;
                 }
-                EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
-                    for (index, block) in data.blocks.iter().enumerate().rev() {
-                        let InputBlock::Raw {
-                            text,
-                            key: Some(key),
-                            retire,
-                        } = block
-                        else {
-                            continue;
-                        };
-                        if found.contains_key(key) {
-                            continue;
-                        }
-                        if *retire {
-                            closed.insert(key.clone());
-                            continue;
-                        }
-                        if closed.contains(key) {
-                            continue;
-                        }
-                        found.insert(
-                            key.clone(),
-                            (
-                                event.sequence,
-                                index,
-                                wire::KeyEntry {
-                                    key: key.clone(),
-                                    sequence: event.sequence,
-                                    input_id: event.id.clone(),
-                                    text: text.clone(),
-                                },
-                            ),
-                        );
-                        if found.len() > KEYS_ENTRY_LIMIT {
-                            return Err(too_many_keys());
-                        }
-                    }
+                if closed.contains(key) {
+                    continue;
                 }
-                EventKind::InputMessage(_) => {}
-                _ => {}
+                found.insert(
+                    key.clone(),
+                    (
+                        sequence,
+                        index,
+                        wire::KeyEntry {
+                            key: key.clone(),
+                            sequence,
+                            input_id: id.clone(),
+                            text: text.clone(),
+                        },
+                    ),
+                );
+                if found.len() > KEYS_ENTRY_LIMIT {
+                    return Err(too_many_keys());
+                }
             }
         }
-        if done || exhausted {
+        after = page.next;
+        if after.is_none() {
             break;
         }
-        from = page
-            .events
-            .last()
-            .map_or(0, |event| event.sequence.saturating_sub(1));
     }
     let mut entries: Vec<_> = found.into_values().collect();
     entries.sort_by_key(|(sequence, index, _)| (*sequence, *index));
@@ -909,27 +1064,36 @@ async fn window_events(
     end: u64,
 ) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>, RpcError> {
     let limit = end.saturating_sub(low).saturating_add(1).max(1);
-    Ok(read
+    let reply = read
         .query(
             branch,
             TimelineQuery {
                 scope: TimelineQueryScope::Branch,
+                from: Some(dim_agent_types::TimelinePosition {
+                    branch_id: branch.into(),
+                    sequence: low,
+                }),
+                through: Some(end),
                 include_publishing: false,
-                from_event: None,
-                from_sequence: Some(low),
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Ascending,
-                kinds: Vec::new(),
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: std::num::NonZeroU64::new(limit).expect("a page keeps one event"),
-                offset: 0,
+                query: QuerySpec {
+                    filter: None,
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: std::num::NonZeroU64::new(limit).unwrap(),
+                    after: None,
+                }),
             },
         )
         .await
-        .map_err(history_error)?
-        .events)
+        .map_err(history_error)?;
+    let QueryOutput::Events { events } = reply.result else {
+        unreachable!("event selection returns events")
+    };
+    Ok(events.into_iter().map(|row| row.event).collect())
 }
 
 /// One event of a history page with its encoded form, built once, and size.

@@ -1,6 +1,6 @@
 # Rust 会话存储格式
 
-The current native format is **v34**, with a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
+The current native format is **v36**, with property text-candidate indexes, a submission identity index, a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
@@ -9,11 +9,11 @@ omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, a delegation's Agent owner and
 member leader, a Session's creation origin, Session file grants, command output
 ownership and the two context reading switches on timeline events. Startup
-requires the exact v34 SQL schema and a single
-format marker of 34 before writable PRAGMAs, or the exact v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
+requires the exact v36 SQL schema and a single
+format marker of 36 before writable PRAGMAs, or the exact v35, v34, v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v34 one step after
-another ([#1099 v34 decision](#1099-v34-格式决定), [#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
+which the same startup transaction upgrades in place to v36 one step after
+another ([v36 text candidates](#v36-property-text-candidates), [v35 submission index](#v35-submission-identity-index), [#1099 v34 decision](#1099-v34-格式决定), [#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
 [#2 v18 decision](#2-v18-格式决定), [#364 v19 decision](#364-v19-格式决定),
@@ -26,7 +26,7 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v34, and v16 request rows stay readable as written.
+valid in v36, and v16 request rows stay readable as written.
 除格式自身的 SQL 外，每次打开都接受派生索引：`timeline_history_anchors`
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
 [latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
@@ -36,7 +36,7 @@ valid in v34, and v16 request rows stay readable as written.
 读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
 `CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
 `timeline_events` 重新推导，读同一份事件不因它们有无而不同，因此不属于格式：启动门禁的
-精确结构比较忽略这些名字，格式标记不变（当前 v34）；其余任何多余对象仍按原规则拒绝。代价是早于
+精确结构比较忽略这些名字，格式标记不变（当前 v36）；其余任何多余对象仍按原规则拒绝。代价是早于
 该变更的二进制不认识这些名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
 索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
@@ -64,12 +64,12 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 
 | 情形 | 判据 | 说明的结论 |
 | --- | --- | --- |
-| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 34） | 本构建读不了这个更新格式的库 |
+| 更新格式 | 结构不是本构建认识的形状，`agent_store_format` 可读且恰有一行 `version > FORMAT`（当前 36） | 本构建读不了这个更新格式的库 |
 | 标记与结构不符 | 结构是本构建认识的形状（当前格式或某个升级起点），但标记行不是该版本的唯一值 | 标记和结构不一致；不诊断为“降级” |
 | 无法识别 | 结构不是本构建认识的形状，且可读的单一标记在本构建接受的范围内（`MIN_FORMAT ≤ version ≤ FORMAT`，已移除的 v14 除外），或没有可读的单一标记 | 结构无法识别；读出标记时一并给出 |
 | 过旧或不再准入 | 结构不是本构建认识的形状，且可读的单一标记低于 `MIN_FORMAT`，或为已移除的 v14 | 该格式不再被这个构建读取 |
 
-正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 34），不写字面量）。
+正文模板（`<path>`、`<marker>`、`<schema>` 由存储填写；`<format>` 取 `FORMAT` 常量（当前 36），不写字面量）。
 更新格式：
 
 ```text
@@ -127,7 +127,7 @@ Cannot open native store <path>.
 - **写入与清理**：拒绝前用同目录临时文件写入并原子替换；写入失败不改变返回值，原错误照常返回。正常打开、升级成功和其他启动失败不写说明。成功打开（含升级成功）时，存储 owner 删除遗留说明；删除失败不影响启动，下一次成功打开再清理。说明的读取、打印和其余清理属于 CLI 启动，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)；说明不进入日志历史。
 - **位置**：说明是库的同级文件，不是新数据库格式，也不是 `daemon.log` 的一部分。CLI 启动的守护进程使用 `<native home>/dimcode.sqlite`，所以 CLI 读取 `<native home>/dimcode.sqlite.startup`。直接以 `--database` 启动的守护进程把说明写在它的库旁，CLI 的启动路径不读取。
 - **不自动恢复**：不删除、重建、降级、重置标记或复制库；`--home PATH` 只建立另一个环境。终端说明只给兼容构建和 `--home` 两条路；开发说明继续使用 `./dev` 的隔离 home。
-- **验证**：`storage_flow` 用一次性库覆盖全部分支：v35 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v32 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v34 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+- **验证**：`storage_flow` 用一次性库覆盖全部分支：v37 标记的未知结构被拒绝、库字节不变，说明为“更新格式”；当前格式的库把标记改成 v29，以及 v13 结构配 v32 标记，都得到“标记与结构不符”而不是“更新格式”；当前格式的空标记表得到 `v36 (format marker is missing or ambiguous)`；未知结构配可读标记 v20 得到 `v20 (unrecognized schema)`，没有可读标记得到 `unrecognized`；v12 和已移除的 v14 得到“过旧”；正常打开和升级成功删除遗留说明，失败替换上一次留下的说明。CLI 启动流程另覆盖终端打印、PID、权限和控制字符，见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
 
 ## SQLite 运行参数与空间回收
 
@@ -147,13 +147,13 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 
 删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构后执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和。`VACUUM` 重写整个库，需要约等于库大小的临时空间；守护进程持锁时该命令拒绝执行，也不升级或创建库。
 
-## Current v34 tables
+## Current v36 tables
 
 下表逐列对应 `SqliteStorage::SCHEMA`。新表按业务实体命名，其中 `agent_sessions` 与旧 TypeScript 的 `sessions` 区分；当前启动门禁仍只接受本格式，不因此支持旧表同库存取。`—` 表示 SQL 中没有显式 `DEFAULT`；可空列若省略会得到 SQLite 的隐式 `NULL`。SQLite rowid 表中的 `TEXT PRIMARY KEY` 不自动保证非空，因此下表如实标出 v1 的两个缺口；正常写入仍必须给出 ID。
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 34)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 36)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -816,6 +816,10 @@ ProjectionCheckpoint = {
 | --- | --- | --- |
 | `session_owners_by_agent` | `(agent_id, protocol_version, session_id)` | 按 Agent 和协议过滤目录 |
 | `timeline_events_by_id` | `(session_id, event_id) WHERE event_id IS NOT NULL`，非唯一 | 按事件 ID 查找跨页 ToolCall |
+| `timeline_input_submissions` | `(session_id, branch_id, json_extract(body, '$.record.event.data.submission_id'), sequence) WHERE kind = 'input/message'`，非唯一 | 按提交标识定位输入；属于 v35 精确 schema，不属于启动时补建的派生索引 |
+| `timeline_events_requests` | `(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence)` | 请求标识等值定位，兼容 inline 与 output 行 |
+| `timeline_events_inputs` | `(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence)` | 输入采纳、删除、应用和撤回关联 |
+| `timeline_events_users` | `(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence)` | 用户输入存在性筛选与计数 |
 | `timeline_tool_use_starts` | `(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start'` | 按请求与调用 ID 查找跨页 `step/tool-use-start`，为不带 `call_event_id` 的结果取调用名；查询须使用相同表达式与条件 |
 | `timeline_events_context` | `(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1` | 只取渲染器或 checkpoint 折叠消费的行（v32；v31 的两个部分索引各取其一） |
 | `timeline_events_positions` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')` | 策略定位：轮次开始与压缩边界（v31） |
@@ -824,7 +828,7 @@ ProjectionCheckpoint = {
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
-## 完整记录示例（v34）
+## 完整记录示例（v36）
 
 下例是一条 Session `s1`、主分支 `main` 和子分支 `child` 的全部原生表记录，用于核对存储关系，不代表完整的对话执行序列。为便于阅读，`profile`、`config`、`info` 和事件 `body` 这几个实际为 `TEXT` 的列在展示时解析为 JSON；写入时各自是完整 JSON 字符串，类型规定省略的可选字段照常省略。ID/时间是示例值。`timeline_content.body` 保留实际写入的字符串形式，因此下面各 hash 可以按上文算法复核。`main` 第 4 条 `model/call` 是升级前 v16 写入的行，`child` 第 3 条是升级后 v17 写入的行，示例同时展示两种行混存。
 
@@ -991,3 +995,80 @@ current manual title.
 ```
 
 这十一条逻辑事件占十条物理事件行；`main` 的已发布 head 为 8，`child` 为 3。`input/consumed` 把 `e1` 转成 ID 为 `e2` 的用户历史条目；压缩的 `retain_from` 指向事件 `e2`，即从该事件放置的条目起原样保留；可选快照从第 2 条事件重放，所保存的前缀状态含尚未采纳的 `e1` 输入。`main` 的输出行合并两个增量，读出后各自恢复 `turn_id`/`request_id`，两者的原子批次终点都是 6。子分支通过 `branch_point=7` 共享 `main` 的前缀 1–7，不复制父事件；`create_anchor=8` 指向父分支的 `branch/create`。`main` 的 v16 `model/call` 的两个 hash 在同一 Session 的 `timeline_content` 命中。`child` 的 v17 `model/call` 以 `list` 引用三条消息的最后一个节点，`length` 为 3；它在逻辑历史中的上一个请求是 `main` 第 4 条 v16 行，没有可共用的节点，所以三条消息各写一个节点，`system` 按 v16 的写法得到同一地址。`timeline_snapshots` 的独立行锚定主分支第 3 条 completed 事实，事件本身没有快照数据；删除该快照不影响事实重放或 replacement。回滚 Session 时先删除快照，再删除事件、分支、内容、owner 和 Session 文件、grants、输出 owner 行，最后删除 `agent_sessions`；Agent 只有在不再被任何 Session 引用时才能删除。
+
+## v35: submission identity index
+
+The property-query consumer needs `(session, branch, submission_id)` to locate an
+input without scanning all input bodies. The required index is:
+
+```sql
+CREATE INDEX timeline_input_submissions
+ON timeline_events (
+  session_id, branch_id,
+  json_extract(body, '$.record.event.data.submission_id'), sequence
+)
+WHERE kind = 'input/message';
+```
+
+This index belongs to the validated schema. Its introduction takes format **35**;
+it is not added to v34's derived-index exemptions. A v34-to-v35 transaction creates
+the index, validates the resulting schema and changes the marker atomically.
+Malformed indexed input bodies fail the transaction and leave v34 intact. Existing
+row/content encodings do not change. Older binaries reject v35 before normal use;
+there is no silent downgrade or in-place user-store test.
+
+The index is not unique: historical duplicate identities must remain readable so
+the submission contract can report ambiguity. SQL uses the literal JSON expression
+above and the input kind constraint so the planner can use the index. The Timeline
+commit lock still controls duplicate admission; this read index is not a replacement
+for that concurrency rule.
+
+Acceptance uses disposable v34 stores, duplicates, malformed inputs, upgrade
+rollback, reopen and an older-format rejection check. Query diagnostics must show
+an indexed lookup for both a hit and a miss as the input count grows. This change
+does not introduce Recall FTS tables or change text-search semantics.
+
+## v36: property text candidates
+
+v36 adds derived text-candidate metadata, a contentless FTS5 trigram index and bounded stream tails. It retains the v35 submission identity index. The public candidate semantics and indexed properties are owned by [Timeline property-query design §6C](../timeline-property-query.md#6c-文本候选查询与-fts5).
+
+The writer updates these tables in the same transaction as the corresponding Timeline batch. Physical output merging does not merge logical event identities in the index. Fork copies rebuild from their copied prefix; deleting a Session removes its text rows, postings and tails. None of these rows is an authoritative event or a replacement for event content.
+
+Opening v35 creates and backfills the index before committing the v36 marker. Any failure rolls back the entire upgrade. Backfill reads one physical row at a time in branch/sequence order and keeps at most 199 characters per text stream. Existing v13–v34 upgrades continue through v35 and then v36. SQLite owns the FTS virtual table's shadow schema; the format gate checks its declared virtual-table schema and the ordinary metadata/tail tables.
+
+FTS contains no stored copy of the original text. Costs to accept are the metadata and postings on disk, one bounded overlap per text fragment, and indexing work in the append transaction. Acceptance measures database growth and append time as well as query plans, decoded bodies, SQLite memory and VM steps. A returned candidate count alone is insufficient evidence.
+
+The v36 scalar lookup indexes use these literal expressions:
+
+```sql
+CREATE INDEX timeline_events_requests ON timeline_events(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence);
+CREATE INDEX timeline_events_inputs ON timeline_events(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence);
+CREATE INDEX timeline_events_users ON timeline_events(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence);
+```
+
+The exact ordinary and virtual text-index objects are:
+
+```sql
+CREATE TABLE timeline_text (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL, physical_sequence INTEGER NOT NULL, property TEXT NOT NULL, partition_key TEXT NOT NULL, UNIQUE(session_id, branch_id, sequence, property));
+CREATE INDEX timeline_text_partition ON timeline_text(session_id, branch_id, property, partition_key, sequence);
+CREATE VIRTUAL TABLE timeline_text_fts USING fts5(text, content='', contentless_delete=1, detail=none, tokenize='trigram case_sensitive 1');
+CREATE TRIGGER timeline_text_delete AFTER DELETE ON timeline_text BEGIN DELETE FROM timeline_text_fts WHERE rowid=old.id; END;
+CREATE TABLE timeline_text_tails (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, request_id TEXT NOT NULL, tail TEXT NOT NULL, PRIMARY KEY(session_id, branch_id, request_id));
+```
+
+`timeline_text.id` is the FTS rowid. `sequence` is a logical event position;
+`physical_sequence` points to its containing physical row. `property` is `data`
+or `data.delta`; `partition_key` is an event identity for `data`, or the encoded
+kind/request tuple for `data.delta`. Text is Unicode-lowercased before indexing.
+Tails retain at most 199 characters per request stream and remain derived rows
+after request completion, so later fragments of that identity still concatenate.
+FTS shadow tables are SQLite-owned and cannot contain authoritative records.
+The complete-record example above illustrates authoritative records; its derived
+text rows and SQLite-owned FTS shadow rows are omitted.
+
+Input identity joins must constrain the expression key itself, not only the
+Session/branch/kind prefix. Comparing a JSON expression with a TEXT column can
+prevent SQLite from using the expression key because of column affinity. The
+compiled join uses `json_extract(r.body,'$.record.event.data.input_id') = +(e.event_id)`
+to retain the event ID value without its column affinity. Plan acceptance requires
+`<expr>=?` in `timeline_events_inputs`; merely naming that index is insufficient.

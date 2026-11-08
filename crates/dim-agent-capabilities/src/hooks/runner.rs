@@ -20,13 +20,14 @@ use crate::{
     tool_registry::ToolRegistry,
 };
 use dim_agent_runtime::{
-    BranchLifecycle, CollaborationRole, Dispatcher, Names, SessionConfig, SessionIdentity,
-    Timeline, TimelineIdentity, rebuild_facts,
+    BranchLifecycle, CollaborationRole, Dispatcher, Names, QueryComparison, QueryFilter,
+    QueryOperand, QueryOutput, QueryPage, QuerySelect, QuerySpec, QueryValue, SessionConfig,
+    SessionIdentity, Timeline, TimelineIdentity, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData, ApprovalRespondData,
     BranchSource, ContentBlock, EventKind, InputBlock, InputMessageData, InputMode, JsonObject,
-    PermissionPreset, ToolCallResult, ToolContent, ToolDefinition, TurnOutcome, UserInput,
+    PermissionPreset, ToolCallResult, ToolContent, TurnOutcome, UserInput,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -1026,6 +1027,34 @@ struct View {
 }
 
 impl View {
+    fn input(&mut self, id: &str, operator: bool, started: bool, follow_up: bool) {
+        if operator {
+            self.operator_inputs.insert(id.to_owned());
+        }
+        self.started |= started;
+        if follow_up {
+            self.follow_up_input = Some(id.to_owned());
+            self.follow_ups += 1;
+        }
+    }
+    fn consumed(&mut self, id: &str, sequence: u64) {
+        if self.operator_inputs.remove(id) {
+            self.spoken = sequence;
+        }
+        if self.follow_up_input.as_deref() == Some(id) {
+            self.consuming = true;
+            self.follow_up_input = None;
+        }
+    }
+    fn turn_ended(&mut self) -> bool {
+        let from_follow_up = self.consuming;
+        self.consuming = false;
+        if !from_follow_up {
+            self.follow_ups = 0;
+        }
+        from_follow_up
+    }
+
     fn fold(&mut self, event: &AgentEvent) -> Option<Job> {
         self.last = event.sequence;
         match &event.kind {
@@ -1033,25 +1062,15 @@ impl View {
                 self.interrupted = event.sequence;
             }
             EventKind::InputMessage(data) => {
-                if operator_input(data) {
-                    self.operator_inputs.insert(event.id.clone());
-                }
-                if session_started(event) {
-                    self.started = true;
-                }
-                if follow_up_input(event) {
-                    self.follow_up_input = Some(event.id.clone());
-                    self.follow_ups += 1;
-                }
+                self.input(
+                    &event.id,
+                    operator_input(data),
+                    session_started(event),
+                    follow_up_input(event),
+                );
             }
             EventKind::InputConsumed(data) => {
-                if self.operator_inputs.remove(&data.input_id) {
-                    self.spoken = event.sequence;
-                }
-                if self.follow_up_input.as_deref() == Some(data.input_id.as_str()) {
-                    self.consuming = true;
-                    self.follow_up_input = None;
-                }
+                self.consumed(&data.input_id, event.sequence);
             }
             EventKind::InputDeleted(data) => {
                 // A withdrawn input ends without being consumed: the queue
@@ -1063,11 +1082,7 @@ impl View {
                 self.started = true;
             }
             EventKind::TurnEnd(data) => {
-                let from_follow_up = self.consuming;
-                self.consuming = false;
-                if !from_follow_up {
-                    self.follow_ups = 0;
-                }
+                let from_follow_up = self.turn_ended();
                 if matches!(data.outcome, TurnOutcome::Completed { .. }) {
                     return Some(Job::Stop {
                         trigger: event.sequence,
@@ -1102,7 +1117,21 @@ impl View {
                 self.tool_aliases = data.settings.tools.as_ref().map(|tools| {
                     tools
                         .iter()
-                        .filter_map(|tool| Some((tool.name.clone(), alias(tool)?)))
+                        .filter_map(|tool| {
+                            Some((
+                                tool.name.clone(),
+                                alias(
+                                    &tool.name,
+                                    tool.risk.as_deref(),
+                                    tool.metadata
+                                        .as_ref()
+                                        .and_then(|metadata| metadata.mcp_server_id.as_deref()),
+                                    tool.metadata.as_ref().and_then(|metadata| {
+                                        metadata.mcp_original_tool_name.as_deref()
+                                    }),
+                                )?,
+                            ))
+                        })
                         .collect()
                 });
             }
@@ -1132,14 +1161,16 @@ impl View {
 }
 
 /// The migration alias a pasted Claude or Codex matcher selects (G.2).
-fn alias(tool: &ToolDefinition) -> Option<String> {
-    if let Some(metadata) = tool.metadata.as_ref()
-        && let (Some(server), Some(original)) =
-            (&metadata.mcp_server_id, &metadata.mcp_original_tool_name)
-    {
+fn alias(
+    name: &str,
+    risk: Option<&str>,
+    server: Option<&str>,
+    original: Option<&str>,
+) -> Option<String> {
+    if let (Some(server), Some(original)) = (server, original) {
         return Some(format!("mcp__{server}__{original}"));
     }
-    match (tool.name.as_str(), tool.risk.as_deref()) {
+    match (name, risk) {
         (_, Some("execute_process")) => Some("Bash".into()),
         ("read", _) => Some("Read".into()),
         ("write", _) => Some("Write".into()),
@@ -1198,6 +1229,253 @@ struct Branch {
 }
 
 impl Branch {
+    async fn rebuild(&self) -> dim_agent_runtime::Result<u64> {
+        let through = self.timeline.committed();
+        let mut after = None;
+        let mut view = View::default();
+        loop {
+            let reply = self
+                .timeline
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: None,
+                    through: Some(through),
+                    include_publishing: true,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: FOLLOWED_EVENTS.map(Into::into).to_vec(),
+                                },
+                                QueryFilter::Not {
+                                    condition: Box::new(QueryFilter::And {
+                                        conditions: vec![
+                                            QueryFilter::In {
+                                                value: QueryOperand::Field {
+                                                    path: "kind".into(),
+                                                },
+                                                values: vec!["step/tool-call".into()],
+                                            },
+                                            QueryFilter::Exists {
+                                                condition: Box::new(QueryFilter::And {
+                                                    conditions: vec![
+                                                        QueryFilter::In {
+                                                            value: QueryOperand::Field {
+                                                                path: "kind".into(),
+                                                            },
+                                                            values: vec!["step/tool-result".into()],
+                                                        },
+                                                        QueryFilter::Compare {
+                                                            left: QueryOperand::Field {
+                                                                path: "data.call_event_id".into(),
+                                                            },
+                                                            comparison: QueryComparison::Eq,
+                                                            right: QueryOperand::Outer {
+                                                                path: "id".into(),
+                                                            },
+                                                        },
+                                                    ],
+                                                }),
+                                            },
+                                        ],
+                                    }),
+                                },
+                            ],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: [
+                                "kind",
+                                "id",
+                                "position.sequence",
+                                "data.user.content[].type",
+                                "data.blocks[].text",
+                                "data.blocks[].key",
+                                "data.input_id",
+                                "data.calls",
+                                "data.turn_id",
+                                "data.results[].call_id",
+                                "data.settings.tools[].name",
+                                "data.settings.tools[].risk",
+                                "data.settings.tools[].metadata.mcpServerId",
+                                "data.settings.tools[].metadata.mcpOriginalToolName",
+                            ]
+                            .map(String::from)
+                            .to_vec(),
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: std::num::NonZeroU64::new(256).unwrap(),
+                        after,
+                    }),
+                })
+                .await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
+            };
+            for row in rows {
+                let [
+                    QueryValue::Value {
+                        value: Value::String(kind),
+                    },
+                    QueryValue::Value {
+                        value: Value::String(id),
+                    },
+                    QueryValue::Value { value: sequence },
+                    user,
+                    texts,
+                    keys,
+                    input_id,
+                    calls,
+                    turn_id,
+                    results,
+                    names,
+                    risks,
+                    servers,
+                    originals,
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("event has kind, id and sequence")
+                };
+                let sequence = sequence
+                    .as_u64()
+                    .expect("position sequence is an unsigned integer");
+                view.last = sequence;
+                match kind.as_str() {
+                    "stop/interrupt" => view.interrupted = sequence,
+                    "input/message" => {
+                        let texts = match texts {
+                            QueryValue::Elements { values } => values.as_slice(),
+                            QueryValue::Missing => &[],
+                            _ => unreachable!("block text projection is an array"),
+                        };
+                        let keys = match keys {
+                            QueryValue::Elements { values } => values.as_slice(),
+                            QueryValue::Missing => &[],
+                            _ => unreachable!("block key projection is an array"),
+                        };
+                        let operator = !matches!(user, QueryValue::Missing)
+                            && !matches!(texts.first(), Some(QueryValue::Value { value: Value::String(text) }) if text.starts_with("<dim-"));
+                        let started = keys.iter().any(|key| matches!(key, QueryValue::Value { value: Value::String(key) } if key.starts_with(SESSION_START_KEY)));
+                        let follow_up = texts.iter().any(|text| matches!(text, QueryValue::Value { value: Value::String(text) } if text.starts_with("<dim-hooks kind=\"follow-up\">")));
+                        view.input(id, operator, started, follow_up);
+                    }
+                    "input/consumed" | "input/deleted" => {
+                        let QueryValue::Value {
+                            value: Value::String(input),
+                        } = input_id
+                        else {
+                            unreachable!("input decision has an input id")
+                        };
+                        if kind == "input/consumed" {
+                            view.consumed(input, sequence);
+                        } else {
+                            view.operator_inputs.remove(input);
+                        }
+                    }
+                    "turn/start" => view.started = true,
+                    "turn/end" => {
+                        view.turn_ended();
+                    }
+                    "step/tool-call" => {
+                        let (
+                            QueryValue::Value { value: calls },
+                            QueryValue::Value {
+                                value: Value::String(turn),
+                            },
+                        ) = (calls, turn_id)
+                        else {
+                            unreachable!("tool call has calls and turn id")
+                        };
+                        let calls: Vec<dim_agent_types::ToolCall> =
+                            serde_json::from_value(calls.clone())
+                                .expect("calls follow the event contract");
+                        for call in calls {
+                            view.calls
+                                .insert(call.id, (call.name, call.input, turn.clone()));
+                        }
+                    }
+                    "step/tool-result" => {
+                        let QueryValue::Elements { values } = results else {
+                            unreachable!("tool results have call ids")
+                        };
+                        for value in values {
+                            let QueryValue::Value {
+                                value: Value::String(id),
+                            } = value
+                            else {
+                                unreachable!("tool result has call id")
+                            };
+                            view.calls.remove(id);
+                        }
+                    }
+                    "context/configured" => {
+                        view.tool_aliases = match names {
+                            QueryValue::Missing => None,
+                            QueryValue::Elements { values: names } => {
+                                let (
+                                    QueryValue::Elements { values: risks },
+                                    QueryValue::Elements { values: servers },
+                                    QueryValue::Elements { values: originals },
+                                ) = (risks, servers, originals)
+                                else {
+                                    unreachable!("tool property arrays retain the same shape")
+                                };
+                                let mut aliases = HashMap::new();
+                                for (index, name) in names.iter().enumerate() {
+                                    let QueryValue::Value {
+                                        value: Value::String(name),
+                                    } = name
+                                    else {
+                                        unreachable!("tool has a name")
+                                    };
+                                    let risk = match &risks[index] {
+                                        QueryValue::Missing => None,
+                                        QueryValue::Value {
+                                            value: Value::String(value),
+                                        } => Some(value.as_str()),
+                                        _ => unreachable!("risk is an optional string"),
+                                    };
+                                    let server = match &servers[index] {
+                                        QueryValue::Missing => None,
+                                        QueryValue::Value {
+                                            value: Value::String(value),
+                                        } => Some(value.as_str()),
+                                        _ => unreachable!("MCP server id is an optional string"),
+                                    };
+                                    let original = match &originals[index] {
+                                        QueryValue::Missing => None,
+                                        QueryValue::Value {
+                                            value: Value::String(value),
+                                        } => Some(value.as_str()),
+                                        _ => unreachable!("MCP tool name is an optional string"),
+                                    };
+                                    if let Some(value) = alias(name, risk, server, original) {
+                                        aliases.insert(name.clone(), value);
+                                    }
+                                }
+                                Some(aliases)
+                            }
+                            _ => unreachable!("tool name projection is an optional array"),
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            after = reply.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        *self.view.lock().unwrap() = view;
+        Ok(through)
+    }
+
     /// The alias a matcher of a tool event is tested against (G.2): a
     /// property of the declaration the branch uses. A branch that adopted a
     /// tool part uses that part, and a name it does not declare has no alias.
@@ -1209,7 +1487,20 @@ impl Branch {
         self.registry
             .fixed(name)
             .or_else(|| self.registry.contributed(name))
-            .and_then(|tool| alias(&tool.definition))
+            .and_then(|tool| {
+                alias(
+                    &tool.definition.name,
+                    tool.definition.risk.as_deref(),
+                    tool.definition
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.mcp_server_id.as_deref()),
+                    tool.definition
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.mcp_original_tool_name.as_deref()),
+                )
+            })
     }
 
     /// Fills a settled batch's aliases from the view it folded under.
@@ -1808,7 +2099,6 @@ impl DynPlugin for HooksBranchPlugin {
             });
             let owner = branch.clone();
             let read = branch.clone();
-            let read_timeline = branch.timeline.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -1816,14 +2106,7 @@ impl DynPlugin for HooksBranchPlugin {
                     FOLLOWED_EVENTS.map(String::from).to_vec(),
                     Arc::new(move || {
                         let read = read.clone();
-                        let timeline = read_timeline.clone();
-                        Box::pin(async move {
-                            let reply = rebuild_facts(&timeline, &FOLLOWED_EVENTS).await?;
-                            for event in &reply.events {
-                                read.fold(event, false);
-                            }
-                            Ok(reply.through)
-                        })
+                        Box::pin(async move { read.rebuild().await })
                     }),
                     Arc::new(move |event| {
                         let owner = owner.clone();

@@ -77,24 +77,23 @@ const counter = definePlugin({
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     const timeline = ctx.use<Services['timeline']>('timeline')
-    let count = 0
+    let count = 0n
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
     // One registration: the rebuild folds this branch's facts and returns the
     // cutoff of its read, then the events above it arrive as live.
     await dispatcher.consume('example-counter', ['input/message'], async () => {
-      let from: bigint | undefined
-      for (;;) {
-        const page = await timeline.query({
-          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
-          direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
-        })
-        page.events.forEach(fold)
-        const last = page.events.at(-1)
-        if (last === undefined || page.events.length < 256) return BigInt(page.through)
-        from = BigInt(last.sequence) + 1n
-      }
+      const page = await timeline.query({
+        scope: 'branch', include_publishing: true,
+        query: {
+          filter: { op: 'in', value: { kind: 'field', path: 'kind' }, values: ['input/message'] },
+          select: { kind: 'count' },
+        },
+      })
+      if (page.result.kind !== 'count') throw new Error('expected a count')
+      count = BigInt(page.result.count)
+      return BigInt(page.through)
     }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
@@ -794,26 +793,23 @@ export const counter = definePlugin({
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     const timeline = ctx.use<Services['timeline']>('timeline')
-    let count = 0
+    let count = 0n
     let through = 0n
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
     await dispatcher.consume('example-counter', ['input/message'], async () => {
-      let from: bigint | undefined
-      for (;;) {
-        const page = await timeline.query({
-          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
-          direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
-        })
-        page.events.forEach(fold)
-        const last = page.events.at(-1)
-        if (last === undefined || page.events.length < 256) {
-          through = BigInt(page.through)
-          return through
-        }
-        from = BigInt(last.sequence) + 1n
-      }
+      const page = await timeline.query({
+        scope: 'branch', include_publishing: true,
+        query: {
+          filter: { op: 'in', value: { kind: 'field', path: 'kind' }, values: ['input/message'] },
+          select: { kind: 'count' },
+        },
+      })
+      if (page.result.kind !== 'count') throw new Error('expected a count')
+      count = BigInt(page.result.count)
+      through = BigInt(page.through)
+      return BigInt(page.through)
     }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count, through }) })
   },
@@ -823,11 +819,11 @@ export const counter = definePlugin({
 Its plugin registers it for `branch` and lists `"exampleCounter": "branch"` in its row's
 `instanceNames` ([One row per plugin](#one-row-per-plugin)).
 
-`consume` subscribes first and holds the events that match the keys, then calls the rebuild, which
-reads this branch's facts through its published head with the facts written and not yet published,
-a page at a time, and folds them itself. The reply's `through` is the cutoff of that read, and it is
-the last page's cutoff when the read pages; an earlier cutoff would re-read what lies between the
-two. The registration returns that cutoff as the rebuild's value, then releases the held facts
+`consume` subscribes first and holds the events that match the keys, then calls the rebuild.
+This example queries a count, including committed facts that have not been published. The reply's
+`through` is its cutoff. A rebuild that needs multiple pages passes that same cutoff and each
+returned continuation to the next query; it consumes each page before requesting another. The
+registration returns the fixed cutoff as the rebuild's value, then releases the held facts
 above it, and each later matching fact reaches the handler directly; none is folded twice. Live
 facts wait until the rebuild returns, so do what the rebuild leaves to do, such as ending the
 operations a previous generation left open, before returning. A rebuild repeats no external side
@@ -902,7 +898,7 @@ export const checkpoints = definePlugin({
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     const timeline = ctx.use<Services['timeline']>('timeline')
     // Rebuild from your own events in history; act only on live events.
-    let steps = 0
+    let steps = 0n
     const fold = (event: BranchEvent) => {
       if (event.type === 'myplugin') steps++
     }
@@ -910,22 +906,21 @@ export const checkpoints = definePlugin({
       if (event.type === 'myplugin') {
         fold(event)
       } else {
-        await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
+        await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1n } })
       }
     }
     // Rebuild from your own events in history; act only on live events.
     await dispatcher.consume('example-checkpoints', ['myplugin/*', 'turn/end'], async () => {
-      let from: bigint | undefined
-      for (;;) {
-        const page = await timeline.query({
-          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
-          direction: 'ascending', kinds: ['myplugin/*'], limit: 256n, offset: 0n,
-        })
-        page.events.forEach(fold)
-        const last = page.events.at(-1)
-        if (last === undefined || page.events.length < 256) return BigInt(page.through)
-        from = BigInt(last.sequence) + 1n
-      }
+      const page = await timeline.query({
+        scope: 'branch', include_publishing: true,
+        query: {
+          filter: { op: 'prefix', value: { kind: 'field', path: 'kind' }, prefix: 'myplugin/' },
+          select: { kind: 'count' },
+        },
+      })
+      if (page.result.kind !== 'count') throw new Error('expected a count')
+      steps = BigInt(page.result.count)
+      return BigInt(page.through)
     }, event => release(event))
   },
 })

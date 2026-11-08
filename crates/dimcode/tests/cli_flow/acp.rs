@@ -60,7 +60,8 @@ fn title_request_input(request: &Value) -> Option<String> {
 fn recovery_hello(wire: &mut Wire, instance: &str) {
     let hello = wire.read("hello");
     assert_eq!(hello["params"]["clientName"], "AcpGateway");
-    wire.reply(&hello,json!({"instanceId":instance,"serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.input_lookup"]}));
+    wire.2 = true;
+    wire.reply(&hello,json!({"instanceId":instance,"serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input_lookup","session.methods"]}));
 }
 
 /// #557: `session/new` records the editor as its creation origin, on a daemon
@@ -373,9 +374,25 @@ fn acp_stdio_recovers_accepted_input_without_resubmitting_and_resets_subagent_ob
                     json!({"turn_id":"owned","status":if restarted {"cancelled"} else {"completed"},"reason":if restarted {"server_restarted"} else {"end_turn"}}),
                 ),
             ];
+            let pending = json!({"eventId":"delegation","sequence":8,"startedAt":1,"request":facts[0]["data"],"delivery":null});
+            let after = history["params"]["after"].as_u64().unwrap();
+            let facts: Vec<_> = facts
+                .into_iter()
+                .filter(|fact| fact["sequence"].as_u64().unwrap() > after)
+                .collect();
             wire.reply(
                 &history,
                 json!({"events":facts,"through":13,"nextAfter":13,"done":true}),
+            );
+            let methods = wire.read("session.methods");
+            wire.reply(
+                &methods,
+                json!({"methods":[{"name":"session.collaboration.pending","mutating":false}]}),
+            );
+            let read = wire.read("session.collaboration.pending");
+            wire.reply(
+                &read,
+                json!({"branchId":"main","through":13,"requests":[pending],"next":null}),
             );
             detached_eof(&mut wire);
         });
@@ -1337,7 +1354,7 @@ fn acp_stdio_model_choices_keep_the_catalog_provider_and_adopted_result() {
     let daemon = home.daemon(|wire| {
         let mut methods = METHODS.to_vec(); methods.extend(["session.methods","provider.catalog"]); wire.hello(&methods);
         wire.created();
-        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({"sequence":8,"model":{"providerId":"provider/with/slashes","modelId":"native/model"}}));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[event(8,"configured","context","configured",json!({"provider_id":"provider/with/slashes","model_id":"native/model"}))],"through":8,"nextAfter":8,"done":true}));
         let methods = wire.read("session.methods"); wire.reply(&methods,json!({"methods":[{"name":"session.model.update","mutating":true}]}));
@@ -1404,10 +1421,15 @@ fn lody_projection(version: u32) {
             event(19,"background-ended","exec","ended",json!({"task_id":"background","status":"cancelled","result":{"content":"Native command was cancelled","isError":true}})),
         ];
         for fact in &facts { wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":fact})); }
-        for _ in 0..2 {
-            let list = wire.read("session.list"); wire.reply(&list,json!([{"sessionId":"session","cwd":cwd}]));
-            let history = wire.read("session.history"); wire.reply(&history,json!({"events":facts,"through":19,"nextAfter":19,"done":true}));
-        }
+        let list = wire.read("session.list"); wire.reply(&list,json!([{"sessionId":"session","cwd":cwd}]));
+        let attach = wire.read("session.attach"); wire.reply(&attach,json!({"sequence":19}));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["after"],0);
+        wire.reply(&history,json!({"events":facts,"through":19,"nextAfter":19,"done":true}));
+        let list = wire.read("session.list"); wire.reply(&list,json!([{"sessionId":"session","cwd":cwd}]));
+        let turn = wire.read("session.turn.get");
+        assert_eq!(turn["params"]["turnId"],"turn");
+        wire.reply(&turn,json!({"branchId":"main","through":19,"turn":{"turnId":"turn","sequence":15,"ended":true},"output":null}));
         let fork = wire.read("session.fork"); assert_eq!(fork["params"]["at"],15); wire.reply(&fork,json!({"sessionId":"forked","sequence":15}));
         let attach = wire.read("session.attach"); assert_eq!(attach["params"]["sessionId"],"forked"); wire.reply(&attach,json!({}));
         let history = wire.read("session.history"); wire.reply(&history,json!({"events":[],"through":15,"nextAfter":15,"done":true}));
@@ -2122,7 +2144,8 @@ fn acp_stdio_correlates_the_consumed_input_and_deduplicates_unicode_progress() {
         let hello = wire.read("hello");
         assert_eq!(hello["params"]["clientKind"], "other");
         assert_eq!(hello["params"]["clientName"], "AcpGateway");
-        let mut methods = vec!["session.create", "session.history"];
+        wire.2 = true;
+        let mut methods = vec!["session.create", "session.history", "session.history.latestTurn"];
         methods.extend_from_slice(METHODS);
         wire.reply(&hello, json!({"instanceId":"fixture","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":methods}));
         let create = wire.read("session.create");
@@ -2198,13 +2221,13 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
         assert!(first["params"].get("through").is_none());
         wire.reply(
             &first,
-            json!({"events":[],"through":8,"nextAfter":3,"done":false}),
+            json!({"events":[],"through":8,"nextBefore":4,"nextAfter":8,"done":false}),
         );
         let second = wire.read("session.history");
         assert_eq!(second["params"]["through"], 8);
-        assert_eq!(second["params"]["after"], 3);
+        assert_eq!(second["params"]["before"], 4);
         let text = event(
-            8,
+            3,
             "answer",
             "step",
             "text",
@@ -2216,7 +2239,7 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
         );
         wire.reply(
             &second,
-            json!({"events":[text],"through":8,"nextAfter":8,"done":true}),
+            json!({"events":[text],"through":8,"nextBefore":1,"nextAfter":3,"done":true}),
         );
         detached_eof(wire);
     });
@@ -2456,6 +2479,102 @@ fn acp_stdio_reports_a_blocked_prompt_as_refusal_with_the_reason() {
         "the block's message is text: {:?}",
         peer.updates
     );
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_load_bounds_a_long_turn_and_marks_the_omitted_prefix() {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        let list = wire.read("session.list");
+        wire.reply(&list, json!([{"sessionId":"saved","cwd":cwd}]));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({"sequence":1000}));
+        for page in 0..4_u64 {
+            let read = wire.read("session.history");
+            assert_eq!(read["params"]["limit"], 256);
+            if page == 0 {
+                assert_eq!(read["params"]["latestTurn"], true);
+                wire.notice("session.event", json!({"sessionId":"saved","branchId":"main","event":event(1001,"live","step","text",json!({"turn_id":"turn","request_id":"reply","delta":"live"}))}));
+            } else {
+                assert_eq!(read["params"]["before"], 1000-page*100);
+                assert_eq!(read["params"]["through"], 1000);
+                assert!(read["params"].get("latestTurn").is_none());
+            }
+            let sequence = 900-page*100;
+            wire.reply(&read, json!({"events":[event(sequence,&format!("e{sequence}"),"step","text",json!({"turn_id":"turn","request_id":"reply","delta":format!("p{page}")}))],"through":1000,"nextBefore":sequence,"nextAfter":sequence,"done":true}));
+        }
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(
+        2,
+        "session/load",
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+    );
+    let loaded = peer.response(2);
+    assert_eq!(
+        loaded["result"]["_meta"]["dim/history"],
+        json!({"through":1000,"before":600,"complete":false}),
+        "{loaded}"
+    );
+    let text: String = peer
+        .updates
+        .iter()
+        .filter_map(|frame| frame["params"]["update"]["content"]["text"].as_str())
+        .collect();
+    assert_eq!(text, "p3p2p1p0");
+    let live = peer.frame();
+    assert_eq!(live["params"]["update"]["content"]["text"], "live");
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn acp_load_resolves_an_orphan_result_by_request_and_call_without_extending_history() {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let daemon=home.daemon(move |wire| {
+        let mut methods=METHODS.to_vec(); methods.push("session.methods"); wire.hello(&methods);
+        let list=wire.read("session.list"); wire.reply(&list,json!([{"sessionId":"saved","cwd":cwd}]));
+        let attach=wire.read("session.attach"); wire.reply(&attach,json!({"sequence":1000}));
+        let history=wire.read("session.history"); assert_eq!(history["params"]["latestTurn"],true);
+        let mut events:Vec<_>=(900..999).map(|sequence|event(sequence,&format!("text-{sequence}"),"step","text",json!({"turn_id":"turn","request_id":format!("r-{sequence}"),"delta":"text"}))).collect();
+        events.push(event(999,"result","step","tool-result",json!({"turn_id":"turn","request_id":"old-request","results":[{"call_id":"old-call","result":{"content":"saved result"}}]})));
+        wire.reply(&history,json!({"events":events,"through":1000,"nextBefore":900,"nextAfter":999,"done":true}));
+        let methods=wire.read("session.methods");
+        wire.reply(&methods,json!({"methods":[{"name":"session.tool.get","mutating":false}]}));
+        wire.2=true;
+        let read=wire.read("session.tool.get");
+        assert_eq!(read["params"],json!({"sessionId":"saved","branchId":"main","requestId":"old-request","callId":"old-call","through":1000}));
+        wire.reply(&read,json!({"branchId":"main","through":1000,"call":{"turn_id":"turn","request_id":"old-request","call":{"id":"old-call","name":"echo","input":{"text":"original arguments"}}}}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(
+        2,
+        "session/load",
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+    );
+    let loaded = peer.response(2);
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let updates: Vec<_> = peer
+        .updates
+        .iter()
+        .map(|frame| &frame["params"]["update"])
+        .filter(|update| {
+            update["toolCallId"].as_str() == Some(r#"["main","old-request","old-call"]"#)
+        })
+        .collect();
+    assert_eq!(updates.len(), 2, "{updates:?}");
+    assert_eq!(updates[0]["sessionUpdate"], "tool_call");
+    assert_eq!(updates[0]["rawInput"], json!({"text":"original arguments"}));
+    assert_eq!(updates[1]["status"], "completed");
     peer.close();
     daemon.join().unwrap();
 }

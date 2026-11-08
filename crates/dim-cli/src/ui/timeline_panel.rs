@@ -242,6 +242,8 @@ mod tests {
             streaming: false,
             elapsed_ms: None,
             tone: None,
+            call_id: None,
+            tool_lookup_done: false,
             tool_name: None,
             tool_input: None,
             batch: None,

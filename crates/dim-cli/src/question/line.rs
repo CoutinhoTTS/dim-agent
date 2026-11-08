@@ -25,10 +25,9 @@ use crate::{
     display::Display,
     input::Input,
     sanitize::safe,
-    session::History,
 };
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use unicode_width::UnicodeWidthStr;
 
 /// The questions of one attached Session in a line-mode turn loop.
@@ -38,8 +37,8 @@ pub struct Questions {
     /// call id; the rest are asked.
     handled: HashSet<(String, String, String)>,
     asking: Option<Asking>,
-    /// Branches whose history was read or is being read.
-    branches: HashSet<String>,
+    /// Branches seen, with the cutoff of each completed inventory.
+    branches: HashMap<String, Option<u64>>,
     reads: Vec<Read>,
     /// Replies this client waits for and then ignores.
     drained: HashSet<u64>,
@@ -60,12 +59,13 @@ struct Asking {
     settled: Option<bool>,
 }
 
-/// One paged `session.history` read of a branch other than `main`.
+/// One pending-question inventory at a fixed published cutoff.
 struct Read {
     branch_id: String,
     request: u64,
-    after: u64,
     through: Option<u64>,
+    sequence: u64,
+    live: Vec<Value>,
 }
 
 impl Default for Questions {
@@ -74,7 +74,7 @@ impl Default for Questions {
             pending: Pending::default(),
             handled: HashSet::new(),
             asking: None,
-            branches: HashSet::from(["main".to_owned()]),
+            branches: HashMap::from([("main".to_owned(), Some(0))]),
             reads: Vec::new(),
             drained: HashSet::new(),
         }
@@ -90,9 +90,9 @@ fn key(call: &Call) -> (String, String, String) {
 }
 
 impl Questions {
-    /// Reads one stored event of `branch_id`, before the turn loop runs.
-    pub fn history(&mut self, branch_id: &str, event: &Value) {
-        self.pending.event(branch_id, event);
+    /// Starts the main branch inventory independently of its transcript window.
+    pub async fn start(&mut self, client: &mut Client, session_id: &str) -> Result<()> {
+        self.read(client, session_id, "main").await
     }
 
     /// Whether a question prompt owns the terminal input.
@@ -121,6 +121,11 @@ impl Questions {
     fn unhandled(&self) -> Option<&Call> {
         self.pending
             .calls()
+            .filter(|call| {
+                self.branches
+                    .get(&call.branch_id)
+                    .is_some_and(Option::is_some)
+            })
             .find(|call| !self.handled.contains(&key(call)))
     }
 
@@ -129,6 +134,13 @@ impl Questions {
     pub fn unanswerable(&mut self) -> Vec<String> {
         let mut branches = Vec::new();
         for call in self.pending.calls() {
+            if self
+                .branches
+                .get(&call.branch_id)
+                .is_none_or(Option::is_none)
+            {
+                continue;
+            }
             if self.handled.insert(key(call)) && !branches.contains(&call.branch_id) {
                 branches.push(call.branch_id.clone());
             }
@@ -295,7 +307,7 @@ impl Questions {
     }
 
     /// A notice of the attached Session: events update the waiting calls;
-    /// a branch seen for the first time has its history read.
+    /// a branch seen for the first time has its pending questions read.
     pub async fn notice(
         &mut self,
         client: &mut Client,
@@ -309,11 +321,31 @@ impl Questions {
         };
         match method {
             "session.event" => {
+                if self
+                    .branches
+                    .get(branch_id)
+                    .and_then(|cut| *cut)
+                    .is_some_and(|cut| {
+                        params["event"]["sequence"]
+                            .as_u64()
+                            .is_some_and(|sequence| sequence <= cut)
+                    })
+                {
+                    return Ok(());
+                }
+                if let Some(read) = self
+                    .reads
+                    .iter_mut()
+                    .find(|read| read.branch_id == branch_id)
+                {
+                    read.live.push(params["event"].clone());
+                    return Ok(());
+                }
                 let settled = self.pending.event(branch_id, &params["event"]);
                 self.settle(settled, display)?;
             }
-            "session.state" if self.branches.insert(branch_id.to_owned()) => {
-                self.read(client, session_id, branch_id, 0, None).await?;
+            "session.state" if !self.branches.contains_key(branch_id) => {
+                self.read(client, session_id, branch_id).await?;
             }
             _ => {}
         }
@@ -339,25 +371,21 @@ impl Questions {
         Ok(())
     }
 
-    async fn read(
-        &mut self,
-        client: &mut Client,
-        session_id: &str,
-        branch_id: &str,
-        after: u64,
-        through: Option<u64>,
-    ) -> Result<()> {
-        let mut params =
-            json!({"sessionId":session_id,"branchId":branch_id,"after":after,"limit":256});
-        if let Some(through) = through {
-            params["through"] = json!(through);
-        }
-        let request = client.send("session.history", params).await?;
+    async fn read(&mut self, client: &mut Client, session_id: &str, branch_id: &str) -> Result<()> {
+        self.branches.insert(branch_id.into(), None);
+        self.pending.clear_branch(branch_id);
+        let request = client
+            .send(
+                "session.question.pending",
+                json!({"sessionId":session_id,"branchId":branch_id}),
+            )
+            .await?;
         self.reads.push(Read {
             branch_id: branch_id.to_owned(),
             request,
-            after,
-            through,
+            through: None,
+            sequence: 0,
+            live: Vec::new(),
         });
         Ok(())
     }
@@ -366,18 +394,27 @@ impl Questions {
         &mut self,
         client: &mut Client,
         session_id: &str,
-        read: Read,
+        mut read: Read,
         result: std::result::Result<Value, RpcError>,
         display: &mut Display,
     ) -> Result<()> {
-        let page = match result {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Page {
+            branch_id: String,
+            through: u64,
+            batches: Vec<dim_agent_types::PendingQuestionBatch>,
+            next: Option<Value>,
+        }
+        let value = match result {
+            Ok(value) => value,
             Err(error)
                 if error
                     .data
                     .as_ref()
                     .and_then(|data| data.get("appError"))
                     .and_then(Value::as_str)
-                    == Some("branch_missing") =>
+                    .is_some_and(|code| matches!(code, "branch_missing" | "unknown_method")) =>
             {
                 return Ok(());
             }
@@ -387,24 +424,47 @@ impl Questions {
                     read.branch_id
                 ));
             }
-            Ok(value) => {
-                serde_json::from_value::<History>(value).map_err(|_| "Invalid history page")?
-            }
         };
-        let next = page.next(read.after, read.through)?;
-        for event in &page.events {
-            let settled = self.pending.event(&read.branch_id, event);
-            self.settle(settled, display)?;
+        let page: Page = serde_json::from_value(value)?;
+        if page.branch_id != read.branch_id
+            || page.through > dim_agent_types::JS_MAX_SAFE_INTEGER
+            || read.through.is_some_and(|through| through != page.through)
+            || page.batches.len() > 128
+            || page.next.is_some() && page.batches.is_empty()
+        {
+            return Err("Invalid pending-question cutoff".into());
         }
-        if let Some(after) = next {
-            self.read(
-                client,
-                session_id,
+        for batch in page.batches {
+            if batch.sequence <= read.sequence || batch.sequence > page.through {
+                return Err("Invalid pending-question position".into());
+            }
+            read.sequence = batch.sequence;
+            self.pending.asked(
                 &read.branch_id,
-                after,
-                Some(page.through),
-            )
-            .await?;
+                &batch.event_id,
+                &batch.request_id,
+                &batch.calls,
+            );
+        }
+        if let Some(next) = page.next {
+            read.through = Some(page.through);
+            read.request = client.send("session.question.pending", json!({
+                "sessionId":session_id,"branchId":read.branch_id,"through":page.through,"after":next,
+            })).await?;
+            self.reads.push(read);
+        } else {
+            self.branches
+                .insert(read.branch_id.clone(), Some(page.through));
+            read.live.sort_by_key(|event| event["sequence"].as_u64());
+            for event in read.live {
+                let sequence = event["sequence"]
+                    .as_u64()
+                    .ok_or("Invalid question event sequence")?;
+                if sequence > page.through {
+                    let settled = self.pending.event(&read.branch_id, &event);
+                    self.settle(settled, display)?;
+                }
+            }
         }
         Ok(())
     }

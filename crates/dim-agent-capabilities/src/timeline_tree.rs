@@ -1,3 +1,5 @@
+pub mod read;
+
 use crate::{
     host::{HostError, HostFuture, ToolExecutionContext},
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
@@ -5,10 +7,10 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Branch, BranchDirectoryEntry, BranchDirectoryState, BranchLifecycle, BranchOptions,
-    Dispatcher, Names, Result, SessionIdentity, StoredBranch, StoredEvent, Timeline,
-    TimelineContext, TimelineFactory, TimelineIdentity, TimelineInfo, TimelineKey, TimelineQuery,
-    TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply,
-    TimelineQueryScope, TimelineStore, TimelineTreeControl, rebuild_facts,
+    Dispatcher, Names, QueryComparison, QueryFilter, QueryOperand, QueryOutput, QueryPage,
+    QueryPick, QuerySelect, QuerySpec, QueryValue, Result, SessionIdentity, StoredBranch,
+    StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity, TimelineInfo,
+    TimelineKey, TimelineQuery, TimelineQueryScope, TimelineStore, TimelineTreeControl,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -16,7 +18,6 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::service;
 use rutis::{Ctx, Error};
 use serde::Deserialize;
-use serde_json::json;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
@@ -31,10 +32,6 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
-
-/// Events per page of a restored child's creation check; the events a
-/// created child wrote while it opened fit in one.
-const CREATION_PAGE: usize = 32;
 
 /// Facts one page of a line read keeps.
 const LINE_PAGE: u64 = 32;
@@ -171,6 +168,17 @@ impl TreeCommands {
     ) -> std::result::Result<Arc<AgentEvent>, AgentError> {
         self.get(&id)?.input(input).await
     }
+    /// Commits `inputs` to branch `id` as one atomic batch through its
+    /// validating `Branch::inputs`: the given order, contiguous sequences and
+    /// one publication. Rust only: no other language has a consumer.
+    #[service(skip)]
+    pub async fn inputs(
+        &self,
+        id: String,
+        inputs: Vec<InputMessageData>,
+    ) -> std::result::Result<Vec<Arc<AgentEvent>>, AgentError> {
+        self.get(&id)?.inputs(inputs).await
+    }
     /// Ends the line `id` with `source`; only the target is checked (§10).
     pub async fn end(
         &self,
@@ -198,14 +206,13 @@ impl TreeCommands {
             .page(&id, after, limit, through)
             .await
     }
-    /// Queries one line's own facts, forwarding to its Timeline while open
-    /// and reading at the tree's fixed head after it ends. Chain scope is
-    /// invalid; an ended line has no publishing tail.
+    /// Computes properties of one line at a fixed cutoff. Chain scope is invalid.
+    /// An ended line reads its persisted facts and has no publishing tail.
     pub async fn query(
         &self,
         id: String,
-        query: TimelineQuery,
-    ) -> std::result::Result<TimelineQueryReply, AgentError> {
+        query: dim_agent_runtime::TimelineQuery,
+    ) -> std::result::Result<dim_agent_runtime::TimelineQueryReply, AgentError> {
         self.tree
             .upgrade()
             .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
@@ -300,43 +307,55 @@ async fn open_page(
     limit: usize,
     through: u64,
 ) -> Result<Vec<Arc<AgentEvent>>> {
-    let mut events = timeline.query(line_page(after, limit)).await?.events;
-    events.retain(|event| event.sequence <= through);
-    while let Some(last) = events.last() {
-        if last.sequence >= through {
+    if after >= through {
+        return Ok(vec![]);
+    }
+    let mut events = Vec::new();
+    let mut from = after + 1;
+    let mut wanted = limit;
+    loop {
+        let reply = timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: Some(TimelinePosition {
+                    branch_id: timeline.branch_id(),
+                    sequence: from,
+                }),
+                through: Some(through),
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: None,
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::new(wanted as u64).expect("a page keeps one fact"),
+                    after: None,
+                }),
+            })
+            .await?;
+        let QueryOutput::Events { events: rows } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        if rows.is_empty() {
             break;
         }
-        match timeline.batch_end(last.sequence).await {
+        events.extend(rows.into_iter().map(|row| row.event));
+        let last = events.last().unwrap().sequence;
+        if last >= through {
+            break;
+        }
+        match timeline.batch_end(last).await {
             Ok(()) => break,
             Err(AgentError::InvalidInput(_)) => {}
             Err(error) => return Err(error),
         }
-        let next = timeline.query(line_page(last.sequence, 1)).await?.events;
-        let Some(event) = next.into_iter().find(|event| event.sequence <= through) else {
-            break;
-        };
-        events.push(event);
+        from = last + 1;
+        wanted = 1;
     }
     Ok(events)
-}
-
-/// The facts after `after` a page asks for, up to `limit`.
-fn line_page(after: u64, limit: usize) -> TimelineQuery {
-    TimelineQuery {
-        scope: TimelineQueryScope::Branch,
-        include_publishing: false,
-        from_event: None,
-        from_sequence: Some(after.saturating_add(1)),
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Ascending,
-        kinds: Vec::new(),
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: std::num::NonZeroU64::new(u64::try_from(limit).unwrap_or(u64::MAX).max(1))
-            .expect("a page keeps one fact"),
-        offset: 0,
-    }
 }
 
 impl TimelineTree {
@@ -388,38 +407,74 @@ impl TimelineTree {
     }
     /// The lines whose end `branch` recorded, from its stored history.
     async fn stored_ends(&self, branch: &str, head: u64) -> Result<BTreeSet<String>> {
-        if head == 0 {
-            return Ok(BTreeSet::new());
+        let scope = self.stored_scope(branch, 1, head);
+        let mut ended = BTreeSet::new();
+        let mut after = None;
+        loop {
+            let reply = self
+                .store
+                .query(
+                    &scope,
+                    &QuerySpec {
+                        filter: Some(QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: vec!["branch/ended".into()],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: vec!["data.branch".into()],
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    Some(&QueryPage {
+                        limit: NonZeroU64::new(256).unwrap(),
+                        after,
+                    }),
+                )
+                .await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
+            };
+            for row in rows {
+                let [
+                    QueryValue::Value {
+                        value: serde_json::Value::String(branch),
+                    },
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("branch end names its branch")
+                };
+                ended.insert(branch.clone());
+            }
+            after = reply.next;
+            if after.is_none() {
+                return Ok(ended);
+            }
         }
-        let key = TimelineKey {
-            session_id: self.session_id.clone(),
-            branch_id: branch.into(),
-        };
-        let query = TimelineQuery {
-            scope: dim_agent_runtime::TimelineQueryScope::Branch,
-            include_publishing: false,
-            from_event: None,
-            from_sequence: Some(1),
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Descending,
-            kinds: vec!["branch/ended".into()],
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::new(head).expect("non-empty stored head"),
-            offset: 0,
-        };
-        Ok(self
-            .store
-            .query(&key, &query, 1, head)
-            .await?
-            .events
-            .into_iter()
-            .filter_map(|event| match &event.kind {
-                EventKind::BranchEnded(data) => Some(data.branch.clone()),
-                _ => None,
-            })
-            .collect())
+    }
+    fn stored_scope(
+        &self,
+        branch: &str,
+        from: u64,
+        through: u64,
+    ) -> dim_agent_runtime::TimelineReadScope {
+        dim_agent_runtime::TimelineReadScope {
+            key: TimelineKey {
+                session_id: self.session_id.clone(),
+                branch_id: branch.into(),
+            },
+            through,
+            segments: vec![dim_agent_runtime::TimelineReadSegment {
+                branch_id: branch.into(),
+                from,
+                through,
+                stored_through: through,
+                tail: vec![],
+            }],
+        }
     }
     /// The stored lines below `id`, deepest first.
     fn stored_descendants(id: &str, stored: &BTreeMap<String, StoredBranch>) -> Vec<String> {
@@ -532,56 +587,84 @@ impl TimelineTree {
             }
         }
     }
-    /// Whether a stored child's own facts settle its creation: `branch/start`
-    /// followed by the first input, which is Queue. What Prompt writes while
-    /// `branch/start` dispatches is Append and does not count. Reads from the
-    /// start a page at a time and stops at that input, so a created child
-    /// reads only the events of its opening, not its whole history.
+    /// Whether a Queue input follows this stored child's branch start.
+    /// Append inputs written by Prompt do not settle creation.
     async fn created(&self, branch: &str, head: u64) -> Result<bool> {
-        let key = TimelineKey {
-            session_id: self.session_id.clone(),
-            branch_id: branch.into(),
+        let scope = self.stored_scope(branch, 1, head);
+        let reply = self
+            .store
+            .query(
+                &scope,
+                &QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["input/message".into()],
+                            },
+                            QueryFilter::Or {
+                                conditions: vec![
+                                    QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "data.mode".into(),
+                                        },
+                                        values: vec!["queue".into()],
+                                    },
+                                    QueryFilter::And {
+                                        conditions: vec![
+                                            QueryFilter::Not {
+                                                condition: Box::new(QueryFilter::Present {
+                                                    value: QueryOperand::Field {
+                                                        path: "data.mode".into(),
+                                                    },
+                                                }),
+                                            },
+                                            QueryFilter::Present {
+                                                value: QueryOperand::Field {
+                                                    path: "data.user.content".into(),
+                                                },
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
+                            QueryFilter::Exists {
+                                condition: Box::new(QueryFilter::And {
+                                    conditions: vec![
+                                        QueryFilter::In {
+                                            value: QueryOperand::Field {
+                                                path: "kind".into(),
+                                            },
+                                            values: vec!["branch/start".into()],
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "position.sequence".into(),
+                                            },
+                                            comparison: QueryComparison::Lt,
+                                            right: QueryOperand::Outer {
+                                                path: "position.sequence".into(),
+                                            },
+                                        },
+                                    ],
+                                }),
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Exists,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                None,
+            )
+            .await?;
+        let QueryOutput::Exists { exists } = reply.result else {
+            unreachable!("existence selection returns a boolean")
         };
-        let mut query = TimelineQuery {
-            scope: TimelineQueryScope::Branch,
-            include_publishing: false,
-            from_event: None,
-            from_sequence: Some(1),
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Ascending,
-            kinds: vec!["branch/start".into(), "input/message".into()],
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::new(CREATION_PAGE as u64).expect("a page keeps one fact"),
-            offset: 0,
-        };
-        let mut started = false;
-        while let Some(from) = query.from_sequence {
-            if from > head {
-                break;
-            }
-            let page = self.store.query(&key, &query, from, head).await?;
-            for event in &page.events {
-                match &event.kind {
-                    EventKind::BranchStart(_) => started = true,
-                    EventKind::InputMessage(data)
-                        if started && data.effective_mode() == InputMode::Queue =>
-                    {
-                        return Ok(true);
-                    }
-                    _ => {}
-                }
-            }
-            let Some(last) = page.events.last().map(|event| event.sequence) else {
-                break;
-            };
-            if page.events.len() < CREATION_PAGE || last >= head {
-                break;
-            }
-            query.from_sequence = Some(last + 1);
-        }
-        Ok(false)
+        Ok(exists)
     }
     fn new(
         factory: Arc<TimelineFactory>,
@@ -709,53 +792,43 @@ impl TimelineTree {
                     Opening::Start { start, first } => (EventKind::BranchStart(start), first),
                     Opening::Resume { head, lines } => {
                         let mut facts = LineFacts::default();
-                        let mut from = 1;
+                        let mut after = None;
                         loop {
                             let reply = tokio::select! {
                                 result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().query(TimelineQuery {
-                                    scope: TimelineQueryScope::Branch,
-                                    include_publishing: false,
-                                    from_event: None,
-                                    from_sequence: Some(from),
-                                    order_by: TimelineQueryOrderBy::Sequence,
-                                    direction: TimelineQueryDirection::Ascending,
-                                    kinds: vec![
-                                        "branch/create-failed".into(),
-                                        "branch/create".into(),
-                                        "branch/ended".into(),
-                                    ],
-                                    flags: Vec::new(),
-                                    event_id: None,
-                                    predicate: None,
-                                    limit: NonZeroU64::new(LINE_PAGE).expect("a page keeps at least one event"),
-                                    offset: 0,
-                                })) =>
-                                    result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
+                                    scope: TimelineQueryScope::Branch, from: None, through: Some(head), include_publishing: false,
+                                    query: QuerySpec {
+                                        filter: Some(QueryFilter::In { value: QueryOperand::Field { path: "kind".into() }, values: ["branch/create-failed", "branch/create", "branch/ended"].map(Into::into).to_vec() }),
+                                        select: QuerySelect::Fields { fields: ["kind", "data.branch", "data.createEvent", "data.source", "data.endEvent"].map(String::from).to_vec() },
+                                        group_by: vec![], pick: None, order_by: vec![],
+                                    },
+                                    page: Some(QueryPage { limit: NonZeroU64::new(LINE_PAGE).unwrap(), after }),
+                                })) => result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                                 _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                             };
-                            let short = (reply.events.len() as u64) < LINE_PAGE;
-                            let last = reply.events.last().map(|event| event.sequence);
-                            for event in &reply.events {
-                                match &event.kind {
-                                    EventKind::BranchCreateFailed(
-                                        BranchCreateFailedData::Failed { create_event, .. }
-                                        | BranchCreateFailedData::Cancelled { create_event, .. },
-                                    ) => {
-                                        facts.failed_creates.insert(*create_event);
+                            let QueryOutput::Rows { rows } = reply.result else { unreachable!("field selection returns rows") };
+                            for row in rows {
+                                let [QueryValue::Value { value: serde_json::Value::String(kind) },
+                                    QueryValue::Value { value: serde_json::Value::String(branch) }, create, source, end] = row.values.as_slice()
+                                else { unreachable!("line facts name kind and branch") };
+                                match kind.as_str() {
+                                    "branch/create-failed" => {
+                                        let QueryValue::Value { value: create } = create else { unreachable!("creation failure names its creation") };
+                                        facts.failed_creates.insert(create.as_u64().expect("creation sequence is unsigned"));
                                     }
-                                    EventKind::BranchCreate(data) => {
-                                        facts.sources.insert(data.branch.clone(), data.source.clone());
+                                    "branch/create" => {
+                                        let QueryValue::Value { value: source } = source else { unreachable!("creation has a source") };
+                                        facts.sources.insert(branch.clone(), serde_json::from_value(source.clone()).expect("source follows its event contract"));
                                     }
-                                    EventKind::BranchEnded(data) => {
-                                        facts.ended.insert(data.branch.clone(), data.end_event);
+                                    "branch/ended" => {
+                                        let QueryValue::Value { value: end } = end else { unreachable!("ended line has an end sequence") };
+                                        facts.ended.insert(branch.clone(), end.as_u64().expect("end sequence is unsigned"));
                                     }
                                     _ => unreachable!("the read selects the line facts"),
                                 }
                             }
-                            match last {
-                                Some(last) if !short && last < head => from = last + 1,
-                                _ => break,
-                            }
+                            after = reply.next;
+                            if after.is_none() { break; }
                         }
                         let _ = lines.send(facts);
                         (EventKind::BranchResume(BranchResumeData {}), None)
@@ -881,8 +954,11 @@ impl TimelineTree {
             .map(|record| record.event)
             .collect())
     }
-    async fn query(&self, id: &str, query: TimelineQuery) -> Result<TimelineQueryReply> {
-        query.validate()?;
+    async fn query(
+        &self,
+        id: &str,
+        query: TimelineQuery,
+    ) -> Result<dim_agent_runtime::TimelineQueryReply> {
         if query.scope != TimelineQueryScope::Branch {
             return Err(AgentError::InvalidInput(
                 "a tree query reads one line's own facts".into(),
@@ -891,45 +967,45 @@ impl TimelineTree {
         if let Some(context) = self.owned_context(id) {
             return context.timeline().query(query).await;
         }
-        let through = self
+        let head = self
             .ended_head(id)
             .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
-        let key = TimelineKey {
-            session_id: self.session_id.clone(),
-            branch_id: id.into(),
+        query.query.validate(query.page.as_ref())?;
+        if query.through.is_none() && query.page.as_ref().is_some_and(|page| page.after.is_some()) {
+            return Err(AgentError::InvalidInput(
+                "continued queries require the original through".into(),
+            ));
+        }
+        let through = query.through.unwrap_or(head);
+        if through > head {
+            return Err(AgentError::InvalidInput(format!(
+                "future timeline sequence {through}"
+            )));
+        }
+        let from = match query.from {
+            Some(position)
+                if position.branch_id == id
+                    && position.sequence > 0
+                    && position.sequence <= through =>
+            {
+                position.sequence
+            }
+            Some(_) => {
+                return Err(AgentError::InvalidInput(
+                    "query start is outside its branch scope or sequence range".into(),
+                ));
+            }
+            None => 1,
         };
-        let anchor = if let Some(event_id) = &query.from_event {
-            let point = TimelineQuery {
-                from_event: None,
-                event_id: Some(event_id.clone()),
-                kinds: Vec::new(),
-                flags: Vec::new(),
-                predicate: None,
-                offset: 0,
-                limit: NonZeroU64::MIN,
-                ..query.clone()
-            };
-            let page = self.store.query(&key, &point, 1, through).await?;
-            let Some(event) = page.events.first() else {
-                return Ok(TimelineQueryReply {
-                    events: Vec::new(),
-                    positions: Vec::new(),
-                    through,
-                });
-            };
-            Some(event.sequence)
-        } else {
-            query.from_sequence
-        };
-        let (from, bound) = match query.direction {
-            TimelineQueryDirection::Ascending => (anchor.unwrap_or(1), through),
-            TimelineQueryDirection::Descending => (1, anchor.unwrap_or(through).min(through)),
-        };
-        let page = self.store.query(&key, &query, from, bound).await?;
-        Ok(TimelineQueryReply {
-            events: page.events,
-            positions: page.positions,
+        let scope = self.stored_scope(id, from, through);
+        let result = self
+            .store
+            .query(&scope, &query.query, query.page.as_ref())
+            .await?;
+        Ok(dim_agent_runtime::TimelineQueryReply {
             through,
+            result: result.result,
+            next: result.next,
         })
     }
     /// The batch-end check of one line, forwarding to its Timeline while open
@@ -951,50 +1027,52 @@ impl TimelineTree {
     /// opened must see ([timeline branches §7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)):
     /// an operator input, or a tool call.
     async fn activity_after(&self, id: &str, from: u64, through: u64) -> Result<bool> {
-        const PAGE: u64 = 8;
         if through <= from {
             return Ok(false);
         }
-        let key = TimelineKey {
-            session_id: self.session_id.clone(),
-            branch_id: id.into(),
+        let scope = self.stored_scope(id, from + 1, through);
+        let reply = self
+            .store
+            .query(
+                &scope,
+                &QuerySpec {
+                    filter: Some(QueryFilter::Or {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["step/tool-use".into()],
+                            },
+                            QueryFilter::And {
+                                conditions: vec![
+                                    QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "kind".into(),
+                                        },
+                                        values: vec!["input/message".into()],
+                                    },
+                                    QueryFilter::Present {
+                                        value: QueryOperand::Field {
+                                            path: "data.user.content".into(),
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Exists,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                None,
+            )
+            .await?;
+        let QueryOutput::Exists { exists } = reply.result else {
+            unreachable!("existence selection returns a boolean")
         };
-        let mut offset = 0;
-        loop {
-            let query = TimelineQuery {
-                scope: TimelineQueryScope::Branch,
-                from_event: None,
-                from_sequence: None,
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                include_publishing: false,
-                kinds: vec!["input/message".into(), "step/tool-use".into()],
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: std::num::NonZeroU64::new(PAGE).expect("a page is nonzero"),
-                offset,
-            };
-            let page = self
-                .store
-                .query(&key, &query, from.saturating_add(1), through)
-                .await?;
-            if page.events.is_empty() {
-                return Ok(false);
-            }
-            for event in &page.events {
-                if event.sequence <= from {
-                    return Ok(false);
-                }
-                if counts_as_activity(event) {
-                    return Ok(true);
-                }
-            }
-            if (page.events.len() as u64) < PAGE {
-                return Ok(false);
-            }
-            offset += PAGE;
-        }
+        Ok(exists)
     }
     /// Whether the latest block under `key` in the context `parent` has built
     /// at `cut` is live: the keyed state, resolved over the chain the child
@@ -1007,60 +1085,71 @@ impl TimelineTree {
         cut: u64,
         key: &str,
     ) -> Result<bool> {
-        const PAGE: u64 = 8;
         let mut chain = timeline.ancestors();
         chain.push((parent.to_owned(), cut));
         for (line, through) in chain.into_iter().rev() {
-            // The root line has no parent, so it never carries a parent block.
             if self.info(&line).is_none_or(|info| info.parent.is_none()) {
                 continue;
             }
-            let target = TimelineKey {
-                session_id: self.session_id.clone(),
-                branch_id: line,
+            let scope = self.stored_scope(&line, 1, through);
+            let reply = self
+                .store
+                .query(
+                    &scope,
+                    &QuerySpec {
+                        filter: Some(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: vec!["input/message".into()],
+                                },
+                                QueryFilter::Any {
+                                    field: "data.blocks".into(),
+                                    condition: Box::new(QueryFilter::In {
+                                        value: QueryOperand::Element { path: "key".into() },
+                                        values: vec![key.into()],
+                                    }),
+                                },
+                            ],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: vec!["data.blocks[].key".into(), "data.blocks[].retire".into()],
+                        },
+                        group_by: vec![],
+                        pick: Some(QueryPick::Last),
+                        order_by: vec![],
+                    },
+                    Some(&QueryPage {
+                        limit: NonZeroU64::MIN,
+                        after: None,
+                    }),
+                )
+                .await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
             };
-            let mut offset = 0;
-            loop {
-                let query = TimelineQuery {
-                    scope: TimelineQueryScope::Branch,
-                    from_event: None,
-                    from_sequence: None,
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Descending,
-                    include_publishing: false,
-                    kinds: vec!["input/message".into()],
-                    flags: Vec::new(),
-                    event_id: None,
-                    predicate: None,
-                    limit: std::num::NonZeroU64::new(PAGE).expect("a page is nonzero"),
-                    offset,
+            if let Some(row) = rows.first() {
+                let [
+                    QueryValue::Elements { values: keys },
+                    QueryValue::Elements { values: retires },
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("input block projections retain array positions")
                 };
-                let page = self.store.query(&target, &query, 1, through).await?;
-                if page.events.is_empty() {
-                    break;
-                }
-                for event in &page.events {
-                    let EventKind::InputMessage(data) = &event.kind else {
-                        continue;
-                    };
-                    for block in data.blocks.iter().rev() {
-                        let InputBlock::Raw {
-                            key: Some(found),
+                for (found, retire) in keys.iter().zip(retires).rev() {
+                    if matches!(found, QueryValue::Value { value: serde_json::Value::String(found) } if found == key)
+                    {
+                        return Ok(!matches!(
                             retire,
-                            ..
-                        } = block
-                        else {
-                            continue;
-                        };
-                        if found == key {
-                            return Ok(!*retire);
-                        }
+                            QueryValue::Value {
+                                value: serde_json::Value::Bool(true)
+                            }
+                        ));
                     }
                 }
-                if (page.events.len() as u64) < PAGE {
-                    break;
-                }
-                offset += PAGE;
+                unreachable!("selected input has a matching keyed block");
             }
         }
         Ok(false)
@@ -1081,40 +1170,48 @@ impl TimelineTree {
             .map(|node| node.turn_end.subscribe())
     }
     async fn own_end(&self, branch: &str, head: u64) -> Result<Option<(u64, BranchEndData)>> {
-        if head == 0 {
-            return Ok(None);
-        }
-        let key = TimelineKey {
-            session_id: self.session_id.clone(),
-            branch_id: branch.into(),
-        };
-        // A line holds at most one `branch/end` (the write path refuses a
-        // second on an ended line), so one page over the whole line is enough.
-        // The bound is the caller's `1..=head`; the query carries no anchor.
-        let query = TimelineQuery {
-            scope: dim_agent_runtime::TimelineQueryScope::Branch,
-            include_publishing: false,
-            from_event: None,
-            from_sequence: None,
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Descending,
-            kinds: vec!["branch/end".into()],
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::MIN,
-            offset: 0,
-        };
-        Ok(self
+        let scope = self.stored_scope(branch, 1, head);
+        let reply = self
             .store
-            .query(&key, &query, 1, head)
-            .await?
-            .events
-            .into_iter()
-            .find_map(|event| match event.kind {
-                EventKind::BranchEnd(ref data) => Some((event.sequence, data.clone())),
-                _ => None,
-            }))
+            .query(
+                &scope,
+                &QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["branch/end".into()],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["position.sequence".into(), "data".into()],
+                    },
+                    group_by: vec![],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![],
+                },
+                Some(&QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            )
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        Ok(rows.into_iter().next().map(|row| {
+            let [
+                QueryValue::Value { value: sequence },
+                QueryValue::Value { value: data },
+            ] = row.values.as_slice()
+            else {
+                unreachable!("branch end has a sequence and data")
+            };
+            (
+                sequence.as_u64().expect("event sequence is unsigned"),
+                serde_json::from_value(data.clone())
+                    .expect("branch end follows its event contract"),
+            )
+        }))
     }
     async fn creation_source(
         &self,
@@ -1122,36 +1219,51 @@ impl TimelineTree {
         child: &str,
         anchor: u64,
     ) -> Result<Option<BranchSource>> {
-        let key = TimelineKey {
-            session_id: self.session_id.clone(),
-            branch_id: parent.into(),
-        };
-        let query = TimelineQuery {
-            scope: dim_agent_runtime::TimelineQueryScope::Branch,
-            include_publishing: false,
-            from_event: None,
-            from_sequence: Some(anchor),
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Ascending,
-            kinds: vec!["branch/create".into()],
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::MIN,
-            offset: 0,
-        };
-        Ok(self
+        let scope = self.stored_scope(parent, anchor, anchor);
+        let reply = self
             .store
-            .query(&key, &query, anchor, anchor)
-            .await?
-            .events
-            .into_iter()
-            .find_map(|event| match event.kind {
-                EventKind::BranchCreate(ref data) if data.branch == child => {
-                    Some(data.source.clone())
-                }
-                _ => None,
-            }))
+            .query(
+                &scope,
+                &QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["branch/create".into()],
+                            },
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "data.branch".into(),
+                                },
+                                values: vec![child.into()],
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["data.source".into()],
+                    },
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                Some(&QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            )
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        Ok(rows.into_iter().next().map(|row| {
+            let [QueryValue::Value { value: source }] = row.values.as_slice() else {
+                unreachable!("branch create has a source")
+            };
+            serde_json::from_value(source.clone())
+                .expect("branch source follows its event contract")
+        }))
     }
     /// The stored head of an ended line, `None` for an open, ending or unknown
     /// one.
@@ -2214,6 +2326,47 @@ struct LineView {
     ending: bool,
 }
 impl LineView {
+    fn input_block(&mut self, id: &str, text: &str, key: &str, retire: bool) {
+        if key == line_key() {
+            self.roster = Some((text.to_owned(), retire));
+        } else if key == parent_key() {
+            self.parent_input = Some(id.to_owned());
+            if let Some(head) = parent_head(text) {
+                self.parent_told = head;
+            }
+        }
+    }
+    fn interrupt(&mut self, sequence: u64) -> Option<Decision> {
+        let released = self
+            .parent_input
+            .clone()
+            .filter(|id| self.held.contains_key(id));
+        let applied = &self.applied;
+        self.held
+            .retain(|id, _| applied.get(id).is_none_or(|at| *at > sequence));
+        released
+            .filter(|id| !self.held.contains_key(id))
+            .map(|_| Decision::Parent)
+    }
+    fn tool_result(&mut self, call_id: &str, error: bool, next: Option<u64>) {
+        if self
+            .steering
+            .as_ref()
+            .is_some_and(|(_, call)| call == call_id)
+        {
+            let (turn, _) = self.steering.take().unwrap();
+            if !error {
+                self.steered = Some(turn);
+            }
+        }
+        if let Some(target) = self.reads.remove(call_id)
+            && !error
+            && let Some(next) = next
+        {
+            self.cursors.insert(target, next);
+        }
+    }
+
     /// Whether input `id` is the parent block and is still held.
     fn holds_parent(&self, id: &str) -> bool {
         self.parent_input.as_deref() == Some(id) && self.held.contains_key(id)
@@ -2349,28 +2502,7 @@ impl DynPlugin for BranchLinePlugin {
                     Arc::new(move || {
                         let read = read.clone();
                         let timeline = read_timeline.clone();
-                        Box::pin(async move {
-                            let reply = rebuild_facts(
-                                &timeline,
-                                &[
-                                    "branch/create",
-                                    "branch/create-failed",
-                                    "branch/ended",
-                                    "branch/end",
-                                    "input/message",
-                                    "input/applied",
-                                    "input/consumed",
-                                    "input/deleted",
-                                    "stop/interrupt",
-                                    "turn/end",
-                                    "step/tool-use",
-                                    "step/tool-result",
-                                ],
-                            )
-                            .await?;
-                            read.rebuild(&reply.events);
-                            Ok(reply.through)
-                        })
+                        Box::pin(async move { read.rebuild(&timeline).await })
                     }),
                     Arc::new(move |event| {
                         let consumer = consumer.clone();
@@ -2416,13 +2548,288 @@ pub struct BranchLine {
     stop: CancellationToken,
 }
 impl BranchLine {
-    /// Rebuilds the fold from the line's own history, without writing.
-    fn rebuild(&self, events: &[Arc<AgentEvent>]) {
-        let _ = self.resolved();
-        let mut view = self.view.lock().unwrap();
-        for event in events {
-            Self::fold(&mut view, event);
+    async fn rebuild(&self, timeline: &Timeline) -> Result<u64> {
+        let through = timeline.committed();
+        let resolved = self.resolved();
+        let mut view = LineView::default();
+        if let Some((role, parent)) = resolved {
+            view.role = Some(role);
+            view.parent = parent;
         }
+        let mut after = None;
+        loop {
+            let reply = timeline
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: None,
+                    through: Some(through),
+                    include_publishing: true,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: [
+                                "branch/create",
+                                "branch/create-failed",
+                                "branch/ended",
+                                "branch/end",
+                                "input/message",
+                                "input/applied",
+                                "input/consumed",
+                                "input/deleted",
+                                "stop/interrupt",
+                                "step/tool-use",
+                                "step/tool-result",
+                            ]
+                            .map(Into::into)
+                            .to_vec(),
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: [
+                                "kind",
+                                "id",
+                                "position.sequence",
+                                "data.branch",
+                                "data.source",
+                                "data.prompt",
+                                "data.mode",
+                                "data.user.content[].type",
+                                "data.blocks[].text",
+                                "data.blocks[].key",
+                                "data.blocks[].retire",
+                                "data.input_id",
+                                "data.turn_id",
+                                "data.call.id",
+                                "data.call.name",
+                                "data.call.input.action",
+                                "data.call.input.mode",
+                                "data.call.input.to",
+                                "data.call.input.branch",
+                                "data.results[].call_id",
+                                "data.results[].result.isError",
+                                "data.results[].result.structuredContent.nextCursor",
+                            ]
+                            .map(String::from)
+                            .to_vec(),
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: NonZeroU64::new(256).unwrap(),
+                        after,
+                    }),
+                })
+                .await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
+            };
+            for row in rows {
+                let [
+                    QueryValue::Value {
+                        value: serde_json::Value::String(kind),
+                    },
+                    QueryValue::Value {
+                        value: serde_json::Value::String(id),
+                    },
+                    QueryValue::Value { value: sequence },
+                    branch,
+                    source,
+                    prompt,
+                    mode,
+                    user,
+                    texts,
+                    keys,
+                    retires,
+                    input_id,
+                    turn_id,
+                    call_id,
+                    call_name,
+                    action,
+                    call_mode,
+                    to,
+                    target,
+                    result_ids,
+                    errors,
+                    cursors,
+                ] = row.values.as_slice()
+                else {
+                    unreachable!("event has kind, id and sequence")
+                };
+                let sequence = sequence
+                    .as_u64()
+                    .expect("event sequence is an unsigned integer");
+                match kind.as_str() {
+                    "branch/create" => {
+                        let (
+                            QueryValue::Value {
+                                value: serde_json::Value::String(branch),
+                            },
+                            QueryValue::Value { value: source },
+                            QueryValue::Value {
+                                value: serde_json::Value::String(prompt),
+                            },
+                        ) = (branch, source, prompt)
+                        else {
+                            unreachable!("branch create has branch, source and prompt")
+                        };
+                        view.children.insert(
+                            branch.clone(),
+                            Child {
+                                source: serde_json::from_value(source.clone())
+                                    .expect("branch source follows its event contract"),
+                                purpose: first_line(prompt),
+                                opened: sequence,
+                                failed: false,
+                                ended: false,
+                            },
+                        );
+                    }
+                    "branch/create-failed" | "branch/ended" => {
+                        let QueryValue::Value {
+                            value: serde_json::Value::String(branch),
+                        } = branch
+                        else {
+                            unreachable!("branch terminal fact names its branch")
+                        };
+                        if let Some(child) = view.children.get_mut(branch) {
+                            if kind == "branch/ended" {
+                                child.ended = true;
+                            } else {
+                                child.failed = true;
+                            }
+                        }
+                    }
+                    "branch/end" => view.ending = true,
+                    "input/message" => {
+                        let mode = match mode {
+                            QueryValue::Value { value } => serde_json::from_value(value.clone())
+                                .expect("input mode follows its event contract"),
+                            QueryValue::Missing if matches!(user, QueryValue::Missing) => {
+                                InputMode::Append
+                            }
+                            QueryValue::Missing => InputMode::Queue,
+                            _ => unreachable!("input mode is a scalar"),
+                        };
+                        view.held.insert(id.clone(), mode);
+                        if let QueryValue::Elements { values: texts } = texts {
+                            let (
+                                QueryValue::Elements { values: keys },
+                                QueryValue::Elements { values: retires },
+                            ) = (keys, retires)
+                            else {
+                                unreachable!("block projections retain array positions")
+                            };
+                            for ((text, key), retire) in texts.iter().zip(keys).zip(retires) {
+                                let QueryValue::Value {
+                                    value: serde_json::Value::String(key),
+                                } = key
+                                else {
+                                    continue;
+                                };
+                                let QueryValue::Value {
+                                    value: serde_json::Value::String(text),
+                                } = text
+                                else {
+                                    unreachable!("raw block has text")
+                                };
+                                let retire = matches!(
+                                    retire,
+                                    QueryValue::Value {
+                                        value: serde_json::Value::Bool(true)
+                                    }
+                                );
+                                view.input_block(id, text, key, retire);
+                            }
+                        }
+                    }
+                    "input/applied" | "input/consumed" | "input/deleted" => {
+                        let QueryValue::Value {
+                            value: serde_json::Value::String(input),
+                        } = input_id
+                        else {
+                            unreachable!("input decision names its input")
+                        };
+                        if kind == "input/applied" {
+                            view.applied.insert(input.clone(), sequence);
+                        } else {
+                            view.release(input);
+                        }
+                    }
+                    "stop/interrupt" => {
+                        view.interrupt(sequence);
+                    }
+                    "step/tool-use" => {
+                        if !matches!(call_name, QueryValue::Value { value: serde_json::Value::String(name) } if name == "branch")
+                        {
+                            continue;
+                        }
+                        let (
+                            QueryValue::Value {
+                                value: serde_json::Value::String(turn),
+                            },
+                            QueryValue::Value {
+                                value: serde_json::Value::String(call),
+                            },
+                        ) = (turn_id, call_id)
+                        else {
+                            unreachable!("tool use names its turn and call")
+                        };
+                        if matches!(action, QueryValue::Value { value: serde_json::Value::String(action) } if action == "message")
+                            && matches!(call_mode, QueryValue::Value { value: serde_json::Value::String(mode) } if mode == "steer")
+                            && matches!(to, QueryValue::Value { value: serde_json::Value::String(to) } if Some(to) == view.parent.as_ref())
+                        {
+                            view.steering = Some((turn.clone(), call.clone()));
+                        }
+                        if matches!(action, QueryValue::Value { value: serde_json::Value::String(action) } if action == "read")
+                            && let QueryValue::Value {
+                                value: serde_json::Value::String(target),
+                            } = target
+                        {
+                            view.reads.insert(call.clone(), target.clone());
+                        }
+                    }
+                    "step/tool-result" => {
+                        let (
+                            QueryValue::Elements { values: ids },
+                            QueryValue::Elements { values: errors },
+                            QueryValue::Elements { values: cursors },
+                        ) = (result_ids, errors, cursors)
+                        else {
+                            unreachable!("tool result projections retain array positions")
+                        };
+                        for ((id, error), cursor) in ids.iter().zip(errors).zip(cursors) {
+                            let QueryValue::Value {
+                                value: serde_json::Value::String(id),
+                            } = id
+                            else {
+                                unreachable!("tool result has a call id")
+                            };
+                            let error = matches!(
+                                error,
+                                QueryValue::Value {
+                                    value: serde_json::Value::Bool(true)
+                                }
+                            );
+                            let next = match cursor {
+                                QueryValue::Value { value } => value.as_u64(),
+                                _ => None,
+                            };
+                            view.tool_result(id, error, next);
+                        }
+                    }
+                    _ => unreachable!("rebuild selects its own event kinds"),
+                }
+            }
+            after = reply.next;
+            if after.is_none() {
+                break;
+            }
+        }
+        *self.view.lock().unwrap() = view;
+        Ok(through)
     }
     /// Folds one live committed event and queues its decision.
     fn consume(&self, event: &AgentEvent) {
@@ -2440,7 +2847,7 @@ impl BranchLine {
                     data.branch.clone(),
                     Child {
                         source: data.source.clone(),
-                        purpose: data.prompt.clone(),
+                        purpose: first_line(&data.prompt),
                         opened: event.sequence,
                         failed: false,
                         ended: false,
@@ -2484,14 +2891,7 @@ impl BranchLine {
                         retire,
                     } = block
                     {
-                        if key == &line_key() {
-                            view.roster = Some((text.clone(), *retire));
-                        } else if key == &parent_key() {
-                            view.parent_input = Some(event.id.clone());
-                            if let Some(head) = parent_head(text) {
-                                view.parent_told = head;
-                            }
-                        }
+                        view.input_block(&event.id, text, key, *retire);
                     }
                 }
                 None
@@ -2500,18 +2900,7 @@ impl BranchLine {
                 view.applied.insert(data.input_id.clone(), event.sequence);
                 None
             }
-            EventKind::StopInterrupt(_) => {
-                let released = view
-                    .parent_input
-                    .clone()
-                    .filter(|id| view.held.contains_key(id));
-                let applied = &view.applied;
-                view.held
-                    .retain(|id, _| applied.get(id).is_none_or(|at| *at > event.sequence));
-                released
-                    .filter(|id| !view.held.contains_key(id))
-                    .map(|_| Decision::Parent)
-            }
+            EventKind::StopInterrupt(_) => view.interrupt(event.sequence),
             EventKind::InputConsumed(data) => view.release(&data.input_id),
             EventKind::InputDeleted(data) => view.release(&data.input_id),
             EventKind::ToolUse(data) => {
@@ -2526,30 +2915,14 @@ impl BranchLine {
                 None
             }
             EventKind::ToolResult(data) => {
-                if let Some((turn, call)) = view.steering.clone()
-                    && let Some(result) = data.results.iter().find(|at| at.call_id == call)
-                {
-                    if result.result.is_error != Some(true) {
-                        view.steered = Some(turn);
-                    }
-                    view.steering = None;
-                }
                 for result in &data.results {
-                    let Some(target) = view.reads.remove(&result.call_id) else {
-                        continue;
-                    };
-                    if result.result.is_error == Some(true) {
-                        continue;
-                    }
                     let next = result
                         .result
                         .structured_content
                         .as_ref()
                         .and_then(|page| page.get("nextCursor"))
                         .and_then(serde_json::Value::as_u64);
-                    if let Some(next) = next {
-                        view.cursors.insert(target, next);
-                    }
+                    view.tool_result(&result.call_id, result.result.is_error == Some(true), next);
                 }
                 None
             }
@@ -2793,12 +3166,7 @@ impl BranchLine {
         }
         let listed = open
             .iter()
-            .map(|(id, child)| {
-                format!(
-                    "- {id}: {}",
-                    crate::context_block::text(&first_line(&child.purpose))
-                )
-            })
+            .map(|(id, child)| format!("- {id}: {}", crate::context_block::text(&child.purpose)))
             .collect::<Vec<_>>()
             .join("\n");
         (
@@ -2900,13 +3268,6 @@ fn parent_from(view: &LineView, parent: &str, opened: u64) -> u64 {
 }
 /// Whether `event` is activity a line must hear about (design §7.1.1): an
 /// operator input, or a tool call.
-fn counts_as_activity(event: &AgentEvent) -> bool {
-    match &event.kind {
-        EventKind::InputMessage(data) => data.user.is_some(),
-        EventKind::ToolUse(_) => true,
-        _ => false,
-    }
-}
 /// The first line of a purpose, at most 120 characters (design §12.1).
 fn first_line(purpose: &str) -> String {
     purpose
@@ -3028,65 +3389,89 @@ impl BranchTool {
                     .tree
                     .get(&context.branch_id)
                     .map_err(|error| HostError::failed(error.to_string()))?;
-                // The dispatcher delivers only published facts, so the
-                // `step/tool-use` this call runs from and the `step/model-start`
-                // before it are published when the read runs.
-                let mut model_start = None;
-                let mut found = None;
-                let mut from = 1;
-                loop {
-                    let reply = parent
-                        .query(TimelineQuery {
-                            scope: TimelineQueryScope::Branch,
-                            include_publishing: false,
-                            from_event: None,
-                            from_sequence: Some(from),
-                            order_by: TimelineQueryOrderBy::Sequence,
-                            direction: TimelineQueryDirection::Ascending,
-                            kinds: vec!["step/model-start".into(), "step/tool-use".into()],
-                            flags: Vec::new(),
-                            event_id: None,
-                            predicate: Some(TimelineQueryPredicate {
-                                path: "request_id".into(),
-                                value: json!(context.request_id),
-                            }),
-                            limit: NonZeroU64::new(LINE_PAGE)
-                                .expect("a page keeps at least one event"),
-                            offset: 0,
-                        })
-                        .await
-                        .map_err(|error| HostError::failed(error.to_string()))?;
-                    let short = (reply.events.len() as u64) < LINE_PAGE;
-                    let last = reply.events.last().map(|event| event.sequence);
-                    for event in &reply.events {
-                        match &event.kind {
-                            EventKind::ModelStart(data) if data.turn_id == context.turn_id => {
-                                model_start = Some(event.sequence);
-                            }
-                            EventKind::ToolUse(data) if data.turn_id == context.turn_id => {
-                                found = Some(
-                                    model_start.ok_or_else(|| {
-                                        HostError::failed(
-                                            "branch tool batch has no owning model start",
-                                        )
-                                    })? - 1,
-                                );
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                    if found.is_some() {
-                        break;
-                    }
-                    match last {
-                        Some(last) if !short => from = last + 1,
-                        _ => break,
-                    }
-                }
-                found.ok_or_else(|| {
-                    HostError::failed("branch tool call is absent from its owning timeline")
-                })?
+                let through = parent.sequence();
+                let mut query = TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: None,
+                    through: Some(through),
+                    include_publishing: false,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: vec!["step/tool-use".into()],
+                                },
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "data.turn_id".into(),
+                                    },
+                                    values: vec![context.turn_id.clone().into()],
+                                },
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "data.request_id".into(),
+                                    },
+                                    values: vec![context.request_id.clone().into()],
+                                },
+                            ],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: vec!["position.sequence".into()],
+                        },
+                        group_by: vec![],
+                        pick: Some(QueryPick::First),
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: NonZeroU64::MIN,
+                        after: None,
+                    }),
+                };
+                let reply = parent
+                    .query(query.clone())
+                    .await
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                let QueryOutput::Rows { rows } = reply.result else {
+                    unreachable!("field selection returns rows")
+                };
+                let Some(row) = rows.first() else {
+                    return Err(HostError::failed(
+                        "branch tool call is absent from its owning timeline",
+                    ));
+                };
+                let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
+                    unreachable!("tool use has a sequence")
+                };
+                query.through = Some(sequence.as_u64().expect("event sequence is unsigned") - 1);
+                let Some(QueryFilter::And { conditions }) = &mut query.query.filter else {
+                    unreachable!()
+                };
+                conditions[0] = QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec!["step/model-start".into()],
+                };
+                query.query.pick = Some(QueryPick::Last);
+                let reply = parent
+                    .query(query)
+                    .await
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                let QueryOutput::Rows { rows } = reply.result else {
+                    unreachable!("field selection returns rows")
+                };
+                let Some(row) = rows.first() else {
+                    return Err(HostError::failed(
+                        "branch tool batch has no owning model start",
+                    ));
+                };
+                let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
+                    unreachable!("model start has a sequence")
+                };
+                sequence.as_u64().expect("event sequence is unsigned") - 1
             }
         };
         let branch = self
@@ -3726,52 +4111,5 @@ mod tests {
         assert!(parent_due(&view));
         view.ending = true;
         assert!(!parent_due(&view), "an ending line gets no block");
-    }
-
-    #[test]
-    fn activity_is_an_operator_input_or_a_tool_call() {
-        let operator = event(
-            1,
-            EventKind::InputMessage(InputMessageData::text("move on", Some(InputMode::Queue))),
-        );
-        assert!(counts_as_activity(&operator));
-        let block_only = event(
-            2,
-            EventKind::InputMessage(InputMessageData {
-                blocks: vec![crate::context_block::raw("state".to_string(), None)],
-                mode: Some(InputMode::Append),
-                ..InputMessageData::default()
-            }),
-        );
-        assert!(!counts_as_activity(&block_only));
-        let call = |id: &str| {
-            event(
-                3,
-                EventKind::ToolUse(ToolUseData {
-                    turn_id: "turn".into(),
-                    request_id: "request".into(),
-                    call: ToolCall {
-                        id: id.into(),
-                        name: "echo".into(),
-                        input: serde_json::Map::new(),
-                    },
-                }),
-            )
-        };
-        assert!(
-            counts_as_activity(&call("creating")),
-            "the creating call is below the opening, so it never reaches this check"
-        );
-        assert!(counts_as_activity(&call("later")));
-        let end = event(
-            4,
-            EventKind::TurnEnd(TurnEndData {
-                turn_id: "turn".into(),
-                outcome: TurnOutcome::Completed {
-                    reason: "stop".into(),
-                },
-            }),
-        );
-        assert!(!counts_as_activity(&end));
     }
 }

@@ -87,9 +87,107 @@ corresponding client support. No frozen v1/v2 notification set or Approval envel
 ### Timeline block identity
 
 - A text/thinking block is identified by the `id` of its **first raw event**. Following same-kind events belong to that block until a durable event of the other kind (thinking for text, text for thinking) or a tool event starts the next block. Provider `TextEnd`/`ThinkingEnd` are not durable and do not split a block. Replay, history and storage preserve the event ids.
-- Tools use `call_id`; user inputs use the `input/message` event id.
+- Tools use `call_id` within their model request; user inputs use the `input/message` event id.
 - `session.model.progress` carries `textPartId` / `thinkingPartId` for the open blocks. They equal the first-event id that will publish that block.
-- Clients must key timeline blocks/groups by that first-event id (or `call_id` for tools), not by local ordinals, request ids or synthetic `:progress` ids. UI-only group/expansion keys may derive from those stable ids.
+- Clients must key timeline blocks/groups by that first-event id (or the request-scoped `call_id` for tools), not by local ordinals, request ids or synthetic `:progress` ids. UI-only group/expansion keys may derive from those stable ids.
+
+### Opening a conversation with a bounded window
+
+CLI main, line mode, branch side panels, member conversations and ACP load/resume
+open with `session.history {latestTurn: true, limit: 256}`, then use
+`{before: nextBefore, through, limit: 256}` without `latestTurn`. The capability
+name is `session.history.latestTurn`; it is not a separate RPC method. Every page
+keeps the first reply's `through`. They stop after
+the page that reaches 100 transcript rows, after four pages, or at the branch
+start, whichever comes first. A transcript row is a user input, an assistant
+response or a tool call that the client actually renders, not a text delta or a
+hidden runtime input. Counting uses the projection's rules and stable identities. Atomic batches remain whole; the view
+keeps at most 300 initial rows after projection. An oversized batch follows the
+history protocol's byte limit and error contract.
+
+The pages progress backwards; events within each page remain ascending. Clients
+prepend each older page, then project the collected window once in event order. Live events received
+during the read are held until the window is projected, then consumed above its
+fixed head. An empty visible page does not end the read while its backward cursor
+advances. `done` from `latestTurn` ends that turn window, not the branch's history.
+JSON exec emits live wire notifications and has no historical transcript; it reads
+one window page to pin the cursor without decoding historical event bodies.
+Earlier transcript is loaded only on user request. Export keeps its full fixed
+prefix; reconnect catch-up starts from the last consumed cursor.
+
+```text
+attach -> latest page -> older page(s), at most 4 total -> draw -> live
+                         stop at 100 transcript rows
+user asks for earlier -> before(cursor) -> prepend older content
+```
+
+The client retains only the initial window, its oldest `nextBefore` and its fixed
+head. It does not keep a second list of raw events after projection. A missing
+prefix is displayed as “earlier content not loaded”; it does not turn a partial
+reply into a complete reply. Tool results keep their call identity even when the
+start is outside the window; [ToolExecution’s origin read](tool-origin-read.md) supplies that call by identity instead
+of extending the transcript to find it. Neither an unresolved identity nor a
+single very long turn removes the four-page initial-read bound.
+
+A transcript window is not an inventory of running work. Before enabling controls,
+clients must obtain the following state through public reads; they must not infer
+absence from a missing start event in the window:
+
+| State | Required read and merge |
+| --- | --- |
+| Adopted model and preferences | The attach reply; a `context/configured` in the window is historical display, not a substitute for the current adopted value. |
+| Permission | `session.permission.get`; later policy notices update it. |
+| Active turn and output | Current running/turn/request state and output block identities; a window without `turn/start` cannot prove the branch idle. |
+| Pending questions | `session.question.pending` ([Questions §3.5](plugins/Questions.md#35-pending-question-read)); join later tool results by call identity. |
+| Background execution | Task identities, statuses and display fields required by the task panel; a completed task in the transcript is historical, an open task remains controllable even if its start is older. |
+| Delegations and branches | Current member/branch identities and unfinished delegations; read a selected member's transcript with its own window. |
+| Pending inputs | Unconsumed Queue/Steer input identities, modes and display content, excluding deleted inputs. |
+
+The active-turn row and the last four rows raise requirements to InputQueue, Questions, BackgroundExec
+and Collaboration, plus Loop for current execution state, through the App Server. Each read must identify the branch and
+the committed cutoff its result describes. Clients fold held events above that
+cutoff into that state separately from the transcript cutoff; an older transcript
+event cannot overwrite a newer state. Lists must have a fixed cutoff and keyset
+continuation, and are paged independently of the transcript. Questions require
+`call_id`, source request/branch and complete question arguments; pending inputs
+require input id, mode and user-visible content. Task/delegation results reuse the
+owner's task/member identities and display-state types. A failed state read leaves
+its controls unavailable and retryable; it is not an empty list.
+
+These are requirements on the owning public contracts, not permission to read
+private state or an assertion that the interfaces already exist. Their owner
+must define the wire fields and register the public entry;
+clients cannot access owner-private memory or add a second persistent ledger. A
+window change is not complete until these cross-window cases pass. A server without
+the window capability reports that limitation rather than silently triggering a
+full-history initial read.
+
+
+The changes apply to every entry, not just the main TUI:
+
+| Consumer | Modification |
+| --- | --- |
+| CLI `session.rs` | Initial line-mode load uses the window. The existing forward reader remains for export and cursor-based catch-up. |
+| CLI `session_host/tasks.rs` | Main and branch panel history use the same bounded initial-read rules; discovery of running tasks does not depend on those pages. |
+| CLI `session_host/member.rs` | Each selected member pins its own head and loads its own window. Switching member releases the previous read's raw pages. |
+| CLI `question/line.rs` | Questions on other branches come from the unanswered-question read, not a complete branch replay. |
+| ACP `gateway.rs::read_history` | Load/resume returns only the window; model/configuration comes from attach and public current-state reads. A `forkAtTurn` lookup must resolve the requested terminal turn outside the window; full-history/export APIs keep their explicit full-prefix semantics. |
+
+Acceptance opens histories differing by at least ten times with the same visible
+tail. Initial transcript calls remain at most four and retained transcript rows
+at most 300. Include a turn longer than the page budget, an empty visible page,
+a question/task/delegation/input started before the window, a terminal event while
+state is loading, member switching, reconnect and a transport-oversized batch.
+Also verify that `/lines` lists a branch created before the window, line-mode
+`/effort` uses the attach model, and an old ACP `forkAtTurn` anchor still resolves.
+`/goal` reads `session.goal.get` before choosing a command and after its write; a successful Goal read must not
+be discarded because the transcript failed, nor may a partial transcript decide
+whether a goal exists. Retrying a transcript never changes other branches into
+full-history readers. Tests exercise the window protocol itself, without a
+legacy-history switch that silently restores the old production flow.
+
+The separate state reads must also report their query costs; moving a full scan
+behind an endpoint is not a performance acceptance result.
 
 ## 3. Capability coverage
 

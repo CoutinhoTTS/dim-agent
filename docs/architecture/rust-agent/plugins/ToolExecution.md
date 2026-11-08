@@ -1,6 +1,6 @@
 # ToolExecution
 
-The ToolExecution plugin registers two branch parts: ToolBinding, which adopts the Session's tools into the branch's model configuration, and ToolExecutor, which runs committed tool batches.
+The ToolExecution plugin registers the Session [ToolMethods](ToolMethods.md) read part and two branch parts: ToolBinding, which adopts the Session's tools into the branch's model configuration, and ToolExecutor, which runs committed tool batches.
 
 ## ToolBinding
 
@@ -128,6 +128,10 @@ Only one batch runs at once. Interrupts cancel current work and suppress late
 host invocation. Cleanup closes admission, cancels, joins tracked work and
 aggregates failures. Reload settles unmatched committed batches as errors rather
 than rerunning effects; reload-settled results make Loop fail the turn.
+Recovery selects batch identities without a matching `call_event_id` result,
+and reads their turn, request and call identities. It does not read tool
+arguments. Interrupt state comes from the latest interrupt or turn boundary
+at the same fixed read boundary.
 Cancellation is not rollback of a tool's completed side effect.
 
 ### Model-facing texts
@@ -157,3 +161,6 @@ effect before it retries, and reports the work neither as done nor as never run.
 | 提供 | `B:ToolExecutor` |
 | 被注入于 | — |
 <!-- /generated -->
+
+ToolBinding reads the latest `context/configured` settings at a fixed chain head
+when adopting tools; it does not project the conversation to find that configuration.

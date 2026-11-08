@@ -2,8 +2,7 @@ use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
     history::{
-        HistoryEntry, HistoryRenderer, project_context_history, project_history, read_context_in,
-        replay_context, summary_message,
+        HistoryEntry, HistoryRenderer, project_context_history, project_history, summary_message,
     },
     host::*,
 };
@@ -1008,7 +1007,11 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
         "model-start",
         "context-prepare",
         "model-call",
+        "tool-use-start",
+        "tool-use",
         "model-output-end",
+        "tool-call",
+        "undispatched-tool",
     ] {
         let store = Arc::new(MemoryTimelineStore::default());
         store
@@ -1069,7 +1072,13 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
         let request = Arc::new(ModelRequest::new("mock", "echo", vec![]));
         if matches!(
             boundary,
-            "context-prepare" | "model-call" | "model-output-end"
+            "context-prepare"
+                | "model-call"
+                | "tool-use-start"
+                | "tool-use"
+                | "model-output-end"
+                | "tool-call"
+                | "undispatched-tool"
         ) {
             timeline
                 .append(
@@ -1086,7 +1095,15 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
                 )
                 .unwrap();
         }
-        if matches!(boundary, "model-call" | "model-output-end") {
+        if matches!(
+            boundary,
+            "model-call"
+                | "tool-use-start"
+                | "tool-use"
+                | "model-output-end"
+                | "tool-call"
+                | "undispatched-tool"
+        ) {
             timeline
                 .append(
                     EventKind::ModelCall(ModelCallData {
@@ -1100,27 +1117,86 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
                 )
                 .unwrap();
         }
-        if boundary == "model-output-end" {
+        let call = ToolCall {
+            id: "call".into(),
+            name: "echo".into(),
+            input: serde_json::Map::from_iter([("text".into(), "must not execute".into())]),
+        };
+        if matches!(
+            boundary,
+            "tool-use-start" | "tool-use" | "tool-call" | "undispatched-tool"
+        ) {
+            timeline
+                .append(
+                    EventKind::ToolUseStart(ToolUseStartData {
+                        turn_id: "turn".into(),
+                        request_id: "request".into(),
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                    })
+                    .into(),
+                )
+                .unwrap();
+        }
+        if matches!(boundary, "tool-use" | "tool-call" | "undispatched-tool") {
+            timeline
+                .append(
+                    EventKind::ToolUse(ToolUseData {
+                        turn_id: "turn".into(),
+                        request_id: "request".into(),
+                        call: call.clone(),
+                    })
+                    .into(),
+                )
+                .unwrap();
+        }
+        if matches!(
+            boundary,
+            "model-output-end" | "tool-call" | "undispatched-tool"
+        ) {
             timeline
                 .append(
                     EventKind::ModelOutputEnd(ModelOutputEndData {
                         turn_id: "turn".into(),
                         request_id: "request".into(),
                         outcome: ModelOutputOutcome::Completed {
-                            finish_reason: FinishReason::EndTurn,
+                            finish_reason: if matches!(boundary, "tool-call" | "undispatched-tool")
+                            {
+                                FinishReason::ToolUse
+                            } else {
+                                FinishReason::EndTurn
+                            },
                         },
                     })
                     .into(),
                 )
                 .unwrap();
         }
+        let dispatch = if boundary == "tool-call" {
+            Some(
+                timeline
+                    .append(
+                        EventKind::ToolCall(ToolCallData {
+                            turn_id: "turn".into(),
+                            request_id: "request".into(),
+                            calls: vec![call],
+                        })
+                        .into(),
+                    )
+                    .unwrap()
+                    .id
+                    .clone(),
+            )
+        } else {
+            None
+        };
         let persisted = timeline.sequence();
         let mut builder = builder_with_context(
             Arc::new(EchoModel),
             HistoryRenderer::default(),
             Context::default(),
         );
-        builder.timeline_store(store);
+        builder.timeline_store(store.clone());
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent.restore_session("restore".into()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(3), session.idle("main"))
@@ -1137,8 +1213,74 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
                 )),
             "recovery must settle, not rerun preparation or model work"
         );
-        if boundary != "input-consumed" && boundary != "model-output-end" {
+        if !matches!(
+            boundary,
+            "input-consumed" | "model-output-end" | "tool-call" | "undispatched-tool"
+        ) {
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. } if error == CAPABILITY_RELOADING))));
+        }
+        if matches!(
+            boundary,
+            "tool-use-start" | "tool-use" | "tool-call" | "undispatched-tool"
+        ) {
+            let results: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::ToolResult(data) => Some(data),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                results.len(),
+                1,
+                "recovery settles each call exactly once at {boundary}"
+            );
+            assert_eq!(results[0].call_event_id, dispatch);
+            assert_eq!(results[0].results.len(), 1);
+            let result = &results[0].results[0];
+            assert_eq!(result.call_id, "call");
+            assert_eq!(result.result.is_error, Some(true));
+            if matches!(boundary, "tool-call" | "undispatched-tool") {
+                assert_eq!(
+                    result.result.content,
+                    format!("Tool was not executed: {CAPABILITY_RELOADING}").into()
+                );
+            } else {
+                assert_eq!(result.result.content, if boundary == "tool-use-start" {
+                    "Tool was not executed: the model output ended before its arguments were complete"
+                } else { "Tool was not executed: the model output ended" }.into());
+            }
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.kind, EventKind::ToolStart(_))),
+                "recovery does not execute tools"
+            );
+        }
+        if boundary == "undispatched-tool" {
+            let result = events
+                .iter()
+                .find(|event| matches!(event.kind, EventKind::ToolResult(_)))
+                .unwrap();
+            let end = events
+                .iter()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap();
+            let batch = store
+                .read(
+                    &TimelineKey {
+                        session_id: "restore".into(),
+                        branch_id: "main".into(),
+                    },
+                    result.sequence..=end.sequence,
+                )
+                .await
+                .unwrap();
+            assert_eq!(batch.len(), 2);
+            assert!(
+                batch.iter().all(|record| record.batch_end == end.sequence),
+                "undispatched call results and turn end are one atomic batch"
+            );
         }
         assert_eq!(
             events
@@ -1261,6 +1403,38 @@ async fn restoring_pending_inputs_runs_each_queued_input_in_its_own_turn() {
             .into(),
         )
         .unwrap();
+    let mut withdrawn = Vec::new();
+    for index in 0..260 {
+        let input = timeline
+            .append(
+                EventKind::InputMessage(InputMessageData::text(
+                    "withdrawn".repeat(1024),
+                    Some(InputMode::Queue),
+                ))
+                .into(),
+            )
+            .unwrap();
+        timeline
+            .append(
+                EventKind::InputWithdraw(InputWithdrawData {
+                    input_id: input.id.clone(),
+                    reason: None,
+                })
+                .into(),
+            )
+            .unwrap();
+        if index % 2 == 0 {
+            timeline
+                .append(
+                    EventKind::InputDeleted(InputDeletedData {
+                        input_id: input.id.clone(),
+                    })
+                    .into(),
+                )
+                .unwrap();
+        }
+        withdrawn.push(input.id.clone());
+    }
     let second = timeline
         .append(
             EventKind::InputMessage(InputMessageData::text("second", Some(InputMode::Queue)))
@@ -1286,6 +1460,22 @@ async fn restoring_pending_inputs_runs_each_queued_input_in_its_own_turn() {
         .unwrap()
         .unwrap();
     let events = chain_events(&session, "main", ..).await.unwrap();
+    for id in withdrawn {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(&event.kind,
+            EventKind::InputDeleted(data) if data.input_id == id))
+                .count(),
+            1,
+            "recovery writes each owed withdrawal once across pages"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(&event.kind,
+            EventKind::InputApplied(data) if data.input_id == id)),
+            "a withdrawn input must not be applied during recovery"
+        );
+    }
     let consumed = |id: &str| {
         events
             .iter()

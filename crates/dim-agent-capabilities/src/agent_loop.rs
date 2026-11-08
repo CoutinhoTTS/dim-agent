@@ -1,3 +1,5 @@
+pub mod read;
+
 use crate::{
     context_policy::{CompactionStep, ContextPolicy, configured_request},
     history::HistoryRenderer,
@@ -7,13 +9,16 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, CAPABILITY_RELOADING, Dispatcher, LoopPhase, LoopSnapshot, LoopState, Names,
-    Result, StateCell, Timeline, TimelineIdentity, rebuild_facts,
+    QueryComparison, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect,
+    QuerySpec, QueryValue, Result, StateCell, Timeline, TimelineIdentity, TimelineQuery,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU64;
 use std::panic::AssertUnwindSafe;
 use std::sync::{
     Arc, Mutex,
@@ -198,6 +203,24 @@ impl AgentLoop {
         Ok(())
     }
     fn end(&self, turn: &mut Turn, outcome: TurnOutcome) -> Result<()> {
+        let calls = if let Some(request) = turn
+            .request
+            .as_ref()
+            .filter(|request| request.stage == Stage::Tools && request.call_event_id.is_none())
+        {
+            let mut calls: Vec<&ToolCall> = request.calls.iter().collect();
+            let mut starts = HashMap::new();
+            for (index, id) in request.started.iter().enumerate() {
+                starts.entry(id.as_str()).or_insert(index);
+            }
+            calls.sort_by_key(|call| starts.get(call.id.as_str()).copied());
+            calls.into_iter().map(|call| call.id.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        self.settle_turn(turn, outcome, calls)
+    }
+    fn settle_turn(&self, turn: &mut Turn, outcome: TurnOutcome, calls: Vec<String>) -> Result<()> {
         if turn.ending {
             return Err(AgentError::fault("Loop", "turn ended twice"));
         }
@@ -209,19 +232,15 @@ impl AgentLoop {
             None => outcome,
         };
         let mut events = Vec::new();
-        // Calls of a completed output that were never dispatched are closed
-        // here, in the turn end's batch (ADR agent-029 decision 3).
-        if let Some(request) = turn.request.as_ref().filter(|request| {
-            request.stage == Stage::Tools
-                && request.call_event_id.is_none()
-                && !request.calls.is_empty()
-        }) {
+        if !calls.is_empty() {
+            let request = turn
+                .request
+                .as_ref()
+                .expect("undispatched calls belong to a request");
             let reason = match &outcome {
                 TurnOutcome::Completed { reason } | TurnOutcome::Cancelled { reason } => reason,
                 TurnOutcome::Failed { error } => error,
             };
-            let mut calls: Vec<&ToolCall> = request.calls.iter().collect();
-            calls.sort_by_key(|call| request.started.iter().position(|id| *id == call.id));
             events.push(
                 EventKind::ToolResult(ToolResultData {
                     turn_id: turn.id.clone(),
@@ -229,8 +248,8 @@ impl AgentLoop {
                     call_event_id: None,
                     results: calls
                         .into_iter()
-                        .map(|call| ToolCallResult {
-                            call_id: call.id.clone(),
+                        .map(|call_id| ToolCallResult {
+                            call_id,
                             result: ToolResult::error(format!("Tool was not executed: {reason}")),
                         })
                         .collect(),
@@ -490,171 +509,543 @@ impl AgentLoop {
             cancel.cancel();
         }
     }
-    /// Rebuilds the current turn from this branch's committed local events.
-    /// An unfinished turn is marked failed; with nothing outstanding it ends now.
-    /// A command without a result (its step running, or waiting) is settled
-    /// `cancelled` once, with its start if it had one; it is not resumed.
-    fn rebuild(&self, slot: &mut Option<Turn>, events: &[Arc<AgentEvent>]) -> Result<()> {
-        let mut commands: Vec<u64> = Vec::new();
-        let mut starts: Vec<(u64, ContextCompactionStartData)> = Vec::new();
-        for event in events {
-            match &event.kind {
-                EventKind::ContextCompact(_) => commands.push(event.sequence),
-                EventKind::ContextCompactionStart(data) if data.command.is_some() => {
-                    starts.push((event.sequence, data.clone()))
-                }
-                EventKind::ContextCompaction(data) => {
-                    commands.retain(|command| Some(*command) != data.command);
-                    starts.retain(|(sequence, _)| Some(*sequence) != data.start);
-                }
-                EventKind::InputApplied(data) => {
-                    self.pending.lock().unwrap().push(Applied::new(event, data))
-                }
-                EventKind::InputConsumed(data) => self
-                    .pending
-                    .lock()
-                    .unwrap()
-                    .retain(|input| input.id != data.input_id),
-                EventKind::StopInterrupt(data) => {
-                    self.interrupted_at.store(event.sequence, Ordering::Release);
-                    if let Some(turn) = slot.as_mut() {
-                        turn.interrupted = Some(data.reason.clone());
-                    }
-                }
-                EventKind::TurnStart(data) => {
-                    *slot = Some(Turn {
-                        id: data.turn_id.clone(),
-                        open: true,
-                        request: None,
-                        ending: false,
-                        interrupted: None,
-                        failed: None,
-                    });
-                }
-                EventKind::TurnEnd(_) => *slot = None,
-                _ => {
-                    let Some(turn) = slot.as_mut() else { continue };
-                    match &event.kind {
-                        EventKind::ModelStart(data) => {
-                            turn.request = Some(Request {
-                                id: data.request_id.clone(),
-                                stage: Stage::Model,
-                                calls: Vec::new(),
-                                call_event_id: None,
-                                source: None,
-                                preparation: None,
-                                started: Vec::new(),
-                                replaced: false,
-                            });
-                        }
-                        EventKind::ContextPrepare(data) => {
-                            if let Some(request) = turn.request.as_mut() {
-                                request.source = Some(data.clone());
-                            }
-                        }
-                        EventKind::ToolUseStart(data) => {
-                            if let Some(request) = turn.request.as_mut() {
-                                request.started.push(data.call_id.clone());
-                            }
-                        }
-                        EventKind::ToolUse(data) => {
-                            if let Some(request) = turn.request.as_mut() {
-                                request.calls.push(data.call.clone());
-                            }
-                        }
-                        EventKind::ModelOutputEnd(data) => match data.outcome {
-                            ModelOutputOutcome::Completed { .. } => {
-                                if let Some(request) = turn.request.as_mut() {
-                                    request.stage = Stage::Tools;
-                                }
-                            }
-                            _ => turn.request = None,
+    async fn rebuild(&self) -> Result<u64> {
+        let through = self.timeline.committed();
+        let equal = |path: &str, value: serde_json::Value| QueryFilter::Compare {
+            left: QueryOperand::Field { path: path.into() },
+            comparison: QueryComparison::Eq,
+            right: QueryOperand::Value { value },
+        };
+        let related = |inner: &str, outer: &str| QueryFilter::Compare {
+            left: QueryOperand::Field { path: inner.into() },
+            comparison: QueryComparison::Eq,
+            right: QueryOperand::Outer { path: outer.into() },
+        };
+        let mut query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        equal("kind", "input/applied".into()),
+                        QueryFilter::Not {
+                            condition: Box::new(QueryFilter::Exists {
+                                condition: Box::new(QueryFilter::And {
+                                    conditions: vec![
+                                        equal("kind", "input/consumed".into()),
+                                        related("data.input_id", "data.input_id"),
+                                    ],
+                                }),
+                            }),
                         },
-                        EventKind::ToolCall(_) => {
-                            if let Some(request) = turn.request.as_mut() {
-                                request.call_event_id = Some(event.id.clone());
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec![
+                        "data.input_id".into(),
+                        "data.mode".into(),
+                        "position.sequence".into(),
+                    ],
+                },
+                group_by: Vec::new(),
+                pick: None,
+                order_by: Vec::new(),
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(256).expect("a page contains control fields"),
+                after: None,
+            }),
+        };
+        let mut pending = Vec::new();
+        loop {
+            let reply = self.timeline.query(query.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("Loop selects applied input fields")
+            };
+            for row in rows {
+                let Ok(
+                    [
+                        QueryValue::Value {
+                            value: serde_json::Value::String(id),
+                        },
+                        mode,
+                        QueryValue::Value {
+                            value: serde_json::Value::Number(sequence),
+                        },
+                    ],
+                ) = <[_; 3]>::try_from(row.values)
+                else {
+                    return Err(AgentError::fault(
+                        "Loop",
+                        "an applied input has no identity or sequence",
+                    ));
+                };
+                let mode = match mode {
+                    QueryValue::Missing => InputMode::default(),
+                    QueryValue::Value { value } => serde_json::from_value(value)
+                        .map_err(|error| AgentError::fault("Loop", error.to_string()))?,
+                    QueryValue::Elements { .. } => unreachable!("an applied input mode is scalar"),
+                };
+                pending.push(Applied {
+                    id,
+                    mode,
+                    sequence: sequence
+                        .as_u64()
+                        .expect("applied sequences are unsigned integers"),
+                });
+            }
+            let Some(next) = reply.next else {
+                break;
+            };
+            query.page.as_mut().expect("pending inputs are paged").after = Some(next);
+        }
+        *self.pending.lock().unwrap() = pending;
+        query
+            .page
+            .as_mut()
+            .expect("control queries are paged")
+            .after = None;
+        query.query.pick = Some(QueryPick::Last);
+        query.query.filter = Some(equal("kind", "stop/interrupt".into()));
+        query.query.select = QuerySelect::Fields {
+            fields: vec!["position.sequence".into()],
+        };
+        let reply = self.timeline.query(query.clone()).await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("Loop selects the last interrupt position")
+        };
+        if let Some(row) = rows.into_iter().next() {
+            let [
+                QueryValue::Value {
+                    value: serde_json::Value::Number(sequence),
+                },
+            ] = row.values.as_slice()
+            else {
+                return Err(AgentError::fault("Loop", "an interrupt has no sequence"));
+            };
+            self.interrupted_at.store(
+                sequence
+                    .as_u64()
+                    .expect("interrupt sequences are unsigned integers"),
+                Ordering::Release,
+            );
+        }
+        query.query.pick = None;
+        query.query.select = QuerySelect::Fields {
+            fields: [
+                "kind",
+                "position.sequence",
+                "data.command",
+                "data.turn_id",
+                "data.through",
+            ]
+            .map(String::from)
+            .to_vec(),
+        };
+        query.query.filter = Some(QueryFilter::Or {
+            conditions: vec![
+                QueryFilter::And {
+                    conditions: vec![
+                        equal("kind", "context/compaction-start".into()),
+                        QueryFilter::Present {
+                            value: QueryOperand::Field {
+                                path: "data.command".into(),
+                            },
+                        },
+                        QueryFilter::Not {
+                            condition: Box::new(QueryFilter::Exists {
+                                condition: Box::new(QueryFilter::And {
+                                    conditions: vec![
+                                        equal("kind", "context/compaction".into()),
+                                        related("data.start", "position.sequence"),
+                                    ],
+                                }),
+                            }),
+                        },
+                    ],
+                },
+                QueryFilter::And {
+                    conditions: vec![
+                        equal("kind", "context/compact".into()),
+                        QueryFilter::Not {
+                            condition: Box::new(QueryFilter::Exists {
+                                condition: Box::new(QueryFilter::And {
+                                    conditions: vec![
+                                        QueryFilter::In {
+                                            value: QueryOperand::Field {
+                                                path: "kind".into(),
+                                            },
+                                            values: vec![
+                                                "context/compaction".into(),
+                                                "context/compaction-start".into(),
+                                            ],
+                                        },
+                                        related("data.command", "position.sequence"),
+                                    ],
+                                }),
+                            }),
+                        },
+                    ],
+                },
+            ],
+        });
+        loop {
+            let reply = self.timeline.query(query.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("Loop selects unsettled compaction fields")
+            };
+            for row in rows {
+                let Ok(
+                    [
+                        QueryValue::Value {
+                            value: serde_json::Value::String(kind),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::Number(sequence),
+                        },
+                        command,
+                        turn_id,
+                        boundary,
+                    ],
+                ) = <[_; 5]>::try_from(row.values)
+                else {
+                    return Err(AgentError::fault(
+                        "Loop",
+                        "a compaction operation has no kind or sequence",
+                    ));
+                };
+                let sequence = sequence
+                    .as_u64()
+                    .expect("compaction sequences are unsigned integers");
+                let (turn_id, command, start, boundary) = if kind == "context/compact" {
+                    (None, sequence, None, sequence)
+                } else {
+                    let (
+                        QueryValue::Value {
+                            value: serde_json::Value::Number(command),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::Number(boundary),
+                        },
+                    ) = (command, boundary)
+                    else {
+                        return Err(AgentError::fault(
+                            "Loop",
+                            "a manual compaction has no command or boundary",
+                        ));
+                    };
+                    let turn_id = match turn_id {
+                        QueryValue::Missing => None,
+                        QueryValue::Value {
+                            value: serde_json::Value::String(id),
+                        } => Some(id),
+                        _ => {
+                            return Err(AgentError::fault(
+                                "Loop",
+                                "a compaction turn identity must be a string",
+                            ));
+                        }
+                    };
+                    (
+                        turn_id,
+                        command
+                            .as_u64()
+                            .expect("command sequences are unsigned integers"),
+                        Some(sequence),
+                        boundary
+                            .as_u64()
+                            .expect("compaction boundaries are unsigned integers"),
+                    )
+                };
+                self.timeline.append(
+                    EventKind::ContextCompaction(ContextCompactionData {
+                        turn_id,
+                        request_id: None,
+                        command: Some(command),
+                        start,
+                        through: boundary,
+                        outcome: ContextCompactionResult::Cancelled {
+                            reason: CAPABILITY_RELOADING.into(),
+                        },
+                    })
+                    .into(),
+                )?;
+            }
+            let Some(next) = reply.next else {
+                break;
+            };
+            query
+                .page
+                .as_mut()
+                .expect("compaction operations are paged")
+                .after = Some(next);
+        }
+        query
+            .page
+            .as_mut()
+            .expect("turn control queries are paged")
+            .after = None;
+        query.query.pick = Some(QueryPick::Last);
+        query.query.filter = Some(QueryFilter::In {
+            value: QueryOperand::Field {
+                path: "kind".into(),
+            },
+            values: vec!["turn/start".into(), "turn/end".into()],
+        });
+        query.query.select = QuerySelect::Fields {
+            fields: vec![
+                "kind".into(),
+                "data.turn_id".into(),
+                "position.sequence".into(),
+            ],
+        };
+        let reply = self.timeline.query(query.clone()).await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("Loop selects the latest turn control fields")
+        };
+        let mut restored = None;
+        if let Some(row) = rows.into_iter().next() {
+            let Ok(
+                [
+                    QueryValue::Value {
+                        value: serde_json::Value::String(kind),
+                    },
+                    QueryValue::Value {
+                        value: serde_json::Value::String(id),
+                    },
+                    QueryValue::Value {
+                        value: serde_json::Value::Number(sequence),
+                    },
+                ],
+            ) = <[_; 3]>::try_from(row.values)
+            else {
+                return Err(AgentError::fault(
+                    "Loop",
+                    "a turn control event has no identity or position",
+                ));
+            };
+            if kind == "turn/start" {
+                restored = Some(Turn {
+                    id,
+                    open: true,
+                    request: None,
+                    ending: false,
+                    interrupted: None,
+                    failed: Some(CAPABILITY_RELOADING.into()),
+                });
+                query.from = Some(TimelinePosition {
+                    branch_id: self.branch.clone(),
+                    sequence: sequence
+                        .as_u64()
+                        .expect("turn sequences are unsigned integers"),
+                });
+            }
+        }
+        let mut handed_over = false;
+        let mut completed = Vec::<String>::new();
+        if let Some(turn) = restored.as_mut() {
+            query.query.pick = None;
+            query.query.filter = Some(QueryFilter::In {
+                value: QueryOperand::Field {
+                    path: "kind".into(),
+                },
+                values: [
+                    "step/model-start",
+                    "context/prepare",
+                    "step/tool-use-start",
+                    "step/tool-use",
+                    "step/model-output-end",
+                    "step/tool-call",
+                    "step/tool-result",
+                    "stop/interrupt",
+                ]
+                .map(serde_json::Value::from)
+                .to_vec(),
+            });
+            query.query.select = QuerySelect::Fields {
+                fields: [
+                    "kind",
+                    "id",
+                    "data.request_id",
+                    "data.call_id",
+                    "data.call.id",
+                    "data.status",
+                    "data.call_event_id",
+                    "data.reason",
+                ]
+                .map(String::from)
+                .to_vec(),
+            };
+            loop {
+                let reply = self.timeline.query(query.clone()).await?;
+                let QueryOutput::Rows { rows } = reply.result else {
+                    unreachable!("Loop selects current turn control fields")
+                };
+                for row in rows {
+                    let Ok(
+                        [
+                            QueryValue::Value {
+                                value: serde_json::Value::String(kind),
+                            },
+                            QueryValue::Value {
+                                value: serde_json::Value::String(id),
+                            },
+                            request_id,
+                            call_id,
+                            completed_id,
+                            status,
+                            dispatch,
+                            reason,
+                        ],
+                    ) = <[_; 8]>::try_from(row.values)
+                    else {
+                        return Err(AgentError::fault(
+                            "Loop",
+                            "a request control event has no kind or identity",
+                        ));
+                    };
+                    if kind == "stop/interrupt" {
+                        let QueryValue::Value {
+                            value: serde_json::Value::String(reason),
+                        } = reason
+                        else {
+                            return Err(AgentError::fault("Loop", "an interrupt has no reason"));
+                        };
+                        turn.interrupted = Some(reason);
+                        continue;
+                    }
+                    if kind == "step/model-start" {
+                        let QueryValue::Value {
+                            value: serde_json::Value::String(id),
+                        } = request_id
+                        else {
+                            return Err(AgentError::fault(
+                                "Loop",
+                                "a model start has no request identity",
+                            ));
+                        };
+                        turn.request = Some(Request {
+                            id,
+                            stage: Stage::Model,
+                            calls: Vec::new(),
+                            call_event_id: None,
+                            source: None,
+                            preparation: None,
+                            started: Vec::new(),
+                            replaced: false,
+                        });
+                        handed_over = false;
+                        completed.clear();
+                        continue;
+                    }
+                    let Some(request) = turn.request.as_mut() else {
+                        continue;
+                    };
+                    match kind.as_str() {
+                        "context/prepare" => handed_over = true,
+                        "step/tool-use-start" => {
+                            let QueryValue::Value {
+                                value: serde_json::Value::String(id),
+                            } = call_id
+                            else {
+                                return Err(AgentError::fault(
+                                    "Loop",
+                                    "a tool-use start has no call identity",
+                                ));
+                            };
+                            request.started.push(id);
+                        }
+                        "step/tool-use" => {
+                            let QueryValue::Value {
+                                value: serde_json::Value::String(id),
+                            } = completed_id
+                            else {
+                                return Err(AgentError::fault(
+                                    "Loop",
+                                    "a tool-use has no call identity",
+                                ));
+                            };
+                            completed.push(id);
+                        }
+                        "step/model-output-end" => {
+                            if matches!(status, QueryValue::Value { value: serde_json::Value::String(ref status) } if status == "completed")
+                            {
+                                request.stage = Stage::Tools;
+                            } else {
+                                turn.request = None;
+                                completed.clear();
                             }
                         }
-                        // Results without a dispatch close calls; they settle
-                        // no batch (ADR agent-029).
-                        EventKind::ToolResult(data) if data.call_event_id.is_some() => {
-                            turn.request = None
+                        "step/tool-call" => request.call_event_id = Some(id),
+                        "step/tool-result" if !matches!(dispatch, QueryValue::Missing) => {
+                            turn.request = None;
+                            completed.clear();
                         }
-                        _ => {}
+                        _ => (),
                     }
+                }
+                let Some(next) = reply.next else {
+                    break;
+                };
+                query
+                    .page
+                    .as_mut()
+                    .expect("request controls are paged")
+                    .after = Some(next);
+            }
+        }
+        let mut slot = self.turn.lock().unwrap();
+        *slot = restored;
+        self.publish(&slot);
+        match slot.as_mut() {
+            None => self.try_start(&mut slot)?,
+            Some(turn) => {
+                if let Some(request) = turn
+                    .request
+                    .as_ref()
+                    .filter(|request| request.stage == Stage::Model && !handed_over)
+                {
+                    self.timeline.append(
+                        EventKind::ModelOutputEnd(ModelOutputEndData {
+                            turn_id: turn.id.clone(),
+                            request_id: request.id.clone(),
+                            outcome: ModelOutputOutcome::Failed {
+                                error: CAPABILITY_RELOADING.into(),
+                                budget: None,
+                                presentation: None,
+                                failure: None,
+                            },
+                        })
+                        .into(),
+                    )?;
+                } else if !turn.request.as_ref().is_some_and(|request| {
+                    request.stage == Stage::Model || request.call_event_id.is_some()
+                }) {
+                    if let Some(request) = &turn.request {
+                        let mut starts = HashMap::new();
+                        for (index, id) in request.started.iter().enumerate() {
+                            starts.entry(id.as_str()).or_insert(index);
+                        }
+                        completed.sort_by_key(|id| starts.get(id.as_str()).copied());
+                    }
+                    self.settle_turn(
+                        turn,
+                        TurnOutcome::Failed {
+                            error: CAPABILITY_RELOADING.into(),
+                        },
+                        completed,
+                    )?;
                 }
             }
         }
-        for (start, data) in starts {
-            let command = data.command.expect("a manual start");
-            commands.retain(|unsettled| *unsettled != command);
-            self.timeline.append(
-                EventKind::ContextCompaction(ContextCompactionData {
-                    turn_id: data.turn_id,
-                    request_id: None,
-                    command: Some(command),
-                    start: Some(start),
-                    through: data.through,
-                    outcome: ContextCompactionResult::Cancelled {
-                        reason: CAPABILITY_RELOADING.into(),
-                    },
-                })
-                .into(),
-            )?;
-        }
-        for command in commands {
-            self.timeline.append(
-                EventKind::ContextCompaction(ContextCompactionData {
-                    turn_id: None,
-                    request_id: None,
-                    command: Some(command),
-                    start: None,
-                    through: command,
-                    outcome: ContextCompactionResult::Cancelled {
-                        reason: CAPABILITY_RELOADING.into(),
-                    },
-                })
-                .into(),
-            )?;
-        }
-        self.publish(slot);
-        let Some(turn) = slot.as_mut() else {
-            return self.try_start(slot);
-        };
-        turn.failed = Some(CAPABILITY_RELOADING.into());
-        if let Some(request) = turn
-            .request
-            .as_ref()
-            .filter(|request| request.stage == Stage::Model && request.source.is_none())
-        {
-            self.timeline.append(
-                EventKind::ModelOutputEnd(ModelOutputEndData {
-                    turn_id: turn.id.clone(),
-                    request_id: request.id.clone(),
-                    outcome: ModelOutputOutcome::Failed {
-                        error: CAPABILITY_RELOADING.into(),
-                        budget: None,
-                        presentation: None,
-                        failure: None,
-                    },
-                })
-                .into(),
-            )?;
-            return Ok(());
-        }
-        let outstanding = turn.request.as_ref().is_some_and(|request| {
-            request.stage == Stage::Model
-                || (request.stage == Stage::Tools && request.call_event_id.is_some())
-        });
-        if !outstanding {
-            self.end(
-                turn,
-                TurnOutcome::Failed {
-                    error: CAPABILITY_RELOADING.into(),
-                },
-            )?;
-        }
-        Ok(())
+        self.binding.retain_only(
+            slot.as_ref()
+                .and_then(|turn| turn.request.as_ref())
+                .map(|request| request.id.as_str()),
+        );
+        Ok(through)
     }
     fn start_preparation(
         self: &Arc<Self>,
@@ -999,10 +1390,18 @@ impl AgentLoop {
         let turn = slot
             .as_mut()
             .ok_or_else(|| AgentError::fault("Loop", "step outside a turn"))?;
-        let request = turn
-            .request
-            .as_mut()
-            .ok_or_else(|| AgentError::fault("Loop", "step outside a request"))?;
+        let request = turn.request.as_mut().ok_or_else(|| {
+            AgentError::fault(
+                "Loop",
+                format!(
+                    "{} at {} outside a request (turn {}, ending {})",
+                    event.kind.key(),
+                    event.sequence,
+                    turn.id,
+                    turn.ending
+                ),
+            )
+        })?;
         let (turn_id, request_id) = match &event.kind {
             EventKind::ModelStart(d) => (&d.turn_id, &d.request_id),
             EventKind::ToolUseStart(d) => (&d.turn_id, &d.request_id),
@@ -1254,7 +1653,6 @@ impl DynPlugin for LoopPlugin {
             })?;
             let owner = service.clone();
             let read = service.clone();
-            let read_timeline = service.timeline.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -1279,38 +1677,7 @@ impl DynPlugin for LoopPlugin {
                     .to_vec(),
                     Arc::new(move || {
                         let read = read.clone();
-                        let timeline = read_timeline.clone();
-                        Box::pin(async move {
-                            let reply = rebuild_facts(
-                                &timeline,
-                                &[
-                                    "input/applied",
-                                    "input/consumed",
-                                    "context/compact",
-                                    "context/compaction-start",
-                                    "context/compaction",
-                                    "stop/interrupt",
-                                    "turn/start",
-                                    "turn/end",
-                                    "step/model-start",
-                                    "context/prepare",
-                                    "step/tool-use-start",
-                                    "step/tool-use",
-                                    "step/model-output-end",
-                                    "step/tool-call",
-                                    "step/tool-result",
-                                ],
-                            )
-                            .await?;
-                            let mut slot = read.turn.lock().unwrap();
-                            read.rebuild(&mut slot, &reply.events)?;
-                            read.binding.retain_only(
-                                slot.as_ref()
-                                    .and_then(|turn| turn.request.as_ref())
-                                    .map(|request| request.id.as_str()),
-                            );
-                            Ok(reply.through)
-                        })
+                        Box::pin(async move { read.rebuild().await })
                     }),
                     Arc::new(move |event| {
                         let owner = owner.clone();

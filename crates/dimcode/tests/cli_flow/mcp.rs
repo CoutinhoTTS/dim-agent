@@ -19,6 +19,7 @@ fn resumed_mcp_line_commands_use_the_session_workspace_in_both_clients() {
                 let providers = wire.read("account.providers");
                 wire.reply(&providers, json!([]));
             } else {
+                wire.no_pending_questions(8);
                 let idle = wire.read("session.idle");
                 wire.reply(&idle, json!({"sequence":8}));
             }

@@ -11,6 +11,7 @@ pub mod exec;
 pub mod file_reads;
 pub mod files;
 pub mod mentions;
+mod pending;
 
 use crate::{
     host::{HostError, HostFuture, SessionFilesHost, ToolDriver, ToolExecutionContext, ToolHost},
@@ -349,6 +350,20 @@ impl DynPlugin for WorkspaceToolsPlugin {
                             "dir": candidate.dir,
                         })).collect::<Vec<_>>()}))
                     })
+                }),
+            )?;
+            let pending_tree = tools.tree.clone();
+            methods.register(
+                ctx,
+                "session.exec.pending",
+                vec![MethodDecl::new(
+                    "session.exec.pending",
+                    false,
+                    Interruption::Report,
+                )],
+                Arc::new(move |call, cancel, _| {
+                    let tree = pending_tree.clone();
+                    Box::pin(async move { pending::read(&tree, call.params, &cancel).await })
                 }),
             )?;
             let tree = tools.tree.clone();

@@ -48,6 +48,8 @@ mod startup;
 mod tasks;
 #[path = "cli_flow/title.rs"]
 mod title;
+#[path = "cli_flow/windows.rs"]
+mod windows;
 #[path = "cli_flow/workflow.rs"]
 mod workflow;
 
@@ -122,7 +124,7 @@ impl Home {
             };
             stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
-            let mut wire = Wire(BufReader::new(stream), ending);
+            let mut wire = Wire(BufReader::new(stream), ending, false);
             if let Err(payload) =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| flow(&mut wire)))
                 && !payload.is::<PeerGone>()
@@ -166,20 +168,66 @@ const HANG_GUARD: Duration = Duration::from_secs(300);
 /// that still fails at `HANG_GUARD`.
 struct PeerGone;
 
-struct Wire(BufReader<UnixStream>, Arc<AtomicBool>);
+struct Wire(BufReader<UnixStream>, Arc<AtomicBool>, bool);
 impl Wire {
     fn new(stream: UnixStream) -> Self {
-        Self(BufReader::new(stream), Arc::new(AtomicBool::new(false)))
+        Self(
+            BufReader::new(stream),
+            Arc::new(AtomicBool::new(false)),
+            false,
+        )
     }
     fn read(&mut self, method: &str) -> Value {
-        let value = self.frame();
-        assert_eq!(value["method"], method);
-        value
+        loop {
+            let value = self.frame();
+            if value["method"] != method && self.2 && self.empty_state(&value) {
+                continue;
+            }
+            assert_eq!(value["method"], method);
+            return value;
+        }
+    }
+    fn empty_state(&mut self, request: &Value) -> bool {
+        let branch = request["params"]
+            .get("branchId")
+            .cloned()
+            .unwrap_or(json!("main"));
+        let through = request["params"]
+            .get("through")
+            .cloned()
+            .unwrap_or(json!(8));
+        let result = match request["method"].as_str() {
+            Some("session.methods") => json!({"methods": [
+                {"name":"session.input.pending","mutating":false},
+                {"name":"session.exec.pending","mutating":false},
+                {"name":"session.turn.get","mutating":false}
+            ]}),
+            Some("session.question.pending") => {
+                json!({"branchId":branch,"through":through,"batches":[],"next":null})
+            }
+            Some("session.input.pending") => {
+                json!({"branchId":branch,"through":through,"inputs":[],"next":null})
+            }
+            Some("session.exec.pending") => {
+                json!({"branchId":branch,"through":through,"tasks":[],"next":null})
+            }
+            Some("session.turn.get") => {
+                json!({"branchId":branch,"through":through,"turn":null,"output":null})
+            }
+            _ => return false,
+        };
+        self.reply(request, result);
+        true
     }
     /// The next request, whichever it is: for requests whose order the
     /// flow does not fix.
     fn read_any(&mut self) -> Value {
-        self.frame()
+        loop {
+            let value = self.frame();
+            if !self.2 || !self.empty_state(&value) {
+                return value;
+            }
+        }
     }
     fn frame(&mut self) -> Value {
         let deadline = Instant::now() + HANG_GUARD;
@@ -216,7 +264,14 @@ impl Wire {
         loop {
             match self.0.read_line(&mut line) {
                 Ok(0) => return None,
-                Ok(_) => return Some(line),
+                Ok(_) => {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    if self.2 && self.empty_state(&request) {
+                        line.clear();
+                        continue;
+                    }
+                    return Some(line);
+                }
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -256,7 +311,18 @@ impl Wire {
         }
         panic!("{message}");
     }
-    fn reply(&mut self, request: &Value, result: Value) {
+    fn reply(&mut self, request: &Value, mut result: Value) {
+        if request["method"] == "session.history"
+            && (request["params"]["latestTurn"] == true
+                || request["params"].get("before").is_some())
+            && result["done"] == true
+            && result["events"]
+                .as_array()
+                .is_some_and(|events| !events.is_empty())
+            && result.get("nextBefore").is_none()
+        {
+            result["nextBefore"] = json!(1);
+        }
         self.send(json!({"jsonrpc":"2.0","id":request["id"],"result":result}));
     }
     fn notice(&mut self, method: &str, params: Value) {
@@ -264,22 +330,31 @@ impl Wire {
     }
     fn quiet(&mut self, duration: Duration) {
         let previous = self.0.get_ref().read_timeout().unwrap();
-        self.0.get_ref().set_read_timeout(Some(duration)).unwrap();
-        let mut line = String::new();
-        let result = self.0.read_line(&mut line);
-        self.0.get_ref().set_read_timeout(previous).unwrap();
-        match result {
-            Err(ref error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Ok(0) => self.closed(format!("the CLI closed during the quiet window: {line:?}")),
-            Err(ref error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
-                self.closed(format!("the CLI reset during the quiet window: {line:?}"));
+        let deadline = Instant::now() + duration;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            self.0.get_ref().set_read_timeout(Some(remaining)).unwrap();
+            let mut line = String::new();
+            match self.0.read_line(&mut line) {
+                Ok(0) => self.closed(format!("the CLI closed during the quiet window: {line:?}")),
+                Ok(_) => {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    assert!(
+                        self.2 && self.empty_state(&request),
+                        "Unexpected request: {request}"
+                    );
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => self.closed(format!("quiet window: {error}")),
             }
-            _ => panic!("Unexpected request or closure: {line:?}, {result:?}"),
         }
+        self.0.get_ref().set_read_timeout(previous).unwrap();
     }
     fn start(&mut self, resume: bool) {
         self.hello(&[]);
@@ -292,7 +367,17 @@ impl Wire {
     fn hello(&mut self, extra: &[&str]) {
         let hello = self.read("hello");
         assert_eq!(hello["params"]["protocolVersion"], 3);
-        let mut features = vec!["session.create", "session.history", "provider.list"];
+        let mut features = vec![
+            "session.create",
+            "session.history",
+            "session.history.latestTurn",
+            "provider.list",
+        ];
+        let empty_methods = !extra.contains(&"session.methods");
+        self.2 = empty_methods || hello["params"]["clientName"] == "AcpGateway";
+        if empty_methods {
+            features.push("session.methods");
+        }
         features.extend(extra);
         self.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":features}));
     }
@@ -309,8 +394,17 @@ impl Wire {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        self.no_pending_questions(8);
         let idle = self.read("session.idle");
         self.reply(&idle, json!({"sequence":8}));
+    }
+    fn no_pending_questions(&mut self, through: u64) {
+        let request = self.read("session.question.pending");
+        assert_eq!(request["params"]["branchId"], "main");
+        self.reply(
+            &request,
+            json!({"branchId":"main","through":through,"batches":[],"next":null}),
+        );
     }
     /// Answers the context reading the interface asks for when it enters a
     /// Session: this fixture reports the method as unknown, as a Session
@@ -339,7 +433,12 @@ impl Wire {
             line.clear();
             match self.0.read_line(&mut line) {
                 Ok(0) => return,
-                Ok(_) => {}
+                Ok(_) => {
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    if self.2 {
+                        self.empty_state(&request);
+                    }
+                }
                 Err(error)
                     if matches!(
                         error.kind(),
@@ -474,8 +573,10 @@ fn model_catalog_lists_safe_ids_and_availability_and_refreshes_explicitly() {
     for refresh in [false, true] {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
-            let hello = wire.read("hello");
-            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.2 = true;
+            wire.2 = true;
+        let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
             let request = wire.read(if refresh { "provider.refresh" } else { "provider.catalog" });
             assert_eq!(request["params"], json!({"providerId":"fixture"}));
             let catalog = json!({"account":{"accessToken":"must-not-print"},"version":1,"disabledModelIds":["disabled"],"models":[
@@ -505,8 +606,9 @@ fn model_catalog_lists_safe_ids_and_availability_and_refreshes_explicitly() {
     }
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.catalog");
         wire.reply(&catalog, json!({"catalog":null}));
     });
@@ -523,8 +625,9 @@ fn model_catalog_lists_safe_ids_and_availability_and_refreshes_explicitly() {
 fn model_catalog_names_an_empty_catalog() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.catalog");
         assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
         wire.reply(
@@ -553,8 +656,9 @@ fn model_catalog_names_an_empty_catalog() {
 fn model_catalog_refresh_names_an_empty_listing() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.refresh");
         assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
         wire.reply(
@@ -584,8 +688,9 @@ fn model_catalog_refresh_names_an_empty_listing() {
 fn model_catalog_marks_undeclared_limits_and_names_the_declaring_command() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.catalog");
         assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
         wire.reply(
@@ -625,8 +730,9 @@ fn model_catalog_marks_undeclared_limits_and_names_the_declaring_command() {
 fn model_adoption_names_the_declaring_command_for_undeclared_limits() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let create = wire.read("session.create");
         assert_eq!(
             create["params"]["model"],
@@ -672,8 +778,9 @@ fn model_adoption_names_the_declaring_command_for_undeclared_limits() {
 fn model_catalog_declares_limits_for_one_model() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.catalog");
         assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
         wire.reply(
@@ -736,8 +843,9 @@ fn model_catalog_declares_limits_for_one_model() {
 fn model_catalog_declares_missing_limits_for_every_model() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.catalog");
         wire.reply(
             &catalog,
@@ -933,8 +1041,9 @@ fn daemon_stop_waits_for_completion_and_closure_without_touching_a_successor() {
     fs::write(home.0.join("account-marker"), "retained").unwrap();
     let socket = home.0.join("rust/daemon.sock");
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":"0".repeat(64)},"features":["session.create","session.history","daemon.shutdown.completed"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":"0".repeat(64)},"features":["session.create","session.history","session.history.latestTurn","session.methods","daemon.shutdown.completed"]}));
         let shutdown = wire.read("daemon.shutdown");
         assert_eq!(shutdown["params"], json!({}));
         thread::sleep(Duration::from_millis(100));
@@ -966,8 +1075,9 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
     let home = Home::new();
     let socket = home.0.join("rust/daemon.sock");
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","daemon.shutdown.completed"]}));
+        wire.reply(&hello,json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","daemon.shutdown.completed"]}));
         let shutdown = wire.read("daemon.shutdown");
         fs::remove_file(&socket).unwrap();
         let successor = UnixListener::bind(&socket).unwrap();
@@ -994,7 +1104,7 @@ fn a_daemon_of_another_version_is_stopped_and_replaced() {
             };
             let hello: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(hello["method"], "hello");
-            wire.reply(&hello,json!({"instanceId":"new","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+            wire.reply(&hello,json!({"instanceId":"new","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
             let catalog = wire.read("provider.catalog");
             wire.reply(&catalog, json!({"catalog":null}));
             break;
@@ -2128,14 +2238,18 @@ fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() 
     };
     fs::create_dir(&launch).unwrap();
     let daemon = home.daemon(|wire| {
-        let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
-        let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
-        let first = wire.read("session.history"); assert_eq!(first["params"]["after"],0);
-        wire.reply(&first,json!({"events":[{"sequence":4,"create_at":1,"type":"step","name":"text","data":{"turn_id":"old-turn","request_id":"old-request","delta":"old output"}}],"through":10,"nextAfter":7,"done":false}));
+        wire.hello(&[]);
+        let attach = wire.read("session.attach"); wire.reply(&attach,attach_record(&attach));
+        let first = wire.read("session.history"); assert_eq!(first["params"]["latestTurn"],true);
+        wire.reply(&first,json!({"events":[],"through":10,"nextBefore":7,"nextAfter":10,"done":true}));
         let next = wire.read("session.history");
-        assert_eq!(next["params"]["after"],7); assert_eq!(next["params"]["through"],10);
-        wire.reply(&next,json!({"events":[{"sequence":8,"create_at":2,"type":"step","name":"model-output-end","data":{"turn_id":"old-turn","request_id":"old-request","status":"completed","finish_reason":"end_turn"}}],"through":10,"nextAfter":10,"done":true}));
+        assert_eq!(next["params"]["before"],7); assert_eq!(next["params"]["through"],10);
+        assert!(next["params"]["latestTurn"].is_null());
+        wire.reply(&next,json!({"events":[
+            {"sequence":4,"create_at":1,"type":"step","name":"text","data":{"turn_id":"old-turn","request_id":"old-request","delta":"old output"}},
+            {"sequence":5,"create_at":2,"type":"step","name":"model-output-end","data":{"turn_id":"old-turn","request_id":"old-request","status":"completed","finish_reason":"end_turn"}}
+        ],"through":10,"nextBefore":1,"nextAfter":6,"done":true}));
+        wire.no_pending_questions(10);
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"old-request","textOffset":0,"text":"old output","thinking":"","thinkingOffset":0}));
         let idle = wire.read("session.idle"); wire.reply(&idle,json!({"sequence":10}));
         let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
@@ -2195,10 +2309,11 @@ fn exec_json_preserves_public_notifications_and_only_observes_the_selected_sessi
     let emitted = notices.clone();
     let daemon = home.daemon(move |wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn"]}));
         let attach = wire.read("session.attach"); wire.reply(&attach,json!({}));
         let history = wire.read("session.history");
-        wire.reply(&history,json!({"events":[{"sequence":4,"create_at":1,"type":"step","name":"text","data":{"turn_id":"old-turn","request_id":"old","delta":"history-only","newField":"preserved"}}],"through":8,"nextAfter":8,"done":true}));
+        wire.reply(&history,json!({"events":[{"sequence":4,"create_at":1,"type":"step","name":"text","data":{"turn_id":"old-turn","request_id":"old","delta":"history-only","newField":"preserved"}}],"through":8,"nextBefore":1,"nextAfter":8,"done":true}));
+        wire.no_pending_questions(8);
         let idle = wire.read("session.idle"); wire.reply(&idle,json!({"sequence":8}));
         let submit = wire.read("session.submit");
         assert_eq!(submit["params"]["text"], "continue"); wire.reply(&submit,json!({"event":{}}));
@@ -2348,8 +2463,10 @@ fn session_export_preserves_the_fixed_main_prefix_and_does_not_replace_files() {
         ];
         let returned = events.clone();
         let daemon = home.daemon(move |wire| {
-            let hello = wire.read("hello");
-            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.2 = true;
+            wire.2 = true;
+        let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
             if mode == "existing" {
                 assert!(wire.trailing_request().is_none(),"an existing output path is refused before the history read");
                 return;
@@ -2576,8 +2693,10 @@ fn explicit_model_config_rejects_mock_and_mismatched_configured_profiles() {
         let config = home.0.join("model.json");
         fs::write(&config, "{}").unwrap();
         let daemon = home.daemon(move |wire| {
-            let hello = wire.read("hello");
-            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":profile,"features":["session.create","session.history"]}));
+        wire.2 = true;
+            wire.2 = true;
+        let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":profile,"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         });
         let output = home
             .command()
@@ -4293,9 +4412,10 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
 fn startup_effort_on_the_default_model_reports_rejection_without_clearing_saved_preferences() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
         wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-            "protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+            "protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let create = wire.read("session.create");
         assert!(create["params"].get("model").is_none());
         assert_eq!(create["params"]["modelPreferences"], json!({"reasoningEffort":"medium"}));
@@ -4351,12 +4471,14 @@ fn invalid_startup_effort_fails_without_starting_a_daemon() {
 fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.hello(&[]);
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
-        wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -4388,10 +4510,13 @@ fn the_model_label_shows_the_adopted_reasoning_effort_in_both_modes() {
         ] {
             let home = Home::new();
             let event = configured_event(4, "model", preferences.clone());
+            let adopted = preferences.clone();
             let daemon = home.daemon(move |wire| {
                 wire.hello(&[]);
                 let attach = wire.read("session.attach");
-                wire.reply(&attach, attach_record(&attach));
+                let mut record = attach_record(&attach);
+                record["modelPreferences"] = adopted;
+                wire.reply(&attach, record);
                 let history = wire.read("session.history");
                 wire.reply(
                     &history,
@@ -4431,6 +4556,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
         let home = Home::new();
         let (calls, observed) = std::sync::mpsc::channel::<Value>();
         let daemon = home.daemon(move |wire| {
+            wire.2 = true;
             let mut capabilities =
                 serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384))
                     .unwrap();
@@ -4439,6 +4565,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 line.clear();
+                if wire.2 && wire.empty_state(&request) { continue; }
                 calls.send(request.clone()).unwrap();
                 if request["method"] == "session.context.usage" {
                     wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
@@ -4454,7 +4581,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
                         "protocolVersion":3,"daemonProfile":{"kind":"product"},
-                        "features":["session.create","session.history","provider.list",
+                        "features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list",
                             "provider.catalog","provider.management"]}),
                     "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                     "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
@@ -4585,7 +4712,9 @@ fn home_after_new_drops_the_previous_sessions_effort() {
             "ui.replace",
         ]);
         let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
+        let mut record = attach_record(&attach);
+                record["modelPreferences"] = json!({"reasoningEffort":"high"});
+                wire.reply(&attach, record);
         let register = wire.read("ui.attach");
         wire.reply(&register, json!({"uiId":"ui-1"}));
         let history = wire.read("session.history");
@@ -4721,6 +4850,7 @@ fn repicking_the_current_model_keeps_the_effort() {
     let home = Home::new();
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let mut capabilities =
             serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384))
                 .unwrap();
@@ -4734,6 +4864,7 @@ fn repicking_the_current_model_keeps_the_effort() {
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.empty_state(&request) { continue; }
             calls.send(request.clone()).unwrap();
             if request["method"] == "session.context.usage" {
                 wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
@@ -4744,7 +4875,7 @@ fn repicking_the_current_model_keeps_the_effort() {
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
                     "protocolVersion":3,"daemonProfile":{"kind":"product"},
-                    "features":["session.create","session.history","provider.list",
+                    "features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list",
                         "provider.catalog","provider.management","provider.selection","provider.select"]}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                 "provider.catalog" => catalog.clone(),
@@ -4752,7 +4883,11 @@ fn repicking_the_current_model_keeps_the_effort() {
                     "displayName":"Test","enabled":true,"version":1,"connection":null,
                     "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
                 "session.create" => panic!("resuming must not create a Session"),
-                "session.attach" => attach_record(&request),
+                "session.attach" => {
+                    let mut record = attach_record(&request);
+                    record["modelPreferences"] = json!({"reasoningEffort":"high"});
+                    record
+                },
                 "session.history" => json!({"events":[
                     configured_event(4, "model", json!({"reasoningEffort":"high"}))],
                     "through":8,"nextAfter":8,"done":true}),
@@ -4797,7 +4932,10 @@ fn a_resumed_session_draws_the_adopted_model_and_effort() {
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
         let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
+        let mut record = attach_record(&attach);
+        record["model"]["modelId"] = json!("second");
+        record["modelPreferences"] = json!({"reasoningEffort":"high"});
+        wire.reply(&attach, record);
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -4880,7 +5018,9 @@ fn a_narrow_composer_drops_the_effort_before_the_model() {
         let daemon = home.daemon(|wire| {
             wire.hello(&[]);
             let attach = wire.read("session.attach");
-            wire.reply(&attach, attach_record(&attach));
+            let mut record = attach_record(&attach);
+            record["modelPreferences"] = json!({"reasoningEffort":"high"});
+            wire.reply(&attach, record);
             let history = wire.read("session.history");
             wire.reply(
                 &history,
@@ -4989,8 +5129,9 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     let home = Home::new();
     let (release, wait_release) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -5081,7 +5222,9 @@ fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writi
         let daemon = home.daemon(|wire| {
             wire.hello(&[]);
             let attach = wire.read("session.attach");
-            wire.reply(&attach, attach_record(&attach));
+            let mut record = attach_record(&attach);
+            record["modelPreferences"] = json!({"reasoningEffort":"high"});
+            wire.reply(&attach, record);
             let history = wire.read("session.history");
             wire.reply(
                 &history,
@@ -5147,8 +5290,9 @@ fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writi
 fn tui_mcp_and_configuration_commands_use_session_methods() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -5206,8 +5350,9 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
 
 fn no_session_daemon(home: &Home, quieted: std::sync::mpsc::Sender<()>) -> thread::JoinHandle<()> {
     home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         wire.quiet(Duration::from_millis(1200));
@@ -5221,8 +5366,9 @@ fn tui_mcp_without_a_session_reports_the_catalog_only() {
     let home = Home::new();
     let (quieted, quiet_done) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
         let catalog = wire.read("mcp.catalog");
@@ -5307,8 +5453,9 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     let long = "y".repeat(16 * 1024 + 1);
     let expected_long = long.clone();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -5364,8 +5511,9 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
     );
     let (submitted, received) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -5645,8 +5793,9 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
     );
     let (submitted, received) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.catalog"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.catalog"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -5782,8 +5931,9 @@ fn fullscreen_login_releases_mouse_for_the_link_and_restores_the_preference_on_c
 fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management","account.login.browser.begin","account.login.browser.complete"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","account.login.browser.begin","account.login.browser.complete"]}));
         let listed = wire.read("provider.management");
         wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["browser"]}}]}));
         let begin = wire.read("account.login.browser.begin");
@@ -5829,8 +5979,9 @@ fn browser_login_hides_callback_and_uses_only_generic_account_rpc() {
 fn device_login_polls_and_cancels_the_attempt_on_ctrl_c() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list","provider.management","account.login.begin","account.login.status","account.login.cancel"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","account.login.begin","account.login.status","account.login.cancel"]}));
         let listed = wire.read("provider.management");
         wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["device"]}}]}));
         let begin = wire.read("account.login.begin");
@@ -6636,8 +6787,9 @@ fn mcp_catalog(id: &str) -> Value {
 }
 
 fn mcp_hello(wire: &mut Wire) {
+    wire.2 = true;
     let hello = wire.read("hello");
-    wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+    wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
 }
 
 fn mcp_started(wire: &mut Wire, redirect: &str, expired: bool) {
@@ -6749,8 +6901,9 @@ fn mcp_list_says_when_no_server_is_configured() {
 fn tui_mcp_says_when_no_server_is_configured() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -6788,8 +6941,9 @@ fn tui_mcp_says_when_no_server_is_configured() {
 fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -6848,8 +7002,9 @@ fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
 fn tui_mcp_enables_and_disables_a_project_server() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -7332,8 +7487,9 @@ fn daemon_start_waits_for_private_permissions_without_trusting_existing_public_s
     stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
     let mut wire = Wire::new(stream);
+    wire.2 = true;
     let hello = wire.read("hello");
-    wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+    wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
     let catalog = wire.read("provider.catalog");
     wire.reply(
         &catalog,
@@ -7354,9 +7510,10 @@ fn initial_attach_eof_settles_a_shell_started_before_the_first_prompt() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn"]}));
         let attach = wire.read("session.attach"); wire.reply(&attach, attach_record(&attach));
-        let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let history = wire.read("session.history"); wire.reply(&history, json!({"events":[],"through":8,"nextBefore":1,"nextAfter":8,"done":true}));
+        wire.no_pending_questions(8);
         let idle = wire.read("session.idle");
         wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"main","requestId":"restored","textOffset":0,"text":"initial model pending","thinking":"","thinkingOffset":0}));
         let run = wire.read("shell.run");
@@ -7473,8 +7630,9 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
 fn web_prints_the_entry_and_holds_it_until_interrupted() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","web.open"]}));
         let open = wire.read("web.open");
         assert_eq!(open["params"], json!({"port": 4567}));
         wire.reply(&open, json!({"url":"http://127.0.0.1:4567/#token=fixture-token","address":"127.0.0.1:4567"}));
@@ -7516,8 +7674,9 @@ fn web_prints_the_entry_and_holds_it_until_interrupted() {
 fn web_off_clears_the_daemon_switch() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.disable"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","web.disable"]}));
         let disable = wire.read("web.disable");
         assert_eq!(disable["params"], json!({}));
         wire.reply(&disable, json!({"enabled":false,"open":false,"connections":0}));
@@ -7562,8 +7721,10 @@ fn web_without_the_web_workspace_says_how_to_get_it() {
     for (installed, error, expected) in cases {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
-            let hello = wire.read("hello");
-            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.open"]}));
+        wire.2 = true;
+            wire.2 = true;
+        let hello = wire.read("hello");
+            wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","web.open"]}));
             let open = wire.read("web.open");
             wire.send(json!({"jsonrpc":"2.0","id":open["id"],"error":{"code":-32000,"message":"This App Server has no Web workspace","data":{"appError":error}}}));
             let mut line = String::new();
@@ -7634,8 +7795,9 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
     for manual in [true, false] {
         let home = Home::new();
         let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","web.toggle"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","web.toggle"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -7702,8 +7864,9 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     let home = Home::new();
     let (release, wait_release) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -8558,8 +8721,9 @@ fn tui_queue_recall_refuses_attachments_and_steering_preserves_all_content() {
 fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -8576,10 +8740,6 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
         wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":true}));
         wire.notice("session.state", json!({"sessionId":"session","branchId":"child","running":false}));
         wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"child","requestId":"child-request","textOffset":0,"text":"child-only answer","thinkingOffset":0,"thinking":"child-only reasoning"}));
-        let child_history = wire.read("session.history");
-        assert_eq!(child_history["params"]["sessionId"], "session");
-        assert_eq!(child_history["params"]["branchId"], "child");
-        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"note-1","sequence":11,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"background task finished"}]},"mode":"append"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-note","sequence":12,"create_at":1,"type":"input","name":"applied","data":{"input_id":"note-1","mode":"append"}}}));
         let second = wire.read("session.submit");
@@ -8847,9 +9007,9 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-input","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"go"}]},"mode":"queue"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"output-adopted","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"output-input"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"child","event":{"id":"child-start","sequence":1,"create_at":1,"type":"exec","name":"started","data":{"turn_id":"t","request_id":"r","call_id":"child-call","task_id":"child-task","description":"cargo cx build","output_path":"/daemon/private/output"}}}));
-        let child_history = wire.read("session.history");
-        assert_eq!(child_history["params"]["branchId"], "child");
-        wire.reply(&child_history, json!({"events":[],"through":0,"nextAfter":0,"done":true}));
+        let child = wire.read("session.turn.get");
+        assert_eq!(child["params"]["branchId"], "child");
+        wire.reply(&child, json!({"branchId":"child","through":0,"turn":null,"output":null}));
         let expected = json!({"sessionId":"session","branchId":"child","taskId":"child-task"});
         let first = wire.read("session.exec.output");
         assert_eq!(first["params"], expected);
@@ -8999,8 +9159,9 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     let home = Home::new();
     let (deliver, delivery) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -9849,8 +10010,9 @@ fn cold_hosted_tui_opens_without_reading_the_session_catalog() {
 fn resume_by_id_takes_its_model_from_the_attach_record() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"session"}));
         wire.reply(&attach, json!({"sessionId":"session","cwd":"/workspace",
@@ -9879,8 +10041,9 @@ fn resume_by_id_takes_its_model_from_the_attach_record() {
 fn resume_by_id_finds_the_model_in_the_catalog_when_the_attach_reply_is_empty() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"session"}));
         wire.reply(&attach, json!({}));
@@ -9917,8 +10080,9 @@ fn resume_by_id_finds_the_model_in_the_catalog_when_the_attach_reply_is_empty() 
 fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -9937,10 +10101,7 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
         wire.no_context();
         // Replaying the restored compaction marks the reading stale again.
         wire.no_context();
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            line.clear();
-        }
+        wire.hold();
     });
     let mut command = home.command();
     command.args(["--resume", "session"]);
@@ -10075,8 +10236,9 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
     let home = Home::new();
     let (release, wait_release) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","provider.management","provider.create","provider.update","provider.probe"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.management","provider.create","provider.update","provider.probe"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -10144,6 +10306,7 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     let home = Home::new();
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let mut revision = 1;
         let mut policy = json!({"mode":"agent"});
         let mut conflicted = false;
@@ -10151,10 +10314,11 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.2 && wire.empty_state(&request) { continue; }
             calls.send(request.clone()).unwrap();
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
                     "provider.list","provider.catalog","collaboration.model_policy",
                     "collaboration.set_model_policy"]}),
                 "session.create" => panic!("resuming must not create a Session"),
@@ -10250,13 +10414,15 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
 fn tui_models_picker_hides_edit_models_without_management_methods() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.2 && wire.empty_state(&request) { continue; }
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
                     "provider.list","provider.catalog","provider.selection","provider.select"]}),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => attach_record(&request),
@@ -10295,6 +10461,7 @@ fn tui_models_picker_cycles_reasoning_effort() {
     let home = Home::new();
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let mut capabilities =
             serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
         capabilities["reasoning"] = json!(true);
@@ -10310,10 +10477,11 @@ fn tui_models_picker_cycles_reasoning_effort() {
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.2 && wire.empty_state(&request) { continue; }
             calls.send(request.clone()).unwrap();
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
                     "provider.list","provider.catalog","provider.management","provider.selection","provider.select"]}),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => attach_record(&request),
@@ -10399,6 +10567,7 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
     let changed = stored.clone();
     let (release, wait_release) = std::sync::mpsc::channel::<()>();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         // One writer at a time: the listing a provider is slow to give is
         // answered from another thread once the test releases it, so the
         // daemon keeps serving the requests the picker makes meanwhile.
@@ -10410,9 +10579,10 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.2 && wire.empty_state(&request) { continue; }
             let answer = match request["method"].as_str().unwrap() {
                 "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
                     "provider.list","provider.catalog","provider.refresh"]})),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => Some(attach_record(&request)),
@@ -10538,14 +10708,16 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
     let kept = stored.clone();
     let (release, wait_release) = std::sync::mpsc::channel::<()>();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let mut wait_release = Some(wait_release);
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.2 && wire.empty_state(&request) { continue; }
             let answer = match request["method"].as_str().unwrap() {
                 "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
                     "provider.list","provider.catalog","provider.refresh"]})),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => Some(attach_record(&request)),
@@ -10635,12 +10807,14 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     // the kill below cannot interrupt a reply.
     let (settled, wait_settled) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let mut version = 1u32;
         let mut catalogs = 0usize;
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.2 && wire.empty_state(&request) { continue; }
             let model = |id: &str, reason: Option<&str>, declared: bool| {
                 let reason = reason.map_or(Value::Null, |reason| json!(reason));
                 let capabilities = if declared {
@@ -10658,7 +10832,7 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
             };
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
                     "provider.list","provider.catalog"]}),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => {
@@ -10872,10 +11046,11 @@ fn member_approval_without_the_detail_method_offers_only_rejection() {
 fn recording_on_switches_the_model_log() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
         wire.reply(
             &hello,
-            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
+            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}),
         );
         let read = wire.read("settings.read");
         assert_eq!(read["params"], json!({"source":"model-log","scope":"user"}));
@@ -10919,10 +11094,11 @@ fn recording_on_switches_the_model_log() {
 fn recording_reports_whether_it_is_on() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
         wire.reply(
             &hello,
-            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
+            json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}),
         );
         let read = wire.read("settings.read");
         wire.reply(
@@ -11079,7 +11255,7 @@ fn daemon_vacuum_reclaims_an_offline_store() {
             .execute(
                 "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body) \
                  VALUES ('s', 'main', ?1, ?1, 'turn/start', ?2)",
-                rusqlite::params![sequence, "x".repeat(4000)],
+                rusqlite::params![sequence, json!({"padding":"x".repeat(4000)}).to_string()],
             )
             .unwrap();
     }

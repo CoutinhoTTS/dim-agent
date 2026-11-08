@@ -32,7 +32,7 @@ dependency is not necessarily a plugin with the same name.
 | [TimelineTree](TimelineTree.md) | — | TimelineTree | TreeTimeline |
 | [InputQueue](InputQueue.md) | — | InputMethods | InputQueue |
 | [Permission](Permission.md) | — | — | Permission, Approval |
-| [ToolExecution](ToolExecution.md) | — | — | ToolBinding, ToolExecutor |
+| [ToolExecution](ToolExecution.md) | — | [ToolMethods](ToolMethods.md) | ToolBinding, ToolExecutor |
 | [ToolRegistry](ToolRegistry.md) | — | ToolRegistry | — |
 | [SessionMethods](SessionMethods.md) | — | SessionMethods | — |
 | [ShellInput](ShellInput.md) | — | ShellInput | — |
@@ -42,7 +42,7 @@ dependency is not necessarily a plugin with the same name.
 | [BranchTool](BranchTool.md) | — | BranchTool, BranchLine | — |
 | [ContextPreparation](ContextPreparation.md) | — | — | ContextPreparation |
 | [Prompt](Prompt.md) | — | — | Prompt |
-| [Loop](Loop.md) | — | — | Loop |
+| [Loop](Loop.md) | — | [LoopMethods](LoopMethods.md) | Loop |
 | [ModelProvider](ModelProvider.md) | — | — | ModelProvider |
 | [HostPlatform](HostPlatform.md) | HostPlatform | — | — |
 | [FileStorage](FileStorage.md) | FileStorage | — | — |
@@ -81,8 +81,9 @@ adopted raw inputs containing final content, or public tool results, not a
 domain-specific second history projection. Completed compaction facts must
 remain effective without a selected recovery snapshot. Snapshots are separate,
 optional interpreter caches; compatibility is checked before decoding state.
-`Timeline.context` reads full facts; `HistoryRenderer.context` selects a supported
-snapshot, and `history::read_context` uses the default interpreter. These pages
+`Timeline.query` returns selected fields, calculated values or explicitly requested
+complete events. `HistoryRenderer.rendered_stream` consumes context pages;
+`HistoryRenderer.context` selects a supported snapshot for event inspection. These pages
 describe current source, not the planned dynamic-event, loader-configuration or
 cross-language APIs in the [foundation ADR](../../../adr/001-harness-foundation.md).
 

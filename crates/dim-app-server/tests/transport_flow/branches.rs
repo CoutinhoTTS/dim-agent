@@ -116,6 +116,8 @@ async fn branches_list_main_and_its_lines_and_read_an_ended_line_through_its_hea
     assert!(rows[0].get("endEvent").is_none());
     let open = row(&rows, &child);
     assert_eq!(open["state"], "open");
+    assert_eq!(open["purpose"], "child work");
+    assert_eq!(open["cutMessages"], 0);
     assert_eq!(open["parentBranchId"], "main");
     assert!(open["branchPoint"].as_u64().is_some(), "{open}");
     assert!(open["createEvent"].as_u64().is_some(), "{open}");
@@ -137,6 +139,8 @@ async fn branches_list_main_and_its_lines_and_read_an_ended_line_through_its_hea
     assert_eq!(ended["endEvent"], own_end(&mut client, &id, &child).await);
     assert_eq!(ended["head"], session.sequence(&child).unwrap());
     assert_eq!(cascaded["state"], "ended");
+    assert_eq!(ended["end"]["source"]["kind"], "host");
+    assert_eq!(cascaded["end"]["ancestor"], child);
     assert_eq!(
         cascaded["endEvent"],
         own_end(&mut client, &id, &grandchild).await
@@ -208,6 +212,9 @@ async fn branches_answer_the_same_directory_after_a_restart() {
             "createEvent",
             "source",
             "state",
+            "purpose",
+            "cutMessages",
+            "end",
         ] {
             assert_eq!(was.get(field), now.get(field), "{id} keeps {field}: {now}");
         }

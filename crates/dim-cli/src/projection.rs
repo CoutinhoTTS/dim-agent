@@ -52,27 +52,23 @@ pub struct Projection {
     request_starts: HashMap<String, u64>,
     /// The reasoning row each model request streams into while it is open.
     thinking_rows: HashMap<String, OpenThought>,
+    thinking_characters: HashMap<String, u64>,
     /// The tool row each call id opened.
-    tool_rows: HashMap<String, usize>,
+    tool_rows: HashMap<(String, String), usize>,
     /// The compaction row each `context/compaction-start` opened, by its
     /// sequence: the result names that start.
     compaction_rows: HashMap<u64, usize>,
     running: bool,
     approvals: Vec<ApprovalView>,
     pub questions: crate::question::Pending,
-    /// Written messages without their `input/applied` yet. Each enters the
-    /// transcript when it comes, so the transcript keeps the order the model
-    /// sees and a withdrawn input never becomes a row; the queue strip shows
-    /// them while a turn runs. Withdrawal re-submits the kept `UserInput` as
-    /// Steer. Each keeps its input id and the sequence it was submitted at.
-    held: Vec<(String, u64, UserInput)>,
+    inputs: Vec<dim_agent_types::PendingInput>,
     /// The row each written user message draws in, by input id, until its
     /// `input/consumed` settles that row.
     input_rows: HashMap<String, usize>,
     /// Unfinished tasks and the latest 50 terminal results.
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
-    background: HashMap<TaskTarget, String>,
+    background: HashMap<TaskTarget, (String, String)>,
     /// The newest turn end: its sequence and how the turn ended.
     ended: Option<(u64, TurnEnd)>,
     /// Requests whose text, thinking or tool row already showed.
@@ -89,8 +85,7 @@ pub struct Projection {
     /// Agent ids a finished `agent.list` read was asked to name, whether or
     /// not it returned them: only a card naming another id reads again.
     agents_read: std::collections::HashSet<String>,
-    /// The shown branch's goal, folded from its own events (Goal §A.3).
-    goal: crate::goal::Fold,
+    pub goal: Option<crate::goal::Goal>,
 }
 
 impl Projection {
@@ -190,14 +185,19 @@ impl Projection {
     pub fn apply(&mut self, branch_id: &str, event: &Event) {
         match &event.content {
             EventContent::ToolCall(data) => {
-                self.questions.asked(branch_id, &event.id, data);
+                self.questions
+                    .asked(branch_id, &event.id, &data.request_id, &data.calls);
                 if self.owns(branch_id) {
                     for call in data
                         .calls
                         .iter()
                         .filter(|call| call.name == crate::question::TOOL)
                     {
-                        if let Some(index) = self.tool_rows.get(&call.id).copied() {
+                        if let Some(index) = self
+                            .tool_rows
+                            .get(&(data.request_id.clone(), call.id.clone()))
+                            .copied()
+                        {
                             self.row(index).parked = true;
                         }
                     }
@@ -221,12 +221,17 @@ impl Projection {
         {
             return;
         }
-        self.goal.apply(event);
         let sequence = event.sequence;
         match &event.content {
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
-                    self.held.push((event.id.clone(), sequence, user.clone()));
+                    self.inputs.push(dim_agent_types::PendingInput {
+                        input_id: event.id.clone(),
+                        sequence,
+                        mode: data.effective_mode(),
+                        user: Some(user.clone()),
+                        applied: false,
+                    });
                 } else if let Some(text) = data.blocks.iter().find_map(|block| {
                     let dim_agent_types::InputBlock::Raw { text, .. } = block;
                     ShellRun::parse(text).is_some().then(|| text.clone())
@@ -240,13 +245,23 @@ impl Projection {
                 }
             }
             EventContent::InputApplied(data) => {
-                if let Some(index) = self.held.iter().position(|(id, _, _)| *id == data.input_id) {
-                    let (id, submitted, user) = self.held.remove(index);
-                    self.push_user(&id, sequence, submitted, &user);
+                if let Some(input) = self
+                    .inputs
+                    .iter_mut()
+                    .find(|input| input.input_id == data.input_id && !input.applied)
+                {
+                    input.applied = true;
+                    let input = input.clone();
+                    self.push_user(
+                        &input.input_id,
+                        sequence,
+                        input.sequence,
+                        input.user.as_ref().expect("visible input"),
+                    );
                 }
             }
             EventContent::InputDeleted(data) => {
-                self.held.retain(|(id, _, _)| *id != data.input_id);
+                self.inputs.retain(|input| input.input_id != data.input_id);
             }
             EventContent::BranchCreate(data) => {
                 let id = data.branch.get(..8).unwrap_or(&data.branch);
@@ -287,27 +302,7 @@ impl Projection {
                 );
             }
             EventContent::ExecStarted(data) => {
-                let label = self
-                    .rows
-                    .iter()
-                    .find(|row| row.row_id == data.call_id)
-                    .and_then(|row| row.tool_input.as_ref()?.get("command")?.as_str())
-                    .filter(|command| !command.is_empty())
-                    .unwrap_or(data.description.as_str())
-                    .to_owned();
-                let target = TaskTarget {
-                    branch_id: branch_id.to_owned(),
-                    task_id: data.task_id.clone(),
-                };
-                self.tasks.push(TaskView {
-                    id: event.id.clone(),
-                    branch_id: branch_id.to_owned(),
-                    kind: TaskKind::Command(target.clone()),
-                    label,
-                    started_at: event.create_at,
-                    finished: None,
-                });
-                self.background.insert(target, data.call_id.clone());
+                self.exec_started(branch_id, data, &event.id, event.create_at)
             }
             EventContent::ExecEnded(data) => {
                 let target = TaskTarget {
@@ -337,9 +332,12 @@ impl Projection {
                             .and_then(Value::as_i64),
                     });
                 }
-                if let Some(call_id) = self.background.remove(&target)
+                if let Some((request_id, call_id)) = self.background.remove(&target)
                     && self.owns(branch_id)
-                    && let Some(index) = self.rows.iter().position(|row| row.row_id == call_id)
+                    && let Some(index) = self.rows.iter().position(|row| {
+                        row.call_id.as_deref() == Some(call_id.as_str())
+                            && row.batch.as_deref() == Some(request_id.as_str())
+                    })
                 {
                     let row = self.row(index);
                     row.result_is_error =
@@ -354,99 +352,10 @@ impl Projection {
                 }
             }
             EventContent::CollaborationRequest(data) => {
-                let task = TaskView {
-                    id: event.id.clone(),
-                    branch_id: branch_id.to_owned(),
-                    kind: TaskKind::Member(MemberTarget::Starting),
-                    label: data.prompt.lines().next().unwrap_or("").to_owned(),
-                    started_at: event.create_at,
-                    finished: None,
-                };
-                if self.owns(branch_id)
-                    && let Some(index) = self.tool_rows.get(&data.call_id).copied()
-                    && self.rows[index].batch.as_deref() == Some(data.request_id.as_str())
-                    && self.rows[index].member.is_none()
-                {
-                    let (agent, agent_id) = match &data.target {
-                        CollaborationTarget::Agent { agent_id }
-                        | CollaborationTarget::Member { agent_id, .. } => {
-                            let name = self.agent_names.get(agent_id).unwrap_or(agent_id);
-                            (
-                                name.clone(),
-                                (!agent_id.contains(':')).then(|| agent_id.clone()),
-                            )
-                        }
-                        CollaborationTarget::Temporary { profile } => (profile.name.clone(), None),
-                    };
-                    self.row(index).member = Some(Box::new(MemberCard {
-                        task: task.clone(),
-                        agent,
-                        agent_id,
-                        prompt: data.prompt.clone(),
-                        model: None,
-                        activity: None,
-                        observation: None,
-                    }));
-                    self.cards.insert(event.id.clone(), index);
-                }
-                self.tasks.push(task);
+                self.delegation_started(branch_id, data, &event.id, event.create_at)
             }
             EventContent::CollaborationDelivered(data) => {
-                let starting = |task: &TaskView| {
-                    task.branch_id == branch_id
-                        && task.id == data.op_event_id
-                        && task.finished.is_none()
-                        && task.kind == TaskKind::Member(MemberTarget::Starting)
-                };
-                let update = |task: &mut TaskView| match &data.delivery {
-                    CollaborationDelivery::Ok {
-                        agent_id,
-                        session_id,
-                        ..
-                    } => {
-                        task.kind = TaskKind::Member(if agent_id.contains(':') {
-                            MemberTarget::Provider
-                        } else {
-                            MemberTarget::Session(session_id.clone())
-                        });
-                    }
-                    CollaborationDelivery::Error { error } => {
-                        task.finished = Some(TaskFinish {
-                            at: event.create_at,
-                            status: "Failed",
-                            failed: true,
-                            text: serde_json::to_value(error)
-                                .expect("typed delivery error serializes")
-                                .as_str()
-                                .expect("typed delivery error is a string")
-                                .to_owned(),
-                            exit_code: None,
-                        });
-                    }
-                };
-                if let Some(task) = self.tasks.iter_mut().find(|task| starting(task)) {
-                    update(task);
-                }
-                let delivered = match &data.delivery {
-                    CollaborationDelivery::Ok { agent_id, .. } => Some((
-                        self.agent_names.get(agent_id).unwrap_or(agent_id).clone(),
-                        (!agent_id.contains(':')).then(|| agent_id.clone()),
-                    )),
-                    CollaborationDelivery::Error { .. } => None,
-                };
-                if let Some(card) = self.card(branch_id, &data.op_event_id)
-                    && starting(&card.task)
-                {
-                    update(&mut card.task);
-                    match delivered {
-                        Some((name, agent_id)) if card.agent_id.is_some() => {
-                            card.agent = name;
-                            card.agent_id = agent_id;
-                        }
-                        Some(_) => {}
-                        None => card.agent_id = None,
-                    }
-                }
+                self.delegation_delivered(branch_id, data, event.create_at)
             }
             EventContent::CollaborationResult(data) => {
                 let (status, failed, text) = match &data.outcome {
@@ -498,6 +407,10 @@ impl Projection {
                     .insert(data.request_id.clone(), event.create_at);
             }
             EventContent::Thinking(data) => {
+                *self
+                    .thinking_characters
+                    .entry(data.request_id.clone())
+                    .or_default() += data.delta.chars().count() as u64;
                 self.showed.insert(data.request_id.clone());
                 let index = self.open_thinking(&data.request_id);
                 let elapsed = self
@@ -508,11 +421,15 @@ impl Projection {
                     .thinking_rows
                     .get_mut(&data.request_id)
                     .expect("opened above");
+                let first = thought.written.is_empty();
                 thought.written.push_str(&data.delta);
                 let text = thought.written.clone();
                 let row = self.row(index);
                 row.text = text;
                 row.elapsed_ms = elapsed;
+                if first {
+                    row.row_id = format!("thinking-{}", event.id);
+                }
             }
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
@@ -537,25 +454,25 @@ impl Projection {
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
                 self.request_starts.remove(&data.request_id);
-                let row_id = if self.rows.iter().any(|row| row.row_id == data.call.id) {
-                    format!("{}-{}", data.call.id, self.rows.len())
-                } else {
-                    data.call.id.clone()
-                };
+                let row_id = serde_json::to_string(&(&data.request_id, &data.call.id))
+                    .expect("tool identity is JSON");
                 let index = self.push(row_id, RowKind::ToolCall, String::new());
                 let row = self.row(index);
+                row.call_id = Some(data.call.id.clone());
+                row.tool_lookup_done = true;
                 row.tool_name = Some(data.call.name.clone());
                 row.tool_input = Some(Value::Object(data.call.input.clone()));
                 row.batch = Some(data.request_id.clone());
                 row.pending = true;
-                self.tool_rows.insert(data.call.id.clone(), index);
+                self.tool_rows
+                    .insert((data.request_id.clone(), data.call.id.clone()), index);
             }
             EventContent::ToolCompleted(data) => {
-                self.complete_tool(&data.call_id, &data.result);
+                self.complete_tool(&data.request_id, &data.call_id, &data.result);
             }
             EventContent::ToolResult(data) => {
                 for result in &data.results {
-                    self.complete_tool(&result.call_id, &result.result);
+                    self.complete_tool(&data.request_id, &result.call_id, &result.result);
                 }
             }
             EventContent::CompactionStart(_) => {
@@ -586,6 +503,7 @@ impl Projection {
                 self.row(index).compaction = Some(compaction_view(&data.outcome));
             }
             EventContent::ModelEnd(data) => {
+                self.thinking_characters.remove(&data.request_id);
                 let incomplete = self.showed.remove(&data.request_id);
                 self.close_thinking(&data.request_id);
                 self.close_assistant(&data.request_id);
@@ -626,6 +544,7 @@ impl Projection {
                 self.turn_end(sequence, &data.outcome);
             }
             EventContent::InputConsumed(data) => {
+                self.inputs.retain(|input| input.input_id != data.input_id);
                 if let Some(index) = self.input_rows.remove(&data.input_id) {
                     self.row(index).pending = false;
                 }
@@ -686,6 +605,11 @@ impl Projection {
         self.ended = Some((sequence, end));
     }
 
+    pub fn active_output(&mut self, output: &dim_agent_types::ActiveOutput) {
+        self.thinking_characters
+            .insert(output.request_id.clone(), output.thinking_characters);
+    }
+
     pub fn set_running(&mut self, running: bool) {
         self.running = running;
     }
@@ -713,10 +637,10 @@ impl Projection {
 
     /// The content of a held message, to re-submit it as Steer.
     pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
-        self.held
+        self.inputs
             .iter()
-            .find(|(id, _, _)| id == input_id)
-            .map(|(_, _, user)| user)
+            .find(|input| input.input_id == input_id && !input.applied)
+            .and_then(|input| input.user.as_ref())
     }
 
     pub fn add_approval(
@@ -735,7 +659,11 @@ impl Projection {
         {
             return;
         }
-        if let Some(index) = self.tool_rows.get(&request_id).copied() {
+        if let Some(index) = self
+            .tool_rows
+            .iter()
+            .find_map(|((_, call), index)| (call == &request_id).then_some(*index))
+        {
             self.row(index).parked = true;
         }
         self.approvals.push(ApprovalView {
@@ -782,27 +710,21 @@ impl Projection {
     }
 
     pub fn snapshot(&self) -> ViewSnapshot {
-        let mut pending: Vec<_> = self.input_rows.iter().collect();
-        pending.sort_by_key(|(_, index)| **index);
+        let mut pending: Vec<_> = self.inputs.iter().collect();
+        pending.sort_by_key(|input| (!input.applied, input.sequence));
         let queued = pending
             .into_iter()
-            .map(|(id, index)| {
-                let row = &self.rows[*index];
-                QueuedInput {
-                    id: id.clone(),
-                    text: row.text.clone(),
-                    display: row.display.clone(),
-                    held: false,
-                    recallable: false,
-                }
+            .filter_map(|input| {
+                let user = input.user.as_ref()?;
+                Some(QueuedInput {
+                    id: input.input_id.clone(),
+                    text: text_of(&user.content),
+                    display: user_display(&user.content),
+                    held: !input.applied,
+                    recallable: !input.applied
+                        && matches!(user.content.as_slice(), [ContentBlock::Text { .. }]),
+                })
             })
-            .chain(self.held.iter().map(|(id, _, user)| QueuedInput {
-                id: id.clone(),
-                text: text_of(&user.content),
-                display: user_display(&user.content),
-                held: true,
-                recallable: matches!(user.content.as_slice(), [ContentBlock::Text { .. }]),
-            }))
             .collect();
         ViewSnapshot {
             rows: self.rows.clone(),
@@ -812,15 +734,310 @@ impl Projection {
             queued,
             tasks: self.tasks.clone(),
             ended: self.ended,
-            goal: self.goal.goal(),
+            goal: self.goal.clone(),
             retry: self.retry.clone(),
             ..ViewSnapshot::default()
         }
     }
 
-    /// The goal in force on this branch, folded from its events so far.
-    pub fn goal(&self) -> Option<crate::goal::Goal> {
-        self.goal.goal()
+    pub fn exec_started(
+        &mut self,
+        branch_id: &str,
+        data: &dim_agent_types::ExecStartedData,
+        event_id: &str,
+        started_at: u64,
+    ) {
+        if self
+            .tasks
+            .iter()
+            .any(|task| task.branch_id == branch_id && task.id == event_id)
+        {
+            return;
+        }
+
+        let label = self
+            .rows
+            .iter()
+            .find(|row| {
+                row.call_id.as_deref() == Some(data.call_id.as_str())
+                    && row.batch.as_deref() == Some(data.request_id.as_str())
+            })
+            .and_then(|row| row.tool_input.as_ref()?.get("command")?.as_str())
+            .filter(|command| !command.is_empty())
+            .unwrap_or(data.description.as_str())
+            .to_owned();
+        let target = TaskTarget {
+            branch_id: branch_id.to_owned(),
+            task_id: data.task_id.clone(),
+        };
+        self.tasks.push(TaskView {
+            id: event_id.to_owned(),
+            branch_id: branch_id.to_owned(),
+            kind: TaskKind::Command(target.clone()),
+            label,
+            started_at,
+            finished: None,
+        });
+        self.background
+            .insert(target, (data.request_id.clone(), data.call_id.clone()));
+    }
+    pub fn delegation_started(
+        &mut self,
+        branch_id: &str,
+        data: &dim_agent_types::CollaborationRequestData,
+        event_id: &str,
+        started_at: u64,
+    ) {
+        if self
+            .tasks
+            .iter()
+            .any(|task| task.branch_id == branch_id && task.id == event_id)
+        {
+            return;
+        }
+
+        let task = TaskView {
+            id: event_id.to_owned(),
+            branch_id: branch_id.to_owned(),
+            kind: TaskKind::Member(MemberTarget::Starting),
+            label: data.prompt.lines().next().unwrap_or("").to_owned(),
+            started_at,
+            finished: None,
+        };
+        if self.owns(branch_id)
+            && let Some(index) = self
+                .tool_rows
+                .get(&(data.request_id.clone(), data.call_id.clone()))
+                .copied()
+            && self.rows[index].batch.as_deref() == Some(data.request_id.as_str())
+            && self.rows[index].member.is_none()
+        {
+            let (agent, agent_id) = match &data.target {
+                CollaborationTarget::Agent { agent_id }
+                | CollaborationTarget::Member { agent_id, .. } => {
+                    let name = self.agent_names.get(agent_id).unwrap_or(agent_id);
+                    (
+                        name.clone(),
+                        (!agent_id.contains(':')).then(|| agent_id.clone()),
+                    )
+                }
+                CollaborationTarget::Temporary { profile } => (profile.name.clone(), None),
+            };
+            self.row(index).member = Some(Box::new(MemberCard {
+                task: task.clone(),
+                agent,
+                agent_id,
+                prompt: data.prompt.clone(),
+                model: None,
+                activity: None,
+                observation: None,
+            }));
+            self.cards.insert(event_id.to_owned(), index);
+        }
+        self.tasks.push(task);
+    }
+    pub fn delegation_delivered(
+        &mut self,
+        branch_id: &str,
+        data: &dim_agent_types::CollaborationDeliveredData,
+        started_at: u64,
+    ) {
+        let starting = |task: &TaskView| {
+            task.branch_id == branch_id
+                && task.id == data.op_event_id
+                && task.finished.is_none()
+                && task.kind == TaskKind::Member(MemberTarget::Starting)
+        };
+        let update = |task: &mut TaskView| match &data.delivery {
+            CollaborationDelivery::Ok {
+                agent_id,
+                session_id,
+                ..
+            } => {
+                task.kind = TaskKind::Member(if agent_id.contains(':') {
+                    MemberTarget::Provider
+                } else {
+                    MemberTarget::Session(session_id.clone())
+                });
+            }
+            CollaborationDelivery::Error { error } => {
+                task.finished = Some(TaskFinish {
+                    at: started_at,
+                    status: "Failed",
+                    failed: true,
+                    text: serde_json::to_value(error)
+                        .expect("typed delivery error serializes")
+                        .as_str()
+                        .expect("typed delivery error is a string")
+                        .to_owned(),
+                    exit_code: None,
+                });
+            }
+        };
+        if let Some(task) = self.tasks.iter_mut().find(|task| starting(task)) {
+            update(task);
+        }
+        let delivered = match &data.delivery {
+            CollaborationDelivery::Ok { agent_id, .. } => Some((
+                self.agent_names.get(agent_id).unwrap_or(agent_id).clone(),
+                (!agent_id.contains(':')).then(|| agent_id.clone()),
+            )),
+            CollaborationDelivery::Error { .. } => None,
+        };
+        if let Some(card) = self.card(branch_id, &data.op_event_id)
+            && starting(&card.task)
+        {
+            update(&mut card.task);
+            match delivered {
+                Some((name, agent_id)) if card.agent_id.is_some() => {
+                    card.agent = name;
+                    card.agent_id = agent_id;
+                }
+                Some(_) => {}
+                None => card.agent_id = None,
+            }
+        }
+    }
+
+    pub fn pending_exec(&mut self, branch: &str, task: &dim_agent_types::PendingExec) {
+        let target = TaskTarget {
+            branch_id: branch.into(),
+            task_id: task.task_id.clone(),
+        };
+        self.tasks.push(TaskView {
+            id: task.event_id.clone(),
+            branch_id: branch.into(),
+            kind: TaskKind::Command(target.clone()),
+            label: task.description.clone(),
+            started_at: task.started_at,
+            finished: None,
+        });
+        self.background
+            .insert(target, (task.request_id.clone(), task.call_id.clone()));
+    }
+
+    pub fn clear_inventory(&mut self, branch: &str) {
+        self.questions.clear_branch(branch);
+        self.tasks
+            .retain(|task| task.branch_id != branch || task.finished.is_some());
+        self.background
+            .retain(|target, _| target.branch_id != branch);
+        if self.owns(branch) {
+            self.inputs.clear();
+            for (_, index) in self.input_rows.drain() {
+                Arc::make_mut(&mut self.rows[index]).pending = false;
+            }
+        }
+    }
+
+    pub fn pending_input(&mut self, input: &dim_agent_types::PendingInput) {
+        if input.user.is_none() {
+            return;
+        }
+        if input.applied
+            && let Some(index) = self.rows.iter().position(|row| {
+                row.cut == Some(input.sequence.saturating_sub(1))
+                    && row.kind == RowKind::UserMessage
+            })
+        {
+            self.row(index).pending = true;
+            self.input_rows.insert(input.input_id.clone(), index);
+        }
+        self.inputs.push(input.clone());
+    }
+
+    pub fn prepend(&mut self, mut older: Self) {
+        older.rows.retain(|row| {
+            if let Some(existing) = self
+                .rows
+                .iter_mut()
+                .find(|existing| existing.row_id == row.row_id)
+            {
+                if matches!(
+                    row.kind,
+                    RowKind::AssistantMessage | RowKind::StreamingAssistant
+                ) {
+                    let existing = Arc::make_mut(existing);
+                    existing.text = format!("{}{}", row.text, existing.text);
+                } else if row.kind == RowKind::ToolCall && row.batch == existing.batch {
+                    let existing = Arc::make_mut(existing);
+                    existing.tool_lookup_done |= row.tool_lookup_done;
+                    if existing.tool_input.is_none() {
+                        existing.tool_name = row.tool_name.clone();
+                        existing.tool_input = row.tool_input.clone();
+                    }
+                }
+                false
+            } else {
+                true
+            }
+        });
+        let count = older.rows.len();
+        for map in [
+            &mut self.assistant_rows,
+            &mut self.input_rows,
+            &mut self.cards,
+        ] {
+            for index in map.values_mut() {
+                *index += count;
+            }
+        }
+        for index in self.tool_rows.values_mut() {
+            *index += count;
+        }
+        for index in self.compaction_rows.values_mut() {
+            *index += count;
+        }
+        for thought in self.thinking_rows.values_mut() {
+            thought.index += count;
+        }
+        older.rows.append(&mut self.rows);
+        self.rows = older.rows;
+    }
+
+    pub fn trim(&mut self, limit: usize) {
+        let count = self.rows.len().saturating_sub(limit);
+        if count == 0 {
+            return;
+        }
+        self.rows.drain(..count);
+        for map in [
+            &mut self.assistant_rows,
+            &mut self.input_rows,
+            &mut self.cards,
+        ] {
+            map.retain(|_, index| match index.checked_sub(count) {
+                Some(at) => {
+                    *index = at;
+                    true
+                }
+                None => false,
+            });
+        }
+        self.tool_rows
+            .retain(|_, index| match index.checked_sub(count) {
+                Some(at) => {
+                    *index = at;
+                    true
+                }
+                None => false,
+            });
+        self.compaction_rows
+            .retain(|_, index| match index.checked_sub(count) {
+                Some(at) => {
+                    *index = at;
+                    true
+                }
+                None => false,
+            });
+        self.thinking_rows
+            .retain(|_, thought| match thought.index.checked_sub(count) {
+                Some(at) => {
+                    thought.index = at;
+                    true
+                }
+                None => false,
+            });
     }
 
     pub fn tasks(&self) -> &[TaskView] {
@@ -841,11 +1058,70 @@ impl Projection {
         self.running
     }
 
+    pub fn missing_tool(&self) -> Option<(String, String)> {
+        self.rows.iter().find_map(|row| {
+            if row.kind != RowKind::ToolCall || row.tool_lookup_done {
+                return None;
+            }
+            Some((row.batch.clone()?, row.call_id.clone()?))
+        })
+    }
+
+    pub fn tool_lookup(
+        &mut self,
+        request: &str,
+        call: &str,
+        origin: Option<dim_agent_types::ToolUseData>,
+    ) {
+        if let Some(index) = self.rows.iter().position(|row| {
+            row.batch.as_deref() == Some(request) && row.call_id.as_deref() == Some(call)
+        }) {
+            let row = self.row(index);
+            row.tool_lookup_done = true;
+            if let Some(origin) = origin {
+                row.tool_name = Some(origin.call.name);
+                row.tool_input = Some(Value::Object(origin.call.input));
+            }
+        }
+    }
+
     pub fn rows(&self) -> &[Arc<ViewRow>] {
         &self.rows
     }
 
     /// The lines `main` recorded, without `main` itself (design §14).
+    pub fn directory(&mut self, entry: &dim_client::wire::BranchEntry) {
+        if entry.branch_id == "main" || self.lines.iter().any(|line| line.id == entry.branch_id) {
+            return;
+        }
+        self.lines.push(LineView {
+            id: entry.branch_id.clone(),
+            parent: entry.parent_branch_id.clone(),
+            purpose: entry.purpose.clone().unwrap_or_default(),
+            state: if entry.state == "ended" {
+                match &entry.end {
+                    Some(end) => match (&end.source, &end.ancestor) {
+                        (_, Some(ancestor)) => LineState::EndedWith(ancestor.clone()),
+                        (BranchSource::Tool { .. }, None) => LineState::EndedItself,
+                        (BranchSource::Host { .. }, None) => LineState::EndedByOperation,
+                    },
+                    None => LineState::Ended,
+                }
+            } else {
+                LineState::Waiting
+            },
+            cut: entry
+                .branch_point
+                .zip(entry.cut_messages)
+                .map(|(sequence, messages)| LineCut {
+                    sequence,
+                    messages: messages
+                        .try_into()
+                        .expect("message count fits the client address space"),
+                }),
+        });
+    }
+
     pub fn line_views(&self) -> &[LineView] {
         &self.lines
     }
@@ -1095,6 +1371,8 @@ impl Projection {
             streaming: false,
             elapsed_ms: None,
             tone: None,
+            call_id: None,
+            tool_lookup_done: false,
             tool_name: None,
             tool_input: None,
             batch: None,
@@ -1142,7 +1420,13 @@ impl Projection {
         }
         let index = self.open_thinking(request_id);
         let thought = &self.thinking_rows[request_id];
-        if thought.written.chars().count() as u64 != progress.thinking_offset {
+        if self
+            .thinking_characters
+            .get(request_id)
+            .copied()
+            .unwrap_or(0)
+            != progress.thinking_offset
+        {
             return;
         }
         let text = format!("{}{}", thought.written, progress.thinking);
@@ -1187,10 +1471,25 @@ impl Projection {
         }
     }
 
-    fn complete_tool(&mut self, call_id: &str, result: &ToolResult) {
-        let Some(index) = self.tool_rows.remove(call_id) else {
-            return;
-        };
+    fn complete_tool(&mut self, request_id: &str, call_id: &str, result: &ToolResult) {
+        let index = self
+            .tool_rows
+            .remove(&(request_id.to_owned(), call_id.to_owned()))
+            .or_else(|| {
+                self.rows.iter().position(|row| {
+                    row.call_id.as_deref() == Some(call_id)
+                        && row.batch.as_deref() == Some(request_id)
+                })
+            })
+            .unwrap_or_else(|| {
+                let row_id =
+                    serde_json::to_string(&(request_id, call_id)).expect("tool identity is JSON");
+                let index = self.push(row_id, RowKind::ToolCall, String::new());
+                let row = self.row(index);
+                row.call_id = Some(call_id.into());
+                row.batch = Some(request_id.into());
+                index
+            });
         let row = self.row(index);
         row.pending = false;
         row.parked = false;
@@ -1610,6 +1909,53 @@ mod tests {
         let rows = projection.snapshot().rows;
         assert!(!rows[0].streaming);
         assert_eq!(rows[1].kind, RowKind::StreamingAssistant);
+    }
+
+    #[test]
+    fn a_window_keeps_an_older_calls_result_and_earlier_load_supplies_its_arguments() {
+        let result = serde_json::json!({"id":"result","sequence":20,"create_at":20,
+            "type":"step","name":"tool-result","data":{"turn_id":"turn","request_id":"request",
+            "results":[{"call_id":"call","result":{"content":"finished"}}]}});
+        let mut current = Projection::default();
+        apply(&mut current, &[result.clone(), result]);
+        assert_eq!(current.rows().len(), 1);
+        assert_eq!(current.rows()[0].result_text.as_deref(), Some("finished"));
+        assert!(current.rows()[0].tool_input.is_none());
+        let mut older = Projection::default();
+        apply(
+            &mut older,
+            &[serde_json::json!({"id":"use","sequence":3,"create_at":3,
+            "type":"step","name":"tool-use","data":{"turn_id":"turn","request_id":"request",
+            "call":{"id":"call","name":"exec","input":{"command":"echo finished"}}}})],
+        );
+        current.prepend(older);
+        assert_eq!(current.rows().len(), 1);
+        let row = &current.rows()[0];
+        assert_eq!(row.tool_name.as_deref(), Some("exec"));
+        assert_eq!(row.tool_input.as_ref().unwrap()["command"], "echo finished");
+        assert_eq!(row.result_text.as_deref(), Some("finished"));
+        assert!(!row.pending);
+    }
+
+    #[test]
+    fn a_window_resumes_reasoning_after_omitted_blocks_without_copying_the_prefix() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[step(100, "thinking", "visible")]);
+        projection.active_output(&dim_agent_types::ActiveOutput {
+            request_id: "r1".into(),
+            text_characters: 500,
+            thinking_characters: 1007,
+        });
+        projection.progress(&progress(" tail", 1007));
+        assert_eq!(projection.snapshot().rows[0].text, "visible tail");
+        apply(
+            &mut projection,
+            &[step(101, "thinking", " tail"), step(102, "text", "reply")],
+        );
+        projection.progress(&progress("next thought", 1012));
+        let rows = projection.snapshot().rows;
+        assert_eq!(rows[0].text, "visible tail");
+        assert_eq!(rows[2].text, "next thought");
     }
 
     #[test]

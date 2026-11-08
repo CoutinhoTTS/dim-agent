@@ -16,15 +16,14 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
-    StoredEvent, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryFlag,
-    TimelineQueryPage, TimelineQueryScope, TimelineStore, TimelineTrace, panic_message,
+    StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
-    SessionForkedData, TimelinePosition,
+    SessionForkedData,
     grant::{GrantKind, GrantMode, SessionGrant},
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{HostDispatch, host_key};
@@ -106,6 +105,8 @@ pub struct SqliteTimelineStore {
     #[cfg(feature = "testing")]
     node_loads: Mutex<codec::NodeLoads>,
     #[cfg(feature = "testing")]
+    query_statistics: Arc<Mutex<Option<Vec<super::query::QueryStatementStats>>>>,
+    #[cfg(feature = "testing")]
     round_deadlines: Mutex<Vec<Option<Instant>>>,
 }
 struct Admission {
@@ -182,6 +183,21 @@ impl SqliteTimelineStore {
     pub fn take_node_loads(&self) -> codec::NodeLoads {
         std::mem::take(&mut *self.node_loads.lock().unwrap())
     }
+    /// Starts SQL selection diagnostics on this store; feature `testing` only.
+    /// Records actual statement counters and plans, without bound parameter values.
+    #[cfg(feature = "testing")]
+    pub fn record_query_statistics(&self) {
+        *self.query_statistics.lock().unwrap() = Some(Vec::new());
+    }
+    /// Ends diagnostics and returns the statements recorded since enabling them.
+    #[cfg(feature = "testing")]
+    pub fn take_query_statistics(&self) -> Vec<super::query::QueryStatementStats> {
+        self.query_statistics
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default()
+    }
     /// The requests of Session `session` the writer memo can still reach.
     /// Feature `testing` only.
     #[cfg(feature = "testing")]
@@ -220,6 +236,8 @@ impl SqliteTimelineStore {
             validated: Mutex::default(),
             #[cfg(feature = "testing")]
             node_loads: Mutex::default(),
+            #[cfg(feature = "testing")]
+            query_statistics: Arc::default(),
             #[cfg(feature = "testing")]
             round_deadlines: Mutex::default(),
         });
@@ -367,95 +385,6 @@ impl SqliteTimelineStore {
         }
         self.finish(reader);
         Ok(events)
-    }
-    /// The event a query names by id, looked up through the id index so the
-    /// read costs one key and not a range. The event the index finds is only
-    /// returned when it satisfies the whole selection: the kinds, flags, event
-    /// id and predicate. A miss here, including a merged output row's event,
-    /// whose id the index does not hold, falls back to the page.
-    async fn query_event_by_id(
-        &self,
-        key: &TimelineKey,
-        query: &TimelineQuery,
-    ) -> Result<Option<StoredEvent>> {
-        let Some(id) = query.event_id.clone() else {
-            return Ok(None);
-        };
-        let session = key.session_id.clone();
-        let branch = key.branch_id.clone();
-        let sequence: Option<u64> = self
-            .db
-            .run_read(move |connection| {
-                connection
-                    .prepare_cached(BY_ID_SEQUENCE)
-                    .map_err(error)?
-                    .query_row(params![session, branch, id], |row| read_sequence(row, 0))
-                    .optional()
-                    .map_err(error)
-            })
-            .await?;
-        let Some(sequence) = sequence else {
-            return Ok(None);
-        };
-        let mut reader = self.reader(RequestBodies::Rebuild);
-        let record = read_range(&self.db, &mut reader, key, sequence..=sequence, false).await;
-        self.finish(reader);
-        Ok(record?
-            .into_iter()
-            .find(|record| query.accepts(&record.event)))
-    }
-    /// One page of a query: the SQL selects the rows (kinds, flags, event id,
-    /// predicate, order) and takes at most `rows` of them; the decoded events
-    /// are checked against the selection again, because a merged output row
-    /// holds several events. Returns the matching events in read order.
-    async fn query_page(
-        &self,
-        key: &TimelineKey,
-        query: &TimelineQuery,
-        range: RangeInclusive<u64>,
-        rows: u64,
-    ) -> Result<Vec<StoredEvent>> {
-        let session = key.session_id.clone();
-        let branch = key.branch_id.clone();
-        let selection = query.clone();
-        let fetch = range.clone();
-        let descending = query.direction == TimelineQueryDirection::Descending;
-        let mut reader = self.reader(RequestBodies::Rebuild);
-        let fetched = holds(
-            &self.db,
-            &mut reader,
-            None,
-            move |connection, reader, state: &mut Option<Rows>| {
-                let rows = match state {
-                    Some(rows) => rows,
-                    None => state.insert(Rows {
-                        fetched: query_rows(
-                            connection,
-                            &session,
-                            &branch,
-                            &selection,
-                            &fetch,
-                            Some(rows),
-                            descending,
-                        )?,
-                        decoded: vec![],
-                    }),
-                };
-                rows.advance(connection, &session, reader)
-            },
-        )
-        .await?;
-        self.finish(reader);
-        let mut rows = fetched.expect("a finished read fetched its rows");
-        let mut records: Vec<StoredEvent> = rows
-            .records(&range, false)?
-            .into_iter()
-            .filter(|record| query.accepts(&record.event))
-            .collect();
-        if descending {
-            records.sort_by_key(|record| std::cmp::Reverse(record.event.sequence));
-        }
-        Ok(records)
     }
     /// The records of `segments`, decoded with one reader of `request_bodies`.
     async fn segments(
@@ -986,6 +915,8 @@ impl SqliteTimelineStore {
             .map_err(error)?;
         let released = files::release(&tx, session_id).map_err(error)?;
         for table in [
+            "timeline_text",
+            "timeline_text_tails",
             "timeline_snapshots",
             "timeline_events",
             "timeline_branches",
@@ -1724,6 +1655,13 @@ fn write_batch(
                     records.push(wire);
                     let body = serde_json::to_string(&previous.row).map_err(error)?;
                     connection.prepare_cached("UPDATE timeline_events SET last_sequence = ?3, body = ?4 WHERE session_id = ?1 AND branch_id = ?2 AND sequence = ?5").map_err(error)?.execute(params![batch.key.session_id, batch.key.branch_id, sql_sequence(sequence)?, body, sql_sequence(previous.sequence)?]).map_err(error)?;
+                    super::text::event(
+                        connection,
+                        &batch.key.session_id,
+                        &batch.key.branch_id,
+                        previous.sequence,
+                        &serde_json::to_value(&record.event).map_err(error)?,
+                    )?;
                     previous.bytes = body.len();
                     continue;
                 }
@@ -1839,6 +1777,34 @@ fn insert_event(
             i64::from(flags.1),
         ])
         .map_err(error)?;
+    match row {
+        Row::Event { record } => super::text::event(
+            connection,
+            &key.session_id,
+            &key.branch_id,
+            sequence,
+            &record.event,
+        )?,
+        Row::Output {
+            turn_id,
+            request_id,
+            records,
+            ..
+        } => {
+            for record in records {
+                let mut event = record.event.clone();
+                event["data"]["turn_id"] = turn_id.clone().into();
+                event["data"]["request_id"] = request_id.clone().into();
+                super::text::event(
+                    connection,
+                    &key.session_id,
+                    &key.branch_id,
+                    sequence,
+                    &event,
+                )?;
+            }
+        }
+    }
     Ok(body.len())
 }
 /// A stored row whose records are decoded in order, across connection holds.
@@ -1893,203 +1859,6 @@ impl Fetched {
             records: vec![],
         })
     }
-}
-/// The sequence of the event a query names by id. `timeline_events_by_id`
-/// answers this without touching a body; the page then reads that one row.
-const BY_ID_SEQUENCE: &str = "SELECT sequence FROM timeline_events \
-     WHERE session_id=?1 AND branch_id=?2 AND event_id=?3 ORDER BY sequence LIMIT 1";
-
-/// The row-header path of a data field `write_batch` moves out of an output
-/// row's records; a predicate on that field reads the header instead.
-/// A number's JSON text, so an integer above `i64` compares exactly instead of
-/// through the real SQLite extracts. Other scalars compare by type and value.
-fn json_text(value: &serde_json::Value) -> Option<rusqlite::types::Value> {
-    match value {
-        serde_json::Value::Number(_) => Some(rusqlite::types::Value::Text(
-            serde_json::to_string(value).expect("a number has a JSON text"),
-        )),
-        _ => None,
-    }
-}
-
-/// The JSON type SQLite reports for a scalar, so a predicate compares like with
-/// like: `1`, `1.0` and `true` are three different values.
-fn json_type_name(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(true) => "true",
-        serde_json::Value::Bool(false) => "false",
-        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
-        serde_json::Value::Number(_) => "real",
-        serde_json::Value::String(_) => "text",
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => "object",
-    }
-}
-
-fn output_header_path(path: &str) -> Option<String> {
-    matches!(path, "turn_id" | "request_id").then(|| format!("$.{path}"))
-}
-
-/// The rows a query selects from `session`'s `branch` in `range`, in sequence
-/// order. Kinds, flags, event id and predicate select in SQL; the decoded
-/// events are checked against the event id and the predicate again, because a
-/// merged output row holds several events and SQL selects the row.
-fn query_rows(
-    connection: &Connection,
-    session: &str,
-    branch: &str,
-    query: &TimelineQuery,
-    range: &RangeInclusive<u64>,
-    rows: Option<u64>,
-    descending: bool,
-) -> Result<VecDeque<Fetched>> {
-    let start = sql_sequence(*range.start())?;
-    let end = sql_sequence(*range.end())?;
-    let text = |value: &str| rusqlite::types::Value::Text(value.to_owned());
-    let mut sql = String::from(
-        "SELECT sequence, last_sequence, kind, body FROM timeline_events \
-         WHERE session_id=? AND branch_id=? \
-         AND sequence >= coalesce((SELECT max(sequence) FROM timeline_events \
-           WHERE session_id=? AND branch_id=? AND sequence<=?), ?) \
-         AND sequence<=? AND last_sequence>=?",
-    );
-    let mut parameters = vec![
-        text(session),
-        text(branch),
-        text(session),
-        text(branch),
-        start.into(),
-        start.into(),
-        end.into(),
-        start.into(),
-    ];
-    if !query.kinds.is_empty() {
-        let placeholders = vec!["?"; query.kinds.len()].join(",");
-        sql.push_str(&format!(" AND kind IN ({placeholders})"));
-        parameters.extend(query.kinds.iter().map(|kind| text(kind)));
-    }
-    let flags: Vec<TimelineQueryFlag> = query.flags.clone();
-    if !flags.is_empty() {
-        let mut columns = Vec::new();
-        for flag in flags {
-            match flag {
-                TimelineQueryFlag::Render => columns.push("context_render=1"),
-                TimelineQueryFlag::State => columns.push("context_state=1"),
-            }
-        }
-        sql.push_str(&format!(" AND ({})", columns.join(" OR ")));
-    }
-    if let Some(event_id) = &query.event_id {
-        sql.push_str(
-            " AND (event_id=? OR EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
-               WHERE json_extract(r.value, '$.event.id')=? \
-               AND json_extract(r.value, '$.event.sequence') <= ?))",
-        );
-        parameters.extend([
-            text(event_id),
-            text(event_id),
-            rusqlite::types::Value::Integer(sql_sequence(*range.end())?),
-        ]);
-    }
-    if let Some(predicate) = &query.predicate {
-        if predicate.json_path().is_none() {
-            return Err(error("query path is not field names joined by dots"));
-        }
-        let bound = rusqlite::types::Value::Integer(sql_sequence(*range.end())?);
-        let mut paths = vec![format!("$.record.event.data.{}", predicate.path)];
-        if let Some(header) = output_header_path(&predicate.path) {
-            paths.push(header);
-        }
-        let mut clauses = Vec::new();
-        for path in paths {
-            let path = text(&path);
-            match json_text(&predicate.value) {
-                Some(literal) => {
-                    clauses.push("(body -> ?) = ?");
-                    parameters.extend([path, literal]);
-                }
-                None => {
-                    clauses.push("(json_type(body, ?) = ? AND json_extract(body, ?) IS ?)");
-                    parameters.extend([
-                        path.clone(),
-                        text(json_type_name(&predicate.value)),
-                        path,
-                        json_value(&predicate.value)?,
-                    ]);
-                }
-            }
-        }
-        let record_path = text(&format!("$.event.data.{}", predicate.path));
-        match json_text(&predicate.value) {
-            Some(literal) => {
-                clauses.push(
-                    "(EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
-                       WHERE (r.value -> ?) = ? \
-                       AND json_extract(r.value, '$.event.sequence') <= ?))",
-                );
-                parameters.extend([record_path, literal, bound]);
-            }
-            None => {
-                clauses.push(
-                    "(EXISTS (SELECT 1 FROM json_each(json_extract(body, '$.records')) AS r \
-                       WHERE json_type(r.value, ?) = ? AND json_extract(r.value, ?) IS ? \
-                       AND json_extract(r.value, '$.event.sequence') <= ?))",
-                );
-                parameters.extend([
-                    record_path.clone(),
-                    text(json_type_name(&predicate.value)),
-                    record_path,
-                    json_value(&predicate.value)?,
-                    bound,
-                ]);
-            }
-        }
-        sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
-    }
-    sql.push_str(if descending {
-        " ORDER BY sequence DESC"
-    } else {
-        " ORDER BY sequence"
-    });
-    if let Some(rows) = rows {
-        sql.push_str(" LIMIT ?");
-        parameters.push(rusqlite::types::Value::Integer(rows as i64));
-    }
-    let mut statement = connection.prepare(&sql).map_err(error)?;
-    statement
-        .query_map(params_from_iter(parameters), |row| {
-            Ok((
-                read_sequence(row, 0)?,
-                read_sequence(row, 1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })
-        .map_err(error)?
-        .map(|row| {
-            let (first, last, kind, body) = row.map_err(error)?;
-            Fetched::parse(first, last, kind, &body, None)
-        })
-        .collect()
-}
-/// The SQLite value a predicate's JSON scalar binds as. JSON `true` and
-/// `false` extract as 1 and 0, and a number binds as the integer or real it
-/// extracts as; the decoded-event check settles the exact equality.
-fn json_value(value: &serde_json::Value) -> Result<rusqlite::types::Value> {
-    use rusqlite::types::Value;
-    Ok(match value {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(flag) => Value::Integer(i64::from(*flag)),
-        serde_json::Value::Number(number) => match (number.as_i64(), number.as_f64()) {
-            (Some(integer), _) => Value::Integer(integer),
-            (None, Some(real)) => Value::Real(real),
-            (None, None) => return Err(error("query predicate value is not a JSON number")),
-        },
-        serde_json::Value::String(text) => Value::Text(text.clone()),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            return Err(error("query predicate compares one JSON scalar"));
-        }
-    })
 }
 /// The rows of one query, decoded in sequence order with one `Reader`.
 struct Rows {
@@ -2441,6 +2210,20 @@ fn copy_fork_rows(
                 params![source, fork, sql_sequence(after)?, sql_sequence(end)?],
             )
             .map_err(error)?;
+            let mut statement = tx.prepare("SELECT sequence,body FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND sequence>?2 AND sequence<=?3 ORDER BY sequence").map_err(error)?;
+            let mut rows = statement
+                .query(params![fork, sql_sequence(after)?, sql_sequence(end)?])
+                .map_err(error)?;
+            while let Some(row) = rows.next().map_err(error)? {
+                super::text::row_through(
+                    tx,
+                    fork,
+                    "main",
+                    read_sequence(row, 0).map_err(error)?,
+                    &row.get::<_, String>(1).map_err(error)?,
+                    at,
+                )?;
+            }
             Ok(())
         })?;
         after = end;
@@ -2591,7 +2374,13 @@ fn drop_session(connection: &mut Connection, session: &str) -> Result<usize> {
     connection
         .pragma_update(None, "synchronous", "NORMAL")
         .map_err(error)?;
-    for table in ["timeline_snapshots", "timeline_events", "timeline_content"] {
+    for table in [
+        "timeline_text",
+        "timeline_text_tails",
+        "timeline_snapshots",
+        "timeline_events",
+        "timeline_content",
+    ] {
         loop {
             let deleted = chunk(connection, |tx| {
                 tx.execute(
@@ -2689,6 +2478,43 @@ async fn content_closure(
 }
 
 impl TimelineStore for SqliteTimelineStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> BoxFuture<'a, Result<dim_agent_runtime::QueryResult>> {
+        Box::pin(async move {
+            let scope = scope.clone();
+            let query = query.clone();
+            let page = page.cloned();
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let _guard = cancel.clone().drop_guard();
+            let operation = cancel.clone();
+            #[cfg(feature = "testing")]
+            let statistics = self.query_statistics.clone();
+            let mut reader = self.reader(RequestBodies::Rebuild);
+            let (result, reader) = self
+                .db
+                .run_read_cancellable(cancel, move |connection| {
+                    let result = super::query::execute(
+                        connection,
+                        &scope,
+                        &query,
+                        page.as_ref(),
+                        &mut reader,
+                        &operation,
+                        #[cfg(feature = "testing")]
+                        &statistics,
+                    );
+                    Ok((result, reader))
+                })
+                .await?;
+            self.finish(reader);
+            result
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         session_id: &'a str,
@@ -2897,61 +2723,6 @@ impl TimelineStore for SqliteTimelineStore {
         Box::pin(async move {
             self.page(key, after, limit, through, RequestBodies::Rebuild)
                 .await
-        })
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
-        Box::pin(async move {
-            if query.scope != TimelineQueryScope::Branch {
-                return Err(AgentError::InvalidInput(
-                    "a store read applies one branch; the Timeline service composes the chain"
-                        .into(),
-                ));
-            }
-            if query.event_id.is_some()
-                && let Some(record) = self.query_event_by_id(key, query).await?
-                && record.event.sequence >= from
-                && record.event.sequence <= through
-                && query.accepts(&record.event)
-            {
-                let skip_one = query.offset > 0;
-                let mut events = Vec::new();
-                let mut positions = Vec::new();
-                if !skip_one {
-                    positions.push(TimelinePosition {
-                        branch_id: key.branch_id.clone(),
-                        sequence: record.event.sequence,
-                    });
-                    events.push(record.event);
-                }
-                return Ok(TimelineQueryPage {
-                    events,
-                    positions,
-                    skipped: u64::from(skip_one),
-                });
-            }
-            let offset = usize::try_from(query.offset).unwrap_or(usize::MAX);
-            let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
-            let rows = u64::try_from(offset.saturating_add(limit)).unwrap_or(u64::MAX);
-            let records = self.query_page(key, query, from..=through, rows).await?;
-            let skipped = records.len().min(offset);
-            let page: Vec<StoredEvent> = records.into_iter().skip(skipped).take(limit).collect();
-            Ok(TimelineQueryPage {
-                positions: page
-                    .iter()
-                    .map(|record| TimelinePosition {
-                        branch_id: key.branch_id.clone(),
-                        sequence: record.event.sequence,
-                    })
-                    .collect(),
-                events: page.into_iter().map(|record| record.event).collect(),
-                skipped: skipped as u64,
-            })
         })
     }
 

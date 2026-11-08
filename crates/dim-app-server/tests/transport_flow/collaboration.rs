@@ -58,6 +58,16 @@ struct CountingTimelineStore {
 }
 
 impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        self.memory.query(scope, query, page)
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -157,18 +167,6 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
         dim_agent_runtime::Result<Option<dim_agent_types::RecoverySnapshot>>,
     > {
         self.memory.latest_snapshot(key, through, interpreter)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a dim_agent_runtime::TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<
-        'a,
-        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryPage>,
-    > {
-        self.memory.query(key, query, from, through)
     }
 }
 
@@ -2111,7 +2109,7 @@ async fn leader_stop_and_close_settle_requests() {
 }
 
 /// Mock tools plus `hold`, which returns once the test adds a permit.
-struct GateTools(Arc<tokio::sync::Semaphore>);
+pub(super) struct GateTools(pub(super) Arc<tokio::sync::Semaphore>);
 impl ToolDriver for GateTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = MockTools.definitions();

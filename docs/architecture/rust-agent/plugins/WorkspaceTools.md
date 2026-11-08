@@ -369,8 +369,10 @@ injecting it into the Session plugin.
 
 No events, tasks or external resources. A mutex-protected map is created in each
 `apply`. Each binding records the sequence its operation started at, and `write`
-reads the branch's later facts at admission, so a compaction committed before the
-admission is always seen. Reload loses its bindings; it does not reconstruct them
+queries the latest completed compaction after that sequence at admission. It reads
+only `retain_from`, then checks whether that event lies after the binding on this
+branch. Both queries use the same published cutoff; replacement messages and
+compaction diagnostics are not loaded. Reload loses its bindings; it does not reconstruct them
 from history. A fresh read is therefore needed before mutation. The record is not
 a filesystem lock, permission grant or cross-process compare-and-swap.
 
@@ -422,8 +424,11 @@ Session from `start`, before `exec/started`, until its supervisor has appended
 `exec/ended`; that end keeps the branch busy until its wake is posted. A start
 that gets no hold (the Session is closing) is refused as in a closing branch,
 and a refused start stops its command. Tracked tasks are joined on unload.
-Replay reposts unreported non-cancelled ends but never restarts a historical
-process. The notice is not the full command output; output files carry large
+Recovery pages through task lifecycle properties at one committed cutoff. It reads
+only tags from inputs, keeping the task directory, terminal results and outstanding
+notices; it does not collect historical input bodies or events. Ended tasks remain
+in the directory for the task APIs. Recovery reposts unreported non-cancelled ends
+but never restarts a historical process. The notice is not the full command output; output files carry large
 results. The `exec/ended` result carries the final `preview` and
 `previewTruncated` in its `structuredContent`, from the same settled capture
 as the live read. Its escaped result preview uses the existing context-block

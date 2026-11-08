@@ -644,7 +644,7 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
         .unwrap();
     connection
         .execute(
-            "UPDATE timeline_events SET body = '{' WHERE session_id = ?1 AND sequence = 1",
+            "UPDATE timeline_events SET body = '{}' WHERE session_id = ?1 AND sequence = 1",
             [&damaged_event],
         )
         .unwrap();
@@ -785,7 +785,7 @@ async fn damaged_native_records_do_not_hide_healthy_agents_or_sessions() {
                 |row| row.get::<_, String>(0)
             )
             .unwrap(),
-        "{"
+        "{}"
     );
     let profile: String = connection
         .query_row(
@@ -1373,7 +1373,12 @@ async fn failed_creation_rolls_back_storage_but_failed_restore_preserves_it() {
     let connection = Connection::open(&database).unwrap();
     let before = counts(&connection);
     assert!(before[3] > 0);
-    connection.execute("UPDATE timeline_events SET body='invalid stored event' WHERE session_id=?1 AND sequence=1", [&id]).unwrap();
+    connection
+        .execute(
+            "UPDATE timeline_events SET body='{}' WHERE session_id=?1 AND sequence=1",
+            [&id],
+        )
+        .unwrap();
     let server = serve(build(), config).await.unwrap();
     let mut client = Client::new_version(&server, true, 3).await;
     let restored = client.rpc("session.attach", json!({"sessionId":id})).await;
@@ -1392,7 +1397,7 @@ async fn failed_creation_rolls_back_storage_but_failed_restore_preserves_it() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(body, "invalid stored event");
+    assert_eq!(body, "{}");
     drop(connection);
     drop(client);
     server.shutdown();
@@ -1432,7 +1437,7 @@ async fn vacuum_mode_reclaims_an_offline_store_and_refuses_a_held_one() {
             .execute(
                 "INSERT INTO timeline_events (session_id, branch_id, sequence, last_sequence, kind, body) \
                  VALUES ('s', 'main', ?1, ?1, 'turn/start', ?2)",
-                rusqlite::params![sequence, "x".repeat(4000)],
+                rusqlite::params![sequence, json!({"padding":"x".repeat(4000)}).to_string()],
             )
             .unwrap();
     }

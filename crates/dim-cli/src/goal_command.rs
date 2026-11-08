@@ -5,7 +5,7 @@ use crate::{
     client::Client,
     display::Display,
     goal,
-    session::{Interrupts, read_history, settle},
+    session::{Interrupts, settle},
 };
 
 /// What the prompt says when Ctrl+C arrives while a form is in flight.
@@ -28,10 +28,13 @@ pub async fn command(
         if !goal::available(client, session_id).await {
             return Ok::<Reply, crate::Error>(Reply::Unavailable);
         }
-        // Read the line before choosing `set` or `edit`: the fold holds only
-        // what earlier reads applied.
-        display.cursor = catch_up(client, session_id, display).await?;
-        let call = goal::call(&request, display.goal.goal().as_ref());
+        let mut state: dim_agent_types::GoalRead = client
+            .typed(
+                "session.goal.get",
+                serde_json::json!({"sessionId":session_id,"branchId":"main"}),
+            )
+            .await?;
+        let call = goal::call(&request, state.goal.as_ref());
         if let Some(call) = call {
             let mut params = serde_json::json!({"sessionId": session_id, "branchId": "main"});
             if let Some(objective) = goal::objective(&request) {
@@ -43,14 +46,19 @@ pub async fn command(
                     _ => Err(error),
                 };
             }
-            display.cursor = catch_up(client, session_id, display).await?;
+            state = client
+                .typed(
+                    "session.goal.get",
+                    serde_json::json!({"sessionId":session_id,"branchId":"main"}),
+                )
+                .await?;
         }
-        Ok(Reply::Done(call))
+        Ok(Reply::Done(call, state.goal))
     };
     match settle(interrupts, NOTICE, operation).await? {
         Reply::Unavailable => display.record(goal::NOT_AVAILABLE)?,
-        Reply::Done(call) => {
-            for line in goal::report("main", call, display.goal.goal().as_ref()) {
+        Reply::Done(call, goal) => {
+            for line in goal::report("main", call, goal.as_ref()) {
                 display.record(&line)?;
             }
         }
@@ -62,13 +70,5 @@ enum Reply {
     /// The daemon serves no Goal.
     Unavailable,
     /// The call that ran, none for the read form.
-    Done(Option<goal::Call>),
-}
-
-/// Folds the events `main` holds that `display` has not applied yet.
-async fn catch_up(client: &mut Client, session_id: &str, display: &mut Display) -> Result<u64> {
-    read_history(client, session_id, display.cursor, &mut |value| {
-        display.event(serde_json::from_value(value)?, true)
-    })
-    .await
+    Done(Option<goal::Call>, Option<goal::Goal>),
 }

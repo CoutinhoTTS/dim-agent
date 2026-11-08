@@ -38,6 +38,9 @@ pub struct BranchDirectoryView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<dim_agent_types::BranchSource>,
     pub state: &'static str,
+    pub purpose: Option<String>,
+    pub cut_messages: Option<u64>,
+    pub end: Option<dim_agent_types::BranchEndData>,
     pub head: u64,
     /// The line's `branch/end` sequence; absent while open.
     #[serde(skip_serializing_if = "Option::is_none")]

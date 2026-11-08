@@ -179,9 +179,8 @@ is `dispatcher.consume`, and a function in a part in another language, whose bin
 same way. The read belongs to the part.
 
 The kinds the read selects are the kinds its rebuild folds, which are not always the keys it
-consumes: a rebuild may fold the terminals of the operations its part issues. The cutoff belongs to
-the read, so a part that pages a selection takes the cutoff of its last page; a caller that fixes an
-earlier one replays what lies between the two.
+consumes: a rebuild may fold the terminals of the operations its part issues. A paged rebuild
+fixes the cutoff before its first page, keeps it on every page, and returns it to Dispatcher.
 
 ### 5.3 Bus events
 
@@ -211,68 +210,30 @@ Public bus events:
 
 ### 5.4 The event query
 
-A part reads facts through its branch's `timeline` service with one bounded query. The selection is:
+A part reads event properties through its branch's `timeline` service. The shared query contract,
+including expressions, values, results and continuation, is defined in
+[Timeline property queries §2–3](timeline-property-query.md#2-查询接口). The query can return selected
+fields, a count, an existence result, grouped results, or explicitly requested complete events.
+It addresses public event properties and Timeline positions; it cannot address storage tables,
+content hashes or indexes, or execute caller-provided SQL.
 
-| Element | What it says |
-| --- | --- |
-| Scope | This branch, or the branch chain: each ancestor up to its cut, root first, then this branch to its head |
-| Kinds and flags | The event kinds it accepts (`domain/name`), and the envelope's context flags (§5.1) it selects on |
-| Event id | An equality on the event id: one id selects that event, so a caller reads one event or looks up its position without paging |
-| Predicate | One equality against one JSON scalar. The path is a sequence of field names inside the event's data joined by dots, with no array indexing and no wildcards |
-| From | Where the read begins, named by an event id or by a sequence; the event it names is part of the read. A branch read takes it on that branch; a chain read begins in the segment it names and carries on, skipping the segments before it |
-| Order | The key the reply is ordered by — the sequence — and the direction: ascending (oldest first) or descending (newest first). A chain read orders by chain position first |
-| Publishing facts | Whether the queried branch's own facts written but not yet published are part of the read (§5.2); by default they are not. An ancestor is read to its cut either way |
-| Page | How many matching events the read skips, and how many it returns; the second is nonzero by type, so no read is unbounded. Both count events, not storage rows |
+The Timeline fixes the branch chain and cutoff for the entire computation. Ancestors stop at their
+fork positions. A part can include its own branch's atomically committed, unpublished facts; an
+ordinary facade cannot. Filtering, related-event checks and grouping use that complete fixed range,
+including any publishing tail, before the result is paged. Continuation does not narrow the range
+used by related-event checks.
 
-The elements combine: an event is selected when it satisfies all of them, and flags named together
-are alternatives, so an event is accepted when it carries at least one of them — the context read
-selects the rows that carry `context_render` or `context_state`. A selection that names no kind
-accepts every kind, one with no event id accepts every event, one that names no start begins at the
-first event of its scope, and a flag it does not name constrains nothing: no omission is an error.
+A rebuilding part fixes one cutoff, consumes the necessary results, settles any outstanding work,
+and returns that cutoff to Dispatcher. Every subsequent page uses the original cutoff and returned
+continuation. Dispatcher then delivers facts above the cutoff. The part owns its business decisions
+and resulting state; the query mechanism owns no business projection or cross-call result cache.
+A computation that can be expressed as a count or existence query does not require reading events.
+A state machine that requires ordered input consumes selected fields page by page.
 
-Paging is skipping: a caller repeats the query with a larger skip, and a page shorter than the
-count is what says the selection is exhausted. A page does not align with an atomic batch — it may
-end inside one and the next page carries the rest, which a consumer folding in order handles. A
-read is taken at what is published when it runs, unless it asks for the facts still publishing,
-which takes the write head instead; either way a consumer that folds several pages drops what it has
-already folded.
-
-The path's spelling is fixed here and not in a binding: there is one form, the one above, and the
-storage translates that form. A binding writes this path syntax and invents no other.
-
-The selection is what the query is for. Its elements describe events, not a slice of the store, so
-the store executes them where the events are kept and returns the page those events form. A read
-never returns a fact above the coverage of the branch it reads: an ancestor to its cut, this branch
-to the cutoff the service takes, which no caller states as a sequence. A
-selection the store can execute from an index costs the page; one it cannot — an equality on a field
-it holds no index for, a flag set with no index of its own, or any selection in a store that filters
-in memory — costs the scoped range and proves the end of the scope the same way. A
-chain page reaches one segment after another, so it costs what it reaches. The reply carries each
-event's chain position with it, so a caller reads where an event sits without asking again.
-
-The query returns facts; it does not fold, project or aggregate them. What a part folds from facts
-is its own state and stays with it ([ADR 002](../adr/002-plugin-scope.md) D1). A part that needs a
-whole prefix reads pages and folds them itself.
-
-A part that rebuilds asks the same query for its publishing facts
-([ADR 020](../adr/020-timeline-read-convergence.md) D3). That read answers what the query would,
-plus this branch's facts written before it ran that are not yet published, in sequence order and
-without overlapping the published page. The reply carries `through`, the cutoff the read took: the
-published head, or the write head when the request asked for them. A rebuild that then receives live
-events from that cutoff loses and repeats nothing. The cutoff belongs to the read: a caller that
-fixes an earlier one replays what lies between the two. Paging is skipping over both parts, the
-published page first.
-
-| Input | Result |
-| --- | --- |
-| A kind or a data path the store does not know | No rows; not an error |
-
-The query addresses the event contract, not the storage: the session, the branch, the kind, the
-event id, the two context flags and paths inside the event's data. The reply carries each event's
-position, but the request does not select on one. Table, column and
-index names, the content table, batch metadata and every other part of the stored layout are not
-addressable, and SQL is not a capability interface
-([ADR 019](../adr/019-event-query.md) D3).
+Reading complete events is explicit and still returns their complete public contents. Property
+rows are not partial events. A selected property that is absent is distinct from JSON null; query
+and storage errors are not represented as empty results. Consumers use the shared result type
+directly and release each page after consumption.
 
 Besides the query, the service keeps two things: appending a fact of the part's own domain (§5.1)
 and reading the published sequence. Branch segments are the branch directory and recovery
@@ -308,8 +269,9 @@ Being a Capability adds no rule of its own; it says which of the existing rules 
 Examples:
 
 - The Goal branch part folds facts and decides continuations, so it is a Capability.
-- The Goal Session part provides `goal_update` and `session.goal.*` and writes change inputs by branch
-  id. It holds no Goal state, so it is not a Capability.
+- The Goal Session part provides `goal_update` and `session.goal.*` and writes change triggers by branch
+  id. It holds no Goal state, so it is not a Capability; the state is a `goal:state` record the branch
+  part writes, read by the model, the clients and the fold alike (Goal §2, A.5).
 - Questions provides `ask_user` and `session.question.*`. Its waiters are its own tool calls and it
   writes no facts, so it is not a Capability.
 

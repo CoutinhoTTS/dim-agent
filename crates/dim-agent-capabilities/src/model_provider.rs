@@ -9,14 +9,17 @@ use crate::{
     steer::{REPLACED_BY_STEER, SteerMark},
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Dispatcher, ModelProgress, Names, StateCell, Timeline,
-    TimelineIdentity, rebuild_facts,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, ModelProgress, Names, QueryComparison,
+    QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec,
+    QueryValue, StateCell, Timeline, TimelineIdentity, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::*;
 use futures_util::FutureExt;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::{
+    collections::HashMap,
+    num::NonZeroU64,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
 };
@@ -79,7 +82,10 @@ impl ModelProvider {
     /// its started calls in the same batch, before the terminal.
     fn complete(
         &self,
-        call: ModelCallData,
+        turn_id: &str,
+        request_id: &str,
+        provider_id: &str,
+        model_id: &str,
         result: std::result::Result<FinishReason, HostError>,
         started: &[StartedCall],
     ) -> dim_agent_runtime::Result<()> {
@@ -98,10 +104,10 @@ impl ModelProvider {
                 tracing::error!(
                     session_id = %self.identity.session_id,
                     branch_id = %self.identity.branch_id,
-                    turn_id = %call.turn_id,
-                    request_id = %call.request_id,
-                    provider_id = %call.request.provider_id,
-                    model_id = %call.request.model_id,
+                    turn_id = %turn_id,
+                    request_id = %request_id,
+                    provider_id = %provider_id,
+                    model_id = %model_id,
                     error = %message,
                     failure_kind = ?facts.kind,
                     status = facts.status,
@@ -120,14 +126,14 @@ impl ModelProvider {
         };
         let mut events = Vec::new();
         if !matches!(outcome, ModelOutputOutcome::Completed { .. })
-            && let Some(results) = closure(&call.turn_id, &call.request_id, started)
+            && let Some(results) = closure(turn_id, request_id, started)
         {
             events.push(EventKind::ToolResult(results).into());
         }
         events.push(
             EventKind::ModelOutputEnd(ModelOutputEndData {
-                turn_id: call.turn_id,
-                request_id: call.request_id.clone(),
+                turn_id: turn_id.to_owned(),
+                request_id: request_id.to_owned(),
                 outcome,
             })
             .into(),
@@ -135,51 +141,292 @@ impl ModelProvider {
         self.timeline.append_batch_registered(events, |_| Ok(()))?;
         Ok(())
     }
-    /// A committed call without an output end
-    /// was left by a reload and fails without running.
-    fn rebuild(
-        &self,
-        state: &mut ModelState,
-        events: &[Arc<AgentEvent>],
-    ) -> dim_agent_runtime::Result<()> {
-        let mut open: Vec<(ModelCallData, Vec<StartedCall>)> = Vec::new();
-        for event in events {
-            state.steer.apply(event);
-            match &event.kind {
-                EventKind::StopInterrupt(data) => state.interrupted = Some(data.reason.clone()),
-                EventKind::TurnStart(_) | EventKind::TurnEnd(_) => state.interrupted = None,
-                EventKind::ModelCall(call) => open.push((call.clone(), Vec::new())),
-                EventKind::ToolUseStart(data) => {
-                    if let Some((_, started)) = open
-                        .iter_mut()
-                        .find(|(call, _)| call.request_id == data.request_id)
-                    {
-                        started.push(StartedCall {
-                            id: data.call_id.clone(),
-                            complete: false,
-                        });
-                    }
-                }
-                EventKind::ToolUse(data) => {
-                    if let Some(started) = open
-                        .iter_mut()
-                        .filter(|(call, _)| call.request_id == data.request_id)
-                        .flat_map(|(_, started)| started.iter_mut())
-                        .find(|started| started.id == data.call.id)
-                    {
-                        started.complete = true;
-                    }
-                }
-                EventKind::ModelOutputEnd(data) => open.retain(|(call, _)| {
-                    call.turn_id != data.turn_id || call.request_id != data.request_id
+    async fn rebuild(&self) -> dim_agent_runtime::Result<u64> {
+        let through = self.timeline.committed();
+        let mut request = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec![
+                        "stop/interrupt".into(),
+                        "turn/start".into(),
+                        "turn/end".into(),
+                    ],
                 }),
-                _ => {}
+                select: QuerySelect::Fields {
+                    fields: vec!["kind".into(), "data.reason".into()],
+                },
+                group_by: Vec::new(),
+                pick: Some(QueryPick::Last),
+                order_by: Vec::new(),
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(256).expect("a page contains operations"),
+                after: None,
+            }),
+        };
+        let control = self.timeline.query(request.clone()).await?;
+        let QueryOutput::Rows { rows } = control.result else {
+            unreachable!("model recovery selects control fields")
+        };
+        let interrupted = if let Some(row) = rows.into_iter().next() {
+            let mut values = row.values.into_iter();
+            match (values.next(), values.next()) {
+                (
+                    Some(QueryValue::Value {
+                        value: serde_json::Value::String(kind),
+                    }),
+                    Some(reason),
+                ) => {
+                    if kind == "stop/interrupt" {
+                        let QueryValue::Value {
+                            value: serde_json::Value::String(reason),
+                        } = reason
+                        else {
+                            return Err(AgentError::fault(
+                                "ModelProvider",
+                                "an interrupt has no reason",
+                            ));
+                        };
+                        Some(reason)
+                    } else {
+                        None
+                    }
+                }
+                _ => {
+                    return Err(AgentError::fault(
+                        "ModelProvider",
+                        "a control event has no kind",
+                    ));
+                }
             }
+        } else {
+            None
+        };
+        let steer = SteerMark::restore(&self.timeline, through).await?;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.interrupted = interrupted;
+            state.steer = steer;
         }
-        for (call, started) in open {
-            self.complete(call, Err(HostError::failed(CAPABILITY_RELOADING)), &started)?;
+
+        let equal = |path: &str, value: serde_json::Value| QueryFilter::Compare {
+            left: QueryOperand::Field { path: path.into() },
+            comparison: QueryComparison::Eq,
+            right: QueryOperand::Value { value },
+        };
+        request.query.pick = None;
+        request.query.select = QuerySelect::Fields {
+            fields: vec![
+                "data.turn_id".into(),
+                "data.request_id".into(),
+                "data.request.providerId".into(),
+                "data.request.modelId".into(),
+                "position.sequence".into(),
+                "position.branch_id".into(),
+            ],
+        };
+        request.query.filter = Some(QueryFilter::And {
+            conditions: vec![
+                equal("kind", "model/call".into()),
+                QueryFilter::Not {
+                    condition: Box::new(QueryFilter::Exists {
+                        condition: Box::new(QueryFilter::And {
+                            conditions: vec![
+                                equal("kind", "step/model-output-end".into()),
+                                QueryFilter::Compare {
+                                    left: QueryOperand::Field {
+                                        path: "data.turn_id".into(),
+                                    },
+                                    comparison: QueryComparison::Eq,
+                                    right: QueryOperand::Outer {
+                                        path: "data.turn_id".into(),
+                                    },
+                                },
+                                QueryFilter::Compare {
+                                    left: QueryOperand::Field {
+                                        path: "data.request_id".into(),
+                                    },
+                                    comparison: QueryComparison::Eq,
+                                    right: QueryOperand::Outer {
+                                        path: "data.request_id".into(),
+                                    },
+                                },
+                            ],
+                        }),
+                    }),
+                },
+            ],
+        });
+        loop {
+            let reply = self.timeline.query(request.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("model recovery selects operation fields")
+            };
+            for row in rows {
+                let Ok(
+                    [
+                        QueryValue::Value {
+                            value: serde_json::Value::String(turn_id),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::String(request_id),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::String(provider_id),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::String(model_id),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::Number(sequence),
+                        },
+                        QueryValue::Value {
+                            value: serde_json::Value::String(branch_id),
+                        },
+                    ],
+                ) = <[_; 6]>::try_from(row.values)
+                else {
+                    return Err(AgentError::fault(
+                        "ModelProvider",
+                        "a model call has invalid operation identities",
+                    ));
+                };
+                let mut tools = TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: Some(TimelinePosition {
+                        branch_id,
+                        sequence: sequence
+                            .as_u64()
+                            .expect("event sequences are unsigned integers"),
+                    }),
+                    through: Some(through),
+                    include_publishing: true,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: vec![
+                                        "step/tool-use-start".into(),
+                                        "step/tool-use".into(),
+                                    ],
+                                },
+                                equal("data.turn_id", turn_id.clone().into()),
+                                equal("data.request_id", request_id.clone().into()),
+                            ],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: vec![
+                                "kind".into(),
+                                "data.call_id".into(),
+                                "data.call.id".into(),
+                            ],
+                        },
+                        group_by: Vec::new(),
+                        pick: None,
+                        order_by: Vec::new(),
+                    },
+                    page: Some(QueryPage {
+                        limit: NonZeroU64::new(256).expect("a page contains call identities"),
+                        after: None,
+                    }),
+                };
+                let mut started = Vec::<StartedCall>::new();
+                let mut starts = HashMap::new();
+                loop {
+                    let reply = self.timeline.query(tools.clone()).await?;
+                    let QueryOutput::Rows { rows } = reply.result else {
+                        unreachable!("tool-use recovery selects identities")
+                    };
+                    for row in rows {
+                        let Ok(
+                            [
+                                QueryValue::Value {
+                                    value: serde_json::Value::String(kind),
+                                },
+                                start,
+                                complete,
+                            ],
+                        ) = <[_; 3]>::try_from(row.values)
+                        else {
+                            return Err(AgentError::fault(
+                                "ModelProvider",
+                                "a tool-use event has no kind",
+                            ));
+                        };
+                        match kind.as_str() {
+                            "step/tool-use-start" => {
+                                let QueryValue::Value {
+                                    value: serde_json::Value::String(id),
+                                } = start
+                                else {
+                                    return Err(AgentError::fault(
+                                        "ModelProvider",
+                                        "a tool-use start has no call identity",
+                                    ));
+                                };
+                                starts.entry(id.clone()).or_insert(started.len());
+                                started.push(StartedCall {
+                                    id,
+                                    complete: false,
+                                });
+                            }
+                            "step/tool-use" => {
+                                let QueryValue::Value {
+                                    value: serde_json::Value::String(id),
+                                } = complete
+                                else {
+                                    return Err(AgentError::fault(
+                                        "ModelProvider",
+                                        "a tool-use has no call identity",
+                                    ));
+                                };
+                                if let Some(index) = starts.get(&id) {
+                                    started[*index].complete = true;
+                                }
+                            }
+                            _ => {
+                                unreachable!("tool-use recovery selects start and completion facts")
+                            }
+                        }
+                    }
+                    let Some(next) = reply.next else {
+                        break;
+                    };
+                    tools
+                        .page
+                        .as_mut()
+                        .expect("call identity queries are paged")
+                        .after = Some(next);
+                }
+                self.complete(
+                    &turn_id,
+                    &request_id,
+                    &provider_id,
+                    &model_id,
+                    Err(HostError::failed(CAPABILITY_RELOADING)),
+                    &started,
+                )?;
+            }
+            let Some(next) = reply.next else {
+                break;
+            };
+            request
+                .page
+                .as_mut()
+                .expect("model operation queries are paged")
+                .after = Some(next);
         }
-        Ok(())
+        Ok(through)
     }
     async fn run(
         &self,
@@ -273,7 +520,14 @@ impl ModelProvider {
                 (Err(HostError::Cancelled(_)), _) => "interrupted",
                 (Err(_), _) => "failure",
             };
-            let submitted = self.complete(call, result, &output.started);
+            let submitted = self.complete(
+                &call.turn_id,
+                &call.request_id,
+                &call.request.provider_id,
+                &call.request.model_id,
+                result,
+                &output.started,
+            );
             state.current = None;
             (outcome, submitted)
         };
@@ -382,7 +636,6 @@ impl DynPlugin for ModelProviderPlugin {
             let failures = dispatcher.clone();
             let lifecycle = ctx.cancellation_token();
             let read = owner.clone();
-            let read_timeline = owner.timeline.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -399,26 +652,7 @@ impl DynPlugin for ModelProviderPlugin {
                     .to_vec(),
                     Arc::new(move || {
                         let read = read.clone();
-                        let timeline = read_timeline.clone();
-                        Box::pin(async move {
-                            let reply = rebuild_facts(
-                                &timeline,
-                                &[
-                                    "model/call",
-                                    "step/tool-use-start",
-                                    "step/tool-use",
-                                    "step/model-output-end",
-                                    "step/model-start",
-                                    "input/applied",
-                                    "stop/interrupt",
-                                    "turn/start",
-                                    "turn/end",
-                                ],
-                            )
-                            .await?;
-                            read.rebuild(&mut read.state.lock().unwrap(), &reply.events)?;
-                            Ok(reply.through)
-                        })
+                        Box::pin(async move { read.rebuild().await })
                     }),
                     Arc::new(move |event| {
                         let owner = owner.clone();
@@ -478,7 +712,10 @@ impl DynPlugin for ModelProviderPlugin {
                             if let Some(reason) = reason {
                                 drop(state);
                                 return owner.complete(
-                                    call.clone(),
+                                    &call.turn_id,
+                                    &call.request_id,
+                                    &call.request.provider_id,
+                                    &call.request.model_id,
                                     Err(HostError::Cancelled(reason)),
                                     &[],
                                 );
