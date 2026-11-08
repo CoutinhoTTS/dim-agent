@@ -24878,6 +24878,7 @@
       "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::runtime_manager",
       "references": [
+        "path crate::runtime_manager::Kind::Node",
         "path crate::runtime_manager::Kind::Python",
         "path crate::runtime_manager::RuntimeService"
       ]

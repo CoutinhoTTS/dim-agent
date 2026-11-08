@@ -3,6 +3,11 @@
 use super::session_typescript::{fixture, start, submit, when_served};
 use super::*;
 use dim_agent_runtime::testing::chain_events;
+use dim_app_server::{
+    plugin_manager::Defaults,
+    runtime_manager::{Environment, Kind, Runtimes},
+    session_typescript::SessionTypeScriptConfig,
+};
 use std::path::{Path, PathBuf};
 
 pub(super) fn home() -> PathBuf {
@@ -490,6 +495,108 @@ async fn plugin_configuration_installs_switches_and_survives_a_restart() {
     assert!(kept.join("dim-plugin.json").is_file());
     let builtin = call(&mut client, "plugin.remove", json!({"id":"builtin"})).await;
     assert_eq!(app_error(&builtin), "not_removable", "{builtin}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A Python plugin directory named `name`: its entry is `plugin.py`.
+fn python_plugin(root: &Path, name: &str) -> PathBuf {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("dim-plugin.json"),
+        json!({"name": name, "code": {"entry": "plugin.py"}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("plugin.py"), "def apply(ctx):\n    pass\n").unwrap();
+    dir
+}
+
+/// A server on `home` whose default configuration file is `defaults` and
+/// whose RuntimeManager supplies the runtimes found on `search`: nothing is
+/// acquired at startup, and acquiring the Node runtime runs no npm because
+/// its packages are already there.
+fn runtime_config(home: &Path, defaults: Value, search: std::ffi::OsString) -> ServerConfig {
+    std::fs::create_dir_all(home).unwrap();
+    let path = home.join("default-plugins.json");
+    std::fs::write(&path, defaults.to_string()).unwrap();
+    let runtimes = Arc::new(
+        Runtimes::load(
+            home,
+            &Defaults::read(&path).unwrap().runtimes,
+            Some(Environment {
+                path: search,
+                ..Default::default()
+            }),
+        )
+        .unwrap(),
+    );
+    std::fs::create_dir_all(runtimes.plan(Kind::Node).packages.clone().unwrap()).unwrap();
+    ServerConfig {
+        product_home: Some(home.to_owned()),
+        target_home: Some(home.join("rust")),
+        plugin_defaults: Some(path),
+        session_typescript: Some(SessionTypeScriptConfig::acquired(home, runtimes, vec![])),
+        ..Default::default()
+    }
+}
+
+/// §2.5: `plugin.remove` never requests a runtime, even when the
+/// removed plugin's name falls back to a Python default plugin; only a
+/// client call that turns a plugin on asks for one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_remove_never_requests_a_runtime() {
+    let home = home();
+    python_plugin(&home.join("defaults"), "py-default");
+    let copy = python_plugin(&home.join("src"), "py-default");
+    let search = home.join("empty-path");
+    std::fs::create_dir_all(&search).unwrap();
+    let config = runtime_config(
+        &home,
+        json!({
+            "plugins": {"py-default": "defaults/py-default"},
+            "locked": ["PluginManager", "Rpc", "Transport"],
+            "runtimes": {
+                "node": {"source": "system", "auto": false},
+                "python": {"source": "system", "auto": false},
+                "uv": {"source": "download", "auto": false},
+            },
+        }),
+        search.into(),
+    );
+    let dir = copy.canonicalize().unwrap();
+    std::fs::write(
+        home.join("plugins.json"),
+        json!({
+            "version": 2,
+            "installed": [{
+                "id": "copy",
+                "name": "py-default",
+                "source": {"path": dir},
+                "dir": dir,
+                "kinds": ["code"],
+            }],
+            "names": {"py-default": {"use": "copy"}},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_eq!(listed["result"][1]["name"], "python", "{listed}");
+    assert_eq!(listed["result"][1]["status"], "off", "{listed}");
+
+    assert_ok(&call(&mut client, "plugin.remove", json!({"id": "copy"})).await);
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert_eq!(item(&list, "py-default")["use"], "default", "{list}");
+    let listed = client.rpc("runtime.list", json!({})).await;
+    assert_eq!(
+        listed["result"][1]["status"], "off",
+        "remove requested the Python runtime: {listed}"
+    );
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

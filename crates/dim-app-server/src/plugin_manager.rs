@@ -1213,7 +1213,7 @@ impl Manager {
         };
         phase("load");
         let enabled = change.after == Some(Use::Installed(id.clone()));
-        let outcome = self.switch(&name, change).await;
+        let outcome = self.switch(&name, change, true).await;
         let mut reply = outcome.into_map();
         reply.insert("id".into(), json!(id));
         reply.insert("name".into(), json!(name));
@@ -1294,7 +1294,9 @@ impl Manager {
                 Ok(())
             },
         )?;
-        Ok(Value::Object(self.switch(&name, change).await.into_map()))
+        Ok(Value::Object(
+            self.switch(&name, change, true).await.into_map(),
+        ))
     }
 
     /// `plugin.disable` (§3.3).
@@ -1315,7 +1317,7 @@ impl Manager {
                 Ok(())
             },
         )?;
-        self.switch(name, change).await;
+        self.switch(name, change, false).await;
         Ok(json!({}))
     }
 
@@ -1347,7 +1349,7 @@ impl Manager {
                 Ok(entry)
             },
         )?;
-        self.switch(&entry.name, change).await;
+        self.switch(&entry.name, change, false).await;
         self.state
             .dirs
             .remove_python_link(&python_package(&entry.id));
@@ -1556,7 +1558,7 @@ impl Manager {
         phase("load");
         let mut reply = Map::new();
         if change.after == Some(Use::Installed(id.clone())) {
-            reply = self.switch(&entry.name, change).await.into_map();
+            reply = self.switch(&entry.name, change, true).await.into_map();
         }
         reply.insert("commit".into(), json!(commit));
         Ok(Value::Object(reply))
@@ -1588,8 +1590,11 @@ impl Manager {
     /// to the one it uses now (§3.7), and says what that came to: its row's
     /// status, the content kinds skipped or refused, `restartRequired`. A
     /// content owner's name turned on gets that kind of content of every
-    /// plugin.
-    async fn switch(&self, name: &str, change: Change) -> Outcome {
+    /// plugin. `request_runtime` is set by the client calls that turn a
+    /// plugin on (`install`, `enable` and `update`): only they ask
+    /// RuntimeManager for the runtime the plugin's code needs when it is off
+    /// (§2.5, §3.3). A reconcile, a reload and `remove` never do.
+    async fn switch(&self, name: &str, change: Change, request_runtime: bool) -> Outcome {
         self.apply().await;
         let before = change.before.as_ref().and_then(|used| own_id(name, used));
         let after = change.after.as_ref().and_then(|used| own_id(name, used));
@@ -1630,12 +1635,17 @@ impl Manager {
             .register(plugin, &dir, &manifest, &CONTENT, &mut outcome)
             .await;
         if let Some(code) = &manifest.code {
-            // RuntimeManager R1: a Python plugin turned on asks for the Python runtime.
-            if is_python(code)
-                && let Some(runtimes) = self.ctx.get_at(&self.runtimes)
-                && let Err(error) = runtimes.install(crate::runtime_manager::Kind::Python)
-            {
-                tracing::warn!(%error, "the Python runtime configuration did not read");
+            // RuntimeManager R1, §2.5: a client call that turns this plugin
+            // on asks for the runtime its code needs; nothing else does.
+            if request_runtime && let Some(runtimes) = self.ctx.get_at(&self.runtimes) {
+                let runtime = if is_python(code) {
+                    crate::runtime_manager::Kind::Python
+                } else {
+                    crate::runtime_manager::Kind::Node
+                };
+                if let Err(error) = runtimes.install(runtime) {
+                    tracing::warn!(%error, "the runtime configuration did not read");
+                }
             }
             if missing_instance_names(self.state.catalog.get().expect("set at startup"), code)
                 .is_empty()
