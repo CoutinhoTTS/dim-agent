@@ -101,6 +101,7 @@ flowchart TB
 | 关于某个 Session 的客户端方法 | 注册到该 Session 的 `sessionMethods` 的命名空间，由 Rpc 经该 Session 分发（[A.1](contracts/session-boundary.md#a1-方法贡献)） | Questions, Goal, SessionTitle, Attachments, ShellInput, InputQueue（`session.input.withdraw`） |
 | 宿主管理方法 | 进程插件注册到 `managementMethods` 的命名空间，由 Rpc 按调用查找 | 现有管理方法, Settings（业务配置，`settings.read`/`settings.update`/`settings.sources`/`settings.projects`，S8b，已实现）, Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
 | 访问其他 Session | Agents 的 `sessions` 服务（`launch`、`input`、`history`、`idle` 等），与 Collaboration 的做法相同（[Session 访问](contracts/session-access.md#a1-sessions-服务)） | Scheduler, Workflow |
+| 把事件交给订阅了它的 Session | 进程服务 `eventHub`，它经 Agents 的 `sessions` 服务逐条投递 ([EventHub](plugins/EventHub.md)) | 生产方：IM、SaaS 与 CI 通知、定时器、其他 agent；Session 的 `events` 工具与客户端的 `eventhub.*` 方法负责订阅 |
 
 ```mermaid
 flowchart LR

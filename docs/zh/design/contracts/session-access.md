@@ -4,7 +4,7 @@
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 Session 的资源节点查找，该字段在 P3 加入 `SessionConfig`（[A.3](#a3-sessionconfig-字段)）。P1/P2 中每个 Session 都使用控制节点。
 
-进程插件以 Collaboration 已有的方式访问 Session：通过 Agents 和公共的 Session 接口。本文把这种访问定义为语言中立的进程服务 `sessions`（ADR 002 D5），由 Agents 提供，因此 TypeScript 或 Python 进程插件（Scheduler、Workflow）可以按名称使用它。其方法为 `launch`、`input`、`lookup`、`history`、`withdraw`、`stop`、`idle` 和 `delete`，请求与回复均为数据（[A.1](#a1-sessions-服务)）。在 Rust 中，它是 `AgentIndex` 加上 `Session` 门面（[附录 E](#附录-e-rust-绑定)）。本文不增加任何宿主或门面插件。Agents 从不会重载的目录部分提供它，因此 Agents 重载只让进行中的调用失败，从不让调用方重载（D3，#35）；绑定、生命周期及其依据的 spike 见 [sessions 服务](../appserver/sessions-service.md)设计。
+进程插件以 Collaboration 已有的方式访问 Session：通过 Agents 和公共的 Session 接口。本文把这种访问定义为语言中立的进程服务 `sessions`（ADR 002 D5），由 Agents 提供，因此 TypeScript 或 Python 进程插件（Scheduler、Workflow）可以按名称使用它。其方法为 `launch`、`input`、`lookup`、`exists`、`history`、`withdraw`、`stop`、`idle` 和 `delete`，请求与回复均为数据（[A.1](#a1-sessions-服务)）。在 Rust 中，它是 `AgentIndex` 加上 `Session` 门面（[附录 E](#附录-e-rust-绑定)）。本文不增加任何宿主或门面插件。Agents 从不会重载的目录部分提供它，因此 Agents 重载只让进行中的调用失败，从不让调用方重载（D3，#35）；绑定、生命周期及其依据的 spike 见 [sessions 服务](../appserver/sessions-service.md)设计。
 
 | 补充 | 所有者 | 使用方 |
 | --- | --- | --- |
@@ -219,13 +219,14 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ### A.1 sessions 服务
 
-`sessions` 是由 Agents 提供的进程服务，没有实例 key。结构为 camelCase 字段的 JSON；字段名后的 `?` 表示可选，`|` 分隔备选项。除 `launch` 与 `delete` 外，每次调用都会 acquire 该 Session（必要时恢复），并在回复前保持其已装载。调用不携带调用方身份。各方法的步骤、策略上限与生命周期见 [sessions 服务](../appserver/sessions-service.md)设计。
+`sessions` 是由 Agents 提供的进程服务，没有实例 key。结构为 camelCase 字段的 JSON；字段名后的 `?` 表示可选，`|` 分隔备选项。除 `launch`、`delete` 与 `exists` 外，每次调用都会 acquire 该 Session（必要时恢复），并在回复前保持其已装载；`exists` 读取该 Session 是否仍存在，从不 acquire 或恢复它。调用不携带调用方身份。各方法的步骤、策略上限与生命周期见 [sessions 服务](../appserver/sessions-service.md)设计。
 
 | 方法 | 模式 | 请求 | 回复 | 错误 |
 | --- | --- | --- | --- | --- |
 | `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`、`agent_unknown`、`session_closed`、`branch_missing`（启动方）、`branch_ended`（启动方）、`reloading`、`failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`、`ambiguous`、`session_closed`、`branch_missing`、`branch_ended`、`reloading`、`publication_unknown`、`failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`、`session_closed`、`branch_missing`、`branch_ended`、`reloading` |
+| `exists` | async | `{sessionId}` | `{exists}` | `rejected`、`reloading` |
 | `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`、`future_sequence`、`session_closed`、`branch_missing`、`reloading` |
 | `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`、`session_closed`、`branch_missing`、`branch_ended`、`reloading`、`publication_unknown` |
 | `stop` | async | `{sessionId, branchId, reason?}` | `{sequence}` | `session_closed`、`branch_missing`、`branch_ended`、`reloading` |

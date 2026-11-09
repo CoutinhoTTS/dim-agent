@@ -23,10 +23,12 @@
 | [Prompt](Prompt.md) | — | `guideEntries`：输入指南的框架、生效的条目及其组合 | `Prompt`：它发布的配置所采用的 System 携带按生效条目组合出的指南；宿主准备的请求承载同一份组合，由 Loop 放置 | #548 |
 | [PromptSources](PromptSources.md) | — | 具名来源、它们在出厂配置里的策略文字，以及状态与规则两条条目 | — | #548 |
 | [Recall](Recall.md) | — | `recall` 工具（把分支历史讲给模型：轮次、一轮、一件事的全文、检索） | — | M2；#129 |
+| [EventHub](EventHub.md) | 已声明来源与事件类型的目录、订阅、发布与投递、`eventHub` 服务以及 `eventhub` 方法 | `events` 工具，以及 `dim-event` 与 `dim-event-guide` 的指南条目 | — | — |
 | [Hooks](Hooks.md) | App Server 中的 `HooksSettings`：来源 `hooks`（用户）、`hooks-projects` 与 `hooks-plugins`，经 FileStorage 读取的项目文件 `.dimcode/hooks.json`，`hooks.*` 方法与插件登记 | Hook 目录、执行器、向 `submitChecks` 登记供用户输入入口使用的提交检查（`UserPromptSubmit`） | 工具建议、权限请求、工具后（`PostToolUse`、`PostToolUseFailure`）、Stop 与 Session 启动 Hook | M1；#755、#756、#757、#758 |
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | 已撤回 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 运行（定义在 Settings 或项目文件中） | `workflow` 工具 | — | P2 |
+| [Code Mode](../../../design/plugins/CodeMode.md) | `CodeModeSettings`：用户 `codemode` 来源与执行上限(可选包启用时) | `codemode` 工具与运行时工厂 | 一次性程序执行与程序化工具结果关联 | Draft P3；计划的 `runtime/plugins/codemode/` 包尚未存在；[#1276](https://github.com/arcships/dim/issues/1276) |
 | [Collaboration](Collaboration.md) | 成员关系与临时 agent | `agent` 工具（含列出新成员可选模型的 `models` 动作）、报告与消息；两个标记的指南条目 | 委派的事实、唤醒输入与结算 | #551 |
 | [ExternalAgent](ExternalAgent.md) | 外部会话、Collaboration 成员类型 `external-agent`；每节点一个桥接行 | —（委派与决定归 Collaboration） | — | P3 |
 | [AcpGateway](AcpGateway.md) | 接入方宿主插件：ACP/RPC 连接、请求与清理；位于 daemon 外 | — | — | 支持子集已实现，未发布（#436，PR #441；[验收](../../../design/acp-gateway-acceptance.md)） |
@@ -42,6 +44,6 @@
 
 | 作用域 | 部分 |
 | --- | --- |
-| 进程部件 | daemon 内的 Provider（管理补充提案）、Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RuntimeManager、RemoteGateway、Skills（安装）、PromptSuggestion（Settings 来源）、light-ocr；接入方宿主进程内的 AcpGateway |
-| Session 部件 | Questions、ShellInput、Attachments、SessionTitle、PromptSuggestion、Goal、Web、Recall、Hooks、Scheduler、Workflow、PromptSources、Prompt（条目表） |
-| 分支部件 | Goal（含 Pursuit）、ModelRecovery、Hooks、Prompt |
+| 进程部件 | daemon 内的 Provider（管理补充提案）、Scheduler、Workflow、ExternalAgent、Modality、PluginManager、RuntimeManager、RemoteGateway、Skills（安装）、PromptSuggestion（Settings 来源）、`CodeModeSettings`(可选 Code Mode 包启用时)、light-ocr、EventHub；接入方宿主进程内的 AcpGateway |
+| Session 部件 | Questions、ShellInput、Attachments、SessionTitle、PromptSuggestion、Goal、Web、Recall、EventHub、Hooks、Scheduler、Workflow、PromptSources、Prompt（条目表）、Code Mode(启用时) |
+| 分支部件 | Goal（含 Pursuit）、ModelRecovery、Hooks、Prompt、Code Mode(启用时) |
