@@ -170,7 +170,7 @@ fn kind(line: &Value) -> String {
 fn backup(database: &Path, path: &Path) {
     rusqlite::Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .unwrap()
-        .backup(rusqlite::MAIN_DB, path, None)
+        .backup(rusqlite::MAIN_DB, path, rusqlite::backup::NO_PROGRESS)
         .unwrap();
 }
 /// A copy of `database` changed by `sql`.

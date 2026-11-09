@@ -24,7 +24,7 @@ F4 adds no plugin and no Timeline event, changes no infrastructure and no shared
 does not depend on S8b. Done when an OAuth-protected MCP server connects and refreshes its tokens
 (Appendix B).
 
-The OAuth protocol steps come from the official Rust SDK already in the workspace: rmcp 3.5.0
+The OAuth protocol steps come from the official Rust SDK already in the workspace: rmcp
 with its `auth` feature. Mcp owns everything around them: orchestration, storage, the user
 flow, and the gaps rmcp leaves, three of them MUSTs of the specification (Appendix A).
 
@@ -33,7 +33,7 @@ flow, and the gaps rmcp leaves, three of them MUSTs of the specification (Append
 | Source | What it settles | What Dim takes |
 | --- | --- | --- |
 | MCP 2026-07-28 [Authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization), [Authorization Server Discovery](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery), [Client Registration](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration), [Security Considerations](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/security-considerations) | OAuth 2.1 with PKCE `S256`. Protected Resource Metadata (RFC 9728), from `WWW-Authenticate` `resource_metadata` or the well-known URIs (path form first, then root). Authorization server metadata through RFC 8414 or OIDC discovery in a fixed order, with `issuer` checked against the URL used. Registration priority: pre-registered, then Client ID Metadata Document (CIMD), then Dynamic Client Registration (RFC 7591, deprecated), then user-entered. `resource` (RFC 8707) on authorization and token requests. `iss` validation (RFC 9207). A client MUST refuse when `code_challenge_methods_supported` is absent. Authorization server endpoints MUST use HTTPS, and redirect URIs MUST be `localhost` or HTTPS. Bearer token on every request, never in the query. A `403 insufficient_scope` calls for step-up with a union of scopes. Authorization servers rotate public clients' refresh tokens | Everything normative in §§5 to 10 |
-| rmcp 3.5.0, feature `auth` (`src/transport/auth.rs`) | The `auth` module covers metadata discovery, DCR and CIMD client selection, PKCE and `state`, code exchange with `resource` and `iss`, and refresh with rotation. The `CredentialStore` and `StateStore` traits are pluggable. It shares the reqwest 0.13 already used by the transport | The protocol engine; gaps in Appendix A |
+| rmcp, feature `auth` (`src/transport/auth.rs`) | The `auth` module covers metadata discovery, DCR and CIMD client selection, PKCE and `state`, code exchange with `resource` and `iss`, and refresh with rotation. The `CredentialStore` and `StateStore` traits are pluggable. It shares the reqwest 0.13 already used by the transport | The protocol engine; gaps in Appendix A |
 | Claude Code (`/mcp`, `claude mcp login`, [docs](https://code.claude.com/docs/en/mcp)) | The `oauth` object in `.mcp.json`: `clientId`, `callbackPort`, `authServerMetadataUrl`, `scopes`. Redirect `http://localhost:PORT/callback`; a switch to `127.0.0.1` broke servers that match the registered URI exactly and was reverted. Paste the callback URL when the redirect fails. The client secret is kept out of config. Refresh, then retry once, on `401` | The `oauth` field names and types, the redirect form, the paste fallback, the secret outside config |
 | MCP TypeScript and Python SDKs (`OAuthClientProvider`, `TokenStorage`) | Storage and redirect handling are injected by the host. Credentials carry an issuer stamp and are discarded on mismatch. `invalid_client` clears the registration and `invalid_grant` clears the tokens | Owner-supplied storage, issuer binding, clearing rules |
 | Dim account login (`account.login.browser.begin/complete`, `managed_oauth.rs`, `dim-cli/src/login.rs`) | The daemon returns `{attemptId, authorizationUrl, expiresAt}`. The client sends back the pasted callback URL, read with hidden input. Tokens live in `auth.json` under the home root, through a FileStorage lease with atomic 0600 replace | The attempt shape, paste input, the storage pattern |
@@ -523,7 +523,7 @@ callback URLs or authorization server `error_description` text from an unvalidat
 
 | # | Decision | Rejected alternative and why |
 | --- | --- | --- |
-| D1 | OAuth engine: rmcp 3.5.0 `auth` (`AuthorizationManager`) runs discovery, dynamic registration and the authorization request (PKCE `S256`, `state`, `resource`), driven by `McpAuth` through its own HTTP client and a `StateStore` that hands the verifier and `state` to the attempt. Mcp sends every token request itself (code exchange, refresh, revocation) and closes the gaps of Appendix A | A Dim-written OAuth client would re-track every specification revision that the official SDK already follows. rmcp's high-level `OAuthState` and `AuthClient` hold one manager per HTTP client with in-memory stores by default, fall back silently to guessed endpoints, and cannot share one refresh across Sessions. rmcp's `refresh_token` through a `CredentialStore`: after a restart it sends the base URL instead of the recorded `resource`, reports `invalid_client` only as text, and needs an adapter around the record for a request Mcp already sends for the code exchange |
+| D1 | OAuth engine: rmcp `auth` (`AuthorizationManager`) runs discovery, dynamic registration and the authorization request (PKCE `S256`, `state`, `resource`), driven by `McpAuth` through its own HTTP client and a `StateStore` that hands the verifier and `state` to the attempt. Mcp sends every token request itself (code exchange, refresh, revocation) and closes the gaps of Appendix A | A Dim-written OAuth client would re-track every specification revision that the official SDK already follows. Mcp shares stored credentials and refresh across Sessions, refuses guessed endpoints, and uses the recorded `resource` and structured token errors on refresh. |
 | D2 | All parts inside Mcp: a process authority, plus the existing Session discovery, connection instances and management | A separate OAuth plugin would only connect Mcp to its own tokens, a wiring module (ADR 002 D2); the managed OAuth host serves fixed providers and knows no MCP discovery. Per-Session credentials would mean one sign-in per Session |
 | D3 | Discovery strictly per the specification; `authServerMetadataUrl` applies only when there is no valid PRM; refuse missing PKCE metadata and non-HTTPS endpoints | rmcp's base-URL discovery and synthesized `/authorize`, `/token`, `/register`: the specification requires PRM for discovery and otherwise ends in abort or pre-configured values, and a guessed endpoint can send the user to an unintended page. An override that beats a valid PRM (Claude Code's semantics) would let a project file send the user to another authorization server for a server that names its own |
 | D4 | Registration: `clientId`, then CIMD (product URL, once published), then DCR, then `mcp_auth_client_required`. A confidential client's secret is entered at sign-in and kept in the record | A secret in configuration (`clientSecretRef`): `.mcp.json` is shared with the project, and a project entry could point the secret at its own token endpoint; it would also wait for S8b |
@@ -571,7 +571,7 @@ callback URLs or authorization server `error_description` text from an unvalidat
   to the Timeline, `ToolResult.content`, the catalog, `session.mcp`, error messages or
   diagnostics. Mcp emits one `tracing` event per auth operation, target `mcp.auth`, with server
   id, issuer host, outcome code and duration.
-- **rmcp's debug log.** rmcp 3.5.0 logs the authorization code at `debug` in
+- **rmcp's debug log.** rmcp logs the authorization code at `debug` in
   `exchange_code_for_token_with_issuer`, so Mcp sends the code exchange itself (§5.4). rmcp's
   other `auth` logs print tokens only through `oauth2`'s redacting secret types. Nothing depends
   on a host's log filter.
@@ -665,13 +665,13 @@ Other follow-up, not a requirement:
   now, and DCR covers servers without pre-registration. It is decided again when a server
   requires CIMD (Appendix C).
 
-## Appendix A. rmcp 3.5.0 `auth`: used and closed gaps
+## Appendix A. rmcp `auth`: used and closed gaps
 
 Enabling `auth` adds `oauth2` 5 without default features, `async-trait` and `url`. It reuses
 reqwest 0.13, the version `transport-streamable-http-client-reqwest` already uses, so there is
 no second HTTP stack. The `xtask check` dependency rules are re-run with the change.
 
-| Used from rmcp | Gap in rmcp 3.5.0 | Closed by Mcp |
+| Used from rmcp | Gap in rmcp | Closed by Mcp |
 | --- | --- | --- |
 | PRM discovery (header, well-known, same-origin, `resource` check), authorization server discovery order and `issuer` check, a string-only SSRF filter on the authorization server URLs that PRM names | Falls back to the server origin and to synthesized endpoints, reported only in `AuthorizationMetadataResolution.source` | Uses only PRM-sourced metadata or the configured `authServerMetadataUrl`; refuses the fallbacks (§5.2) |
 | Same | Additions to the specification's order: a `/{path}/.well-known/oauth-protected-resource` candidate between the path and root forms; the singular `authorization_server` field before `authorization_servers`; a root `oauth-authorization-server` candidate after the three for an issuer with a path. An `issuer` mismatch aborts discovery instead of trying the next authorization server | Accepted: the extra well-known candidates stay on the origin being discovered and are still checked for `issuer`; the singular field is an older name for the list; the abort fails closed |
@@ -680,7 +680,7 @@ no second HTTP stack. The `xtask check` dependency rules are re-run with the cha
 | `configure_client` and `register_client` (DCR); CIMD is not used (§5.3) | Does not persist `client_secret` | The record keeps it and re-applies it per operation |
 | `get_authorization_url` (PKCE `S256`, `state`, `resource`; verifier, `state` and expected issuer kept in Mcp's in-memory `StateStore`) | Its own selection unions previously requested, challenged and PRM scopes, and falls back to the authorization server's `scopes_supported` when that is empty | Passes the scopes chosen per §5.5 |
 | Nothing | `AuthorizationCallback::from_redirect_url` ignores `error` and does not compare the redirect URI; `exchange_code_for_token_with_issuer` logs the code at `debug` | Mcp parses and validates the callback, `iss` included, and sends the code exchange itself (§5.4) |
-| Nothing (`refresh_token` is not used, D1) | `refresh_token` takes `resource` from discovery state that a restarted daemon lacks, has no re-check after locking, and reports `invalid_client` only as text | Mcp's own refresh request under the store lock, with re-check and rotation (§5.6) |
+| Nothing (`refresh_token` is not used, D1) | `refresh_token` takes `resource` from in-memory discovery state or the base URL and reports `invalid_client` only as text | Mcp's own refresh request under the store lock, with re-check and rotation (§5.6) |
 | `StreamableHttpClientTransport` | Its worker waits for the first message without observing cancellation, so closing a transport that never sent one does not finish | The handshake is polled once before cancellation is honored |
 | `StreamableHttpError::AuthRequired` and `InsufficientScope` | Any `403` that carries `WWW-Authenticate` is `InsufficientScope` | Mcp reads `error="insufficient_scope"` |
 | Nothing | No RFC 7009 revocation | One request per token in `mcp.auth.logout` |
