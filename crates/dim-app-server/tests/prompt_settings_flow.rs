@@ -65,6 +65,20 @@ async fn the_prompts_source_serves_the_three_texts() {
         .await
         .unwrap_err();
     assert!(matches!(refused, SettingsError::Document(_)), "{refused}");
+    for document in [json!({"unknown": "x"}), json!({"base": "   "})] {
+        let refused = settings
+            .update_declared(
+                "prompts",
+                SettingsScope::User,
+                &updated.revision,
+                document,
+                Writer::Client,
+                &cancel,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, SettingsError::Document(_)), "{refused}");
+    }
 
     let base = server.service::<BasePromptSettingsHost>().unwrap();
     assert_eq!(

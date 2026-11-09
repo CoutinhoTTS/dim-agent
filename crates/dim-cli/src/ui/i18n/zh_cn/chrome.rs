@@ -463,6 +463,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Prompt saved; applies to new Sessions" => "提示词已保存；对新会话生效",
         "A prompt save is still in progress" => "提示词保存尚未完成",
         "Prompt settings are not available" => "提示词设置不可用",
+        "↑↓ move · Enter edit · r reset · Esc close" => {
+            "↑↓ 移动 · Enter 编辑 · r 重置 · Esc 关闭"
+        }
         "↑↓ move · Enter select · ←→/Space change · r reset · Esc close" => {
             "↑↓ 移动 · Enter 选择 · ←→/空格 更改 · r 重置 · Esc 关闭"
         }

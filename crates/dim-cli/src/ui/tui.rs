@@ -837,11 +837,18 @@ fn edit_prompt(
         app.set_notice(format!("{}: unchanged", field.key()));
         return Ok(());
     }
-    app.pending_prompt = Some((field, draft));
+    let request = app.next_prompt_request;
+    app.next_prompt_request = app.next_prompt_request.wrapping_add(1);
+    app.pending_prompt = Some(PendingPrompt {
+        request,
+        field,
+        draft: Some(draft),
+    });
     app.host.send(Command::SavePromptSetting {
         field,
         text,
         revision,
+        request,
     });
     Ok(())
 }
@@ -1128,8 +1135,17 @@ struct App {
     prompt_setting: Option<PromptSetting>,
     /// A draft a refused prompt write kept, for the next edit of its field.
     prompt_draft: Option<(PromptField, editor::Draft)>,
-    /// The draft of a prompt write in flight; removed on success.
-    pending_prompt: Option<(PromptField, editor::Draft)>,
+    /// The prompt write in flight: only its own reply settles it.
+    pending_prompt: Option<PendingPrompt>,
+    /// The next prompt write's id.
+    next_prompt_request: u64,
+}
+
+struct PendingPrompt {
+    request: u64,
+    field: PromptField,
+    /// The save's draft; a reset keeps no draft and leaves its copy behind.
+    draft: Option<editor::Draft>,
 }
 
 /// An offer the Session made for the message the user would send next.
@@ -1436,6 +1452,7 @@ impl App {
             prompt_setting: None,
             prompt_draft: None,
             pending_prompt: None,
+            next_prompt_request: 0,
         }
     }
 
@@ -2477,41 +2494,62 @@ impl App {
                     self.set_notice(tf("Prompt suggestion: {error}", &[("error", &error)]));
                 }
             },
-            Update::PromptSettings { result, field } => match result {
-                Ok(setting) => {
-                    self.prompt_setting = Some(setting.clone());
-                    if let (Some(field), Some((pending, draft))) =
-                        (field, self.pending_prompt.take())
-                        && field == pending
-                    {
-                        draft.remove();
+            Update::PromptSettings {
+                result,
+                field,
+                request,
+            } => {
+                let settled = request.is_some_and(|request| {
+                    self.pending_prompt
+                        .as_ref()
+                        .is_some_and(|pending| pending.request == request)
+                });
+                match result {
+                    Ok(setting) => {
+                        self.prompt_setting = Some(setting.clone());
+                        if settled {
+                            if let Some(pending) = self.pending_prompt.take()
+                                && let Some(draft) = pending.draft
+                            {
+                                draft.remove();
+                            }
+                            if field.is_some() {
+                                self.set_notice(t("Prompt saved; applies to new Sessions"));
+                            }
+                        }
+                        if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                            panel.set_prompts(&setting);
+                        }
                     }
-                    if let Some(Prompt::Settings(panel)) = &mut self.prompt {
-                        panel.set_prompts(&setting);
-                    }
-                    if field.is_some() {
-                        self.set_notice(t("Prompt saved; applies to new Sessions"));
+                    Err(error) => {
+                        if settled {
+                            let pending = self.pending_prompt.take().expect("settled prompt");
+                            if let Some(draft) = pending.draft {
+                                let path = draft.path().display().to_string();
+                                self.prompt_draft = Some((pending.field, draft));
+                                self.set_notice(tf(
+                                    "{field}: {error} Your text is kept in {path}",
+                                    &[
+                                        ("field", pending.field.key()),
+                                        ("error", &error),
+                                        ("path", &path),
+                                    ],
+                                ));
+                            } else {
+                                self.set_notice(tf(
+                                    "{field}: {error}",
+                                    &[("field", pending.field.key()), ("error", &error)],
+                                ));
+                            }
+                        } else if request.is_none() {
+                            if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                                panel.set_prompts_unavailable();
+                            }
+                            self.set_notice(tf("Prompts: {error}", &[("error", &error)]));
+                        }
                     }
                 }
-                Err(error) => {
-                    if let (Some(field), Some((pending, draft))) =
-                        (field, self.pending_prompt.take())
-                        && field == pending
-                    {
-                        let path = draft.path().display().to_string();
-                        self.prompt_draft = Some((field, draft));
-                        self.set_notice(tf(
-                            "{field}: {error} Your text is kept in {path}",
-                            &[("field", field.key()), ("error", &error), ("path", &path)],
-                        ));
-                    } else if let Some(Prompt::Settings(panel)) = &mut self.prompt {
-                        panel.set_prompts_unavailable();
-                        self.set_notice(tf("Prompts: {error}", &[("error", &error)]));
-                    } else {
-                        self.set_notice(tf("Prompts: {error}", &[("error", &error)]));
-                    }
-                }
-            },
+            }
             Update::TurnCompleted { turn_id } => self.turn_completed(&turn_id),
             Update::SuggestionOffer { turn_id, text } => {
                 self.suggestion = Some(Suggestion { turn_id, text });
@@ -3573,8 +3611,18 @@ impl App {
                         }
                     }
                 }
-                self.host
-                    .send(Command::ResetPromptSetting { field, revision });
+                let request = self.next_prompt_request;
+                self.next_prompt_request = self.next_prompt_request.wrapping_add(1);
+                self.pending_prompt = Some(PendingPrompt {
+                    request,
+                    field,
+                    draft: None,
+                });
+                self.host.send(Command::ResetPromptSetting {
+                    field,
+                    revision,
+                    request,
+                });
             }
             Effect::ThemePreview(id) => self.paint_theme(&id),
             Effect::ThemeRestore(id) => {
@@ -8208,6 +8256,7 @@ mod tests {
                 document: serde_json::json!({"summary": "S"}),
             }),
             field: None,
+            request: None,
         });
         app.run_command("settings", "");
         let live = strip_escapes(&app.frame((100, 40)).live.join("\n"));
@@ -8236,6 +8285,84 @@ mod tests {
         ));
     }
 
+    /// A read reply never settles a prompt write; only the write's own reply
+    /// may remove its draft.
+    #[test]
+    fn a_read_or_unrelated_reply_leaves_a_pending_prompt_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent)),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let draft = editor::Draft::open_text(home.path(), "base", "md", "draft").unwrap();
+        let path = draft.path().to_path_buf();
+        app.pending_prompt = Some(PendingPrompt {
+            request: 7,
+            field: PromptField::Base,
+            draft: Some(draft),
+        });
+        app.apply(Update::PromptSettings {
+            result: Ok(PromptSetting {
+                revision: "r2".into(),
+                document: serde_json::json!({}),
+            }),
+            field: None,
+            request: None,
+        });
+        assert!(app.pending_prompt.is_some(), "a read settled the write");
+        assert!(path.exists(), "a read removed the draft");
+        app.apply(Update::PromptSettings {
+            result: Ok(PromptSetting {
+                revision: "r3".into(),
+                document: serde_json::json!({}),
+            }),
+            field: Some(PromptField::Base),
+            request: Some(6),
+        });
+        assert!(app.pending_prompt.is_some(), "another write settled it");
+        assert!(path.exists(), "another write removed the draft");
+    }
+
+    /// A reset occupies the slot, so an edit cannot start until its reply.
+    #[test]
+    fn a_reset_is_serialized_with_a_later_edit() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.prompt_setting = Some(PromptSetting {
+            revision: "r1".into(),
+            document: serde_json::json!({"summary": "S"}),
+        });
+        let _ = app.apply_effect(Effect::ResetPrompt(PromptField::Summary));
+        assert!(
+            app.pending_prompt.is_some(),
+            "reset did not occupy the slot"
+        );
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ResetPromptSetting {
+                field: PromptField::Summary,
+                ..
+            })
+        ));
+        assert!(matches!(
+            app.apply_effect(Effect::EditPrompt(PromptField::Summary)),
+            Outcome::Continue
+        ));
+    }
+
     /// The skills warning is visible while the row is selected, before Enter
     /// opens the editor.
     #[test]
@@ -8250,6 +8377,7 @@ mod tests {
                 document: serde_json::json!({}),
             }),
             field: None,
+            request: None,
         });
         drawn.app.run_command("settings", "");
         for _ in 0..10 {

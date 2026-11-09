@@ -144,6 +144,17 @@ fn prompt_label(field: PromptField) -> &'static str {
 const HINT: &str = "↑↓ move · Enter select · ←→/Space change · r reset · Esc close";
 const SKILLS_HINT: &str =
     "skills replaces the marker and call shape; the skill tool and list stay · r reset";
+const PROMPT_HINT: &str = "↑↓ move · Enter edit · r reset · Esc close";
+
+fn hint_for(setting: Setting) -> &'static str {
+    if setting == Setting::SkillsPrompt {
+        SKILLS_HINT
+    } else if setting.prompt_field().is_some() {
+        PROMPT_HINT
+    } else {
+        HINT
+    }
+}
 
 fn prompt_origin(prompt: Option<bool>) -> String {
     match prompt {
@@ -235,14 +246,7 @@ impl SettingsPanel {
         ]);
         let mut list = ListPanel::new("Settings", HINT, "", "", "", false).without_filter();
         list.set_items(Ok(items), Some(select.id()));
-        list.set_hint(
-            t(if select == Setting::SkillsPrompt {
-                SKILLS_HINT
-            } else {
-                HINT
-            })
-            .to_owned(),
-        );
+        list.set_hint(t(hint_for(select)).to_owned());
         Self {
             list,
             prompts: values.prompts,
@@ -328,14 +332,7 @@ impl SettingsPanel {
     }
 
     fn set_hint(&mut self) {
-        self.list.set_hint(
-            t(if self.selected() == Setting::SkillsPrompt {
-                SKILLS_HINT
-            } else {
-                HINT
-            })
-            .to_owned(),
-        );
+        self.list.set_hint(t(hint_for(self.selected())).to_owned());
     }
 
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {

@@ -309,11 +309,13 @@ pub enum Command {
         field: PromptField,
         text: String,
         revision: String,
+        request: u64,
     },
     /// Remove one prompt field, merging the rest of the document.
     ResetPromptSetting {
         field: PromptField,
         revision: String,
+        request: u64,
     },
     ClearModelPreferences {
         provider_id: String,
@@ -1216,6 +1218,7 @@ pub enum Update {
     PromptSettings {
         result: Result<PromptSetting, String>,
         field: Option<PromptField>,
+        request: Option<u64>,
     },
     /// A turn completed on `main`: the interface may ask for the next
     /// message when nothing else has its attention.

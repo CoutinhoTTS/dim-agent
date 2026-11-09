@@ -1575,24 +1575,32 @@ impl Worker {
                 self.send(Update::PromptSettings {
                     result,
                     field: None,
+                    request: None,
                 });
             }
             Command::SavePromptSetting {
                 field,
                 text,
                 revision,
+                request,
             } => {
                 let result = self.write_prompt(field, Some(&text), &revision).await;
                 self.send(Update::PromptSettings {
                     result,
                     field: Some(field),
+                    request: Some(request),
                 });
             }
-            Command::ResetPromptSetting { field, revision } => {
+            Command::ResetPromptSetting {
+                field,
+                revision,
+                request,
+            } => {
                 let result = self.write_prompt(field, None, &revision).await;
                 self.send(Update::PromptSettings {
                     result,
                     field: Some(field),
+                    request: Some(request),
                 });
             }
             Command::ReadModelPolicy => self.read_model_policy(false).await,

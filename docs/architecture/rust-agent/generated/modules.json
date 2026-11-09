@@ -44599,7 +44599,8 @@
       "to": "dim_cli::management::editor",
       "references": [
         "path editor::Draft",
-        "path editor::Draft::open"
+        "path editor::Draft::open",
+        "path editor::Draft::open_text"
       ]
     },
     {
@@ -44634,6 +44635,8 @@
         "path ManagementResult::Applied",
         "path ManagementResult::Refused",
         "path ManagementResult::View",
+        "path PromptField::Base",
+        "path PromptField::Summary",
         "path PromptSetting",
         "path SessionPort",
         "path SuggestionSetting",
@@ -44763,6 +44766,7 @@
       "to": "dim_cli::ui::prompts",
       "references": [
         "path AskUserPrompt::new",
+        "path Effect::ResetPrompt",
         "path WriteTarget::Area",
         "path WriteTarget::Create",
         "path WriteTarget::Run"
@@ -44912,6 +44916,7 @@
         "path ImageRead",
         "path LOAD_MORE",
         "path ManagementDraft",
+        "path PendingPrompt",
         "path Prompt",
         "path Prompt::Ask",
         "path Prompt::Isolation",
