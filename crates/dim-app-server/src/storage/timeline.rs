@@ -1050,6 +1050,12 @@ impl SessionStore {
     pub fn timeline_store(&self) -> Arc<dyn TimelineStore> {
         self.timeline.clone()
     }
+
+    /// Native query counters for product-flow verification.
+    #[cfg(feature = "testing")]
+    pub fn timeline_diagnostics(&self) -> &SqliteTimelineStore {
+        &self.timeline
+    }
     /// Adds a canonical user grant for `session_id`. The caller resolves
     /// `path`; a write grant is not downgraded by a later read grant, and a
     /// read grant may become write.

@@ -248,59 +248,41 @@ impl Connection {
             };
             return reply.map(Reply::History);
         }
-        let events = rpc
-            .index
-            .history_page(&params.session_id, branch, after, limit, through)
-            .await
+        let tree = session
+            .session_service::<TreeCommands>()
             .map_err(history_error)?;
-        // The page's events come from the index; its batch edges come from the
-        // same owner, and a line that ends in between serves them through the
-        // tree at its fixed head (ADR 021 D2).
-        let reply = if session.ended_head(branch).is_some() {
-            let tree = session
-                .session_service::<TreeCommands>()
-                .map_err(history_error)?;
-            forward_at(
-                &HistoryRead::Ended(&tree),
-                branch,
-                events,
-                after,
-                through,
-                self.protocol_version(),
-            )
-            .await
+        let read = if session.ended_head(branch).is_some() {
+            HistoryRead::Ended(&tree)
         } else {
-            match forward_at(
-                &HistoryRead::Open(&session),
-                branch,
-                events.clone(),
-                after,
-                through,
-                self.protocol_version(),
-            )
-            .await
+            HistoryRead::Open(&session)
+        };
+        let reply = forward_page(
+            &read,
+            branch,
+            after,
+            limit,
+            through,
+            self.protocol_version(),
+        )
+        .await;
+        let reply = match reply {
+            Err(error)
+                if error
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.app_error == "branch_ended") =>
             {
-                Err(error)
-                    if error
-                        .data
-                        .as_ref()
-                        .is_some_and(|data| data.app_error == "branch_ended") =>
-                {
-                    let tree = session
-                        .session_service::<TreeCommands>()
-                        .map_err(history_error)?;
-                    forward_at(
-                        &HistoryRead::Ended(&tree),
-                        branch,
-                        events,
-                        after,
-                        through,
-                        self.protocol_version(),
-                    )
-                    .await
-                }
-                other => other,
+                forward_page(
+                    &HistoryRead::Ended(&tree),
+                    branch,
+                    after,
+                    limit,
+                    through,
+                    self.protocol_version(),
+                )
+                .await
             }
+            other => other,
         };
         reply.map(Reply::History)
     }
@@ -972,8 +954,17 @@ async fn window_at(
     turn: crate::storage::TurnWindow,
     version: u32,
 ) -> Result<wire::HistoryResult, RpcError> {
-    let events = window_page(read, branch, before, limit, through, turn.window_start).await?;
-    history_window(read, branch, events, through, turn, version).await
+    let events = window_page(
+        read,
+        branch,
+        before,
+        limit,
+        through,
+        turn.window_start,
+        version,
+    )
+    .await?;
+    history_window(read, branch, events, through, turn).await
 }
 
 /// The newest events below `before` inside `window_start..=through`
@@ -988,7 +979,8 @@ async fn window_page(
     limit: usize,
     through: u64,
     window_start: u64,
-) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>, RpcError> {
+    version: u32,
+) -> Result<Vec<HistoryItem>, RpcError> {
     if through > 0 {
         read.batch_end(branch, through)
             .await
@@ -1001,24 +993,12 @@ async fn window_page(
     let Some(end) = batch_end_at_or_below(read, branch, top, window_start).await? else {
         return Ok(Vec::new());
     };
-    let mut low = end
+    let low = end
         .saturating_sub(limit.saturating_sub(1) as u64)
         .max(1)
         .max(window_start);
-    loop {
-        let events = window_events(read, branch, low, end).await?;
-        let Some(first) = events.first().map(|event| event.sequence) else {
-            return Ok(Vec::new());
-        };
-        if low <= window_start || low == 1 {
-            return Ok(events);
-        }
-        let start = batch_start(read, branch, first, window_start).await?;
-        if start >= low {
-            return Ok(events);
-        }
-        low = start;
-    }
+    let low = batch_start(read, branch, low, window_start).await?;
+    window_items(read, branch, low, end, version).await
 }
 
 /// The greatest atomic-batch end at or below `top`, searching no lower than
@@ -1060,12 +1040,13 @@ async fn batch_start(
 }
 
 /// `low..=end` through the source query.
-async fn window_events(
+async fn window_items(
     read: &HistoryRead<'_>,
     branch: &str,
     low: u64,
     end: u64,
-) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>, RpcError> {
+    version: u32,
+) -> Result<Vec<HistoryItem>, RpcError> {
     let limit = end.saturating_sub(low).saturating_add(1).max(1);
     let reply = read
         .query(
@@ -1080,7 +1061,7 @@ async fn window_events(
                 include_publishing: false,
                 query: QuerySpec {
                     rows: None,
-                    filter: None,
+                    filter: Some(wire::ProductEvent::query_filter()),
                     select: QuerySelect::Events,
                     group_by: vec![],
                     pick: None,
@@ -1097,7 +1078,22 @@ async fn window_events(
     let QueryOutput::Events { events } = reply.result else {
         unreachable!("event selection returns events")
     };
-    Ok(events.into_iter().map(|row| row.event).collect())
+    let mut visible = history_items(events.into_iter().map(|row| row.event).collect(), version)?
+        .into_iter()
+        .peekable();
+    Ok((low..=end)
+        .map(|sequence| {
+            if visible.peek().is_some_and(|item| item.sequence == sequence) {
+                visible.next().unwrap()
+            } else {
+                HistoryItem {
+                    sequence,
+                    bytes: 0,
+                    event: None,
+                }
+            }
+        })
+        .collect())
 }
 
 /// One event of a history page with its encoded form, built once, and size.
@@ -1243,15 +1239,33 @@ async fn batch_end_from(
 /// byte target. A trimmed page is a short page, not the end: `done` is false
 /// and `nextAfter` is its last returned sequence, so the client continues as
 /// it does today.
-async fn forward_at(
+async fn forward_page(
     read: &HistoryRead<'_>,
     branch: &str,
-    events: Vec<Arc<dim_agent_types::AgentEvent>>,
     after: u64,
+    limit: usize,
     through: u64,
     version: u32,
 ) -> Result<wire::HistoryResult, RpcError> {
-    let items = history_items(events, version)?;
+    if after > 0 {
+        read.batch_end(branch, after).await.map_err(history_error)?;
+    }
+    read.batch_end(branch, through)
+        .await
+        .map_err(history_error)?;
+    let mut end = after.saturating_add(limit as u64).min(through);
+    while end < through && end > after {
+        match read.batch_end(branch, end).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => end += 1,
+            Err(error) => return Err(history_error(error)),
+        }
+    }
+    let items = if end > after {
+        window_items(read, branch, after + 1, end, version).await?
+    } else {
+        Vec::new()
+    };
     let keep = bounded_batches(read, branch, &items, false).await?;
     let next_after = keep
         .end
@@ -1278,12 +1292,10 @@ async fn forward_at(
 async fn history_window(
     read: &HistoryRead<'_>,
     branch: &str,
-    events: Vec<Arc<dim_agent_types::AgentEvent>>,
+    mut items: Vec<HistoryItem>,
     through: u64,
     turn: crate::storage::TurnWindow,
-    version: u32,
 ) -> Result<wire::HistoryResult, RpcError> {
-    let mut items = history_items(events, version)?;
     let keep = bounded_batches(read, branch, &items, true).await?;
     let kept = items.split_off(keep.start);
     let next_before = kept.first().map(|item| item.sequence);

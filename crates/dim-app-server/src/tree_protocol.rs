@@ -76,67 +76,76 @@ pub struct BranchesResult {
 
 #[derive(Debug)]
 pub struct ProductEvent(Arc<AgentEvent>);
+const PRODUCT_EVENT_KINDS: &[&str] = &[
+    "input/message",
+    "input/applied",
+    "input/consumed",
+    "exec/started",
+    "exec/ended",
+    "permission/changed",
+    "stop/interrupt",
+    "turn/start",
+    "turn/end",
+    "context/configured",
+    "context/scope",
+    "model/usage",
+    "step/model-start",
+    "step/thinking",
+    "step/text",
+    "step/tool-use",
+    "step/model-output-end",
+    "step/tool-call",
+    "step/tool-start",
+    "step/tool-completed",
+    "branch/create",
+    "branch/start",
+    "branch/create-failed",
+    "collaboration/request",
+    "collaboration/cancel",
+    "collaboration/close",
+    "collaboration/message",
+    "collaboration/delivered",
+    "collaboration/result",
+];
+const V3_EVENT_KINDS: &[&str] = &[
+    "step/tool-use-start",
+    "input/withdraw",
+    "input/deleted",
+    "context/compact",
+    "context/compaction-start",
+    "context/compaction",
+    "branch/end",
+    "branch/ended",
+    "session/forked",
+];
+
 impl ProductEvent {
     /// `version` is the connection's protocol version (2 or 3).
     pub fn new(event: Arc<AgentEvent>, version: u32) -> Option<Self> {
-        let visible = match &event.kind {
-            EventKind::ToolUseStart(_) => version >= 3,
-            EventKind::ToolResult(data) => version >= 3 || data.call_event_id.is_some(),
-            EventKind::InputWithdraw(_) | EventKind::InputDeleted(_) => version >= 3,
-            EventKind::ContextCompact(_)
-            | EventKind::ContextCompactionStart(_)
-            | EventKind::ContextCompaction(_) => version >= 3,
-            EventKind::BranchEnd(_) | EventKind::BranchEnded(_) => version >= 3,
-            // A fork's opening is where an owner that folds the branch's own
-            // history stops reading the copied facts (Goal A11).
-            EventKind::SessionForked(_) => version >= 3,
-            EventKind::InputMessage(_)
-            | EventKind::InputApplied(_)
-            | EventKind::InputConsumed(_)
-            | EventKind::ExecStarted(_)
-            | EventKind::ExecEnded(_)
-            | EventKind::PermissionChanged(_)
-            | EventKind::StopInterrupt(_)
-            | EventKind::TurnStart(_)
-            | EventKind::TurnEnd(_)
-            | EventKind::ContextConfigured(_)
-            | EventKind::ContextScope(_)
-            | EventKind::ModelUsage(_)
-            | EventKind::ModelStart(_)
-            | EventKind::Thinking(_)
-            | EventKind::Text(_)
-            | EventKind::ToolUse(_)
-            | EventKind::ModelOutputEnd(_)
-            | EventKind::ToolCall(_)
-            | EventKind::ToolStart(_)
-            | EventKind::ToolCompleted(_)
-            | EventKind::BranchCreate(_)
-            | EventKind::BranchStart(_)
-            | EventKind::BranchCreateFailed(_)
-            | EventKind::CollaborationRequest(_)
-            | EventKind::CollaborationCancel(_)
-            | EventKind::CollaborationClose(_)
-            | EventKind::CollaborationMessage(_)
-            | EventKind::CollaborationDelivered(_)
-            | EventKind::CollaborationResult(_) => true,
-            EventKind::ModelContent(_)
-            | EventKind::ApprovalRequest(_)
-            | EventKind::ApprovalRespond(_)
-            | EventKind::ApprovalCancelled(_)
-            | EventKind::PromptChanged(_)
-            | EventKind::PromptConfigureRequest(_)
-            | EventKind::PromptConfigureResult(_)
-            | EventKind::ContextPrepare(_)
-            | EventKind::ContextBudget(_)
-            | EventKind::ModelCall(_)
-            | EventKind::BranchResume(_)
-            // v2/v3 keep their allowlists; extension events reach only a
-            // dynamic protocol after host visibility filtering (ADR 001).
-            | EventKind::Extension(_) => false,
-        };
+        let visible = PRODUCT_EVENT_KINDS.contains(&event.kind.key())
+            || (version >= 3 && V3_EVENT_KINDS.contains(&event.kind.key()))
+            || matches!(&event.kind, EventKind::ToolResult(data) if version >= 3 || data.call_event_id.is_some());
         visible.then_some(Self(event))
     }
+
+    /// The visible facts of protocol v3 history; earlier protocols reject that method.
+    pub(crate) fn query_filter() -> dim_agent_runtime::QueryFilter {
+        use dim_agent_runtime::{QueryFilter, QueryOperand};
+        QueryFilter::In {
+            value: QueryOperand::Field {
+                path: "kind".into(),
+            },
+            values: PRODUCT_EVENT_KINDS
+                .iter()
+                .chain(V3_EVENT_KINDS)
+                .copied()
+                .chain(std::iter::once("step/tool-result"))
+                .map(serde_json::Value::from)
+                .collect(),
+        }
+    }
 }
+
 impl Serialize for ProductEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if let EventKind::ContextConfigured(configured) = &self.0.kind {

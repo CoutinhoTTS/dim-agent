@@ -3449,6 +3449,7 @@
       "parent": "dim_app_server",
       "file": "crates/dim-app-server/src/tree_protocol.rs",
       "unexpandedMacros": [
+        "matches",
         "serde_json::json"
       ]
     },
@@ -24848,6 +24849,7 @@
         "path wire::KeyEntry",
         "path wire::KeysResult",
         "path wire::ProductEvent::new",
+        "path wire::ProductEvent::query_filter",
         "use crate::tree_protocol"
       ]
     },
@@ -31594,63 +31596,20 @@
     },
     {
       "from": "dim_app_server::tree_protocol",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path dim_agent_runtime::QueryFilter"
+      ]
+    },
+    {
+      "from": "dim_app_server::tree_protocol",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
         "path ApprovalCallData",
         "path ApprovalDecision",
         "path BranchSource",
-        "path EventKind::ApprovalCancelled",
-        "path EventKind::ApprovalRequest",
-        "path EventKind::ApprovalRespond",
-        "path EventKind::BranchCreate",
-        "path EventKind::BranchCreateFailed",
-        "path EventKind::BranchEnd",
-        "path EventKind::BranchEnded",
-        "path EventKind::BranchResume",
-        "path EventKind::BranchStart",
-        "path EventKind::CollaborationCancel",
-        "path EventKind::CollaborationClose",
-        "path EventKind::CollaborationDelivered",
-        "path EventKind::CollaborationMessage",
-        "path EventKind::CollaborationRequest",
-        "path EventKind::CollaborationResult",
-        "path EventKind::ContextBudget",
-        "path EventKind::ContextCompact",
-        "path EventKind::ContextCompaction",
-        "path EventKind::ContextCompactionStart",
         "path EventKind::ContextConfigured",
-        "path EventKind::ContextPrepare",
-        "path EventKind::ContextScope",
-        "path EventKind::ExecEnded",
-        "path EventKind::ExecStarted",
-        "path EventKind::Extension",
-        "path EventKind::InputApplied",
-        "path EventKind::InputConsumed",
-        "path EventKind::InputDeleted",
-        "path EventKind::InputMessage",
-        "path EventKind::InputWithdraw",
-        "path EventKind::ModelCall",
-        "path EventKind::ModelContent",
-        "path EventKind::ModelOutputEnd",
-        "path EventKind::ModelStart",
-        "path EventKind::ModelUsage",
-        "path EventKind::PermissionChanged",
-        "path EventKind::PromptChanged",
-        "path EventKind::PromptConfigureRequest",
-        "path EventKind::PromptConfigureResult",
-        "path EventKind::SessionForked",
-        "path EventKind::StopInterrupt",
-        "path EventKind::Text",
-        "path EventKind::Thinking",
-        "path EventKind::ToolCall",
-        "path EventKind::ToolCompleted",
-        "path EventKind::ToolResult",
-        "path EventKind::ToolStart",
-        "path EventKind::ToolUse",
-        "path EventKind::ToolUseStart",
-        "path EventKind::TurnEnd",
-        "path EventKind::TurnStart",
         "path ModelFailureKind",
         "path dim_agent_types::BranchEndData",
         "path dim_agent_types::BranchSource",
@@ -49954,6 +49913,14 @@
     {
       "module": "dim_app_server::transport",
       "path": "TryLockError::WouldBlock"
+    },
+    {
+      "module": "dim_app_server::tree_protocol",
+      "path": "QueryFilter::In"
+    },
+    {
+      "module": "dim_app_server::tree_protocol",
+      "path": "QueryOperand::Field"
     },
     {
       "module": "dim_app_server::tree_protocol",

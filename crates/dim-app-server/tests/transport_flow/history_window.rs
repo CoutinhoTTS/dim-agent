@@ -1,5 +1,94 @@
 use super::*;
 
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_model_requests_are_not_rebuilt_for_windows_or_forward_pages() {
+    use dim_agent_runtime::{
+        QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec,
+        TimelineQuery, TimelineQueryScope,
+    };
+    let directory = new_directory("hidden-request");
+    let model = Arc::new(StreamingModel::default());
+    let (server, probe) = serve_streaming(&directory, model.clone()).await;
+    let storage = server
+        .service::<dim_app_server::storage::SessionStore>()
+        .unwrap();
+    let mut writer = Client::new_version(&server, false, 3).await;
+    let created = writer.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap();
+    turn(
+        &mut writer,
+        &model,
+        id,
+        &"H".repeat(2 * 1024 * 1024),
+        Plan::Chunks(1),
+    )
+    .await;
+    let timeline = probe.timeline.lock().unwrap().as_ref().unwrap().clone();
+    let through = timeline.sequence();
+    let reply = timeline
+        .query(TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: false,
+            query: QuerySpec {
+                rows: None,
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec!["model/call".into()],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["position.sequence".into()],
+                },
+                group_by: vec![],
+                pick: Some(QueryPick::Last),
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: std::num::NonZeroU64::MIN,
+                after: None,
+            }),
+        })
+        .await
+        .unwrap();
+    let QueryOutput::Rows { rows } = reply.result else {
+        panic!("the model call position")
+    };
+    let dim_agent_runtime::QueryValue::Value { value } = &rows[0].values[0] else {
+        panic!("the call sequence")
+    };
+    let call = value.as_u64().unwrap();
+    let mut reader = Client::new_version(&server, false, 3).await;
+    assert_ok(&reader.rpc("session.attach", json!({"sessionId":id})).await);
+    for params in [
+        json!({"sessionId":id,"branchId":"main","through":through,"before":call+1,"limit":1}),
+        json!({"sessionId":id,"branchId":"main","through":call,"after":call-1,"limit":1}),
+    ] {
+        let backward = params.get("before").is_some();
+        let _ = storage.timeline_diagnostics().take_node_loads();
+        let page = reader.rpc("session.history", params).await;
+        assert_ok(&page);
+        assert!(page["result"]["events"].as_array().unwrap().is_empty());
+        assert_eq!(page["result"]["nextAfter"], call);
+        assert_eq!(page["result"]["done"], !backward);
+        if backward {
+            assert_eq!(page["result"]["nextBefore"], call);
+        }
+        assert_eq!(
+            storage.timeline_diagnostics().take_node_loads().loads,
+            0,
+            "a hidden request must not load stored message nodes"
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 /// What one model invocation streams: `chunks` thinking fragments, which are
 /// one durable event each, or one text fragment of `bytes`.
 #[derive(Clone, Copy)]
