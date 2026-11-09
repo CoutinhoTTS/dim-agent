@@ -120,6 +120,7 @@ async fn read_image_reaches_a_vision_model_and_becomes_text_for_others() {
     workspace_tools::install(
         &mut builder,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.join("command-output"),
         },
     );
@@ -274,6 +275,7 @@ async fn an_offloaded_read_result_registers_its_output_path() {
     workspace_tools::install(
         &mut builder,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.join("command-output"),
         },
     );

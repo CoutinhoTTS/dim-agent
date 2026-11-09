@@ -377,6 +377,7 @@ impl Harness {
         workspace_tools::install(
             &mut builder,
             WorkspaceToolsConfig {
+                boundary: None,
                 output_root: output_root.clone(),
             },
         );
