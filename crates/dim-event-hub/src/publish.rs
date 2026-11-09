@@ -173,17 +173,13 @@ async fn publish_to_completion(
     let plans = plan_targets(&document.subscriptions, &request, declared_mode);
     let truncated = request.body.len() > BODY_LIMIT;
     let guide_digest = digest(&declaration.guide);
-    let repeated = if truncated {
-        looked_up(&shared, &plans, &submission).await
-    } else {
-        HashMap::new()
-    };
+    let (repeated, lookup_failed) = looked_up(&shared, &plans, &submission).await;
     let pending: Vec<&PlannedTarget> = plans
         .iter()
         .filter(|plan| !repeated.contains_key(&(plan.session_id.clone(), plan.branch_id.clone())))
         .collect();
     let files = if truncated {
-        overflow_files(&shared, &pending, &request.body).await
+        overflow_files(&shared, &pending, &lookup_failed, &request.body).await
     } else {
         HashMap::new()
     };
@@ -203,7 +199,15 @@ async fn publish_to_completion(
                     repeated: Some(true),
                 });
             }
-            let file = files.get(&plan.session_id).and_then(Option::as_ref);
+            // A branch whose lookup failed gets no file: its input carries
+            // the preview with `truncated: true`, the put-failed row of
+            // design §3.2 (design §2.4).
+            let file = if lookup_failed.contains(&(plan.session_id.clone(), plan.branch_id.clone()))
+            {
+                None
+            } else {
+                files.get(&plan.session_id).and_then(Option::as_ref)
+            };
             let text = event_text(request.title.as_deref(), &request.body, truncated);
             Planned::Dispatch(DeliveryJob {
                 session_id: plan.session_id.clone(),
@@ -342,44 +346,62 @@ fn strongest(modes: &[InputMode]) -> Option<InputMode> {
 }
 
 /// The branches that already hold this event's input, by `sessions.lookup`
-/// (design §2.4, §3.2). Only an overflowed body asks: a body that fits writes
-/// no file, so a repeated input is already answered by the branch itself.
+/// (design §2.4, §3.2), and the branches whose lookup failed. Every publish
+/// asks, for every body, under a delivery permit of the install's budget;
+/// a branch that held the input answers `repeated` with the first input's id
+/// and sequence. A failed lookup is not "not held": that branch goes on to
+/// `sessions.input`, which answers by its own dedupe (design §2.4).
 async fn looked_up(
     shared: &Shared,
     plans: &[PlannedTarget],
     submission: &str,
-) -> HashMap<(String, String), (String, u64)> {
+) -> (
+    HashMap<(String, String), (String, u64)>,
+    HashSet<(String, String)>,
+) {
     let mut held = HashMap::new();
+    let mut failed = HashSet::new();
     for plan in plans {
+        let _permit = shared.state.delivery_permit().await;
         let args = json!({
             "sessionId": plan.session_id,
             "branchId": plan.branch_id,
             "submissionId": submission,
         });
-        if let Ok(Ok(value)) = sessions(shared.sessions.as_ref(), "lookup", args).await
-            && value["status"] == json!("accepted")
-            && let (Some(input_id), Some(sequence)) =
-                (value["inputId"].as_str(), value["sequence"].as_u64())
-        {
-            held.insert(
-                (plan.session_id.clone(), plan.branch_id.clone()),
-                (input_id.to_owned(), sequence),
-            );
+        let key = (plan.session_id.clone(), plan.branch_id.clone());
+        match sessions(shared.sessions.as_ref(), "lookup", args).await {
+            Ok(Ok(value)) if value["status"] == json!("accepted") => {
+                if let (Some(input_id), Some(sequence)) =
+                    (value["inputId"].as_str(), value["sequence"].as_u64())
+                {
+                    held.insert(key, (input_id.to_owned(), sequence));
+                }
+            }
+            Ok(Ok(_)) => {}
+            _ => {
+                failed.insert(key);
+            }
         }
     }
-    held
+    (held, failed)
 }
 
 /// Stores an overflowed body once per target Session (design §3.2), and
 /// answers the file each Session got, if any. A Session whose every branch
-/// already holds the input gets no file.
+/// already holds the input gets no file, and neither does one whose pending
+/// branch's lookup failed: its inputs carry the preview with `truncated`
+/// (design §2.4).
 async fn overflow_files(
     shared: &Shared,
     plans: &[&PlannedTarget],
+    lookup_failed: &HashSet<(String, String)>,
     body: &str,
 ) -> HashMap<String, Option<dim_agent_capabilities::host::StoredSessionFile>> {
     let mut sessions: Vec<String> = Vec::new();
     for plan in plans {
+        if lookup_failed.contains(&(plan.session_id.clone(), plan.branch_id.clone())) {
+            continue;
+        }
         if !sessions.contains(&plan.session_id) {
             sessions.push(plan.session_id.clone());
         }

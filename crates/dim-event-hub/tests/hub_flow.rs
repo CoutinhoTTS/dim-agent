@@ -101,6 +101,11 @@ async fn a_republished_event_is_delivered_once() {
         second["deliveries"][0]["sequence"],
         first["deliveries"][0]["sequence"]
     );
+    assert_eq!(
+        second["deliveries"][0]["repeated"],
+        json!(true),
+        "a body under the limit answers repeated too: {second}"
+    );
     let events = history(&mut client, &session).await;
     assert_eq!(inputs(&events, "<dim-event ").len(), 1, "{events:?}");
 
