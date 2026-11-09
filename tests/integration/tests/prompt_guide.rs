@@ -104,6 +104,7 @@ fn workspace(builder: &mut AgentBuilder, dirs: &Dirs) {
     workspace_tools::install(
         builder,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: dirs.dir("output"),
         },
     );

@@ -11518,7 +11518,7 @@ mod tests {
             "the socket must not live under the run root: {socket:?}"
         );
         assert!(
-            !socket.starts_with(&workspace_of(&run_root)),
+            !socket.starts_with(workspace_of(&run_root)),
             "the socket must not live under the workspace: {socket:?}"
         );
     }
