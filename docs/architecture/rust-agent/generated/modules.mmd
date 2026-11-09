@@ -122,10 +122,10 @@ flowchart LR
   m118["dim_agent_capabilities::workspace_tools::exec"]
   m119["dim_agent_capabilities::workspace_tools::file_reads"]
   m120["dim_agent_capabilities::workspace_tools::files"]
-  m121["dim_agent_capabilities::workspace_tools::files::boundary_tests"]
-  m122["dim_agent_capabilities::workspace_tools::files::codec"]
-  m123["dim_agent_capabilities::workspace_tools::files::edit"]
-  m124["dim_agent_capabilities::workspace_tools::files::mutation_tests"]
+  m121["dim_agent_capabilities::workspace_tools::files::codec"]
+  m122["dim_agent_capabilities::workspace_tools::files::edit"]
+  m123["dim_agent_capabilities::workspace_tools::files::mutation_tests"]
+  m124["dim_agent_capabilities::workspace_tools::files::queued_boundary_tests"]
   m125["dim_agent_capabilities::workspace_tools::files::read"]
   m126["dim_agent_capabilities::workspace_tools::files::search"]
   m127["dim_agent_capabilities::workspace_tools::files::write"]
@@ -1574,36 +1574,35 @@ flowchart LR
   m119 --> m156
   m119 --> m157
   m119 --> m172
+  m120 --> m52
   m120 --> m59
   m120 --> m119
   m120 -.-> m121
-  m120 -.-> m122
-  m120 --> m123
+  m120 --> m122
+  m120 -.-> m123
   m120 -.-> m124
   m120 --> m125
   m120 --> m126
   m120 --> m127
   m120 --> m170
   m120 --> m192
-  m121 --> m59
   m121 --> m119
   m121 --> m120
-  m121 --> m141
-  m121 --> m146
-  m121 --> m158
-  m121 --> m173
   m121 --> m192
+  m122 --> m59
   m122 --> m119
   m122 --> m120
+  m122 --> m121
+  m122 --> m127
+  m122 --> m170
   m122 --> m192
   m123 --> m59
   m123 --> m119
   m123 --> m120
-  m123 --> m122
-  m123 --> m127
-  m123 --> m170
+  m123 --> m141
+  m123 --> m146
+  m123 --> m158
   m123 --> m192
-  m124 --> m59
   m124 --> m119
   m124 --> m120
   m124 --> m141
@@ -1614,7 +1613,7 @@ flowchart LR
   m125 --> m67
   m125 --> m119
   m125 --> m120
-  m125 --> m122
+  m125 --> m121
   m125 --> m170
   m125 --> m173
   m125 --> m192
@@ -1626,7 +1625,7 @@ flowchart LR
   m127 --> m59
   m127 --> m119
   m127 --> m120
-  m127 --> m122
+  m127 --> m121
   m127 --> m170
   m127 --> m192
   m129 --> m71
