@@ -2103,3 +2103,114 @@ async fn a_pause_and_resume_between_the_disable_read_and_write_supersedes_it() {
     server.join().await.unwrap();
 }
 
+/// A save that sends the legacy `reuse` binding's mapped target explicitly
+/// has not replaced it: nothing is released, before or after a retention
+/// pass (A.7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_explicitly_sent_equivalent_target_does_not_release_the_binding() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let launched = create_session(&mut client, home.path(), true).await;
+    let dummy_session = create_session(&mut client, home.path(), true).await;
+    save_session_job(
+        &mut client,
+        "seed",
+        &launched,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    seed_legacy_reuse_job(home.path(), &launched);
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let dummy = save_session_job(
+        &mut client,
+        "dummy",
+        &dummy_session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    // The client sends the binding's mapped target explicitly.
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": "reuse",
+                "target": {"kind": "session", "session_id": launched, "branch_id": "main"}}}),
+        )
+        .await
+        .unwrap();
+    let runs = stored_runs(home.path());
+    let run = runs.iter().find(|run| run["run_id"] == "run-1").unwrap();
+    assert!(
+        run.get("released").is_none(),
+        "the equivalent target releases nothing: {run}"
+    );
+    // A retention pass re-derives no release either.
+    client
+        .typed::<Value>("schedule.delete", json!({"job_id": dummy}))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let runs = stored_runs(home.path());
+    let run = runs.iter().find(|run| run["run_id"] == "run-1").unwrap();
+    assert_eq!(run["session_origin"], "launch", "{run}");
+    assert!(
+        run.get("released").is_none(),
+        "the retention pass releases nothing: {run}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A failed release wakes a retention pass, so the release heals at once
+/// rather than at the timer's next minute (A.7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_release_wakes_a_retention_pass() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let launched = create_session(&mut client, home.path(), true).await;
+    let retarget = create_session(&mut client, home.path(), true).await;
+    save_session_job(
+        &mut client,
+        "seed",
+        &launched,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    seed_legacy_reuse_job(home.path(), &launched);
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    support::holds(home.path()).fail_next_release();
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": "reuse",
+                "target": {"kind": "session", "session_id": retarget, "branch_id": "main"}}}),
+        )
+        .await
+        .unwrap();
+    // No delivery or delete follows: only the failed release's wake can run
+    // the pass that re-derives it.
+    wait_for("the failed release heals at the wake", || {
+        stored_runs(home.path())
+            .iter()
+            .any(|run| run["run_id"] == "run-1" && run["released"] == true)
+    })
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}

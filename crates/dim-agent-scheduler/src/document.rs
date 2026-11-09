@@ -236,6 +236,25 @@ impl Job {
         }
     }
 
+    /// Whether the job's stored target replaced the Session its legacy
+    /// `reuse` binding names (A.7): the one legacy form that releases the
+    /// binding's launch ownership. A client that sends the mapped target
+    /// explicitly has not replaced it, so nothing is released.
+    pub fn replaced_reuse_binding(&self) -> bool {
+        if self.mode != Some(Mode::Reuse) {
+            return false;
+        }
+        let (Some(session_id), Some(target)) = (&self.session_id, &self.target) else {
+            return false;
+        };
+        *target
+            != Target::Session {
+                session_id: session_id.clone(),
+                branch_id: default_branch_id(),
+                input_mode: InputMode::Queue,
+            }
+    }
+
     pub fn validate(&self) -> Result<(), SettingsError> {
         if self.name.is_empty() {
             return Err(SettingsError::Invalid("a job needs a name"));

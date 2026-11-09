@@ -578,13 +578,14 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
     let cancel = CancellationToken::new();
     let runs = runs::read(&shared.files).await?;
     let document = read_document(shared, &cancel).await?.document;
-    // A job whose target replaced its legacy `reuse` binding releases that
-    // binding's launch ownership, and a pass re-derives it from the document
-    // so a save whose own release write failed heals here (§2.3, A.7).
+    // A job whose stored target replaced the Session its legacy `reuse`
+    // binding names releases that binding's launch ownership, and a pass
+    // re-derives it from the document so a save whose own release write
+    // failed heals here (§2.3, A.7).
     let releases: HashSet<(String, String)> = document
         .jobs
         .iter()
-        .filter(|job| job.target.is_some() && job.mode == Some(Mode::Reuse))
+        .filter(|job| job.replaced_reuse_binding())
         .filter_map(|job| {
             job.session_id
                 .clone()

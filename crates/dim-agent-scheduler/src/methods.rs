@@ -623,6 +623,14 @@ async fn release_owned_runs(shared: &Shared, job: &Job) -> Result<(), SchedulerE
     let Some(session_id) = job.session_id.clone() else {
         return Ok(());
     };
+    #[cfg(feature = "testing")]
+    if shared
+        .holds
+        .as_ref()
+        .is_some_and(|holds| holds.take_release_failure())
+    {
+        return Err(SchedulerError::new("io", "injected release failure"));
+    }
     let job_id = job.id.clone();
     runs::update(&shared.files, move |history| {
         let retire: HashSet<String> = history
@@ -691,13 +699,13 @@ async fn save_job(
 }
 
 async fn save(
-    shared: &Shared,
+    shared: &Arc<Shared>,
     input: SaveParams,
     cancel: &CancellationToken,
 ) -> Result<Value, SchedulerError> {
     let host = host_bound(shared).await?;
     let id = input.job.id.clone();
-    let (job, previous) = save_job(
+    let (job, _) = save_job(
         shared,
         cancel,
         id.as_deref(),
@@ -709,13 +717,13 @@ async fn save(
     )
     .await?;
     // The settings write has committed, so the reply reports that save even
-    // when the release below fails; the next retention pass re-derives the
-    // release from the saved document (A.7).
-    if let Some(previous) = &previous
-        && previous.target != job.target
-        && let Err(error) = release_owned_runs(shared, previous).await
+    // when the release below fails; the failure wakes a retention pass,
+    // which re-derives the release from the saved document (A.7).
+    if job.replaced_reuse_binding()
+        && let Err(error) = release_owned_runs(shared, &job).await
     {
         tracing::warn!(%error, "scheduler ownership release failed");
+        shared.spawn(crate::engine::prune(shared.clone()));
     }
     Ok(json!({ "job": job.reported() }))
 }
@@ -778,7 +786,7 @@ async fn delete(
     // the Session that binding launched; releasing before the document goes
     // is correct even when this delete fails, since the target already
     // released the binding.
-    if job.target.is_some() {
+    if job.replaced_reuse_binding() {
         release_owned_runs(shared, &job).await?;
     }
     document.jobs.remove(index);
