@@ -1233,7 +1233,7 @@ impl LoadPrompt for SystemSources {
 }
 
 #[tokio::test]
-async fn configure_property_read_failure_keeps_the_previous_state_and_allows_retry() {
+async fn configuration_reference_read_failure_aborts_resume_and_allows_retry() {
     let store = Arc::new(CountContextReads::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
@@ -1264,30 +1264,63 @@ async fn configure_property_read_failure_keeps_the_previous_state_and_allows_ret
         }),
     };
     store.fail_configuration.store(true, Ordering::SeqCst);
-    assert!(matches!(session.configure(update.clone(), "main").await,
-        Err(AgentError::Storage(message)) if message.contains("injected configuration read failure")));
-    assert!(session.failure().is_none());
-    assert!(
-        !chain_events(&session, "main", ..)
-            .await
-            .unwrap()
-            .iter()
-            .any(|event| matches!(
-                event.kind,
-                EventKind::PromptChanged(_) | EventKind::ContextConfigured(_)
-            ))
-    );
     assert_eq!(
         session.configure(update, "main").await.unwrap(),
         ConfigureOutcome::Adopted
     );
+    assert!(
+        store.fail_configuration.load(Ordering::SeqCst),
+        "live adoption must use its current configuration instead of querying history"
+    );
+    assert!(session.failure().is_none());
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let failed = match agent.restore_session(id.clone()).await {
+        Ok(_) => panic!("a missing configuration read must prevent publication"),
+        Err(error) => error,
+    };
+    assert!(
+        failed
+            .to_string()
+            .contains("injected configuration read failure"),
+        "{failed}"
+    );
+    assert!(!store.fail_configuration.load(Ordering::SeqCst));
+    agent.close().await.unwrap();
+
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session(id).await.unwrap();
     session
-        .submit("after configure retry".into(), InputMode::Queue, "main")
+        .submit("after recovery retry".into(), InputMode::Queue, "main")
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event|
-        matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after configure retry"))));
+    let history = chain_events(&session, "main", ..).await.unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ContextConfigured(_)))
+            .count(),
+        1,
+        "failed recovery and retry must preserve the original adoption"
+    );
+    assert!(history.iter().any(|event|
+        matches!(&event.kind, EventKind::Text(data) if data.delta.contains("after recovery retry"))));
+    let request = history
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(&data.request),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        serde_json::to_string(&request.system)
+            .unwrap()
+            .contains("alpha:1")
+    );
     agent.close().await.unwrap();
 }
 
