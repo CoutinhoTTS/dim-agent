@@ -59,6 +59,8 @@ Branch 当前 StateCell 仍持有实际 PromptSnapshot，服务现有采用比�
 
 因此数组接口首版在此负责“按已知身份取元素”，不要求同时增加计算字段、Set/Revoke 路径别名或复杂生命周期 SQL。旧数据初始化才使用历史元素操作来建立引用。
 
+turn/start、turn/end 的状态转移只需要 turn_id。身份页同时选择这个标量，直接推进同一 Prompt 生命周期转移；不逐条读取完整边界事实，不加载 turn/end 的 reason/error。旧数据初始化与结果之后的真实新源使用相同规则，其余实际需要内容的源仍逐对象读取。读取字段不能构造缺少 outcome 的 TurnEndData 或 AgentEvent。
+
 ### 4.1 元素请求形状
 
 例如当前只引用事件 A 的下标 2 和事件 B 的下标 7，请求固定恢复读头，使用：

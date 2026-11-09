@@ -151,10 +151,12 @@ impl PromptSnapshot {
                 self.changed(&data.timeline, &data.revision, &data.changes)
             }
             EventKind::TurnStart(data) => {
-                self.turns.insert(data.turn_id.clone());
+                self.set_turn_active(&data.turn_id, true);
+                return;
             }
             EventKind::TurnEnd(data) => {
-                self.turns.remove(&data.turn_id);
+                self.set_turn_active(&data.turn_id, false);
+                return;
             }
             EventKind::BranchStart(_) => self.turns.clear(),
             EventKind::ContextScope(data) => match data.status {
@@ -166,6 +168,15 @@ impl PromptSnapshot {
                 }
             },
             _ => return,
+        }
+        self.retain_active();
+    }
+
+    pub(crate) fn set_turn_active(&mut self, turn_id: &str, active: bool) {
+        if active {
+            self.turns.insert(turn_id.to_owned());
+        } else {
+            self.turns.remove(turn_id);
         }
         self.retain_active();
     }

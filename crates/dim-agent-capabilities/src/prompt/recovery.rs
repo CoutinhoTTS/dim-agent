@@ -155,6 +155,12 @@ impl Projection {
             .retain(|key, _| self.snapshot.entries.contains_key(key));
     }
 
+    fn set_turn_active(&mut self, turn_id: &str, active: bool) {
+        self.snapshot.set_turn_active(turn_id, active);
+        self.entries
+            .retain(|key, _| self.snapshot.entries.contains_key(key));
+    }
+
     pub(super) fn checkpoint(&mut self, owner: &Prompt, blocks: Vec<InputBlock>) -> Result<()> {
         let recovered = Recovered {
             schema: SCHEMA.into(),
@@ -225,16 +231,41 @@ impl Projection {
         if sequence <= self.source_through || !SOURCES.contains(&kind.key()) {
             return Ok(());
         }
-        let before = matches!(
-            kind,
-            EventKind::TurnEnd(_) | EventKind::ContextScope(_) | EventKind::BranchStart(_)
-        )
-        .then(|| self.snapshot.clone());
+        match kind {
+            EventKind::TurnStart(data) => {
+                return self.step_turn(owner, sequence, &data.turn_id, true);
+            }
+            EventKind::TurnEnd(data) => {
+                return self.step_turn(owner, sequence, &data.turn_id, false);
+            }
+            _ => {}
+        }
+        let before = matches!(kind, EventKind::ContextScope(_) | EventKind::BranchStart(_))
+            .then(|| self.snapshot.clone());
         self.apply(id, kind);
         self.source_through = sequence;
         if matches!(kind, EventKind::BranchStart(_) | EventKind::BranchResume(_)) {
             self.opening = Some((sequence, self.snapshot.clone()));
         }
+        let blocks = before.map_or_else(Vec::new, |before| {
+            context_changes(&before, &self.snapshot, true)
+        });
+        self.checkpoint(owner, blocks)
+    }
+
+    fn step_turn(
+        &mut self,
+        owner: &Prompt,
+        sequence: u64,
+        turn_id: &str,
+        active: bool,
+    ) -> Result<()> {
+        if sequence <= self.source_through {
+            return Ok(());
+        }
+        let before = (!active).then(|| self.snapshot.clone());
+        self.set_turn_active(turn_id, active);
+        self.source_through = sequence;
         let blocks = before.map_or_else(Vec::new, |before| {
             context_changes(&before, &self.snapshot, true)
         });
@@ -406,7 +437,12 @@ impl Projection {
             return Ok((state, false));
         }
         let mut state = Self::default();
-        let mut query = request(TimelineQueryScope::Chain, through, SOURCES, &["id", "kind"]);
+        let mut query = request(
+            TimelineQueryScope::Chain,
+            through,
+            SOURCES,
+            &["id", "kind", "data.turn_id"],
+        );
         loop {
             let reply = owner.timeline.query(query.clone()).await?;
             let QueryOutput::Rows { rows } = reply.result else {
@@ -416,16 +452,28 @@ impl Projection {
                 let [
                     QueryValue::Value { value: id },
                     QueryValue::Value { value: kind },
-                ] = <[_; 2]>::try_from(row.values).expect("legacy source fields")
+                    turn_id,
+                ] = <[_; 3]>::try_from(row.values).expect("legacy source fields")
                 else {
                     unreachable!("legacy source values")
                 };
+                let key = kind.as_str().expect("source kind");
+                if matches!(key, "turn/start" | "turn/end") {
+                    let QueryValue::Value { value: turn_id } = turn_id else {
+                        unreachable!("turn boundary has a turn id")
+                    };
+                    state.set_turn_active(
+                        turn_id.as_str().expect("turn identity"),
+                        key == "turn/start",
+                    );
+                    continue;
+                }
                 let kind = source_kind(
                     owner,
                     TimelineQueryScope::Chain,
                     through,
                     id.as_str().expect("source identity"),
-                    kind.as_str().expect("source kind"),
+                    key,
                 )
                 .await?;
                 state.apply(id.as_str().expect("source identity"), &kind);
@@ -474,7 +522,7 @@ impl Prompt {
                 TimelineQueryScope::Branch,
                 through,
                 SOURCES,
-                &["id", "position", "kind"],
+                &["id", "position", "kind", "data.turn_id"],
             );
             query.from = Some(TimelinePosition {
                 branch_id: self.timeline.branch_id(),
@@ -490,7 +538,8 @@ impl Prompt {
                         QueryValue::Value { value: id },
                         QueryValue::Value { value: position },
                         QueryValue::Value { value: kind },
-                    ] = <[_; 3]>::try_from(row.values).expect("source fields")
+                        turn_id,
+                    ] = <[_; 4]>::try_from(row.values).expect("source fields")
                     else {
                         unreachable!("source values")
                     };
@@ -499,12 +548,26 @@ impl Prompt {
                     if position.sequence <= self.projection.lock().unwrap().source_through {
                         continue;
                     }
+                    let key = kind.as_str().expect("source kind");
+                    if matches!(key, "turn/start" | "turn/end") {
+                        let QueryValue::Value { value: turn_id } = turn_id else {
+                            unreachable!("turn boundary has a turn id")
+                        };
+                        let mut state = self.projection.lock().unwrap();
+                        state.step_turn(
+                            self,
+                            position.sequence,
+                            turn_id.as_str().expect("turn identity"),
+                            key == "turn/start",
+                        )?;
+                        continue;
+                    }
                     let kind = source_kind(
                         self,
                         TimelineQueryScope::Branch,
                         through,
                         id.as_str().expect("source identity"),
-                        kind.as_str().expect("source kind"),
+                        key,
                     )
                     .await?;
                     self.projection.lock().unwrap().step(

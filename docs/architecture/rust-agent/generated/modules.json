@@ -11180,7 +11180,8 @@
         "path MessagePart::ToolUse",
         "path Role::Assistant",
         "path Role::ToolResult",
-        "path Role::User"
+        "path Role::User",
+        "path ToolContent"
       ]
     },
     {
@@ -12968,8 +12969,7 @@
         "path MessagePart::Image",
         "path MessagePart::Text",
         "path MessagePart::ToolResult",
-        "path ToolContent::Blocks",
-        "path content"
+        "path ToolContent::Blocks"
       ]
     },
     {
@@ -13662,6 +13662,8 @@
         "path EventKind::Extension",
         "path EventKind::InputMessage",
         "path EventKind::PromptChanged",
+        "path EventKind::TurnEnd",
+        "path EventKind::TurnStart",
         "path ExtensionEvent::new",
         "path InputBlock",
         "path InputMessageData",
@@ -50544,6 +50546,10 @@
     {
       "module": "dim_cli::wire",
       "path": "Reply::Start"
+    },
+    {
+      "module": "dim_client",
+      "path": "D::Error"
     },
     {
       "module": "dim_client::wire",
