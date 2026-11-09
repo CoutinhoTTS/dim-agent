@@ -1,6 +1,8 @@
 #[path = "storage_flow/recall.rs"]
 mod recall;
 
+#[path = "storage_flow/member_queries.rs"]
+mod member_queries;
 #[path = "storage_flow/property_queries.rs"]
 mod property_queries;
 
@@ -404,6 +406,12 @@ const V36_ADDITIONS: &[&str] = &[
     "CREATE TRIGGER timeline_text_delete AFTER DELETE ON timeline_text BEGIN DELETE FROM timeline_text_fts WHERE rowid=old.id; END",
     "CREATE TABLE timeline_text_tails (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, request_id TEXT NOT NULL, tail TEXT NOT NULL, PRIMARY KEY(session_id, branch_id, request_id))",
 ];
+const V37_ADDITIONS: &[&str] = &[
+    "CREATE TABLE timeline_member_nodes (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0), left_id INTEGER, right_id INTEGER, height INTEGER NOT NULL CHECK(height BETWEEN 1 AND 64))",
+    "CREATE TABLE timeline_member_roots (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, index_id TEXT NOT NULL, group_key BLOB NOT NULL, sequence INTEGER NOT NULL CHECK(sequence >= 0), root_id INTEGER, PRIMARY KEY(session_id,branch_id,index_id,group_key,sequence))",
+    "CREATE TABLE timeline_member_origins (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, index_id TEXT NOT NULL, match_key BLOB NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0), group_key BLOB NOT NULL, PRIMARY KEY(session_id,branch_id,index_id,match_key,sequence,group_key))",
+    "CREATE TABLE timeline_member_terminals (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, index_id TEXT NOT NULL, match_key BLOB NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0), PRIMARY KEY(session_id,branch_id,index_id,match_key))",
+];
 fn schema_of(version: u32) -> Vec<String> {
     let mut statements: Vec<String> = V13_SCHEMA
         .iter()
@@ -419,6 +427,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V33_ADDITIONS.iter().filter(|_| version >= 33))
         .chain(V35_ADDITIONS.iter().filter(|_| version >= 35))
         .chain(V36_ADDITIONS.iter().filter(|_| version >= 36))
+        .chain(V37_ADDITIONS.iter().filter(|_| version >= 37))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {
@@ -4123,11 +4132,12 @@ fn read_startup_note(database: &std::path::Path) -> String {
 #[test]
 fn a_newer_store_leaves_an_actionable_startup_note() {
     let database = Database::new();
+    let future = STORE_FORMAT + 1;
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37));
-             INSERT INTO agent_store_format VALUES (37);",
+            &format!("CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {future}));
+             INSERT INTO agent_store_format VALUES ({future});"),
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -4137,10 +4147,16 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v37"), "{note}");
-    assert!(note.contains("Daemon format: v36"), "{note}");
+    assert!(note.contains(&format!("Store format: v{future}")), "{note}");
+    assert!(
+        note.contains(&format!("Daemon format: v{STORE_FORMAT}")),
+        "{note}"
+    );
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v37"), "{note}");
+    assert!(
+        note.contains(&format!("Run a build supporting v{future}")),
+        "{note}"
+    );
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -4158,7 +4174,10 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29 (schema is v36)"), "{note}");
+    assert!(
+        note.contains(&format!("Store format: v29 (schema is v{STORE_FORMAT})")),
+        "{note}"
+    );
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -4202,7 +4221,9 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v36 (format marker is missing or ambiguous)"),
+        note.contains(&format!(
+            "Store format: v{STORE_FORMAT} (format marker is missing or ambiguous)"
+        )),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -4301,14 +4322,14 @@ fn a_failed_open_replaces_the_previous_startup_note() {
         .unwrap();
     std::fs::write(
         startup_note(&database.0),
-        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v37\n",
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v999999\n",
     )
     .unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     let note = read_startup_note(&database.0);
     assert!(note.contains("Store format: v34"), "{note}");
     assert!(!note.contains("/previous"), "{note}");
-    assert!(!note.contains("v37"), "{note}");
+    assert!(!note.contains("v999999"), "{note}");
 }
 
 #[test]

@@ -3,7 +3,7 @@
 Scope: bounded display reads and execution of the existing property query contract.
 [Timeline property queries](timeline-property-query.md) owns query semantics;
 [Clients](clients.md#opening-a-conversation-with-a-bounded-window) owns window sizes.
-This design changes no event format or search matching rule. The persistent store remains v36.
+This design changes no event format or search matching rule. The [native storage design](appserver/native-storage-format.md) owns format decisions.
 
 ## Consumers
 

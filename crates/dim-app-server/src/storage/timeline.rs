@@ -915,6 +915,10 @@ impl SqliteTimelineStore {
             .map_err(error)?;
         let released = files::release(&tx, session_id).map_err(error)?;
         for table in [
+            "timeline_member_roots",
+            "timeline_member_origins",
+            "timeline_member_terminals",
+            "timeline_member_nodes",
             "timeline_text",
             "timeline_text_tails",
             "timeline_snapshots",
@@ -1507,6 +1511,7 @@ fn insert_branch(connection: &Connection, session: &str, info: &BranchRecord) ->
             serde_json::to_string(info).map_err(error)?
         ])
         .map_err(error)?;
+    super::members::branch(connection, session, &info.id)?;
     Ok(())
 }
 fn writer_operation<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -1723,6 +1728,12 @@ fn write_batch(
                 )?;
             }
         }
+        super::members::event(
+            connection,
+            &batch.key.session_id,
+            &batch.key.branch_id,
+            &record.event,
+        )?;
         if let EventKind::BranchCreate(data) = &record.event.kind {
             let info = BranchRecord {
                 id: data.branch.clone(),
@@ -2216,6 +2227,7 @@ fn copy_fork_rows(
                 params![fork, id, info, head],
             )
             .map_err(error)?;
+            super::members::branch(tx, fork, id)?;
         }
         Ok(())
     })?;
@@ -2230,7 +2242,7 @@ fn copy_fork_rows(
                 params![source, fork, sql_sequence(after)?, sql_sequence(end)?],
             )
             .map_err(error)?;
-            let mut statement = tx.prepare("SELECT sequence,body FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND sequence>?2 AND sequence<=?3 ORDER BY sequence").map_err(error)?;
+            let mut statement = tx.prepare("SELECT sequence,kind,body FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND sequence>?2 AND sequence<=?3 ORDER BY sequence").map_err(error)?;
             let mut rows = statement
                 .query(params![fork, sql_sequence(after)?, sql_sequence(end)?])
                 .map_err(error)?;
@@ -2240,8 +2252,15 @@ fn copy_fork_rows(
                     fork,
                     "main",
                     read_sequence(row, 0).map_err(error)?,
-                    &row.get::<_, String>(1).map_err(error)?,
+                    &row.get::<_, String>(2).map_err(error)?,
                     at,
+                )?;
+                super::members::row(
+                    tx,
+                    fork,
+                    "main",
+                    &row.get::<_, String>(1).map_err(error)?,
+                    &row.get::<_, String>(2).map_err(error)?,
                 )?;
             }
             Ok(())
@@ -2401,6 +2420,10 @@ fn drop_session(connection: &mut Connection, session: &str) -> Result<usize> {
         .pragma_update(None, "synchronous", "NORMAL")
         .map_err(error)?;
     for table in [
+        "timeline_member_roots",
+        "timeline_member_origins",
+        "timeline_member_terminals",
+        "timeline_member_nodes",
         "timeline_text",
         "timeline_text_tails",
         "timeline_snapshots",

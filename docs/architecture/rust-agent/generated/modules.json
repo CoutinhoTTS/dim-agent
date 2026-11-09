@@ -3235,6 +3235,27 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::members",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/members.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "params",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::storage::members::tree",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage::members",
+      "file": "crates/dim-app-server/src/storage/members/tree.rs",
+      "unexpandedMacros": [
+        "params"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::metadata",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -29355,6 +29376,14 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::members",
+      "references": [
+        "mod members",
+        "use members::initialize_session_member_index"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::metadata",
       "references": [
         "mod metadata",
@@ -29886,6 +29915,136 @@
       ]
     },
     {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_agent_runtime::event_property",
+      "references": [
+        "path event_property",
+        "use dim_agent_runtime::event_property"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryDirection::Descending",
+        "use dim_agent_runtime::TimelineQueryDirection"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryComparison::Eq",
+        "path QueryFilter",
+        "path QueryFilter::And",
+        "path QueryFilter::Any",
+        "path QueryFilter::Compare",
+        "path QueryFilter::Exists",
+        "path QueryFilter::In",
+        "path QueryFilter::Not",
+        "path QueryFilter::Or",
+        "path QueryOperand::Element",
+        "path QueryOperand::Field",
+        "path QueryOperand::Outer",
+        "path QueryOperand::Value",
+        "path QueryOrderKey::Position",
+        "path QuerySpec",
+        "path QueryValue",
+        "path QueryValue::Elements",
+        "path QueryValue::Missing",
+        "path QueryValue::Value",
+        "use dim_agent_runtime::QueryComparison",
+        "use dim_agent_runtime::QueryFilter",
+        "use dim_agent_runtime::QueryOperand",
+        "use dim_agent_runtime::QueryOrderKey",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QuerySpec",
+        "use dim_agent_runtime::QueryValue"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineReadScope",
+        "use dim_agent_runtime::TimelineReadScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_app_server::storage::members::tree",
+      "references": [
+        "mod tree",
+        "path Tree",
+        "path tree",
+        "use tree::Tree"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_app_server::storage::query",
+      "references": [
+        "path super::query::Statistics",
+        "path super::query::record_statement"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error",
+        "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path super::timeline::Row::Event"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members::tree",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members::tree",
+      "to": "dim_app_server::storage::query",
+      "references": [
+        "path super::super::query::Statistics",
+        "path super::super::query::cancelled",
+        "path super::super::query::record_statement"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::members::tree",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error",
+        "use super::super::sqlite::error"
+      ]
+    },
+    {
       "from": "dim_app_server::storage::metadata",
       "to": "dim_agent_capabilities::session_broadcast",
       "references": [
@@ -30028,6 +30187,7 @@
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineReadScope",
+        "path dim_agent_runtime::TimelineReadSegment",
         "use dim_agent_runtime::TimelineReadScope"
       ]
     },
@@ -30047,6 +30207,13 @@
         "path WireEvent",
         "use super::codec::Reader",
         "use super::codec::WireEvent"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query",
+      "to": "dim_app_server::storage::members",
+      "references": [
+        "path super::members::candidates"
       ]
     },
     {
@@ -30098,6 +30265,14 @@
       "to": "dim_app_server::storage::catalog",
       "references": [
         "path super::catalog::backfill"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::storage::members",
+      "references": [
+        "path super::members::SCHEMA",
+        "path super::members::backfill"
       ]
     },
     {
@@ -30362,6 +30537,15 @@
         "path files::share_output",
         "use super::files",
         "use super::files::SessionFiles"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::members",
+      "references": [
+        "path super::members::branch",
+        "path super::members::event",
+        "path super::members::row"
       ]
     },
     {
@@ -46251,6 +46435,13 @@
       "to": "dim_app_server::storage::catalog",
       "references": [
         "path dim_app_server::storage::initialize_session_catalog"
+      ]
+    },
+    {
+      "from": "dim_migration::native",
+      "to": "dim_app_server::storage::members",
+      "references": [
+        "path dim_app_server::storage::initialize_session_member_index"
       ]
     },
     {

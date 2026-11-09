@@ -1,8 +1,29 @@
 # Rust 会话存储格式
 
-后续提案：[状态读取索引与数组元素](#提案状态读取索引与数组元素)。该提案不改变下文当前 v36 合同。
+## v37：未完成集合索引的格式决定
 
-The current native format is **v36**, with property text-candidate indexes, a submission identity index, a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
+本次格式采用 v37，不修改已提交的 v36。v37 增加 `timeline_member_nodes`、
+`timeline_member_roots`、`timeline_member_origins` 和 `timeline_member_terminals`。
+节点采用不可变 AVL 树：每节点保存一个成员、两个子节点身份与高度；更新复制并平衡受影响路径。
+这是成员索引设计允许的简化实现，须通过相同的历史增长、固定 through 与累计 I/O 验收。
+不同时引入叶块、内部节点两种编码或节点缓存。
+
+根主键为 `(session_id, branch_id, index_id, group_key, sequence)`；反向定位主键为
+`(session_id, branch_id, index_id, match_key, sequence, group_key)`；终态键主键为
+`(session_id, branch_id, index_id, match_key)`，保留最早终态位置。节点按整数身份点查，
+同时检查所属 Session。所有新增行与其原事实同事务提交；旧根不被后续提交修改。
+
+升级事务按分支和原序号建立输入、工具、执行和协作集合；重复终态与终态先于开始均保留原查询语义。
+失败回滚 schema、索引行和版本标记。Session 复制重建目标前缀索引，删除清理其全部索引行。
+只有完整分支、无 publishing tail、与静态描述逐项相同的反关联可使用成员根；其余范围保留通用查询。
+插件仍只调用 append/query，不读写这些表。
+
+本步骤不更改事件编码。数组元素内容编码与 owner 确认索引属于后续格式步骤，不能在提交 v37 后复用其编号。
+v36 的文本索引和事件编码合同继续适用。
+
+后续提案：[状态读取索引与数组元素](#提案状态读取索引与数组元素)。数组元素编码与 owner 结果索引尚未在 v37 定义。
+
+The current native format is **v37**, with versioned unfinished-member indexes, property text-candidate indexes, a submission identity index, a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
@@ -11,10 +32,10 @@ omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, a delegation's Agent owner and
 member leader, a Session's creation origin, Session file grants, command output
 ownership and the two context reading switches on timeline events. Startup
-requires the exact v36 SQL schema and a single
-format marker of 36 before writable PRAGMAs, or the exact v35, v34, v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
+requires the exact v37 SQL schema and a single
+format marker of 37 before writable PRAGMAs, or the exact v36, v35, v34, v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v36 one step after
+which the same startup transaction upgrades in place to v37 one step after
 another ([v36 text candidates](#v36-property-text-candidates), [v35 submission index](#v35-submission-identity-index), [#1099 v34 decision](#1099-v34-格式决定), [#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
@@ -28,7 +49,7 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v36, and v16 request rows stay readable as written.
+valid in v37, and v16 request rows stay readable as written.
 除格式自身的 SQL 外，每次打开都接受派生索引：`timeline_history_anchors`
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
 [latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
@@ -38,7 +59,7 @@ valid in v36, and v16 request rows stay readable as written.
 读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
 `CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
 `timeline_events` 重新推导，读同一份事件不因它们有无而不同，因此不属于格式：启动门禁的
-精确结构比较忽略这些名字，格式标记不变（当前 v36）；其余任何多余对象仍按原规则拒绝。代价是早于
+精确结构比较忽略这些名字，格式标记不变（当前 v37）；其余任何多余对象仍按原规则拒绝。代价是早于
 该变更的二进制不认识这些名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
 索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong

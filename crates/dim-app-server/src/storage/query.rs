@@ -50,10 +50,10 @@ pub fn sqlite_memory(reset_peak: bool) -> (i64, i64) {
 }
 
 #[cfg(feature = "testing")]
-type Statistics = std::sync::Mutex<Option<Vec<QueryStatementStats>>>;
+pub(super) type Statistics = std::sync::Mutex<Option<Vec<QueryStatementStats>>>;
 
 #[cfg(feature = "testing")]
-fn record_statement(
+pub(super) fn record_statement(
     statistics: &Statistics,
     connection: &Connection,
     statement: &rusqlite::Statement<'_>,
@@ -693,7 +693,12 @@ impl<'a> Compiler<'a> {
             _ => None,
         };
         match filter {
-            QueryFilter::Exists { condition } => self.physical_relation(condition, known),
+            QueryFilter::Exists { condition } => self
+                .resolved_relations
+                .iter()
+                .find(|(candidate, _)| *candidate == condition.as_ref())
+                .map(|(_, expression)| expression.clone())
+                .or_else(|| self.physical_relation(condition, known)),
             QueryFilter::TextCandidate { field, .. } => self
                 .text_candidates
                 .iter()
@@ -1124,7 +1129,7 @@ impl Drop for Temporary<'_> {
     }
 }
 
-fn cancelled(cancel: &CancellationToken) -> Result<()> {
+pub(super) fn cancelled(cancel: &CancellationToken) -> Result<()> {
     if cancel.is_cancelled() {
         Err(AgentError::Cancelled("timeline query".into()))
     } else {
@@ -1374,6 +1379,33 @@ fn sources<'a>(
             .text_candidates
             .push((filter, supported.then_some(table)));
     }
+    if let Some((limit, _)) = compiler.candidate_limit
+        && let Some(members) = super::members::candidates(
+            connection,
+            scope,
+            query,
+            usize::try_from(limit).unwrap_or(usize::MAX),
+            compiler.position_after,
+            cancel,
+            #[cfg(feature = "testing")]
+            statistics,
+        )?
+    {
+        let table =
+            temporary.table("ord INTEGER,seq INTEGER,physical INTEGER,PRIMARY KEY(ord,seq)")?;
+        let mut insert = connection
+            .prepare(&format!("INSERT INTO {table} VALUES(0,?1,?1)"))
+            .map_err(error)?;
+        for sequence in members.positions {
+            insert
+                .execute([i64::try_from(sequence).map_err(error)?])
+                .map_err(error)?;
+        }
+        compiler.physical_candidates = Some(table);
+        compiler
+            .resolved_relations
+            .push((members.terminal, "0".into()));
+    }
     if compiler.direct_relations {
         fn resolve<'a>(
             filter: &'a QueryFilter,
@@ -1452,7 +1484,8 @@ fn sources<'a>(
             .collect::<Vec<_>>()
             .join(" OR ")
     };
-    if let [filter] = roles.as_slice()
+    if compiler.physical_candidates.is_none()
+        && let [filter] = roles.as_slice()
         && let Some(kinds) = kind_values(filter)
     {
         fn necessary<'a>(
