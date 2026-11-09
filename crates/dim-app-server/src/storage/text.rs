@@ -222,16 +222,7 @@ pub(super) fn candidates(
     {
         return None;
     }
-    let terms: Vec<_> = terms
-        .iter()
-        .map(|term| term.to_lowercase())
-        .filter(|term| {
-            (3..=200).contains(&term.len()) && term.bytes().all(|byte| byte.is_ascii_alphabetic())
-        })
-        .collect();
-    if terms.is_empty() {
-        return None;
-    }
+    let grams = trigrams(terms)?;
     let mut parameters = vec![
         SqlValue::Text(scope.key.session_id.clone()),
         SqlValue::Text(field.into()),
@@ -242,15 +233,7 @@ pub(super) fn candidates(
         "branch_id,partition_key"
     };
     let mut intersections = Vec::new();
-    for term in terms {
-        let grams = term
-            .as_bytes()
-            .windows(3)
-            .map(|gram| format!("\"{}\"", std::str::from_utf8(gram).unwrap()))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-            .join(" AND ");
+    for grams in grams {
         parameters.push(SqlValue::Text(grams));
         intersections.push(format!("SELECT DISTINCT {group} FROM timeline_text_fts CROSS JOIN timeline_text ON timeline_text.id=timeline_text_fts.rowid WHERE timeline_text_fts MATCH ?{} AND session_id=?1 AND property=?2",parameters.len()));
     }
@@ -273,4 +256,24 @@ pub(super) fn candidates(
         return Some((sql, parameters));
     }
     None
+}
+
+pub(super) fn trigrams(terms: &[String]) -> Option<Vec<String>> {
+    let grams = terms
+        .iter()
+        .map(|term| term.to_lowercase())
+        .filter(|term| {
+            (3..=200).contains(&term.len()) && term.bytes().all(|byte| byte.is_ascii_alphabetic())
+        })
+        .map(|term| {
+            term.as_bytes()
+                .windows(3)
+                .map(|gram| format!("\"{}\"", std::str::from_utf8(gram).unwrap()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        })
+        .collect::<Vec<_>>();
+    (!grams.is_empty()).then_some(grams)
 }

@@ -7,6 +7,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Model startup](design/model-startup.md): temporary model, effort and multi-protocol connections with branch/member/compaction inheritance
 - [Model failures](design/model-failures.md)（[中文](zh/design/model-failures.md)）: the failure kind, the fact on the terminal event, who words the line, and retry (#1197)
 - [模型请求重试与任务续接方案](design/research/model-retry-recovery.md)（中文，#1210）：请求重试的可见性、独立恢复能力的边界及所有者合同需求
+- [插件远程化：可行性与落地路径](design/research/remote-plugins.md)（中文，研究稿）：rutis 链路能跨什么、HostPlatform/exec/基础工具/存储各自能不能远程化、推荐拓扑与分阶段
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
 - [AcpGateway implementation contract](design/acp-gateway-implementation.md)（中文，#436）：protocol mapping, client-host plugin wiring, lifecycle and unsupported features
@@ -39,6 +40,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Architecture decisions](adr/README.md)
 - [ADR 022 — Timeline 属性查询与正文重建](adr/022-event-property-queries.md)（中文）：目标 API 与模块结构、属性查询、业务状态恢复和正文释放
 - [Timeline 属性查询与消费端改造](design/timeline-property-query.md)（中文）：查询契约、SQL 与内容解码、恢复和请求构造的修改方案
+- [Timeline read consumers and page execution](design/timeline-read-followups.md): bounded Web windows, title/activity field reads and cumulative SQL page costs
 - [输入、轮次及活动输出的当前状态读取](design/input-state-read.md)：输入队列、轮次身份和输出字符水位
 - [Goal 属性查询与状态恢复](design/plugins/Goal-property-queries.md)（中文）：统一状态记录下的查询对象、状态来源、剩余遍历和删除重算提案
 - [Rust agent design documents](architecture/README.md#design-documents)

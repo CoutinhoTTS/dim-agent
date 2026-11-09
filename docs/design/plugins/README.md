@@ -23,6 +23,7 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [Prompt](Prompt.md) | — | `guideEntries`: the input guide's frame, the entries in force and their composition | `Prompt`: the System its publisher adopts carries the composition over the entries in force, and a host-prepared request carries the same composition, placed by Loop | #548 |
 | [PromptSources](PromptSources.md) | — | the named sources, their policy texts at the factory configuration, and the state and rule entries | — | #548 |
 | [Recall](Recall.md) | — | `recall` tool (tells the model its branch's history: turns, a turn, one thing in full, search) | — | M2; #129 |
+| [EventHub](EventHub.md) | the catalog of declared sources and event types, the subscriptions, publish and delivery, the `eventHub` service and the `eventhub` methods | the `events` tool, and the guide entry for `dim-event` and `dim-event-guide` | — | — |
 | [Hooks](Hooks.md) | `HooksSettings` in App Server: sources `hooks` (user), `hooks-projects` and `hooks-plugins`, the project file `.dimcode/hooks.json` read through FileStorage, `hooks.*` methods and plugin registration | hook catalog, runner, a submit check registered with `submitChecks` for the user-input entries (`UserPromptSubmit`) | tool advice, permission requests, post-tool (`PostToolUse`, `PostToolUseFailure`), Stop and Session-start hooks | M1; #755, #756, #757, #758 |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
@@ -44,6 +45,6 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 
 | Scope | Parts |
 | --- | --- |
-| Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source), `CodeMode` when installed, light-ocr in the daemon; AcpGateway in its client host process |
-| Session parts | Questions, ShellInput, Attachments, SessionTitle, PromptSuggestion, Goal, Web, Recall, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), Code Mode when enabled |
+| Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source), `CodeMode` when installed, light-ocr in the daemon, EventHub; AcpGateway in its client host process |
+| Session parts | Questions, ShellInput, Attachments, SessionTitle, PromptSuggestion, Goal, Web, Recall, EventHub, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), Code Mode when enabled |
 | Branch parts | Goal (with Pursuit), ModelRecovery, Hooks, Prompt, Code Mode when enabled |

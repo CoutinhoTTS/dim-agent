@@ -300,6 +300,10 @@ async function fork(): Promise<void> {
     </div>
     <TimelineView
       :rows="view.rows"
+      :earlier="view.earlier"
+      :loading-earlier="view.loadingEarlier"
+      :history-error="view.historyError"
+      @earlier="chat.loadEarlier(sessionId, 'main')"
       :running="view.running"
       :retry="view.retry"
       :quotable="!approval && questions.length === 0"

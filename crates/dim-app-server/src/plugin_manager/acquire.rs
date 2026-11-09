@@ -26,8 +26,9 @@ pub fn check_id(id: &str) -> Result<(), PluginError> {
 /// The directories PluginManager may create, rename or delete. Every one is
 /// checked to be exactly `<home>/plugins/.staging/<random>`,
 /// `<home>/plugins/.python`, `<home>/plugins/<id>`,
-/// `<home>/plugins/<id>/<commit>` or `<home>/plugins/<id>/<commit>+<suffix>`
-/// before use.
+/// `<home>/plugins/<id>/<key>` or `<home>/plugins/<id>/<key>+<suffix>`
+/// before use, where `<key>` is a Git commit or an optional plugin's
+/// version (§7).
 #[derive(Clone, Debug)]
 pub struct PluginsDir {
     root: PathBuf,
@@ -45,30 +46,32 @@ impl PluginsDir {
         self.root.join(".staging")
     }
 
-    pub fn id_dir(&self, id: &str) -> Result<PathBuf, PluginError> {
+    fn id_dir(&self, id: &str) -> Result<PathBuf, PluginError> {
         check_id(id)?;
         Ok(self.root.join(id))
     }
 
-    pub fn clone_dir(&self, id: &str, commit: &str) -> Result<PathBuf, PluginError> {
-        if commit.len() < 7 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(outside(commit));
+    /// `<root>/<id>/<key>`: the shape a record written before suffixes names.
+    fn key_dir(&self, id: &str, key: &str) -> Result<PathBuf, PluginError> {
+        if !key_name(key) {
+            return Err(outside(key));
         }
-        Ok(self.id_dir(id)?.join(commit))
+        Ok(self.id_dir(id)?.join(key))
     }
 
-    /// `<root>/<id>/<commit>+<16 lowercase hex>`: what one acquisition
-    /// renames into (§3.2 step 4). The suffix is drawn for this acquisition,
-    /// and a name that already exists is never reused.
-    pub fn acquisition_dir(&self, id: &str, commit: &str) -> Result<PathBuf, PluginError> {
+    /// `<root>/<id>/<key>+<16 lowercase hex>`: what one acquisition
+    /// renames into (§3.2 step 4); `<key>` is the Git commit or the optional
+    /// plugin's version. The suffix is drawn for this acquisition, and a
+    /// name that already exists is never reused.
+    pub fn acquisition_dir(&self, id: &str, key: &str) -> Result<PathBuf, PluginError> {
         let id_dir = self
-            .clone_dir(id, commit)?
+            .key_dir(id, key)?
             .parent()
-            .expect("a clone directory has a parent")
+            .expect("a key directory has a parent")
             .to_owned();
         for _ in 0..8 {
             let suffix = uuid::Uuid::new_v4().simple().to_string();
-            let dir = id_dir.join(format!("{commit}+{}", &suffix[..16]));
+            let dir = id_dir.join(format!("{key}+{}", &suffix[..16]));
             self.check(&dir)?;
             if !dir.exists() {
                 return Ok(dir);
@@ -92,10 +95,10 @@ impl PluginsDir {
             [".staging", random] => !random.is_empty(),
             [".python"] => true,
             [id] => check_id(id).is_ok(),
-            // A bare `<commit>` is the directory a record written before
+            // A bare `<key>` is the directory a record written before
             // suffixes names, and what the startup cleanup reads; nothing
             // acquires into that shape.
-            [id, name] => self.clone_dir(id, name).is_ok() || acquisition(name),
+            [id, name] => self.key_dir(id, name).is_ok() || acquisition(name),
             _ => false,
         };
         if !shaped {
@@ -291,16 +294,20 @@ impl Drop for Staging {
     }
 }
 
-/// `<commit>+<16 lowercase hex>`: one acquisition's own directory.
+/// `<key>+<16 lowercase hex>`: one acquisition's own directory.
 fn acquisition(name: &str) -> bool {
-    let Some((commit, suffix)) = name.split_once('+') else {
+    let Some((key, suffix)) = name.split_once('+') else {
         return false;
     };
     let hex = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
-    commit.len() >= 7
-        && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && suffix.len() == 16
-        && suffix.bytes().all(hex)
+    key_name(key) && suffix.len() == 16 && suffix.bytes().all(hex)
+}
+
+/// One acquisition's key (§3.2 step 4): a Git commit, or an optional
+/// plugin's version.
+fn key_name(key: &str) -> bool {
+    let commit = key.len() >= 7 && key.bytes().all(|byte| byte.is_ascii_hexdigit());
+    commit || super::record::is_version(key)
 }
 
 /// A Python package name: what an id becomes with `-` as `_`.
@@ -478,4 +485,59 @@ pub fn check_links(root: &Path, dir: &Path) -> Result<(), PluginError> {
 pub fn manifest_of(staging: &Staging) -> Result<Manifest, PluginError> {
     let work = std::fs::canonicalize(work_dir(staging)).map_err(acquire_failed)?;
     Manifest::read(&work)
+}
+
+/// Copies the shipped plugin directory `from` into `to`, never
+/// `node_modules`, and refuses a symbolic link that leads outside it (§3.2,
+/// §7). `from` is only read: the shipped directory stays untouched. A
+/// missing or unreadable `from` is `acquire_failed` naming the path.
+pub fn copy(from: &Path, to: &Path) -> Result<(), PluginError> {
+    let source = std::fs::canonicalize(from)
+        .map_err(|error| acquire_failed(format!("{}: {error}", from.display())))?;
+    if !source.is_dir() {
+        return Err(acquire_failed(format!(
+            "{}: not a directory",
+            from.display()
+        )));
+    }
+    check_links(&source, &source)?;
+    copy_tree(&source, to)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), PluginError> {
+    std::fs::create_dir(to).map_err(acquire_failed)?;
+    for entry in std::fs::read_dir(from).map_err(acquire_failed)? {
+        let entry = entry.map_err(acquire_failed)?;
+        let kind = entry.file_type().map_err(acquire_failed)?;
+        // §3.2: the copy never carries `node_modules`; its dependencies are
+        // installed there from its lock.
+        if kind.is_dir() && entry.file_name() == "node_modules" {
+            continue;
+        }
+        let path = entry.path();
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&path, &target)?;
+        } else if kind.is_symlink() {
+            copy_link(&path, &target)?;
+        } else {
+            std::fs::copy(&path, &target).map_err(acquire_failed)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies a symbolic link as a link; `check_links` already refused one that
+/// leads outside the plugin.
+fn copy_link(from: &Path, to: &Path) -> Result<(), PluginError> {
+    let target = std::fs::read_link(from).map_err(acquire_failed)?;
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(target, to);
+    #[cfg(windows)]
+    let made = if std::fs::metadata(from).is_ok_and(|meta| meta.is_dir()) {
+        std::os::windows::fs::symlink_dir(target, to)
+    } else {
+        std::os::windows::fs::symlink_file(target, to)
+    };
+    made.map_err(acquire_failed)
 }

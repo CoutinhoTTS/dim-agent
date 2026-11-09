@@ -8,11 +8,12 @@ Agents 的稳定目录还提供生成的只读服务 `sessionPermissions`：`per
 
 ## 1. 概要
 
-Agents 提供进程服务 `sessions`，让任何语言的进程插件都能像 Collaboration 那样启动和驱动 Session。方法为 `launch`、`input`、`lookup`、`history`、`withdraw`、`stop`、`idle` 和 `delete`，每个都映射到 Agents 现有的 Session 创建与准入（`AgentIndex`）和公共 Session 门面。`withdraw` 转交给 S1 已加入的 InputQueue 撤回服务，`delete` 转交给 S5c 的 `AgentIndex::delete`。
+Agents 提供进程服务 `sessions`，让任何语言的进程插件都能像 Collaboration 那样启动和驱动 Session。方法为 `launch`、`input`、`lookup`、`exists`、`history`、`withdraw`、`stop`、`idle` 和 `delete`，每个都映射到 Agents 现有的 Session 创建与准入（`AgentIndex`）和公共 Session 门面。`withdraw` 转交给 S1 已加入的 InputQueue 撤回服务，`delete` 转交给 S5c 的 `AgentIndex::delete`。
 
 - **形态。** 一个具名进程服务 `sessions`，没有实例 key。它是 `host_key("sessions")` 上的 `dyn HostDispatch`，像 `pluginFiles` 一样经服务目录跨语言共享。由 Agents 中从不重载的目录部分提供，每次调用时查找 Agents 索引，因此使用方从不随索引重载（#35）。
 - **启动。** `launch` 创建非交互 Session。它的权限策略是请求的策略，以启动方分支的当前策略为上限；当前策略即由 `permission/changed` 事实折叠出的 `PermissionState`。没有启动方时，上限是宿主的 Session 默认值。Agents 在创建前经 `SessionConfig.permission_policy` 施加上限。
 - **输入。** `input` 经 `Session::input` 写入 `input/message`，事件发布后才回复。分支对每个 `submissionId` 只接受一次：重复提交不写入，回复第一条输入的回执。按 `submissionId` 的 `lookup` 读同一个索引，不写入。
+- **存在。** `exists` 回答某个 Session id 是否仍存在：`false` 表示已被删除，已关闭但可恢复的 Session 为 `true`。它从不取得或恢复 Session，因此对空闲卸载没有影响，也不写入任何东西。
 - **空闲。** `idle` 就是门面的 `Session::idle`：Loop 没有未结束的 turn，没有等待发布的事件，分发已追到尾部。待处理的审批或提问会让 turn 保持未结束，因此调用方用 `stop` 给等待设上限。
 - **撤回。** `withdraw` 转交给 S1 的分支撤回服务，语义归 S1；删除成功时，与 `input` 一样等 `input/deleted` 发布后才回复。
 - **生命周期。** Agents 像拥有其他 Session 一样拥有启动的 Session；`sessions` 既不关闭也不卸载它们。已装载的 Session 曾会累积（§2 第 6 条），空闲卸载（[#126](https://github.com/arcships/dim/issues/126)）之后，Agents 卸载在宽限期内没有被任何租约持有的 Session，下一次调用恢复它（§8.6）。存储中的 Session 同样会累积，因此使用方在删掉一次运行的记录时删除该次运行的 Session，经由转交给 S5c 删除的 `sessions.delete`（§6.8、§8.7）。
@@ -303,6 +304,12 @@ Agents 在该分支上用 `Session::service::<InputQueue>` 取得 S1 的 InputQu
 删除一旦开始就执行到它自己的结果，与 Rpc 的 `session.delete` 相同：索引重载不会截断它，因为各 Session 及其存储比索引活得更久（D1），而中途停下的删除会让 Session 保持关闭、行仍保留，直到重试。放弃调用的 Rust 调用方可能让删除只执行了一部分，与 Rpc 回复丢失相同（S5c §3.5）；再次删除即可完成。
 
 错误：`rejected`（id 不是单个路径分量，S5c D3）、`reloading`（没有激活的 Agents 索引；什么都没做）与 `failed`（命令输出或行无法删除，[S5c §3.5](session-deletion-and-fork.md#35-幂等与错误)）。`failed` 之后，被这次删除关闭的 Session 在本进程中保持关闭，行仍保留（S5c D5）：对它的调用以 `session_closed` 失败，直到某次删除成功。删除是幂等的，因此调用方在任何错误或回复丢失后都再次删除（§8.7）。
+
+### 6.9 exists
+
+`{sessionId}` → `{exists}`；错误 `rejected`、`reloading`。
+
+这次读取回答该 id 是否有所有者或 SessionStore 记录，这正是 `acquire` 在恢复任何东西之前读取的内容(`crates/dim-app-server/src/agents.rs:832-843`)：`false` 表示该 Session 已被删除，已关闭但可恢复的 Session 为 `true`。它不取得任何东西、不取租约、不恢复 Session、不写事件，所以对空闲卸载没有影响。它服务于必须把自己的记录与 Session 删除对账、又不能用轮询把一个关闭当成删除的使用方(EventHub §3.4)。Agents 重载时回答 `reloading`；调用方保留自己的记录，稍后再问。
 
 ## 7. 时序
 

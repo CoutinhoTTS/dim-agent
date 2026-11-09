@@ -18,6 +18,9 @@ import { RAIL_MIN_MARKERS, timelineMarkers } from "../../timeline-markers"
  * `variant`: the main column or the narrower line panel.
  */
 const props = defineProps<{
+  earlier?: boolean
+  loadingEarlier?: boolean
+  historyError?: string
   rows: readonly TimelineRow[]
   running: boolean
   /** The retry the running request is waiting to make, while it sleeps. */
@@ -27,7 +30,7 @@ const props = defineProps<{
   empty?: string
   variant?: "main" | "panel"
 }>()
-const emit = defineEmits<{ quote: [text: string]; branch: [text: string, cut: number]; openLine: [branchId: string] }>()
+const emit = defineEmits<{ earlier: []; quote: [text: string]; branch: [text: string, cut: number]; openLine: [branchId: string] }>()
 const { t } = useI18n()
 const viewport = ref<HTMLElement>()
 const list = ref<HTMLElement>()
@@ -142,6 +145,8 @@ onMounted(() => void toEnd())
 <template>
   <div class="timeline-shell" :data-variant="variant ?? 'main'">
     <div ref="viewport" class="timeline app-scroll-viewport" @scroll.passive="onScroll">
+      <button v-if="earlier" type="button" class="ui-button" :disabled="loadingEarlier" @click="following = false; emit('earlier')">{{ loadingEarlier ? t("timeline.loadingEarlier") : t("timeline.loadEarlier") }}</button>
+      <p v-if="historyError" role="alert">{{ historyError }}</p>
       <p v-if="display.length === 0 && !running" class="timeline-empty">{{ empty ?? t("chat.emptyTimeline") }}</p>
       <div ref="list" class="virtual-timeline" :style="{ height: `${totalSize}px`, position: 'relative' }">
         <div

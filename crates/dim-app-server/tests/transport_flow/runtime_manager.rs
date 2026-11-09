@@ -1451,14 +1451,15 @@ async fn watch_until(
 /// `lib/node_modules/npm/bin/npm-cli.js` is the npm the check looks for.
 /// `new` answers nothing else, so its connection row never greets and goes
 /// down; `with` runs the npm body instead, after recording each run — the
-/// working directory, then the arguments.
-struct FixtureNode {
+/// working directory, then the arguments. The plugin manager flows reuse the
+/// fixture for a plugin's dependency install.
+pub(super) struct FixtureNode {
     directory: PathBuf,
     log: PathBuf,
 }
 
 impl FixtureNode {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let directory = Self::directory();
         write_script(
             &directory.join("bin"),
@@ -1471,7 +1472,7 @@ impl FixtureNode {
     }
 
     /// A Node reporting `version` and otherwise running what it was given.
-    fn with(version: &str, npm: &str) -> Self {
+    pub(super) fn with(version: &str, npm: &str) -> Self {
         let directory = Self::directory();
         write_script(
             &directory.join("bin"),
@@ -1492,7 +1493,7 @@ impl FixtureNode {
     }
 
     /// Replaces what npm does, after the run is recorded.
-    fn npm(&self, body: &str) {
+    pub(super) fn npm(&self, body: &str) {
         write_script(
             &self.directory.join("lib/node_modules/npm/bin"),
             "npm-cli.js",
@@ -1505,7 +1506,7 @@ impl FixtureNode {
     }
 
     /// The search path that resolves the fixture as the system Node.
-    fn search_path(&self) -> std::ffi::OsString {
+    pub(super) fn search_path(&self) -> std::ffi::OsString {
         self.directory.join("bin").into_os_string()
     }
 

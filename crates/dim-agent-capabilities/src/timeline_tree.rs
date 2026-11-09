@@ -206,6 +206,41 @@ impl TreeCommands {
             .page(&id, after, limit, through)
             .await
     }
+    /// Ends a raw-event page on an atomic batch boundary without reading its payloads.
+    #[service(skip)]
+    pub async fn page_end(
+        &self,
+        id: &str,
+        after: u64,
+        limit: std::num::NonZeroU64,
+        through: u64,
+    ) -> Result<u64> {
+        let tree = self
+            .tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+        let head = tree
+            .head(id)
+            .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
+        if after > through || through > head {
+            return Err(AgentError::InvalidInput("future Timeline cursor".into()));
+        }
+        let target = after.saturating_add(limit.get()).min(through);
+        if let Some(context) = tree.owned_context(id) {
+            let timeline = context.timeline();
+            timeline.batch_end(after).await?;
+            timeline.batch_end(through).await?;
+            timeline.batch_end_at(target).await
+        } else {
+            let key = TimelineKey {
+                session_id: tree.session_id.clone(),
+                branch_id: id.into(),
+            };
+            tree.store.batch_end(&key, after).await?;
+            tree.store.batch_end(&key, through).await?;
+            tree.store.batch_end_at(&key, target).await
+        }
+    }
     /// Computes properties of one line at a fixed cutoff. Chain scope is invalid.
     /// An ended line reads its persisted facts and has no publishing tail.
     pub async fn query(
@@ -3594,12 +3629,23 @@ impl BranchTool {
                 target.id
             )));
         }
-        let events = self
+        let next = self
             .tree
-            .page(target.id.clone(), after, limit, head)
+            .page_end(
+                &target.id,
+                after,
+                NonZeroU64::new(limit as u64).unwrap(),
+                head,
+            )
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        let (items, next) = read_items(&events, after);
+        let items = if after == next {
+            Vec::new()
+        } else {
+            line_read_items(&self.tree, &target.id, after, next)
+                .await
+                .map_err(|error| HostError::failed(error.to_string()))?
+        };
         let done = next >= head;
         let page = serde_json::json!({"items": items, "nextCursor": next, "done": done});
         let mut output = ToolResult::text(page.to_string());
@@ -3711,86 +3757,270 @@ fn message_block(from: &str, to: &str, content: &str, final_message: bool) -> In
         )
     }
 }
-fn read_items(events: &[Arc<AgentEvent>], after: u64) -> (Vec<serde_json::Value>, u64) {
-    let mut items: Vec<serde_json::Value> = Vec::new();
-    let mut next = after;
-    let mut text_request: Option<String> = None;
-    let mut names = BTreeMap::<(String, String), String>::new();
-    for event in events {
-        next = event.sequence;
-        let mut merged = None;
-        match &event.kind {
-            EventKind::InputMessage(data) => items.push(serde_json::json!({
-                "sequence": event.sequence, "type": "input",
-                "mode": data.effective_mode(), "user": data.user, "blocks": data.blocks})),
-            EventKind::Text(data) => {
-                if text_request.as_deref() == Some(data.request_id.as_str())
-                    && let Some(text) = items.last_mut().and_then(|item| item.get_mut("text"))
-                {
-                    *text =
-                        serde_json::json!(format!("{}{}", text.as_str().unwrap_or(""), data.delta));
-                } else {
-                    items.push(serde_json::json!({
-                        "sequence": event.sequence, "type": "text", "text": data.delta}));
-                }
-                merged = Some(data.request_id.clone());
-            }
-            EventKind::ToolUseStart(data) => {
-                names.insert(
-                    (data.request_id.clone(), data.call_id.clone()),
-                    data.name.clone(),
-                );
-            }
-            EventKind::ToolCall(data) => {
-                for call in &data.calls {
-                    names.insert(
-                        (data.request_id.clone(), call.id.clone()),
-                        call.name.clone(),
+enum LineRead {
+    Input(InputMessageData),
+    Text(TextData),
+    Start(ToolUseStartData),
+    End(TurnEndData),
+    Calls {
+        request: String,
+        calls: Vec<(String, String)>,
+    },
+    Results {
+        request: String,
+        results: Vec<(String, bool, Option<Vec<ToolEffect>>)>,
+    },
+}
+
+async fn line_read_items(
+    tree: &TreeCommands,
+    branch: &str,
+    after: u64,
+    through: u64,
+) -> Result<Vec<serde_json::Value>> {
+    let mut facts = Vec::new();
+    let selections: [(&[&str], &[&str]); 3] = [
+        (
+            &[
+                "input/message",
+                "step/text",
+                "step/tool-use-start",
+                "turn/end",
+            ],
+            &["position.sequence", "kind", "data"],
+        ),
+        (
+            &["step/tool-call"],
+            &[
+                "position.sequence",
+                "data.request_id",
+                "data.calls[].id",
+                "data.calls[].name",
+            ],
+        ),
+        (
+            &["step/tool-result"],
+            &[
+                "position.sequence",
+                "data.request_id",
+                "data.results[].call_id",
+                "data.results[].result.is_error",
+                "data.results[].result.effects",
+            ],
+        ),
+    ];
+    for (index, (kinds, fields)) in selections.into_iter().enumerate() {
+        let reply = tree
+            .query(
+                branch.into(),
+                TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: Some(TimelinePosition {
+                        branch_id: branch.into(),
+                        sequence: after + 1,
+                    }),
+                    through: Some(through),
+                    include_publishing: false,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: kinds.iter().map(|kind| serde_json::json!(kind)).collect(),
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: fields.iter().map(|field| (*field).into()).collect(),
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: NonZeroU64::new(through - after).unwrap(),
+                        after: None,
+                    }),
+                },
+            )
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("line read fields")
+        };
+        for row in rows {
+            let QueryValue::Value { value: sequence } = &row.values[0] else {
+                unreachable!("event sequence")
+            };
+            let sequence = sequence.as_u64().expect("event sequence");
+            let fact = match (index, row.values.as_slice()) {
+                (
+                    0,
+                    [
+                        _,
+                        QueryValue::Value {
+                            value: serde_json::Value::String(kind),
+                        },
+                        QueryValue::Value { value: data },
+                    ],
+                ) => match kind.as_str() {
+                    "input/message" => {
+                        LineRead::Input(serde_json::from_value(data.clone()).expect("input fields"))
+                    }
+                    "step/text" => {
+                        LineRead::Text(serde_json::from_value(data.clone()).expect("text fields"))
+                    }
+                    "step/tool-use-start" => LineRead::Start(
+                        serde_json::from_value(data.clone()).expect("tool start fields"),
+                    ),
+                    "turn/end" => LineRead::End(
+                        serde_json::from_value(data.clone()).expect("turn end fields"),
+                    ),
+                    _ => unreachable!("selected line read kind"),
+                },
+                (
+                    1,
+                    [
+                        _,
+                        QueryValue::Value {
+                            value: serde_json::Value::String(request),
+                        },
+                        QueryValue::Elements { values: ids },
+                        QueryValue::Elements { values: names },
+                    ],
+                ) => {
+                    assert_eq!(
+                        ids.len(),
+                        names.len(),
+                        "call projections preserve array positions"
                     );
-                    items.push(serde_json::json!({
-                        "sequence": event.sequence, "type": "tool_call",
-                        "callId": call.id, "name": call.name}));
+                    let calls = ids
+                        .iter()
+                        .zip(names)
+                        .map(|(id, name)| {
+                            let (
+                                QueryValue::Value {
+                                    value: serde_json::Value::String(id),
+                                },
+                                QueryValue::Value {
+                                    value: serde_json::Value::String(name),
+                                },
+                            ) = (id, name)
+                            else {
+                                unreachable!("call identity fields")
+                            };
+                            (id.clone(), name.clone())
+                        })
+                        .collect();
+                    LineRead::Calls {
+                        request: request.clone(),
+                        calls,
+                    }
                 }
-            }
-            EventKind::ToolResult(data) => {
-                for result in &data.results {
-                    let key = (data.request_id.clone(), result.call_id.clone());
-                    let name = names.get(&key);
-                    let mut item = serde_json::json!({
-                        "sequence": event.sequence, "type": "tool_result",
-                        "callId": result.call_id,
-                        "status": if result.result.is_error == Some(true) { "error" } else { "ok" }});
-                    if let Some(name) = name {
-                        item["name"] = serde_json::json!(name);
+                (
+                    2,
+                    [
+                        _,
+                        QueryValue::Value {
+                            value: serde_json::Value::String(request),
+                        },
+                        QueryValue::Elements { values: ids },
+                        QueryValue::Elements { values: errors },
+                        QueryValue::Elements { values: effects },
+                    ],
+                ) => {
+                    assert_eq!(
+                        ids.len(),
+                        errors.len(),
+                        "result projections preserve array positions"
+                    );
+                    assert_eq!(
+                        ids.len(),
+                        effects.len(),
+                        "result projections preserve array positions"
+                    );
+                    let results = ids
+                        .iter()
+                        .zip(errors)
+                        .zip(effects)
+                        .map(|((id, error), effects)| {
+                            let QueryValue::Value {
+                                value: serde_json::Value::String(id),
+                            } = id
+                            else {
+                                unreachable!("result identity field")
+                            };
+                            let error = match error {
+                                QueryValue::Value {
+                                    value: serde_json::Value::Bool(error),
+                                } => *error,
+                                QueryValue::Missing => false,
+                                _ => unreachable!("result error flag"),
+                            };
+                            let effects: Option<Vec<ToolEffect>> = match effects {
+                                QueryValue::Missing => None,
+                                QueryValue::Value { value: effects } => Some(
+                                    serde_json::from_value(effects.clone())
+                                        .expect("declared tool effects"),
+                                ),
+                                _ => unreachable!("declared effects are an array"),
+                            };
+                            (
+                                id.clone(),
+                                error,
+                                effects
+                                    .filter(|effects| !effects.is_empty())
+                                    .map(|effects| {
+                                        effects.iter().map(ToolEffect::shortened).collect()
+                                    }),
+                            )
+                        })
+                        .collect();
+                    LineRead::Results {
+                        request: request.clone(),
+                        results,
                     }
-                    if let Some(effects) = result.result.shortened_effects() {
-                        item["effects"] = serde_json::json!(effects);
-                    }
-                    items.push(item);
                 }
-            }
-            EventKind::TurnEnd(data) => {
-                let mut item = serde_json::json!({"sequence": event.sequence, "type": "turn_end"});
-                match &data.outcome {
-                    TurnOutcome::Completed { .. } => {
-                        item["status"] = serde_json::json!("completed")
-                    }
-                    TurnOutcome::Failed { error } => {
-                        item["status"] = serde_json::json!("failed");
-                        item["reason"] = serde_json::json!(error);
-                    }
-                    TurnOutcome::Cancelled { reason } => {
-                        item["status"] = serde_json::json!("cancelled");
-                        item["reason"] = serde_json::json!(reason);
-                    }
+                _ => unreachable!("line read projection contract"),
+            };
+            facts.push((sequence, fact));
+        }
+    }
+    facts.sort_by_key(|(sequence, _)| *sequence);
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut text_request: Option<String> = None;
+    let mut previous = after;
+    let mut names = BTreeMap::<(String, String), String>::new();
+    for (sequence, fact) in facts {
+        let mut merged = None;
+        match fact {
+            LineRead::Input(data) => items.push(serde_json::json!({"sequence":sequence,"type":"input","mode":data.effective_mode(),"user":data.user,"blocks":data.blocks})),
+            LineRead::Text(data) => {
+                if text_request.as_deref()==Some(data.request_id.as_str()) && sequence==previous+1
+                    && let Some(text)=items.last_mut().and_then(|item|item.get_mut("text")) {
+                    *text=serde_json::json!(format!("{}{}",text.as_str().unwrap(),data.delta));
+                } else { items.push(serde_json::json!({"sequence":sequence,"type":"text","text":data.delta})); }
+                merged=Some(data.request_id);
+            },
+            LineRead::Start(data)=>{ names.insert((data.request_id,data.call_id),data.name); },
+            LineRead::Calls { request,calls }=>for (id,name) in calls { names.insert((request.clone(),id.clone()),name.clone()); items.push(serde_json::json!({"sequence":sequence,"type":"tool_call","callId":id,"name":name})); },
+            LineRead::Results { request,results }=>for (id,error,effects) in results {
+                let mut item=serde_json::json!({"sequence":sequence,"type":"tool_result","callId":id,"status":if error {"error"} else {"ok"}});
+                if let Some(name)=names.get(&(request.clone(),id)) { item["name"]=serde_json::json!(name); }
+                if let Some(effects)=effects { item["effects"]=serde_json::json!(effects); }
+                items.push(item);
+            },
+            LineRead::End(data)=>{
+                let mut item=serde_json::json!({"sequence":sequence,"type":"turn_end"});
+                match data.outcome {
+                    TurnOutcome::Completed {..}=>item["status"]=serde_json::json!("completed"),
+                    TurnOutcome::Failed { error }=>{item["status"]=serde_json::json!("failed");item["reason"]=serde_json::json!(error);},
+                    TurnOutcome::Cancelled { reason }=>{item["status"]=serde_json::json!("cancelled");item["reason"]=serde_json::json!(reason);},
                 }
                 items.push(item);
-            }
-            _ => {}
+            },
         }
+        previous = sequence;
         text_request = merged;
     }
-    (items, next)
+    Ok(items)
 }
 impl ToolHandler for BranchTool {
     fn execute(

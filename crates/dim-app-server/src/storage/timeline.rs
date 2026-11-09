@@ -2651,8 +2651,22 @@ impl TimelineStore for SqliteTimelineStore {
     }
     fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            if self.batch_end_at(key, sequence).await? > sequence {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {sequence} is inside an atomic batch"
+                )));
+            }
+            Ok(())
+        })
+    }
+    fn batch_end_at<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(async move {
             if sequence == 0 {
-                return Ok(());
+                return Ok(0);
             }
             let (session, branch) = (key.session_id.clone(), key.branch_id.clone());
             let row = self
@@ -2681,12 +2695,7 @@ impl TimelineStore for SqliteTimelineStore {
             let Some((_, end)) = row.filter(|(last, _)| *last >= sequence) else {
                 return Err(error(format!("Timeline has no sequence {sequence}")));
             };
-            if sequence_value(end)? > sequence {
-                return Err(AgentError::InvalidInput(format!(
-                    "sequence {sequence} is inside an atomic batch"
-                )));
-            }
-            Ok(())
+            sequence_value(end)
         })
     }
     fn append(

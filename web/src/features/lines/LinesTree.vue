@@ -39,7 +39,7 @@ function end(line: LineView): void {
 }
 
 function cut(line: LineView): string {
-  return line.cut === null ? "" : t("lines.afterMessage", { count: line.cut.messages })
+  return line.cut === null || line.cut.messages === undefined ? "" : t("lines.afterMessage", { count: line.cut.messages })
 }
 
 function parent(line: LineView): string {

@@ -1653,6 +1653,7 @@ async fn recall_text_relations_seek_candidates_across_position_pages() {
                 "Recall relation size={size} direction={direction:?} pages={pages} firstVM={first} totalVM={all}"
             );
             measured.push(first);
+            measured.push(all);
         }
         let Some(QueryFilter::And { conditions }) = &mut query.filter else {
             unreachable!()
@@ -1691,7 +1692,324 @@ async fn recall_text_relations_seek_candidates_across_position_pages() {
     for (small, large) in costs[0].iter().zip(&costs[1]) {
         assert!(
             *large < *small * 20,
-            "16x more candidates must not produce quadratic membership work: {costs:?}"
+            "16x more candidates must not produce quadratic first-page or full-pagination work: {costs:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn mixed_recall_relations_page_inputs_outputs_and_tools_without_rebuilding_the_prefix() {
+    let and = |conditions| QueryFilter::And { conditions };
+    let or = |conditions| QueryFilter::Or { conditions };
+    let kinds = |names: &[&str]| QueryFilter::In {
+        value: QueryOperand::Field {
+            path: "kind".into(),
+        },
+        values: names.iter().map(|name| json!(name)).collect(),
+    };
+    let joined = |inner: &str, outer: &str| QueryFilter::Compare {
+        left: QueryOperand::Field { path: inner.into() },
+        comparison: QueryComparison::Eq,
+        right: QueryOperand::Outer { path: outer.into() },
+    };
+    let exists = |condition| QueryFilter::Exists {
+        condition: Box::new(condition),
+    };
+    let mut costs = Vec::new();
+    for size in [128u64, 2048] {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        store
+            .create_session("properties", &SessionConfig::default())
+            .await
+            .unwrap();
+        let mut records = Vec::new();
+        for n in 0..size {
+            let at = 1 + n * 7;
+            let request = format!("request-{n}");
+            let turn = format!("turn-{n}");
+            records.extend([
+                record(
+                    at,
+                    EventKind::InputMessage(InputMessageData::text("uniqueneedle", None)),
+                ),
+                record(
+                    at + 1,
+                    EventKind::InputConsumed(InputConsumedData {
+                        input_id: format!("event-{at}"),
+                    }),
+                ),
+                record(
+                    at + 2,
+                    EventKind::ModelStart(ModelStartData {
+                        turn_id: turn.clone(),
+                        request_id: request.clone(),
+                    }),
+                ),
+                record(
+                    at + 3,
+                    EventKind::Text(DeltaData {
+                        turn_id: turn.clone(),
+                        request_id: request.clone(),
+                        delta: "uniqueneedle".into(),
+                    }),
+                ),
+                record(
+                    at + 4,
+                    EventKind::ToolUseStart(ToolUseStartData {
+                        turn_id: turn.clone(),
+                        request_id: request.clone(),
+                        call_id: format!("call-{n}"),
+                        name: "echo".into(),
+                    }),
+                ),
+                record(
+                    at + 5,
+                    EventKind::ToolUse(ToolUseData {
+                        turn_id: turn.clone(),
+                        request_id: request.clone(),
+                        call: ToolCall {
+                            id: format!("call-{n}"),
+                            name: "echo".into(),
+                            input: json!({"text":"uniqueneedle"}).as_object().unwrap().clone(),
+                        },
+                    }),
+                ),
+                record(
+                    at + 6,
+                    EventKind::ToolResult(ToolResultData {
+                        turn_id: turn,
+                        request_id: request,
+                        call_event_id: None,
+                        results: vec![ToolCallResult {
+                            call_id: format!("call-{n}"),
+                            result: ToolResult::text("uniqueneedle"),
+                        }],
+                    }),
+                ),
+            ]);
+        }
+        append(&store, key("properties", "main"), records)
+            .await
+            .unwrap();
+        let mut measured = Vec::new();
+        for word in ["uniqueneedle", "absentwordxyz"] {
+            let text = |field: &str, partition: &[&str]| QueryFilter::TextCandidate {
+                field: field.into(),
+                partition_by: partition.iter().map(|p| (*p).into()).collect(),
+                terms: vec![word.into()],
+            };
+            let mut query = fields(&[
+                "id",
+                "kind",
+                "position",
+                "data.input_id",
+                "data.request_id",
+                "data.call_id",
+            ]);
+            query.filter = Some(or(vec![
+                and(vec![
+                    kinds(&["input/consumed"]),
+                    exists(and(vec![
+                        kinds(&["input/message"]),
+                        joined("id", "data.input_id"),
+                        text("data", &[]),
+                    ])),
+                ]),
+                and(vec![
+                    kinds(&["step/model-start"]),
+                    exists(and(vec![
+                        joined("data.request_id", "data.request_id"),
+                        or(vec![
+                            and(vec![
+                                kinds(&["step/text"]),
+                                text("data.delta", &["kind", "data.request_id"]),
+                            ]),
+                            and(vec![kinds(&["step/model-content"]), text("data", &[])]),
+                        ]),
+                    ])),
+                ]),
+                and(vec![
+                    kinds(&["step/tool-use-start"]),
+                    or(vec![
+                        exists(and(vec![
+                            kinds(&["step/tool-use-start", "step/tool-use", "step/tool-result"]),
+                            joined("data.request_id", "data.request_id"),
+                            text("data", &[]),
+                        ])),
+                        exists(and(vec![
+                            kinds(&[
+                                "exec/started",
+                                "collaboration/request",
+                                "collaboration/message",
+                            ]),
+                            joined("data.request_id", "data.request_id"),
+                        ])),
+                        exists(and(vec![
+                            kinds(&["approval/request", "branch/create"]),
+                            joined("data.source.request_id", "data.request_id"),
+                        ])),
+                    ]),
+                ]),
+                kinds(&[
+                    "stop/interrupt",
+                    "permission/changed",
+                    "context/compaction",
+                    "session/forked",
+                    "branch/start",
+                ]),
+            ]));
+            query.order_by = vec![QueryOrder {
+                key: QueryOrderKey::Position,
+                direction: TimelineQueryDirection::Descending,
+            }];
+            let mut p = page(128);
+            let mut seen = std::collections::BTreeSet::new();
+            let mut steps = 0i64;
+            let mut plans = Vec::new();
+            loop {
+                store.record_query_statistics();
+                let result = store
+                    .query(&scope(size * 7), &query, Some(&p))
+                    .await
+                    .unwrap();
+                let stats = store.take_query_statistics();
+                steps += stats.iter().map(|s| i64::from(s.vm_steps)).sum::<i64>();
+                if plans.is_empty() {
+                    plans = stats.iter().flat_map(|s| s.plan.clone()).collect();
+                }
+                let dim_agent_runtime::QueryOutput::Rows { rows } = result.result else {
+                    panic!("mixed Recall candidates")
+                };
+                for row in rows {
+                    assert!(
+                        seen.insert(serde_json::to_string(&row.values[0]).unwrap()),
+                        "each origin occurs once across pages"
+                    );
+                }
+                let Some(next) = result.next else {
+                    break;
+                };
+                p.after = Some(next);
+            }
+            assert_eq!(
+                seen.len(),
+                if word == "uniqueneedle" {
+                    size as usize * 3
+                } else {
+                    0
+                }
+            );
+            assert!(
+                plans
+                    .iter()
+                    .any(|line| line.contains("timeline_events_requests")),
+                "request joins must use the existing identity index: {plans:?}"
+            );
+            println!("Mixed Recall size={size} word={word} totalVM={steps}");
+            measured.push(steps);
+        }
+        costs.push(measured);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+    for (small, large) in costs[0].iter().zip(&costs[1]) {
+        assert!(
+            *large < *small * 20,
+            "16x more mixed candidates must not become quadratic: {costs:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn related_text_candidates_keep_unindexed_kinds_when_the_same_filter_is_indexed_elsewhere() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("properties", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("properties", "main"),
+        vec![
+            model_call(1, vec![Message::text(Role::User, "ordinary content")]),
+            record(
+                2,
+                EventKind::ModelStart(ModelStartData {
+                    turn_id: "turn-1".into(),
+                    request_id: "request-1".into(),
+                }),
+            ),
+            record(
+                3,
+                EventKind::InputMessage(InputMessageData::text("ordinary content", None)),
+            ),
+            record(
+                4,
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: "event-3".into(),
+                }),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    let text = QueryFilter::TextCandidate {
+        field: "data".into(),
+        partition_by: vec![],
+        terms: vec!["absentwordxyz".into()],
+    };
+    let relation = |kind: &str, inner: &str, outer: &str| QueryFilter::Exists {
+        condition: Box::new(QueryFilter::And {
+            conditions: vec![
+                eq("kind", json!(kind)),
+                QueryFilter::Compare {
+                    left: QueryOperand::Field { path: inner.into() },
+                    comparison: QueryComparison::Eq,
+                    right: QueryOperand::Outer { path: outer.into() },
+                },
+                text.clone(),
+            ],
+        }),
+    };
+    let mut query = fields(&["id"]);
+    query.filter = Some(QueryFilter::Or {
+        conditions: vec![
+            QueryFilter::And {
+                conditions: vec![
+                    eq("kind", json!("input/consumed")),
+                    relation("input/message", "id", "data.input_id"),
+                ],
+            },
+            QueryFilter::And {
+                conditions: vec![
+                    eq("kind", json!("step/model-start")),
+                    relation("model/call", "data.request_id", "data.request_id"),
+                ],
+            },
+        ],
+    });
+    let result = store
+        .query(&scope(4), &query, Some(&page(2)))
+        .await
+        .unwrap();
+    let dim_agent_runtime::QueryOutput::Rows { rows } = result.result else {
+        panic!("candidate identities")
+    };
+    assert_eq!(
+        rows.len(),
+        1,
+        "an unindexed request remains a candidate even for an absent word"
+    );
+    assert_eq!(
+        rows[0].values[0],
+        dim_agent_runtime::QueryValue::Value {
+            value: json!("event-2")
+        }
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }

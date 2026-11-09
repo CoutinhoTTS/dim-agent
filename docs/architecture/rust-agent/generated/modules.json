@@ -1196,6 +1196,7 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
       "unexpandedMacros": [
+        "assert_eq",
         "format",
         "matches",
         "serde_json::json",
@@ -2790,7 +2791,9 @@
         "format",
         "json",
         "matches",
+        "tokio::select",
         "tracing::warn",
+        "unreachable",
         "vec",
         "write"
       ]
@@ -15486,11 +15489,8 @@
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
-        "path EventKind::Text",
-        "path EventKind::ToolCall",
         "path EventKind::ToolResult",
         "path EventKind::ToolUse",
-        "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path InputBlock",
         "path InputBlock::Raw",
@@ -15500,6 +15500,9 @@
         "path InputMode::Append",
         "path InputMode::Queue",
         "path InputMode::Steer",
+        "path TextData",
+        "path ToolUseStartData",
+        "path TurnEndData",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
@@ -15527,6 +15530,8 @@
       "references": [
         "path ToolCall",
         "path ToolDefinition",
+        "path ToolEffect",
+        "path ToolEffect::shortened",
         "path ToolResult",
         "path ToolResult::error",
         "path ToolResult::text",
@@ -19214,6 +19219,7 @@
       "references": [
         "path Result",
         "path crate::AgentError::InvalidInput",
+        "path crate::AgentError::Storage",
         "use crate::Result"
       ]
     },
@@ -26728,10 +26734,13 @@
         "mod acquire",
         "path PluginsDir",
         "path PluginsDir::new",
+        "path acquire::Staging",
         "path acquire::check_git_url",
         "path acquire::check_id",
         "path acquire::clone",
+        "path acquire::copy",
         "path acquire::manifest_of",
+        "path acquire::work_dir",
         "use acquire::PluginsDir"
       ]
     },
@@ -26765,6 +26774,7 @@
         "path Record",
         "path Record::read",
         "path Source::Git",
+        "path Source::Optional",
         "path Source::Path",
         "path record",
         "path record::Code",
@@ -26789,7 +26799,9 @@
       "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::runtime_manager",
       "references": [
+        "path crate::runtime_manager::Kind::Node",
         "path crate::runtime_manager::Kind::Python",
+        "path crate::runtime_manager::PackagesError",
         "path crate::runtime_manager::RuntimeService"
       ]
     },
@@ -26834,6 +26846,7 @@
       "references": [
         "path Manifest",
         "path Manifest::read",
+        "path super::record::is_version",
         "use super::record::Manifest"
       ]
     },
@@ -30007,7 +30020,8 @@
       "to": "dim_app_server::storage::text",
       "references": [
         "path super::text::candidates",
-        "path super::text::indexed"
+        "path super::text::indexed",
+        "path super::text::trigrams"
       ]
     },
     {
@@ -34704,6 +34718,7 @@
       "to": "dim_cli::plugin_command",
       "references": [
         "path parse",
+        "use super::list_line",
         "use super::parse"
       ]
     },
@@ -47632,6 +47647,14 @@
     },
     {
       "from": "dim_session_title",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_session_title",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
@@ -47672,6 +47695,40 @@
     },
     {
       "from": "dim_session_title",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryFilter::And",
+        "path QueryFilter::In",
+        "path QueryOperand::Field",
+        "path QueryOutput::Rows",
+        "path QueryPage",
+        "path QueryPick::First",
+        "path QueryPick::Last",
+        "path QuerySelect::Fields",
+        "path QuerySpec",
+        "path QueryValue::Value",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryFilter",
+        "use dim_agent_runtime::QueryOperand",
+        "use dim_agent_runtime::QueryOutput",
+        "use dim_agent_runtime::QueryPage",
+        "use dim_agent_runtime::QueryPick",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QuerySpec",
+        "use dim_agent_runtime::QueryValue",
+        "use dim_agent_runtime::TimelineQuery"
+      ]
+    },
+    {
+      "from": "dim_session_title",
       "to": "dim_agent_types::content",
       "references": [
         "path ContentBlock::Text",
@@ -47684,12 +47741,8 @@
       "from": "dim_session_title",
       "to": "dim_agent_types::events",
       "references": [
-        "path AgentEvent",
-        "path EventKind::ContextConfigured",
         "path EventKind::InputApplied",
-        "path EventKind::InputMessage",
         "path UserInput",
-        "use dim_agent_types::AgentEvent",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::UserInput"
       ]

@@ -36,7 +36,7 @@ function user(sequence) {
   return event(sequence, { kind: "input", text: `message ${sequence}` })
 }
 
-test("lines follow the parent tree, order by cut and count inherited messages", () => {
+test("lines use owner details for inherited message counts and keep tree order", () => {
   const lines = new Lines()
   lines.apply("main", user(2))
   lines.apply("main", create(3, "b-child", 4, "parser race\nmore"))
@@ -44,6 +44,8 @@ test("lines follow the parent tree, order by cut and count inherited messages", 
   lines.apply("b-child", user(6))
   lines.apply("b-child", create(7, "b-grandchild", 6, "the guard"))
 
+  lines.detail({ branchId: "b-child", parentBranchId: "main", branchPoint: 4, state: "open", head: 7, purpose: "parser race\nmore", cutMessages: 1 })
+  lines.detail({ branchId: "b-grandchild", parentBranchId: "b-child", branchPoint: 6, state: "open", head: 1, cutMessages: 2 })
   const views = lines.views()
   assert.deepEqual(views.map((line) => [line.id, line.depth]), [
     ["main", 0],
@@ -98,14 +100,13 @@ test("creation failures and every end source map to the line states", () => {
   assert.deepEqual(states["b-failed"], { kind: "creation-failed" })
 })
 
-test("withdrawn inputs no longer count toward a cut", () => {
+test("directory does not invent a cut count from a partial transcript", () => {
   const lines = new Lines()
-  lines.apply("main", user(2))
-  lines.apply("main", user(3))
-  lines.apply("main", create(4, "b-child", 3))
-  lines.apply("main", { ...event(5, { kind: "input-deleted", inputId: "e2" }) })
-
-  assert.deepEqual(lines.views()[1].cut, { sequence: 3, messages: 1 })
+  lines.directory([{ branchId: "child", parentBranchId: "main", branchPoint: 1000, state: "open", head: 200 }])
+  lines.apply("main", user(999))
+  assert.deepEqual(lines.views()[1].cut, { sequence: 1000, messages: undefined })
+  lines.detail({ branchId: "child", parentBranchId: "main", branchPoint: 1000, state: "open", head: 200, cutMessages: 40 })
+  assert.equal(lines.views()[1].cut.messages, 40)
 })
 
 test("approval shortcuts follow the visible surface across wide, expanded and covered layouts", () => {
