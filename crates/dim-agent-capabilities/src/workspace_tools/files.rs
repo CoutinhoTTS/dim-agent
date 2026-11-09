@@ -842,9 +842,7 @@ impl Target {
         }
     }
 
-    pub(crate) fn open_regular(
-        &self,
-    ) -> Result<Result<std::fs::File, NotRegular>, TargetError> {
+    pub(crate) fn open_regular(&self) -> Result<Result<std::fs::File, NotRegular>, TargetError> {
         match self {
             Self::Path(path) => open_regular(path).map_err(TargetError::Io),
             #[cfg(unix)]
@@ -878,12 +876,11 @@ impl Target {
             Self::Path(path) => {
                 #[cfg(windows)]
                 {
-                    let parent = crate::file_storage::windows::open_root(
-                        path.parent().ok_or_else(|| {
-                            TargetError::Io(std::io::Error::other("a target has a parent"))
-                        })?,
-                    )
-                    .map_err(|error| TargetError::Io(std::io::Error::other(error)))?;
+                    let parent =
+                        crate::file_storage::windows::open_root(path.parent().ok_or_else(
+                            || TargetError::Io(std::io::Error::other("a target has a parent")),
+                        )?)
+                        .map_err(|error| TargetError::Io(std::io::Error::other(error)))?;
                     let file = crate::file_storage::windows::create_temp(
                         &parent,
                         &name.to_owned(),
@@ -914,11 +911,7 @@ impl Target {
         }
     }
 
-    pub(crate) fn staged_owned(
-        &self,
-        name: &std::ffi::OsStr,
-        file: &std::fs::File,
-    ) -> bool {
+    pub(crate) fn staged_owned(&self, name: &std::ffi::OsStr, file: &std::fs::File) -> bool {
         match self {
             Self::Path(path) => owned_temporary(&path.with_file_name(name), file),
             #[cfg(unix)]
@@ -949,12 +942,11 @@ impl Target {
             Self::Path(path) => {
                 #[cfg(windows)]
                 if existing {
-                    let parent = crate::file_storage::windows::open_root(
-                        path.parent().ok_or_else(|| {
-                            TargetError::Io(std::io::Error::other("a target has a parent"))
-                        })?,
-                    )
-                    .map_err(|error| TargetError::Io(std::io::Error::other(error)))?;
+                    let parent =
+                        crate::file_storage::windows::open_root(path.parent().ok_or_else(
+                            || TargetError::Io(std::io::Error::other("a target has a parent")),
+                        )?)
+                        .map_err(|error| TargetError::Io(std::io::Error::other(error)))?;
                     return crate::file_storage::windows::replace(
                         file,
                         &parent,

@@ -472,7 +472,9 @@ impl Permission {
                 format!("Failed to resolve workspace {}: {error}", cwd.display())
             })?;
             let target: Result<PathBuf, String> = match home {
-                Some(home) => resolve_path(&cwd, &home, None, Access::Write, &path).map_err(String::from),
+                Some(home) => {
+                    resolve_path(&cwd, &home, None, Access::Write, &path).map_err(String::from)
+                }
                 None => canonical_prefix(PathBuf::from(path)),
             };
             target.map(|target| (workspace, target))

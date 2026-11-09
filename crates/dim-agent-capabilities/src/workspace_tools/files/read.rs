@@ -3,9 +3,9 @@
 use super::super::file_reads::{FileReads, TextEncoding, TextFileBinding};
 use super::codec::{self, CodecError};
 use super::{
-    Access, Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking,
-    cancelled, failed, field, hex, invalid_input, js_len, not_regular, object, refused,
-    resolve_path, succeeded,
+    Access, Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking, cancelled,
+    failed, field, hex, invalid_input, js_len, not_regular, object, refused, resolve_path,
+    succeeded,
 };
 use crate::host::HostError;
 use crate::images::{self, ImageKind, ImageRefusal, ImageSize, ScaledImage, Sniffed};
