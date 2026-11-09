@@ -7,6 +7,109 @@ use serde_json::{Value, json};
 use std::num::NonZeroU64;
 
 #[tokio::test]
+async fn mixed_kind_pages_seek_each_type_before_merging() {
+    let mut costs = Vec::new();
+    for unrelated in [100, 5_000] {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        store
+            .create_session("properties", &SessionConfig::default())
+            .await
+            .unwrap();
+        let mut records = (1..=16)
+            .map(|sequence| {
+                record(
+                    sequence,
+                    EventKind::Extension(
+                        ExtensionEvent::new(
+                            "owner",
+                            if sequence % 2 == 0 { "a" } else { "b" },
+                            json!({}),
+                        )
+                        .unwrap(),
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
+        records.extend((17..=unrelated + 16).map(|sequence| {
+            record(
+                sequence,
+                EventKind::InputMessage(InputMessageData::text("unrelated history", None)),
+            )
+        }));
+        append(&store, key("properties", "main"), records)
+            .await
+            .unwrap();
+        let mut query = fields(&["position.sequence"]);
+        query.filter = Some(QueryFilter::In {
+            value: QueryOperand::Field {
+                path: "kind".into(),
+            },
+            values: vec![json!("owner/a"), json!("owner/b"), json!("owner/a")],
+        });
+        let mut measured = Vec::new();
+        for direction in [
+            TimelineQueryDirection::Ascending,
+            TimelineQueryDirection::Descending,
+        ] {
+            query.order_by = vec![QueryOrder {
+                key: QueryOrderKey::Position,
+                direction,
+            }];
+            for pick in [None, Some(QueryPick::First), Some(QueryPick::Last)] {
+                query.pick = pick;
+                let mut p = page(3);
+                let mut found = Vec::new();
+                let mut steps = 0i64;
+                loop {
+                    store.record_query_statistics();
+                    let reply = store
+                        .query(&scope(unrelated + 16), &query, Some(&p))
+                        .await
+                        .unwrap();
+                    steps += store
+                        .take_query_statistics()
+                        .iter()
+                        .map(|stat| i64::from(stat.vm_steps))
+                        .sum::<i64>();
+                    let dim_agent_runtime::QueryOutput::Rows { rows } = reply.result else {
+                        panic!("selected positions");
+                    };
+                    for row in rows {
+                        let dim_agent_runtime::QueryValue::Value { value } = &row.values[0] else {
+                            panic!("position value");
+                        };
+                        found.push(value.as_u64().unwrap());
+                    }
+                    let Some(next) = reply.next else { break };
+                    p.after = Some(next);
+                }
+                let mut expected: Vec<_> = match pick {
+                    Some(QueryPick::First) => vec![1],
+                    Some(QueryPick::Last) => vec![16],
+                    None => (1..=16).collect(),
+                };
+                if pick.is_none() && direction == TimelineQueryDirection::Descending {
+                    expected.reverse();
+                }
+                assert_eq!(found, expected);
+                measured.push(steps);
+            }
+        }
+        costs.push(measured);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+    for (small, large) in costs[0].iter().zip(&costs[1]) {
+        assert!(
+            *large < *small * 2,
+            "unrelated history must not be scanned: {costs:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn v37_text_upgrade_removes_opaque_documents_without_losing_query_candidates() {
     let database = Database::new();
     let db = SqliteStorage::open(database.0.clone()).unwrap();

@@ -243,6 +243,7 @@ struct Compiler<'a> {
     direct_relations: bool,
     physical_candidates: Option<String>,
     physical_ids: Option<Vec<String>>,
+    physical_kinds: Option<&'a [Value]>,
     array_rows: bool,
     element_values: bool,
     resolved_relations: Vec<(&'a QueryFilter, String)>,
@@ -405,6 +406,7 @@ impl<'a> Compiler<'a> {
             direct_relations: false,
             physical_candidates: None,
             physical_ids: None,
+            physical_kinds: query.filter.as_ref().and_then(kind_values),
             array_rows,
             element_values,
             resolved_relations: Vec::new(),
@@ -1074,12 +1076,39 @@ impl<'a> Compiler<'a> {
             let direction = if descending { "DESC" } else { "ASC" };
             let predicate = predicate.replace("e.", "candidate.");
             let limit = self.bind(limit.min(i64::MAX as u64) as i64);
-            format!(
-                "AND e.sequence IN (SELECT candidate.sequence FROM timeline_events candidate
+            let kinds = self.physical_kinds.map(|kinds| {
+                kinds
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<std::collections::BTreeSet<_>>()
+            });
+            if let Some(kinds) = kinds.filter(|kinds| (2..=32).contains(&kinds.len())) {
+                let candidates = kinds
+                    .into_iter()
+                    .map(|kind| {
+                        let kind = self.bind(kind.to_owned());
+                        format!(
+                            "SELECT sequence FROM (SELECT candidate.sequence
+                      FROM timeline_events candidate INDEXED BY timeline_events_by_kind
+                      WHERE candidate.session_id={session} AND candidate.branch_id=s.branch
+                      AND candidate.kind={kind} AND candidate.sequence BETWEEN {lower} AND s.hi
+                      AND candidate.last_sequence>=s.lo AND ({predicate})
+                      ORDER BY candidate.sequence {direction} LIMIT {limit})"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" UNION ALL ");
+                format!(
+                    "AND e.sequence IN (SELECT sequence FROM ({candidates}) ORDER BY sequence {direction} LIMIT {limit})"
+                )
+            } else {
+                format!(
+                    "AND e.sequence IN (SELECT candidate.sequence FROM timeline_events candidate
               WHERE candidate.session_id={session} AND candidate.branch_id=s.branch
               AND candidate.sequence BETWEEN {lower} AND s.hi AND candidate.last_sequence>=s.lo
               AND ({predicate}) ORDER BY candidate.sequence {direction} LIMIT {limit})"
-            )
+                )
+            }
         } else {
             String::new()
         };
@@ -2099,6 +2128,7 @@ fn selected_properties(
         direct_relations: false,
         physical_candidates: None,
         physical_ids: None,
+        physical_kinds: None,
         array_rows: false,
         element_values: false,
         resolved_relations: Vec::new(),
