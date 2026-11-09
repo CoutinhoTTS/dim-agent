@@ -551,6 +551,12 @@ impl Owner {
 /// The applied inputs that may title a Session (SessionTitle.md §0.1, A10): an
 /// operator `input/message` with `data.user`, or Goal's applied `goal:state`
 /// record, which states the objective.
+///
+/// Goal's key alone identifies the record; `goal_objective` decodes it, so a
+/// change to Goal's wording does not change eligibility. The `<objective>`
+/// element stays a condition because Goal also writes a retired `goal:state`
+/// record with no objective when a goal is cleared, and such a record must not
+/// become the first eligible input and block a later title.
 fn eligible_input() -> QueryFilter {
     QueryFilter::Or {
         conditions: vec![
@@ -566,12 +572,6 @@ fn eligible_input() -> QueryFilter {
                         QueryFilter::In {
                             value: QueryOperand::Element { path: "key".into() },
                             values: vec!["goal:state".into()],
-                        },
-                        QueryFilter::Prefix {
-                            value: QueryOperand::Element {
-                                path: "text".into(),
-                            },
-                            prefix: "<dim-goal ".into(),
                         },
                         QueryFilter::Contains {
                             value: QueryOperand::Element {
