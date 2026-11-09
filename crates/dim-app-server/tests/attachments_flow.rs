@@ -98,6 +98,7 @@ async fn launch(home: &Home, native: bool) -> RunningServer {
         workspace_tools::install(
             &mut builder,
             WorkspaceToolsConfig {
+                boundary: None,
                 output_root: home.0.join("command-output"),
             },
         );

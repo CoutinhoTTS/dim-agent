@@ -4,8 +4,8 @@ use super::super::file_reads::{Eol, FileReads, TextFileBinding};
 use super::codec;
 use super::write::write_target;
 use super::{
-    Cancelled, FileTools, NotRegular, blocking, cancelled, failed, field, hex, invalid_input,
-    js_len, not_regular, open_regular, resolve_path, revision, wrote,
+    Access, Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking, cancelled,
+    failed, field, hex, invalid_input, js_len, not_regular, refused, resolve_path, revision, wrote,
 };
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolResult};
@@ -103,19 +103,34 @@ pub(super) async fn run(
             json!({ "code": "no_change" }),
         ));
     }
-    let (cwd, home, requested) = (tools.cwd.clone(), tools.home.clone(), input.path.clone());
-    let path = match blocking(move || resolve_path(&cwd, &home, &requested)).await? {
+    let (cwd, home, requested, boundary) = (
+        tools.cwd.clone(),
+        tools.home.clone(),
+        input.path.clone(),
+        tools.boundary.clone(),
+    );
+    let path = match blocking(move || {
+        resolve_path(&cwd, &home, boundary.as_ref(), Access::Write, &requested)
+    })
+    .await?
+    {
         Ok(path) => path,
-        Err(message) => return Ok(invalid_input(message)),
+        Err(PathError::Refused(path)) => return Ok(refused(&path)),
+        Err(PathError::Message(message)) => return Ok(invalid_input(message)),
     };
+    #[cfg(test)]
+    if let Some(hook) = &tools.before_lock {
+        hook(&path);
+    }
     let _lock = tools.locks.lock(&path, &cancel).await?;
     let binding = reads.get(&path);
-    let target = path.clone();
+    let (target, bounded) = (path.clone(), tools.boundary.is_some());
     #[cfg(test)]
     let hook = tools.before_commit.clone();
     let (_lock, written) = blocking(move || {
         let written = edit_locked(
             &target,
+            bounded,
             &input,
             binding,
             &cancel,
@@ -134,6 +149,7 @@ pub(super) async fn run(
 
 fn edit_locked(
     path: &Path,
+    bounded: bool,
     input: &Input,
     binding: Option<TextFileBinding>,
     cancel: &CancellationToken,
@@ -141,31 +157,42 @@ fn edit_locked(
 ) -> Result<(ToolResult, Option<TextFileBinding>), Cancelled> {
     let done = |result| Ok((result, None));
     let display = &input.path;
+    let stat_failure = |error: std::io::Error| match error.kind() {
+        ErrorKind::NotFound => failed(
+            format!("File not found: {display}"),
+            json!({ "code": "file_not_found" }),
+        ),
+        ErrorKind::PermissionDenied => failed(
+            format!("Permission denied: {display}"),
+            json!({ "code": "permission_denied" }),
+        ),
+        _ => failed(
+            format!("Failed to stat file: {error}"),
+            json!({ "code": "stat_error" }),
+        ),
+    };
     Cancelled::check(cancel)?;
-    let size = match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_dir() => {
+    let target = match Target::for_mutation(path, bounded, false) {
+        Ok(target) => target,
+        Err(TargetError::Refused) => return done(refused(path)),
+        Err(TargetError::Io(error)) => return done(stat_failure(error)),
+    };
+    let size = match target.stat() {
+        Ok(Some(stat)) if stat.directory => {
             return done(failed(
                 format!("Cannot edit directory: {display}"),
                 json!({ "code": "is_directory" }),
             ));
         }
-        Ok(metadata) => metadata.len(),
-        Err(error) => {
-            return done(match error.kind() {
-                ErrorKind::NotFound => failed(
-                    format!("File not found: {display}"),
-                    json!({ "code": "file_not_found" }),
-                ),
-                ErrorKind::PermissionDenied => failed(
-                    format!("Permission denied: {display}"),
-                    json!({ "code": "permission_denied" }),
-                ),
-                _ => failed(
-                    format!("Failed to stat file: {error}"),
-                    json!({ "code": "stat_error" }),
-                ),
-            });
+        Ok(Some(stat)) => stat.len,
+        Ok(None) => {
+            return done(failed(
+                format!("File not found: {display}"),
+                json!({ "code": "file_not_found" }),
+            ));
         }
+        Err(TargetError::Refused) => return done(refused(path)),
+        Err(TargetError::Io(error)) => return done(stat_failure(error)),
     };
     Cancelled::check(cancel)?;
     if size > EDIT_TARGET_MAX_BYTES {
@@ -184,10 +211,11 @@ fn edit_locked(
             )
         }
     };
-    let file = match open_regular(path) {
+    let file = match target.open_regular() {
         Ok(Ok(file)) => file,
         Ok(Err(NotRegular)) => return done(not_regular(display)),
-        Err(error) => return done(read_failure(error)),
+        Err(TargetError::Refused) => return done(refused(path)),
+        Err(TargetError::Io(error)) => return done(read_failure(error)),
     };
     let Some(binding) = binding else {
         return done(failed(
@@ -236,7 +264,7 @@ fn edit_locked(
     };
     Cancelled::check(cancel)?;
     if let Err(result) = write_target(
-        path,
+        &target,
         &written,
         display,
         Some(limited.get_ref()),
