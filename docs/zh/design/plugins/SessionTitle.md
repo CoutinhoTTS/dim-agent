@@ -2,7 +2,7 @@
 
 总体设计：[overview](../overview.md)（SessionTitle）。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上的第一条操作者输入被采用时（`input/applied`），它仅凭该输入的文本，按 §3.3 的分流策略生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（已交付的 C6 通知记录见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它把命名空间 `session.rename` 注册到本 Session 的 `sessionMethods`，以此提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
+SessionTitle 是一个 Session 插件，为交互式 leader Session 提供经 SessionStore 元数据保存的标题。它通过既有的 Session 广播观察自己的 Session；当 `main` 上第一条符合条件的输入被采用时 (`input/applied`) —— 带 `user` 内容的操作者输入，或 Goal 已采用的 objective (A10) —— 它仅凭该输入的文本，按 §3.3 的分流策略生成标题。标题是 SessionStore 的状态：SessionTitle 只通过 SessionStore 的类型化操作 `setTitle` 写入，SessionStore 在每次变更后发出一条 Session 广播通知，由客户端消费（已交付的 C6 通知记录见 [§9](#9-向机制所有者提出的需求)；SessionStore 标题元数据和 Rpc 转发是补充，见[总体设计附录 B.2](../overview.md#b2-app-server-进程插件)）。它把命名空间 `session.rename` 注册到本 Session 的 `sessionMethods`，以此提供 `session.rename`（[方法与工具贡献](../contracts/session-boundary.md)）。它不写任何 Timeline 事件，也没有模型可见的效果。契约以语言中立形式给出（[ADR 002 D5](../../adr/002-plugin-scope.md)）；Rust 绑定见附录 G。
 
 ## 0. 实施边界
 
@@ -54,7 +54,7 @@ atLeast 与 through，直接使用原生 HistoryPage/AgentEvent。S2 稳定目�
 产品装配独立于外语插件行安装原生插件。
 必需服务的提供者缺失时，依照既有依赖规则仅影响 SessionTitle 的可用性，不影响 Session 的执行能力。
 
-固定快照止于返回的 T，不承诺恰好止于 N。第一条被采用的操作者输入提供文本；model=null
+固定快照止于返回的 T，不承诺恰好止于 N。第一条被采用且符合条件的输入提供文本；model=null
 时，从该快照最新 ContextConfiguredData.settings 读取 providerId/modelId。没有被采用的
 模型时使用 §3.3 的文本兜底，不改用该配置当前默认模型。
 
@@ -103,7 +103,7 @@ flowchart LR
 ```mermaid
 flowchart TB
   subgraph TLM["main 分支 Timeline"]
-    FUI["第一条被采用的操作者输入（input/message、input/applied）"]
+    FUI["第一条被采用且符合条件的输入 (input/message, input/applied)"]
     CC["context/configured（被采用的模型）"]
   end
   subgraph STORE["SessionStore 元数据（持久）"]
@@ -124,7 +124,7 @@ flowchart TB
 
 ## 3. 流程
 
-### 3.1 由第一条用户输入自动生成标题
+### 3.1 由第一条符合条件的输入自动生成标题
 
 ```mermaid
 sequenceDiagram
@@ -140,14 +140,14 @@ sequenceDiagram
   Note over ST: 交互式 leader，无在途生成
   ST->>Settings: 读取 session-title；禁用时跳过
   ST->>Meta: metadata：无标题，revision r
-  ST->>Sessions: history(main, atLeast N)，按固定 T 分页：第一条采用的操作者文本
+  ST->>Sessions: history(main, atLeast N)，按固定 T 分页：第一条采用且符合条件的文本
   ST->>Aux: complete(model, text)
   Aux-->>ST: 标题文本
   ST->>Meta: setTitle(expected r, auto)
   Meta-->>SB: 标题通知
 ```
 
-生成在输入被采用时开始，而非 turn 结束后。只发送 `main` 上第一条被采用的操作者输入的文本；被删除的输入从未被采用，因此不会产生标题，其文本也不会发给辅助模型。
+生成在输入被采用时开始，而非 turn 结束后。只发送 `main` 上第一条被采用且符合条件的输入的文本 —— 操作者消息的文本，或 Goal 已采用的 objective (A10)；被删除的输入从未被采用，因此不会产生标题，其文本也不会发给辅助模型。
 main turn 不等待标题完成，标题任务遵循自己的预算。
 
 ### 3.2 手动重命名
@@ -211,7 +211,7 @@ revision 检查就是复检：手动标题总是胜出。
 | --- | --- | --- | --- |
 | 成员 Session（`collaborationRole`），或非交互 Session | `SessionConfig` | 从不生成；允许重命名 | SessionTitle |
 | 生成完成前出现第二条输入 | — | 跳过（在途） | SessionTitle |
-| 第一条输入已删除 | input < `input/deleted` | 从未被采用：不用它生成标题；下一条被采用的操作者输入触发（A9） | SessionTitle |
+| 第一条输入已删除 | input < `input/deleted` | 从未被采用：不用它生成标题；下一条被采用且符合条件的输入触发 (A9) | SessionTitle |
 | 生成路径失败 | — | 输入文本兜底（§3.3）；存储失败且仍无标题时可以重试（A5） | SessionTitle |
 | 生成中途重载或 Session 卸载 | — | 存储交接前取消，下一条采用的 main 输入可触发；已接纳的修改由 SessionStore 结算 | Lifecycle / SessionStore |
 
@@ -224,7 +224,7 @@ revision 检查就是复检：手动标题总是胜出。
 | 部分 | 内容 |
 | --- | --- |
 | System | `Write a short title for this conversation: at most 8 words, in the language of the user's message, no quotes, no trailing punctuation. Reply with the title only.`（A2） |
-| User 消息 | `main` 上第一条被采用（有 `input/applied`）的操作者 `input/message` 的文本块，以换行连接，截断到 2000 个字符（A2） |
+| User 消息 | `main` 上第一条被采用 (有 `input/applied`) 的操作者 `input/message` 的文本块，以换行连接，或 Goal 第一条被采用的 `goal:state` 记录中的 `<objective>` 元素，截断到 2000 个字符 (A2, A10) |
 
 从不发送：图片、raw 输入块、被删除的输入、后续输入、助手输出、系统提示词、工具调用与结果、子分支事件。诊断只记录结果与耗时。
 
@@ -239,7 +239,7 @@ revision 检查就是复检：手动标题总是胜出。
 
 ## 7. 安全
 
-第一条输入的文本只发送给 §3.3 选定的路径：显式模型，或可选服务与已采纳模型。标题可能包含用户内容，并返回给每个能列出 Session 的客户端。请求中不包含凭据、宿主设置或工具输出。重命名输入由 SessionTitle 的方法校验（A.1）。
+第一条符合条件的输入的文本只发送给 §3.3 选定的路径：显式模型，或可选服务与已采纳模型。标题可能包含用户内容，并返回给每个能列出 Session 的客户端。请求中不包含凭据、宿主设置或工具输出。重命名输入由 SessionTitle 的方法校验（A.1）。
 
 ## 8. 规则检查
 
@@ -325,7 +325,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 资格 | C4 创建快照：`interactive !== false && collaborationRole === "leader"`；原生省略值表示 true |
 | 触发 | 收到位于 `N` 的 `input/applied` 时：若不具资格、已禁用、有在途生成或失败次数 ≥ 3（A5）则跳过；否则启动一个归属插件生命周期的生成任务 |
 | 检查 | `sessionMetadata.read({sessionId})`：已有任何标题则跳过；记下 revision `r` |
-| 读取 | 既有 sessions.history 以 atLeast=N 固定已发布 T >= N，再按 through=T 分页（S2 A.5）。选取第一条有 user 内容且 input/applied 的操作者输入；没有该输入/文本则不生成（A8/A10） |
+| 读取 | 既有 sessions.history 以 atLeast=N 固定已发布 T >= N，再按 through=T 分页 (S2 A.5)。选取第一条有 user 内容、或是 Goal 的 `goal:state` 记录 (含 objective)，且 input/applied 的输入；没有该输入/文本则不生成 (A8/A10) |
 | 生成 | 按 §3.3 分流，在共享 30 秒预算内生成或兜底；取第一行、去除引号与末尾标点、折叠空白并按 maxLength 截断 |
 | 写入 | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`；`conflict` 或 `not_found` 时丢弃 |
 | Timeline | 不写入，不登记 Dispatcher，无 `StateCell` |
@@ -336,8 +336,9 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 场景 | 序号顺序 | 结果 | 负责方 |
 | --- | --- | --- | --- |
 | 第一条输入的 turn 被中断或失败 | input < `stop/interrupt` | 生成继续 | SessionTitle |
-| 不含 `user` 内容的输入（Goal 块、来源标记） | — | 从不触发，从不使用 | SessionTitle |
-| 第一条输入在被应用前被撤回（`session.input.withdraw`） | input < withdraw < `input/deleted` | 从未被应用：不生成，文本从不发送；第一条被应用的操作者输入触发 | SessionTitle |
+| Goal 已采用、带 objective 的 `goal:state` 记录 | — | 符合条件：用 `<objective>` 为 Session 命名 (A10)；之后的用户 turn 不再改名 | SessionTitle |
+| 其他不含 `user` 内容的输入 (Goal 的 trigger 与 continuation、来源标记) | — | 从不触发，从不使用 | SessionTitle |
+| 第一条输入在被应用前被撤回（`session.input.withdraw`） | input < withdraw < `input/deleted` | 从未被应用：不生成，文本从不发送；第一条被应用的符合条件的输入触发 | SessionTitle |
 | 第一条用户输入只含图片 | — | 无自动标题（A8） | SessionTitle |
 | 检查之前重命名 | rename < check | 已有标题：跳过 | SessionTitle |
 | 生成期间重命名 | check (r) < rename (r+1) < write | `conflict`：自动标题被丢弃 | SessionStore revision |
@@ -348,7 +349,7 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 | 子分支输入 | 分支过滤 | 从不触发 | SessionTitle |
 | 成员、阶段或定时 Session | `SessionConfig` | 从不生成 | SessionTitle |
 | 生成期间关闭 Session | — | 存储交接前取消；已接纳修改仍由 SessionStore 持有 | Lifecycle / SessionStore |
-| Session fork | 不复制元数据（A7） | fork 无标题；`main` 上下一条被采用的操作者输入触发生成，取其前缀中第一条被采用的操作者输入 | SessionTitle |
+| Session fork | 不复制元数据（A7） | fork 无标题；`main` 上下一条被采用且符合条件的输入触发生成，取其前缀中第一条被采用且符合条件的输入 | SessionTitle |
 | SessionTitle、模型选择所有者、SessionStore 或 Settings 重载 | — | 交接前取消生成，已接纳存储修改遵循 S5b 结算（D3） | Lifecycle / SessionStore |
 | 模型或策略不可用 | — | 输入文本兜底（§3.3） | SessionTitle |
 | 资源节点离线 | — | 无影响 | — |
@@ -385,6 +386,8 @@ Settings 来源 `session-title`，一个文档：`enabled: bool` 默认 `true`�
 
 12. 可选服务缺失或卸载后仍能生成和改名；服务成功不重复调用模型，显式模型跳过服务；不可用或失败转普通模型，模型失败或超时转文本；关闭等待原调用取消结算，不降级、不写标题。
 
+13. Goal 创建的 Session 在没有任何操作者输入时由已采用的 objective 命名：请求只带 `<objective>` 文本，到达一条标题通知。之后的用户 turn 不重新命名；先有用户 turn 的 Session 在之后设置 goal 时保留该 turn 的标题；非交互 Session 即使有 goal 也不命名，但 `session.rename` 可用；辅助调用失败时回退到 objective 摘录。
+
 ## 附录 E. 假设
 
 A1–A12 是首版实现采用的策略。
@@ -400,7 +403,7 @@ A1–A12 是首版实现采用的策略。
 | A7 | Session fork 不复制标题 | 判断 | fork 显示源标题 |
 | A8 | 不含文本的第一条用户输入不产生自动标题 | 决定：标题取自第一条用户输入 | 使用后续输入或占位符 |
 | A9 | 生成等待输入被采用（`input/applied`）；被删除的输入从不产生标题 | 维护者决定 | 被删除的文本可能发给辅助模型 |
-| A10 | “用户输入”指操作者输入：在交互式 leader Session 中，即带 `user` 内容的输入，因为 Collaboration、Goal 和 ShellInput 只写 raw 块（Scheduler 与 Workflow 的输入带 `user` 内容，但运行在非交互 Session 中，SessionTitle 不为其命名） | 判断 | 来源写入的输入可能为 Session 命名 |
+| A10 | “用户输入”指带 `user` 内容的操作者输入，或 Goal 已采用的 `goal:state` 记录，后者陈述 objective。Collaboration 与 ShellInput 只写 raw 块；Scheduler 与 Workflow 的输入带 `user` 内容，但运行在非交互 Session 中，SessionTitle 不为其命名。Goal 优先的 Session 用其 objective 命名，之后的用户 turn 不重新命名。 | 判断 | Goal 创建的 Session 一直无标题，客户端需要第二个标题来源 |
 | A11 | SessionStore 用 Session 广播通知宣布标题变更；未订阅的客户端在下一次 `session.summaries` 时看到变更 | 原则 §4 第 9 条 | 客户端轮询 `session.summaries` |
 | A12 | 仅用户作用域文件 session-title.json，不合并项目来源；原生 Settings 记录 user/session-title | 既有 S8b 原行来源机制，A.3 | 不同来源/作用域须明确确认 |
 
