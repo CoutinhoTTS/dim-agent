@@ -1209,6 +1209,10 @@ struct Options {
     /// A test hook that offers the `plugin` tool to the run's Sessions,
     /// to exercise the tools check.
     offer_plugin: bool,
+    /// A test hook that contributes one tool `RUN_TOOLS` does not name from
+    /// a part the run's plugin defaults do not name, to exercise the
+    /// tools-product check.
+    extra_tool: bool,
     /// The default plugin configuration file both arms load; `None` serves
     /// the assembly without the product's plugins.
     defaults: Option<PathBuf>,
@@ -1371,6 +1375,7 @@ impl Options {
             isolate: true,
             fail_preflight: false,
             offer_plugin: false,
+            extra_tool: false,
             rejudge,
             select,
             pool,
@@ -2115,6 +2120,11 @@ struct ChildParams {
     /// A test hook that offers the `plugin` tool to the run's Sessions,
     /// to exercise the tools check.
     offer_plugin: bool,
+    /// A test hook that contributes one tool `RUN_TOOLS` does not name from
+    /// a part the run's plugin defaults do not name, to exercise the
+    /// tools-product check.
+    #[serde(default)]
+    extra_tool: bool,
 }
 
 /// One preflight check's outcome.
@@ -2253,6 +2263,9 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
             if !scenario.sources.is_empty() {
                 install_producer(builder, &scenario.sources, producer.clone());
             }
+            if params.extra_tool {
+                install_extra_tool(builder);
+            }
         },
     )
     .await
@@ -2358,6 +2371,7 @@ async fn child_drive(
     // actual behavior. An isolated run aborts on a failed check; an
     // unisolated run (an offline ablation) reports the checks as they are
     // and runs on.
+    let mut ceiling = None;
     let (checks, preflight) = if params.isolate && params.fail_preflight {
         (
             vec![PreflightCheck {
@@ -2369,13 +2383,24 @@ async fn child_drive(
         )
     } else {
         let expected = session_tools(scenario);
-        let (checks, error) =
-            match preflight_session(&mut client, params, preflight, &expected).await {
-                Ok(checks) => (checks, None),
-                Err((checks, error)) => (checks, Some(error)),
-            };
-        let error = if params.isolate { error } else { None };
-        (checks, error)
+        match preflight_session(
+            &mut client,
+            params,
+            preflight,
+            &expected,
+            &settings.database(&params.home),
+        )
+        .await
+        {
+            Ok((checks, tools)) => {
+                ceiling = Some(tools);
+                (checks, None)
+            }
+            Err((checks, error)) => {
+                let error = if params.isolate { Some(error) } else { None };
+                (checks, error)
+            }
+        }
     };
     let finished = match preflight {
         None => match drive_once(
@@ -2389,7 +2414,8 @@ async fn child_drive(
             limits,
             &cancel,
             producer,
-            (!params.offer_plugin).then(|| session_tools(scenario)),
+            (!params.offer_plugin)
+                .then(|| ceiling.clone().unwrap_or_else(|| session_tools(scenario))),
         )
         .await
         {
@@ -2517,18 +2543,162 @@ const WELL_KNOWN_CREDENTIAL_NAMES: &[&str] = &[
     "GOOGLE_API_KEY",
 ];
 
-/// The preflight Session: a scripted Session against the run's preflight
-/// provider that checks the five things before the live model's first turn —
-/// the disposable `HOME`, the absence of credential names, an outside read
-/// refused for `exec` and for a file tool, the operator's home refused for
-/// both, and the run's socket unreachable. Any failure aborts the run and is
-/// reported as a harness failure.
+/// The product probe: one Session of the served assembly, created without a
+/// mount list, so its model request carries every tool the assembly offers —
+/// the host's own tools, the parts' contributed tools and the tools the
+/// run's plugin defaults contribute. Its declared set, without the `plugin`
+/// tool, is the ceiling every Session of the run mounts, and the
+/// tools-product check reads it against `RUN_TOOLS`. Its one turn is answered
+/// without a tool call, so the probe never executes anything.
+async fn product_probe(
+    client: &mut Client,
+    params: &ChildParams,
+    database: &Path,
+) -> std::result::Result<Vec<(String, ToolSource)>, String> {
+    let probe = client
+        .rpc(
+            "session.create",
+            json!({
+                "cwd": params.workspace,
+                "model": {"provider": "preflight", "modelId": "mock"},
+                "permissionPolicy": {"preset": "full-access"},
+            }),
+        )
+        .await
+        .map_err(|error| format!("session.create failed: {error}"))?;
+    let probe = probe["sessionId"].as_str().unwrap_or_default().to_owned();
+    if probe.is_empty() {
+        return Err("the product probe Session has no session id".into());
+    }
+    client
+        .rpc("session.attach", json!({"sessionId": probe}))
+        .await
+        .map_err(|error| format!("session.attach failed: {error}"))?;
+    submit(client, &probe, "PRODUCT-TOOLS\n", None)
+        .await
+        .map_err(|error| error.to_string())?;
+    loop {
+        match tokio::time::timeout(Duration::from_secs(60), client.next()).await {
+            Ok(Ok(WireMessage::Notice { method, params })) => match notice(&method, &params) {
+                Notice::Event { event, .. } => {
+                    if event["type"] == "turn" && event["name"] == "end" {
+                        if let Some(error) = event["data"]["error"].as_str() {
+                            return Err(format!("the product probe turn failed: {error}"));
+                        }
+                        break;
+                    }
+                }
+                Notice::Approval { branch, request } => {
+                    let _ = client
+                        .rpc(
+                            "approval.respond",
+                            json!({"sessionId": probe, "branchId": branch,
+                                   "requestId": request, "decision": "allow"}),
+                        )
+                        .await;
+                }
+                Notice::Other => {}
+            },
+            Ok(Ok(WireMessage::Response { .. })) => {}
+            Ok(Err(error)) => return Err(format!("the product probe Session failed: {error}")),
+            Err(_) => return Err("the product probe Session timed out".into()),
+        }
+    }
+    let _ = client
+        .rpc("session.close", json!({"sessionId": probe}))
+        .await;
+    // The declared tools and their sources: the probe's adopted
+    // configuration in its exported Timeline. The model request the loopback
+    // provider received carries the names; only the Timeline records each
+    // tool's `source`.
+    let mut export = Vec::new();
+    dim_app_server::storage::export_timeline(database.to_path_buf(), &probe, &mut export)
+        .await
+        .map_err(|error| format!("the product probe Session's export failed: {error}"))?;
+    let export = String::from_utf8_lossy(&export).into_owned();
+    requested_tools(&export)
+        .ok_or_else(|| "the product probe Session's Timeline holds no configured tools".to_owned())
+}
+
+/// The tools a Session's model request declares, in request order, with
+/// each tool's source: the request of the last `model/call` event of an
+/// exported Timeline.
+fn requested_tools(export: &str) -> Option<Vec<(String, ToolSource)>> {
+    let mut declared = None;
+    for line in export.lines() {
+        let Ok(line) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if line["kind"] != "event" {
+            continue;
+        }
+        let event = &line["event"];
+        if event["type"] != "model" || event["name"] != "call" {
+            continue;
+        }
+        let Some(tools) = event["data"]["request"]["tools"].as_array() else {
+            continue;
+        };
+        declared = Some(
+            tools
+                .iter()
+                .filter_map(|tool| {
+                    Some((
+                        tool["name"].as_str()?.to_owned(),
+                        serde_json::from_value(tool["source"].clone()).ok()?,
+                    ))
+                })
+                .collect(),
+        );
+    }
+    declared
+}
+
+/// The plugin names the run's default plugin configuration names: the
+/// `plugins` and `optional` maps of the defaults file. Empty when the run
+/// serves no default plugins or the file cannot be read.
+fn plugin_default_names(path: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for group in ["plugins", "optional"] {
+        if let Some(map) = value.get(group).and_then(Value::as_object) {
+            names.extend(map.keys().cloned());
+        }
+    }
+    names
+}
+
+/// The preflight Session: the product probe, then a scripted Session against
+/// the run's preflight provider that checks the five things before the live
+/// model's first turn — the disposable `HOME`, the absence of credential
+/// names, an outside read refused for `exec` and for a file tool, the
+/// operator's home refused for both, and the run's socket unreachable. Any
+/// failure aborts the run and is reported as a harness failure.
 async fn preflight_session(
     client: &mut Client,
     params: &ChildParams,
     preflight: &Arc<Provider>,
     expected: &[String],
-) -> std::result::Result<Vec<PreflightCheck>, (Vec<PreflightCheck>, String)> {
+    database: &Path,
+) -> std::result::Result<(Vec<PreflightCheck>, Vec<String>), (Vec<PreflightCheck>, String)> {
+    let declared = product_probe(client, params, database)
+        .await
+        .map_err(|error| (Vec::new(), error))?;
+    // The ceiling: every tool the served assembly offers, without the
+    // `plugin` tool. The probe declares the run's plugin defaults' tools
+    // too, so a run that evaluates a plugin still offers the model the thing
+    // under test, and the tools-product check reads what the product itself
+    // offers against `RUN_TOOLS`.
+    let ceiling: Vec<String> = declared
+        .iter()
+        .map(|(name, _)| name.clone())
+        .filter(|name| name != PLUGIN_TOOL)
+        .collect();
     let message = format!(
         "PREFLIGHT\nSOCKET={}\nOPERATOR_HOME={}\nOUTPUT_ROOT={}",
         params.socket.display(),
@@ -2548,7 +2718,7 @@ async fn preflight_session(
         // Session will declare. The tools check reads the request the
         // loopback provider received and verifies what this Session
         // actually offered.
-        create["tools"] = json!(expected);
+        create["tools"] = json!(ceiling);
     }
     let created = client
         .rpc("session.create", create)
@@ -2612,82 +2782,17 @@ async fn preflight_session(
     let _ = client
         .rpc("session.close", json!({"sessionId": session}))
         .await;
-    // The product probe: one more Session of the same served assembly,
-    // created without a mount list, so its model request carries the
-    // product's own declared tool set — what a live run would have been
-    // offered if the harness withheld nothing. Its one turn is answered
-    // without a tool call, so the probe never executes anything.
-    let probe = client
-        .rpc(
-            "session.create",
-            json!({
-                "cwd": params.workspace,
-                "model": {"provider": "preflight", "modelId": "mock"},
-                "permissionPolicy": {"preset": "full-access"},
-            }),
-        )
-        .await
-        .map_err(|error| (Vec::new(), format!("session.create failed: {error}")))?;
-    let probe = probe["sessionId"].as_str().unwrap_or_default().to_owned();
-    if probe.is_empty() {
-        return Err((
-            Vec::new(),
-            "the product probe Session has no session id".into(),
-        ));
-    }
-    client
-        .rpc("session.attach", json!({"sessionId": probe}))
-        .await
-        .map_err(|error| (Vec::new(), format!("session.attach failed: {error}")))?;
-    submit(client, &probe, "PRODUCT-TOOLS\n", None)
-        .await
-        .map_err(|error| (Vec::new(), error))?;
-    loop {
-        match tokio::time::timeout(Duration::from_secs(60), client.next()).await {
-            Ok(Ok(WireMessage::Notice { method, params })) => match notice(&method, &params) {
-                Notice::Event { event, .. } => {
-                    if event["type"] == "turn" && event["name"] == "end" {
-                        if let Some(error) = event["data"]["error"].as_str() {
-                            return Err((
-                                Vec::new(),
-                                format!("the product probe turn failed: {error}"),
-                            ));
-                        }
-                        break;
-                    }
-                }
-                Notice::Approval { branch, request } => {
-                    let _ = client
-                        .rpc(
-                            "approval.respond",
-                            json!({"sessionId": probe, "branchId": branch,
-                                   "requestId": request, "decision": "allow"}),
-                        )
-                        .await;
-                }
-                Notice::Other => {}
-            },
-            Ok(Ok(WireMessage::Response { .. })) => {}
-            Ok(Err(error)) => {
-                return Err((
-                    Vec::new(),
-                    format!("the product probe Session failed: {error}"),
-                ));
-            }
-            Err(_) => return Err((Vec::new(), "the product probe Session timed out".into())),
-        }
-    }
-    let _ = client
-        .rpc("session.close", json!({"sessionId": probe}))
-        .await;
-    // The tools the preflight Session's model request carried: the
-    // loopback provider received the request before it scripted any step,
-    // so its first entry is this Session's declaration. The product
+    // The tools the preflight Session's model request carried: the loopback
+    // provider received the request before it scripted any step, so its
+    // first PREFLIGHT request is this Session's declaration. The product
     // probe's request is the first whose messages carry the probe marker.
     let held = preflight.requests.lock().unwrap();
     let offered = held
         .iter()
         .find_map(|request| {
+            if !request.contains("PREFLIGHT") {
+                return None;
+            }
             let tools = offered_tools(request);
             (!tools.is_empty()).then_some(tools)
         })
@@ -2703,12 +2808,14 @@ async fn preflight_session(
         })
         .unwrap_or_default();
     drop(held);
-    let checks = preflight_checks(&results, params, &offered, expected, &product);
+    let checks = preflight_checks(
+        &results, params, &offered, &ceiling, expected, &product, &declared,
+    );
     if let Some(failed) = checks.iter().find(|check| !check.passed) {
         let detail = format!("{}: {}", failed.name, failed.detail);
         return Err((checks, detail));
     }
-    Ok(checks)
+    Ok((checks, ceiling))
 }
 
 /// The nine checks over the preflight Session's tool results and the model
@@ -2717,8 +2824,10 @@ fn preflight_checks(
     results: &[Value],
     params: &ChildParams,
     offered: &[String],
+    ceiling: &[String],
     expected: &[String],
     product: &[String],
+    declared: &[(String, ToolSource)],
 ) -> Vec<PreflightCheck> {
     let mut checks = Vec::new();
     let mut check = |name: &str, passed: bool, detail: String| {
@@ -2729,11 +2838,11 @@ fn preflight_checks(
         });
     };
     let plugin = offered.iter().any(|tool| tool == PLUGIN_TOOL);
-    let exact = offered.len() == expected.len()
+    let exact = offered.len() == ceiling.len()
         && offered
             .iter()
-            .zip(expected)
-            .all(|(offered, expected)| offered == expected);
+            .zip(ceiling)
+            .all(|(offered, ceiling)| offered == ceiling);
     check(
         "tools",
         !plugin && exact,
@@ -2748,41 +2857,70 @@ fn preflight_checks(
             format!(
                 "the preflight Session's model request offered {} tools, not the run's {}",
                 offered.len(),
-                expected.len()
+                ceiling.len()
             )
         },
     );
-    // The product's own declared set (the probe Session without a mount
-    // list), minus `plugin`, must equal the run's mount list as a set: a
-    // product tool the run list does not name would silently leave a live
-    // run without it, and a listed tool the product stopped serving would
-    // silently whitelist a name nobody registers. This check catches both
-    // at run time, where CI's eval-tests gating cannot hide them.
-    let product_no_plugin: BTreeSet<&str> = product
-        .iter()
-        .filter(|tool| tool.as_str() != PLUGIN_TOOL)
-        .map(String::as_str)
-        .collect();
+    // The product's declared set, each tool's origin its source: the host's
+    // own tools (`builtin`/`static`) are the product's and must be named by
+    // `RUN_TOOLS`, where a contributed tool (`extension`/`dynamic`) beyond
+    // the run list is the run's plugin defaults' contribution — the harness
+    // names those plugins, never the model — and only while the run names
+    // plugin defaults at all. A product tool the run list does not name
+    // would silently leave a live run without it, and a listed tool the
+    // product stopped serving would silently whitelist a name nobody
+    // registers; this check catches both at run time, where CI's eval-tests
+    // gating cannot hide them.
+    let declared_names: BTreeSet<&str> = declared.iter().map(|(name, _)| name.as_str()).collect();
     let expected_set: BTreeSet<&str> = expected.iter().map(String::as_str).collect();
-    let extra: Vec<&str> = product_no_plugin
-        .difference(&expected_set)
-        .copied()
-        .collect();
-    let absent: Vec<&str> = expected_set
-        .difference(&product_no_plugin)
-        .copied()
-        .collect();
+    let mut unreviewed: Vec<&str> = Vec::new();
+    let mut contributed: Vec<&str> = Vec::new();
+    for (name, source) in declared {
+        if name == PLUGIN_TOOL || expected_set.contains(name.as_str()) {
+            continue;
+        }
+        let host = matches!(source, ToolSource::Builtin | ToolSource::Static);
+        if host || params.defaults.is_none() {
+            unreviewed.push(name);
+        } else {
+            contributed.push(name);
+        }
+    }
+    let requested: BTreeSet<&str> = product.iter().map(String::as_str).collect();
+    let agree = requested == declared_names;
+    let absent: Vec<&str> = expected_set.difference(&declared_names).copied().collect();
+    let plugins = params
+        .defaults
+        .as_deref()
+        .map(plugin_default_names)
+        .unwrap_or_default();
     check(
         "tools-product",
-        extra.is_empty() && absent.is_empty(),
-        if extra.is_empty() && absent.is_empty() {
-            "the product offered the run's tool set".into()
+        unreviewed.is_empty() && absent.is_empty() && agree,
+        if unreviewed.is_empty() && absent.is_empty() && agree {
+            let mut detail = "the product offered the run's tool set".to_owned();
+            if !contributed.is_empty() {
+                detail.push_str(&format!(
+                    "; the run's plugin defaults ({}) contribute: {}",
+                    plugins.join(", "),
+                    contributed.join(", ")
+                ));
+            }
+            detail
         } else {
             let mut detail = String::new();
-            if !extra.is_empty() {
+            if !agree {
+                detail.push_str(
+                    "the product probe's request and its Timeline declare different tools",
+                );
+            }
+            if !unreviewed.is_empty() {
+                if !detail.is_empty() {
+                    detail.push_str("; ");
+                }
                 detail.push_str(&format!(
                     "the product offers tools the run list does not name: {}; update RUN_TOOLS after review",
-                    extra.join(", ")
+                    unreviewed.join(", ")
                 ));
             }
             if !absent.is_empty() {
@@ -3164,6 +3302,7 @@ async fn isolate_run(
         isolate: options.isolate,
         fail_preflight: options.fail_preflight,
         offer_plugin: options.offer_plugin,
+        extra_tool: options.extra_tool,
     };
     let params_path = options
         .out
@@ -4556,6 +4695,98 @@ pub(crate) fn install_producer(
             state.clone(),
         )?) as Box<dyn DynPlugin>)
     });
+}
+
+/// A test hook: a Session part that contributes one tool `RUN_TOOLS` does
+/// not name, from a part no default plugin names, so a test can watch the
+/// tools-product check refuse it.
+fn install_extra_tool(builder: &mut AgentBuilder) {
+    builder.plugin(|names| Ok(Box::new(ExtraToolProducer::new(names)?) as Box<dyn DynPlugin>));
+}
+
+struct ExtraToolProducer {
+    parts: Key<PartRegistry>,
+}
+
+impl ExtraToolProducer {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            parts: names.key()?,
+        })
+    }
+}
+
+impl DynPlugin for ExtraToolProducer {
+    fn name(&self) -> &str {
+        "ExtraToolProducer"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.parts.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            ctx.require_at(&self.parts)?.register(
+                ctx,
+                PartScope::Session,
+                "ExtraToolSession",
+                |mount| Ok(Some(Box::new(ExtraToolSession::new(mount.names)?))),
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+struct ExtraToolSession {
+    tools: Key<ToolRegistry>,
+}
+
+impl ExtraToolSession {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            tools: names.key()?,
+        })
+    }
+}
+
+impl DynPlugin for ExtraToolSession {
+    fn name(&self) -> &str {
+        "ExtraToolSession"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.tools.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let tools = ctx.require_at(&self.tools)?;
+            let mut extra = definition(
+                "fixture_extra",
+                "A test hook's tool outside the run list.",
+                json!({"type": "object"}),
+            );
+            extra.source = ToolSource::Extension;
+            tools.register(
+                ctx,
+                ToolContribution {
+                    definition: extra,
+                    handler: Arc::new(ExtraTool),
+                },
+            )?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+struct ExtraTool;
+
+impl ToolHandler for ExtraTool {
+    fn execute(
+        &self,
+        _call: ToolCall,
+        _context: ToolExecutionContext,
+        _cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async move { Ok(ToolResult::text("extra")) })
+    }
 }
 
 struct ScenarioProducer {
@@ -8694,6 +8925,7 @@ mod tests {
                 isolate: true,
                 fail_preflight: false,
                 offer_plugin: false,
+                extra_tool: false,
                 defaults: None,
                 node: None,
                 js_runtime: None,
@@ -11146,7 +11378,10 @@ mod tests {
     /// A candidate for a TypeScript plugin's text replaces that member of
     /// the plugin's factory configuration: the candidate arm's request
     /// carries it, and the current arm carries the shipped text (issue #612,
-    /// acceptance 3).
+    /// acceptance 3). The plugin's tool reaches the model too: a run's
+    /// Sessions mount the set the product probe declares, so both arms'
+    /// requests declare `fixture_prompt`, which the harness itself never
+    /// names.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
     async fn node_a_plugin_candidate_reaches_the_request() {
@@ -11208,6 +11443,13 @@ mod tests {
             candidate.iter().all(|request| !request.contains(SHIPPED)),
             "the candidate arm never carries the shipped text"
         );
+        for (arm, requests) in [("current", &current), ("candidate", &candidate)] {
+            let offered = offered_tools(&requests[0]);
+            assert!(
+                offered.iter().any(|tool| tool == "fixture_prompt"),
+                "{arm}: the run's request declares the plugin's tool: {offered:?}"
+            );
+        }
     }
 
     /// The serve child of a run when the runner is this test binary: the
@@ -11433,6 +11675,7 @@ mod tests {
             isolate: true,
             fail_preflight: false,
             offer_plugin: false,
+            extra_tool: false,
             defaults: None,
             node: None,
             js_runtime: None,
@@ -11608,5 +11851,49 @@ mod tests {
             assert!(product.passed, "{product:?}");
             assert_eq!(record["stop"], "idle", "{record}");
         }
+    }
+
+    /// A tool `RUN_TOOLS` does not name, contributed by a part no plugin
+    /// defaults contribute, fails `tools-product`: the run list stays a
+    /// reviewed whitelist at run time, so a product tool can never reach a
+    /// live run unreviewed. The test hook contributes `fixture_extra`; the
+    /// unisolated run records the failed check and proceeds, the isolated
+    /// one aborts as a harness failure before the model's first turn.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_isolated_run_rejects_a_tool_outside_the_run_list() {
+        let fixture = Fixture::start(
+            "isolated-tools-extra",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let ablated = fixture.directory.join("ablated");
+        let mut options = fixture.options(ablated.clone());
+        options.isolate = false;
+        options.extra_tool = true;
+        let _ = fixture.evaluate(&options).await.unwrap();
+        let checks = recorded_checks(&ablated, "current");
+        let product = check(&checks, "tools-product");
+        assert!(!product.passed, "{product:?}");
+        assert!(product.detail.contains("fixture_extra"), "{product:?}");
+        let aborted = fixture.directory.join("aborted");
+        let mut options = fixture.options(aborted.clone());
+        options.extra_tool = true;
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate is inconclusive"), "{report}");
+        for record in fixture.records(&aborted) {
+            assert_eq!(record["stop"], "error", "{record}");
+            assert!(
+                record["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("harness failure: preflight"),
+                "{record}"
+            );
+        }
+        let checks = recorded_checks(&aborted, "current");
+        let product = check(&checks, "tools-product");
+        assert!(!product.passed, "{product:?}");
     }
 }
