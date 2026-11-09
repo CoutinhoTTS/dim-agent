@@ -99,20 +99,6 @@ pub enum Target {
     },
 }
 
-impl Target {
-    /// The session branch a `session` target names; `None` for `launch`.
-    pub fn session(&self) -> Option<(&str, &str, InputMode)> {
-        match self {
-            Self::Session {
-                session_id,
-                branch_id,
-                input_mode,
-            } => Some((session_id, branch_id, *input_mode)),
-            Self::Launch { .. } => None,
-        }
-    }
-}
-
 /// Why a delivery's target-gone failure disabled the job (A.1, A.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

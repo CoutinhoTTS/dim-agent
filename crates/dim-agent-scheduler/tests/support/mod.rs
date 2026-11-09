@@ -1,7 +1,7 @@
 //! A real App Server with the Scheduler installed and a scripted model.
 #![allow(dead_code)]
 use dim_agent_capabilities::{defaults, history::HistoryRenderer, host::*};
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
 use dim_agent_types::*;
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use dim_client::{Client, ConnectionConfig, Server};
@@ -114,6 +114,16 @@ pub fn home() -> tempfile::TempDir {
 }
 
 pub async fn start(home: &Path, model: Arc<Script>) -> RunningServer {
+    start_with(home, model, SessionConfig::default()).await
+}
+
+/// [`start`] with the host's Session defaults, so a flow can set the role or
+/// the authority bound a Session is created under.
+pub async fn start_with(
+    home: &Path,
+    model: Arc<Script>,
+    defaults: SessionConfig,
+) -> RunningServer {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts_with_model(&mut builder, HistoryRenderer::default(), model);
@@ -124,6 +134,7 @@ pub async fn start(home: &Path, model: Arc<Script>) -> RunningServer {
             startup_timeout: Duration::from_secs(60),
             database_path: Some(home.join("dimcode.sqlite")),
             product_home: Some(home.to_owned()),
+            session_defaults: defaults,
             unix_path: Some(home.join("native.sock")),
             ..Default::default()
         },
@@ -190,12 +201,22 @@ pub async fn wait_for(description: &str, mut check: impl FnMut() -> bool) {
 
 /// An interactive leader Session that may call `schedule`.
 pub async fn create_session(client: &mut Client, home: &Path, interactive: bool) -> String {
+    create_session_with(client, home, &["schedule"], interactive).await
+}
+
+/// A Session that may call `schedule` and the named tools.
+pub async fn create_session_with(
+    client: &mut Client,
+    home: &Path,
+    tools: &[&str],
+    interactive: bool,
+) -> String {
     let created = client
         .rpc(
             "session.create",
             json!({
                 "cwd": home,
-                "tools": ["schedule"],
+                "tools": tools,
                 "interactive": interactive,
                 "permissionPolicy": {"preset": "full-access", "allowedTools": [], "disallowedTools": []}
             }),

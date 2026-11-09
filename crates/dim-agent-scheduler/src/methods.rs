@@ -1,8 +1,10 @@
 //! The process owner: the `schedule` management namespace over the `schedule`
 //! settings document and the delivery history file ([design §1.3, A.3](../../../docs/design/plugins/Scheduler.md)).
 use crate::{
-    document::{Job, MAX_TOOL_JOBS_PER_SESSION, Origin, Schedule, Target, canonical_instant},
-    runs::{self, Delivery, DeliveryState, SchedulerError, stamp},
+    document::{
+        Job, MAX_TOOL_JOBS_PER_SESSION, Mode, Origin, Schedule, Target, canonical_instant,
+    },
+    runs::{self, Delivery, DeliveryState, SchedulerError, SessionOrigin, stamp},
 };
 use chrono::{DateTime, Duration, Utc};
 use dim_agent_capabilities::{
@@ -588,6 +590,32 @@ fn build_job(
     Ok(job)
 }
 
+/// A save that replaces a legacy `reuse` job's target, or the deletion of a
+/// job whose target replaced that binding, releases the Session the binding
+/// launched (§2.3, A.7): the job's compatibility field keeps its bytes, and
+/// the launch-origin records that carried the ownership are retired so
+/// retention never deletes the released Session.
+async fn release_owned_runs(shared: &Shared, job: &Job) -> Result<(), SchedulerError> {
+    if job.mode != Some(Mode::Reuse) {
+        return Ok(());
+    }
+    let Some(session_id) = job.session_id.clone() else {
+        return Ok(());
+    };
+    let job_id = job.id.clone();
+    runs::update(&shared.files, move |history| {
+        let held = history.len();
+        history.retain(|run| {
+            !(run.job_id == job_id
+                && run.session_origin == Some(SessionOrigin::Launch)
+                && run.session_id.as_deref() == Some(session_id.as_str()))
+        });
+        Ok((history.len() != held, ()))
+    })
+    .await?;
+    Ok(())
+}
+
 /// Writes a job as one authorizing save. `admit` runs on the document the
 /// write is based on, so an admission bound and the write share one read.
 /// `make` builds the saved input from the job it replaces, if any. Returns
@@ -645,7 +673,7 @@ async fn save(
 ) -> Result<Value, SchedulerError> {
     let host = host_bound(shared).await?;
     let id = input.job.id.clone();
-    let (job, _previous) = save_job(
+    let (job, previous) = save_job(
         shared,
         cancel,
         id.as_deref(),
@@ -656,6 +684,11 @@ async fn save(
         move |previous| merge(previous, input.job),
     )
     .await?;
+    if let Some(previous) = &previous
+        && previous.target != job.target
+    {
+        release_owned_runs(shared, previous).await?;
+    }
     Ok(json!({ "job": job.reported() }))
 }
 
@@ -712,6 +745,13 @@ async fn delete(
         .iter()
         .position(|job| job.id == input.job_id)
         .ok_or_else(|| not_found(&input.job_id))?;
+    let job = document.jobs[index].clone();
+    // A job whose target replaced its legacy reuse binding no longer owns
+    // the Session that binding launched; deleting the job must not delete
+    // that Session, so its launch records go before retention reads them.
+    if job.target.is_some() {
+        release_owned_runs(shared, &job).await?;
+    }
     document.jobs.remove(index);
     shared
         .settings

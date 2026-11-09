@@ -3,7 +3,7 @@
 //! branch, a due window writes one input there, and the declarations and
 //! refusals are as the design states (A.2, §5.1).
 use dim_agent_capabilities::{defaults, history::HistoryRenderer, host::*};
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, CollaborationRole, SessionConfig};
 use dim_agent_scheduler::install;
 use dim_agent_types::*;
 use dim_app_server::{ServerConfig, serve};
@@ -293,6 +293,69 @@ async fn the_schedule_tool_saves_jobs_for_interactive_sessions_only() {
         .unwrap();
     wait_for("the retarget refusal", || {
         model.texts().contains("schedule: schedule_invalid")
+    })
+    .await;
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Appendix D item 15: a Collaboration member Session is refused too, even
+/// when it is interactive and its model asks the tool directly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_schedule_tool_is_refused_in_a_member_session() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir_all(home.path().join("scheduler")).unwrap();
+
+    let model = Arc::new(Script::default());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut builder);
+    defaults::mock_hosts_with_model(&mut builder, HistoryRenderer::default(), model.clone());
+    install(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            startup_timeout: Duration::from_secs(60),
+            database_path: Some(home.path().join("dimcode.sqlite")),
+            product_home: Some(home.path().to_owned()),
+            unix_path: Some(home.path().join("native.sock")),
+            session_defaults: SessionConfig {
+                collaboration_role: CollaborationRole::Member,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let config = ConnectionConfig {
+        endpoint: server.unix_path.clone().unwrap(),
+        server: Server {
+            program: std::env::current_exe().unwrap(),
+            embedded: false,
+        },
+        profile: None,
+        client_kind: "cli",
+        client_name: "scheduler-member-test",
+    };
+    let mut client = Client::connect(&config).await.unwrap();
+    select_model(&mut client).await;
+
+    let member = create_session(&mut client, home.path(), true).await;
+    model.push(vec![call("m1", json!({"action": "list"}))]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": member, "branchId": "main", "text": "list the jobs"}),
+        )
+        .await
+        .unwrap();
+    wait_for("the member refusal", || {
+        model
+            .texts()
+            .contains("available only in interactive leader Sessions")
     })
     .await;
 

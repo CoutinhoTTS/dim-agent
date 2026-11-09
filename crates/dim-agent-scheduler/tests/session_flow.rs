@@ -9,11 +9,20 @@ use support::*;
 
 /// Every event of one branch, in order.
 async fn branch_events(client: &mut dim_client::Client, session_id: &str) -> Vec<Value> {
+    branch_events_on(client, session_id, "main").await
+}
+
+/// Every event of the named branch, in order.
+async fn branch_events_on(
+    client: &mut dim_client::Client,
+    session_id: &str,
+    branch_id: &str,
+) -> Vec<Value> {
     let mut events = Vec::new();
     let mut after = 0;
     let mut through = None;
     loop {
-        let mut params = json!({"sessionId": session_id, "branchId": "main", "after": after});
+        let mut params = json!({"sessionId": session_id, "branchId": branch_id, "after": after});
         if let Some(through) = through {
             params["through"] = json!(through);
         }
@@ -944,4 +953,495 @@ async fn legacy_jobs_map_to_their_targets_and_keep_their_bytes() {
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
+}
+
+/// A job's explicit target is the whole truth: a legacy top-level policy and
+/// Agent do not come back once a save replaces the target (zerob13
+/// 4511587383). The host allows full access, so a stale full-access request
+/// would reach the Session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_explicit_target_ignores_the_legacy_top_level_fields() {
+    use dim_agent_runtime::SessionConfig;
+    use dim_agent_types::{PermissionPolicy, PermissionPreset};
+
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let seed = create_session(&mut client, home.path(), true).await;
+    save_session_job(
+        &mut client,
+        "seed",
+        &seed,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let policy_cap = json!({"preset": "full-access", "allowedTools": [], "disallowedTools": []});
+    let job = |id: &str, agent: Option<&str>| {
+        let mut job = json!({
+            "id": id,
+            "name": id,
+            "schedule": {"at": "2030-01-01T00:00:00Z"},
+            "prompt": format!("Work on {id}."),
+            "cwd": home.path(),
+            "mode": "create",
+            "policy": "full-access",
+            "enabled": true,
+            "enabled_at": "2026-01-01T00:00:00.000Z",
+            "revision": 1,
+            "created_by": "user",
+            "policy_cap": policy_cap.clone(),
+        });
+        if let Some(agent) = agent {
+            job["agent_id"] = json!(agent);
+        }
+        job
+    };
+    let legacy = json!({"max_concurrent_runs": 4, "jobs": [
+        job("policy-job", None),
+        job("agent-job", Some("00000000-0000-7000-8000-0000000000ff")),
+    ]});
+    rusqlite::Connection::open(home.path().join("dimcode.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE settings_documents SET document = ?1 WHERE source = 'user/schedule'",
+            [legacy.to_string()],
+        )
+        .unwrap();
+
+    let server = start_with(
+        home.path(),
+        Arc::new(Script::default()),
+        SessionConfig {
+            permission_policy: PermissionPolicy {
+                preset: PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut client = support::connect(&server).await;
+    for id in ["policy-job", "agent-job"] {
+        client
+            .typed::<Value>(
+                "schedule.save",
+                json!({"job": {"id": id,
+                    "target": {"kind": "launch", "cwd": home.path(), "max_run_minutes": 60}}}),
+            )
+            .await
+            .unwrap();
+    }
+    for id in ["policy-job", "agent-job"] {
+        let accepted: Value = client
+            .typed("schedule.run_now", json!({"job_id": id}))
+            .await
+            .unwrap();
+        let run = run_where(&mut client, id, accepted["run_id"].as_str().unwrap(), |run| {
+            !matches!(
+                run["state"].as_str(),
+                Some("launching" | "submitted" | "running" | "delivering")
+            )
+        })
+        .await;
+        // The stale Agent would make the launch fail; the stale policy would
+        // be the effect the Session received.
+        assert_eq!(run["state"], "completed", "{id}: {run}");
+        assert_eq!(run["policy"]["preset"], "read-only", "{id}: {run}");
+    }
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A save that replaces a legacy `reuse` job's target releases the Session
+/// that binding launched: deleting the retargeted job keeps it (zerob13
+/// 4511587391).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_save_that_replaces_a_legacy_reuse_target_releases_its_session() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let launched = create_session(&mut client, home.path(), true).await;
+    let retarget = create_session(&mut client, home.path(), true).await;
+    save_session_job(
+        &mut client,
+        "seed",
+        &launched,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let policy = json!({"preset": "read-only", "allowedTools": [], "disallowedTools": []});
+    let legacy = json!({"max_concurrent_runs": 4, "jobs": [{
+        "id": "reuse",
+        "name": "reuse",
+        "schedule": {"at": "2030-01-01T00:00:00Z"},
+        "prompt": "Work.",
+        "cwd": home.path(),
+        "mode": "reuse",
+        "session_id": launched,
+        "enabled": true,
+        "enabled_at": "2026-01-01T00:00:00.000Z",
+        "revision": 1,
+        "created_by": "user",
+        "policy_cap": policy.clone(),
+    }]});
+    rusqlite::Connection::open(home.path().join("dimcode.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE settings_documents SET document = ?1 WHERE source = 'user/schedule'",
+            [legacy.to_string()],
+        )
+        .unwrap();
+    edit_runs(home.path(), |runs| {
+        runs.push(json!({
+            "run_id": "run-1",
+            "job_id": "reuse",
+            "window": "2026-01-01T00:00:00.000Z",
+            "state": "completed",
+            "deadline_at": "2026-01-01T01:00:00.000Z",
+            "session_id": launched,
+            "session_origin": "launch",
+            "policy": policy,
+            "input_event_id": "input-1",
+            "submission_id": "scheduler:run-1",
+            "report_to": null,
+            "created_at": "2026-01-01T00:00:00.000Z",
+            "ended_at": "2026-01-01T00:01:00.000Z",
+            "detail": "",
+            "attempts": null,
+        }));
+    });
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": "reuse",
+                "target": {"kind": "session", "session_id": retarget, "branch_id": "main"}}}),
+        )
+        .await
+        .unwrap();
+    // The compatibility fields keep their bytes through the retarget.
+    let document: String = rusqlite::Connection::open(home.path().join("dimcode.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source = 'user/schedule'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let document: Value = serde_json::from_str(&document).unwrap();
+    let stored = &document["jobs"][0];
+    assert_eq!(stored["mode"], "reuse", "{stored}");
+    assert_eq!(stored["session_id"], json!(launched), "{stored}");
+    assert_eq!(stored["target"]["kind"], "session", "{stored}");
+
+    client
+        .typed::<Value>("schedule.delete", json!({"job_id": "reuse"}))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let catalog = client
+        .rpc(
+            "session.catalog",
+            json!({"withInternal": true, "limit": 100}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        catalog.to_string().contains(&launched),
+        "the released Session survives the job's deletion: {catalog}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A due `session` window writes the branch its target names, not only
+/// `main` (Appendix D item 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_target_writes_a_non_main_branch() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session_with(&mut client, home.path(), &["schedule", "branch"], true).await;
+    let agent = server.agent().expect("the default Agent");
+    let at = agent
+        .get_session(&session)
+        .unwrap()
+        .sequence("main")
+        .unwrap();
+    let branch = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId": session, "parentBranchId": "main", "at": at,
+                "prompt": "Child work."}),
+        )
+        .await
+        .unwrap()["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let saved: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"name": "side", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Work on the side.",
+                "target": {"kind": "session", "session_id": session, "branch_id": branch}}}),
+        )
+        .await
+        .unwrap();
+    let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job_id}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &job_id, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "delivered", "{run}");
+    assert_eq!(run["branch_id"], json!(branch), "{run}");
+    let inputs = branch_events_on(&mut client, &session, &branch).await;
+    assert!(
+        inputs.iter().any(|event| {
+            event["type"] == "input"
+                && event["data"]["submission_id"] == run["submission_id"]
+        }),
+        "the target branch takes the delivery: {inputs:?}"
+    );
+    let main = scheduled_inputs(&mut client, &session).await;
+    assert!(main.is_empty(), "main takes nothing: {main:?}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A target-gone disable whose write loses or fails is still required state:
+/// the conflict retry and the timer's claim scan both recover it (zerob13
+/// 4511587398, eric).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_target_gone_disable_is_retried() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let gone = "00000000-0000-7000-8000-0000000000aa";
+    let first = client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"name": "gone", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Work.", "target": {"kind": "session", "session_id": gone}}}),
+        )
+        .await
+        .unwrap()["job"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second = client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"name": "gone too", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Work.", "target": {"kind": "session", "session_id": gone}}}),
+        )
+        .await
+        .unwrap()["job"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // A conflicting write: hold the settings revision, let the delivery's
+    // read see it, then commit the bump so the CAS loses.
+    let lock = rusqlite::Connection::open(home.path().join("dimcode.sqlite")).unwrap();
+    lock.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .unwrap();
+    lock.execute(
+        "UPDATE settings_documents SET version = version + 1 WHERE source = 'user/schedule'",
+        [],
+    )
+    .unwrap();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": first}))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    lock.execute_batch("COMMIT").unwrap();
+    drop(lock);
+    let run = settled(&mut client, &first, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "failed", "{run}");
+    let disabled = wait_for_job(&mut client, &first).await;
+    assert_eq!(disabled["enabled"], false, "{disabled}");
+    assert_eq!(
+        disabled["disabled_reason"]["code"], "session_closed",
+        "{disabled}"
+    );
+
+    // A failed write: the settings update is refused until the failure is
+    // lifted, and the timer's claim scan then disables the job.
+    let trigger = rusqlite::Connection::open(home.path().join("dimcode.sqlite")).unwrap();
+    trigger
+        .execute_batch(
+            "CREATE TRIGGER \"fail-disable\" BEFORE UPDATE ON settings_documents \
+             WHEN OLD.source = 'user/schedule' BEGIN SELECT RAISE(ABORT, 'injected'); END",
+        )
+        .unwrap();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": second}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &second, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "failed", "{run}");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+    let still = &listed["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == second.as_str())
+        .unwrap();
+    assert_eq!(
+        still["enabled"], true,
+        "the refused write leaves the job enabled: {still}"
+    );
+    trigger
+        .execute_batch("DROP TRIGGER \"fail-disable\"")
+        .unwrap();
+    let disabled = wait_for_job(&mut client, &second).await;
+    assert_eq!(disabled["enabled"], false, "{disabled}");
+    assert_eq!(
+        disabled["disabled_reason"]["code"], "session_closed",
+        "{disabled}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// The job as `schedule.list` reports it, once it reads disabled.
+async fn wait_for_job(client: &mut dim_client::Client, job_id: &str) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+            let job = listed["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|job| job["id"] == job_id)
+                .unwrap()
+                .clone();
+            if job["enabled"] == json!(false) && !job["disabled_reason"].is_null() {
+                return job;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the job is disabled with its reason")
+}
+
+/// An uncertain input reply looks up only its own delivery: another job's
+/// `delivering` record keeps its persisted attempts (zerob13 4511587407).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_uncertain_write_looks_up_only_its_own_delivery() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let earlier = create_session(&mut client, home.path(), true).await;
+    let other = create_session(&mut client, home.path(), true).await;
+    let earlier_job = save_session_job(
+        &mut client,
+        "earlier",
+        &earlier,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    let other_job = save_session_job(
+        &mut client,
+        "other",
+        &other,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // A write that meets the owner's unload is answered with an uncertain
+    // reply, which carries no fact about the write (A.5, A.6): while the
+    // Scheduler unloads, the delivery task keeps running, and its input outlives
+    // the Sessions index. `other`'s run then takes its own lookup (attempt
+    // one) while `earlier`'s record is left to the next generation's
+    // once-per-pass settling — which this test never starts.
+    let mut observed = None;
+    for _ in 0..4 {
+        edit_runs(home.path(), |runs| {
+            runs.retain(|run| run["run_id"] != "earlier-run");
+            runs.push(json!({
+                "run_id": "earlier-run",
+                "job_id": earlier_job,
+                "window": "manual",
+                "state": "delivering",
+                "session_id": earlier,
+                "branch_id": "main",
+                "submission_id": "scheduler:earlier-run",
+                "created_at": "2026-01-01T00:00:00.000Z",
+                "detail": "",
+                "attempts": 0,
+            }));
+        });
+        let server = start(home.path(), Arc::new(Script::default())).await;
+        let mut client = support::connect(&server).await;
+        // The start's own recovery pass settles every `delivering` record
+        // once, so `earlier` starts at attempt one.
+        wait_for("the startup settling pass", || {
+            stored_runs(home.path())
+                .iter()
+                .any(|run| run["run_id"] == "earlier-run" && run["attempts"] == json!(1))
+        })
+        .await;
+        let run: Value = client
+            .typed("schedule.run_now", json!({"job_id": other_job}))
+            .await
+            .unwrap();
+        let run_id = run["run_id"].as_str().unwrap().to_owned();
+        server.shutdown();
+        server.join().await.unwrap();
+        let runs = stored_runs(home.path());
+        let own = runs
+            .iter()
+            .find(|run| run["run_id"] == run_id.as_str())
+            .expect("the manual window is recorded");
+        if own["state"] == "delivering" && own["attempts"] == json!(1) {
+            let own = own.clone();
+            observed = Some((runs, own));
+            break;
+        }
+        // The unload closed before the write reached the Sessions service,
+        // so the reply was definite; take the next unload.
+    }
+    let (runs, own) = observed.expect("a write answered with the uncertain reply");
+    println!("the uncertain delivery: {own}");
+    let earlier = runs
+        .iter()
+        .find(|run| run["run_id"] == "earlier-run")
+        .unwrap();
+    assert_eq!(
+        earlier["attempts"], 1,
+        "the earlier delivery keeps its own budget: {earlier}"
+    );
+    assert_eq!(earlier["state"], "delivering", "{earlier}");
 }

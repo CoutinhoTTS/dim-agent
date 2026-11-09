@@ -247,6 +247,20 @@ pub async fn tick(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
     let history = runs::read(&shared.files).await?;
     let now = Utc::now();
     for job in document.jobs.iter().filter(|job| job.enabled) {
+        // A disable whose write did not land is still required state: read
+        // the claim back from the job's newest terminal delivery (A.3).
+        if let Some(run) = latest_terminal(&history, &job.id)
+            && run.state == DeliveryState::Failed
+            && target_gone(&run.detail)
+            && same_target(job, run)
+        {
+            let at = run
+                .ended_at
+                .clone()
+                .unwrap_or_else(|| run.created_at.clone());
+            disable_gone(shared, run, &run.detail, at).await;
+            continue;
+        }
         let Ok(next) = job.next_window(window_after(job, &history)) else {
             continue;
         };
@@ -304,38 +318,79 @@ async fn disable(shared: &Arc<Shared>, job_id: &str) -> Result<(), SchedulerErro
     }
 }
 
-/// A `session` delivery settled `failed` with a target-gone code disables the
-/// job and stores why (A.3). A save or `set_enabled(true)` clears it.
-async fn disable_gone(shared: &Arc<Shared>, job_id: &str, code: &str, at: String) {
-    let cancel = CancellationToken::new();
-    let Ok(snapshot) = read_document(shared, &cancel).await else {
-        return;
-    };
-    let mut document = snapshot.document;
-    let Some(job) = document
-        .jobs
-        .iter_mut()
-        .find(|job| job.id == job_id && job.enabled)
-    else {
-        return;
-    };
-    job.enabled = false;
-    job.enabled_at = None;
-    job.disabled_reason = Some(crate::document::DisabledReason {
-        code: code.into(),
-        at,
-    });
-    job.revision += 1;
-    let _ = shared
-        .settings
-        .update(SettingsScope::User, &snapshot.revision, document, &cancel)
-        .await;
+/// Whether `run` names the Session branch `job` delivers to now: the claim a
+/// target-gone failure disables the job under, which a save that replaces
+/// the target ends.
+fn same_target(job: &Job, run: &Delivery) -> bool {
+    match job.effective_target() {
+        Some(Target::Session {
+            session_id,
+            branch_id,
+            ..
+        }) => {
+            run.session_id.as_deref() == Some(session_id.as_str())
+                && run.branch_id.as_deref() == Some(branch_id.as_str())
+        }
+        _ => false,
+    }
 }
 
-/// The authority a launch target requests: the saved preset, capped by the
-/// saved cap. A management job without a preset requests read-only.
-pub(crate) fn requested_policy(job: &Job, policy: Option<PermissionPreset>) -> PermissionPolicy {
-    match policy.or(job.policy) {
+/// The job's newest terminal delivery, which the timer pass reads a
+/// target-gone claim back from.
+fn latest_terminal<'a>(history: &'a [Delivery], job_id: &str) -> Option<&'a Delivery> {
+    history
+        .iter()
+        .filter(|run| run.job_id == job_id && run.state.is_terminal())
+        .max_by(|a, b| a.ended_at.cmp(&b.ended_at).then(a.run_id.cmp(&b.run_id)))
+}
+
+/// A `session` delivery settled `failed` with a target-gone code disables the
+/// job and stores why (A.3). The write is required state, not a note: a CAS
+/// that loses is retried against the current document while the job still
+/// names the delivery's Session, and any other failure leaves the claim to
+/// the timer pass, which reads it back from the delivery record.
+async fn disable_gone(shared: &Arc<Shared>, run: &Delivery, code: &str, at: String) {
+    for attempt in 0..3 {
+        let cancel = CancellationToken::new();
+        let Ok(snapshot) = read_document(shared, &cancel).await else {
+            return;
+        };
+        let mut document = snapshot.document;
+        let Some(job) = document
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == run.job_id && job.enabled)
+        else {
+            return;
+        };
+        if !same_target(job, run) {
+            return;
+        }
+        job.enabled = false;
+        job.enabled_at = None;
+        job.disabled_reason = Some(crate::document::DisabledReason {
+            code: code.into(),
+            at: at.clone(),
+        });
+        job.revision += 1;
+        match shared
+            .settings
+            .update(SettingsScope::User, &snapshot.revision, document, &cancel)
+            .await
+        {
+            Ok(_) => return,
+            Err(SettingsError::Conflict) if attempt < 2 => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// The authority a launch target requests: its saved preset, capped by the
+/// saved cap. A management job without a preset requests read-only. The
+/// preset comes from the effective target: a job's top-level legacy
+/// `policy` never applies once the job has a target of its own.
+pub(crate) fn requested_policy(policy: Option<PermissionPreset>) -> PermissionPolicy {
+    match policy {
         Some(preset) => PermissionPolicy {
             preset,
             ..PermissionPolicy::default()
@@ -528,10 +583,13 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
                 .map(|run| run.run_id.clone()),
         );
     }
+    // A legacy `reuse` binding is a reference only while the job has no
+    // target of its own: a save that changed the target releases the
+    // launched Session it used to own (§2.3, A.7).
     let mut references: HashSet<String> = document
         .jobs
         .iter()
-        .filter(|job| job.mode == Some(Mode::Reuse))
+        .filter(|job| job.target.is_none() && job.mode == Some(Mode::Reuse))
         .filter_map(|job| job.session_id.clone())
         .collect();
     references.extend(
@@ -791,12 +849,18 @@ async fn write_session(
             settle_delivered(shared, &run.run_id, input_id).await
         }
         Ok(Err(code)) if uncertain(&code) => {
-            settle_delivering(shared).await;
+            // Only this delivery's reply was uncertain: look it up now, and
+            // leave other records to the timer's once-a-minute pass (A.6).
+            if let Err(error) = lookup_once(shared, run).await {
+                tracing::warn!(%error, "scheduler lookup failed");
+            }
             Ok(())
         }
         Ok(Err(code)) => failed(shared, run, &code).await,
         Err(_) => {
-            settle_delivering(shared).await;
+            if let Err(error) = lookup_once(shared, run).await {
+                tracing::warn!(%error, "scheduler lookup failed");
+            }
             Ok(())
         }
     }
@@ -807,7 +871,7 @@ async fn write_session(
 async fn failed(shared: &Arc<Shared>, run: &Delivery, code: &str) -> Result<(), SchedulerError> {
     finish(shared, &run.run_id, DeliveryState::Failed, code.into()).await?;
     if target_gone(code) {
-        disable_gone(shared, &run.job_id, code, stamp(Utc::now())).await;
+        disable_gone(shared, run, code, stamp(Utc::now())).await;
     }
     Ok(())
 }
@@ -1045,7 +1109,6 @@ async fn still_eligible(
 /// the delivery before any input. `None` means the delivery settled.
 async fn launch(
     shared: &Arc<Shared>,
-    job: &Job,
     run: &Delivery,
     requested: &PermissionPolicy,
     target: &Target,
@@ -1056,11 +1119,8 @@ async fn launch(
         ));
     };
     let mut args = json!({"cwd": cwd, "policy": requested});
-    if let Some(agent) = agent_id.as_ref().or(job.agent_id.as_ref()) {
+    if let Some(agent) = agent_id.as_ref() {
         args["agent"] = json!(agent);
-    }
-    if let Some(model) = &job.model {
-        args["model"] = json!({"providerId": model.provider_id, "modelId": model.model_id});
     }
     let launched = match sessions(shared.sessions.as_ref(), "launch", args).await {
         Err(_) => {
@@ -1108,8 +1168,8 @@ async fn drive(shared: &Arc<Shared>, job: &Job, run: &Delivery) -> Result<(), Sc
             "a launch delivery names a non-launch target",
         ));
     };
-    let requested = requested_policy(job, *policy).cap(&job.policy_cap.clone().unwrap_or_default());
-    let Some(session_id) = launch(shared, job, run, &requested, &target).await? else {
+    let requested = requested_policy(*policy).cap(&job.policy_cap.clone().unwrap_or_default());
+    let Some(session_id) = launch(shared, run, &requested, &target).await? else {
         return Ok(());
     };
     if !still_eligible(shared, job, run, job.revision).await? {
