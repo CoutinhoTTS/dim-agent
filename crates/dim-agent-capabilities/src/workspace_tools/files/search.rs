@@ -7,8 +7,8 @@
 #[cfg(test)]
 use super::SearchHook;
 use super::{
-    Access, FileTools, NotRegular, Target, TargetError, blocking, cancelled, failed, field, inside,
-    js_len, lexical, succeeded,
+    Access, FileTools, NotRegular, Target, TargetError, blocking, cancelled, expand_tilde, failed,
+    field, inside, js_len, lexical, succeeded,
 };
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolResult};
@@ -231,21 +231,23 @@ impl Scope {
 
 /// TS `resolveSearchScope`; directory searches must not be the filesystem
 /// root or the user home. With `boundary` configured, `~` expands against
-/// the configured home (as the other file tools do), and a scope outside
-/// the roots is refused.
+/// the configured home through the file tools' one tilde rule
+/// (`expand_tilde`), and a scope outside the roots is refused; without one
+/// a leading `~` stays a literal component under the cwd, the product's
+/// long-standing behaviour.
 fn resolve_scope(
     cwd: &Path,
     home: &Path,
     boundary: Option<&super::FileToolBoundary>,
     path: Option<&str>,
 ) -> Result<Scope, SearchError> {
-    let expanded = match (boundary, path) {
-        (Some(_), Some("~")) => home.to_owned(),
-        (Some(_), Some(path)) => path
-            .strip_prefix("~/")
-            .or_else(|| path.strip_prefix("~\\"))
-            .map_or_else(|| PathBuf::from(path), |rest| home.join(rest)),
-        _ => PathBuf::from(path.unwrap_or("")),
+    let path = path.unwrap_or("");
+    let expanded = match boundary {
+        Some(_) => expand_tilde(path, home).unwrap_or_else(|| PathBuf::from(path)),
+        // Without a boundary the search tools have always taken a leading
+        // `~` as a literal component under the cwd (`<cwd>/~`, `main`'s
+        // `resolve_scope`); keep that product behaviour.
+        None => PathBuf::from(path),
     };
     let absolute = lexical(&cwd.join(expanded));
     let unreadable = || {

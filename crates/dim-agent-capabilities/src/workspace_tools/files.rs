@@ -171,6 +171,23 @@ pub(crate) enum Access {
     Write,
 }
 
+/// The one tilde rule of the file tools: `~`, `~/…` and `~\…` expand
+/// against `home`; `None` when the input does not start with a tilde.
+///
+/// `resolve_path` always applies it. `glob` and `grep` apply it only when a
+/// boundary is configured: without one the product has always taken `~` as
+/// a literal component under the cwd (`<cwd>/~`, `resolve_scope` in
+/// `files/search.rs` on main), and that behaviour is kept (ADR 014).
+fn expand_tilde(input: &str, home: &Path) -> Option<PathBuf> {
+    if input == "~" {
+        return Some(home.to_owned());
+    }
+    input
+        .strip_prefix("~/")
+        .or_else(|| input.strip_prefix("~\\"))
+        .map(|rest| home.join(rest))
+}
+
 /// Resolves a model-supplied file path (TS `path.ts`, design §7.2): `~`
 /// expansion, Windows corrections, join onto cwd, lexical `.`/`..`
 /// removal, then realpath of the longest existing prefix. With `boundary`
@@ -185,12 +202,9 @@ pub(crate) fn resolve_path(
     access: Access,
     input: &str,
 ) -> Result<PathBuf, PathError> {
-    let expanded = if input == "~" {
-        home.to_owned()
-    } else if let Some(rest) = input.strip_prefix("~/").or(input.strip_prefix("~\\")) {
-        home.join(rest)
-    } else {
-        windows_path(input)?
+    let expanded = match expand_tilde(input, home) {
+        Some(path) => path,
+        None => windows_path(input)?,
     };
     match canonical_prefix(lexical(&cwd.join(expanded))) {
         Ok(path) if boundary.is_some_and(|boundary| !inside(boundary, &path, access)) => {
