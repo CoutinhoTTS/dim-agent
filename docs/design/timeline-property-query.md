@@ -4,6 +4,8 @@ Scope: Timeline 读取机制，以及状态恢复、请求构造对它的使用�
 决策依据：[ADR 022](../adr/022-event-property-queries.md)。本文细化该提案的接口和修改方案，不表示这些接口已可用。
 相关问题：[#1147](https://github.com/arcships/dim/issues/1147)。既有 issue、PR 的范围不由本文自动扩大。
 
+后续提案：[数组元素行](timeline-array-rows.md)扩展现有 query；[成员索引](appserver/timeline-member-index.md)优化既有反关联；[状态结果](owner-state-indexed-reads.md)规定 owner 如何保存计算与确认。三者不新增通用状态 CRUD，提案字段不当作当前可调用接口。
+
 ## 1. 修改范围
 
 | 对象 | 需要修改的行为 |

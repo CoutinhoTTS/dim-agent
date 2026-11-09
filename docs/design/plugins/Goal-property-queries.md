@@ -4,6 +4,8 @@ Status: Draft.
 Scope: Goal 的 branch 恢复和 Session 状态读取；写命令、模型输入及事件格式不变。
 Issue: [#1147](https://github.com/arcships/dim/issues/1147)。
 
+后续正常读取目标见 [Goal 状态结果](Goal-state-read.md)（#1320）。该目标采用已完成结果与未处理输入索引；本文 Q1/Q2 与顺序 Fold 保留为旧格式初始化、语义对照和业务受影响范围的说明，不作为新设计下普通 get 的回退。
+
 本设计以[统一状态记录契约](https://github.com/arcships/dim/blob/6c8dc8680f0ca22edcf21dd76ea656536c2fe232/docs/design/plugins/Goal.md)为前提，补充 [Goal](Goal.md) 的读取与恢复设计。目标是替换完整历史收集，不改变目标、续行、评估、删除补偿和恢复校正的业务结果。删除后的异步重算遵循 §6；正常送达仍直接更新 Goal 的当前状态。
 
 ## 1. 模块与读取范围

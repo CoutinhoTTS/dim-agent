@@ -91,3 +91,19 @@ is added. Web drops its historical Goal fold and per-branch input history for me
 short-lived raw window is required for backwards pages to project in order; it is released afterwards.
 The branch activity enum orders three field projections before rendering. SQL compiler state and
 temporary content tables belong only to one query.
+
+## 属性投影与累计执行成本
+
+本节是 [#1320](https://github.com/arcships/dim/issues/1320) 的执行优化草案，不增加查询运算或修改持久化格式。
+
+只需要内联字段的选中行，应在候选限量后批量投影这些字段，不先选位置再为每行构造并执行同形 SQL。存在混合字段时，将内联字段和确实依赖内容引用的字段分开：前者批量返回，后者只对所需行解析对应内容。字段是否缺失及数组投影的形状仍使用既有查询类型，不能靠填默认值合并结果。
+
+候选位置推进和关系范围仍遵循上文。不能把分页游标加到内层 terminal 查询，也不能在存在性或分组语义不等价时提前 LIMIT。Memory、SQLite 和 publishing tail 返回相同的逻辑结果。
+
+大 JSON 的多个 json_extract 或数组投影可能反复解析正文。返回几列未必比一次类型解码更省 CPU。比较批量字段投影与现有执行路径时，同时报告 SQLite 内存、解析开销、正文节点加载和 Rust 内存；不得只因 Rust 分配减少就判定优化成立。
+
+统计覆盖外层选中语句、selected-properties 内部语句、关联查询、内容引用和临时表构建。对同一业务查询报告累计 statement 数、VM 指令、候选与返回行数、解析字节及排序成本。第一页面和全部页面分别测量；索引只在计划与放大测试证明必要时增加，并由存储 owner 另作格式决定。
+
+本节不引入统计持久表或通用业务投影。索引保证身份与位置访问能力，不保证任意分组、NOT EXISTS 或数组表达式都是常数成本。
+
+有选择性的文本候选应允许驱动外层关联查询。不能只因存在直接关系，就固定改为扫描 origin 并按每条身份检查 FTS。验收增加“输入历史增长十倍、文本候选为零、附带删除反关联”的对照，同时计入候选生成和全部分页；优化必须保留删除判断、固定关系范围和未索引内容的保守候选语义。

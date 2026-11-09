@@ -2,6 +2,8 @@
 
 Read and recovery design: [Goal property queries](Goal-property-queries.md). It defines the selected fields, current state and deletion recovery used by this part.
 
+Proposed result-based reads and recovery: [Goal state read](Goal-state-read.md). It retains the model-visible state contract and replaces ordinary candidate replay with completed results and indexed outstanding work.
+
 Overall design: [overview §4](../overview.md#4-plugin-catalog). Phase: P2. Language: Rust ([overview Appendix C](../overview.md#appendix-c-implementation-language)). Scope: Session + branch ([ADR 002](../../adr/002-plugin-scope.md)). Depends on ([roadmap](../roadmap.md) P5): C1, C3, C4, C5, S1, S8b ([#118](https://github.com/arcships/dim/issues/118)).
 
 Requirement ([feature list](../../feature-list.md), Branch Agent behavior): `/goal` sets, edits, pauses, resumes and clears a goal ("switch Goal mode"), and Goal continuation keeps working toward an explicit goal and records its completion or blockage.
