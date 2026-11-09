@@ -9,11 +9,11 @@ Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 
 InputQueue 保存自己的完整队列控制状态，不再通过历史 input/turn 字段重放恢复。UI pending 继续由既有方法返回；它排除 handover，不作为本恢复的数据源。
 
-新增 owner 结果类型 `input-queue/recovered`，采用既有扩展事实路径，不新增 query/getState/saveState 接口。源输入和结果确认遵循[状态结果协议](owner-state-indexed-reads.md)。事件是提议的合同，不表示类型或索引已实现。
+新增 owner 结果类型 `input-queue/recovered`，采用既有扩展事实路径，不新增 query/getState/saveState 接口。源输入的已完成位置遵循[状态结果协议](owner-state-indexed-reads.md)。事件是提议的合同，不表示类型已实现。
 
 ## 2. 恢复对象
 
-结果的 schema、base_through、source_through、source_ids、previous_result 由上述协议定义；state 的唯一类型为 QueueRecoveryState：
+结果的 schema、source_through 由上述协议定义；state 的唯一类型为 QueueRecoveryState：
 
 | 字段 | 类型与含义 |
 | --- | --- |
@@ -52,11 +52,11 @@ input/applied 和 input/deleted 是本 owner 的输出，不再次改变已经�
           -> 提交成功，发布 queued 数及原有撤回回复
 
 恢复 -> 最后一个恢复状态
-     -> 索引取得真实未处理输入
+     -> 按类型和位置索引读取 source_through 之后的源输入
      -> 仅处理这些输入，提交输出和新状态
 ```
 
-处理一批源事件时，转移仍逐项按序执行；可以合并最后恢复状态，不合并掉必要终态。结果的 source_ids 确认本批所有处理过的源输入。普通新结果与它产生的 Apply/Delete 一起提交，因此不留下“状态说已完成、终态尚未写”的中间持久状态。
+处理一批源事件时，转移仍逐项按序执行；可以合并最后恢复状态，不合并掉必要终态。source_through 只推进到本批已经按序完成的最后源位置。普通新结果与它产生的 Apply/Delete 一起提交，因此不留下“状态说已完成、终态尚未写”的中间持久状态。
 
 本代处理了新的源输入，但批次尚未提交时，状态不得被当作持久结果返回。提交失败中止该代处理并走 fault；不能继续以已修改内存接受更多工作。handler 不等待 SQLite，顺序任务由 InputQueue 登记和关闭。
 
@@ -83,7 +83,7 @@ input/applied 和 input/deleted 是本 owner 的输出，不再次改变已经�
 
 | owner / 问题 | 现有合同与不足 | 需要的能力 | 位置和生命周期 |
 | --- | --- | --- | --- |
-| Store / #1320 | 反关联可表达，但当前从全部源记录筛选；缺数组确认索引 | 支持源类型集合与 recovered.source_ids 的精确成员索引；schema 条件不可丢失 | 源截止与确认读头分别遵循状态结果协议；取消释放本页。 |
+| Store / #1320 | 已有类型/位置索引；恢复不得枚举旧前缀 | 将 from/through 和源类型直接用于索引范围，合并本次新输入 | 固定源截止；取消释放本页，不新增恢复成员索引。 |
 | Timeline / #1320 | 已有原子批次，无需另建事务端口 | 保持必要输出与结果同批，失败不发布 | 不改序号、before、发布或关闭规则。 |
 
 ## 7. 验收、Rule check 与删减

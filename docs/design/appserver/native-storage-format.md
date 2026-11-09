@@ -18,10 +18,10 @@
 只有完整分支、无 publishing tail、与静态描述逐项相同的反关联可使用成员根；其余范围保留通用查询。
 插件仍只调用 append/query，不读写这些表。
 
-本步骤不更改事件编码。数组元素内容编码与 owner 确认索引属于后续格式步骤，不能在提交 v37 后复用其编号。
+本步骤不更改事件编码。数组元素内容编码属于后续格式步骤，不能在提交 v37 后复用其编号。
 v36 的文本索引和事件编码合同继续适用。
 
-后续提案：[状态读取索引与数组元素](#提案状态读取索引与数组元素)。数组元素编码与 owner 结果索引尚未在 v37 定义。
+后续提案：[状态读取索引与数组元素](#提案状态读取索引与数组元素)。数组元素编码采用独立新格式；owner 结果复用既有事件索引。
 
 The current native format is **v37**, with versioned unfinished-member indexes, property text-candidate indexes, a submission identity index, a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
@@ -1112,28 +1112,71 @@ to retain the event ID value without its column affinity. Plan acceptance requir
 
 ## 提案：状态读取索引与数组元素
 
-Status: Draft. 本节提出下一格式的具体对象，不修改当前 FORMAT=36；实现时须确定未占用的新版本号，并经格式决定确认。不能把这些表、索引或新编码当作 v36 的可选对象加入。
+Status: Draft. 本节提出 v37 之后的扩展；实现时须确定未占用的新版本号，并经格式决定确认。不能把新表、索引或编码当作 v37 的可选对象加入。基础 member 结构沿用本文件开头的 v37 决定，不重新建立第二套成员树。
 
 ### 范围
 
 支持[未完成成员索引](timeline-member-index.md)、[数组元素读取](../timeline-array-rows.md)和[状态结果协议](../owner-state-indexed-reads.md)。Store 不解释 Goal、队列或 token；原事件格式和公开完整事件结果不变。
 
-### 新增结构
+### 沿用与新增结构
 
 | 逻辑对象 | 主键/索引与内容 |
 | --- | --- |
 | member_roots | 主键 session、branch、index_id、group_key、sequence；值为 root_id。支持最后版本与旧 through。 |
-| member_nodes | 主键 session、node_id；不可变叶或内部节点。引用位置和节点，不复制事件正文。 |
+| member_nodes | 沿用 v37 的不可变 AVL 节点及主键；引用位置和左右节点，不复制事件正文。 |
 | member_origins | session、branch、index_id、关联键、原位置的反向定位，含成员分组。 |
 | member_terminals | session、branch、index_id、关闭键的定位，保留最早终态位置。 |
 | array_elements | 主键 session、branch、逻辑 sequence、property、element_index；值为内容节点引用。 |
-| result_positions | 原 timeline_events 的表达式索引：session、branch、kind、schema、source_through、sequence；只包含相应元数据存在的记录。 |
+
+最后结果复用既有 `timeline_events_by_kind(session_id, branch_id, kind, sequence, event_id)`；不新建 result_positions 表或表达式索引。schema 与 source_through 在选中一条结果后读取，不参与跳过记录。
 
 index_id 是规范化的、由 Store 明确支持的查询描述身份；不是插件名或可执行回调。group_key 编码已声明的标量分组，未分组也有固定编码。节点编码、完整 SQL schema 与外键在实现该格式时固定，不能在普通 query 中创建临时持久结构。
 
-初始普通成员描述覆盖 input、tool-call、exec 和 collaboration 的反关联，见成员索引合同。结果处理描述覆盖各 owner 设计列明的源类型、schema 与 source_ids 数组确认；这些描述是有限的声明数据，不引入 SQL 插件或运行时注册 API。新增 owner 或改变查询形状必须补充格式与成本验证，不能默认任意新 query 都得到物化索引。
+普通成员描述覆盖 input、tool-call、exec 和 collaboration 的反关联，见成员索引合同。owner 按序处理输入，恢复直接查询 source_through 之后的源位置，不新增恢复源成员树、确认数组或关联表。启用与版本初始化由 owner 保存第一份状态，Store 不执行其业务算法。
 
-普通 pending 描述从分支起点维护。恢复处理描述只接受当前本地 opening 后的结果，不以 fork 复制前缀中的结果激活新分支；在首次兼容初始化结果提交时，从显式 base_through 之后建立，索引只用于外层范围包含该下界的等价查询。初始化事务还处理 base 之后、结果之前已经落盘的源输入，不漏掉初始化期间追加的工作。没有该 owner 的兼容结果时，不为未安装 owner 无条件建立整个历史的处理队列。
+### 查询定位
+
+以下是 Store 内部定位步骤，不是插件可调用的 SQL 接口。数组表使用本节的逻辑名称，最终拼写与 codec 随新格式 schema 固定。
+
+最后结果首先定位身份与版本，再投影所选字段：
+
+```sql
+SELECT sequence, event_id
+FROM timeline_events
+WHERE session_id = :session AND branch_id = :branch
+  AND kind = :result_kind AND sequence > :opening AND sequence <= :head
+ORDER BY sequence DESC
+LIMIT 1;
+```
+
+该查询利用既有按类型索引倒序定位；再按所选位置投影 schema、source_through 与 state。缺少或不支持的 schema 都交给 owner 报错，不在 SQL 中排除后冒用更旧结果。当前结果读取不提供任意历史源位置版本；请求准备需要的旧数字根按事实中明确保存的身份点查。
+
+新源的单类型定位使用相同索引和显式位置范围：
+
+```sql
+SELECT sequence, event_id
+FROM timeline_events
+WHERE session_id = :session AND branch_id = :branch AND kind = :source_kind
+  AND sequence > :source_through AND sequence <= :source_cutoff
+ORDER BY sequence
+LIMIT :page_size;
+```
+
+多个源类型分别定位后按原位置合并，附加属性只在这个范围求值；SQL 页游标继续约束位置下界。已完成前缀不进入候选。捕获的 publishing tail 只合并范围内、尚未落盘的源，不能有尾部就扫描历史。普通 pending 仍先按指定 through 取得成员根，再遍历当前成员。
+
+Prompt 已有引用转成成对的定位键，例如：
+
+```sql
+WITH wanted(sequence, element_index) AS (VALUES (:a, 2), (:b, 7))
+SELECT w.sequence, w.element_index, a.content_ref
+FROM wanted w
+JOIN array_elements a
+  ON a.session_id = :session AND a.branch_id = :branch
+ AND a.sequence = w.sequence AND a.property = 'data.changes'
+ AND a.element_index = w.element_index;
+```
+
+事件 ID 先通过既有身份索引取得逻辑位置，并核对固定查询范围；之后只加载所选 content_ref。这条路径不用 json_each 展开未选中元素，也不读取整份原数组。所有辅助定位与内容加载都计入查询成本，不能仅统计最终 SELECT 的行数。
 
 ### 数组编码
 
@@ -1149,14 +1192,14 @@ index_id 是规范化的、由 Store 明确支持的查询描述身份；不是�
 接收原子事实批次
  -> 编码数组元素/已有内容节点
  -> 按逻辑顺序更新所有受影响成员根
- -> 保存事件、节点、根与结果表达式键
+ -> 保存事件、节点和根，维护既有事件索引
  -> 同事务提交，再执行原发布回调
 ```
 
-从 v36 升级时逐批读取所需逻辑属性，建立普通成员索引及数组编码；同一升级事务最后更新格式标记。owner 状态的业务初始化不由 Store 执行：缺结果的 owner 在其明确初始化流程产生第一份状态，Store 只维护声明关系。升级失败整体回滚，报告既有升级进度，不在下次普通 query 补建。
+从 v37 升级时逐批读取所需逻辑属性，保留已有普通成员与事件索引，建立新增数组编码；同一升级事务最后更新格式标记。更旧受支持格式先按既有升级合同到达 v37。owner 状态的业务初始化不由 Store 执行：缺结果的 owner 在其明确初始化流程产生第一份状态。升级失败整体回滚，报告既有升级进度，不在下次普通 query 补建。
 
 Session 复制保留逻辑位置、身份关系和原数组顺序，在目标范围重建索引；复制节点引用必须连同节点验证，不留下跨 Session 悬挂引用。删除 Session 同事务删除其根、关系和仅属于它的内容。旧版本程序按新格式拒读，不修改旧格式标记来伪装兼容。
 
 ### 进入实现前的验收清单
 
-一次性 v36→新格式数据库验证升级、回滚、重复打开、只读导出、Session 复制/删除及各提交阶段崩溃。query 的祖先、批次内部 through、合并输出、数组与 publishing tail 做语义对照。固定 10 个成员或 1 个数组元素，扩大历史及原数组体积，记录真实扫描、节点加载、VM、SQLite/Rust 内存和 WAL。不能只通过表结构检查就宣布性能满足。
+一次性 v37→新格式数据库验证升级、回滚、重复打开、只读导出、Session 复制/删除及各提交阶段崩溃。query 的祖先、批次内部 through、合并输出、数组与 publishing tail 做语义对照。固定 10 个成员或 1 个数组元素，扩大历史及原数组体积，记录真实扫描、节点加载、VM、SQLite/Rust 内存和 WAL。不能只通过表结构检查就宣布性能满足。

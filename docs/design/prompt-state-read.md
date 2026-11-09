@@ -59,6 +59,23 @@ Branch 当前 StateCell 仍持有实际 PromptSnapshot，服务现有采用比�
 
 因此数组接口首版在此负责“按已知身份取元素”，不要求同时增加计算字段、Set/Revoke 路径别名或复杂生命周期 SQL。旧数据初始化才使用历史元素操作来建立引用。
 
+### 4.1 元素请求形状
+
+例如当前只引用事件 A 的下标 2 和事件 B 的下标 7，请求固定恢复读头，使用：
+
+```text
+rows       = Elements { field: "data.changes" }
+filter     = (id = A AND element.index = 2)
+          OR (id = B AND element.index = 7)
+select     = Fields [id, position, element.index, element.value.entry]
+order_by   = Position ascending
+page.limit = 128
+```
+
+结果只有这两个原始 Set.entry；不会读取两条事件的其它 changes 来重新计算有效性。多个下标属于同一事件时，可以在该事件 ID 条件内使用 In。不得改写为 `id In [A,B] AND element.index In [2,7]`，后者还会选中 A/7 和 B/2。
+
+恢复类型只保存事件身份和下标。插件不用数组内容哈希，不调用 Store，也不把原始数组放入另一层缓存。
+
 ## 5. 收拢五个读取入口
 
 | 入口 | 修改 |
@@ -79,7 +96,7 @@ ConfigurationPublisher 不反向依赖 Prompt StateCell，避免加载环。当�
 | --- | --- | --- | --- |
 | Timeline / #1320 | 数组投影不能逐元素返回与分页 | 数组行、原元素下标和按成对身份选取；不需要任意计算字段 | 原 through、祖先截止和缺失值合同不变。 |
 | Store / #1320 | 大 JSON 选一个元素仍可能解析完整数组 | 按事件身份/元素下标定位公开数组内容；与成员索引一同作格式决定 | 既有完整事件读取仍还原完整数组，不能修改事件 wire fixture。 |
-| Store / #1320 | 恢复结果确认关系目前无直接成员执行 | 对上述源事实与 prompt-state/recovered.source_ids 建立精确索引 | 结果与确认同事务；普通恢复不建索引。 |
+| Store / #1320 | 源读取必须跳过已完成前缀 | 沿用类型/位置索引，按 source_through 的下一个位置读取新源 | 固定源截止；不用确认关联或恢复成员树。 |
 
 元素内容可沿用 Store 内容节点，但插件只持有事件 ID 和数组下标，不持有内容哈希。该格式要求在存储 owner 的[下一格式提案](appserver/native-storage-format.md#提案状态读取索引与数组元素)决定，本文不指定另一套私有 SQL 表。
 

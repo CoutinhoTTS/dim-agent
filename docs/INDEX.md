@@ -42,7 +42,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [ADR 022 — Timeline 属性查询与正文重建](adr/022-event-property-queries.md)（中文）：目标 API 与模块结构、属性查询、业务状态恢复和正文释放
 - [ADR 023 — 上下文用量由独立分支部件维护](adr/023-context-usage.md)（中文）：ContextUsage 的职责、增量统计、服务商校准及后续设计边界
 - [Resume：按业务对象设计计算与读取](design/resume-read-design.md)（中文，草案）：usage、输入队列、Prompt、显示详情、SQL 执行和恢复校验的分项设计与成本验收
-- [状态结果与未处理输入](design/owner-state-indexed-reads.md)（中文，草案）：沿用 append/query，结果和处理确认同批提交，恢复只处理索引中的未完成工作
+- [状态结果与未处理输入](design/owner-state-indexed-reads.md)（中文，草案）：沿用 append/query，保存完整状态与已完成源位置，恢复按索引读取其后的新输入
 - [Timeline 数组元素查询](design/timeline-array-rows.md)（中文，草案）：元素行、原下标、固定范围与按身份取值
 - [Timeline 未完成成员索引](design/appserver/timeline-member-index.md)（中文，草案）：版本集合、同事务维护、分页和新增读写成本
 - [Timeline 属性查询与消费端改造](design/timeline-property-query.md)（中文）：查询契约、SQL 与内容解码、恢复和请求构造的修改方案

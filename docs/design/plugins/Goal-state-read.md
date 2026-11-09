@@ -31,7 +31,7 @@ GoalRecoveryState 是唯一恢复类型：
 
 源类型沿用 Goal 已声明的事实；恢复结果不是它自己的新驱动输入。现有 state record/trigger 原子批次保留。Goal 把本次完成的状态、必要的校正输出和处理输入身份同批写入，顺序与确认遵循状态结果协议。
 
-Goal 的模型可见自写输入统一作为后续源输入消费，不提前加入本批 source_ids。本批 state 记录已经处理的源前缀，以及 committed_outputs 中已经提交的输出 ID；不假设输出与决定源之间没有其它输入。后续按原顺序消费这些输出后再移除 committed_outputs。外部提交的 Goal 触发也按其原始位置处理，不用过滤后的候选顺序代替。
+Goal 的模型可见自写输入统一作为后续源输入消费，不提前推进 source_through。本批 state 记录已经处理的源前缀，以及 committed_outputs 中已经提交的输出 ID；不假设输出与决定源之间没有其它输入。后续按原顺序消费这些输出后再移除 committed_outputs。外部提交的 Goal 触发也按其原始位置处理，不用过滤后的候选顺序代替。
 
 处理普通对话输入时，只有原 Goal 规则需要的控制字段进入 state；没有 Goal 不收集正文。连续无状态变化的处理确认可以合并；遇到需决定的 turn/end、interrupt 或删除，必须按原顺序完成决定，不把后面的状态当作当时状态。
 
@@ -44,8 +44,8 @@ session.goal.get
   -> 返回原 GoalRead
 
 冷恢复
-  -> 最后兼容 GoalRecoveryState
-  -> 索引中的未处理 Goal 源输入
+  -> 最后结果，检查 schema 后取得 GoalRecoveryState
+  -> 类型/位置索引中 source_through 之后的 Goal 源输入
   -> 结算真实欠写工作，提交结果
 ```
 
@@ -55,7 +55,7 @@ get 没有调用方 through，不增加任意历史版本 API。入口固定目�
 
 ## 5. 删除与旧数据
 
-删除是仍需结算的业务输入，不是一次 getter 查询。Goal 先使旧结果对该删除不再就绪；处理删除及补偿后才确认它。发生崩溃时，删除仍在未处理索引，恢复不能把旧 view 宣布为最新。
+删除是仍需结算的业务输入，不是一次 getter 查询。Goal 先使旧结果对该删除不再就绪；处理删除及补偿后才推进 source_through。发生崩溃时，删除仍位于旧 source_through 之后，恢复不能把旧 view 宣布为最新。
 
 重算只允许处理实际受影响的 Goal 变更、记录与决定，不扫描普通对话正文。通过删除输入 ID 点查原始输入、引用该输入的 after/trigger 关系，定位最后未受影响的状态边界；对确实依赖被删输入的后续操作重算。受影响操作数 D 可以很大，必须报告，不能承诺任意撤销为常数时间。具体依赖字段索引须由 Goal 与存储 owner 确认，不能在 SQL 中解析标记。
 
@@ -67,12 +67,12 @@ get 没有调用方 through，不增加任意历史版本 API。入口固定目�
 | --- | --- |
 | read.rs::current | 正常路径只取有效结果的 goal，产生原 GoalView，删除 Q2/Q1 页面循环。 |
 | session.rs get | 沿既有 Owner 路由等待真实覆盖位置，不将 write_guard 视作处理屏障。 |
-| branch.rs / restore.rs | 使用 GoalRecoveryState 和未处理成员恢复；旧属性恢复保留为显式初始化入口。 |
+| branch.rs / restore.rs | 使用 GoalRecoveryState 和已保存前缀之后的新源恢复；旧属性恢复保留为显式初始化入口。 |
 | Fold | 保留业务转移，恢复编码只含上表的当前状态；删除结果读取端的历史容器。 |
 
 | owner / 问题 | 现有机制与限制 | 需求 | 位置及生命周期 |
 | --- | --- | --- | --- |
-| Store / #1320 | 有字段与反关联，但没有 Goal 源输入的直接未处理集合 | 按公开源类型/属性条件及 recovered.source_ids 维护成员，不解释 Goal 文本 | schema、分支、本地 opening 和源范围不得丢失。 |
+| Store / #1320 | 已有类型/位置索引，恢复不能扫描全部 Goal 候选 | 按源类型/公开属性条件，在 source_through 之后定位新源，不解释 Goal 文本 | 分支、本地 opening 和固定源截止不得丢失。 |
 | Goal / #1320 | 删除可能使已发布块过期 | 定义结构化依赖身份和受影响边界，维持原删除结果 | 处理完成才确认；取消不发布部分新状态。 |
 
 ## 7. Rule check、验收与删减
