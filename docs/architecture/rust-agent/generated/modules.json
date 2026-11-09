@@ -19548,6 +19548,7 @@
       "references": [
         "path Job",
         "path MAX_TOOL_JOBS_PER_SESSION",
+        "path Mode::Reuse",
         "path Origin",
         "path Origin::Tool",
         "path Origin::User",
@@ -19560,6 +19561,7 @@
         "path crate::document::ScheduleDocument::NAMESPACE",
         "use crate::document::Job",
         "use crate::document::MAX_TOOL_JOBS_PER_SESSION",
+        "use crate::document::Mode",
         "use crate::document::Origin",
         "use crate::document::Schedule",
         "use crate::document::Target",
@@ -19585,13 +19587,16 @@
         "path SchedulerError",
         "path SchedulerError::invalid_data",
         "path SchedulerError::new",
+        "path SessionOrigin::Launch",
         "path runs",
         "path runs::read",
+        "path runs::update",
         "path stamp",
         "use crate::runs",
         "use crate::runs::Delivery",
         "use crate::runs::DeliveryState",
         "use crate::runs::SchedulerError",
+        "use crate::runs::SessionOrigin",
         "use crate::runs::stamp"
       ]
     },
@@ -19835,6 +19840,7 @@
       "from": "dim_agent_scheduler::support",
       "to": "dim_agent_capabilities::defaults",
       "references": [
+        "path defaults",
         "path defaults::install",
         "path defaults::mock_hosts_with_model",
         "use dim_agent_capabilities::defaults"
@@ -19878,7 +19884,10 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path AgentConfig::default",
-        "use dim_agent_runtime::AgentConfig"
+        "path SessionConfig",
+        "path SessionConfig::default",
+        "use dim_agent_runtime::AgentConfig",
+        "use dim_agent_runtime::SessionConfig"
       ]
     },
     {
@@ -47703,8 +47712,10 @@
       "from": "dim_session_title",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
+        "path QueryFilter",
         "path QueryFilter::And",
         "path QueryFilter::In",
+        "path QueryFilter::Or",
         "path QueryOperand::Field",
         "path QueryOutput::Rows",
         "path QueryPage",
@@ -47740,8 +47751,11 @@
       "to": "dim_agent_types::events",
       "references": [
         "path EventKind::InputApplied",
+        "path InputBlock",
+        "path InputBlock::Raw",
         "path UserInput",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
         "use dim_agent_types::UserInput"
       ]
     },
