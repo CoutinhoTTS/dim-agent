@@ -25,7 +25,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 chrono-tz = "0.10"
 croner = "4"
 
+[features]
+# Hooks flow tests hold an operation open with.
+testing = []
+
 [dev-dependencies]
+dim-agent-scheduler = { path = ".", features = ["testing"] }
 rusqlite = "0.40.2"
 tempfile = "3"
 tokio.workspace = true

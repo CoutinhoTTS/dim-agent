@@ -117,13 +117,36 @@ pub async fn start(home: &Path, model: Arc<Script>) -> RunningServer {
     start_with(home, model, SessionConfig::default()).await
 }
 
+/// The hooks of each started server, by home, newest last.
+static HOLDS: Mutex<Vec<(std::path::PathBuf, Arc<dim_agent_scheduler::testing::Holds>)>> =
+    Mutex::new(Vec::new());
+
+/// The hooks of the server started last for `home`.
+pub fn holds(home: &Path) -> Arc<dim_agent_scheduler::testing::Holds> {
+    HOLDS
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(path, _)| path == home)
+        .map(|(_, holds)| holds.clone())
+        .expect("a server started for this home")
+}
+
 /// [`start`] with the host's Session defaults, so a flow can set the role or
 /// the authority bound a Session is created under.
 pub async fn start_with(home: &Path, model: Arc<Script>, defaults: SessionConfig) -> RunningServer {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts_with_model(&mut builder, HistoryRenderer::default(), model);
-    dim_agent_scheduler::install(&mut builder);
+    let holds = Arc::new(dim_agent_scheduler::testing::Holds::default());
+    HOLDS.lock().unwrap().push((home.to_owned(), holds.clone()));
+    dim_agent_scheduler::install_with_testing(
+        &mut builder,
+        dim_agent_scheduler::SchedulerTexts::default(),
+        holds,
+    )
+    .expect("the built-in texts are valid");
     serve(
         builder,
         ServerConfig {

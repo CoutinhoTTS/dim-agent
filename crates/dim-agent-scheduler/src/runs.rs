@@ -144,6 +144,11 @@ pub struct Delivery {
     /// deletion authority for that Session.
     #[serde(default, skip_serializing_if = "omitted_when_false")]
     pub released: bool,
+    /// The job revision the delivery was due under (A.7): the target-gone
+    /// claim a failure carries is valid only against a job that still has
+    /// this revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_revision: Option<u64>,
 }
 
 fn omitted_when_false(value: &bool) -> bool {

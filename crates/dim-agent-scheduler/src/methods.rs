@@ -41,6 +41,8 @@ pub struct SchedulerPlugin {
     sessions: Key<dyn HostDispatch>,
     parts: Key<PartRegistry>,
     texts: Arc<crate::SchedulerTexts>,
+    #[cfg(feature = "testing")]
+    holds: Option<Arc<crate::testing::Holds>>,
 }
 
 impl SchedulerPlugin {
@@ -53,6 +55,22 @@ impl SchedulerPlugin {
             sessions: host_key("sessions"),
             parts: names.key()?,
             texts,
+            #[cfg(feature = "testing")]
+            holds: None,
+        })
+    }
+
+    /// [`SchedulerPlugin::new`] with the flow tests' holds (feature
+    /// `testing`).
+    #[cfg(feature = "testing")]
+    pub fn new_with_testing(
+        names: &Names<'_>,
+        texts: Arc<crate::SchedulerTexts>,
+        holds: Arc<crate::testing::Holds>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            holds: Some(holds),
+            ..Self::new(names, texts)?
         })
     }
 }
@@ -94,6 +112,8 @@ impl DynPlugin for SchedulerPlugin {
                 retention: Default::default(),
                 reporting: Default::default(),
                 watch: crate::watch::Watchers::default(),
+                #[cfg(feature = "testing")]
+                holds: self.holds.clone(),
             });
             let cleanup = shared.clone();
             ctx.effect(move || async move {
@@ -244,6 +264,9 @@ pub(crate) struct Shared {
     pub(crate) reporting: std::sync::Mutex<HashSet<String>>,
     /// The open `schedule.watch` calls of this generation (design §11.2).
     pub(crate) watch: crate::watch::Watchers,
+    /// The flow tests' holds (feature `testing`).
+    #[cfg(feature = "testing")]
+    pub(crate) holds: Option<Arc<crate::testing::Holds>>,
 }
 
 impl Shared {

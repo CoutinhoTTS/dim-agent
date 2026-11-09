@@ -197,6 +197,7 @@ async fn record(
             detail: detail.into(),
             attempts: None,
             released: false,
+            job_revision: Some(job.revision),
         };
         run.validate().map_err(SchedulerError::invalid_data)?;
         history.push(run.clone());
@@ -255,8 +256,7 @@ pub async fn tick(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
         if let Some(run) = latest_terminal(&history, &job.id)
             && run.state == DeliveryState::Failed
             && target_gone(&run.detail)
-            && same_target(job, run)
-            && claim_on_current_enable(job, run)
+            && claim_current(job, run)
         {
             let at = run
                 .ended_at
@@ -348,35 +348,35 @@ fn latest_terminal<'a>(history: &'a [Delivery], job_id: &str) -> Option<&'a Deli
         .max_by(|a, b| a.ended_at.cmp(&b.ended_at).then(a.run_id.cmp(&b.run_id)))
 }
 
-/// Whether the target-gone claim belongs to the enable that recorded it: a
-/// failure older than the job's current `enabled_at` was superseded by a
-/// successful save or re-enable, and the timer pass must not replay it (A.3).
-fn claim_on_current_enable(job: &Job, run: &Delivery) -> bool {
-    let enabled_at = job.enabled_at.as_deref().and_then(canonical_instant);
-    let ended_at = run.ended_at.as_deref().and_then(canonical_instant);
-    matches!((enabled_at, ended_at), (Some(enabled_at), Some(ended_at)) if ended_at >= enabled_at)
+/// Whether `run`'s target-gone claim still applies to `job` as read for the
+/// write: the job is enabled, still names the delivery's effective target,
+/// and carries the revision the delivery was due under (A.3). A record
+/// without the revision cannot prove its claim is current and never disables.
+fn claim_current(job: &Job, run: &Delivery) -> bool {
+    job.enabled && same_target(job, run) && run.job_revision == Some(job.revision)
 }
 
 /// A `session` delivery settled `failed` with a target-gone code disables the
-/// job and stores why (A.3). The write is required state, not a note: a CAS
-/// that loses is retried against the current document while the job still
-/// names the delivery's Session, and any other failure leaves the claim to
-/// the timer pass, which reads it back from the delivery record.
+/// job and stores why (A.3). The write is required state, not a note: it
+/// decides on the document it is about to change, on every attempt including
+/// a CAS retry, and disables only while the claim is current; any other
+/// failure leaves the claim to the timer pass, which reads it back from the
+/// delivery record.
 async fn disable_gone(shared: &Arc<Shared>, run: &Delivery, code: &str, at: String) {
     for attempt in 0..3 {
         let cancel = CancellationToken::new();
         let Ok(snapshot) = read_document(shared, &cancel).await else {
             return;
         };
+        #[cfg(feature = "testing")]
+        if let Some(holds) = &shared.holds {
+            holds.before_disable_write().await;
+        }
         let mut document = snapshot.document;
-        let Some(job) = document
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == run.job_id && job.enabled)
-        else {
+        let Some(job) = document.jobs.iter_mut().find(|job| job.id == run.job_id) else {
             return;
         };
-        if !same_target(job, run) {
+        if !claim_current(job, run) {
             return;
         }
         job.enabled = false;

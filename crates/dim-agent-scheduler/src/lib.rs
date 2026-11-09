@@ -12,6 +12,9 @@ mod session;
 mod wakeups;
 mod watch;
 
+#[cfg(feature = "testing")]
+pub mod testing;
+
 #[cfg(test)]
 extern crate self as dim_agent_scheduler;
 #[cfg(test)]
@@ -60,14 +63,38 @@ impl Default for SchedulerTexts {
 /// is refused, since the guide entry tells the model the report's last line
 /// is guidance.
 pub fn install_with(builder: &mut AgentBuilder, texts: SchedulerTexts) -> Result<(), String> {
-    if texts.report_guidance.contains(['\n', '\r']) {
-        return Err("Scheduler report_guidance must be one line".into());
-    }
-    let texts = std::sync::Arc::new(texts);
+    let texts = checked(texts)?;
     dim_agent_runtime::names::register::<ScheduleJobs>(builder.catalog_mut(), None);
     dim_agent_runtime::names::register::<Wakeups>(builder.catalog_mut(), None);
     builder.optional_plugin(move |names| {
         Ok(Box::new(SchedulerPlugin::new(names, texts.clone())?) as Box<dyn DynPlugin>)
     });
     Ok(())
+}
+
+/// [`install_with`] with the flow tests' holds in force (feature `testing`).
+#[cfg(feature = "testing")]
+pub fn install_with_testing(
+    builder: &mut AgentBuilder,
+    texts: SchedulerTexts,
+    holds: std::sync::Arc<testing::Holds>,
+) -> Result<(), String> {
+    let texts = checked(texts)?;
+    dim_agent_runtime::names::register::<ScheduleJobs>(builder.catalog_mut(), None);
+    dim_agent_runtime::names::register::<Wakeups>(builder.catalog_mut(), None);
+    builder.optional_plugin(move |names| {
+        Ok(Box::new(SchedulerPlugin::new_with_testing(
+            names,
+            texts.clone(),
+            holds.clone(),
+        )?) as Box<dyn DynPlugin>)
+    });
+    Ok(())
+}
+
+fn checked(texts: SchedulerTexts) -> Result<std::sync::Arc<SchedulerTexts>, String> {
+    if texts.report_guidance.contains(['\n', '\r']) {
+        return Err("Scheduler report_guidance must be one line".into());
+    }
+    Ok(std::sync::Arc::new(texts))
 }

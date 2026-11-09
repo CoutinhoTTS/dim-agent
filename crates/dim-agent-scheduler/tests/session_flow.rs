@@ -1945,13 +1945,10 @@ async fn a_target_gone_lookup_settles_failed_and_disables() {
     server.join().await.unwrap();
 
     edit_runs(home.path(), |runs| {
-        runs.push(seeded_delivery(
-            "gone-run",
-            &job,
-            missing,
-            "scheduler:gone-run",
-            None,
-        ));
+        let mut record = seeded_delivery("gone-run", &job, missing, "scheduler:gone-run", None);
+        // The delivery was due under the job's first revision.
+        record["job_revision"] = json!(1);
+        runs.push(record);
     });
     let server = start(home.path(), Arc::new(Script::default())).await;
     let mut client = support::connect(&server).await;
@@ -1970,3 +1967,139 @@ async fn a_target_gone_lookup_settles_failed_and_disables() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// The job `schedule.list` reports for `job_id`.
+fn listed_job_value(listed: &Value, job_id: &str) -> Value {
+    listed["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == job_id)
+        .unwrap()
+        .clone()
+}
+
+/// The stored `schedule` settings document.
+fn stored_document(home: &std::path::Path) -> Value {
+    let document: String = rusqlite::Connection::open(home.join("dimcode.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source = 'user/schedule'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&document).unwrap()
+}
+
+/// A same-target save that commits after the target-gone failure and before
+/// the disable lands supersedes the claim: the disable re-checks on its CAS
+/// retry, leaves the job enabled, and the next window delivers (A.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_same_target_save_supersedes_the_target_gone_claim() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let job = save_session_job(
+        &mut client,
+        "same-target",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    client
+        .rpc("session.close", json!({"sessionId": session}))
+        .await
+        .unwrap();
+    let hold = support::holds(home.path()).hold_next_disable();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &job, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "failed", "{run}");
+    assert_eq!(run["detail"], "session_closed", "{run}");
+    // The disable has read the document; the save commits before it writes.
+    hold.read.notified().await;
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": job, "prompt": "Work on it after the edit."}}),
+        )
+        .await
+        .unwrap();
+    hold.release();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+    let listed = listed_job_value(&listed, &job);
+    assert_eq!(listed["enabled"], true, "{listed}");
+    assert!(listed["disabled_reason"].is_null(), "{listed}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // The restored Session takes the next window.
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &job, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "delivered", "{run}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A pause and resume that commit between the disable's read and its CAS
+/// force a retry, and the retry re-checks the claim: the job stays enabled
+/// (A.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pause_and_resume_between_the_disable_read_and_write_supersedes_it() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let job = save_session_job(
+        &mut client,
+        "pause-resume",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    client
+        .rpc("session.close", json!({"sessionId": session}))
+        .await
+        .unwrap();
+    let hold = support::holds(home.path()).hold_next_disable();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &job, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "failed", "{run}");
+    hold.read.notified().await;
+    for enabled in [false, true] {
+        client
+            .typed::<Value>(
+                "schedule.set_enabled",
+                json!({"job_id": job, "enabled": enabled}),
+            )
+            .await
+            .unwrap();
+    }
+    hold.release();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+    let listed = listed_job_value(&listed, &job);
+    assert_eq!(listed["enabled"], true, "{listed}");
+    assert!(listed["disabled_reason"].is_null(), "{listed}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+

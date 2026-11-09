@@ -1139,6 +1139,7 @@ dependencies = [
  "croner",
  "dim-agent-capabilities",
  "dim-agent-runtime",
+ "dim-agent-scheduler",
  "dim-agent-types",
  "dim-app-server",
  "dim-client",
