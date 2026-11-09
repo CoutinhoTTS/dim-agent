@@ -1,5 +1,17 @@
 # Rust 会话存储格式
 
+## v38：收窄全文与关联索引的写入范围
+
+v38 保留 v37 的事件编码与 SQL 表，收窄索引的写入范围。`data` 全文索引覆盖核心保留域的事件，仍排除 context/prepare、model/call 和 context/compaction；不为不透明扩展事实建立全文倒排项。`data.delta` 的 step/text 索引不变。域集合复用事件信封合同，不在 Store 列出 Goal、InputQueue 或统计插件的类型。
+
+request、input 和 user 关联索引保留原列及排序，改为只保存对应索引表达式非 SQL NULL 的记录。没有这些字段的事实不再写入三个无用的 NULL 索引项。JSON null 的 user 仍有 `json_type='null'`，保留原 Present 语义；非字符串关联值仍按公开查询合同处理。等值、In 与 Present 查询继续使用原表达式定位；缺失字段的查询保留通用执行语义，不强制套用不覆盖它的部分索引。
+
+扩展事实仍完整持久化、导出和复制；TextCandidate 查询这些类型时保留候选，由调用方验证，不以索引缺失判定不匹配。混合核心与扩展类型的条件也必须保留未索引部分。普通结构化字段、身份、位置和关联查询不受影响。
+
+v37→v38 在同一升级事务中删除覆盖范围外的全文元数据，由既有删除触发器清理对应倒排项，并以部分索引替换上述三个关联索引；不重写事实正文、不重建成员集合、不改变流式尾部。失败连同格式标记回滚，普通打开不重复清理。旧程序认为扩展事实的 data 全部已索引，可能漏掉新写扩展事实的候选，因此必须以 v38 格式拒绝旧程序，不能复用 v37。
+
+数组元素内容编码仍采用后续独立格式；本步骤不引入数组表或新查询 API。
+
 ## v37：未完成集合索引的格式决定
 
 本次格式采用 v37，不修改已提交的 v36。v37 增加 `timeline_member_nodes`、
@@ -23,7 +35,7 @@ v36 的文本索引和事件编码合同继续适用。
 
 后续提案：[状态读取索引与数组元素](#提案状态读取索引与数组元素)。数组元素编码采用独立新格式；owner 结果复用既有事件索引。
 
-The current native format is **v37**, with versioned unfinished-member indexes, property text-candidate indexes, a submission identity index, a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
+The current native format is **v38**, with versioned unfinished-member indexes, property text-candidate indexes, a submission identity index, a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
@@ -32,10 +44,10 @@ omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, a delegation's Agent owner and
 member leader, a Session's creation origin, Session file grants, command output
 ownership and the two context reading switches on timeline events. Startup
-requires the exact v37 SQL schema and a single
-format marker of 37 before writable PRAGMAs, or the exact v36, v35, v34, v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
+requires the exact v38 SQL schema and a single
+format marker of 38 before writable PRAGMAs, or the exact v37, v36, v35, v34, v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v37 one step after
+which the same startup transaction upgrades in place to v38 one step after
 another ([v36 text candidates](#v36-property-text-candidates), [v35 submission index](#v35-submission-identity-index), [#1099 v34 decision](#1099-v34-格式决定), [#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
@@ -49,7 +61,7 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v37, and v16 request rows stay readable as written.
+valid in v38, and v16 request rows stay readable as written.
 除格式自身的 SQL 外，每次打开都接受派生索引：`timeline_history_anchors`
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
 [latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
@@ -59,7 +71,7 @@ valid in v37, and v16 request rows stay readable as written.
 读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
 `CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
 `timeline_events` 重新推导，读同一份事件不因它们有无而不同，因此不属于格式：启动门禁的
-精确结构比较忽略这些名字，格式标记不变（当前 v37）；其余任何多余对象仍按原规则拒绝。代价是早于
+精确结构比较忽略这些名字，格式标记不变（当前 v38）；其余任何多余对象仍按原规则拒绝。代价是早于
 该变更的二进制不认识这些名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
 索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
@@ -184,7 +196,7 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 36)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 38)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -848,9 +860,9 @@ ProjectionCheckpoint = {
 | `session_owners_by_agent` | `(agent_id, protocol_version, session_id)` | 按 Agent 和协议过滤目录 |
 | `timeline_events_by_id` | `(session_id, event_id) WHERE event_id IS NOT NULL`，非唯一 | 按事件 ID 查找跨页 ToolCall |
 | `timeline_input_submissions` | `(session_id, branch_id, json_extract(body, '$.record.event.data.submission_id'), sequence) WHERE kind = 'input/message'`，非唯一 | 按提交标识定位输入；属于 v35 精确 schema，不属于启动时补建的派生索引 |
-| `timeline_events_requests` | `(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence)` | 请求标识等值定位，兼容 inline 与 output 行 |
-| `timeline_events_inputs` | `(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence)` | 输入采纳、删除、应用和撤回关联 |
-| `timeline_events_users` | `(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence)` | 用户输入存在性筛选与计数 |
+| `timeline_events_requests` | `(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence)`；WHERE 为该 coalesce 表达式 IS NOT NULL | 请求标识等值定位，兼容 inline 与 output 行 |
+| `timeline_events_inputs` | `(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence)`；WHERE 为该 json_extract 表达式 IS NOT NULL | 输入采纳、删除、应用和撤回关联 |
+| `timeline_events_users` | `(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence)`；WHERE 为该 json_type 表达式 IS NOT NULL | 用户输入存在性筛选与计数 |
 | `timeline_tool_use_starts` | `(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start'` | 按请求与调用 ID 查找跨页 `step/tool-use-start`，为不带 `call_event_id` 的结果取调用名；查询须使用相同表达式与条件 |
 | `timeline_events_context` | `(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1` | 只取渲染器或 checkpoint 折叠消费的行（v32；v31 的两个部分索引各取其一） |
 | `timeline_events_positions` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')` | 策略定位：轮次开始与压缩边界（v31） |
@@ -1112,7 +1124,7 @@ to retain the event ID value without its column affinity. Plan acceptance requir
 
 ## 提案：状态读取索引与数组元素
 
-Status: Draft. 本节提出 v37 之后的扩展；实现时须确定未占用的新版本号，并经格式决定确认。不能把新表、索引或编码当作 v37 的可选对象加入。基础 member 结构沿用本文件开头的 v37 决定，不重新建立第二套成员树。
+Status: Draft. 本节提出 v38 之后的扩展；实现时须确定未占用的新版本号，并经格式决定确认。不能把新表、索引或编码当作 v38 的可选对象加入。基础 member 结构沿用本文件开头的 v37 决定，不重新建立第二套成员树。
 
 ### 范围
 
@@ -1196,10 +1208,10 @@ JOIN array_elements a
  -> 同事务提交，再执行原发布回调
 ```
 
-从 v37 升级时逐批读取所需逻辑属性，保留已有普通成员与事件索引，建立新增数组编码；同一升级事务最后更新格式标记。更旧受支持格式先按既有升级合同到达 v37。owner 状态的业务初始化不由 Store 执行：缺结果的 owner 在其明确初始化流程产生第一份状态。升级失败整体回滚，报告既有升级进度，不在下次普通 query 补建。
+从 v38 升级时逐批读取所需逻辑属性，保留已有普通成员与事件索引，建立新增数组编码；同一升级事务最后更新格式标记。更旧受支持格式先按既有升级合同到达 v38。owner 状态的业务初始化不由 Store 执行：缺结果的 owner 在其明确初始化流程产生第一份状态。升级失败整体回滚，报告既有升级进度，不在下次普通 query 补建。
 
 Session 复制保留逻辑位置、身份关系和原数组顺序，在目标范围重建索引；复制节点引用必须连同节点验证，不留下跨 Session 悬挂引用。删除 Session 同事务删除其根、关系和仅属于它的内容。旧版本程序按新格式拒读，不修改旧格式标记来伪装兼容。
 
 ### 进入实现前的验收清单
 
-一次性 v37→新格式数据库验证升级、回滚、重复打开、只读导出、Session 复制/删除及各提交阶段崩溃。query 的祖先、批次内部 through、合并输出、数组与 publishing tail 做语义对照。固定 10 个成员或 1 个数组元素，扩大历史及原数组体积，记录真实扫描、节点加载、VM、SQLite/Rust 内存和 WAL。不能只通过表结构检查就宣布性能满足。
+一次性 v38→新格式数据库验证升级、回滚、重复打开、只读导出、Session 复制/删除及各提交阶段崩溃。query 的祖先、批次内部 through、合并输出、数组与 publishing tail 做语义对照。固定 10 个成员或 1 个数组元素，扩大历史及原数组体积，记录真实扫描、节点加载、VM、SQLite/Rust 内存和 WAL。不能只通过表结构检查就宣布性能满足。

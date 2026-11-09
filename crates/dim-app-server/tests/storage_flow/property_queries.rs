@@ -6,6 +6,198 @@ use dim_agent_runtime::{
 use serde_json::{Value, json};
 use std::num::NonZeroU64;
 
+#[tokio::test]
+async fn v37_text_upgrade_removes_opaque_documents_without_losing_query_candidates() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("properties", &SessionConfig::default())
+        .await
+        .unwrap();
+    append(
+        &store,
+        key("properties", "main"),
+        vec![
+            record(
+                1,
+                EventKind::InputMessage(InputMessageData::text("coreword", None)),
+            ),
+            record(
+                2,
+                EventKind::Extension(
+                    ExtensionEvent::new("private", "state", json!({"text":"opaqueword"})).unwrap(),
+                ),
+            ),
+            text(3, "streamword"),
+            text(4, "suffix"),
+        ],
+    )
+    .await
+    .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    drop(store);
+    drop(db);
+    let connection = Connection::open(&database.0).unwrap();
+    connection.execute_batch("DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37)); INSERT INTO agent_store_format VALUES(37);").unwrap();
+    for sql in V36_ADDITIONS
+        .iter()
+        .filter(|sql| sql.starts_with("CREATE INDEX "))
+    {
+        let name = sql.split_whitespace().nth(2).unwrap();
+        connection
+            .execute_batch(&format!("DROP INDEX {name}; {sql}"))
+            .unwrap();
+    }
+    let opaque: i64 = connection.query_row("INSERT INTO timeline_text(session_id,branch_id,sequence,physical_sequence,property,partition_key) VALUES('properties','main',2,2,'data','event:2') RETURNING id", [], |row| row.get(0)).unwrap();
+    connection
+        .execute(
+            "INSERT INTO timeline_text_fts(rowid,text) VALUES(?1,'opaqueword')",
+            [opaque],
+        )
+        .unwrap();
+    assert_eq!(schema(&connection), schema_of(37));
+    let facts = rows(&connection, "timeline_events");
+    let tails = rows(&connection, "timeline_text_tails");
+    let documents = rows(&connection, "timeline_text");
+    let docsize_schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='timeline_text_fts_docsize'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let docsizes = connection
+        .prepare("SELECT id,sz FROM timeline_text_fts_docsize")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    connection
+        .execute_batch("DROP TABLE timeline_text_fts_docsize")
+        .unwrap();
+    drop(connection);
+
+    let error = match SqliteStorage::open(database.0.clone()) {
+        Ok(_) => panic!("the text cleanup must fail when its required FTS table is missing"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("timeline_text_fts_docsize"),
+        "{error}"
+    );
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(marker(&connection), [37]);
+    assert_eq!(rows(&connection, "timeline_events"), facts);
+    assert_eq!(rows(&connection, "timeline_text"), documents);
+    connection.execute_batch(&docsize_schema).unwrap();
+    for (id, bytes) in docsizes {
+        connection
+            .execute(
+                "INSERT INTO timeline_text_fts_docsize(id,sz) VALUES(?1,?2)",
+                params![id, bytes],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), Some(37));
+    let store = SqliteTimelineStore::new(db.clone());
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
+    assert_eq!(rows(&connection, "timeline_events"), facts);
+    assert_eq!(rows(&connection, "timeline_text_tails"), tails);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM timeline_text WHERE sequence=2",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM timeline_text_fts WHERE rowid=?1",
+                [opaque],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM timeline_text WHERE property='data.delta'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        2
+    );
+    drop(connection);
+    for (kinds, term, expected) in [
+        (vec!["input/message"], "coreword", vec!["event-1"]),
+        (vec!["input/message"], "absentword", vec![]),
+        (vec!["private/state"], "opaqueword", vec!["event-2"]),
+        (vec!["private/state"], "absentword", vec!["event-2"]),
+        (
+            vec!["input/message", "private/state"],
+            "absentword",
+            vec!["event-2"],
+        ),
+    ] {
+        let mut query = fields(&["id"]);
+        query.filter = Some(QueryFilter::And {
+            conditions: vec![
+                QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: kinds.into_iter().map(Value::from).collect(),
+                },
+                QueryFilter::TextCandidate {
+                    field: "data".into(),
+                    partition_by: vec![],
+                    terms: vec![term.into()],
+                },
+            ],
+        });
+        let dim_agent_runtime::QueryOutput::Rows { rows } = store
+            .query(&scope(4), &query, Some(&page(8)))
+            .await
+            .unwrap()
+            .result
+        else {
+            panic!("candidate rows")
+        };
+        assert_eq!(
+            rows.into_iter()
+                .map(|row| row.values[0].clone())
+                .collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|id| dim_agent_runtime::QueryValue::Value { value: json!(id) })
+                .collect::<Vec<_>>(),
+            "term={term}"
+        );
+    }
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    drop(store);
+    drop(db);
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), None);
+    db.close().await.unwrap();
+}
+
 fn fields(names: &[&str]) -> QuerySpec {
     QuerySpec {
         rows: None,

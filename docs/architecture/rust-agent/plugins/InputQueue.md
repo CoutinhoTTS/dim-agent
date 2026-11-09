@@ -74,15 +74,28 @@ observable input queue.
 
 ### Events and lifetime
 
-Consumes `input/message`, `input/consumed`, `turn/start`, `turn/end`,
-`stop/interrupt`; produces `input/applied`. It does not run a model itself.
-It registers with `Dispatcher::consume`; recovery reads ordered identity, input
-mode, handover identity and turn identity fields in pages at one committed boundary. User-content shape
-distinguishes the default queue mode from an internal append; content text is
-not read. Recovery retains queue entries and owed decisions, removes each owed
-decision when its written result is read, and writes the remaining application
-or withdrawal decisions before live delivery. It holds no historical event
-list. No background tasks or external resources. An idle append
+Consumes `input/message`, `input/consumed`, `input/withdraw`, `turn/start`,
+`turn/end`, `stop/interrupt` and its own `input-queue/recovered`;
+produces `input/applied`, `input/deleted`, `input-queue/node` and `input-queue/recovered`.
+It does not run a model itself.
+
+It registers with `Dispatcher::consume`. Recovery reads the latest local result,
+checks its schema, then queries only source positions after its saved
+`source_through` at a fixed cutoff. The result contains an immutable AVL root,
+queued count, turn identity and starting flag. Nodes contain current input
+identities, source order and release modes without user or block content.
+They are loaded by event identity, only from the current root. Results before the latest branch opening or
+Session-fork marker are not used as local state. Missing results initialize once
+from legacy transition fields, settling outstanding decisions before live delivery.
+Default input modes are resolved by a bounded identity query for user-content
+presence; content and content-type arrays are not loaded.
+
+Each handler computes the transition and queues its required outputs and result
+as one atomic batch. It waits for no database I/O. The observable queue changes
+when the result is dispatched after publication, never replacing a newer
+published result with an earlier recovery page; a withdrawal reply also waits
+for that batch to publish. Failed commits publish neither output nor result.
+The queue retains no historical event list, background tasks or external resources. An idle append
 is pending until a driving input; an interrupt is not permission to start a new
 turn from previously unapplied input.
 

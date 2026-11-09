@@ -16,7 +16,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 37;
+pub const FORMAT: u32 = 38;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -55,7 +55,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 38))",
     ),
     (
         "settings_documents",
@@ -123,15 +123,15 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     ),
     (
         "timeline_events_requests",
-        "CREATE INDEX timeline_events_requests ON timeline_events(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence)",
+        "CREATE INDEX timeline_events_requests ON timeline_events(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence) WHERE coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')) IS NOT NULL",
     ),
     (
         "timeline_events_inputs",
-        "CREATE INDEX timeline_events_inputs ON timeline_events(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence)",
+        "CREATE INDEX timeline_events_inputs ON timeline_events(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence) WHERE json_extract(body,'$.record.event.data.input_id') IS NOT NULL",
     ),
     (
         "timeline_events_users",
-        "CREATE INDEX timeline_events_users ON timeline_events(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence)",
+        "CREATE INDEX timeline_events_users ON timeline_events(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence) WHERE json_type(body,'$.record.event.data.user') IS NOT NULL",
     ),
     (
         "timeline_input_submissions",
@@ -229,7 +229,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 23] = [
+const UPGRADES: [(u32, &[&str]); 24] = [
     (
         13,
         &[
@@ -323,6 +323,7 @@ const UPGRADES: [(u32, &[&str]); 23] = [
             "timeline_member_terminals",
         ],
     ),
+    (37, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -356,6 +357,14 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
                 "agent_sessions" if version < 30 => AGENT_SESSIONS_BEFORE_V30.to_owned(),
                 "agents" if version < 27 => AGENTS_BEFORE_V27.to_owned(),
                 "timeline_events" if version < 31 => TIMELINE_EVENTS_BEFORE_V31.to_owned(),
+                "timeline_events_requests" | "timeline_events_inputs" | "timeline_events_users"
+                    if version < 38 =>
+                {
+                    sql.split(" WHERE ")
+                        .next()
+                        .expect("index definition")
+                        .to_owned()
+                }
                 _ => sql.to_owned(),
             };
             (name, sql)
@@ -869,6 +878,20 @@ impl SqliteStorage {
                     }
                     if *from == 36 {
                         super::members::backfill(&tx)?;
+                    }
+                    if *from == 37 && version >= 36 {
+                        super::text::restrict_coverage(&tx)?;
+                        for (name, sql) in SCHEMA.iter().filter(|(name, _)| {
+                            matches!(
+                                *name,
+                                "timeline_events_requests"
+                                    | "timeline_events_inputs"
+                                    | "timeline_events_users"
+                            )
+                        }) {
+                            tx.execute_batch(&format!("DROP INDEX {name}; {sql}"))
+                                .map_err(storage)?;
+                        }
                     }
                     if *from == 24 {
                         tx.execute_batch("DROP INDEX timeline_events_by_end")

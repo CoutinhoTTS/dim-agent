@@ -148,7 +148,12 @@ async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit()
             && failure.kind == ModelFailureKind::OutputLimit
             && failure.reason.as_deref().is_some_and(|reason| reason.contains("max_tokens")))));
     assert!(matches!(
-        &history.last().unwrap().kind,
+        &history
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Failed { .. },
             ..
@@ -172,7 +177,12 @@ async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit()
     session.idle("main").await.unwrap();
     let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(matches!(
-        &history.last().unwrap().kind,
+        &history
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Completed { .. },
             ..
@@ -427,7 +437,7 @@ async fn stop_waits_for_native_cleanup_and_keeps_a_real_success() {
         assert!(cleaned.load(Ordering::SeqCst));
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("native operation succeeded".into()) && data.results[0].result.is_error.is_none())));
-        assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Cancelled { .. }, .. })));
+        assert!(matches!(events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Cancelled { .. }, .. })));
         agent.close().await.unwrap();
     }).await.unwrap();
 }
@@ -493,7 +503,9 @@ async fn invalid_model_stream_is_cancelled_and_drained_before_settlement() {
             chain_events(&session, "main", ..)
                 .await
                 .unwrap()
-                .last()
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
                 .unwrap()
                 .kind,
             EventKind::TurnEnd(TurnEndData {
@@ -1544,7 +1556,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                         "{outcomes:?}"
                     );
                     assert!(matches!(
-                        &events.last().unwrap().kind,
+                        &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
                         EventKind::TurnEnd(TurnEndData {
                             outcome: TurnOutcome::Cancelled { reason },
                             ..
@@ -1558,7 +1570,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                         EventKind::InputConsumed(data) if Some(&data.input_id) == steered.as_ref()
                     )));
                     assert!(matches!(
-                        &events.last().unwrap().kind,
+                        &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
                         EventKind::TurnEnd(TurnEndData {
                             outcome: TurnOutcome::Completed { .. },
                             ..
@@ -2646,10 +2658,18 @@ async fn open_turn(session: &dim_agent_runtime::Session) -> String {
         .expect("a started turn")
 }
 
-/// Waits until the dispatcher has handled every committed event.
-async fn dispatched_past(session: &dim_agent_runtime::Session, sequence: u64) {
+async fn queue_published_through(session: &dim_agent_runtime::Session, sequence: u64) {
     let mut dispatch = session.dispatch_watch("main").unwrap();
-    while dispatch.borrow().sequence < sequence {
+    loop {
+        let events = chain_events(session, "main", sequence..).await.unwrap();
+        if events.iter().any(|event| {
+            matches!(&event.kind, EventKind::Extension(data)
+                if event.kind.key() == "input-queue/recovered"
+                    && data.data()["source_through"].as_u64().is_some_and(|covered| covered >= sequence)
+                    && dispatch.borrow().sequence >= event.sequence)
+        }) {
+            return;
+        }
         dispatch.changed().await.unwrap();
     }
 }
@@ -2713,7 +2733,7 @@ async fn a_handover_input_is_held_without_being_applied_or_counted() {
             .submit("operator next".into(), InputMode::Queue, "main")
             .await
             .unwrap();
-        dispatched_past(&session, queued.sequence).await;
+        queue_published_through(&session, queued.sequence).await;
         assert_eq!(
             session
                 .get::<InputSnapshot>("main")
@@ -2726,7 +2746,7 @@ async fn a_handover_input_is_held_without_being_applied_or_counted() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_published_through(&session, handover.sequence).await;
         assert_eq!(
             session
                 .get::<InputSnapshot>("main")
@@ -2779,7 +2799,7 @@ async fn a_handover_input_is_deleted_at_its_turn_end_and_never_reaches_the_model
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_published_through(&session, handover.sequence).await;
         release.notify_one();
         deleted(&session, &handover.id).await;
         session.idle("main").await.unwrap();
@@ -2921,7 +2941,7 @@ async fn a_consumed_handover_input_is_not_deleted_at_turn_end() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_published_through(&session, handover.sequence).await;
         let timeline = slot.lock().unwrap().clone().expect("the branch Timeline");
         let consumed = timeline
             .append(
@@ -2931,7 +2951,7 @@ async fn a_consumed_handover_input_is_not_deleted_at_turn_end() {
                 .into(),
             )
             .unwrap();
-        dispatched_past(&session, consumed.sequence).await;
+        queue_published_through(&session, consumed.sequence).await;
         release.notify_one();
         session.idle("main").await.unwrap();
         let events = chain_events(&session, "main", ..).await.unwrap();
@@ -2974,12 +2994,12 @@ async fn a_held_handover_input_does_not_steal_the_next_queued_input() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_published_through(&session, handover.sequence).await;
         let operator = session
             .submit("operator next".into(), InputMode::Queue, "main")
             .await
             .unwrap();
-        dispatched_past(&session, operator.sequence).await;
+        queue_published_through(&session, operator.sequence).await;
         release.notify_one();
         deleted(&session, &handover.id).await;
         session.idle("main").await.unwrap();
@@ -3086,7 +3106,7 @@ async fn a_withdrawn_handover_input_is_deleted_once() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_published_through(&session, handover.sequence).await;
         let queue = session.service::<InputQueue>("main").unwrap();
         let (answer, replacement) = queue
             .withdraw(
@@ -3373,7 +3393,12 @@ async fn tool_result_estimates(image: bool) -> Vec<f64> {
     let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         matches!(
-            events.last().unwrap().kind,
+            events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
             EventKind::TurnEnd(TurnEndData {
                 outcome: TurnOutcome::Completed { .. },
                 ..

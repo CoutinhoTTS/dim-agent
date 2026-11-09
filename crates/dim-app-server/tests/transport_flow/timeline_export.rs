@@ -439,6 +439,8 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (33, "", false),
             (34, "", false),
             (35, "", false),
+            (36, "", false),
+            (37, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -475,14 +477,28 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else {
                 ""
             };
-            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees} {submission}
+            let members = if version < 37 {
+                "DROP TABLE timeline_member_roots; DROP TABLE timeline_member_origins; DROP TABLE timeline_member_terminals; DROP TABLE timeline_member_nodes;"
+            } else {
+                ""
+            };
+            let text = if version < 36 { "
                 DROP INDEX timeline_events_requests;
                 DROP INDEX timeline_events_inputs;
                 DROP INDEX timeline_events_users;
                 DROP TRIGGER timeline_text_delete;
                 DROP TABLE timeline_text;
                 DROP TABLE timeline_text_fts;
-                DROP TABLE timeline_text_tails;
+                DROP TABLE timeline_text_tails;"
+            } else { "
+                DROP INDEX timeline_events_requests;
+                DROP INDEX timeline_events_inputs;
+                DROP INDEX timeline_events_users;
+                CREATE INDEX timeline_events_requests ON timeline_events(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence);
+                CREATE INDEX timeline_events_inputs ON timeline_events(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence);
+                CREATE INDEX timeline_events_users ON timeline_events(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence);"
+            };
+            changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees} {submission} {members} {text}
                 DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
@@ -509,14 +525,15 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             assert_eq!(marker(&older), version, "v{version}");
         }
 
+        let future = dim_app_server::storage::STORE_FORMAT + 1;
         for (name, sql) in [
-            ("newer.sqlite", "DROP TABLE agent_store_format;
-                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37));
-                INSERT INTO agent_store_format VALUES (37);"),
-            ("changed.sqlite", "CREATE TABLE extra (id TEXT)"),
+            ("newer.sqlite", format!("DROP TABLE agent_store_format;
+                CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {future}));
+                INSERT INTO agent_store_format VALUES ({future});")),
+            ("changed.sqlite", "CREATE TABLE extra (id TEXT)".into()),
         ] {
             let path = directory.join("copies").join(name);
-            changed(&database, &path, sql);
+            changed(&database, &path, &sql);
             let bytes = std::fs::read(&path).unwrap();
             assert!(rejected(&path, &session).await.contains("unsupported Timeline storage format"), "{name}");
             assert_eq!(std::fs::read(&path).unwrap(), bytes, "{name}");

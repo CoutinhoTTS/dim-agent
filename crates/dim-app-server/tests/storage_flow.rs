@@ -38,6 +38,9 @@ mod catalog;
 #[path = "storage_flow/worktrees.rs"]
 mod worktrees;
 
+#[path = "storage_flow/queue_recovery.rs"]
+mod queue_recovery;
+
 const INTERPRETER: &str = "dim/context-projection/v4";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {
@@ -432,6 +435,18 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V37_ADDITIONS.iter().filter(|_| version >= 37))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
+        .map(|sql| {
+            if version >= 38 {
+                match sql.as_str() {
+                    sql if sql.starts_with("CREATE INDEX timeline_events_requests ") => format!("{sql} WHERE coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')) IS NOT NULL"),
+                    sql if sql.starts_with("CREATE INDEX timeline_events_inputs ") => format!("{sql} WHERE json_extract(body,'$.record.event.data.input_id') IS NOT NULL"),
+                    sql if sql.starts_with("CREATE INDEX timeline_events_users ") => format!("{sql} WHERE json_type(body,'$.record.event.data.user') IS NOT NULL"),
+                    _ => sql,
+                }
+            } else {
+                sql
+            }
+        })
         .map(|sql| {
             let sql = if version < 27 {
                 sql

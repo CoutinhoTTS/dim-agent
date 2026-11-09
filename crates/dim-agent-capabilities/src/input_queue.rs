@@ -1,4 +1,6 @@
+mod entries;
 mod pending;
+mod recovery;
 
 use crate::{
     host::HostFuture,
@@ -6,16 +8,14 @@ use crate::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    AgentError, Dispatcher, InputSnapshot, Names, QueryFilter, QueryOperand, QueryOutput,
-    QueryPage, QuerySelect, QuerySpec, QueryValue, Registrations, Result, StateCell, Timeline,
-    TimelineQuery, TimelineQueryScope,
+    AgentError, Dispatcher, InputSnapshot, Names, Registrations, Result, StateCell, Timeline,
 };
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    num::NonZeroU64,
     sync::{Arc, Mutex},
 };
 use tokio_util::sync::CancellationToken;
@@ -44,10 +44,15 @@ pub enum Withdrawal {
 }
 
 /// One committed input until Loop consumes it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Entry {
-    id: String,
+    input_id: String,
+    sequence: u64,
     kind: EntryKind,
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum EntryKind {
     /// An input this queue releases by its mode.
     Input { mode: InputMode, released: bool },
@@ -55,9 +60,11 @@ enum EntryKind {
     Handover { turn_id: String },
 }
 /// What InputQueue derives from the events it consumes.
-#[derive(Default)]
-struct QueueState {
-    entries: Vec<Entry>,
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueueState<R = Arc<entries::Node>> {
+    entries_root: Option<R>,
+    queued: usize,
     /// The open turn's id, between a dispatched `turn/start` and its
     /// `turn/end`.
     turn: Option<String>,
@@ -67,15 +74,38 @@ struct QueueState {
     /// longer start a turn.
     starting: bool,
 }
+impl<R> Default for QueueState<R> {
+    fn default() -> Self {
+        Self {
+            entries_root: None,
+            queued: 0,
+            turn: None,
+            starting: false,
+        }
+    }
+}
+
 impl QueueState {
+    fn set(&mut self, entry: Entry, batch: u64) {
+        self.entries_root = entries::set(self.entries_root.take(), entry, batch);
+        self.queued = entries::queued(&self.entries_root);
+    }
+    fn remove(&mut self, id: &str, batch: u64) {
+        if entries::get(&self.entries_root, id).is_some() {
+            self.entries_root = entries::remove(self.entries_root.take(), id, batch);
+            self.queued = entries::queued(&self.entries_root);
+        }
+    }
     fn step(&mut self, event: &AgentEvent) -> Vec<Decision> {
         match &event.kind {
             EventKind::InputMessage(data) => self.input(
                 &event.id,
+                event.sequence,
                 data.effective_mode(),
                 data.handover
                     .as_ref()
                     .map(|handover| handover.turn_id.as_str()),
+                event.sequence,
             ),
             EventKind::TurnStart(data) => {
                 self.turn = Some(data.turn_id.clone());
@@ -86,99 +116,101 @@ impl QueueState {
                 self.starting = false;
                 Vec::new()
             }
-            EventKind::TurnEnd(data) => self.end_turn(&data.turn_id),
+            EventKind::TurnEnd(data) => self.end_turn(&data.turn_id, event.sequence),
             EventKind::InputConsumed(data) => {
-                self.entries.retain(|entry| entry.id != data.input_id);
+                self.remove(&data.input_id, event.sequence);
                 Vec::new()
             }
-            EventKind::InputWithdraw(data) => self.withdraw(&data.input_id),
+            EventKind::InputWithdraw(data) => self.withdraw(&data.input_id, event.sequence),
             _ => Vec::new(),
         }
     }
-    fn input(&mut self, id: &str, mode: InputMode, handover: Option<&str>) -> Vec<Decision> {
+    fn input(
+        &mut self,
+        id: &str,
+        sequence: u64,
+        mode: InputMode,
+        handover: Option<&str>,
+        batch: u64,
+    ) -> Vec<Decision> {
         if let Some(turn_id) = handover {
             if self.turn.as_deref() != Some(turn_id) {
                 return vec![Decision::Delete(id.to_owned())];
             }
-            self.entries.push(Entry {
-                id: id.to_owned(),
-                kind: EntryKind::Handover {
-                    turn_id: turn_id.to_owned(),
+            self.set(
+                Entry {
+                    input_id: id.to_owned(),
+                    sequence,
+                    kind: EntryKind::Handover {
+                        turn_id: turn_id.to_owned(),
+                    },
                 },
-            });
+                batch,
+            );
             return Vec::new();
         }
-        self.entries.push(Entry {
-            id: id.to_owned(),
-            kind: EntryKind::Input {
-                mode,
-                released: false,
+        let held_queue = self
+            .entries_root
+            .as_ref()
+            .is_some_and(|root| root.data.first_held.is_some());
+        self.set(
+            Entry {
+                input_id: id.to_owned(),
+                sequence,
+                kind: EntryKind::Input {
+                    mode,
+                    released: false,
+                },
             },
-        });
-        let held_queue = self.entries.iter().any(|entry| {
-            matches!(
-                entry.kind,
-                EntryKind::Input {
-                    mode: InputMode::Queue,
-                    released: false
-                }
-            ) && entry.id != id
-        });
+            batch,
+        );
         match mode {
             InputMode::Queue if self.turn.is_some() || self.starting || held_queue => Vec::new(),
-            _ => self.release(id),
+            _ => self.release(id, batch),
         }
     }
-    fn end_turn(&mut self, turn: &str) -> Vec<Decision> {
+    fn end_turn(&mut self, turn: &str, batch: u64) -> Vec<Decision> {
         self.turn = None;
-        let mut decisions = Vec::new();
-        self.entries.retain(|entry| {
-            let ended = matches!(&entry.kind, EntryKind::Handover { turn_id } if turn_id == turn);
-            if ended {
-                decisions.push(Decision::Delete(entry.id.clone()));
-            }
-            !ended
-        });
-        if let Some(next) = self.entries.iter().find(|entry| {
-            matches!(
-                entry.kind,
-                EntryKind::Input {
-                    mode: InputMode::Queue,
-                    released: false
-                }
-            )
-        }) {
-            let next = next.id.clone();
-            decisions.extend(self.release(&next));
+        let mut ended = Vec::new();
+        entries::handovers(&self.entries_root, turn, &mut ended);
+        let mut decisions = Vec::with_capacity(ended.len() + 1);
+        for id in ended {
+            self.remove(&id, batch);
+            decisions.push(Decision::Delete(id));
+        }
+        if let Some(next) = entries::first_held(&self.entries_root) {
+            let next = next.input_id.clone();
+            decisions.extend(self.release(&next, batch));
         }
         decisions
     }
-    fn withdraw(&mut self, id: &str) -> Vec<Decision> {
-        match self.entries.iter().position(|entry| {
-            entry.id == id && !matches!(entry.kind, EntryKind::Input { released: true, .. })
-        }) {
-            Some(index) => {
-                self.entries.remove(index);
-                vec![Decision::Delete(id.to_owned())]
-            }
-            None => Vec::new(),
+    fn withdraw(&mut self, id: &str, batch: u64) -> Vec<Decision> {
+        if entries::get(&self.entries_root, id)
+            .is_some_and(|entry| !matches!(entry.kind, EntryKind::Input { released: true, .. }))
+        {
+            self.remove(id, batch);
+            vec![Decision::Delete(id.to_owned())]
+        } else {
+            Vec::new()
         }
     }
-    /// Releases one input. One that drives a turn while none runs makes a
-    /// turn about to start.
-    fn release(&mut self, id: &str) -> Vec<Decision> {
-        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
+    fn release(&mut self, id: &str, batch: u64) -> Vec<Decision> {
+        let Some(entry) = entries::get(&self.entries_root, id) else {
             return Vec::new();
         };
-        let EntryKind::Input { mode, released } = &mut entry.kind else {
+        let EntryKind::Input { mode, .. } = entry.kind else {
             return Vec::new();
         };
-        *released = true;
-        let mode = *mode;
+        let mut entry = entry.clone();
+        entry.kind = EntryKind::Input {
+            mode,
+            released: true,
+        };
+        self.set(entry, batch);
         if self.turn.is_none() && mode != InputMode::Append {
             self.starting = true;
         }
-        vec![Decision::Apply(entry.id.clone(), mode)]
+        vec![Decision::Apply(id.to_owned(), mode)]
     }
 }
 /// Consumes `input/message` and decides by its mode when Loop may consume
@@ -191,221 +223,58 @@ impl QueueState {
 /// to consume what is applied. Consumes `input/withdraw` in order and
 /// writes `input/deleted` for an input it still holds unapplied.
 pub struct InputQueue {
-    state: Mutex<QueueState>,
+    state: Mutex<recovery::Recovered>,
     observable: Arc<StateCell<InputSnapshot>>,
+    published_result: Mutex<u64>,
     timeline: Arc<Timeline>,
     /// Answers to `input/withdraw` commands by their sequence, until the
     /// withdrawal that wrote each one collects it.
-    answers: Mutex<HashMap<u64, Withdrawal>>,
+    answers: Mutex<HashMap<u64, Option<(u64, Withdrawal)>>>,
     answered: tokio::sync::Notify,
     /// Ends waits when this generation unloads.
     lifecycle: CancellationToken,
 }
+
+struct WithdrawalWaiter<'a> {
+    queue: &'a InputQueue,
+    sequence: u64,
+}
+
+impl Drop for WithdrawalWaiter<'_> {
+    fn drop(&mut self) {
+        self.queue.answers.lock().unwrap().remove(&self.sequence);
+    }
+}
+
 impl InputQueue {
-    fn publish(&self, state: &QueueState) {
-        self.observable.set(InputSnapshot {
-            queued: state
-                .entries
-                .iter()
-                .filter(|entry| matches!(&entry.kind, EntryKind::Input { .. }))
-                .count(),
-        });
-    }
-    /// Writes the decisions; returns the sequence of the last `input/deleted`.
-    fn write(&self, decisions: Vec<Decision>) -> Result<Option<u64>> {
-        let mut deleted = None;
-        for decision in decisions {
-            match decision {
-                Decision::Apply(input_id, mode) => {
-                    self.timeline.append(
-                        EventKind::InputApplied(InputAppliedData {
-                            input_id,
-                            mode: Some(mode),
-                        })
-                        .into(),
-                    )?;
-                }
-                Decision::Delete(input_id) => {
-                    let event = self
-                        .timeline
-                        .append(EventKind::InputDeleted(InputDeletedData { input_id }).into())?;
-                    deleted = Some(event.sequence);
-                }
-            }
+    fn publish<R>(&self, sequence: u64, state: &QueueState<R>) {
+        let mut published = self.published_result.lock().unwrap();
+        if sequence > *published {
+            self.observable.set(InputSnapshot {
+                queued: state.queued,
+            });
+            *published = sequence;
         }
-        Ok(deleted)
-    }
-    async fn rebuild(&self) -> Result<u64> {
-        let through = self.timeline.committed();
-        let mut request = TimelineQuery {
-            scope: TimelineQueryScope::Branch,
-            from: None,
-            through: Some(through),
-            include_publishing: true,
-            query: QuerySpec {
-                rows: None,
-                filter: Some(QueryFilter::In {
-                    value: QueryOperand::Field {
-                        path: "kind".into(),
-                    },
-                    values: [
-                        "input/message",
-                        "input/consumed",
-                        "input/withdraw",
-                        "input/applied",
-                        "input/deleted",
-                        "turn/start",
-                        "turn/end",
-                        "stop/interrupt",
-                    ]
-                    .map(serde_json::Value::from)
-                    .to_vec(),
-                }),
-                select: QuerySelect::Fields {
-                    fields: [
-                        "kind",
-                        "id",
-                        "data.mode",
-                        "data.user.content[].type",
-                        "data.input_id",
-                        "data.turn_id",
-                        "data.handover.turn_id",
-                    ]
-                    .map(String::from)
-                    .to_vec(),
-                },
-                group_by: Vec::new(),
-                pick: None,
-                order_by: Vec::new(),
-            },
-            page: Some(QueryPage {
-                limit: NonZeroU64::new(256).expect("a page contains queue transitions"),
-                after: None,
-            }),
-        };
-        let mut state = QueueState::default();
-        let mut owed = Vec::<Decision>::new();
-        loop {
-            let reply = self.timeline.query(request.clone()).await?;
-            let QueryOutput::Rows { rows } = reply.result else {
-                unreachable!("queue recovery selects transition fields")
-            };
-            for row in rows {
-                let Ok(
-                    [
-                        QueryValue::Value {
-                            value: serde_json::Value::String(kind),
-                        },
-                        QueryValue::Value {
-                            value: serde_json::Value::String(id),
-                        },
-                        mode,
-                        user,
-                        input,
-                        turn,
-                        handover,
-                    ],
-                ) = <[_; 7]>::try_from(row.values)
-                else {
-                    return Err(AgentError::fault(
-                        "InputQueue",
-                        "a queue transition has no kind or identity",
-                    ));
-                };
-                match kind.as_str() {
-                    "input/message" => {
-                        let mode = match mode {
-                            QueryValue::Missing if matches!(user, QueryValue::Missing) => {
-                                InputMode::Append
-                            }
-                            QueryValue::Missing => InputMode::Queue,
-                            QueryValue::Value { value } => {
-                                serde_json::from_value(value).map_err(|error| {
-                                    AgentError::fault("InputQueue", error.to_string())
-                                })?
-                            }
-                            QueryValue::Elements { .. } => unreachable!("an input mode is scalar"),
-                        };
-                        let handover = match &handover {
-                            QueryValue::Missing => None,
-                            QueryValue::Value { value } if value.is_null() => None,
-                            QueryValue::Value { value } => {
-                                Some(value.as_str().expect("handover turn identity"))
-                            }
-                            QueryValue::Elements { .. } => {
-                                unreachable!("handover turn identity is scalar")
-                            }
-                        };
-                        owed.extend(state.input(&id, mode, handover));
-                    }
-                    "turn/start" => {
-                        let QueryValue::Value { value: turn } = turn else {
-                            unreachable!("turn identity")
-                        };
-                        state.turn = Some(turn.as_str().expect("turn identity").to_owned());
-                        state.starting = false;
-                    }
-                    "turn/end" => {
-                        let QueryValue::Value { value: turn } = turn else {
-                            unreachable!("turn identity")
-                        };
-                        owed.extend(state.end_turn(turn.as_str().expect("turn identity")));
-                    }
-                    "stop/interrupt" => state.starting = false,
-                    "input/consumed" | "input/withdraw" | "input/applied" | "input/deleted" => {
-                        let QueryValue::Value {
-                            value: serde_json::Value::String(input_id),
-                        } = input
-                        else {
-                            return Err(AgentError::fault(
-                                "InputQueue",
-                                "a queue transition has no input identity",
-                            ));
-                        };
-                        match kind.as_str() {
-                            "input/consumed" => {
-                                state.entries.retain(|entry| entry.id != input_id);
-                                owed.retain(|decision| !matches!(decision, Decision::Apply(id, _) if *id == input_id));
-                            }
-                            "input/withdraw" => owed.extend(state.withdraw(&input_id)),
-                            _ => owed.retain(|decision| decision.input_id() != input_id),
-                        }
-                    }
-                    _ => unreachable!("queue recovery selects only queue transitions"),
-                }
-            }
-            let Some(next) = reply.next else {
-                break;
-            };
-            request
-                .page
-                .as_mut()
-                .expect("queue recovery is paged")
-                .after = Some(next);
-        }
-        owed.retain(|decision| match decision {
-            Decision::Apply(id, _) => state.entries.iter().any(|entry| entry.id == *id),
-            Decision::Delete(_) => true,
-        });
-        self.publish(&state);
-        *self.state.lock().unwrap() = state;
-        self.write(owed)?;
-        Ok(through)
     }
     fn on_event(&self, event: Arc<AgentEvent>) -> Result<()> {
-        let decisions = {
-            let mut state = self.state.lock().unwrap();
-            let decisions = state.step(&event);
-            self.publish(&state);
-            decisions
-        };
-        let deleted = self.write(decisions)?;
+        if let EventKind::Extension(data) = &event.kind
+            && event.kind.key() == recovery::KEY
+        {
+            let recovered = recovery::Recovered::<String>::decode(data.data().clone())?;
+            self.publish(event.sequence, &recovered.state);
+            return Ok(());
+        }
+        let mut recovered = self.state.lock().unwrap();
+        let decisions = recovered.state.step(&event);
+        recovered.source_through = event.sequence;
+        let (published, deleted) = self.checkpoint(&recovered, decisions)?;
         if matches!(event.kind, EventKind::InputWithdraw(_)) {
-            let answer = match deleted {
-                Some(sequence) => Withdrawal::Deleted { sequence },
-                None => Withdrawal::NotHeld,
-            };
-            self.answers.lock().unwrap().insert(event.sequence, answer);
+            let answer = deleted.map_or(Withdrawal::NotHeld, |sequence| Withdrawal::Deleted {
+                sequence,
+            });
+            if let Some(waiter) = self.answers.lock().unwrap().get_mut(&event.sequence) {
+                *waiter = Some((published, answer));
+            }
             self.answered.notify_waiters();
         }
         Ok(())
@@ -434,16 +303,41 @@ impl InputQueue {
                 .map_err(|reason| AgentError::InvalidInput(reason.into()))?;
             drafts.push(EventKind::InputMessage(input).into());
         }
-        let mut events = self.timeline.append_batch_registered(drafts, |_| Ok(()))?;
+        let mut waiter = None;
+        let appended = self.timeline.append_batch_registered(drafts, |events| {
+            self.answers
+                .lock()
+                .unwrap()
+                .insert(events[0].sequence, None);
+            waiter = Some(WithdrawalWaiter {
+                queue: self,
+                sequence: events[0].sequence,
+            });
+            Ok(())
+        });
+        let _waiter = waiter;
+        let mut events = appended?;
         let replacement = (events.len() > 1).then(|| events.remove(1));
         let sequence = events[0].sequence;
+        let mut publication = self.timeline.watch();
         loop {
             let answered = self.answered.notified();
-            if let Some(answer) = self.answers.lock().unwrap().remove(&sequence) {
-                return Ok((answer, replacement));
+            {
+                let answers = self.answers.lock().unwrap();
+                if let Some(Some((published, answer))) = answers.get(&sequence)
+                    && self.timeline.sequence() >= *published
+                {
+                    return Ok((*answer, replacement));
+                }
+            }
+            if let Some(error) = self.timeline.failure() {
+                return Err(error);
             }
             tokio::select! {
                 _ = answered => {}
+                result = publication.changed() => {
+                    result.map_err(|_| AgentError::Closed(self.timeline.branch_id()))?;
+                }
                 _ = self.lifecycle.cancelled() => {
                     return Err(AgentError::Reloading("InputQueue".into()));
                 }
@@ -479,8 +373,9 @@ impl DynPlugin for InputQueuePlugin {
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let queue = Arc::new(InputQueue {
-                state: Mutex::new(QueueState::default()),
+                state: Mutex::new(recovery::Recovered::default()),
                 observable: Arc::new(StateCell::new(InputSnapshot::default())),
+                published_result: Mutex::new(0),
                 timeline,
                 answers: Mutex::new(HashMap::new()),
                 answered: tokio::sync::Notify::new(),
@@ -499,6 +394,7 @@ impl DynPlugin for InputQueuePlugin {
                         "turn/start",
                         "turn/end",
                         "stop/interrupt",
+                        recovery::KEY,
                     ]
                     .map(String::from)
                     .to_vec(),

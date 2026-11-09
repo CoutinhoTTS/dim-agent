@@ -426,7 +426,12 @@ async fn a_steer_before_any_model_output_ends_the_request_and_continues_the_turn
             1
         );
         assert!(matches!(
-            events.last().unwrap().kind,
+            events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
             EventKind::TurnEnd(TurnEndData {
                 outcome: TurnOutcome::Completed { .. },
                 ..
@@ -502,7 +507,12 @@ async fn provider_budget_recovery_uses_one_fixed_source_and_retries_only_once() 
             1
         );
         assert!(matches!(
-            events.last().unwrap().kind,
+            events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
             EventKind::TurnEnd(TurnEndData {
                 outcome: TurnOutcome::Failed { .. },
                 ..
@@ -565,7 +575,7 @@ async fn foreign_compaction_cursor_fails_recovery_without_another_model_call() {
                 && matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. } if error.contains("cut is outside the fixed context history"))
         )));
         assert!(matches!(
-            &events.last().unwrap().kind,
+            &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
             EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { error }, .. })
                 if error.contains("cut is outside the fixed context history")
         ));
@@ -615,7 +625,7 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
             2
         );
         assert!(matches!(
-            &events.last().unwrap().kind,
+            &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
             EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { error }, .. })
                 if error == "Compaction cut separates a tool call from its results or context."
         ));
@@ -797,7 +807,12 @@ async fn compaction_restores_counts_and_uses_the_committed_context_baseline() {
             )))
     );
     assert!(matches!(
-        &forged_events.last().unwrap().kind,
+        &forged_events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Completed { .. },
             ..
@@ -1848,7 +1863,12 @@ async fn a_changed_prefix_message_fails_the_preparation() {
                 if error.contains("must preserve the timeline history prefix"))
     )));
     assert!(matches!(
-        events.last().unwrap().kind,
+        events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Failed { .. },
             ..
@@ -2039,7 +2059,12 @@ async fn a_completed_compaction_keeps_its_replacement_in_the_prefix_check() {
                 if error.contains("must preserve the timeline history prefix"))
     )));
     assert!(matches!(
-        events.last().unwrap().kind,
+        events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Failed { .. },
             ..

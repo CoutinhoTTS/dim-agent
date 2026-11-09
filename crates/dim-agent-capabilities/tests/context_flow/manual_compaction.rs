@@ -496,7 +496,12 @@ async fn steers_wait_for_compaction_and_explicit_interrupts_still_cancel() {
                 previous = at;
             }
             assert!(matches!(
-                events.last().unwrap().kind,
+                events
+                    .iter()
+                    .rev()
+                    .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
                 EventKind::TurnEnd(TurnEndData {
                     outcome: TurnOutcome::Completed { .. },
                     ..
@@ -864,7 +869,10 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
     session.idle("main").await.unwrap();
     let events = until(&session, |events| {
         matches!(
-            events.last().map(|event| &event.kind),
+            events.iter().rev().find_map(|event| match &event.kind {
+                EventKind::TurnEnd(_) => Some(&event.kind),
+                _ => None,
+            }),
             Some(EventKind::TurnEnd(_))
         )
     })
@@ -928,7 +936,12 @@ async fn a_manual_compaction_inside_a_turn_runs_at_the_next_step_boundary() {
         3
     );
     assert!(matches!(
-        &events.last().unwrap().kind,
+        &events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Completed { .. },
             ..
@@ -1420,7 +1433,10 @@ async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts
     session.idle("main").await.unwrap();
     let events = until(&session, |events| {
         matches!(
-            events.last().map(|event| &event.kind),
+            events.iter().rev().find_map(|event| match &event.kind {
+                EventKind::TurnEnd(_) => Some(&event.kind),
+                _ => None,
+            }),
             Some(EventKind::TurnEnd(_))
         )
     })
@@ -1454,7 +1470,12 @@ async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts
         CompactionTrigger::ProviderOutputBudgetExhausted
     );
     assert!(matches!(
-        &events.last().unwrap().kind,
+        &events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Completed { .. },
             ..
