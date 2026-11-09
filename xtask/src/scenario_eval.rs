@@ -1255,10 +1255,11 @@ struct Options {
     /// a part the run's plugin defaults do not name, to exercise the
     /// tools-product check.
     extra_tool: bool,
-    /// A test hook that makes one arm's run child exit non-zero after a
-    /// short wait, to exercise a failed run cancelling a still-working
-    /// sibling: the arm's name.
-    fail_child: Option<String>,
+    /// A test hook that makes one arm's run child wait for a marker file —
+    /// written once the other arm's model call is held — and then exit
+    /// non-zero, to exercise a failed run cancelling a still-working
+    /// sibling: the arm's name and the marker's path.
+    fail_child: Option<(String, PathBuf)>,
     /// The default plugin configuration file both arms load; `None` serves
     /// the assembly without the product's plugins.
     defaults: Option<PathBuf>,
@@ -2172,10 +2173,11 @@ struct ChildParams {
     /// tools-product check.
     #[serde(default)]
     extra_tool: bool,
-    /// A test hook that makes this child exit non-zero after a short wait,
+    /// A test hook: this child waits for the marker file — written once
+    /// the sibling arm's model call is held — bounded, then exits non-zero,
     /// so a failed run cancels a sibling still working.
     #[serde(default)]
-    fail_child: bool,
+    fail_child: Option<PathBuf>,
     /// The native probe's declared set: the assembly served without the
     /// plugin defaults. Each run's `tools-product` check reads its own
     /// declared set against it.
@@ -2282,12 +2284,29 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
     augment_model_config(&params.model_config, &preflight_url, &config_path)?;
     let mut params = params;
     params.model_config = config_path;
-    // A test hook: this child lets its scheduled sibling start and reach
-    // its model call, then exits non-zero, so the sibling is still working
-    // when the harness sees the failure and cancels it.
-    if params.fail_child {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        return Err("the failing-child test hook".into());
+    // A test hook: the test writes `marker` once the sibling arm's model
+    // call is held; this child waits for that event, bounded, then exits
+    // non-zero. The wait's outcome is printed on a line of its own, so the
+    // parent's error says which happened instead of leaving a missed event
+    // to the exit status.
+    if let Some(marker) = &params.fail_child {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let seen = loop {
+            if marker.exists() {
+                break true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let outcome = if seen {
+            "the held sibling's model call was seen"
+        } else {
+            "the held sibling's model call was not seen within the bound"
+        };
+        println!("{}", json!({"failChild": outcome}));
+        return Err(format!("the failing-child test hook: {outcome}").into());
     }
     if params.probe_only {
         // The differential native probe: the assembly served without the
@@ -3492,7 +3511,11 @@ async fn isolate_run(
         fail_preflight: options.fail_preflight,
         offer_plugin: options.offer_plugin,
         extra_tool: options.extra_tool,
-        fail_child: options.fail_child.as_deref() == Some(arm),
+        fail_child: options
+            .fail_child
+            .as_ref()
+            .filter(|(arm_name, _)| arm_name == arm)
+            .map(|(_, marker)| marker.clone()),
         native_tools: native.to_vec(),
         probe_only: false,
     };
@@ -3587,7 +3610,7 @@ async fn native_probe(
         fail_preflight: false,
         offer_plugin: false,
         extra_tool: options.extra_tool,
-        fail_child: false,
+        fail_child: None,
         native_tools: Vec::new(),
         probe_only: true,
     };
@@ -3930,6 +3953,18 @@ async fn spawn_child_json(
     };
     let text = String::from_utf8_lossy(&output);
     if !status.success() {
+        // A test hook's child names the event that ended it on a line of
+        // its own; the error carries that name, so a test waiting for the
+        // event fails when it never arrived instead of reading only the
+        // exit status.
+        if let Some(message) = text
+            .lines()
+            .filter_map(|line| line.find('{').map(|start| &line[start..]))
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find_map(|value| value["failChild"].as_str().map(str::to_owned))
+        {
+            return Err(format!("the run's serve child exited with {status}: {message}").into());
+        }
         return Err(format!("the run's serve child exited with {status}").into());
     }
     let line = text
@@ -12334,7 +12369,7 @@ mod tests {
             fail_preflight: false,
             offer_plugin: false,
             extra_tool: false,
-            fail_child: false,
+            fail_child: None,
             native_tools: native
                 .iter()
                 .map(|name| ((*name).to_owned(), ToolSource::Builtin))
@@ -12482,19 +12517,42 @@ mod tests {
         let directory = fixture.directory.join("out");
         let mut options = fixture.options(directory.clone());
         options.jobs = 2;
-        options.fail_child = Some("current".into());
+        // The failing child waits for the event the assertions read, not
+        // for a fixed time: the marker is written as soon as the fixture
+        // provider records the candidate arm's model call, which it does
+        // just before it holds the answer.
+        let marker = fixture.directory.join("held.marker");
+        let _watcher = {
+            let provider = fixture.provider.clone();
+            let marker = marker.clone();
+            tokio::spawn(async move {
+                loop {
+                    let held = provider
+                        .requests
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|request| request.contains("/candidate/"));
+                    if held {
+                        std::fs::write(&marker, "the candidate arm's call is held").unwrap();
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+        options.fail_child = Some(("current".into(), marker));
         let settled = fixture.evaluate(&options).await;
-        assert!(settled.is_err(), "the failing run fails the evaluation");
-        // The sibling was working when the failure landed: its model call
-        // reached the fixture provider and is held there.
-        let working = fixture
-            .provider
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|request| request.contains("/candidate/"));
-        assert!(working, "the sibling reached its model call");
+        let error = settled
+            .expect_err("the failing run fails the evaluation")
+            .to_string();
+        // The failing child saw the event this test waited for; a missed
+        // event fails here with the child's own message instead of passing
+        // because the sibling happened not to be working yet.
+        assert!(
+            error.contains("the held sibling's model call was seen"),
+            "the sibling's model call was held: {error}"
+        );
         // Its child, and the group it leads, is gone.
         let params = directory.join("children/candidate/case/run-0.json");
         let pid = SPAWNED
