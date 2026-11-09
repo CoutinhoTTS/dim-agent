@@ -153,7 +153,7 @@ classDiagram
 | `delivering` | 记录已命名目标(launch 目标还命名 Session)，输入可能已被接受也可能没有。重启后由 `sessions.lookup` 结算(A.6)。 | 否 |
 | `delivered` | 目标分支已发布该输入；`input_event_id` 是回执。 | 是 |
 | `failed` | 该窗口没有写入输入，或要写入的 Session 无法创建。`detail` 携带原因。 | 是 |
-| `lost` | 写入结果当前无法确定，且该窗口不重试。`detail` 携带诊断。 | 是 |
+| `lost` | 写入结果未在查询上限内确定(A.6)，且该窗口不重试。`detail` 命名最后一次查询回答。 | 是 |
 | `missed` | 守护进程没有在宽限内观察到该窗口(A.4)，或该窗口因该任务仍有未结算的投递而被跳过(§3.1)；`detail` 说明是哪一种。 | 是 |
 
 投递到达终态后永不更新，Scheduler 永不重发一个窗口。`session_id` 与 `branch_id` 命名实际使用的目标；对 `launch`，它们命名启动的 Session 及其 `main` 分支，`deadline_at` 是其停止时刻。`session` 目标以及从未启动运行的投递没有 `deadline_at`。
@@ -218,7 +218,7 @@ sequenceDiagram
 
 **重叠。** 该任务只要还有任意一条 `delivering` 记录，窗口就被跳过，因此一个任务同时至多有一条 `delivering` 记录。被跳过的窗口不写输入，并记录一条带 `detail: previous_delivery_unsettled` 的 `missed` 投递(A.6)，它计入保留期(A.7)。这条记录是终态，本身不会放行下一个窗口：条件是该任务的 `delivering` 记录，而不是它前面那一条投递。`schedule.run_now` 遵循同一规则；它为手动窗口记录自己的投递，有它自己的 `run_id` 与 `window`，绝不返回定时器路径的记录，因此被该规则跳过的手动窗口返回那条 `missed` 记录。跳过持续的时间不超过那条 `delivering` 记录保持未结的时间，下面的上限固定了它。
 
-**上限。** 一条 `delivering` 记录至多进行五次 `sessions.lookup` 尝试，每个定时器节拍一次。`reloading`、`ambiguous` 与传输失败计入这五次；`accepted` 在任一次尝试都把它结算为 `delivered`。第五次尝试即使得不到可用回答也会结算记录：此时 `unknown` 记为 `lost` 而不是 `failed`，其他任何非 `accepted` 的结果同样记为 `lost`。`lost` 是终态且可清理(A.7)，因此没有记录永久未结，跳过规则也不会超过这五次尝试。
+**上限。** 查询回答只有在携带事实时才结算 `delivering` 记录。`accepted` 在任一次尝试都把它结算为 `delivered`，且不写第二条输入。`unknown`、`reloading`、`ambiguous` 与传输失败让它保持 `delivering`；每次回答计入五次上限，且计数在查询之前持久化为 `attempts`(A.1)。第五次这类回答把它结算为 `lost`，`detail` 命名该回答。`unknown` 不能结算记录：它只对查找开始前已返回的写入是最终结果([sessions 服务 §6.3](../appserver/sessions-service.md#63-lookup))，而回复丢失的写入会继续跑到它自己的结果([§6.2](../appserver/sessions-service.md#62-input))，因此 `unknown` 可能意味着尚未提交。因此，写入从未提交的窗口在五次查询后是 `lost` 而不是 `failed`，其间该任务的窗口被跳过。`lost` 是终态且可清理(A.7)，因此没有记录永久未结，跳过规则也不会超过这五次尝试。
 
 **排队的输入。** Scheduler 只约束自己的写入：每个任务每个窗口一条输入，且该任务有未结算投递时不再写。目标分支持有多少输入是该分支 InputQueue 的事，不是 Scheduler 的事。InputQueue 目前没有上限([input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs))，因此目标持续繁忙的 `queue` 任务每个窗口都会增加一条排队输入，直到分支消费它们。排队输入的上限会适用于向分支写入的每个生产方，因此它属于 InputQueue 的设计，而不是本设计。
 
@@ -510,7 +510,7 @@ Scheduler 的记录是进程状态，没有 Timeline 事实，因此要展示它
 | `Delivery.deadline_at` | 与 launch 目标的 `delivering` 记录一同设为 `created_at + snapshot.max_run_minutes`；保留在 `delivered` 记录上。 | §3.2 的停止定时器，包括重启或任务编辑后的恢复。启动与准入时间计入该上限。 |
 | `Delivery.session_id`/`branch_id` | launch 目标在写入输入之前与 `deadline_at` 一同持久化(启动回复的 Session)；`session` 目标在接受时持久化。 | A.7 的所有权：只有 Scheduler 自己成功 `sessions.launch` 记录下的 Session 才会被删除。 |
 | `Delivery.input_event_id` | 已发布回执，或确认输入的 `lookup` 回复。 | 投递是否为 `delivered`；恢复绝不为其记录再次写入。 |
-| `Delivery.attempts` | 查询通道在发送查询之前持久化递增后的计数，遵循“在进行任何 `sessions` 调用之前释放文件事务”的规则；在持久化与查询之间崩溃仍计入该次尝试。 | 下一个查询通道，包括重启之后，读取存储的计数并总共至多尝试五次。 |
+| `Delivery.attempts` | 查询通道在发送查询之前持久化递增后的计数，遵循“在进行任何 `sessions` 调用之前释放文件事务”的规则；在持久化与查询之间崩溃仍计入该次尝试。 | 下一个查询通道，包括重启之后，读取存储的计数；第五次不带事实的回答把记录结算为 `lost`(§3.1)。 |
 
 ### A.2 工具 `schedule`
 
@@ -586,13 +586,12 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 目标拒绝 | `failed: <code>` | 没有写入，或没有创建 Session；`detail` 携带代码 |
 | 目标已消失 | `failed: session_closed` / `branch_missing` / `branch_ended`，且任务被禁用 | 没有写入；任务需要新目标 |
 | 回复丢失而查询找到了输入 | `delivered` | 查询的 `{inputId,sequence}` 确认了那一次写入 |
-| 回复丢失而查询在第五次尝试之前回答 `unknown` | `failed: not_delivered` | 分支从未接受该输入；该窗口不重试 |
-| 查询回答 `reloading`、`ambiguous` 或传输失败 | 记录保持 `delivering`；定时器重试查询，每次尝试计入上限，且计数在查询之前持久化到 `attempts` | 在记录未结期间不尝试第二次写入 |
-| 第五次尝试返回 `accepted` 之外的任何结果 | `lost`，带 `detail`；此处的 `unknown` 记为 `lost` 而不是 `failed` | 结果已无法得知；记录是终态且可清理(A.7) |
+| 查询回答 `unknown`、`reloading`、`ambiguous` 或传输失败 | 记录保持 `delivering`；该回答计入上限的一次尝试，且计数在查询之前持久化到 `attempts` | 回答不携带事实：`unknown` 可能意味着尚未提交(§3.1)。在记录未结期间不尝试第二次写入 |
+| 第五次不带事实的回答 | `lost`，带命名该回答的 `detail` | 结果未在上限内确定；记录是终态且可清理(A.7) |
 | 该任务仍有 `delivering` 投递时窗口到期 | `missed: previous_delivery_unsettled` | 不写输入；该窗口不重试，记录可清理(A.7) |
 | 守护进程错过了窗口 | `missed` | 不启动、不写输入 |
 
-恢复绝不重写已结算记录，也绝不重发窗口。在持久化 `delivering` 与输入回复之间崩溃，由下次启动时的 `sessions.lookup` 结算；在 launch Session 已创建、其身份尚未记录时崩溃，会留下一条没有记录命名的 Session(附录 F 的已知限制)。每条 `delivering` 记录每个定时器节拍查询一次，总共至多五次，跨重启累计；第五次尝试结算它(§3.1)，每个节拍在查询之前持久化递增后的 `attempts`，因此在两次尝试之间崩溃不会重新开始计数。“未结期间永不被清理”因此仍然成立，同时有了上限：目标持续失败的任务，既不会无界增长记录，也不会写两次。
+恢复绝不重写已结算记录，也绝不重发窗口。在持久化 `delivering` 与输入回复之间崩溃，由下次启动时的 `sessions.lookup` 结算；在 launch Session 已创建、其身份尚未记录时崩溃，会留下一条没有记录命名的 Session(附录 F 的已知限制)。每条 `delivering` 记录每个定时器节拍查询一次，总共至多五次，跨重启累计。`accepted` 回答把它结算为 `delivered`；第五次不带事实的回答把它结算为 `lost`(§3.1)。每个节拍在查询之前持久化递增后的 `attempts`，因此在两次尝试之间崩溃不会重新开始计数。“未结期间永不被清理”因此仍然成立，同时有了上限：目标持续失败的任务，既不会无界增长记录，也不会写两次。
 
 ### A.7 运行存储与保留期
 
@@ -625,7 +624,7 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 投递进行中目标 Session 被删除 | — | 写入失败 `session_closed`，或已提交并发布；两种结果都归入记录 | Agents |
 | 投递与读取之间目标 Session 空闲卸载 | — | 没有读取会失败：下一个窗口的 `sessions.input` acquire 并恢复它 | Agents |
 | Agents 索引重载 | — | `reloading`；`delivering` 记录由查询结算 | Agents |
-| `reloading` 或传输失败持续 | — | 查询在五次尝试后停止并结算 `lost`，计数跨重启保留；其间到期的窗口为 `missed: previous_delivery_unsettled`；每条记录都是终态且可清理 | Scheduler、Agents |
+| `unknown`、`reloading` 或传输失败持续 | — | 查询在五次不带事实的回答后停止并结算 `lost`，计数跨重启保留；其间到期的窗口为 `missed: previous_delivery_unsettled`；每条记录都是终态且可清理 | Scheduler、Agents |
 | Scheduler 重载或重启 | — | `delivering` 记录由查询结算；窗口不会被写两次 | Scheduler |
 | 守护进程跨过窗口停机 | — | `missed`；不补做 | Scheduler |
 | 启动被拒(cwd 缺失、未知 Agent、策略拒绝) | — | `failed: <code>`；无输入 | Agents、Scheduler |
@@ -649,8 +648,8 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 投递写入失败 `reloading`，或回复丢失 | 记录保持 `delivering`；由查询结算(A.6) |
 | 投递写入失败 `session_closed`、`branch_missing` 或 `branch_ended` | `failed: <code>`，任务以该原因被禁用 |
 | 投递写入因其他原因失败 | `failed: <code>`；任务保持启用 |
-| 查询在第五次尝试之前回答 `unknown` | `failed: not_delivered`；该窗口不重试 |
-| 查询无法回答 | 记录保持 `delivering`，每分钟重试；第五次尝试结算为 `lost` |
+| 查询回答 `unknown` | 记录保持 `delivering`，该回答计入上限；之后的 `accepted` 结算为 `delivered`，绝不写第二条输入 |
+| 查询回答 `reloading`、`ambiguous` 或传输失败 | 记录保持 `delivering`，每分钟重试；每次回答都计入，第五次不带事实的回答结算为 `lost` |
 | 启动失败 | `failed: <code>`；该窗口不重试 |
 | 停止定时器调用失败 | 在记录仍命名该 Session 期间每分钟重试；投递不变 |
 | 存储不可读或未知格式版本 | Scheduler 应用失败(不静默重置) |
@@ -668,9 +667,9 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 4. 管理 `schedule.save` 设置 `launch` 目标；到期窗口用保存的 Agent 与收拢后的预设启动一个非交互 Session，向 `main` 写入一条输入，并记录带截止时刻的 `delivered`。验证 Session 在停止时刻被停止，且不早于它。
 5. 超过宽限的窗口记为一条 `missed`，不启动、不写输入。跨窗口重启守护进程得到 `missed`。
 6. 触发时目标已消失的投递以对应代码结算 `failed` 并禁用任务；`schedule.list` 显示原因，保存清除它，后续窗口不再触发。
-7. 丢失的投递回复由查询结算：已接受 → `delivered` 且无第二条输入；第五次尝试之前回答 `unknown` → `failed: not_delivered`；查询无回答则保持 `delivering` 重试且不写入(第 9 项)。
+7. 丢失的投递回复由查询结算：任一次尝试回答 `accepted` → `delivered` 且无第二条输入；`unknown`、`reloading`、`ambiguous` 或传输失败保持 `delivering` 并计入上限，不写入(第 9 项)。
 8. **未结重叠。** 任务仍有 `delivering` 投递时，它的下一个到期窗口记录 `missed: previous_delivery_unsettled`，不写输入，且该记录计入保留期；同一状态下的 `schedule.run_now` 为手动窗口记录自己的 `missed` 投递并不写入。
-9. **有界查询。** 查询持续回答 `reloading`、`ambiguous` 或传输失败的 `delivering` 记录，在第五次尝试时结算为 `lost`；该次尝试回答 `unknown` 也结算为 `lost` 而不是 `failed`；记录可清理，且不再写入任何输入。
+9. **有界查询。** 查询持续回答 `unknown`、`reloading`、`ambiguous` 或传输失败的 `delivering` 记录，在第五次这类回答时结算为 `lost`，`detail` 命名该回答；记录可清理，且不再写入任何输入。写入从未提交的窗口是 `lost`，而不是 `failed`。
 10. 带 `delivering` 记录重启：无重复输入、无重复启动。带停止时刻已过的 `delivered` launch 记录重启：停止该 Session，绝不在其停止时刻之前删除它。
 11. 旧文档：任何旧 `mode` 的工具保存任务投递到其保存 Session 与分支；用户 `create` 任务映射为 launch 目标；有 Session 的用户 `reuse` 任务映射为该 Session 的 `main`；没有的用户 `reuse` 任务映射为 launch。每种都能读取、投递并往返，且不重写旧字节。旧 `reuse` 任务启动的 Session 仍随其任务；任务只是复用的 Session，以及其他所有目标 Session，在任务删除后存活。
 12. `schedule.history` 读取新词表，并且仍能解码本次变更之前写下的记录；非法内层字节被保留。
@@ -681,6 +680,7 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 17. **每个任务一条未结写入。** 窗口 B 到期时投递 R1 仍是 `delivering`，窗口 C 到期时 R1 仍是 `delivering`。B 与 C 各记录一条 `missed: previous_delivery_unsettled`，且都不写输入；R1 在查询结算它之前保持 `delivering`。
 18. **尝试次数跨重启保留。** 存储的 `attempts` 为二的 `delivering` 记录，在重启后的下一个通道进行第三次查询尝试；在持久化一次尝试与发送其查询之间崩溃，仍计入该次尝试。
 19. **缺少 attempts 读作零。** 存储的 `delivering` 记录没有 `attempts` 时读作零次尝试，重启后的第一个查询通道就是第一次尝试。
+20. **在途写入不会被 `unknown` 结算。** 查询回答 `unknown`，记录保持 `delivering` 且该次尝试计入；之后的查询回答 `accepted`，记录结算为 `delivered`，且没有写入第二条输入。
 
 ## 附录 E. 假设
 

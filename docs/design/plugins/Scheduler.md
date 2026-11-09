@@ -175,7 +175,7 @@ A delivery records one window. Its state is `delivering` while the write is unse
 | `delivering` | The record names the target (and, for `launch`, the Session) and the input may or may not have been accepted. Settled by `sessions.lookup` after a restart (A.6). | no |
 | `delivered` | The target branch published the input; `input_event_id` is its receipt. | yes |
 | `failed` | The window wrote no input, or the Session to write to could not be created. `detail` carries the reason. | yes |
-| `lost` | The write's outcome cannot be determined now, and the window is not retried. `detail` carries the diagnostic. | yes |
+| `lost` | The write's outcome was not determined within the lookup bound (A.6), and the window is not retried. `detail` names the last lookup answer. | yes |
 | `missed` | The daemon did not observe the window within its grace (A.4), or the window was skipped while the job had an unsettled delivery (§3.1); `detail` says which. | yes |
 
 A delivery is never updated after it reaches a terminal state, and Scheduler never resends a window. `session_id` and `branch_id` name the target that was used; for `launch` they name the launched Session and its `main` branch, and `deadline_at` is its stop time. `deadline_at` is absent for a `session` target and for a run that never launched.
@@ -240,7 +240,7 @@ The `delivering` record is persisted before any external effect, so a restart se
 
 **Overlap.** A window is skipped while that job has any `delivering` record, so a job has at most one `delivering` record at a time. The skipped window writes no input and records one `missed` delivery with `detail: previous_delivery_unsettled` (A.6), which counts toward retention (A.7). That record is terminal and does not by itself admit the next window: the condition is the job's `delivering` record, not the delivery before it. `schedule.run_now` obeys the same rule; it records its own delivery for the manual window, with its own `run_id` and `window`, and never returns the timer path's record, so a manual window the rule skips returns that `missed` record. The skip lasts no longer than the `delivering` record can stay unsettled, and the bound below fixes that.
 
-**Bound.** A `delivering` record gets at most five `sessions.lookup` attempts, one per timer pass. `reloading`, `ambiguous` and a transport failure count toward the five; `accepted` settles it `delivered` at any attempt. The fifth attempt settles the record even when it answers nothing usable: `unknown` there is `lost` rather than `failed`, and any other non-`accepted` result is `lost` too. A `lost` record is terminal and prunable (A.7), so no record stays unsettled for ever and the skip rule cannot outlast those five attempts.
+**Bound.** A lookup answer settles a `delivering` record only when it carries a fact. `accepted` settles it `delivered` at any attempt, with no second input. `unknown`, `reloading`, `ambiguous` and a transport failure leave it `delivering`; each counts as one attempt toward the five, and the count is persisted as `attempts` before the lookup (A.1). The fifth such answer settles it `lost`, and `detail` names that answer. `unknown` cannot settle a record because it is final only for a write that returned before the lookup began ([sessions service §6.3](../appserver/sessions-service.md#63-lookup)), and a write whose reply was lost keeps running to its own outcome ([§6.2](../appserver/sessions-service.md#62-input)), so `unknown` may mean not committed yet. A window whose write never committed is therefore `lost` after five passes instead of `failed`, and the job's windows are skipped meanwhile. A `lost` record is terminal and prunable (A.7), so no record stays unsettled for ever and the skip rule cannot outlast those five attempts.
 
 **Queued inputs.** Scheduler bounds its own writes: one input per window per job, and none while the job has an unsettled delivery. How many inputs a target branch holds is that branch's InputQueue's concern, not Scheduler's. InputQueue has no bound today ([input_queue.rs](../../../crates/dim-agent-capabilities/src/input_queue.rs)), so a `queue` job whose target stays busy adds one queued input per window until the branch consumes them. A queue bound would apply to every producer that writes to a branch, so it belongs to an InputQueue design, not to this one.
 
@@ -535,7 +535,7 @@ The following fields carry facts needed after restart. They belong to those exis
 | `Delivery.deadline_at` | Set with the `delivering` record of a launch target as `created_at + snapshot.max_run_minutes`; retained on the `delivered` record. | §3.2's stop timer, including recovery after a restart or a job edit. Launch and admission time count towards the limit. |
 | `Delivery.session_id`/`branch_id` | Persisted atomically with `deadline_at` before the input of a launch target (the launch reply's Session), or at acceptance for a `session` target. | A.7's ownership: only a Session recorded from Scheduler's own successful `sessions.launch` is ever deleted. |
 | `Delivery.input_event_id` | The published receipt, or the `lookup` reply that confirmed the input. | Whether the delivery is `delivered`; recovery never writes again for the record. |
-| `Delivery.attempts` | The lookup pass persists the incremented count before it sends the lookup, under the rule that the file transaction is released before any `sessions` call; a crash between the persist and the lookup still counts that attempt. | The next lookup pass, including after a restart, reads the stored count and stops at five attempts in all. |
+| `Delivery.attempts` | The lookup pass persists the incremented count before it sends the lookup, under the rule that the file transaction is released before any `sessions` call; a crash between the persist and the lookup still counts that attempt. | The next lookup pass, including after a restart, reads the stored count; the fifth answer without a fact settles the record `lost` (§3.1). |
 
 ### A.2 Tool `schedule`
 
@@ -611,13 +611,12 @@ Scheduler delivers no run outcome to a Session, and no notification is sent. A r
 | The target refused | `failed: <code>` | Nothing was written, or no Session was created; `detail` carries the code |
 | The target is gone | `failed: session_closed` / `branch_missing` / `branch_ended`, and the job is disabled | Nothing was written; the job needs a new target |
 | The reply was lost and lookup found the input | `delivered` | The lookup's `{inputId,sequence}` confirms the one write |
-| The reply was lost and lookup answered `unknown`, before the fifth attempt | `failed: not_delivered` | The branch never accepted the input; the window is not retried |
-| Lookup answers `reloading`, `ambiguous` or a transport failure | the record stays `delivering`; the timer retries the lookup, each attempt counts toward the bound, and the count is persisted in `attempts` before the lookup | No second write is attempted while the record is unsettled |
-| The fifth attempt returns anything but `accepted` | `lost`, with `detail`; `unknown` here is `lost`, not `failed` | The outcome is no longer knowable; the record is terminal and prunable (A.7) |
+| Lookup answers `unknown`, `reloading`, `ambiguous` or a transport failure | the record stays `delivering`; the answer counts as one attempt toward the bound, and the count is persisted in `attempts` before the lookup | The answer carries no fact: `unknown` may mean not committed yet (§3.1). No second write is attempted while the record is unsettled |
+| The fifth answer without a fact | `lost`, with `detail` naming that answer | The outcome was not determined within the bound; the record is terminal and prunable (A.7) |
 | A window is due while the job has a `delivering` delivery | `missed: previous_delivery_unsettled` | No input; the window is not retried, and the record is prunable (A.7) |
 | The daemon missed the window | `missed` | No launch and no input |
 
-Recovery never rewrites a settled record and never resends a window. A crash between persisting `delivering` and the input's reply is settled by `sessions.lookup` at the next start; a crash after a launched Session was created but before its identity was recorded leaves a Session named by no record (the known limit in Appendix F). Each `delivering` record is looked up once per timer pass and at most five times in all, across restarts; the fifth attempt settles it (§3.1), and each pass persists the incremented `attempts` before the lookup, so a crash between attempts does not start the count again. "Never pruned while unsettled" therefore stays true and becomes bounded: a job whose target keeps failing neither grows records without bound nor writes twice.
+Recovery never rewrites a settled record and never resends a window. A crash between persisting `delivering` and the input's reply is settled by `sessions.lookup` at the next start; a crash after a launched Session was created but before its identity was recorded leaves a Session named by no record (the known limit in Appendix F). Each `delivering` record is looked up once per timer pass and at most five times in all, across restarts. An `accepted` answer settles it `delivered`; the fifth answer without a fact settles it `lost` (§3.1). Each pass persists the incremented `attempts` before the lookup, so a crash between attempts does not start the count again. "Never pruned while unsettled" therefore stays true and becomes bounded: a job whose target keeps failing neither grows records without bound nor writes twice.
 
 ### A.7 Run storage and retention
 
@@ -650,7 +649,7 @@ Run a retention pass after startup recovery, each settled delivery and `schedule
 | Target Session deleted while a delivery is in flight | — | The write fails `session_closed` or is committed and published; either outcome is the record's | Agents |
 | Target Session idle-unloaded between delivery and read | — | No read to fail: the next window's `sessions.input` acquires and restores it | Agents |
 | Agents index reload | — | `reloading`; a `delivering` record settles by lookup | Agents |
-| `reloading` or a transport failure persists | — | Lookup stops at five attempts and settles `lost`, and the count survives a restart; a due window meanwhile is `missed: previous_delivery_unsettled`; every record is terminal and prunable | Scheduler, Agents |
+| `unknown`, `reloading` or a transport failure persists | — | Lookup stops at five answers without a fact and settles `lost`, and the count survives a restart; a due window meanwhile is `missed: previous_delivery_unsettled`; every record is terminal and prunable | Scheduler, Agents |
 | Scheduler reload or restart | — | `delivering` records settle by lookup; no window is written twice | Scheduler |
 | Daemon down over a window | — | `missed`; no catch-up | Scheduler |
 | Launch refused (missing cwd, unknown Agent, policy refusal) | — | `failed: <code>`; no input | Agents, Scheduler |
@@ -674,8 +673,8 @@ Run a retention pass after startup recovery, each settled delivery and `schedule
 | Delivery write fails `reloading`, or its reply is lost | The record stays `delivering`; lookup settles it (A.6) |
 | Delivery write fails `session_closed`, `branch_missing` or `branch_ended` | `failed: <code>`, and the job is disabled with that reason |
 | Delivery write fails any other way | `failed: <code>`; the job stays enabled |
-| Lookup answers `unknown` before the fifth attempt | `failed: not_delivered`; the window is not retried |
-| Lookup cannot answer | The record stays `delivering` and is retried once a minute; the fifth attempt settles it `lost` |
+| Lookup answers `unknown` | The record stays `delivering` and the answer counts toward the bound; a later `accepted` settles `delivered`, never a second input |
+| Lookup answers `reloading`, `ambiguous` or a transport failure | The record stays `delivering` and is retried once a minute; each answer counts, and the fifth answer without a fact settles it `lost` |
 | Launch failure | `failed: <code>`; the window is not retried |
 | Stop timer call fails | Retried once a minute while the record names the Session; the delivery is unchanged |
 | Storage unreadable or unknown format version | Scheduler fails to apply (no silent reset) |
@@ -693,9 +692,9 @@ Verify actual flows through the management methods and the `schedule` tool, with
 4. A management `schedule.save` sets a `launch` target; a due window launches a non-interactive Session with the saved Agent and the capped preset, writes one input to `main`, and records `delivered` with the deadline. Verify the Session is stopped at the stop time and not before.
 5. A window past its grace is one `missed` record with no launch and no input. A daemon restart over a window yields `missed`.
 6. A target that is gone at firing settles `failed` with its code and disables the job; `schedule.list` shows the reason, a save clears it, and later windows do not fire.
-7. A lost delivery reply is settled by lookup: accepted → `delivered` with no second input; `unknown` before the fifth attempt → `failed: not_delivered`; an unanswered lookup keeps `delivering` and retries without writing (item 9).
+7. A lost delivery reply is settled by lookup: `accepted` at any attempt → `delivered` with no second input; `unknown`, `reloading`, `ambiguous` or a transport failure keeps `delivering` and counts toward the bound without writing (item 9).
 8. **Unsettled overlap.** While a job has a `delivering` delivery, its next due window records `missed: previous_delivery_unsettled`, writes no input, and the record counts toward retention; `schedule.run_now` in the same state records its own `missed` delivery for the manual window and writes nothing.
-9. **Bounded lookup.** A `delivering` record whose lookups keep answering `reloading`, `ambiguous` or a transport failure settles `lost` on the fifth attempt; an `unknown` on that attempt settles `lost` rather than `failed`; the record is prunable and no further input is written.
+9. **Bounded lookup.** A `delivering` record whose lookups keep answering `unknown`, `reloading`, `ambiguous` or a transport failure settles `lost` on the fifth such answer, with `detail` naming it; the record is prunable and no further input is written. A window whose write never committed is `lost`, not `failed`.
 10. Restart with a `delivering` record: no duplicate input and no duplicate launch. Restart with a `delivered` launch record whose stop time has passed stops the Session, never deletes it before its stop time.
 11. Legacy documents: a tool-saved job of either old mode delivers to its saving Session and branch; a user `create` job maps to a launch target; a user `reuse` job with a Session maps to that Session's `main`; a user `reuse` job without one maps to launch. Each reads, delivers and round-trips without rewriting legacy bytes. A legacy `reuse` job's launched Session still goes with its job; a Session the job only reused, and every other target Session, survives job deletion.
 12. `schedule.history` reads the new vocabulary and still decodes records written before this change; invalid inner bytes are preserved.
@@ -706,6 +705,7 @@ Verify actual flows through the management methods and the `schedule` tool, with
 17. **One unsettled write per job.** Delivery R1 is `delivering` when window B is due and still `delivering` when window C is due. B and C each record `missed: previous_delivery_unsettled` and write no input; R1 stays `delivering` until a lookup settles it.
 18. **Attempts survive a restart.** A `delivering` record whose stored `attempts` is two makes its third lookup attempt on the next pass after a restart, and a crash between persisting an attempt and sending its lookup still counts that attempt.
 19. **Absent attempts read as zero.** A stored `delivering` record without `attempts` reads as zero attempts, and its first lookup pass after the restart is attempt one.
+20. **An in-flight write is not settled by `unknown`.** The lookup answers `unknown`, the record stays `delivering` and the attempt counts; a later lookup answers `accepted`, the record settles `delivered`, and no second input was written.
 
 ## Appendix E. Assumptions
 
