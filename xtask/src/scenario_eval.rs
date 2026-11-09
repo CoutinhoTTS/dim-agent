@@ -10842,11 +10842,25 @@ mod tests {
             record.stop, "idle",
             "append starts no turn, so no budget stop"
         );
+        // The run is isolated: this fixture path serves the run in the
+        // child with the sandbox and the file-tool boundary, and every
+        // preflight check passed for the run to finish idle.
+        let checks = recorded_checks(&options.out, "current");
+        for check in &checks {
+            assert!(check.passed, "{check:?}");
+        }
         assert_eq!(record.events.len(), 1, "one event was published");
         assert_eq!(
             record.events[0].receipt["deliveries"][0]["status"],
             json!("delivered"),
             "{}",
+            record.events[0].receipt
+        );
+        assert!(
+            record.events[0].receipt["deliveries"][0]["subscriptionIds"]
+                .as_array()
+                .is_some_and(|ids| !ids.is_empty()),
+            "the model's own subscription carried the event: {}",
             record.events[0].receipt
         );
     }
@@ -11043,88 +11057,6 @@ mod tests {
             record.events.is_empty(),
             "the event was never published: {:?}",
             record.events
-        );
-    }
-
-    /// A timed delivery's mode comes from the subscriptions that directed it:
-    /// a model that subscribes with `append` to a type declared `queue`
-    /// receives the `afterSeconds` event as an `append` input, which starts
-    /// no turn, so the run ends idle rather than at its seconds budget
-    /// (EventHub design §3.1, A.2).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_timed_append_delivery_starts_no_turn() {
-        /// The judge's verdict, the `events` subscribe call until its result
-        /// is in the request, and plain text after.
-        fn answers(text: &str) -> Option<Value> {
-            judged(text).or_else(|| {
-                (!text.contains("sub_")).then(|| {
-                    tool_call(
-                        "events",
-                        &json!({"action": "subscribe", "types": ["ci.failure"], "mode": "append"})
-                            .to_string(),
-                    )
-                })
-            })
-        }
-        let fixture = Fixture::start(
-            "eventhub-tool-timed-append",
-            answers,
-            json!({
-                "message": "Subscribe to CI failures with append, then finish.",
-                "sources": [{
-                    "name": "ci",
-                    "guide": "CI publishes a failure notice when a build breaks.",
-                    "types": [{
-                        "type": "ci.failure",
-                        "description": "A failed build.",
-                        "mode": "queue"
-                    }]
-                }],
-                "events": [{
-                    "source": "ci",
-                    "type": "ci.failure",
-                    "id": "f-1",
-                    "title": "The build failed",
-                    "body": "The build failed on the release branch.",
-                    "afterSeconds": 1
-                }],
-                "budget": {"turns": 4, "seconds": 30, "window": 24000},
-                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
-            }),
-            &[],
-        )
-        .await;
-        let options = fixture.options(fixture.directory.join("out"));
-        let record = run_arm(&fixture, &options, "current", &Overrides::default(), 0).await;
-        assert_eq!(record.error, None);
-        assert!(
-            !record.failed,
-            "the delivery is correct and nothing is outstanding"
-        );
-        assert_eq!(
-            record.stop, "idle",
-            "an append delivery starts no turn: {:?}",
-            record.events
-        );
-        // The run is isolated: this fixture path serves the run in the
-        // child with the sandbox and the file-tool boundary, and every
-        // preflight check passed for the run to finish idle.
-        let checks = recorded_checks(&options.out, "current");
-        for check in &checks {
-            assert!(check.passed, "{check:?}");
-        }
-        assert_eq!(record.events.len(), 1, "one event was published");
-        let receipt = &record.events[0].receipt;
-        assert_eq!(
-            receipt["deliveries"][0]["status"],
-            json!("delivered"),
-            "{receipt}"
-        );
-        assert!(
-            receipt["deliveries"][0]["subscriptionIds"]
-                .as_array()
-                .is_some_and(|ids| !ids.is_empty()),
-            "the model's own subscription carried the event: {receipt}"
         );
     }
 

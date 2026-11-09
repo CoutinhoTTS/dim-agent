@@ -263,13 +263,17 @@ impl ToolDriver for WorkspaceTools {
                 && let Some(path) = call.input.get("path").and_then(|value| value.as_str())
                 && !path.is_empty()
             {
+                // One effective home: the boundary's when configured, the
+                // platform's otherwise — the same home the executed tool
+                // resolves `~` against, so pre-admission resolution cannot
+                // disagree with execution.
                 let (cwd, home, path) = (
                     self.cwd.clone(),
-                    self.platform.home.clone(),
+                    self.files.home().to_owned(),
                     path.to_owned(),
                 );
                 let target = tokio::task::spawn_blocking(move || {
-                    files::resolve_path(&cwd, &home, None, false, &path)
+                    files::resolve_path(&cwd, &home, None, files::Access::Write, &path)
                 });
                 let path = tokio::select! {
                     result = target => result.map_err(|error| HostError::failed(error.to_string()))?
@@ -345,6 +349,15 @@ impl DynPlugin for WorkspaceToolsPlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            // Fail closed where the handle-based path operations do not
+            // exist: a configured boundary would silently degrade to the
+            // unbounded path, so the Session part refuses to construct.
+            #[cfg(not(unix))]
+            if self.config.boundary.is_some() {
+                return Err(rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    "the file-tool root boundary needs handle-based path operations, which this platform does not provide".into(),
+                )));
+            }
             let platform = ctx.require_at(&self.platform)?;
             let config = ctx.require_at(&self.session_config)?;
             let identity = ctx.require_at(&self.identity)?;

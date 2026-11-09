@@ -1383,18 +1383,15 @@
       ]
     },
     {
-      "id": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "id": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools::files",
       "file": "crates/dim-agent-capabilities/src/workspace_tools/files.rs",
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "assert_ne",
         "format",
-        "json",
-        "panic",
-        "vec"
+        "json"
       ]
     },
     {
@@ -1430,6 +1427,19 @@
         "format",
         "json",
         "unreachable"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::workspace_tools::files::queued_boundary_tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools::files",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/files.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "format",
+        "json"
       ]
     },
     {
@@ -12830,8 +12840,10 @@
       "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
+        "path Access::Write",
         "path canonical_prefix",
         "path resolve_path",
+        "use crate::workspace_tools::files::Access",
         "use crate::workspace_tools::files::canonical_prefix",
         "use crate::workspace_tools::files::resolve_path"
       ]
@@ -14173,6 +14185,7 @@
       "from": "dim_agent_capabilities::session_grants",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
+        "path crate::workspace_tools::files::Access::Write",
         "path crate::workspace_tools::files::resolve_path"
       ]
     },
@@ -16398,6 +16411,7 @@
         "path FileTools::handles",
         "path FileTools::with_coordinator",
         "path FileWriteCoordinator",
+        "path files::Access::Write",
         "path files::FileToolBoundary",
         "path files::resolve_path",
         "use files::FileToolBoundary",
@@ -16850,6 +16864,15 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::files",
+      "to": "dim_agent_capabilities::file_storage::windows",
+      "references": [
+        "path crate::file_storage::windows::create_temp",
+        "path crate::file_storage::windows::open_root",
+        "path crate::file_storage::windows::replace"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
@@ -16868,9 +16891,9 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::files",
-      "to": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
       "references": [
-        "mod boundary_tests"
+        "mod bounded_search_tests"
       ]
     },
     {
@@ -16894,6 +16917,13 @@
       "to": "dim_agent_capabilities::workspace_tools::files::mutation_tests",
       "references": [
         "mod mutation_tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files",
+      "to": "dim_agent_capabilities::workspace_tools::files::queued_boundary_tests",
+      "references": [
+        "mod queued_boundary_tests"
       ]
     },
     {
@@ -16923,7 +16953,8 @@
         "mod write",
         "path write",
         "path write::definition",
-        "path write::run"
+        "path write::run",
+        "path write::same_identity"
       ]
     },
     {
@@ -16949,14 +16980,7 @@
       ]
     },
     {
-      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path HostError"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
       "to": "dim_agent_capabilities::workspace_tools::file_reads",
       "references": [
         "path FileReads",
@@ -16964,19 +16988,18 @@
       ]
     },
     {
-      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
         "path FileToolBoundary",
         "path FileTools",
-        "path FileTools::new",
         "path FileTools::with_boundary",
         "use crate::workspace_tools::files::FileToolBoundary",
         "use crate::workspace_tools::files::FileTools"
       ]
     },
     {
-      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path Timeline::new",
@@ -16984,7 +17007,7 @@
       ]
     },
     {
-      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
       "to": "dim_agent_runtime::memory_timeline_store",
       "references": [
         "path MemoryTimelineStore::default",
@@ -16992,7 +17015,7 @@
       ]
     },
     {
-      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineKey",
@@ -17000,14 +17023,7 @@
       ]
     },
     {
-      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
-      "to": "dim_agent_types::content",
-      "references": [
-        "path dim_agent_types::ToolContent::Text"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -17089,11 +17105,15 @@
       "from": "dim_agent_capabilities::workspace_tools::files::edit",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
+        "path Access::Write",
         "path Cancelled",
         "path Cancelled::check",
         "path FileTools",
         "path PathError::Message",
         "path PathError::Refused",
+        "path Target::for_mutation",
+        "path TargetError::Io",
+        "path TargetError::Refused",
         "path blocking",
         "path cancelled",
         "path failed",
@@ -17101,16 +17121,18 @@
         "path invalid_input",
         "path js_len",
         "path not_regular",
-        "path open_regular",
         "path refused",
         "path resolve_path",
         "path revision",
         "path super::CommitHook",
         "path wrote",
+        "use super::Access",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
         "use super::PathError",
+        "use super::Target",
+        "use super::TargetError",
         "use super::blocking",
         "use super::cancelled",
         "use super::failed",
@@ -17119,7 +17141,6 @@
         "use super::invalid_input",
         "use super::js_len",
         "use super::not_regular",
-        "use super::open_regular",
         "use super::refused",
         "use super::resolve_path",
         "use super::revision",
@@ -17218,6 +17239,58 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::workspace_tools::files::queued_boundary_tests",
+      "to": "dim_agent_capabilities::workspace_tools::file_reads",
+      "references": [
+        "path FileReads",
+        "path FileReads::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::queued_boundary_tests",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path FileToolBoundary",
+        "path FileTools",
+        "path FileTools::with_coordinator",
+        "path FileWriteCoordinator",
+        "use crate::workspace_tools::files::FileToolBoundary",
+        "use crate::workspace_tools::files::FileTools"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::queued_boundary_tests",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline::new",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::queued_boundary_tests",
+      "to": "dim_agent_runtime::memory_timeline_store",
+      "references": [
+        "path MemoryTimelineStore::default",
+        "use dim_agent_runtime::MemoryTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::queued_boundary_tests",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineKey",
+        "use dim_agent_runtime::TimelineKey"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::queued_boundary_tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolResult"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::workspace_tools::files::read",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -17271,11 +17344,16 @@
       "from": "dim_agent_capabilities::workspace_tools::files::read",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
+        "path Access::Read",
         "path Cancelled",
         "path Cancelled::check",
         "path FileTools",
         "path PathError::Message",
         "path PathError::Refused",
+        "path Target",
+        "path Target::for_read",
+        "path TargetError::Io",
+        "path TargetError::Refused",
         "path blocking",
         "path cancelled",
         "path failed",
@@ -17284,14 +17362,16 @@
         "path js_len",
         "path not_regular",
         "path object",
-        "path open_regular",
         "path refused",
         "path resolve_path",
         "path succeeded",
+        "use super::Access",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
         "use super::PathError",
+        "use super::Target",
+        "use super::TargetError",
         "use super::blocking",
         "use super::cancelled",
         "use super::failed",
@@ -17301,7 +17381,6 @@
         "use super::js_len",
         "use super::not_regular",
         "use super::object",
-        "use super::open_regular",
         "use super::refused",
         "use super::resolve_path",
         "use super::succeeded"
@@ -17364,9 +17443,15 @@
       "from": "dim_agent_capabilities::workspace_tools::files::search",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
+        "path Access::Read",
         "path FileTools",
+        "path SearchHook",
+        "path Target::for_read",
+        "path TargetError::Io",
+        "path TargetError::Refused",
         "path blocking",
         "path cancelled",
+        "path expand_tilde",
         "path failed",
         "path field",
         "path inside",
@@ -17374,9 +17459,15 @@
         "path lexical",
         "path succeeded",
         "path super::FileToolBoundary",
+        "use super::Access",
         "use super::FileTools",
+        "use super::NotRegular",
+        "use super::SearchHook",
+        "use super::Target",
+        "use super::TargetError",
         "use super::blocking",
         "use super::cancelled",
+        "use super::expand_tilde",
         "use super::failed",
         "use super::field",
         "use super::inside",
@@ -17405,9 +17496,6 @@
       "from": "dim_agent_capabilities::workspace_tools::files::write",
       "to": "dim_agent_capabilities::file_storage::windows",
       "references": [
-        "path crate::file_storage::windows::create_temp",
-        "path crate::file_storage::windows::open_root",
-        "path crate::file_storage::windows::replace",
         "path crate::file_storage::windows::workspace_security_revision"
       ]
     },
@@ -17444,28 +17532,35 @@
       "from": "dim_agent_capabilities::workspace_tools::files::write",
       "to": "dim_agent_capabilities::workspace_tools::files",
       "references": [
+        "path Access::Write",
         "path Cancelled",
         "path Cancelled::check",
         "path FileTools",
         "path PathError::Message",
         "path PathError::Refused",
+        "path Target",
+        "path Target::Path",
+        "path Target::for_mutation",
+        "path TargetError::Io",
+        "path TargetError::Refused",
         "path blocking",
         "path cancelled",
         "path failed",
         "path field",
         "path invalid_input",
         "path not_regular",
-        "path open_options",
-        "path open_regular",
         "path refused",
         "path resolve_path",
         "path revision",
         "path super::CommitHook",
         "path wrote",
+        "use super::Access",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
         "use super::PathError",
+        "use super::Target",
+        "use super::TargetError",
         "use super::blocking",
         "use super::cancelled",
         "use super::failed",
@@ -17473,8 +17568,6 @@
         "use super::hex",
         "use super::invalid_input",
         "use super::not_regular",
-        "use super::open_options",
-        "use super::open_regular",
         "use super::refused",
         "use super::resolve_path",
         "use super::revision",
@@ -47853,8 +47946,10 @@
       "from": "dim_session_title",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
+        "path QueryFilter",
         "path QueryFilter::And",
         "path QueryFilter::In",
+        "path QueryFilter::Or",
         "path QueryOperand::Field",
         "path QueryOutput::Rows",
         "path QueryPage",
@@ -47890,8 +47985,11 @@
       "to": "dim_agent_types::events",
       "references": [
         "path EventKind::InputApplied",
+        "path InputBlock",
+        "path InputBlock::Raw",
         "path UserInput",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
         "use dim_agent_types::UserInput"
       ]
     },

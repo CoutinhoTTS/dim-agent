@@ -5,8 +5,8 @@ use super::super::file_reads::{
 };
 use super::codec;
 use super::{
-    Cancelled, FileTools, NotRegular, PathError, blocking, cancelled, failed, field, hex,
-    invalid_input, not_regular, open_options, open_regular, refused, resolve_path, revision, wrote,
+    Access, Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking, cancelled,
+    failed, field, hex, invalid_input, not_regular, refused, resolve_path, revision, wrote,
 };
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolEffect, ToolResult};
@@ -59,22 +59,33 @@ pub(super) async fn run(
         display.clone(),
         tools.boundary.clone(),
     );
-    let path =
-        match blocking(move || resolve_path(&cwd, &home, boundary.as_ref(), true, &requested))
-            .await?
-        {
-            Ok(path) => path,
-            Err(PathError::Refused(path)) => return Ok(refused(&path)),
-            Err(PathError::Message(message)) => return Ok(invalid_input(message)),
-        };
+    let path = match blocking(move || {
+        resolve_path(&cwd, &home, boundary.as_ref(), Access::Write, &requested)
+    })
+    .await?
+    {
+        Ok(path) => path,
+        Err(PathError::Refused(path)) => return Ok(refused(&path)),
+        Err(PathError::Message(message)) => return Ok(invalid_input(message)),
+    };
+    #[cfg(test)]
+    if let Some(hook) = &tools.before_lock {
+        hook(&path);
+    }
     let _lock = tools.locks.lock(&path, &cancel).await?;
     let binding = reads.write_binding(&path).await?;
-    let (display, content, target) = (display.clone(), content.clone(), path.clone());
+    let (display, content, target, bounded) = (
+        display.clone(),
+        content.clone(),
+        path.clone(),
+        tools.boundary.is_some(),
+    );
     #[cfg(test)]
     let hook = tools.before_commit.clone();
     let (_lock, written) = blocking(move || {
         let written = write_locked(
             &target,
+            bounded,
             &display,
             &content,
             binding,
@@ -94,6 +105,7 @@ pub(super) async fn run(
 
 fn write_locked(
     path: &Path,
+    bounded: bool,
     display: &str,
     content: &str,
     binding: WriteBinding,
@@ -101,17 +113,28 @@ fn write_locked(
     #[cfg(test)] hook: Option<super::CommitHook>,
 ) -> Result<(ToolResult, Option<TextFileBinding>), Cancelled> {
     let done = |result| Ok((result, None));
+    let target = match Target::for_mutation(path, bounded, true) {
+        Ok(target) => target,
+        Err(TargetError::Refused) => return done(refused(path)),
+        Err(TargetError::Io(error)) => {
+            return done(failed(
+                format!("Failed to open the target's parent directory: {error}"),
+                json!({ "code": "mkdir_error" }),
+            ));
+        }
+    };
     Cancelled::check(cancel)?;
-    let exists = match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_dir() => {
+    let exists = match target.stat() {
+        Ok(Some(stat)) if stat.directory => {
             return done(failed(
                 format!("Cannot write to directory: {display}"),
                 json!({ "code": "is_directory" }),
             ));
         }
-        Ok(_) => true,
-        Err(error) if error.kind() == ErrorKind::NotFound => false,
-        Err(error) => {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(TargetError::Refused) => return done(refused(path)),
+        Err(TargetError::Io(error)) => {
             return done(failed(
                 format!("Failed to stat file: {error}"),
                 json!({ "code": "stat_error" }),
@@ -120,10 +143,11 @@ fn write_locked(
     };
     Cancelled::check(cancel)?;
     let original = if exists {
-        match open_regular(path) {
+        match target.open_regular() {
             Ok(Ok(file)) => Some(file),
             Ok(Err(NotRegular)) => return done(not_regular(display)),
-            Err(error) => return done(write_failure(&error, display, false)),
+            Err(TargetError::Refused) => return done(refused(path)),
+            Err(TargetError::Io(error)) => return done(write_failure(&error, display, false)),
         }
     } else {
         None
@@ -144,7 +168,7 @@ fn write_locked(
             }
             WriteBinding::Text(binding) => binding,
         };
-        if let Some(conflict) = revision_conflict(path, &binding.raw_revision, display) {
+        if let Some(conflict) = revision_conflict(&target, &binding.raw_revision, display) {
             return done(conflict);
         }
         Cancelled::check(cancel)?;
@@ -165,7 +189,10 @@ fn write_locked(
         Err(error) => return done(error.into_result()),
     };
     Cancelled::check(cancel)?;
-    if let Some(parent) = path.parent()
+    // Path-based writes create missing parents here, as they always did; the
+    // bounded target created them during its walk, relative to the handles.
+    if let Target::Path(target_path) = &target
+        && let Some(parent) = target_path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
         return done(failed(
@@ -175,7 +202,7 @@ fn write_locked(
     }
     Cancelled::check(cancel)?;
     let written = write_target(
-        path,
+        &target,
         &bytes,
         display,
         original.as_ref(),
@@ -202,7 +229,7 @@ fn write_locked(
 }
 
 /// Fails closed: anything but the recorded bytes is a conflict.
-fn revision_conflict(path: &Path, expected: &[u8; 32], display: &str) -> Option<ToolResult> {
+fn revision_conflict(target: &Target, expected: &[u8; 32], display: &str) -> Option<ToolResult> {
     let modified = || {
         failed(
             "File was modified after it was last read. Use the read tool again before writing.",
@@ -210,10 +237,11 @@ fn revision_conflict(path: &Path, expected: &[u8; 32], display: &str) -> Option<
         )
     };
     let mut bytes = Vec::new();
-    let read = match open_regular(path) {
+    let read = match target.open_regular() {
         Ok(Ok(mut file)) => file.read_to_end(&mut bytes),
         Ok(Err(NotRegular)) => return Some(not_regular(display)),
-        Err(error) => Err(error),
+        Err(TargetError::Refused) => return Some(refused(target.path())),
+        Err(TargetError::Io(error)) => Err(error),
     };
     match read {
         Ok(_) if revision(&bytes) == *expected => None,
@@ -229,10 +257,13 @@ fn revision_conflict(path: &Path, expected: &[u8; 32], display: &str) -> Option<
 /// portable CAS: uncoordinated path/parent renames or metadata changes can still
 /// race the final syscall. Windows installs the owned handle, not a temp name.
 ///
+/// With a boundary the target is a parent-directory handle, and the staged
+/// sibling, the verification and the install all run relative to it.
+///
 /// Cancellation is checked before the publish. After the publish the function
 /// must not return `Cancelled`: the destination may already have changed.
 pub(super) fn write_target(
-    path: &Path,
+    target: &Target,
     bytes: &[u8],
     display: &str,
     original: Option<&std::fs::File>,
@@ -240,16 +271,12 @@ pub(super) fn write_target(
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
+    let path = target.path();
     if let Some(original) = original {
-        let mut options = open_options();
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::custom_flags(
-            &mut options,
-            libc::O_NOFOLLOW | libc::O_NONBLOCK,
-        );
-        let writable = match options.write(true).open(path) {
+        let writable = match target.open_writable() {
             Ok(file) => file,
-            Err(error) => return Ok(Err(write_failure(&error, display, false))),
+            Err(TargetError::Refused) => return Ok(Err(refused(path))),
+            Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
         };
         if !same_identity(original, &writable).unwrap_or(false) {
             return Ok(Err(failed(
@@ -270,73 +297,57 @@ pub(super) fn write_target(
             false,
         )));
     }
-    #[cfg(windows)]
-    let parent = match crate::file_storage::windows::open_root(path.parent().unwrap()) {
-        Ok(parent) => parent,
-        Err(error) => {
-            return Ok(Err(write_failure(
-                &std::io::Error::other(error),
-                display,
-                false,
-            )));
-        }
-    };
-    struct Temporary(std::path::PathBuf, std::fs::File);
-    impl Drop for Temporary {
+    struct Temporary<'a> {
+        target: &'a Target,
+        name: std::ffi::OsString,
+        file: std::fs::File,
+    }
+    impl Drop for Temporary<'_> {
         fn drop(&mut self) {
-            if owned_temporary(&self.0, &self.1) {
+            if self.target.staged_owned(&self.name, &self.file) {
                 #[cfg(windows)]
-                if let Ok(metadata) = self.1.metadata() {
+                if let Ok(metadata) = self.file.metadata() {
                     let mut permissions = metadata.permissions();
                     permissions.set_readonly(false);
-                    let _ = self.1.set_permissions(permissions);
+                    let _ = self.file.set_permissions(permissions);
                 }
-                let _ = std::fs::remove_file(&self.0);
+                self.target.remove_staged(&self.name);
             }
         }
     }
-    let staged = path.with_file_name(format!(".dim-write-{}", uuid::Uuid::new_v4()));
-    let mut options = open_options();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    #[cfg(unix)]
-    let file = options.open(&staged);
-    #[cfg(windows)]
-    let file = crate::file_storage::windows::create_temp(
-        &parent,
-        &staged.file_name().unwrap().to_owned(),
-        &parent,
-        &path.file_name().unwrap().to_owned(),
-        None,
-    );
-    let file = match file {
+    let staged = std::ffi::OsString::from(format!(".dim-write-{}", uuid::Uuid::new_v4()));
+    let file = match target.create_staged(&staged) {
         Ok(file) => file,
-        Err(error) => return Ok(Err(write_failure(&error, display, false))),
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
     };
-    let mut temporary = Temporary(staged, file);
+    let mut temporary = Temporary {
+        target,
+        name: staged.clone(),
+        file,
+    };
     let prepare = (|| -> std::io::Result<()> {
-        temporary.1.write_all(bytes)?;
+        temporary.file.write_all(bytes)?;
         if let Some(original) = original {
             #[cfg(unix)]
             {
                 use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
                 let metadata = original.metadata()?;
-                let staged = temporary.1.metadata()?;
+                let staged = temporary.file.metadata()?;
                 if (metadata.uid(), metadata.gid()) != (staged.uid(), staged.gid())
                     && unsafe {
-                        libc::fchown(temporary.1.as_raw_fd(), metadata.uid(), metadata.gid())
+                        libc::fchown(temporary.file.as_raw_fd(), metadata.uid(), metadata.gid())
                     } != 0
                 {
                     return Err(std::io::Error::last_os_error());
                 }
             }
             temporary
-                .1
+                .file
                 .set_permissions(original.metadata()?.permissions())?;
-            preserve_metadata(original, &temporary.1)?;
+            preserve_metadata(original, &temporary.file)?;
         }
-        temporary.1.sync_all()
+        temporary.file.sync_all()
     })();
     if let Err(error) = prepare {
         return Ok(Err(write_failure(&error, display, false)));
@@ -347,23 +358,21 @@ pub(super) fn write_target(
     }
     Cancelled::check(cancel)?;
     if let Some(original) = original {
-        if let Some(conflict) = revision_conflict(path, expected, display) {
+        if let Some(conflict) = revision_conflict(target, expected, display) {
             return Ok(Err(conflict));
         }
-        let same = open_regular(path)
-            .and_then(|current| match current {
-                Ok(current) => same_identity(original, &current),
-                Err(_) => Ok(false),
-            })
-            .unwrap_or(false)
+        let same = target
+            .open_regular()
+            .ok()
+            .and_then(Result::ok)
+            .is_some_and(|current| same_identity(original, &current).unwrap_or(false))
             && metadata_revision(original).ok().as_ref() == metadata_before.as_ref()
-            && std::fs::symlink_metadata(path)
-                .is_ok_and(|metadata| metadata.is_file() && !metadata.is_symlink())
+            && target.final_regular()
             && original
                 .metadata()
                 .and_then(|metadata| {
                     temporary
-                        .1
+                        .file
                         .metadata()
                         .map(|staged| metadata.permissions() == staged.permissions())
                 })
@@ -375,7 +384,7 @@ pub(super) fn write_target(
             )));
         }
         #[cfg(windows)]
-        if metadata_revision(&temporary.1).ok().as_ref() != metadata_before.as_ref() {
+        if metadata_revision(&temporary.file).ok().as_ref() != metadata_before.as_ref() {
             return Ok(Err(failed(
                 "Cannot preserve the file's owner, group or access control during replacement.",
                 json!({"code": "write_error"}),
@@ -383,45 +392,34 @@ pub(super) fn write_target(
         }
     }
     Cancelled::check(cancel)?;
-    if !owned_temporary(&temporary.0, &temporary.1) {
+    if !target.staged_owned(&staged, &temporary.file) {
         return Ok(Err(failed(
             "Staged file was replaced during preparation.",
             json!({"code": "write_error"}),
         )));
     }
-    let committed = if original.is_some() {
-        #[cfg(unix)]
-        let result = std::fs::rename(&temporary.0, path);
-        #[cfg(windows)]
-        let result = crate::file_storage::windows::replace(
-            &temporary.1,
-            &parent,
-            &temporary.0.file_name().unwrap().to_owned(),
-            &parent,
-            &path.file_name().unwrap().to_owned(),
-        );
-        result
-    } else {
-        std::fs::hard_link(&temporary.0, path)
-    };
+    let committed = target.install(&staged, &temporary.file, original.is_some());
     if let Err(error) = committed {
-        return Ok(Err(
-            if original.is_none() && error.kind() == ErrorKind::AlreadyExists {
+        return Ok(Err(match error {
+            TargetError::Refused => refused(path),
+            TargetError::Io(error)
+                if original.is_none() && error.kind() == ErrorKind::AlreadyExists =>
+            {
                 failed(
                     "Read the existing file before overwriting it.",
                     json!({"code": "text_binding_required"}),
                 )
-            } else {
-                write_failure(&error, display, false)
-            },
-        ));
+            }
+            TargetError::Io(error) => write_failure(&error, display, false),
+        }));
     }
     drop(temporary);
     #[cfg(unix)]
-    if let Err(error) = std::fs::File::open(path.parent().expect("resolved target has parent"))
-        .and_then(|parent| parent.sync_all())
-    {
-        return Ok(Err(write_failure(&error, display, true)));
+    if let Err(error) = target.sync_parent() {
+        return Ok(Err(match error {
+            TargetError::Refused => refused(path),
+            TargetError::Io(error) => write_failure(&error, display, true),
+        }));
     }
     Ok(Ok(()))
 }
@@ -523,7 +521,7 @@ fn preserve_metadata(source: &std::fs::File, target: &std::fs::File) -> std::io:
     Ok(())
 }
 
-fn same_identity(a: &std::fs::File, b: &std::fs::File) -> std::io::Result<bool> {
+pub(super) fn same_identity(a: &std::fs::File, b: &std::fs::File) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -547,24 +545,6 @@ fn same_identity(a: &std::fs::File, b: &std::fs::File) -> std::io::Result<bool> 
         Ok(a.dwVolumeSerialNumber == b.dwVolumeSerialNumber
             && a.nFileIndexHigh == b.nFileIndexHigh
             && a.nFileIndexLow == b.nFileIndexLow)
-    }
-}
-
-fn owned_temporary(path: &Path, owned: &std::fs::File) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        match (owned.metadata(), std::fs::symlink_metadata(path)) {
-            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
-            _ => false,
-        }
-    }
-    #[cfg(windows)]
-    {
-        open_regular(path)
-            .ok()
-            .and_then(Result::ok)
-            .is_some_and(|current| same_identity(owned, &current).unwrap_or(false))
     }
 }
 

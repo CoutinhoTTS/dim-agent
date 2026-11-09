@@ -3,8 +3,9 @@
 use super::super::file_reads::{FileReads, TextEncoding, TextFileBinding};
 use super::codec::{self, CodecError};
 use super::{
-    Cancelled, FileTools, NotRegular, PathError, blocking, cancelled, failed, field, hex,
-    invalid_input, js_len, not_regular, object, open_regular, refused, resolve_path, succeeded,
+    Access, Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking, cancelled,
+    failed, field, hex, invalid_input, js_len, not_regular, object, refused, resolve_path,
+    succeeded,
 };
 use crate::host::HostError;
 use crate::images::{self, ImageKind, ImageRefusal, ImageSize, ScaledImage, Sniffed};
@@ -134,12 +135,19 @@ pub(super) async fn run(
         tools.boundary.clone(),
     );
     let outcome = blocking(move || {
-        let path = match resolve_path(&cwd, &home, boundary.as_ref(), false, &input.path) {
+        let path = match resolve_path(&cwd, &home, boundary.as_ref(), Access::Read, &input.path) {
             Ok(path) => path,
             Err(PathError::Refused(path)) => return Ok((refused(&path), None)),
             Err(PathError::Message(message)) => return Ok((invalid_input(message), None)),
         };
-        read_text(&input, path, &cancel)
+        let target = match Target::for_read(&path, boundary.is_some()) {
+            Ok(target) => target,
+            Err(TargetError::Refused) => return Ok((refused(&path), None)),
+            Err(TargetError::Io(error)) => {
+                return Ok((stat_failure(&error, &path, &input.path), None));
+            }
+        };
+        read_text(&input, &target, &cancel)
     })
     .await?
     .map_err(|Cancelled| cancelled())?;
@@ -232,26 +240,36 @@ type Outcome = (ToolResult, Option<(PathBuf, TextFileBinding)>);
 
 fn read_text(
     input: &Input,
-    path: PathBuf,
+    target: &Target,
     cancel: &CancellationToken,
 ) -> Result<Outcome, Cancelled> {
     let done = |result| Ok((result, None));
     let display = &input.path;
-    let metadata = match std::fs::metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) => return done(stat_failure(&error, &path, display)),
+    let path = target.path().to_owned();
+    let stat = match target.stat() {
+        Ok(Some(stat)) => stat,
+        Ok(None) => {
+            return done(stat_failure(
+                &std::io::Error::from(ErrorKind::NotFound),
+                &path,
+                display,
+            ));
+        }
+        Err(TargetError::Refused) => return done(refused(&path)),
+        Err(TargetError::Io(error)) => return done(stat_failure(&error, &path, display)),
     };
     Cancelled::check(cancel)?;
-    if metadata.is_dir() {
+    if stat.directory {
         return done(failed(
             format!("Cannot read directory: {display}"),
             json!({ "code": "is_directory" }),
         ));
     }
-    let mut file = match open_regular(&path) {
+    let mut file = match target.open_regular() {
         Ok(Ok(file)) => file,
         Ok(Err(NotRegular)) => return done(not_regular(display)),
-        Err(error) => return done(open_failure(&error, display)),
+        Err(TargetError::Refused) => return done(refused(&path)),
+        Err(TargetError::Io(error)) => return done(open_failure(&error, display)),
     };
     let mut head = Vec::with_capacity(DETECT_BYTES);
     if let Err(error) = (&mut file).take(DETECT_BYTES as u64).read_to_end(&mut head) {
@@ -261,7 +279,7 @@ fn read_text(
     if let Some(sniffed) = images::sniff(&head) {
         return match sniffed {
             Sniffed::Image(_) => Ok((
-                read_image(&mut file, display, metadata.len(), input, cancel)?,
+                read_image(&mut file, display, stat.len, input, cancel)?,
                 None,
             )),
             Sniffed::Unsupported(name) => done(unsupported_image(display, name)),
@@ -308,7 +326,7 @@ fn read_text(
     };
     let mut structured = json!({
         "path": display,
-        "size": metadata.len(),
+        "size": stat.len,
         "revision": hex(&binding.raw_revision),
         "encoding": codec::encoding_json(&binding.encoding),
         "encodingSource": codec::source_str(binding.encoding_source),
