@@ -76,7 +76,7 @@ impl AgentBuilder {
 
 ### 2.5 存量迁移
 
-存量不一次改完。每个非 shared 的名字先标 `internal("legacy: <category>; see #1300")`，等有 leaf 消费者时改数据面；#1300 的盘点表是清单。这样 `xtask check` 从第一天就能拦住“新写的服务忘了形状”，而不用等 84 个名字全部迁完。
+存量不一次改完。每个非 shared 名字按 §3 的分类标 reason（`object`/`hot-path`/`secret`/…）；#1300 的清单就是映射，出现 leaf 消费者时再改数据面。这样 `xtask check` 从第一天就能拦住“新写的服务忘了形状”，而不用等 84 个名字全部迁完。
 
 ## 3. 盘点（#1300）
 
@@ -92,7 +92,7 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 
 | 名字 | 目标 | 备注 |
 | --- | --- | --- |
-| `scheduleJobs` | 新数据面 `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md) 已接受的 `JobRequest`/`Caller`/`JobReply`；它们现在没有 serde derive，随迁移补 |
+| `scheduleJobs` | 新数据面 `scheduleJobs.call(ToolRequest)` | 按 [Scheduler](plugins/Scheduler.md) 已接受的 `ToolRequest`/`Caller`/`JobReply`；`ToolRequest` 已有 `Deserialize`，`Caller`/`JobReply` 缺 serde，随迁移补 |
 | `workflowRuns` | 新数据面 `workflowRuns.call(RunRequest)` | 按 [Workflow](plugins/Workflow.md) 已接受的 `RunRequest`/`RunReply`；Workflow 未实现，接口预留 |
 | `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
 | `managedSearch` | 新数据面，只含 `search` | `managedProviders` 保持 internal(secret)，账号/token 不出去 |
@@ -170,8 +170,8 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 按 [Scheduler](plugins/Scheduler.md) 已接受的形状，不在这里重定义：
 
 ```text
-scheduleJobs.call(JobRequest)
-  JobRequest = {action, jobId?, job?, enabled?, limit?, caller: Caller}
+scheduleJobs.call(ToolRequest)
+  ToolRequest = {action, job_id?, job?, enabled?, limit?, caller: Caller}
   Caller = {sessionId, branchId, cwd}
   -> JobReply
   -> error {code, message}
@@ -180,7 +180,7 @@ scheduleJobs.call(JobRequest)
 改动：
 
 - 给 `ScheduleJobs` 加 `#[rutis::service]` 数据面（或手写 dispatcher），在 `host_key("scheduleJobs")` 提供；本地仍用 typed。
-- `ToolRequest`、`Caller`、`JobReply` 补 serde derive；字段按 Scheduler 附录，不另起一套。
+- `ToolRequest` 已有 `Deserialize`；`Caller`、`JobReply` 补 serde derive。字段按 Scheduler 附录，不另起一套。
 - `SchedulerSession` 改注入 `dyn HostDispatch`；调用传 `caller` 和取消。
 - 测试：Scheduler 的 Session 工具 flow；离线/取消。
 
@@ -219,11 +219,12 @@ sessionFiles.owned_paths {sessionId} -> {paths: [string]}
 不把 `managedProviders` 变成 shared；新增一个名字，只含搜索：
 
 ```text
-managedSearch.search {query, count, cancel?}
+managedSearch.search {query, count}
   -> {results: [{title, url, snippet, publishedAt?}]}
   -> error {code: unavailable | search_failed, message}
 ```
 
+- 取消是协议动作（调用方丢弃调用或发 bridge cancel），不是请求字段。
 - `managedProviders` 保持 internal(secret)：账号、登录、token、租约仍在类型化面。
 - Web 的搜索改调 `managedSearch`；Web 的 settings 仍走 `settings`。
 - 新名字使 catalog 多一行；它不在 84 个现有名字里。
