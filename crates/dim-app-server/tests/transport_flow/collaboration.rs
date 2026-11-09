@@ -2928,6 +2928,7 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.0.join("command-output"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),

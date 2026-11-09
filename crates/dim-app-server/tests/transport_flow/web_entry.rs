@@ -322,6 +322,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: native.join("outputs"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),

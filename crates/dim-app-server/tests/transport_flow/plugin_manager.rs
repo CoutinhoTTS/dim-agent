@@ -2650,6 +2650,7 @@ pub(super) fn product_builder() -> AgentBuilder {
         &mut builder,
         dim_agent_capabilities::model_provider::ModelProviderPlugin::new,
         dim_agent_capabilities::workspace_tools::WorkspaceToolsConfig {
+            boundary: None,
             output_root: std::env::temp_dir().join("dm-pm-outputs"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),

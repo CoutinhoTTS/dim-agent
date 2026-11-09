@@ -478,7 +478,10 @@ pub fn run_with(
             defaults::install_local_execution(
                 &mut builder,
                 ModelProviderPlugin::process,
-                WorkspaceToolsConfig { output_root },
+                WorkspaceToolsConfig {
+                    boundary: None,
+                    output_root,
+                },
                 dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
             );
             permission_rules::install(&mut builder);

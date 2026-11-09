@@ -88,6 +88,7 @@ async fn host(work: &Work) -> RunningServer {
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: work.home.join("outputs"),
         },
         Default::default(),

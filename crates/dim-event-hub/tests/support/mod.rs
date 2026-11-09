@@ -306,6 +306,7 @@ async fn start_full(
     dim_agent_capabilities::workspace_tools::install(
         &mut builder,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.join("command-output"),
         },
     );
