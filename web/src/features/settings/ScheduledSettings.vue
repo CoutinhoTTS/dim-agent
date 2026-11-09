@@ -75,7 +75,9 @@ function applyTarget(form: Form, target: Target): void {
 }
 function toInput(form: Form): JobInput {
   const target: Target = form.kind === "launch"
-    ? { kind: "launch", cwd: form.cwd, agent_id: form.agent_id || undefined, policy: form.policy, max_run_minutes: form.max_run_minutes }
+    ? { kind: "launch", cwd: form.cwd, max_run_minutes: form.max_run_minutes,
+        ...(form.agent_id ? { agent_id: form.agent_id } : {}),
+        ...(form.policy ? { policy: form.policy } : {}) }
     : { kind: "session", session_id: form.session_id, branch_id: form.branch_id || "main", input_mode: form.input_mode }
   return { name: form.name, prompt: form.prompt, schedule: form.schedule, target, enabled: form.enabled }
 }
