@@ -94,12 +94,10 @@ impl PlannedTarget {
     }
 }
 
-/// The guide a delivery writes before its event: the current declaration's
-/// text and digest (design §3.3).
+/// The source whose guide a delivery writes before its event, when the
+/// branch's record is stale (design §3.3).
 struct GuideRefresh {
     source: String,
-    guide: String,
-    digest: String,
 }
 
 /// One delivery to make, or one branch that already holds the event.
@@ -225,13 +223,7 @@ async fn publish_to_completion(
                     &text,
                 ),
                 truncated: truncated && file.is_none(),
-                refresh: guide_refresh(
-                    &document,
-                    plan,
-                    &request.source,
-                    &declaration.guide,
-                    &guide_digest,
-                ),
+                refresh: guide_refresh(&document, plan, &request.source, &guide_digest),
             })
         })
         .collect();
@@ -455,7 +447,6 @@ fn guide_refresh(
     document: &Document,
     plan: &PlannedTarget,
     source: &str,
-    guide: &str,
     digest: &str,
 ) -> Option<GuideRefresh> {
     if plan.subscription_ids.is_empty() {
@@ -465,8 +456,6 @@ fn guide_refresh(
         Some(record) if record.digest == digest => None,
         _ => Some(GuideRefresh {
             source: source.to_owned(),
-            guide: guide.to_owned(),
-            digest: digest.to_owned(),
         }),
     }
 }
@@ -563,8 +552,11 @@ async fn deliver(
 
 /// Writes the current guide to the branch before its event, under that
 /// Session's lock, and only while a stored subscription on that branch still
-/// names the source (design §3.3). A refresh that cannot be written leaves the
-/// record stale, so the next delivery tries again.
+/// names the source (design §3.3). The declaration is read again here, under
+/// the delivery's permit, so the branch gets the text that is current at the
+/// write and the record carries that text's digest, not the plan's. A refresh
+/// that cannot be written leaves the record stale, so the next delivery tries
+/// again.
 async fn refresh_guide(
     service: &Arc<dyn HostDispatch>,
     store: &Arc<Store>,
@@ -580,19 +572,21 @@ async fn refresh_guide(
     if !store.document().names_source(&target, &refresh.source) {
         return None;
     }
+    let declaration = state.catalog().source(&refresh.source)?;
+    let digest = digest(&declaration.guide);
     match write_live_guide(
         service.as_ref(),
         &target,
         refresh_submission(&refresh.source),
         &refresh.source,
-        &refresh.guide,
+        &declaration.guide,
     )
     .await
     {
         Ok(()) => Some(GuideRecord {
             target,
             source: refresh.source.clone(),
-            digest: refresh.digest.clone(),
+            digest,
         }),
         Err(_) => None,
     }

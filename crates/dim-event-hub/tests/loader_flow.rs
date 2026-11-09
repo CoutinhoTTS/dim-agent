@@ -1,8 +1,9 @@
 //! The flows that need the product loader and a controllable `sessions`
 //! service: the factory rebuild keeps the install's state, a delete racing a
 //! subscribe, a retry after a failed put, a retry while the first append is
-//! paused, a changed guide written before the next event, and the install's
-//! shared delivery budget (design §2.1, §2.4, §2.5, §3.2, §3.3).
+//! paused, a changed guide written before the next event, a guide written
+//! from the declaration current at the write, and the install's shared
+//! delivery budget (design §2.1, §2.4, §2.5, §3.2, §3.3).
 mod support;
 
 use dim_agent_types::InputMode;
@@ -236,8 +237,8 @@ async fn a_limit_refusal_retires_the_guide_the_subscribe_wrote() {
         fixture.subscribe("b", &["other.*"], None)
     );
     let (loser_session, loser_source, winner_session) = match (&first, &second) {
-        (Ok(_), Err(error)) => ("b", "other", "a"),
-        (Err(error), Ok(_)) => ("a", "im", "b"),
+        (Ok(_), Err(_)) => ("b", "other", "a"),
+        (Err(_), Ok(_)) => ("a", "im", "b"),
         other => panic!("one subscribe wins the last slot: {other:?}"),
     };
     let loser_error = match (&first, &second) {
@@ -408,6 +409,80 @@ async fn a_changed_guide_is_written_before_the_next_event() {
     fixture.producer.publish(event("second")).await.unwrap();
     let calls = fixture.sessions.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(
+        calls[0].submission_id.starts_with("eventhub:im:"),
+        "{calls:?}"
+    );
+}
+
+/// A redeclaration that lands between a publish's plan and its guide write is
+/// the one written: the text and the recorded digest are the declaration the
+/// write read, not the plan's (design §3.3, Appendix D item 15).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guide_is_written_from_the_declaration_current_at_the_write() {
+    let fixture = Arc::new(LoaderFixture::mount().await);
+    fixture.producer.declare(im_declaration()).await.unwrap();
+    fixture.subscribe("branch", &["im.*"], None).await.unwrap();
+    fixture.sessions.clear();
+    // A second subscribe holds the Session lock in its guide write, so the
+    // delivery's guide write waits for the lock (design §3.3).
+    let gate = fixture.sessions.gate_live();
+    let holding = {
+        let fixture = fixture.clone();
+        tokio::spawn(async move { fixture.subscribe("branch", &["im.*"], None).await })
+    };
+    wait_for("the subscribe's guide write in flight", || gate.max() >= 1).await;
+    // The publish captures this declaration on its first poll, then its
+    // delivery waits for the Session lock.
+    let mut second = im_declaration();
+    second.guide = "The second guide.".into();
+    fixture.producer.declare(second).await.unwrap();
+    let redeclaring = {
+        let fixture = fixture.clone();
+        async move {
+            // Polled after the publish's first poll: the captured declaration
+            // is the second one, and the write still waits for the lock.
+            let mut third = im_declaration();
+            third.guide = "The third guide.".into();
+            fixture.producer.declare(third).await.unwrap();
+            gate.release();
+        }
+    };
+    let waiting = async {
+        fixture
+            .producer
+            .publish(event_to("shared", &["branch".to_owned()]))
+            .await
+    };
+    let (receipt, ()) = tokio::join!(waiting, redeclaring);
+    receipt.unwrap();
+    holding.await.unwrap().unwrap();
+
+    let calls = fixture.sessions.calls();
+    let refreshes: Vec<_> = calls
+        .iter()
+        .filter(|call| call.submission_id.starts_with("eventhub-guide-refresh:im:"))
+        .collect();
+    assert_eq!(refreshes.len(), 1, "one guide write: {calls:?}");
+    assert!(
+        refreshes[0].text.contains("The third guide."),
+        "the write reads the declaration current at the write: {calls:?}"
+    );
+    assert!(
+        !refreshes[0].text.contains("The second guide."),
+        "{calls:?}"
+    );
+
+    // The record carries the written text's digest: the next publish, under
+    // the same declaration, writes no guide.
+    fixture.sessions.clear();
+    fixture
+        .producer
+        .publish(event_to("later", &["branch".to_owned()]))
+        .await
+        .unwrap();
+    let calls = fixture.sessions.calls();
+    assert_eq!(calls.len(), 1, "no second guide write: {calls:?}");
     assert!(
         calls[0].submission_id.starts_with("eventhub:im:"),
         "{calls:?}"
