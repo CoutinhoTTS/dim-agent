@@ -7,6 +7,7 @@ pub struct CodeModeConfig {
     pub max_calls: u64,
     pub max_parallel_calls: usize,
     pub max_memory_bytes: usize,
+    pub max_programs: usize,
     pub max_output_bytes: usize,
     pub max_single_result_bytes: usize,
 }
@@ -19,6 +20,7 @@ impl Default for CodeModeConfig {
             max_calls: 64,
             max_parallel_calls: 4,
             max_memory_bytes: 256 * 1024 * 1024,
+            max_programs: 2,
             max_output_bytes: 1024 * 1024,
             max_single_result_bytes: 256 * 1024,
         }

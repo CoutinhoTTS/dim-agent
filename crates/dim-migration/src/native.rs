@@ -618,6 +618,7 @@ pub(crate) fn history(data: &SessionData) -> Result<Vec<StoredEvent>> {
                 sequence,
                 create_at: now,
                 tags: Some(vec!["migration:legacy-import".into()]),
+                parent_call_id: None,
                 kind,
             }),
             trace: None,

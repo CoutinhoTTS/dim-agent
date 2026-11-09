@@ -19,5 +19,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+dim-agent-questions.workspace = true
 dim-agent-runtime = { workspace = true, features = ["testing"] }
 futures-util.workspace = true

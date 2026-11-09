@@ -69,6 +69,7 @@ fn internal_controls_use_the_common_event_envelope() {
             sequence: 27,
             create_at: 1_750_000_000_123,
             tags: None,
+            parent_call_id: None,
             kind,
         };
         let mut expected = payload;
@@ -127,6 +128,7 @@ fn native_product_events_round_trip_without_a_v1_view() {
             sequence: 1,
             create_at: 1,
             tags: None,
+            parent_call_id: None,
             kind: draft.kind,
         };
         assert_eq!(
@@ -216,6 +218,7 @@ fn v1_boundary_rejects_new_fields_and_hides_new_events() {
         sequence: 1,
         create_at: 1,
         tags: None,
+        parent_call_id: None,
         kind: EventKind::PromptChanged(PromptChangedData {
             timeline: "main".into(),
             revision: "r1".into(),

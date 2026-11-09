@@ -37,7 +37,10 @@ impl DynPlugin for CodeModeProcessPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let registry = ctx.require_at(&self.registry)?;
-            ctx.provide_at(self.runs.clone(), Arc::new(CodeModeRuns::default()))?;
+            ctx.provide_at(
+                self.runs.clone(),
+                Arc::new(CodeModeRuns::new(self.config.max_programs)),
+            )?;
 
             let session_config = self.config.clone();
             registry.register(ctx, PartScope::Session, "CodeModeSession", move |mount| {

@@ -1,37 +1,47 @@
 use dim_agent_capabilities::{
     host::{HostError, ToolExecutionContext},
-    tool_executor::ToolExecutor,
+    tool_executor::{NestedGate, ToolExecutor},
 };
-use dim_agent_types::{ToolCall, ToolDefinition, ToolResult};
-use std::{future::Future, pin::Pin};
+use dim_agent_types::ToolDefinition;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// The child-call surface a program sees. The production implementation is
+/// The child-call surface a program sees. The production implementation wraps
 /// `ToolExecutor`; a test supplies its own.
 pub trait NestedToolHost: Send + Sync + 'static {
     /// The declarations the request pinned, without the `codemode` tool.
     fn definitions(&self, request_id: &str) -> Result<Vec<ToolDefinition>, String>;
 
-    /// Runs one child call through the host's pinned binding and admission.
-    fn invoke(
+    /// Opens the gate for one outer call.
+    fn open(
         &self,
-        call: ToolCall,
+        parent_call_id: String,
         context: ToolExecutionContext,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>>;
+    ) -> Result<Arc<dyn NestedGate>, HostError>;
 }
 
-impl NestedToolHost for ToolExecutor {
+pub struct ToolExecutorHost {
+    executor: Arc<ToolExecutor>,
+}
+
+impl ToolExecutorHost {
+    pub fn new(executor: Arc<ToolExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+impl NestedToolHost for ToolExecutorHost {
     fn definitions(&self, request_id: &str) -> Result<Vec<ToolDefinition>, String> {
-        ToolExecutor::definitions(self, request_id)
+        self.executor.definitions(request_id)
     }
 
-    fn invoke(
+    fn open(
         &self,
-        call: ToolCall,
+        parent_call_id: String,
         context: ToolExecutionContext,
         cancel: CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>> {
-        Box::pin(ToolExecutor::nested(self, call, context, cancel))
+    ) -> Result<Arc<dyn NestedGate>, HostError> {
+        ToolExecutor::open(&self.executor, parent_call_id, context, cancel)
     }
 }

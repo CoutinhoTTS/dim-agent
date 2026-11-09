@@ -1212,6 +1212,7 @@ mod tests {
             sequence: 41,
             create_at: 0,
             tags: None,
+            parent_call_id: None,
             kind: dim_agent_types::EventKind::InputMessage(input),
         };
         let mut fold = Fold::default();

@@ -1194,6 +1194,14 @@ pub struct EventDraft {
         deserialize_with = "crate::optional_non_null"
     )]
     pub tags: Option<Vec<String>>,
+    /// The tool call that produced this event, when the event belongs to a
+    /// child invocation. Absent for a top-level model batch.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub parent_call_id: Option<String>,
     #[serde(flatten)]
     pub kind: EventKind,
 }
@@ -1203,12 +1211,18 @@ impl EventDraft {
         Self {
             id: None,
             tags: None,
+            parent_call_id: None,
             kind,
         }
     }
 
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
+        self
+    }
+
+    pub fn with_parent_call_id(mut self, parent_call_id: impl Into<String>) -> Self {
+        self.parent_call_id = Some(parent_call_id.into());
         self
     }
 }
@@ -1231,6 +1245,12 @@ pub struct AgentEvent {
         deserialize_with = "crate::optional_non_null"
     )]
     pub tags: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub parent_call_id: Option<String>,
     #[serde(flatten)]
     pub kind: EventKind,
 }

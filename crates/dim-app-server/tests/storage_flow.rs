@@ -101,6 +101,7 @@ fn record(sequence: u64, kind: EventKind) -> StoredEvent {
             sequence,
             create_at: 1000 + sequence,
             tags: Some(vec!["stored".into()]),
+            parent_call_id: None,
             kind,
         }),
         trace: None,
@@ -757,6 +758,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
             result: Some(EventDraft {
                 id: None,
                 tags: first.event.tags.clone(),
+                parent_call_id: None,
                 kind: prepare,
             }),
         }],
@@ -785,6 +787,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
             result: Some(EventDraft {
                 id: None,
                 tags: fifth.event.tags.clone(),
+                parent_call_id: None,
                 kind: fifth.event.kind.clone(),
             }),
         }],
@@ -2033,6 +2036,7 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
         Some(EventDraft {
             id: None,
             tags: traced.event.tags.clone(),
+            parent_call_id: None,
             kind: prepare(request),
         })
     };
@@ -4126,8 +4130,8 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37));
-             INSERT INTO agent_store_format VALUES (37);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 38));
+             INSERT INTO agent_store_format VALUES (38);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -4137,10 +4141,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v37"), "{note}");
-    assert!(note.contains("Daemon format: v36"), "{note}");
+    assert!(note.contains("Store format: v38"), "{note}");
+    assert!(note.contains("Daemon format: v37"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v37"), "{note}");
+    assert!(note.contains("Run a build supporting v38"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -4158,7 +4162,7 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29 (schema is v36)"), "{note}");
+    assert!(note.contains("Store format: v29 (schema is v37)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -4202,7 +4206,7 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v36 (format marker is missing or ambiguous)"),
+        note.contains("Store format: v37 (format marker is missing or ambiguous)"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -4301,14 +4305,14 @@ fn a_failed_open_replaces_the_previous_startup_note() {
         .unwrap();
     std::fs::write(
         startup_note(&database.0),
-        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v37\n",
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v38\n",
     )
     .unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     let note = read_startup_note(&database.0);
     assert!(note.contains("Store format: v34"), "{note}");
     assert!(!note.contains("/previous"), "{note}");
-    assert!(!note.contains("v37"), "{note}");
+    assert!(!note.contains("v38"), "{note}");
 }
 
 #[test]
@@ -8054,6 +8058,7 @@ fn query_record(sequence: u64, batch_end: u64, id: &str, kind: EventKind) -> Sto
             sequence,
             create_at: 1000 + sequence,
             tags: None,
+            parent_call_id: None,
             kind,
         }),
         trace: None,

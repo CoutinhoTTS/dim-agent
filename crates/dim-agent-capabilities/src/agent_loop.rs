@@ -1229,6 +1229,9 @@ impl AgentLoop {
         result_cancel
     }
     fn on_event(self: &Arc<Self>, event: Arc<AgentEvent>) -> Result<()> {
+        if event.parent_call_id.is_some() {
+            return Ok(());
+        }
         let mut slot = self.turn.lock().unwrap();
         match &event.kind {
             EventKind::InputApplied(data) => {

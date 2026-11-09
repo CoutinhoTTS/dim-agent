@@ -1514,6 +1514,7 @@ async fn stored(harness: &Harness, session_id: &str, kinds: Vec<EventKind>) -> V
             sequence,
             create_at: 0,
             tags: None,
+            parent_call_id: None,
             kind,
         });
         ids.push(event.id.clone());

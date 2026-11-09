@@ -557,6 +557,7 @@ impl TimelineTree {
             sequence,
             create_at: dim_agent_runtime::core::unix_millis(),
             tags: None,
+            parent_call_id: None,
             kind: EventKind::BranchEnded(data),
         });
         let (published, wait) = oneshot::channel();
@@ -3941,6 +3942,7 @@ mod tests {
             sequence,
             create_at: 1_750_000_000_000 + sequence,
             tags: None,
+            parent_call_id: None,
             kind,
         })
     }

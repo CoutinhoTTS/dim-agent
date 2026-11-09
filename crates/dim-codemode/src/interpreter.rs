@@ -1,5 +1,8 @@
 use crate::{config::CodeModeConfig, host::NestedToolHost};
-use dim_agent_capabilities::host::{HostError, ToolExecutionContext};
+use dim_agent_capabilities::{
+    host::{HostError, ToolExecutionContext},
+    tool_executor::NestedGate,
+};
 use dim_agent_types::{JsonObject, ToolCall, ToolEffect, ToolResult};
 use rquickjs::{AsyncContext, AsyncRuntime, Function, Object, Promise, prelude::*};
 use serde_json::json;
@@ -24,9 +27,11 @@ type EffectLog = Arc<Mutex<Vec<(u64, Vec<ToolEffect>)>>>;
 /// Runs one program in a fresh QuickJS context. The context receives only
 /// `tools.list`, `tools.describe` and `tools.call`; every child call goes
 /// through the branch's `ToolExecutor` with its pinned binding and Approval.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_program(
     executor: Arc<dyn NestedToolHost>,
     config: Arc<CodeModeConfig>,
+    outer_call_id: String,
     code: String,
     timeout_ms: Option<u64>,
     max_calls: Option<u64>,
@@ -64,11 +69,16 @@ pub(crate) async fn run_program(
     let calls = Arc::new(AtomicU64::new(0));
     let parallel = Arc::new(Semaphore::new(config.max_parallel_calls.max(1)));
     let effects = Arc::new(Mutex::new(Vec::<(u64, Vec<ToolEffect>)>::new()));
+    let child_cancel = cancel.child_token();
+    let gate = match executor.open(outer_call_id, context.clone(), child_cancel.clone()) {
+        Ok(gate) => gate,
+        Err(error) => return Ok(ToolResult::error(error.to_string())),
+    };
 
     let runtime = AsyncRuntime::new()
         .map_err(|error| HostError::failed(format!("QuickJS runtime: {error}")))?;
     runtime.set_memory_limit(config.max_memory_bytes).await;
-    let interrupted = cancel.clone();
+    let interrupted = child_cancel.clone();
     runtime
         .set_interrupt_handler(Some(Box::new(move || {
             instant_passed(deadline) || interrupted.is_cancelled()
@@ -81,6 +91,8 @@ pub(crate) async fn run_program(
     let output_limit = config.max_output_bytes;
     let cancel_after = cancel.clone();
     let effects_after = effects.clone();
+    let gate_after = gate.clone();
+    let child_cancel_after = child_cancel.clone();
     let run = context_handle.async_with(async move |ctx| {
         let globals = ctx.globals();
         let tools = Object::new(ctx.clone())?;
@@ -108,9 +120,8 @@ pub(crate) async fn run_program(
         tools.set("describe", describe)?;
 
         let call_scope = CallScope {
-            executor: executor.clone(),
-            context: context.clone(),
-            cancel: cancel.clone(),
+            gate: gate.clone(),
+            cancel: child_cancel.clone(),
             count: calls.clone(),
             parallel: parallel.clone(),
             effects: effects.clone(),
@@ -165,6 +176,8 @@ pub(crate) async fn run_program(
         _ = cancel_after.cancelled() => None,
         result = timeout_at(deadline, run) => result.ok(),
     };
+    child_cancel_after.cancel();
+    gate_after.close().await;
 
     match result {
         Some(Ok(output)) => {
@@ -179,7 +192,10 @@ pub(crate) async fn run_program(
         }
         Some(Err(error)) => {
             if cancel_after.is_cancelled() {
-                Err(HostError::Cancelled("Code Mode program cancelled".into()))
+                Ok(with_effects(
+                    ToolResult::error("Code Mode program cancelled"),
+                    &effects_after,
+                ))
             } else if instant_passed(deadline) {
                 Ok(with_effects(
                     ToolResult::error("Code Mode program timed out"),
@@ -194,7 +210,10 @@ pub(crate) async fn run_program(
         }
         None => {
             if cancel_after.is_cancelled() {
-                Err(HostError::Cancelled("Code Mode program cancelled".into()))
+                Ok(with_effects(
+                    ToolResult::error("Code Mode program cancelled"),
+                    &effects_after,
+                ))
             } else {
                 Ok(with_effects(
                     ToolResult::error("Code Mode program timed out"),
@@ -207,8 +226,7 @@ pub(crate) async fn run_program(
 
 #[derive(Clone)]
 struct CallScope {
-    executor: Arc<dyn NestedToolHost>,
-    context: ToolExecutionContext,
+    gate: Arc<dyn NestedGate>,
     cancel: CancellationToken,
     count: Arc<AtomicU64>,
     parallel: Arc<Semaphore>,
@@ -264,10 +282,7 @@ async fn call_nested_tool(
         name,
         input,
     };
-    let result = scope
-        .executor
-        .invoke(call, scope.context, scope.cancel)
-        .await;
+    let result = scope.gate.invoke(call).await;
     drop(permit);
     match result {
         Ok(result) => {

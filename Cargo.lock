@@ -1190,7 +1190,6 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
- "dim-codemode",
  "dim-modality",
  "encoding_rs",
  "flate2",
@@ -1294,6 +1293,7 @@ name = "dim-codemode"
 version = "0.1.0-alpha.18"
 dependencies = [
  "dim-agent-capabilities",
+ "dim-agent-questions",
  "dim-agent-runtime",
  "dim-agent-types",
  "futures-util",

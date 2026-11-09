@@ -131,6 +131,7 @@ impl ToolHandler for CodeModeTool {
                 })?;
             runner
                 .run(
+                    call.id,
                     input.code,
                     input.timeout_ms,
                     input.max_calls,

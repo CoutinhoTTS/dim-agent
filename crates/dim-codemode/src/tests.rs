@@ -1,6 +1,7 @@
 use crate::{CodeModeConfig, NestedToolHost, interpreter::run_program};
 use dim_agent_capabilities::{
     host::{HostError, ToolExecutionContext},
+    tool_executor::NestedGate,
     tool_registry::definition,
 };
 use dim_agent_types::{ToolCall, ToolContent, ToolDefinition, ToolResult, ToolSource};
@@ -17,11 +18,22 @@ impl NestedToolHost for MockHost {
         Ok(self.definitions.clone())
     }
 
+    fn open(
+        &self,
+        _: String,
+        _: ToolExecutionContext,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn NestedGate>, HostError> {
+        Ok(Arc::new(MockGate))
+    }
+}
+
+struct MockGate;
+
+impl NestedGate for MockGate {
     fn invoke(
         &self,
         call: ToolCall,
-        _: ToolExecutionContext,
-        _: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>> {
         Box::pin(async move {
             match call.name.as_str() {
@@ -43,6 +55,10 @@ impl NestedToolHost for MockHost {
                 other => Ok(ToolResult::error(format!("unknown tool {other}"))),
             }
         })
+    }
+
+    fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
     }
 }
 
@@ -72,6 +88,7 @@ async fn run(code: &str, max_calls: Option<u64>) -> ToolResult {
     run_program(
         host(),
         Arc::new(CodeModeConfig::default()),
+        "outer".into(),
         code.into(),
         None,
         max_calls,
@@ -163,6 +180,7 @@ async fn a_never_settling_promise_is_a_timeout() {
     let result = run_program(
         host(),
         Arc::new(config),
+        "outer".into(),
         "await new Promise(() => {}); return 1;".into(),
         None,
         None,
@@ -196,14 +214,16 @@ async fn cancellation_wins_over_a_synchronous_loop() {
     let result = run_program(
         host(),
         Arc::new(CodeModeConfig::default()),
+        "outer".into(),
         "while (true) {}".into(),
         None,
         None,
         context(),
         token,
     )
-    .await;
-    assert!(matches!(result, Err(HostError::Cancelled(_))));
+    .await
+    .expect("program settles");
+    assert_eq!(text(&result), "Code Mode program cancelled");
 }
 
 #[tokio::test]
@@ -221,6 +241,7 @@ async fn a_waiting_parallel_call_is_released_by_cancellation() {
     let result = run_program(
         host(),
         Arc::new(config),
+        "outer".into(),
         r#"await Promise.all([tools.call("slow", {}), tools.call("slow", {})]); return "done";"#
             .into(),
         None,
@@ -228,8 +249,9 @@ async fn a_waiting_parallel_call_is_released_by_cancellation() {
         context(),
         token,
     )
-    .await;
-    assert!(matches!(result, Err(HostError::Cancelled(_))));
+    .await
+    .expect("program settles");
+    assert_eq!(text(&result), "Code Mode program cancelled");
 }
 
 #[tokio::test]
@@ -241,6 +263,7 @@ async fn a_synchronous_loop_is_interrupted() {
     let result = run_program(
         host(),
         Arc::new(config),
+        "outer".into(),
         "while (true) {}".into(),
         None,
         None,
