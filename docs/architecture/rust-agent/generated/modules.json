@@ -1885,6 +1885,13 @@
       ]
     },
     {
+      "id": "dim_agent_scheduler::testing",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler",
+      "file": "crates/dim-agent-scheduler/src/testing.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_scheduler::wakeup_pass",
       "crate": "dim_agent_scheduler",
       "parent": "dim_agent_scheduler",
@@ -19492,6 +19499,7 @@
         "mod methods",
         "path ScheduleJobs",
         "path SchedulerPlugin::new",
+        "path SchedulerPlugin::new_with_testing",
         "use methods::ScheduleJobs",
         "use methods::SchedulerPlugin"
       ]
@@ -19519,6 +19527,14 @@
       "to": "dim_agent_scheduler::support",
       "references": [
         "mod support"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler",
+      "to": "dim_agent_scheduler::testing",
+      "references": [
+        "mod testing",
+        "path testing::Holds"
       ]
     },
     {
@@ -19825,6 +19841,13 @@
     },
     {
       "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_scheduler::testing",
+      "references": [
+        "path crate::testing::Holds"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
       "to": "dim_agent_scheduler::wakeups",
       "references": [
         "path crate::wakeups::Wakeups",
@@ -20125,7 +20148,16 @@
       "from": "dim_agent_scheduler::support",
       "to": "dim_agent_scheduler",
       "references": [
-        "path dim_agent_scheduler::install"
+        "path dim_agent_scheduler::SchedulerTexts::default",
+        "path dim_agent_scheduler::install_with_testing"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::support",
+      "to": "dim_agent_scheduler::testing",
+      "references": [
+        "path dim_agent_scheduler::testing::Holds",
+        "path dim_agent_scheduler::testing::Holds::default"
       ]
     },
     {
