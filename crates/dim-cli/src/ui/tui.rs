@@ -2571,7 +2571,9 @@ impl App {
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Lines(p) => p.handle_key(key),
                 Prompt::Timeline(p) => p.handle_key(key),
-                Prompt::Queue(p) => p.handle_key(key),
+                Prompt::Queue(p) => {
+                    p.handle_key(key, self.snapshot.as_ref().expect("attached queue"))
+                }
                 Prompt::Export(p) => match p.handle_key(key) {
                     ListEvent::Pick(format) => Effect::Export(if format == "markdown" {
                         crate::export::Format::Markdown
@@ -4651,7 +4653,13 @@ impl App {
                         input.id.clone(),
                         format!(
                             "{} · {}",
-                            t(if input.held { "Held" } else { "Incorporating" }),
+                            t(if input.held {
+                                "Held"
+                            } else if self.running() {
+                                "Incorporating"
+                            } else {
+                                "Unread"
+                            }),
                             input.display.as_deref().unwrap_or(&input.text)
                         ),
                     )
@@ -4665,7 +4673,20 @@ impl App {
                 self.queue_rows.max(queued.len().min(QUEUE_ROWS))
             };
             if self.queue_rows > 0 {
-                live.extend(queue_strip(&queued, self.queue_rows, cols, &self.palette));
+                let hint = if !self.queued().is_empty() {
+                    QUEUE_HINT
+                } else if self.running() {
+                    "/queue view · awaiting model consumption"
+                } else {
+                    "/queue view · waiting for your next message"
+                };
+                live.extend(queue_strip(
+                    &queued,
+                    self.queue_rows,
+                    cols,
+                    &self.palette,
+                    hint,
+                ));
             }
         }
         let side = match self.snapshot.as_ref().and_then(|s| s.side.as_ref()) {
@@ -6098,15 +6119,20 @@ const QUEUE_ROWS: usize = 5;
 /// The queue strip's hint, and its form when messages are not shown. Every
 /// `/name` it can draw is a command in the table.
 const QUEUE_HINT: &str = "/queue manage · shift+← edit last · ctrl+s steer now";
-const QUEUE_HINT_MORE: &str =
-    "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now";
+const QUEUE_HINT_MORE: &str = "+{count} more · {hint}";
 
 /// The queue, drawn in a titled border above the composer: the next message
 /// to run reads at the top. `height` message rows are drawn (at least the
 /// queue's, at most [`QUEUE_ROWS`]), blank past the queue's end, so the
 /// strip holds its height while the queue drains. An empty queue is not
 /// drawn at all.
-fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palette) -> Vec<String> {
+fn queue_strip(
+    items: &[(String, String)],
+    height: usize,
+    cols: usize,
+    p: &Palette,
+    hint: &str,
+) -> Vec<String> {
     use crate::ui::render::panel::bordered;
     use crate::ui::text::truncate_cells;
     let outer = cols.saturating_sub(2 + MARGIN).max(4);
@@ -6122,9 +6148,12 @@ fn queue_strip(items: &[(String, String)], height: usize, cols: usize, p: &Palet
         .collect();
     rows.resize_with(height, String::new);
     let hint = if hidden == 0 {
-        t(QUEUE_HINT).to_owned()
+        t(hint).to_owned()
     } else {
-        tf(QUEUE_HINT_MORE, &[("count", &hidden.to_string())])
+        tf(
+            QUEUE_HINT_MORE,
+            &[("count", &hidden.to_string()), ("hint", t(hint))],
+        )
     };
     rows.push(fg(&truncate_cells(&hint, inner), &p.muted));
     let title = paint(
@@ -10075,8 +10104,11 @@ mod tests {
         let p = &test_theme().palette;
         let item = |n: usize| (format!("id{n}"), format!("message {n}"));
         let three: Vec<_> = (1..=3).map(item).collect();
-        let full = queue_strip(&three, 3, 80, p);
-        assert_eq!(queue_strip(&three[..1], 3, 80, p).len(), full.len());
+        let full = queue_strip(&three, 3, 80, p, QUEUE_HINT);
+        assert_eq!(
+            queue_strip(&three[..1], 3, 80, p, QUEUE_HINT).len(),
+            full.len()
+        );
     }
 
     /// The queue strip names only commands the table has, in every locale.
