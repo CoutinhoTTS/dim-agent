@@ -1389,10 +1389,7 @@ async fn a_save_that_replaces_a_legacy_reuse_target_releases_its_session() {
         "the retarget keeps every delivery: {after}"
     );
     let runs = stored_runs(home.path());
-    let released = runs
-        .iter()
-        .find(|run| run["run_id"] == "run-1")
-        .unwrap();
+    let released = runs.iter().find(|run| run["run_id"] == "run-1").unwrap();
     assert_eq!(
         released["session_origin"], "reuse",
         "the launch ownership is retired on the record: {released}"
@@ -1478,10 +1475,7 @@ async fn a_failed_release_heals_at_the_next_retention_pass() {
         .unwrap();
     std::fs::write(home.path().join("scheduler/runs.json"), &valid).unwrap();
     let runs = stored_runs(home.path());
-    let still_owned = runs
-        .iter()
-        .find(|run| run["run_id"] == "run-1")
-        .unwrap();
+    let still_owned = runs.iter().find(|run| run["run_id"] == "run-1").unwrap();
     assert_eq!(still_owned["session_origin"], "launch", "{still_owned}");
 
     // Deleting the dummy job runs a retention pass, which re-derives the
@@ -1491,9 +1485,9 @@ async fn a_failed_release_heals_at_the_next_retention_pass() {
         .await
         .unwrap();
     wait_for("the retention pass releases the record", || {
-        stored_runs(home.path()).iter().any(|run| {
-            run["run_id"] == "run-1" && run["session_origin"] == "reuse"
-        })
+        stored_runs(home.path())
+            .iter()
+            .any(|run| run["run_id"] == "run-1" && run["session_origin"] == "reuse")
     })
     .await;
 
@@ -1895,7 +1889,12 @@ async fn a_re_enable_does_not_replay_the_old_target_gone_claim() {
         .typed("schedule.run_now", json!({"job_id": saved_job}))
         .await
         .unwrap();
-    let run = settled(&mut client, &saved_job, accepted["run_id"].as_str().unwrap()).await;
+    let run = settled(
+        &mut client,
+        &saved_job,
+        accepted["run_id"].as_str().unwrap(),
+    )
+    .await;
     assert_eq!(run["state"], "delivered", "{run}");
 
     drop(client);
@@ -1941,10 +1940,7 @@ async fn a_target_gone_lookup_settles_failed_and_disables() {
     })
     .await;
     let runs = stored_runs(home.path());
-    let run = runs
-        .iter()
-        .find(|run| run["run_id"] == "gone-run")
-        .unwrap();
+    let run = runs.iter().find(|run| run["run_id"] == "gone-run").unwrap();
     assert_eq!(run["detail"], "session_closed", "{run}");
     let job = wait_for_job(&mut client, &job).await;
     assert_eq!(job["disabled_reason"]["code"], "session_closed", "{job}");
