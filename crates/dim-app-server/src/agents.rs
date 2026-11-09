@@ -1426,23 +1426,22 @@ impl AgentIndex {
         Self::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
-        let in_use = self.in_use_reason(id).await?;
-        let removed = match in_use {
-            Some(_) => None,
-            None => Some(self.remove_locked(id, &slot).await?),
+        // One match yields both the outcome and what there is to announce, so
+        // neither an `unreachable!()` arm nor a second decision is needed.
+        let (outcome, removed) = match self.in_use_reason(id).await? {
+            Some(reason) => (DeleteOutcome::InUse(reason), None),
+            None => {
+                let removed = self.remove_locked(id, &slot).await?;
+                (DeleteOutcome::Removed(removed.deleted), Some(removed))
+            }
         };
         drop(gate);
         drop(slot);
         self.directory.inner.lock().expect("agent index").sweep();
-        match (in_use, removed) {
-            (Some(reason), _) => Ok(DeleteOutcome::InUse(reason)),
-            (None, Some(removed)) => {
-                let deleted = removed.deleted;
-                self.announce(removed).await;
-                Ok(DeleteOutcome::Removed(deleted))
-            }
-            (None, None) => unreachable!("a delete either refuses or removes"),
+        if let Some(removed) = removed {
+            self.announce(removed).await;
         }
+        Ok(outcome)
     }
 
     /// The id names `command-output/<id>`, so only a single path component
