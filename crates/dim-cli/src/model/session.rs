@@ -65,6 +65,15 @@ pub enum PromptField {
 impl PromptField {
     pub const ALL: [Self; 3] = [Self::Base, Self::Summary, Self::Skills];
 
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "base" => Some(Self::Base),
+            "summary" => Some(Self::Summary),
+            "skills" => Some(Self::Skills),
+            _ => None,
+        }
+    }
+
     /// The field's name in the document and on the command line.
     pub fn key(self) -> &'static str {
         match self {
@@ -294,14 +303,17 @@ pub enum Command {
     },
     /// Read the `prompts` source.
     ReadPromptSettings,
-    /// Replace one prompt field, merging the rest of the document.
+    /// Replace one prompt field, merging the rest of the document. `revision`
+    /// is the one the client displayed; a newer one is a conflict.
     SavePromptSetting {
         field: PromptField,
         text: String,
+        revision: String,
     },
     /// Remove one prompt field, merging the rest of the document.
     ResetPromptSetting {
         field: PromptField,
+        revision: String,
     },
     ClearModelPreferences {
         provider_id: String,
@@ -1199,8 +1211,12 @@ pub enum Update {
     SuggestionMethods(bool),
     /// The `prompt-suggestion` switch, as last read or written.
     SuggestionSetting(Result<SuggestionSetting, String>),
-    /// The `prompts` source, as last read or written.
-    PromptSettings(Result<PromptSetting, String>),
+    /// The `prompts` source, as last read or written. `field` names the write
+    /// that produced it; a read carries none.
+    PromptSettings {
+        result: Result<PromptSetting, String>,
+        field: Option<PromptField>,
+    },
     /// A turn completed on `main`: the interface may ask for the next
     /// message when nothing else has its attention.
     TurnCompleted {

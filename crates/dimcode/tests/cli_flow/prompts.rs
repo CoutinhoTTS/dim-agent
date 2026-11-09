@@ -158,6 +158,38 @@ fn prompt_edit_writes_what_the_editor_leaves() {
 }
 
 #[test]
+fn prompt_set_skills_warns_about_the_protocol_sentences() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        hello(wire);
+        read(wire, "rev:1", json!({}));
+        let update = wire.read("settings.update");
+        assert_eq!(update["params"]["document"], json!({"skills": "K"}));
+        wire.reply(
+            &update,
+            json!({"revision": "rev:2", "document": {"skills": "K"}}),
+        );
+    });
+    let mut child = home
+        .command()
+        .args(["prompt", "set", "skills", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"K").unwrap();
+    let output = child.wait_with_output().unwrap();
+    daemon.join().unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("marker and call shape"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn prompt_reset_removes_only_its_field() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

@@ -34,6 +34,10 @@ impl SkillsInstructionsSettings for FixedInstructions {
 async fn host_overrides_replace_the_policy_texts() {
     let dirs = Dirs::new();
     let cwd = dirs.dir("root");
+    dirs.write(
+        &dirs.home.join(".agents/skills/review/SKILL.md"),
+        &skill_file("review", "Review a diff", "REVIEW"),
+    );
     let env = env(
         &dirs,
         Options {
@@ -51,6 +55,45 @@ async fn host_overrides_replace_the_policy_texts() {
     assert!(!system.contains("You are DimAgent."), "{system}");
     assert!(system.contains("CUSTOM-SKILLS"), "{system}");
     assert!(!system.contains("<skills_instructions>"), "{system}");
+    let last = sent.last().unwrap();
+    assert!(
+        last.tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.name == "skill")),
+        "the skill tool is still declared"
+    );
+    let text = request_text(last);
+    assert!(text.contains("dim/skills/list"), "{text}");
+    assert!(text.contains("review"), "{text}");
+    env.agent.close().await.unwrap();
+}
+
+/// A registered but unprovided host is not a gate: the Session opens with the
+/// built-in texts instead of waiting for the service.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_registered_but_missing_host_keeps_the_built_in_text() {
+    let dirs = Dirs::new();
+    let cwd = dirs.dir("root");
+    let env = env(
+        &dirs,
+        Options {
+            missing_settings_hosts: true,
+            ..Options::default()
+        },
+    )
+    .await;
+    let session = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        env.session(&cwd, "SESSION-S"),
+    )
+    .await
+    .expect("the Session opens without the host")
+    .unwrap();
+    run(&session, "hello").await;
+    let sent = requests(&session).await;
+    let system = system_text(sent.last().unwrap().system.as_deref().unwrap());
+    assert!(system.contains("You are DimAgent."), "{system}");
+    assert!(system.contains("<skills_instructions>"), "{system}");
     env.agent.close().await.unwrap();
 }
 

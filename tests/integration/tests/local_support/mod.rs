@@ -398,6 +398,9 @@ pub struct Options {
     /// root when present.
     pub skills_instructions:
         Option<Arc<dyn dim_agent_capabilities::skills::SkillsInstructionsSettings>>,
+    /// Register both prompt-settings names without providing a host: the
+    /// parts must fall back to the built-in text instead of waiting for one.
+    pub missing_settings_hosts: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -414,6 +417,7 @@ impl Default for Options {
             execution: None,
             base_prompt: None,
             skills_instructions: None,
+            missing_settings_hosts: false,
         }
     }
 }
@@ -466,6 +470,14 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     if let Some(store) = options.store {
         builder.timeline_store(store);
+    }
+    if options.missing_settings_hosts {
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::prompt_sources::BasePromptSettingsHost,
+        >(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::skills::SkillsInstructionsSettingsHost,
+        >(builder.catalog_mut(), None);
     }
     if let Some(base) = &options.base_prompt {
         dim_agent_runtime::names::register::<

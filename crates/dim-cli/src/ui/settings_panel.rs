@@ -141,6 +141,10 @@ fn prompt_label(field: PromptField) -> &'static str {
     }
 }
 
+const HINT: &str = "↑↓ move · Enter select · ←→/Space change · r reset · Esc close";
+const SKILLS_HINT: &str =
+    "skills replaces the marker and call shape; the skill tool and list stay · r reset";
+
 fn prompt_origin(prompt: Option<bool>) -> String {
     match prompt {
         Some(true) => format!("{} ›", t("custom")),
@@ -289,6 +293,14 @@ impl SettingsPanel {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         let setting = self.selected();
+        self.list.set_hint(
+            if setting == Setting::SkillsPrompt {
+                t(SKILLS_HINT)
+            } else {
+                t(HINT)
+            }
+            .to_owned(),
+        );
         if let Some(field) = setting.prompt_field() {
             let custom = PromptField::ALL
                 .iter()

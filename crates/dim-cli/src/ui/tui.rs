@@ -679,8 +679,12 @@ fn run_terminal(
                     title.forget();
                     dirty = true;
                 }
-                Outcome::EditPrompt { field, text } => {
-                    if let Err(code) = edit_prompt(&mut app, &mut terminal, field, text) {
+                Outcome::EditPrompt {
+                    field,
+                    text,
+                    revision,
+                } => {
+                    if let Err(code) = edit_prompt(&mut app, &mut terminal, field, text, revision) {
                         app.host.shutdown();
                         return code;
                     }
@@ -751,10 +755,12 @@ enum Outcome {
         text: String,
         seed: Option<serde_json::Value>,
     },
-    /// A prompt row's edit: the field and the text the editor opens with.
+    /// A prompt row's edit: the field, the text the editor opens with, and
+    /// the revision it was displayed at.
     EditPrompt {
         field: PromptField,
         text: String,
+        revision: String,
     },
     /// `/web`: flip the daemon-owned Web entry switch without leaving.
     Web,
@@ -770,6 +776,7 @@ fn edit_prompt(
     terminal: &mut Terminal,
     field: PromptField,
     text: String,
+    revision: String,
 ) -> std::result::Result<(), i32> {
     let draft = match app.prompt_draft.as_ref().map(|(kept, _)| *kept) {
         Some(kept) if kept == field => app.prompt_draft.take().expect("the kept prompt draft").1,
@@ -831,7 +838,11 @@ fn edit_prompt(
         return Ok(());
     }
     app.pending_prompt = Some((field, draft));
-    app.host.send(Command::SavePromptSetting { field, text });
+    app.host.send(Command::SavePromptSetting {
+        field,
+        text,
+        revision,
+    });
     Ok(())
 }
 
@@ -2466,18 +2477,27 @@ impl App {
                     self.set_notice(tf("Prompt suggestion: {error}", &[("error", &error)]));
                 }
             },
-            Update::PromptSettings(result) => match result {
+            Update::PromptSettings { result, field } => match result {
                 Ok(setting) => {
                     self.prompt_setting = Some(setting.clone());
-                    if let Some((_, draft)) = self.pending_prompt.take() {
+                    if let (Some(field), Some((pending, draft))) =
+                        (field, self.pending_prompt.take())
+                        && field == pending
+                    {
                         draft.remove();
                     }
                     if let Some(Prompt::Settings(panel)) = &mut self.prompt {
                         panel.set_prompts(&setting);
                     }
+                    if field.is_some() {
+                        self.set_notice(t("Prompt saved; applies to new Sessions"));
+                    }
                 }
                 Err(error) => {
-                    if let Some((field, draft)) = self.pending_prompt.take() {
+                    if let (Some(field), Some((pending, draft))) =
+                        (field, self.pending_prompt.take())
+                        && field == pending
+                    {
                         let path = draft.path().display().to_string();
                         self.prompt_draft = Some((field, draft));
                         self.set_notice(tf(
@@ -3511,21 +3531,35 @@ impl App {
                 }
             }
             Effect::EditPrompt(field) => {
-                let text = self
-                    .prompt_setting
-                    .as_ref()
-                    .and_then(|setting| setting.text(field))
-                    .unwrap_or_default()
-                    .to_owned();
-                return Outcome::EditPrompt { field, text };
+                if self.pending_prompt.is_some() {
+                    self.set_notice(t("A prompt save is still in progress"));
+                    return Outcome::Continue;
+                }
+                let Some(setting) = &self.prompt_setting else {
+                    self.set_notice(t("Prompt settings are not available"));
+                    return Outcome::Continue;
+                };
+                let text = setting.text(field).unwrap_or_default().to_owned();
+                let revision = setting.revision.clone();
+                return Outcome::EditPrompt {
+                    field,
+                    text,
+                    revision,
+                };
             }
             Effect::ResetPrompt(field) => {
-                if let Some(text) = self
-                    .prompt_setting
-                    .as_ref()
-                    .and_then(|setting| setting.text(field))
-                {
-                    match editor::Draft::open_text(&self.home, field.key(), "md", text) {
+                if self.pending_prompt.is_some() {
+                    self.set_notice(t("A prompt save is still in progress"));
+                    return Outcome::Continue;
+                }
+                let Some(setting) = &self.prompt_setting else {
+                    self.set_notice(t("Prompt settings are not available"));
+                    return Outcome::Continue;
+                };
+                let revision = setting.revision.clone();
+                let old = setting.text(field).map(str::to_owned);
+                if let Some(text) = old {
+                    match editor::Draft::open_text(&self.home, field.key(), "md", &text) {
                         Ok(draft) => {
                             let path = draft.path().display().to_string();
                             self.set_notice(tf(
@@ -3533,10 +3567,14 @@ impl App {
                                 &[("field", field.key()), ("path", &path)],
                             ));
                         }
-                        Err(error) => self.set_notice(error),
+                        Err(error) => {
+                            self.set_notice(error);
+                            return Outcome::Continue;
+                        }
                     }
                 }
-                self.host.send(Command::ResetPromptSetting { field });
+                self.host
+                    .send(Command::ResetPromptSetting { field, revision });
             }
             Effect::ThemePreview(id) => self.paint_theme(&id),
             Effect::ThemeRestore(id) => {
@@ -8164,10 +8202,13 @@ mod tests {
             "/work".into(),
         );
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
-        app.apply(Update::PromptSettings(Ok(PromptSetting {
-            revision: "r1".into(),
-            document: serde_json::json!({"summary": "S"}),
-        })));
+        app.apply(Update::PromptSettings {
+            result: Ok(PromptSetting {
+                revision: "r1".into(),
+                document: serde_json::json!({"summary": "S"}),
+            }),
+            field: None,
+        });
         app.run_command("settings", "");
         let live = strip_escapes(&app.frame((100, 40)).live.join("\n"));
         for row in ["Base prompt", "Compaction prompt", "Skills instructions"] {
@@ -8189,7 +8230,8 @@ mod tests {
         assert!(matches!(
             sent.borrow().last(),
             Some(Command::ResetPromptSetting {
-                field: PromptField::Summary
+                field: PromptField::Summary,
+                ..
             })
         ));
     }

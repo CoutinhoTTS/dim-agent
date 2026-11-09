@@ -9,7 +9,9 @@ D1 and D4, [ADR 007](../../adr/007-plugin-configuration.md) D5, [settings
 service](settings-service.md). Scope: process, inside the existing Settings plugin and one App
 Server row; the texts stay in their Session parts.
 
-The three texts are policy, not protocol: the runtime behaves the same whatever they say. Each
+`base` and `summary` are policy: the runtime behaves the same whatever they say. `skills` is
+mixed — its override also replaces the protocol sentences that name the marker and the call
+shape, while the `skill` tool and the `dim/skills/list` state source do not change. Each text
 already has a factory configuration member. This design adds one user setting that fills a
 member its assembly left unset; it does not move the text, add a context path or make the
 capability read a second source.
@@ -25,9 +27,11 @@ adopted. Precedence is:
 factory configuration (a candidate assembly) > user setting > built-in text
 ```
 
-A missing field, a missing port or a read failure keeps the built-in text. A change applies to
-Sessions loaded after it: a new Session, or one restored after it unloaded. A loaded Session
-keeps the text it adopted.
+A missing field, a missing port or a read failure keeps the built-in text. A change applies to a
+new Session. A restored Session keeps the `base` and `skills` System entries it persisted; the
+summary strategy reads its setting when the restored Session's part applies, so a changed
+summary prompt applies to that Session's next compaction. A loaded Session keeps the text it
+adopted.
 
 ```text
                        App Server process row: PromptSettings
@@ -123,8 +127,9 @@ The native client presents each field as plain text rather than JSON:
   Session, `edit` reuses the management draft and editor, `set` reads a file or stdin, and every
   write uses the revision it read. Empty input is refused; `reset` removes the field.
 
-A saved change says it applies to Sessions started after it. A daemon without the source answers
-the named unsupported-daemon error and the client shows no value.
+A saved change says it applies to new Sessions. Both surfaces warn before a `skills` write that
+it replaces the marker and call shape while the tool and the list stay. A daemon without the
+source answers the named unsupported-daemon error and the client shows no value.
 
 ## 5. Texts that stay closed
 
@@ -145,13 +150,15 @@ This setting opens policy texts that have a safe default and no parsed output. I
   stages, scheduled job prompts, hooks and Skill bodies.
 
 `skills` is a mixed text: an override replaces the whole block, including the protocol sentences
-that name the marker and the call shape. The client's draft note says so; the `skill` tool and
-the `dim/skills/list` state source do not change. `base` is replaced whole as well, so the
-built-in safety and working rules disappear with it; that is the operator's explicit choice.
+that name the marker and the call shape. Both client paths warn before writing it; the `skill`
+tool and the `dim/skills/list` state source do not change, and the flow test asserts both. `base`
+is replaced whole as well, so the built-in safety and working rules disappear with it; that is
+the operator's explicit choice.
 
-A text is added to this document only when its owner exposes it at factory configuration, the
-text is policy, and a flow test can assert that the override leaves the marker, declaration or
-output contract unchanged.
+A text is added to this document only when its owner exposes it at factory configuration and a
+flow test can assert that the override leaves the marker, declaration or output contract
+unchanged. A pure policy text qualifies directly; a mixed text (`skills`) qualifies only with a
+client warning and a test that its tool declaration and state source still work.
 
 ## 6. Rule check
 

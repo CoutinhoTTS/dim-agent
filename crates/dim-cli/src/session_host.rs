@@ -1572,15 +1572,28 @@ impl Worker {
                 } else {
                     Err("This daemon does not provide prompt overrides".into())
                 };
-                self.send(Update::PromptSettings(result));
+                self.send(Update::PromptSettings {
+                    result,
+                    field: None,
+                });
             }
-            Command::SavePromptSetting { field, text } => {
-                let result = self.write_prompt(field, Some(&text)).await;
-                self.send(Update::PromptSettings(result));
+            Command::SavePromptSetting {
+                field,
+                text,
+                revision,
+            } => {
+                let result = self.write_prompt(field, Some(&text), &revision).await;
+                self.send(Update::PromptSettings {
+                    result,
+                    field: Some(field),
+                });
             }
-            Command::ResetPromptSetting { field } => {
-                let result = self.write_prompt(field, None).await;
-                self.send(Update::PromptSettings(result));
+            Command::ResetPromptSetting { field, revision } => {
+                let result = self.write_prompt(field, None, &revision).await;
+                self.send(Update::PromptSettings {
+                    result,
+                    field: Some(field),
+                });
             }
             Command::ReadModelPolicy => self.read_model_policy(false).await,
             Command::SetModelPolicy {
@@ -3246,6 +3259,7 @@ impl Worker {
         &mut self,
         field: PromptField,
         value: Option<&str>,
+        revision: &str,
     ) -> Result<PromptSetting, String> {
         if !self.client.supports(&["settings.read", "settings.update"]) {
             return Err("This daemon does not provide prompt overrides".into());
@@ -3276,7 +3290,7 @@ impl Worker {
                 json!({
                     "source": "prompts",
                     "scope": "user",
-                    "expectedRevision": snapshot.revision,
+                    "expectedRevision": revision,
                     "document": document,
                 }),
             )

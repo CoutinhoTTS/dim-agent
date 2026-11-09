@@ -120,7 +120,7 @@ impl DynPlugin for PromptSettingsPlugin {
                             }
                         }
                     }),
-                    user_only: Vec::new(),
+                    user_only: vec!["/base".into(), "/summary".into(), "/skills".into()],
                 },
             )?;
             let storage = Arc::new(Storage { settings });

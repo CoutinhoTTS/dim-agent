@@ -183,7 +183,6 @@ impl DynPlugin for SkillsPlugin {
             self.checks.erase(),
         ];
         keys.extend(self.factory.iter().map(Key::erase));
-        keys.extend(self.settings.iter().map(Key::erase));
         keys
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {

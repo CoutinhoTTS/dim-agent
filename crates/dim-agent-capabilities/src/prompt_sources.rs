@@ -452,13 +452,11 @@ impl DynPlugin for PromptSourcesPlugin {
         "PromptSources"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        let mut keys = vec![
+        vec![
             self.platform.erase(),
             self.config.erase(),
             self.registry.erase(),
-        ];
-        keys.extend(self.settings.iter().map(Key::erase));
-        keys
+        ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {

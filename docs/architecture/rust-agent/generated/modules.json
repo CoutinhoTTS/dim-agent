@@ -4300,6 +4300,7 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/prompt_command.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "json",
         "println"
@@ -35418,6 +35419,19 @@
         "path editor::Draft::open_text",
         "path editor::command",
         "use crate::management::editor"
+      ]
+    },
+    {
+      "from": "dim_cli::prompt_command",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path PromptField",
+        "path PromptField::ALL",
+        "path PromptField::Skills",
+        "path PromptField::parse",
+        "path PromptSetting",
+        "use crate::model::session::PromptField",
+        "use crate::model::session::PromptSetting"
       ]
     },
     {

@@ -157,13 +157,11 @@ impl DynPlugin for ProductSummaryStrategyPlugin {
         "ProductSummaryStrategy"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        let mut keys = vec![
+        vec![
             self.model.erase(),
             self.resolver.erase(),
             self.guide.erase(),
-        ];
-        keys.extend(self.settings.iter().map(Key::erase));
-        keys
+        ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {

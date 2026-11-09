@@ -91,5 +91,22 @@ async fn the_prompts_source_serves_the_three_texts() {
             .as_deref(),
         Some("S")
     );
+
+    let owner = settings
+        .update_declared(
+            "prompts",
+            SettingsScope::User,
+            &updated.revision,
+            json!({"base": "OWNER", "summary": "S", "skills": "K"}),
+            Writer::Owner,
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(owner, SettingsError::UserOnlyField(ref pointer) if pointer == "/base"),
+        "{owner}"
+    );
+
     server.shutdown();
 }

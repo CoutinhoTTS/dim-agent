@@ -655,7 +655,7 @@ a user can through this control; that write creates no grant and changes no runn
 the daemon's `prompts` Settings source when the panel opens. Enter opens the current text in
 `$VISUAL`, `$EDITOR` or the platform default; `r` on a custom row removes the override after
 keeping the old text in a draft file. An empty draft writes nothing. A save replaces one field
-and preserves the others, and applies to Sessions started after it.
+and preserves the others, and applies to new Sessions.
 
 ```text
 +------------------------------------------+
@@ -682,7 +682,9 @@ The headless surface is `dimcode prompt`:
 | `dimcode prompt set NAME PATH` | Write one override from `PATH`, or from stdin for `-`; empty or whitespace-only text is refused. |
 | `dimcode prompt reset NAME` | Remove one override. |
 
-`NAME` is `base`, `summary` or `skills`. Both surfaces use `settings.read` and `settings.update`
+`NAME` is `base`, `summary` or `skills`. `skills` is a mixed text, and both surfaces warn that
+its override replaces the marker and call shape while the `skill` tool and `dim/skills/list`
+stay. Both surfaces use `settings.read` and `settings.update`
 with `source: "prompts"` and `scope: "user"`: every write reads the revision and the document
 first, changes one field and writes the whole document back, so a concurrent change is reported
 rather than overwritten. `edit` needs a terminal; a failed write keeps the draft and names it.
