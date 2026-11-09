@@ -374,8 +374,8 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 
 空闲卸载约束的是内存，但每个启动的 Session 还留在存储里，也出现在每个客户端的 Session 列表中。每五分钟一个任务，一天就多约 288 个。因此由使用方删除它们（D14）：
 
-- **谁删、何时删。** 启动 Session 的使用方在删掉最后一条指向它的记录时删除它。Scheduler 在一次运行移出其运行历史（A8，每个任务保留最近 100 次）或任务被删除时删除；`reuse` Session 由任务指向，随任务一起删除。Workflow 在一条运行记录移出其保留范围（A9，保留最近 100 次）时删除；这条记录指向该次运行的所有阶段 Session。
-- **只删已结束的运行。** 删除会关闭 Session，从而停止它的 turn。使用方只在运行到达终态后才删除其 Session；任务被删除后仍在进行的运行（Scheduler A14），在它结束时删除其 Session。
+- **谁删、何时删。** 启动 Session 的使用方在删掉最后一条指向它的记录时删除它。Scheduler 在一条启动 Session 的投递移出其投递历史(A8，每个任务保留最近 100 次投递)且该 Session 的停止时刻已过时删除，或任务被删除时删除。Scheduler 没有启动的目标 Session 永不删除；在投递变更之前保存的 `reuse` 任务绑定的 Session 仍归该任务所有，随任务一起删除。Workflow 在一条运行记录移出其保留范围(A9，保留最近 100 次)时删除；这条记录指向该次运行的所有阶段 Session。
+- **只删已结束的运行。** 删除会关闭 Session，从而停止它的 turn。使用方只在运行到达终态后才删除其 Session；Scheduler 的 launch 目标在任务保存的最长运行时间处停止其 Session，且只在该停止时刻之后删除它。任务被删除后仍在进行的运行(Scheduler A14)，在它结束时删除其 Session。
 - **顺序。** 使用方先删除 Session，再删掉记录。删除失败时记录保留，下一轮重试；删除一个已经不存在的 Session 也会成功，因此在两步之间崩溃不会造成损害。
 - **保留某次运行。** 想保留某次运行对话的用户可以 fork 它（S5c 的 `session.fork`）。没有记录指向 fork 出的 Session，它会一直保留到用户删除。
 - **留给用户的部分。** `launch` 回复丢失时留下的 Session（§6.1）没有记录指向。用户用 CLI 按时间或数量的清理删除它，该清理由 `session.summaries` 与 `session.delete` 组合而成（S5c §5.1；F6，[#77](https://github.com/arcships/dim/issues/77)）。

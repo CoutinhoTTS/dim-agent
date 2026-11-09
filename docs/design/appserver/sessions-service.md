@@ -570,13 +570,8 @@ D2).
 Idle unload bounds memory, but every launched Session also stays in storage and in every client's Session list. One
 job every five minutes adds about 288 a day. So the consumers delete them (D14):
 
-- **Who and when.** The consumer that launched a Session deletes it when it drops the last record that names it.
-  Scheduler does so when a run falls out of its run history (A8, the last 100 runs per job) or when the job is
-  deleted; a `reuse` Session is named by its job, so it goes with the job. Workflow does so when a run record falls
-  out of its retention (A9, the last 100 runs); the record names every stage Session of the run.
-- **Finished runs only.** A delete closes the Session and so stops its turn. A consumer deletes a run's Session only
-  once the run is terminal; a run that outlives its job's deletion (Scheduler A14) has its Session deleted when it
-  ends.
+- **Who and when.** The consumer that launched a Session deletes it when it drops the last record that names it. Scheduler does so when a launched Session's delivery falls out of its delivery history (A8, the last 100 deliveries per job) and the Session's stop time has passed, or when the job is deleted. A job's target Session that Scheduler did not launch is never deleted; a `reuse` Session bound by a job saved before the delivery change stays owned by that job and goes with it. Workflow does so when a run record falls out of its retention (A9, the last 100 runs); the record names every stage Session of the run.
+- **Finished runs only.** A delete closes the Session and so stops its turn. A consumer deletes a run's Session only once the run is terminal; Scheduler's launch target stops its Session at the job's saved maximum and deletes it only after that stop time. A run that outlives its job's deletion (Scheduler A14) has its Session deleted when it ends.
 - **Order.** The consumer deletes the Session first and drops the record after. A failed delete keeps the record, so
   the next pass retries; a delete of a Session that is already gone succeeds, so a crash between the two steps is
   harmless.
