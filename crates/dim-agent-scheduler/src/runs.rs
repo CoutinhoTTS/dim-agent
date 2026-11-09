@@ -139,6 +139,15 @@ pub struct Delivery {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts: Option<u32>,
+    /// A launch record whose Session a target-changing save or a delete
+    /// released (A.7): it keeps the origin it recorded and no longer carries
+    /// deletion authority for that Session.
+    #[serde(default, skip_serializing_if = "omitted_when_false")]
+    pub released: bool,
+}
+
+fn omitted_when_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Delivery {
@@ -156,6 +165,12 @@ impl Delivery {
     /// invalid, so the bytes stay unchanged.
     pub fn validate(&self) -> Result<(), String> {
         let timestamp = |text: &str| canonical_instant(text).is_some();
+        if self.released && self.session_origin != Some(SessionOrigin::Launch) {
+            return Err(format!(
+                "delivery {} releases a record without the launch origin",
+                self.run_id
+            ));
+        }
         if !timestamp(&self.created_at)
             || self
                 .deadline_at
@@ -322,19 +337,22 @@ pub async fn update<R: Send + 'static>(
         .await?
 }
 
-/// Retires the launch ownership the named records carry: each keeps its
-/// place and fields, and stops naming a launch-owned Session by changing its
-/// `session_origin` from `launch` to `reuse` (A.7). Idempotent; `true` when
-/// any record changed. A reader of an earlier build decodes `reuse` as it
-/// always did, so this introduces no downgrade refusal.
+/// Marks the named records released: each keeps its place, its fields and the
+/// `session_origin: launch` it recorded, and stops carrying deletion
+/// authority for its Session (A.7). Idempotent; `true` when any record
+/// changed. An earlier build's reader refuses a file carrying `released` as
+/// invalid data and rewrites nothing (A.7).
 pub fn retire_launch_ownership(
     history: &mut [Delivery],
     retire: &std::collections::HashSet<String>,
 ) -> bool {
     let mut changed = false;
     for run in history {
-        if retire.contains(&run.run_id) && run.session_origin == Some(SessionOrigin::Launch) {
-            run.session_origin = Some(SessionOrigin::Reuse);
+        if retire.contains(&run.run_id)
+            && run.session_origin == Some(SessionOrigin::Launch)
+            && !run.released
+        {
+            run.released = true;
             changed = true;
         }
     }
@@ -344,4 +362,48 @@ pub fn retire_launch_ownership(
 /// The timestamp field, rendered as the file stores it.
 pub fn stamp(instant: DateTime<Utc>) -> String {
     format_instant(instant)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record written before this change, with the launch origin and the
+    /// new `released` flag.
+    fn launch_record() -> Delivery {
+        serde_json::from_value(serde_json::json!({
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "window": "2026-01-01T00:00:00.000Z",
+            "state": "completed",
+            "deadline_at": "2026-01-01T01:00:00.000Z",
+            "session_id": "session-1",
+            "session_origin": "launch",
+            "policy": {"preset": "read-only", "allowedTools": [], "disallowedTools": []},
+            "input_event_id": "input-1",
+            "submission_id": "scheduler:run-1",
+            "created_at": "2026-01-01T00:00:00.000Z",
+            "ended_at": "2026-01-01T00:01:00.000Z",
+            "detail": "",
+            "released": true,
+        }))
+        .unwrap()
+    }
+
+    /// `released` is valid only on a record that recorded the launch origin
+    /// (A.7): a legacy launch record carries it, a reused one is invalid.
+    #[test]
+    fn released_is_valid_only_on_a_launch_origin_record() {
+        let record = launch_record();
+        assert_eq!(record.session_origin, Some(SessionOrigin::Launch));
+        assert_eq!(record.validate(), Ok(()));
+        let mut reused = launch_record();
+        reused.session_origin = Some(SessionOrigin::Reuse);
+        let error = reused.validate().unwrap_err();
+        assert!(error.contains("without the launch origin"), "{error}");
+        let mut no_origin = launch_record();
+        no_origin.session_origin = None;
+        let error = no_origin.validate().unwrap_err();
+        assert!(error.contains("without the launch origin"), "{error}");
+    }
 }

@@ -1388,11 +1388,29 @@ async fn a_save_that_replaces_a_legacy_reuse_target_releases_its_session() {
         deliveries,
         "the retarget keeps every delivery: {after}"
     );
+    let shown = after["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["run_id"] == "run-1")
+        .unwrap();
+    assert_eq!(
+        shown["session_origin"], "launch",
+        "the record keeps the origin it recorded: {shown}"
+    );
+    assert_eq!(
+        shown["released"], true,
+        "the record is marked released: {shown}"
+    );
     let runs = stored_runs(home.path());
     let released = runs.iter().find(|run| run["run_id"] == "run-1").unwrap();
     assert_eq!(
-        released["session_origin"], "reuse",
-        "the launch ownership is retired on the record: {released}"
+        released["session_origin"], "launch",
+        "the origin stays as recorded: {released}"
+    );
+    assert_eq!(
+        released["released"], true,
+        "the stored record is marked released: {released}"
     );
     // The compatibility fields keep their bytes through the retarget.
     let document: String = rusqlite::Connection::open(home.path().join("dimcode.sqlite"))
@@ -1477,6 +1495,10 @@ async fn a_failed_release_heals_at_the_next_retention_pass() {
     let runs = stored_runs(home.path());
     let still_owned = runs.iter().find(|run| run["run_id"] == "run-1").unwrap();
     assert_eq!(still_owned["session_origin"], "launch", "{still_owned}");
+    assert!(
+        still_owned.get("released").is_none(),
+        "the failed release leaves the record unreleased: {still_owned}"
+    );
 
     // Deleting the dummy job runs a retention pass, which re-derives the
     // release from the saved document.
@@ -1487,7 +1509,7 @@ async fn a_failed_release_heals_at_the_next_retention_pass() {
     wait_for("the retention pass releases the record", || {
         stored_runs(home.path())
             .iter()
-            .any(|run| run["run_id"] == "run-1" && run["session_origin"] == "reuse")
+            .any(|run| run["run_id"] == "run-1" && run["released"] == true)
     })
     .await;
 

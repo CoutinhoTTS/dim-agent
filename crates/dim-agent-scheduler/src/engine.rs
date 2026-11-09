@@ -60,8 +60,10 @@ pub(crate) fn target_gone(code: &str) -> bool {
     matches!(code, "session_closed" | "branch_missing" | "branch_ended")
 }
 
+/// Whether the record carries the launch ownership A.7's deletion reads: a
+/// launch origin that has not been released (A.7).
 fn is_launched(run: &Delivery) -> bool {
-    run.session_origin == Some(SessionOrigin::Launch)
+    run.session_origin == Some(SessionOrigin::Launch) && !run.released
 }
 /// A window this far behind the clock is missed, not run (A.4). The wakeup
 /// policy uses the same grace (design §10).
@@ -194,6 +196,7 @@ async fn record(
             ended_at: state.is_terminal().then(|| stamp(now)),
             detail: detail.into(),
             attempts: None,
+            released: false,
         };
         run.validate().map_err(SchedulerError::invalid_data)?;
         history.push(run.clone());
@@ -644,8 +647,7 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
         let owner = runs
             .iter()
             .filter(|run| {
-                run.session_id.as_deref() == Some(session_id)
-                    && run.session_origin == Some(SessionOrigin::Launch)
+                run.session_id.as_deref() == Some(session_id) && is_launched(run)
             })
             .max_by(|a, b| {
                 a.created_at
