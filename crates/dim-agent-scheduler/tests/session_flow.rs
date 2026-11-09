@@ -1272,9 +1272,71 @@ async fn an_explicit_target_ignores_the_legacy_top_level_fields() {
     server.join().await.unwrap();
 }
 
+/// Seeds a legacy `reuse` job bound to `launched`, with one terminal
+/// launch-origin delivery. The server must be stopped.
+fn seed_legacy_reuse_job(home: &std::path::Path, launched: &str) {
+    let policy = json!({"preset": "read-only", "allowedTools": [], "disallowedTools": []});
+    let legacy = json!({"max_concurrent_runs": 4, "jobs": [{
+        "id": "reuse",
+        "name": "reuse",
+        "schedule": {"at": "2030-01-01T00:00:00Z"},
+        "prompt": "Work.",
+        "cwd": home,
+        "mode": "reuse",
+        "session_id": launched,
+        "enabled": true,
+        "enabled_at": "2026-01-01T00:00:00.000Z",
+        "revision": 1,
+        "created_by": "user",
+        "policy_cap": policy.clone(),
+    }]});
+    rusqlite::Connection::open(home.join("dimcode.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE settings_documents SET document = ?1 WHERE source = 'user/schedule'",
+            [legacy.to_string()],
+        )
+        .unwrap();
+    edit_runs(home, |runs| {
+        runs.push(json!({
+            "run_id": "run-1",
+            "job_id": "reuse",
+            "window": "2026-01-01T00:00:00.000Z",
+            "state": "completed",
+            "deadline_at": "2026-01-01T01:00:00.000Z",
+            "session_id": launched,
+            "session_origin": "launch",
+            "policy": policy,
+            "input_event_id": "input-1",
+            "submission_id": "scheduler:run-1",
+            "report_to": null,
+            "created_at": "2026-01-01T00:00:00.000Z",
+            "ended_at": "2026-01-01T00:01:00.000Z",
+            "detail": "",
+            "attempts": null,
+        }));
+    });
+}
+
+/// The deliveries `schedule.history` shows, as `(run_id, state)` pairs.
+fn shown_deliveries(history: &Value) -> Vec<(String, String)> {
+    history["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|run| {
+            (
+                run["run_id"].as_str().unwrap().to_owned(),
+                run["state"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
 /// A save that replaces a legacy `reuse` job's target releases the Session
-/// that binding launched: deleting the retargeted job keeps it (zerob13
-/// 4511587391).
+/// that binding launched: the deliveries keep their place and only the
+/// launch ownership is retired, so deleting the retargeted job keeps the
+/// Session (zerob13 4511587391, 4512306141; Simon, eric).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_save_that_replaces_a_legacy_reuse_target_releases_its_session() {
     let home = home();
@@ -1294,50 +1356,21 @@ async fn a_save_that_replaces_a_legacy_reuse_target_releases_its_session() {
     server.shutdown();
     server.join().await.unwrap();
 
-    let policy = json!({"preset": "read-only", "allowedTools": [], "disallowedTools": []});
-    let legacy = json!({"max_concurrent_runs": 4, "jobs": [{
-        "id": "reuse",
-        "name": "reuse",
-        "schedule": {"at": "2030-01-01T00:00:00Z"},
-        "prompt": "Work.",
-        "cwd": home.path(),
-        "mode": "reuse",
-        "session_id": launched,
-        "enabled": true,
-        "enabled_at": "2026-01-01T00:00:00.000Z",
-        "revision": 1,
-        "created_by": "user",
-        "policy_cap": policy.clone(),
-    }]});
-    rusqlite::Connection::open(home.path().join("dimcode.sqlite"))
-        .unwrap()
-        .execute(
-            "UPDATE settings_documents SET document = ?1 WHERE source = 'user/schedule'",
-            [legacy.to_string()],
-        )
-        .unwrap();
-    edit_runs(home.path(), |runs| {
-        runs.push(json!({
-            "run_id": "run-1",
-            "job_id": "reuse",
-            "window": "2026-01-01T00:00:00.000Z",
-            "state": "completed",
-            "deadline_at": "2026-01-01T01:00:00.000Z",
-            "session_id": launched,
-            "session_origin": "launch",
-            "policy": policy,
-            "input_event_id": "input-1",
-            "submission_id": "scheduler:run-1",
-            "report_to": null,
-            "created_at": "2026-01-01T00:00:00.000Z",
-            "ended_at": "2026-01-01T00:01:00.000Z",
-            "detail": "",
-            "attempts": null,
-        }));
-    });
+    seed_legacy_reuse_job(home.path(), &launched);
 
     let server = start(home.path(), Arc::new(Script::default())).await;
     let mut client = support::connect(&server).await;
+    // The retarget keeps every delivery: only the ownership changes.
+    let before: Value = client
+        .typed("schedule.history", json!({"job_id": "reuse", "limit": 50}))
+        .await
+        .unwrap();
+    let deliveries = shown_deliveries(&before);
+    assert_eq!(
+        deliveries,
+        vec![("run-1".to_owned(), "completed".to_owned())],
+        "{before}"
+    );
     client
         .typed::<Value>(
             "schedule.save",
@@ -1346,6 +1379,24 @@ async fn a_save_that_replaces_a_legacy_reuse_target_releases_its_session() {
         )
         .await
         .unwrap();
+    let after: Value = client
+        .typed("schedule.history", json!({"job_id": "reuse", "limit": 50}))
+        .await
+        .unwrap();
+    assert_eq!(
+        shown_deliveries(&after),
+        deliveries,
+        "the retarget keeps every delivery: {after}"
+    );
+    let runs = stored_runs(home.path());
+    let released = runs
+        .iter()
+        .find(|run| run["run_id"] == "run-1")
+        .unwrap();
+    assert_eq!(
+        released["session_origin"], "reuse",
+        "the launch ownership is retired on the record: {released}"
+    );
     // The compatibility fields keep their bytes through the retarget.
     let document: String = rusqlite::Connection::open(home.path().join("dimcode.sqlite"))
         .unwrap()
@@ -1378,6 +1429,91 @@ async fn a_save_that_replaces_a_legacy_reuse_target_releases_its_session() {
         "the released Session survives the job's deletion: {catalog}"
     );
 
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A save whose own release write fails still reports the save; the next
+/// retention pass re-derives the release from the document (A.7; eric's
+/// ordering point).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_release_heals_at_the_next_retention_pass() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let launched = create_session(&mut client, home.path(), true).await;
+    let retarget = create_session(&mut client, home.path(), true).await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    seed_legacy_reuse_job(home.path(), &launched);
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    // A second job whose deletion runs a retention pass later.
+    let dummy = save_session_job(
+        &mut client,
+        "dummy",
+        "00000000-0000-7000-8000-0000000000ee",
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    // The release write cannot decode while the store is broken; the save
+    // still lands and the reply reports it.
+    let valid = std::fs::read(home.path().join("scheduler/runs.json")).unwrap();
+    std::fs::write(
+        home.path().join("scheduler/runs.json"),
+        br#"{"version":1,"text":"not json"}"#,
+    )
+    .unwrap();
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": "reuse",
+                "target": {"kind": "session", "session_id": retarget, "branch_id": "main"}}}),
+        )
+        .await
+        .unwrap();
+    std::fs::write(home.path().join("scheduler/runs.json"), &valid).unwrap();
+    let runs = stored_runs(home.path());
+    let still_owned = runs
+        .iter()
+        .find(|run| run["run_id"] == "run-1")
+        .unwrap();
+    assert_eq!(still_owned["session_origin"], "launch", "{still_owned}");
+
+    // Deleting the dummy job runs a retention pass, which re-derives the
+    // release from the saved document.
+    client
+        .typed::<Value>("schedule.delete", json!({"job_id": dummy}))
+        .await
+        .unwrap();
+    wait_for("the retention pass releases the record", || {
+        stored_runs(home.path()).iter().any(|run| {
+            run["run_id"] == "run-1" && run["session_origin"] == "reuse"
+        })
+    })
+    .await;
+
+    // The released Session survives the job's deletion.
+    client
+        .typed::<Value>("schedule.delete", json!({"job_id": "reuse"}))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let catalog = client
+        .rpc(
+            "session.catalog",
+            json!({"withInternal": true, "limit": 100}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        catalog.to_string().contains(&launched),
+        "the released Session survives the job's deletion: {catalog}"
+    );
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

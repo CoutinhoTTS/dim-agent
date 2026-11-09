@@ -591,8 +591,8 @@ fn build_job(
 /// A save that replaces a legacy `reuse` job's target, or the deletion of a
 /// job whose target replaced that binding, releases the Session the binding
 /// launched (§2.3, A.7): the job's compatibility field keeps its bytes, and
-/// the launch-origin records that carried the ownership are retired so
-/// retention never deletes the released Session.
+/// every delivery record keeps its place, with only the launch ownership
+/// retired so retention never deletes the released Session.
 async fn release_owned_runs(shared: &Shared, job: &Job) -> Result<(), SchedulerError> {
     if job.mode != Some(Mode::Reuse) {
         return Ok(());
@@ -602,13 +602,16 @@ async fn release_owned_runs(shared: &Shared, job: &Job) -> Result<(), SchedulerE
     };
     let job_id = job.id.clone();
     runs::update(&shared.files, move |history| {
-        let held = history.len();
-        history.retain(|run| {
-            !(run.job_id == job_id
-                && run.session_origin == Some(SessionOrigin::Launch)
-                && run.session_id.as_deref() == Some(session_id.as_str()))
-        });
-        Ok((history.len() != held, ()))
+        let retire: HashSet<String> = history
+            .iter()
+            .filter(|run| {
+                run.job_id == job_id
+                    && run.session_origin == Some(SessionOrigin::Launch)
+                    && run.session_id.as_deref() == Some(session_id.as_str())
+            })
+            .map(|run| run.run_id.clone())
+            .collect();
+        Ok((runs::retire_launch_ownership(history, &retire), ()))
     })
     .await?;
     Ok(())
@@ -682,10 +685,14 @@ async fn save(
         move |previous| merge(previous, input.job),
     )
     .await?;
+    // The settings write has committed, so the reply reports that save even
+    // when the release below fails; the next retention pass re-derives the
+    // release from the saved document (A.7).
     if let Some(previous) = &previous
         && previous.target != job.target
+        && let Err(error) = release_owned_runs(shared, previous).await
     {
-        release_owned_runs(shared, previous).await?;
+        tracing::warn!(%error, "scheduler ownership release failed");
     }
     Ok(json!({ "job": job.reported() }))
 }
@@ -745,8 +752,9 @@ async fn delete(
         .ok_or_else(|| not_found(&input.job_id))?;
     let job = document.jobs[index].clone();
     // A job whose target replaced its legacy reuse binding no longer owns
-    // the Session that binding launched; deleting the job must not delete
-    // that Session, so its launch records go before retention reads them.
+    // the Session that binding launched; releasing before the document goes
+    // is correct even when this delete fails, since the target already
+    // released the binding.
     if job.target.is_some() {
         release_owned_runs(shared, &job).await?;
     }

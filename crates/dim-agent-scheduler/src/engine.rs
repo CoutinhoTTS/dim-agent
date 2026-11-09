@@ -565,6 +565,29 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
     let cancel = CancellationToken::new();
     let runs = runs::read(&shared.files).await?;
     let document = read_document(shared, &cancel).await?.document;
+    // A job whose target replaced its legacy `reuse` binding releases that
+    // binding's launch ownership, and a pass re-derives it from the document
+    // so a save whose own release write failed heals here (§2.3, A.7).
+    let releases: HashSet<(String, String)> = document
+        .jobs
+        .iter()
+        .filter(|job| job.target.is_some() && job.mode == Some(Mode::Reuse))
+        .filter_map(|job| {
+            job.session_id
+                .clone()
+                .map(|session| (job.id.clone(), session))
+        })
+        .collect();
+    let retire: HashSet<String> = runs
+        .iter()
+        .filter(|run| {
+            run.session_origin == Some(SessionOrigin::Launch)
+                && run.session_id.as_ref().is_some_and(|session| {
+                    releases.contains(&(run.job_id.clone(), session.clone()))
+                })
+        })
+        .map(|run| run.run_id.clone())
+        .collect();
     let reporting = shared.reporting.lock().unwrap().clone();
     let mut keep: HashSet<String> = runs
         .iter()
@@ -629,7 +652,7 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
         .collect();
     let deletions: HashSet<String> = expired
         .iter()
-        .filter(|run| is_launched(run))
+        .filter(|run| is_launched(run) && !retire.contains(&run.run_id))
         .filter_map(|run| run.session_id.clone())
         .filter(|session_id| !references.contains(session_id))
         .collect();
@@ -650,6 +673,7 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
                         .iter()
                         .filter(|run| {
                             is_launched(run)
+                                && !retire.contains(&run.run_id)
                                 && run.session_id.as_deref() == Some(session_id.as_str())
                         })
                         .map(|run| run.run_id.clone()),
@@ -662,11 +686,12 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
         .filter(|run| !keep.contains(&run.run_id))
         .map(|run| run.run_id.clone())
         .collect();
-    if !remove.is_empty() {
+    if !remove.is_empty() || !retire.is_empty() {
         runs::update(&shared.files, move |history| {
             let before = history.len();
+            let released = runs::retire_launch_ownership(history, &retire);
             history.retain(|run| !remove.contains(&run.run_id));
-            Ok((history.len() != before, ()))
+            Ok((released || history.len() != before, ()))
         })
         .await?;
     }

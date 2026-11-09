@@ -322,6 +322,25 @@ pub async fn update<R: Send + 'static>(
         .await?
 }
 
+/// Retires the launch ownership the named records carry: each keeps its
+/// place and fields, and stops naming a launch-owned Session by changing its
+/// `session_origin` from `launch` to `reuse` (A.7). Idempotent; `true` when
+/// any record changed. A reader of an earlier build decodes `reuse` as it
+/// always did, so this introduces no downgrade refusal.
+pub fn retire_launch_ownership(
+    history: &mut [Delivery],
+    retire: &std::collections::HashSet<String>,
+) -> bool {
+    let mut changed = false;
+    for run in history {
+        if retire.contains(&run.run_id) && run.session_origin == Some(SessionOrigin::Launch) {
+            run.session_origin = Some(SessionOrigin::Reuse);
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// The timestamp field, rendered as the file stores it.
 pub fn stamp(instant: DateTime<Utc>) -> String {
     format_instant(instant)
