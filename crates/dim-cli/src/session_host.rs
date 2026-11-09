@@ -4110,6 +4110,16 @@ impl Worker {
             None => self.projection.snapshot(),
         };
         snapshot.lines = self.line_views();
+        snapshot.unread_lines = snapshot
+            .lines
+            .iter()
+            .filter(|line| {
+                self.task_history
+                    .get(&line.id)
+                    .is_some_and(|history| history.latest_reply > history.seen_reply)
+            })
+            .map(|line| line.id.clone())
+            .collect();
         snapshot.side = self.side.as_ref().and_then(|id| {
             let line = snapshot.lines.iter().find(|line| &line.id == id)?;
             Some(SideLine {

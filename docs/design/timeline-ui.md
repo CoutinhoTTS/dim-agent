@@ -213,6 +213,25 @@ Unchanged from #427 §14: a switch writes a `⑂ name · id` boundary and the sh
 
 Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines them.
 
+### Unread replies
+
+The composer's bottom border shows how many other lines have unread reply text. `/lines` marks those lines `Unread` and selects the first one when the list opens. Enter on a line opens its transcript and acknowledges that line's current reply. The prompt keeps its focus when a new reply arrives.
+
+```text
++--------------------------------------------+
+| >                                          |
++------------------------ Unread (1) · /lines+
+
+/lines
+  main
+  * parser race       Unread · waiting
+  Enter shows the selected line
+```
+
+The Session worker derives the indicator from nonblank assistant text in live `session.event` records. Text in the shown transcript or open side panel is already seen. The badge counts lines and stays until each is opened. History pages and repeated events leave the indicator alone. The worker keeps reply and acknowledgment positions for the current attachment. A fresh attachment starts without unread marks and presents existing replies as history. The position used here concerns what the user saw in that line's transcript.
+
+The notification shares the existing bottom border in both TUI modes. Narrow widths favor the notification over the directory label and shorten it to `/lines (N)` when needed. The existing left status in fullscreen keeps priority.
+
 ## 7. Client data
 
 | # | Need | Owner | Notes |
@@ -221,6 +240,7 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 | R2 | A user message row's cut (`ViewRow.cut`), whether the model has consumed it (`ViewRow.pending`), and a marker row's line (`ViewRow.line`) | CLI projection | From sequences and input state the client already has |
 | R3 | `session.branch_create` and `session.fork` calls | CLI session host | Existing methods; a request made from a stale attachment is refused locally |
 | R4 | Later, optional: show a fork's origin (`↗ forked` on the source, `forked from S` in the fork) | App Server, needs a format decision | `session/forked` carries no data and the fork design adds no provenance column |
+| R5 | Unread line IDs in the CLI snapshot | CLI session worker | Derived from existing live assistant text and client acknowledgment positions. Both positions are local to the attachment. |
 
 ## 8. Not in scope
 
