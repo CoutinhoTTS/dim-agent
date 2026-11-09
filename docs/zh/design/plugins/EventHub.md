@@ -123,7 +123,7 @@ GuideRecord {
 
 同一条事件的每次投递都使用同一个 `submissionId`，即 `eventhub:<source>:<eventId>`，而一条分支对每个 `submissionId` 只接受一次，见 [session access A.2](../contracts/session-access.md#a2-来源输入约定) 与 [sessions 服务 §6.2](../appserver/sessions-service.md#62-input)。因此被两次命中的分支只收到一次事件，用同一个 `id` 重新发布的生产方在每条分支上都是幂等的：第二次 `publish` 什么也不写，回复第一次输入的 `inputId` 与 `sequence`。输入被消费或被撤回之后，这个 id 仍然占用。
 
-每次发布从第一次查找到最后一次投递，持有以该提交 id 为键的进程内锁，即 `eventhub:<source>:<eventId>`(即 2.5 的实例状态)。这把锁把按分支的保证延伸到文件(3.2)：正文超过上限时先按 id 在每条目标分支上查找，已经持有该输入的分支直接回答 `repeated: true`，不写文件。发布结束时释放锁，映射项随最后一个持有者消失。
+每次发布从第一次查找到最后一次投递，持有以该提交 id 为键的进程内锁，即 `eventhub:<source>:<eventId>`(即 2.5 的实例状态)。这把锁把按分支的保证延伸到文件(3.2)：每次发布都先按 id 在每条目标分支上查找，已经持有该输入的分支直接回答 `repeated: true`，不写文件，也不写第二个输入。查找失败的分支继续走 `sessions.input`，由它保证该 id 只被接受一次；正文超过上限时，该分支不写文件，它的输入带预览并标 `truncated: true`。发布结束时释放锁，映射项随最后一个持有者消失。
 
 发布一旦持有它的事件锁，就在 EventHub 自己拥有的任务里运行到完成。丢弃回复的调用方或一次重载，都既不会停止它，也不会释放那把锁，所以用同一个 `id` 的重试会等它结束，然后找到该输入并回答 `repeated`。
 
@@ -186,7 +186,7 @@ sequenceDiagram
 
 文件原样保存正文，不含标题，标题留在标记里。put 按目标 Session 各做一次，所以订阅了同一事件的两个 Session 得到两个文件：Session 文件属于一个 Session，并随它删除。
 
-**重试不会写第二个文件。** 发布持有事件锁(2.4)，所以同一个 id 的两次发布不会交错。在存任何东西之前，它在每条目标分支上 `sessions.lookup` 该提交 id：已经持有该输入的分支直接回答 `delivered`，带上那个输入的 id 与 sequence 以及 `repeated: true`，不写文件，也不写第二个输入。只有没有该输入的分支才得到文件与输入。第一次发布的 put 可能失败而已投递了预览；此时重试对这些分支回答 `repeated: true` 且不含 `truncated`，因为带预览的是第一个输入，新文件从未被引用。put 成功而输入未写之间崩溃，只留下一个未被引用的文件，它随该 Session 删除。
+**重试不会为已持有该输入的分支写文件。** 发布持有事件锁(2.4)，所以同一个 id 的两次发布不会交错。在存任何东西之前，它在每条目标分支上 `sessions.lookup` 该提交 id：已经持有该输入的分支直接回答 `delivered`，带上那个输入的 id 与 sequence 以及 `repeated: true`，不写文件，也不写第二个输入。只有没有该输入的分支才得到文件与输入。等待仍在运行的发布之锁的重试，会复用那次发布存下的文件。如果重试发生在该发布结束之后，则每个 Session 里、它命中的是第一次发布错过的分支时，会多存一个文件：`sessionFiles.put` 每次调用都存一个新文件，每个输入引用自己的那份，随该 Session 删除。第一次发布的 put 可能失败而已投递了预览；此时重试对这些分支回答 `repeated: true` 且不含 `truncated`，因为带预览的是第一个输入，新文件从未被引用。put 成功而输入未写之间崩溃，只留下一个未被引用的文件，它随该 Session 删除。
 
 标记与条目不变。
 
@@ -459,6 +459,7 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 | 正文超过 5120 字节且没有 `sessionFiles` | — | `truncated="true"`，只有预览，回执 `truncated: true` | EventHub |
 | Session 文件 put 失败 | — | 同没有 `sessionFiles`；重试回答 `repeated: true` 且不写文件(3.2) | EventHub |
 | 同一事件 id 的两次发布同时进行 | — | 事件锁 `eventhub:<source>:<eventId>` 串行化它们：一次写入，另一次回答 `repeated: true` | EventHub |
+| 只到达部分分支的发布之后的重试 | 第一次发布结束 < 重试 | 已持有该输入的每条分支回答 `repeated: true`；第一次发布错过的分支得到它的输入，正文超限时其 Session 多一个文件(3.2) | EventHub |
 | 生产方以新的指南再次声明某来源 | 声明 < 下一次投递 | 下一次投递在事件之前写出新指南并存入 digest；再往后的投递不写指南 | EventHub |
 | 已投递的输入在持有期间被撤回 | 输入 < `input/withdraw`，且没有 `input/applied` | `input/deleted`；EventHub 无从得知；回执早就说了 `delivered` | InputQueue |
 | 已投递的输入在被应用后被撤回 | `input/applied` < 撤回 | `notHeld`；输入照常被消费 | InputQueue |
