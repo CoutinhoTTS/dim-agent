@@ -6,13 +6,7 @@ Business owner: Collaboration.
 Scope: the model-policy part of [#263](https://github.com/arcships/dim/issues/263)
 and [the feature list](../feature-list.md#providers-and-models).
 
-The confirmed scope applies inherit/fixed policy to **every newly created native
-Collaboration member Session**, including a named Agent such as `reviewer`. Workflow
-stages and Scheduler runs keep their `sessions.launch` model precedence; leader
-`/agent` profile adoption is unchanged. Collaboration members cannot delegate, so
-there is no nested-member policy. Existing member Sessions retain their
-configuration. The configuration and interfaces below were approved in
-[#352](https://github.com/arcships/dim/pull/352).
+The confirmed scope applies inherit/fixed policy to **every newly created native Collaboration member Session**, including a named Agent such as `reviewer`. Workflow stages keep their `sessions.launch` model precedence; a Scheduler launch names an Agent profile and runs that profile's model; leader `/agent` profile adoption is unchanged. Collaboration members cannot delegate, so there is no nested-member policy. Existing member Sessions retain their configuration. The configuration and interfaces below were approved in [#352](https://github.com/arcships/dim/pull/352).
 
 ## 1. Behavior
 

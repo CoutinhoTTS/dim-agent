@@ -316,7 +316,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前�
 
 ## 10. 不在本设计内
 
-- **以 Agent 为目标的投递。** 交给一个 Agent 而不是一个 Session 的事件属于后续设计，方向指向 Scheduler：它变成一条带事件触发器的 Scheduler 作业。`reuse` 绑定一个 Session，每条匹配的事件都到达它；`create` 为每条事件启动一个，沿用 Scheduler 的已保存策略、宿主上限、绑定与清理规则([Scheduler](Scheduler.md) §3.3、A.5)。EventHub 从不启动 Session。该设计增加一项能力：一个进程行只能订阅它自己启动的 Session。安装一个生产方不创建任何作业；生产方可以提供一个，由客户端请用户启用。
+- **以 Agent 为目标的投递。** 交给一个 Agent 而不是一个 Session 的事件属于后续设计，方向指向 Scheduler：它变成一条带事件触发器的 Scheduler 作业。作业投递到它保存的目标——一个既有 Session 与分支，或者一个为每条事件启动新 Session 的 launch 目标，沿用作业保存的 Agent 与策略([Scheduler](Scheduler.md) A.1、A.5)。EventHub 从不启动 Session。该设计增加一项能力：一个进程行只能订阅它自己启动的 Session。安装一个生产方不创建任何作业；生产方可以提供一个，由客户端请用户启用。
 - **向所有分支的 Session 级扇出。** 一条订阅只命名一条分支，分支为自己订阅；自动为新分支订阅属于后续的分支设计。
 - **内容变换，包括由模型书写的包装。** EventHub 按生产方写下的文字投递。包装会让 EventHub 解释外部材料，而内容归生产方所有。
 - **拉取式预览**，即模型稍后再解析的 id。解析它会让 EventHub 保留事件并回答对它的读取，而这正是 2.5 排除的队列与保留；溢出文件已经把完整正文交给模型。

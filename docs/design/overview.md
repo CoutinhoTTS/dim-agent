@@ -266,31 +266,28 @@ sequenceDiagram
 
 ### 5.5 Scheduled run through Agents
 
-[Scheduler](plugins/Scheduler.md) defines its own design status; its optional package and its public-flow verification are implemented ([#317](https://github.com/arcships/dim/pull/317)), and installation remains explicit under its §1.3. The diagram shows its owned create-mode run flow. S2, Settings and pluginFiles' [public composition](process-typescript.md#52-public-pluginfiles-binding) are available.
+[Scheduler](plugins/Scheduler.md) defines its own design status; its optional package and its public-flow verification are implemented ([#317](https://github.com/arcships/dim/pull/317)), and installation remains explicit under its §1.3. The diagram shows the delivery flow its design defines. S2, Settings and pluginFiles' [public composition](process-typescript.md#52-public-pluginfiles-binding) are available.
 
 ```mermaid
 sequenceDiagram
   participant SC as Scheduler (process)
   participant AI as Agents sessions
   participant PF as Scheduler pluginFiles
-  SC->>PF: persist run launching
-  SC->>AI: launch (S2 creates a non-interactive Session)
-  AI-->>SC: sessionId, effective policy
-  SC->>PF: persist launch reply
+  SC->>PF: persist the delivery delivering
+  opt launch target
+    SC->>AI: launch (S2 creates a non-interactive Session)
+    AI-->>SC: sessionId, effective policy
+    SC->>PF: persist the Session and the stop time
+  end
   SC->>AI: input Queue with dim-scheduler marker
   AI-->>SC: published input receipt
-  SC->>PF: persist submitted
-  loop own run input is not terminal
-    SC->>AI: history(main), fixed published prefix and pages
-    AI-->>SC: own input consumption and turn facts
-  end
-  SC->>PF: persist terminal run
-  opt report selected under A.6
-    SC->>AI: input Steer to recorded report branch
+  SC->>PF: persist delivered
+  opt launch target
+    SC->>AI: stop at the stop time
   end
 ```
 
-The tracker reads its own input's published history as [§3.2](plugins/Scheduler.md#32-completion-and-timeout) defines, with no outstanding native idle wait. It persists the terminal run before one report attempt under [A.6](plugins/Scheduler.md#a6-run-outcome-delivery); failed delivery is recorded and not resent. The target branch consumes the input normally before its text enters model context.
+The delivery writes one input to the target branch and reads nothing afterwards ([Scheduler §3.1](plugins/Scheduler.md#31-a-due-window), [A.5](plugins/Scheduler.md#a5-timeline-and-capability-mechanics)). A launch target is started first, recorded with its stop time, and stopped at it ([§3.2](plugins/Scheduler.md#32-completion-and-timeout)). The delivery record is the outcome, and no report is written. The target branch consumes the input normally before its text enters model context.
 
 ### 5.6 Collaboration delegation to an external agent
 
