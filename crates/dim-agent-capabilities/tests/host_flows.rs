@@ -3276,6 +3276,80 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
 const TOOL_IMAGE: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
 
+#[tokio::test]
+async fn replacing_a_tool_image_preserves_other_messages_and_the_stored_result() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = MinimalHost::start(&builder(
+        Arc::new(RecordingModel(requests.clone())),
+        Arc::new(Screenshot(true)),
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig {
+            model: model_with_vision("text-only", false),
+            tools: Some(vec!["shot".into()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    session
+        .submit("keep this answer".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    session
+        .submit("tool:shot {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let sent = requests.lock().unwrap().last().unwrap().clone();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let stored = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(call) => Some(call.request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!Arc::ptr_eq(&sent, &stored));
+    assert_eq!(sent.messages.len(), stored.messages.len());
+    let mut replaced = 0;
+    for (before, after) in stored.messages.iter().zip(&sent.messages) {
+        if before == after {
+            assert!(Arc::ptr_eq(before, after), "unchanged messages stay shared");
+            continue;
+        }
+        replaced += 1;
+        let MessageContent::Parts(parts) = &after.content else {
+            panic!("tool results contain parts")
+        };
+        let [MessagePart::ToolResult { content, .. }] = parts.as_slice() else {
+            panic!("one tool result is adapted")
+        };
+        assert_eq!(
+            content,
+            &ToolContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "screenshot".into()
+                },
+                ContentBlock::Text {
+                    text: "[Image omitted: the current model does not accept images.]".into()
+                }
+            ])
+        );
+    }
+    assert_eq!(replaced, 1);
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::ToolResult(data) if data.results.iter().any(|result| matches!(
+            &result.result.content,
+            ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))
+        ))
+    )));
+    agent.close().await.unwrap();
+}
+
 /// A tool whose result is a text block, with or without a PNG block after it.
 struct Screenshot(bool);
 impl ToolDriver for Screenshot {
