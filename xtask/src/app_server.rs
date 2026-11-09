@@ -175,7 +175,10 @@ pub async fn serve_home(
     defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::process,
-        WorkspaceToolsConfig { output_root },
+        WorkspaceToolsConfig {
+            boundary: None,
+            output_root,
+        },
         dim_agent_capabilities::timeline_tree::BranchToolConfig {
             description: run.overrides.branch_description.clone(),
             roster_closing: run.overrides.roster_closing.clone(),

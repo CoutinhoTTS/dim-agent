@@ -1434,6 +1434,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: native.join("outputs"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),

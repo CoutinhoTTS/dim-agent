@@ -207,6 +207,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: dir.join("outputs"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
