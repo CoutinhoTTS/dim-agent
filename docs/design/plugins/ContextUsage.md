@@ -117,9 +117,11 @@ ContextPreparation 对最终请求的专有增补或 host 变换单独核验，�
 | baseline | 可空；request ID、请求源位置、前缀身份、该前缀的本地贡献、provider prompt_tokens。 |
 | limits | context window、output allowance、compaction threshold。 |
 
-Contribution 只定义一次：serialized_bytes 和 images，都是非负整数。计数 owner 提供 fixed(system, tools)、message(message) 和 estimate(contribution)；产品 estimate 沿用字节除以 4、图片乘以 1600。序列化范围与现有 WindowFacts 相同，包括空 Option 的 null 和工具 Blocks 分支。不能把不同算法的 Contribution 相加。
+Contribution 只定义一次：serialized_bytes 和 images，都是非负整数。计数操作、算法身份、精确序列化范围和 Rust 绑定归 [ContextCompaction §5.1 的计数合同](ContextCompaction.md#51-productcontextmodel)。本部件保存该合同的 ContextContribution，不定义另一种计数类型或复制其序列化规则。
 
 产品 ContextModel 显式声明支持该算法；其它实现继续保留完整请求计数，但若未提供等价的可组合统计，usage 返回不支持此统计，不能静默重建历史。最终完整请求计数的原合同不删除。
+
+读取计数能力只调用当前 ContextModel 的 contribution_counter；None 是明确的不支持，不向 Timeline 补查正文来试算。新增消息只调用一次 message；固定内容变化只调用 fixed；读取已保存总量只调用 estimate。算法身份不同则不得复用旧数字根或 provider 校准；走显式初始化，而非在 getter 内偷偷重算。
 
 ## 9. 数字节点、压缩和请求基准
 

@@ -9694,6 +9694,9 @@
       "from": "dim_agent_capabilities::context_model",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path ContextContribution",
+        "path ContextContribution::default",
+        "path ContextCounter",
         "path ContextModel",
         "path HostError::classified",
         "path HostErrorKind::InvalidRequest",
@@ -9706,6 +9709,7 @@
       "to": "dim_agent_types::content",
       "references": [
         "path ContentBlock::Image",
+        "path Message",
         "path MessageContent::Parts",
         "path MessageContent::Text",
         "path MessagePart::Image",
@@ -9719,7 +9723,15 @@
       "references": [
         "path ModelCapabilitySnapshot",
         "path ModelConfig",
-        "path ModelRequest"
+        "path ModelRequest",
+        "path SystemPrompt"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_model",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolDefinition"
       ]
     },
     {
