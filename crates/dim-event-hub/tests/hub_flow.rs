@@ -546,6 +546,92 @@ async fn deleting_a_subscribed_session_removes_its_subscriptions() {
     server.join().await.unwrap();
 }
 
+/// EventHub §9.1 with a delete and a subscribe in flight. A write held on
+/// the store keeps the delete inside `delete_session` with the Session's
+/// admission gate in hand; the subscribe then waits for that gate in
+/// `acquire`, holding the EventHub Session lock across `sessions.input`.
+/// The delete must release the gate before it announces: its listener takes
+/// that lock, so announcing under the gate would deadlock the two.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delete_announces_after_its_gate_is_released() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    producer.declare(im_declaration("")).await.unwrap();
+    let session = create_session(&mut client, home.path()).await;
+    subscribe(&mut client, &session, vec!["im.*"], None).await;
+
+    // The gate: a write on the store, so the delete blocks in
+    // `delete_session` while it holds the Session's admission gate.
+    let connection = rusqlite::Connection::open(home.path().join("dimcode.sqlite")).unwrap();
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let mut deleter = connect(&server).await;
+    let target = session.clone();
+    let deleting = tokio::spawn(async move {
+        deleter
+            .rpc("session.delete", json!({"sessionId": target}))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !deleting.is_finished(),
+        "the delete is held by the store write, its gate in hand"
+    );
+
+    // The subscribe waits for the gate inside `sessions.input`, its EventHub
+    // Session lock taken.
+    let mut subscriber = connect(&server).await;
+    let target = session.clone();
+    let subscribing = tokio::spawn(async move {
+        subscriber
+            .rpc(
+                "eventhub.subscribe",
+                json!({"types": ["im.*"], "target": {"sessionId": target}}),
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !subscribing.is_finished(),
+        "the subscribe waits for the delete's gate"
+    );
+
+    connection.execute_batch("COMMIT").unwrap();
+
+    let deleted = tokio::time::timeout(Duration::from_secs(5), deleting)
+        .await
+        .expect("the delete returns: it announces after releasing the gate")
+        .unwrap()
+        .unwrap();
+    assert!(deleted.get("error").is_none(), "{deleted}");
+    let subscribed = tokio::time::timeout(Duration::from_secs(5), subscribing)
+        .await
+        .expect("the subscribe returns: the delete's gate is free")
+        .unwrap();
+    // The subscribe either failed or its subscription was removed by the
+    // delete (design §3.3); nothing of it remains either way.
+    match subscribed {
+        Ok(reply) => assert!(
+            reply["subscriptionId"].is_string(),
+            "the subscribe answered: {reply}"
+        ),
+        Err(error) => assert!(
+            format!("{error:?}").contains("session_closed"),
+            "the subscribe failed on the deleted Session: {error:?}"
+        ),
+    }
+    assert!(
+        listed(&mut client, &session).await.is_empty(),
+        "the deleted Session keeps no subscription"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// A `steer` delivery reaches the running turn at its next step and, like
 /// every steer, ends a wait without a `taskId`; the marker arrives in the
 /// same turn (design 3.1).
