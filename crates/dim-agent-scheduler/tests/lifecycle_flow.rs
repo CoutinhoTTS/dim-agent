@@ -431,14 +431,15 @@ async fn a_reused_session_with_a_long_history_still_settles() {
         )
         .await
         .unwrap();
-    let last = head["events"]
-        .as_array()
-        .and_then(|events| events.last())
-        .and_then(|event| event["sequence"].as_u64())
-        .unwrap_or_else(|| panic!("history has events: {head}"));
+    assert_eq!(
+        head["done"], false,
+        "the reused Session has another history page: {head}"
+    );
+    let after = head["nextAfter"].as_u64().unwrap();
+    let through = head["through"].as_u64().unwrap();
     assert!(
-        last >= 256,
-        "the reused Session has more than one history page: first page ends at {last}"
+        after > 0 && after < through,
+        "the first page advances without reaching the fixed head: {head}"
     );
 
     let second: Value = client

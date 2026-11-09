@@ -386,11 +386,17 @@ async fn summaries_read_atomic_configuration_tails_and_survive_restart() {
         .await
         .unwrap();
     let through = session.sequence("main").unwrap();
-    assert!(
-        session.batch_end("main", through - 1).await.is_err(),
-        "regression fixture must end with a multi-event atomic batch"
-    );
     let history = branch_events(&session, "main", ..=through).await.unwrap();
+    let configured = history
+        .iter()
+        .rev()
+        .find(|event| matches!(event.kind, EventKind::ContextConfigured(_)))
+        .unwrap()
+        .sequence;
+    assert!(
+        session.batch_end("main", configured - 1).await.is_err(),
+        "the adopted configuration belongs to a multi-event atomic batch"
+    );
     let reply = client.rpc("session.summaries", json!({})).await;
     assert_ok(&reply);
     assert_eq!(reply["result"][0]["sequence"], through);

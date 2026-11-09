@@ -580,21 +580,18 @@ async fn attach(fixture: &Fixture, session_id: &str) -> Client {
 
 /// The `turnId` of the newest `turn/end` on `main`.
 async fn latest_turn(client: &mut Client, id: &str) -> String {
-    let history = client
+    let reply = client
         .rpc(
-            "session.history",
-            json!({"sessionId":id,"branchId":"main","after":0,"limit":256}),
+            "session.turn.get",
+            json!({"sessionId":id,"branchId":"main"}),
         )
         .await;
-    assert_ok(&history);
-    history["result"]["events"]
-        .as_array()
+    assert_ok(&reply);
+    assert_eq!(reply["result"]["turn"]["ended"], true);
+    reply["result"]["turn"]["turnId"]
+        .as_str()
         .unwrap()
-        .iter()
-        .rev()
-        .find(|event| event["type"] == "turn" && event["name"] == "end")
-        .map(|event| event["data"]["turn_id"].as_str().unwrap().to_owned())
-        .expect("a completed turn")
+        .to_owned()
 }
 
 async fn configure(client: &mut Client, document: Value) -> Value {

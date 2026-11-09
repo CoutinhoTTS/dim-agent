@@ -947,20 +947,22 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
         let main = wire.read("session.history");
         wire.reply(
             &main,
-            json!({"events":[command("old",1,1000,"old attachment command")],
-            "through":1,"nextAfter":1,"done":true}),
+            json!({"events":[],"through":0,"nextAfter":0,"done":true}),
         );
         wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        let usage = wire.read("session.context.usage");
+        event(
+            wire,
+            "main",
+            command("old", 1, 1000, "old attachment command"),
+        );
+        let catalog = wire.read("provider.list");
         ready.send(()).unwrap();
         control.recv_timeout(Duration::from_secs(10)).unwrap();
-        wire.reply(
-            &usage,
-            json!({"contextWindow":2000,"outputTokens":100,"thresholdTokens":1500,
-            "estimatedInputTokens":50,"baselineSource":"fixture"}),
-        );
+        wire.reply(&catalog, json!({"providers":[]}));
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
         // `/new` goes home without a Session; the queued stop reaches nothing.
         let mut line = String::new();
         assert_eq!(
@@ -971,9 +973,11 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
-    terminal.write(b"/usage\r");
+    terminal.write(b"/tasks\r");
+    terminal.until("old attachment command");
+    terminal.write(b"\x1b[27u/models\r");
     readiness.recv_timeout(Duration::from_secs(10)).unwrap();
-    terminal.write(b"/new\r/tasks\r\x18queued-proof");
+    terminal.write(b"\x1b[27u/new\r/tasks\r\x18queued-proof");
     terminal.until("No matching tasks.");
     proceed.send(()).unwrap();
     terminal.until("Task attachment changed; reopen the panel before stopping work");
