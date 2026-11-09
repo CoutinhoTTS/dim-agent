@@ -33521,6 +33521,7 @@
         "path scheduler::Answer::Jobs",
         "path scheduler::Catalog",
         "path scheduler::Failure::ReadFailed",
+        "path scheduler::Target::column",
         "path scheduler::apply",
         "path scheduler::catalog",
         "use crate::management::scheduler"
