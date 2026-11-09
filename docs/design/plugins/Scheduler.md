@@ -571,7 +571,7 @@ Namespace `schedule`, registered with `managementMethods`: its declarations list
 
 `schedule.save` is the only entry that may set a `launch` target, and it is the only one that may set `agent_id` and `policy`. A `launch` target's `cwd` is required; a `session` target's `session_id` is required and `branch_id` defaults to `main`. A `policy` preset is stored as given; `sessions.launch` caps it against the live host bound at launch and the delivery records what the Session received.
 
-A delivery that settles `failed` with `session_closed`, `branch_missing` or `branch_ended` also disables the job: the same Settings CAS sets `enabled = false`, clears `enabled_at` and stores `disabled_reason = {code, at}`. `schedule.list` reports it; a save or `set_enabled(true)` clears it. A `failed` delivery for any other reason leaves the job enabled.
+A delivery that settles `failed` with `session_closed`, `branch_missing` or `branch_ended` also disables the job: the same Settings CAS sets `enabled = false`, clears `enabled_at` and stores `disabled_reason = {code, at}`. `schedule.list` reports it; a save or `set_enabled(true)` clears it. A `failed` delivery for any other reason leaves the job enabled. The disable is required state, not a best-effort note: a CAS that loses to a concurrent write is retried against the current document while the job still names that delivery's Session, a save that replaced the target ends the claim, and a read or write failure leaves it to the timer pass, which reads the claim back from the job's newest terminal delivery.
 
 The process row's `schedule` namespace (§1.3) uses existing method admission: `list`/`history`/`watch` are `report`; mutations are `drain` so accepted operations settle before unload. Rpc returns `service_reloading` for a Pending/reloading owner, `service_unavailable` for a Failed/Unresolved owner, and `unknown_method` when disabled/absent.
 
@@ -750,6 +750,8 @@ The change ships as four pull requests. The first, this document, is the design 
 | 2 | The `session` target end to end: the job record, the tool's schema and description, `scheduleJobs`'s target and 16-job bound, the timer's delivery path, the delivery record and `schedule.history`, with the launch target's old behaviour retained, and every client read or write of the shapes it changes, so a release cut after it works |
 | 3 | The `launch` target reduced to one launch, one input and the stop timer; retirement of the run tracker, the report, `report_guidance`, the guide entry's report kind and the save-time policy capture |
 | 4 | The client reads and writes of the shapes PR 3 changes: the launch route's retired fields and its report |
+
+Client-side follow-ups, which are not requirements on another owner: the clients in this repository change with the shapes; the Desktop client adopts A.3's shapes in its own repository. The App Server keeps no compatibility window or gate for the fields those shapes remove.
 
 Known limit: a `launch` can finish after its caller disappears, before its identity is persisted. A delivery without that identity is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for the stop timer or retention. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
 

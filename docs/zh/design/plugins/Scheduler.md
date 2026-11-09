@@ -546,7 +546,7 @@ Scheduler 的记录是进程状态，没有 Timeline 事实，因此要展示它
 
 `schedule.save` 是唯一能设置 `launch` 目标的入口，也是唯一能设置 `agent_id` 与 `policy` 的入口。`launch` 目标的 `cwd` 必需；`session` 目标的 `session_id` 必需，`branch_id` 缺省为 `main`。`policy` 预设在保存时原样存储；`sessions.launch` 在启动时按实时宿主上限收拢它，投递记录 Session 实际收到的策略。
 
-以 `session_closed`、`branch_missing` 或 `branch_ended` 结算为 `failed` 的投递还会禁用任务：同一次 Settings CAS 设置 `enabled = false`、清除 `enabled_at` 并存入 `disabled_reason = {code, at}`。`schedule.list` 报告它；一次保存或 `set_enabled(true)` 会清除它。因其他原因 `failed` 的投递让任务保持启用。
+以 `session_closed`、`branch_missing` 或 `branch_ended` 结算为 `failed` 的投递还会禁用任务：同一次 Settings CAS 设置 `enabled = false`、清除 `enabled_at` 并存入 `disabled_reason = {code, at}`。`schedule.list` 报告它；一次保存或 `set_enabled(true)` 会清除它。因其他原因 `failed` 的投递让任务保持启用。这次禁用是必需的状态，不是尽力而为的备注：输给并发写入的 CAS 会针对当前文档重试，只要任务仍命名该投递的 Session；替换目标的一次保存结束这份依据；读取或写入失败则留给定时通道，由它从任务最新的终态投递读回这份依据。
 
 进程行的 `schedule` 命名空间(§1.3)使用既有方法准入：`list`/`history`/`watch` 是 `report`；变更是 `drain`，因此已接受操作在卸载前结算。Rpc 对 Pending/重载中的所有者返回 `service_reloading`，对 Failed/Unresolved 所有者返回 `service_unavailable`，在禁用/缺失时返回 `unknown_method`。
 
@@ -725,6 +725,8 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 2 | `session` 目标端到端：任务记录、工具的 schema 与描述、`scheduleJobs` 的目标与 16 条上限、定时器的投递路径、投递记录与 `schedule.history`，同时保留 launch 目标的旧行为；以及所有客户端对它所改形状的读写，使在它之后切出的版本仍可工作 |
 | 3 | `launch` 目标收敛为一次启动、一条输入与停止定时器；退役运行追踪器、报告、`report_guidance`、guide 条目的 report 种类与保存时策略捕获 |
 | 4 | PR 3 所改形状的客户端读写：launch 路线退役的字段及其报告 |
+
+客户端跟进不是对另一所有者的要求：本仓库内的客户端随形状一起改变；桌面客户端在其自己的仓库中采纳 A.3 的形状。App Server 对这些形状移除的字段不保留兼容窗口或闸门。
 
 已知限制：一次 `launch` 可能在调用方消失、其身份尚未持久化时完成。没有该身份的投递记为 `lost`，永不重启；Scheduler 无法识别由此产生的 Session 用于停止定时器或保留期。为后续统一恢复设计保留这一限制的明确说明，不在此增加幂等、注册表或基础设施闸门。
 
