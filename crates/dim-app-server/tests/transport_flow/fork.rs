@@ -764,6 +764,7 @@ pub(super) async fn launch_configured(
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: store
                 .0
                 .join(dim_app_server::storage::COMMAND_OUTPUT_DIRECTORY),

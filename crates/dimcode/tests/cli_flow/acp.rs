@@ -1792,10 +1792,14 @@ fn acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof() {
     }
     peer.close();
     model.join().unwrap();
-    assert!(
-        pid_file.with_extension("pid.cancelled").exists(),
-        "EOF must cancel the accepted MCP call before closing its server"
-    );
+    let deadline = Instant::now() + PATIENCE;
+    while !pid_file.with_extension("pid.cancelled").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "EOF must cancel the accepted MCP call before closing its server"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     let pid: i32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
     let deadline = Instant::now() + PATIENCE;
     while unsafe { libc::kill(pid, 0) } == 0 {

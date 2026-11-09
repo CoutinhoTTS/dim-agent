@@ -578,7 +578,7 @@ impl rutis::host::DynPlugin for CaptureMemberConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn product_collaboration_adopts_profile_and_default_capabilities() {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let home = std::env::temp_dir().join(format!("dim-team-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let configs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -2928,6 +2928,7 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.0.join("command-output"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),

@@ -1,5 +1,6 @@
 //! File tool flows: text preservation, branch-scoped read bindings, write
-//! serialization, and glob/grep parity with the TS grep-glob acceptance test.
+//! serialization, glob/grep parity with the TS grep-glob acceptance test, and
+//! the file-root boundary.
 
 use dim_agent_capabilities::{
     host::HostError,
@@ -212,12 +213,14 @@ async fn coordinated_sessions_reject_stale_mutations() {
         workspace.root.clone(),
         workspace.root.join("outputs"),
         coordinator.clone(),
+        None,
     );
     let other = FileTools::with_coordinator(
         workspace.root.clone(),
         workspace.root.clone(),
         workspace.root.join("outputs"),
         coordinator,
+        None,
     );
     workspace.put("shared", b"before\r\n");
     let (a, b) = (branch(), branch());
@@ -1890,4 +1893,840 @@ fn the_mention_index_drops_roots_whose_walk_is_past_its_ttl() {
 
     let _ = fs::remove_dir_all(&first);
     let _ = fs::remove_dir_all(&second);
+}
+
+/// The root boundary tests: each refusal carries an ablation — the same call
+/// with no boundary at all must not refuse, so reverting the boundary code
+/// fails the test.
+#[cfg(unix)]
+mod boundary {
+    use super::*;
+    use dim_agent_capabilities::workspace_tools::files::FileToolBoundary;
+
+    /// One branch with its own empty Timeline; one per test, so read
+    /// bindings survive between the calls of a test.
+    fn boundary_reads() -> FileReads {
+        FileReads::new(Arc::new(Timeline::new(
+            rutis::Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: "boundary".into(),
+                branch_id: "main".into(),
+            },
+            Vec::new(),
+            Arc::new(MemoryTimelineStore::default()),
+        )))
+    }
+
+    async fn call(
+        tools: &FileTools,
+        reads: &FileReads,
+        name: &str,
+        input: Value,
+    ) -> Result<ToolResult, HostError> {
+        tools
+            .execute(
+                &ToolCall {
+                    id: "boundary".into(),
+                    name: name.into(),
+                    input: input.as_object().unwrap().clone(),
+                },
+                reads,
+                CancellationToken::new(),
+            )
+            .await
+    }
+
+    /// A canonical temp tree with a workspace, the configured home (with a
+    /// `sub/` directory under it), a read-only root, an outside directory
+    /// and a separate platform home the no-boundary `~` resolves against.
+    struct Boundary {
+        workspace: PathBuf,
+        platform_home: PathBuf,
+        home: PathBuf,
+        /// A sibling directory no root covers.
+        outside: PathBuf,
+        read_only: PathBuf,
+        boundary: FileToolBoundary,
+    }
+
+    fn fixture() -> Boundary {
+        let root = std::env::temp_dir().join(format!("dim-boundary-{}", uuid::Uuid::new_v4()));
+        for dir in [
+            "workspace",
+            "home/sub",
+            "platform-home",
+            "read-only",
+            "outside",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("workspace/notes.txt"), "workspace-notes").unwrap();
+        std::fs::write(root.join("home/marker.txt"), "home-marker").unwrap();
+        std::fs::write(root.join("home/sub/marker.txt"), "home-sub-marker").unwrap();
+        std::fs::write(root.join("platform-home/marker.txt"), "platform-marker").unwrap();
+        std::fs::write(root.join("read-only/facts.txt"), "read-only-facts").unwrap();
+        std::fs::write(root.join("outside/secret.txt"), "secret").unwrap();
+        let root = root.canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let boundary = FileToolBoundary {
+            workspace: workspace.clone(),
+            home: root.join("home"),
+            read_only_roots: vec![root.join("read-only")],
+        };
+        Boundary {
+            workspace,
+            platform_home: root.join("platform-home"),
+            home: root.join("home"),
+            outside: root.join("outside"),
+            read_only: root.join("read-only"),
+            boundary,
+        }
+    }
+
+    /// The trees' tools with the boundary, and the same tree's tools without
+    /// one (today's unbounded behaviour).
+    fn tools(fixture: &Boundary) -> (FileTools, FileTools) {
+        let output = fixture.workspace.join("out");
+        (
+            FileTools::with_boundary(
+                fixture.workspace.clone(),
+                output.clone(),
+                fixture.boundary.clone(),
+            ),
+            FileTools::new(
+                fixture.workspace.clone(),
+                fixture.platform_home.clone(),
+                output,
+            ),
+        )
+    }
+
+    /// The refusal a call must produce: an error whose structured code is
+    /// the outside-roots code.
+    fn assert_refused(result: &ToolResult) {
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["code"],
+            "outside_file_roots",
+            "{result:?}"
+        );
+    }
+
+    fn text(result: &ToolResult) -> String {
+        match &result.content {
+            dim_agent_types::ToolContent::Text(text) => text.clone(),
+            other => panic!("expected a text result, got {other:?}"),
+        }
+    }
+
+    fn remove(fixture: &Boundary) {
+        std::fs::remove_dir_all(fixture.boundary.workspace.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_is_allowed_inside_the_roots() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, _) = tools(&fixture);
+        let result = call(&tools, &reads, "read", json!({"path": "notes.txt"}))
+            .await
+            .unwrap();
+        assert!(text(&result).contains("workspace-notes"), "{result:?}");
+        let home_read = call(&tools, &reads, "read", json!({"path": "~/marker.txt"}))
+            .await
+            .unwrap();
+        assert!(text(&home_read).contains("home-marker"), "{home_read:?}");
+        let root_read = call(
+            &tools,
+            &reads,
+            "read",
+            json!({"path": fixture.read_only.join("facts.txt")}),
+        )
+        .await
+        .unwrap();
+        assert!(
+            text(&root_read).contains("read-only-facts"),
+            "{root_read:?}"
+        );
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn read_outside_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "read",
+            json!({"path": "../outside/secret.txt"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation: without the boundary the same read is today's behaviour.
+        let result = call(
+            &plain,
+            &reads,
+            "read",
+            json!({"path": "../outside/secret.txt"}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("secret"), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn read_through_a_symlink_out_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        std::os::unix::fs::symlink(&fixture.outside, fixture.workspace.join("link")).unwrap();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(&tools, &reads, "read", json!({"path": "link/secret.txt"}))
+            .await
+            .unwrap();
+        assert_refused(&result);
+        // Ablation: canonicalization is what refuses the symlink; without
+        // the boundary the same read follows it.
+        let result = call(&plain, &reads, "read", json!({"path": "link/secret.txt"}))
+            .await
+            .unwrap();
+        assert!(text(&result).contains("secret"), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn read_tilde_resolves_to_the_configured_home() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(&tools, &reads, "read", json!({"path": "~/marker.txt"}))
+            .await
+            .unwrap();
+        assert!(text(&result).contains("home-marker"), "{result:?}");
+        // Ablation: without the boundary, `~` is the platform home, which
+        // holds a different marker, so the assertion above would fail.
+        let result = call(&plain, &reads, "read", json!({"path": "~/marker.txt"}))
+            .await
+            .unwrap();
+        assert!(text(&result).contains("platform-marker"), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn write_is_allowed_inside_the_workspace() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, _) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "write",
+            json!({"path": "made.txt", "content": "made\n"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(fixture.workspace.join("made.txt")).unwrap(),
+            "made\n"
+        );
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn write_outside_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        for input in [
+            json!({"path": "../outside/one.txt", "content": "made\n"}),
+            json!({"path": fixture.outside.join("two.txt"), "content": "made\n"}),
+        ] {
+            let result = call(&tools, &reads, "write", input.clone()).await.unwrap();
+            assert_refused(&result);
+            // Ablation.
+            let result = call(&plain, &reads, "write", input).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+        }
+        for name in ["one.txt", "two.txt"] {
+            assert_eq!(
+                std::fs::read_to_string(fixture.outside.join(name)).unwrap(),
+                "made\n"
+            );
+        }
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn write_through_a_symlink_out_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        std::os::unix::fs::symlink(&fixture.outside, fixture.workspace.join("link")).unwrap();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "write",
+            json!({"path": "link/made.txt", "content": "made\n"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation.
+        let result = call(
+            &plain,
+            &reads,
+            "write",
+            json!({"path": "link/made.txt", "content": "made\n"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn write_tilde_resolves_to_the_configured_home_and_is_refused_there() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "write",
+            json!({"path": "~/made.txt", "content": "x\n"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // The refusal names the resolved path: the configured home, not the
+        // platform home.
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["path"],
+            fixture.home.join("made.txt").to_string_lossy().as_ref(),
+            "{result:?}"
+        );
+        // Ablation: without the boundary the same write succeeds at the
+        // platform home, so the refusal assertion above would fail.
+        let result = call(
+            &plain,
+            &reads,
+            "write",
+            json!({"path": "~/made.txt", "content": "x\n"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(fixture.platform_home.join("made.txt")).unwrap(),
+            "x\n"
+        );
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn write_to_a_read_only_root_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let target = fixture.read_only.join("made.txt");
+        let result = call(
+            &tools,
+            &reads,
+            "write",
+            json!({"path": target, "content": "x\n"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation.
+        let result = call(
+            &plain,
+            &reads,
+            "write",
+            json!({"path": target, "content": "x\n"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn edit_is_allowed_inside_the_workspace() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, _) = tools(&fixture);
+        let read = call(&tools, &reads, "read", json!({"path": "notes.txt"}))
+            .await
+            .unwrap();
+        assert!(text(&read).contains("workspace-notes"), "{read:?}");
+        let result = call(
+            &tools,
+            &reads,
+            "edit",
+            json!({"path": "notes.txt", "oldText": "workspace-notes", "newText": "edited"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn edit_outside_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let outside = fixture.outside.join("secret.txt");
+        let result = call(
+            &tools,
+            &reads,
+            "edit",
+            json!({"path": outside, "oldText": "secret", "newText": "changed"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation: read the target first, as the tool requires, then edit.
+        call(
+            &plain,
+            &reads,
+            "read",
+            json!({"path": "../outside/secret.txt"}),
+        )
+        .await
+        .unwrap();
+        let result = call(
+            &plain,
+            &reads,
+            "edit",
+            json!({"path": outside, "oldText": "secret", "newText": "changed"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn edit_through_a_symlink_out_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        std::os::unix::fs::symlink(&fixture.outside, fixture.workspace.join("link")).unwrap();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "edit",
+            json!({"path": "link/secret.txt", "oldText": "secret", "newText": "changed"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation: read then edit, as the tool requires.
+        call(&plain, &reads, "read", json!({"path": "link/secret.txt"}))
+            .await
+            .unwrap();
+        let result = call(
+            &plain,
+            &reads,
+            "edit",
+            json!({"path": "link/secret.txt", "oldText": "secret", "newText": "changed"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn edit_tilde_resolves_to_the_configured_home_and_is_refused_there() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "edit",
+            json!({"path": "~/marker.txt", "oldText": "home-marker", "newText": "edited"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["path"],
+            fixture.home.join("marker.txt").to_string_lossy().as_ref(),
+            "{result:?}"
+        );
+        // Ablation: without the boundary the same edit resolves to the
+        // platform home and succeeds there, not an outside-roots refusal.
+        call(&plain, &reads, "read", json!({"path": "~/marker.txt"}))
+            .await
+            .unwrap();
+        let result = call(
+            &plain,
+            &reads,
+            "edit",
+            json!({"path": "~/marker.txt", "oldText": "platform-marker", "newText": "edited"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn edit_a_read_only_root_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let target = fixture.read_only.join("facts.txt");
+        let result = call(
+            &tools,
+            &reads,
+            "edit",
+            json!({"path": target, "oldText": "read-only-facts", "newText": "edited"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation: read then edit, as the tool requires.
+        call(
+            &plain,
+            &reads,
+            "read",
+            json!({"path": "../read-only/facts.txt"}),
+        )
+        .await
+        .unwrap();
+        let result = call(
+            &plain,
+            &reads,
+            "edit",
+            json!({"path": target, "oldText": "read-only-facts", "newText": "edited"}),
+        )
+        .await
+        .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        remove(&fixture);
+    }
+
+    /// Glob and grep share the search scope resolution.
+    #[tokio::test]
+    async fn glob_is_allowed_inside_the_roots() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, _) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": "."}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("notes.txt"), "{result:?}");
+        let result = call(
+            &tools,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": "~/sub"}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("marker.txt"), "{result:?}");
+        let result = call(
+            &tools,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": fixture.read_only}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("facts.txt"), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn glob_outside_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": "../outside"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation.
+        let result = call(
+            &plain,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": "../outside"}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("secret.txt"), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn glob_through_a_symlink_out_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        std::os::unix::fs::symlink(&fixture.outside, fixture.workspace.join("link")).unwrap();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": "link"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation.
+        let result = call(
+            &plain,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": "link"}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("secret.txt"), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn glob_tilde_resolves_to_the_configured_home() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": "~/sub"}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("marker.txt"), "{result:?}");
+        // Ablation: without the boundary `~/sub` joins the workspace as a
+        // literal directory and the search fails as an input error, never
+        // as an outside-roots refusal.
+        let result = call(
+            &plain,
+            &reads,
+            "glob",
+            json!({"pattern": "*.txt", "path": "~/sub"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result
+                .structured_content
+                .as_ref()
+                .and_then(|it| it["code"].as_str()),
+            Some("invalid_input"),
+            "{result:?}"
+        );
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn grep_is_allowed_inside_the_roots() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, _) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "grep",
+            json!({"pattern": "workspace-notes", "path": "."}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("notes.txt"), "{result:?}");
+        let result = call(
+            &tools,
+            &reads,
+            "grep",
+            json!({"pattern": "home-marker", "path": "~/marker.txt"}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("marker.txt"), "{result:?}");
+        let result = call(
+            &tools,
+            &reads,
+            "grep",
+            json!({"pattern": "read-only-facts", "path": fixture.read_only}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("facts.txt"), "{result:?}");
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn grep_outside_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        for input in [
+            json!({"pattern": "secret", "path": "../outside"}),
+            json!({"pattern": "secret", "path": fixture.outside}),
+        ] {
+            let result = call(&tools, &reads, "grep", input.clone()).await.unwrap();
+            assert_refused(&result);
+            // Ablation.
+            let result = call(&plain, &reads, "grep", input).await.unwrap();
+            assert!(text(&result).contains("secret"), "{result:?}");
+        }
+        remove(&fixture);
+    }
+
+    #[tokio::test]
+    async fn grep_through_a_symlink_out_is_refused_and_allowed_without_a_boundary() {
+        let fixture = fixture();
+        std::os::unix::fs::symlink(&fixture.outside, fixture.workspace.join("link")).unwrap();
+        let reads = boundary_reads();
+        let (tools, plain) = tools(&fixture);
+        let result = call(
+            &tools,
+            &reads,
+            "grep",
+            json!({"pattern": "secret", "path": "link"}),
+        )
+        .await
+        .unwrap();
+        assert_refused(&result);
+        // Ablation.
+        let result = call(
+            &plain,
+            &reads,
+            "grep",
+            json!({"pattern": "secret", "path": "link"}),
+        )
+        .await
+        .unwrap();
+        assert!(text(&result).contains("secret"), "{result:?}");
+        remove(&fixture);
+    }
+}
+
+/// The effective home through the real path: a host's platform home is the
+/// workspace, the boundary's home is a separate read-only sibling, and
+/// `write {path: "~/made.txt"}` is refused with nothing created in the
+/// workspace — the ToolExecutor's pre-admission resolution and the executed
+/// tool agree on the boundary home.
+#[cfg(unix)]
+mod toolhost {
+    use super::*;
+    use dim_agent_capabilities::{
+        defaults,
+        execution_settings::ExecutionSettingsHost,
+        host_platform::{
+            ExecShellRuntime, HostPlatform, OutputEncoding, ShellEdition, ShellSource, ShellStatus,
+        },
+        workspace_tools::{self, FileToolBoundary, WorkspaceToolsConfig},
+    };
+    use dim_agent_runtime::testing::{MinimalHost, chain_events};
+    use dim_agent_runtime::*;
+    use dim_agent_types::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bounded_write_resolves_tilde_against_the_configured_home() {
+        let root = std::env::temp_dir().join(format!("dim-toolhost-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let mut platform = HostPlatform::current(ShellStatus::Available(ExecShellRuntime {
+            executable_path: "/bin/sh".into(),
+            edition: ShellEdition::Sh,
+            source: ShellSource::Fallback,
+            output_encoding: OutputEncoding::Utf8,
+        }))
+        .unwrap()
+        .with_execution_settings(ExecutionSettingsHost::fixed(Default::default()));
+        platform.home = workspace.clone();
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::mock_model_hosts(&mut builder);
+        defaults::install(&mut builder);
+        workspace_tools::install(
+            &mut builder,
+            WorkspaceToolsConfig {
+                boundary: Some(FileToolBoundary {
+                    workspace: workspace.clone(),
+                    home: root.join("home"),
+                    read_only_roots: Vec::new(),
+                }),
+                output_root: root.join("out"),
+            },
+        );
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide_as::<HostPlatform>(Arc::new(platform))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let session = agent
+            .create_session(SessionConfig {
+                cwd: workspace.to_string_lossy().into_owned(),
+                tools: Some(vec!["write".into()]),
+                permission_policy: PermissionPolicy {
+                    preset: PermissionPreset::FullAccess,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session
+            .submit(
+                "tool:write {\"path\":\"~/made.txt\",\"content\":\"wrong-home\"}".into(),
+                InputMode::Queue,
+                "main",
+            )
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let results: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::ToolResult(data) => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 1, "one tool call settles once");
+        let result = &results[0].results[0].result;
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["code"], "outside_file_roots", "{result:?}");
+        assert_eq!(
+            structured["path"],
+            root.join("home/made.txt").to_string_lossy().as_ref(),
+            "{result:?}"
+        );
+        assert!(
+            !workspace.join("made.txt").exists(),
+            "nothing is created in the workspace"
+        );
+        assert!(
+            !root.join("home/made.txt").exists(),
+            "the configured home is read-only"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

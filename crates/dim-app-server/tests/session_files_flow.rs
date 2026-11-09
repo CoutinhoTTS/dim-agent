@@ -390,6 +390,7 @@ async fn a_session_reads_its_own_file_without_an_approval_request() {
     dim_agent_capabilities::workspace_tools::install(
         &mut builder,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.0.join("command-output"),
         },
     );
