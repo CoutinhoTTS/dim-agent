@@ -4,8 +4,11 @@
 //! traversal (`--hidden`, ignore files, the default exclusions), the same
 //! per-file and preview limits, and the same output.
 
+#[cfg(test)]
+use super::SearchHook;
 use super::{
-    Access, FileTools, blocking, cancelled, failed, field, inside, js_len, lexical, succeeded,
+    Access, FileTools, NotRegular, Target, TargetError, blocking, cancelled, failed, field, inside,
+    js_len, lexical, succeeded,
 };
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolResult};
@@ -17,11 +20,16 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
+    io::Read,
     path::{Path, PathBuf},
     sync::LazyLock,
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
+
+/// No search hook in a build without tests.
+#[cfg(not(test))]
+type SearchHook = std::convert::Infallible;
 
 const SEARCH_RESULT_BYTE_LIMIT: usize = 2 * 1024 * 1024;
 const SEARCH_MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024;
@@ -254,6 +262,9 @@ fn resolve_scope(
             if !inside(boundary, &canonical, Access::Read) {
                 return Err(refused_scope(&canonical));
             }
+            // The bounded content read walks from the target's parent, so
+            // the scope is the admitted canonical file.
+            return Ok(Scope::File(canonical));
         }
         return Ok(Scope::File(absolute));
     }
@@ -270,10 +281,13 @@ fn resolve_scope(
             "Open-ended searches cannot use the filesystem root or user home",
         ));
     }
-    if let Some(boundary) = boundary
-        && !inside(boundary, &canonical, Access::Read)
-    {
-        return Err(refused_scope(&canonical));
+    if let Some(boundary) = boundary {
+        if !inside(boundary, &canonical, Access::Read) {
+            return Err(refused_scope(&canonical));
+        }
+        // The walk starts from the admitted canonical directory, not the
+        // lexical one.
+        return Ok(Scope::Directory(canonical));
     }
     Ok(Scope::Directory(absolute))
 }
@@ -405,6 +419,14 @@ fn run_glob(
         path: relative(&root, path),
         fs_path: path.to_string_lossy().into_owned(),
     };
+    // `glob` returns names only: each result's canonical path is re-checked
+    // against the roots before it is returned, and a path that no longer
+    // canonicalizes inside is dropped.
+    let keep = |path: &Path| match boundary {
+        None => true,
+        Some(boundary) => std::fs::canonicalize(path)
+            .is_ok_and(|canonical| inside(boundary, &canonical, Access::Read)),
+    };
     let mut files = Vec::new();
     let mut truncated = false;
     match &scope {
@@ -415,7 +437,7 @@ fn run_glob(
                 .build()
                 .map_err(|error| input_error(format!("Invalid glob: {error}")))?
                 .compile_matcher();
-            if !excluded_file(path) && matcher.is_match(file_name(path)) {
+            if !excluded_file(path) && matcher.is_match(file_name(path)) && keep(path) {
                 files.push(record(path));
             }
         }
@@ -428,7 +450,7 @@ fn run_glob(
             for entry in walk(path, Some((&glob, true)), None)? {
                 active.check()?;
                 let Ok(entry) = entry else { continue };
-                if !is_file(&entry) {
+                if !is_file(&entry) || !keep(entry.path()) {
                     continue;
                 }
                 if files.len() >= limit {
@@ -577,7 +599,11 @@ pub(super) async fn grep(
         tools.boundary.clone(),
         input.clone(),
     );
-    run(move || run_grep(&cwd, &home, boundary.as_ref(), &input, cancel)).await
+    #[cfg(test)]
+    let hook = tools.before_search.clone();
+    #[cfg(not(test))]
+    let hook = None;
+    run(move || run_grep(&cwd, &home, boundary.as_ref(), &input, cancel, hook)).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -886,7 +912,10 @@ fn run_grep(
     boundary: Option<&super::FileToolBoundary>,
     input: &JsonObject,
     cancel: CancellationToken,
+    hook: Option<SearchHook>,
 ) -> Result<ToolResult, SearchError> {
+    #[cfg(not(test))]
+    let _ = &hook;
     let request = normalize_grep_input(input)?;
     if request.literal {
         if js_len(&request.pattern) > GREP_MAX_REGEX_LENGTH {
@@ -928,6 +957,7 @@ fn run_grep(
             .binary_detection(BinaryDetection::quit(b'\x00'))
             .build(),
     };
+    let bounded = boundary.is_some();
     match &scope {
         Scope::File(path) => {
             let include_matches = match &request.include {
@@ -946,7 +976,7 @@ fn run_grep(
             {
                 results.add_skipped(file, "too_large")?;
             } else {
-                search.file(path, file, &mut results)?;
+                search.file(path, file, &mut results, bounded)?;
             }
         }
         Scope::Directory(path) => {
@@ -954,10 +984,19 @@ fn run_grep(
             for entry in walk(path, include, Some(SEARCH_MAX_FILE_SIZE_BYTES))? {
                 active.check()?;
                 let Ok(entry) = entry else { continue };
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook(entry.path());
+                }
                 if !is_file(&entry) {
                     continue;
                 }
-                search.file(entry.path(), relative(&root, entry.path()), &mut results)?;
+                search.file(
+                    entry.path(),
+                    relative(&root, entry.path()),
+                    &mut results,
+                    bounded,
+                )?;
                 if results.frozen {
                     break;
                 }
@@ -988,6 +1027,33 @@ fn run_grep(
     })
 }
 
+/// Opens one walked file for its content through the same symlink-free
+/// walk `read` uses, so a path swapped for an outside symlink after the
+/// walk listed it is not read. `None` is a file whose path no longer walks
+/// cleanly; the caller skips it like any other unreadable file.
+fn open_bounded(path: &Path) -> Result<Option<std::fs::File>, std::io::Error> {
+    let target = match Target::for_read(path, true) {
+        Ok(target) => target,
+        Err(TargetError::Refused) => return Ok(None),
+        Err(TargetError::Io(error)) => return Err(error),
+    };
+    match target.open_regular() {
+        Ok(Ok(file)) => Ok(Some(file)),
+        Ok(Err(NotRegular)) => Ok(None),
+        Err(TargetError::Refused) => Ok(None),
+        Err(TargetError::Io(error)) => Err(error),
+    }
+}
+
+/// The skip reason an unreadable file reports, as the search always has.
+fn unreadable(error: &std::io::Error) -> &'static str {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        "permission_denied"
+    } else {
+        "read_error"
+    }
+}
+
 struct FileSearch<'a> {
     request: &'a GrepRequest,
     matcher: &'a RegexMatcher,
@@ -1000,10 +1066,26 @@ impl FileSearch<'_> {
         path: &Path,
         file: String,
         results: &mut Results,
+        bounded: bool,
     ) -> Result<(), SearchError> {
         if self.request.multiline {
-            return self.multiline_file(path, file, results);
+            return self.multiline_file(path, file, results, bounded);
         }
+        let opened = if bounded {
+            match open_bounded(path) {
+                Ok(Some(opened)) => Some(opened),
+                Ok(None) => {
+                    results.add_skipped(file, "read_error")?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    results.add_skipped(file, unreadable(&error))?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
         let mut sink = FileSink {
             request: self.request,
             matcher: self.matcher,
@@ -1020,18 +1102,17 @@ impl FileSearch<'_> {
             binary: false,
             failure: None,
         };
-        let searched = self.searcher.search_path(self.matcher, path, &mut sink);
+        let searched = match opened {
+            Some(opened) => self.searcher.search_reader(self.matcher, opened, &mut sink),
+            None => self.searcher.search_path(self.matcher, path, &mut sink),
+        };
         if let Some(failure) = sink.failure.take() {
             return Err(failure);
         }
         if let Err(error) = searched
             && !sink.active_file
         {
-            let reason = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                "permission_denied"
-            } else {
-                "read_error"
-            };
+            let reason = unreadable(&error);
             let file = std::mem::take(&mut sink.file);
             sink.results.add_skipped(file, reason)?;
             return Ok(());
@@ -1045,16 +1126,22 @@ impl FileSearch<'_> {
         path: &Path,
         file: String,
         results: &mut Results,
+        bounded: bool,
     ) -> Result<(), SearchError> {
-        let bytes = match std::fs::read(path) {
+        let bytes = match if bounded {
+            open_bounded(path).and_then(|opened| {
+                let Some(mut opened) = opened else {
+                    return Err(std::io::Error::other("the path no longer walks cleanly"));
+                };
+                let mut bytes = Vec::new();
+                opened.read_to_end(&mut bytes).map(|_| bytes)
+            })
+        } else {
+            std::fs::read(path)
+        } {
             Ok(bytes) => bytes,
             Err(error) => {
-                let reason = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                    "permission_denied"
-                } else {
-                    "read_error"
-                };
-                results.add_skipped(file, reason)?;
+                results.add_skipped(file, unreadable(&error))?;
                 return Ok(());
             }
         };

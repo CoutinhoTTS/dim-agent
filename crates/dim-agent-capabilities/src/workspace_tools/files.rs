@@ -49,12 +49,19 @@ pub struct FileTools {
     /// Runs after a complete sibling is synced and before commit verification;
     /// no sleeps, production hooks or global test locks.
     before_commit: Option<CommitHook>,
+    #[cfg(test)]
+    /// Runs inside a bounded `grep` walk for each walked entry, before the
+    /// entry is read; no sleeps, production hooks or global test locks. A
+    /// test swaps a directory here.
+    before_search: Option<SearchHook>,
 }
 
 #[cfg(test)]
 type CommitHook = Arc<dyn Fn(&Path) + Send + Sync>;
 #[cfg(test)]
 type ResolveHook = Arc<dyn Fn(&Path) + Send + Sync>;
+#[cfg(test)]
+type SearchHook = Arc<dyn Fn(&Path) + Send + Sync>;
 
 impl FileTools {
     pub fn new(cwd: PathBuf, home: PathBuf, output_dir: PathBuf) -> Self {
@@ -90,6 +97,8 @@ impl FileTools {
             before_lock: None,
             #[cfg(test)]
             before_commit: None,
+            #[cfg(test)]
+            before_search: None,
         }
     }
 
@@ -223,17 +232,22 @@ impl From<PathError> for String {
 
 /// The roots a host configures for a session's file tools: they bound the
 /// model's file-tool calls — `read`, `write`, `edit`, `glob` and `grep` —
-/// when a host configures them. They make no sandbox claim: `exec` is
-/// bounded by the sandbox (ADR 010 owns it). Client-initiated file paths —
-/// `@` mention expansion and the App Server's `session.files.*` methods —
-/// are outside the roots, because the model cannot make those calls: in a
-/// run it has only its tools, and the run's App Server socket is outside
-/// every root and unreachable from a sandboxed command. The paths are
-/// absolute and canonical: the evaluation harness resolves them from
-/// directories it created, and a root reached through a symlink would
-/// answer `starts_with` with its lexical path. The product passes `None`,
-/// so its behaviour does not change (ADR 014 keeps deciding file access for
-/// it).
+/// when a host configures them. Content reads and mutations are
+/// handle-verified: `read`, each file `grep` matches, and `write`/`edit`
+/// act on the target's parent opened through a symlink-free walk, so a path
+/// swapped after admission fails closed. `glob` returns names only; each
+/// result's canonical path is re-checked against the roots before it is
+/// returned and a failed one is dropped. The roots make no sandbox claim:
+/// `exec` is bounded by the sandbox (ADR 010 owns it). Client-initiated
+/// file paths — `@` mention expansion and the App Server's
+/// `session.files.*` methods — are outside the roots, because the model
+/// cannot make those calls: in a run it has only its tools, and the run's
+/// App Server socket is outside every root and unreachable from a sandboxed
+/// command. The paths are absolute and canonical: the evaluation harness
+/// resolves them from directories it created, and a root reached through a
+/// symlink would answer `starts_with` with its lexical path. The product
+/// passes `None`, so its behaviour does not change (ADR 014 keeps deciding
+/// file access for it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileToolBoundary {
     /// The session's workspace: reads and writes. A model's cwd is inside
@@ -1484,5 +1498,96 @@ mod queued_boundary_tests {
             "the outside bytes must be unchanged"
         );
         std::fs::remove_dir_all(&fixture.root).unwrap();
+    }
+}
+
+/// The bounded-search regression: `grep` reads each file it matches through
+/// the admitted walk, so a subdirectory swapped for a symlink to an outside
+/// sibling after the walk listed it yields no content from outside. The
+/// hook runs inside the walk on each entry, before the entry is read; no
+/// sleeps. In-crate because the hook is a private test field.
+#[cfg(all(test, unix))]
+mod bounded_search_tests {
+    use super::*;
+    use crate::workspace_tools::files::{FileToolBoundary, FileTools};
+    use dim_agent_runtime::{MemoryTimelineStore, Timeline, TimelineKey};
+    use rutis::host::CtxHost;
+
+    fn reads() -> FileReads {
+        FileReads::new(Arc::new(Timeline::new(
+            rutis::Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: "search".into(),
+                branch_id: "main".into(),
+            },
+            Vec::new(),
+            Arc::new(MemoryTimelineStore::default()),
+        )))
+    }
+
+    async fn call(tools: &FileTools, input: Value) -> ToolResult {
+        tools
+            .execute(
+                &ToolCall {
+                    id: "search".into(),
+                    name: "grep".into(),
+                    input: input.as_object().unwrap().clone(),
+                },
+                &reads(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_bounded_grep_reads_no_file_outside_the_roots() {
+        let root = std::env::temp_dir().join(format!("dim-search-{}", uuid::Uuid::new_v4()));
+        for dir in ["workspace/sub", "home", "outside"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("workspace/sub/note.txt"), "NEEDLE inside").unwrap();
+        std::fs::write(root.join("outside/note.txt"), "NEEDLE outside").unwrap();
+        let root = root.canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        let boundary = FileToolBoundary {
+            workspace: workspace.clone(),
+            home: root.join("home"),
+            read_only_roots: Vec::new(),
+        };
+        let mut tools =
+            FileTools::with_boundary(workspace.clone(), workspace.join("out"), boundary);
+        // Control: the file inside the workspace is read.
+        let found = call(&tools, json!({"pattern": "NEEDLE", "path": "sub"})).await;
+        let matches = found.structured_content.as_ref().unwrap()["matches"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(matches.len(), 1, "{found:?}");
+        assert_eq!(matches[0]["content"], "NEEDLE inside");
+        // The walk lists `sub`, then the hook swaps it for a symlink to the
+        // outside sibling before its contents are read.
+        let link = workspace.join("sub");
+        tools.before_search = Some(Arc::new(move |path| {
+            if path == link.as_path() && !link.is_symlink() {
+                let _ = std::fs::remove_file(link.join("note.txt"));
+                let _ = std::fs::remove_dir(&link);
+                let _ = std::os::unix::fs::symlink(&outside, &link);
+            }
+        }));
+        let escaped = call(&tools, json!({"pattern": "NEEDLE", "path": "."})).await;
+        let structured = escaped.structured_content.as_ref().unwrap().clone();
+        assert!(
+            structured["matches"].as_array().unwrap().is_empty(),
+            "no match may come from outside the roots: {structured:?}"
+        );
+        assert!(
+            !serde_json::to_string(&structured)
+                .unwrap()
+                .contains("NEEDLE outside"),
+            "{structured:?}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
