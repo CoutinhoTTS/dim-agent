@@ -1470,6 +1470,7 @@ dependencies = [
  "dim-agent-types",
  "dim-app-server",
  "dim-client",
+ "dim-goal",
  "futures-util",
  "regex",
  "rutis",

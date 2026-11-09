@@ -9,7 +9,7 @@ use dim_agent_runtime::{
     QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, SessionConfig,
     SessionIdentity, SessionLifecycle, TimelineQuery, TimelineQueryScope,
 };
-use dim_agent_types::{ContentBlock, EventKind, Message, ModelId, Role, UserInput};
+use dim_agent_types::{ContentBlock, EventKind, InputBlock, Message, ModelId, Role, UserInput};
 use dim_app_server::{
     settings::{SettingsScope, SettingsService, SourceDeclaration},
     storage::{MetadataError, SessionStore, Title, TitleSource},
@@ -318,7 +318,7 @@ impl Owner {
                             comparison: dim_agent_runtime::QueryComparison::Eq,
                             right: QueryOperand::Outer { path: "data.input_id".into() },
                         },
-                        QueryFilter::Present { value: QueryOperand::Field { path: "data.user".into() } },
+                        eligible_input(),
                     ] }),
                 }],
             }, QuerySelect::Fields { fields: vec!["data.input_id".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
@@ -328,18 +328,26 @@ impl Owner {
             let Some(first) = rows.first() else { return Ok("skipped"); };
             let [QueryValue::Value { value: Value::String(first_id) }] = first.values.as_slice() else { return Err(()); };
             let operator = self.tree.query("main".into(), request(Some(through), QueryFilter::And {
-                conditions: vec![kind("input/message"), field("id", input_id.into()),
-                    QueryFilter::Present { value: QueryOperand::Field { path: "data.user".into() } }],
+                conditions: vec![kind("input/message"), field("id", input_id.into()), eligible_input()],
             }, QuerySelect::Fields { fields: vec!["id".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
             let QueryOutput::Rows { rows } = operator.result else { return Err(()); };
             if rows.is_empty() { return Ok("skipped"); }
             let input = self.tree.query("main".into(), request(Some(through), QueryFilter::And {
                 conditions: vec![kind("input/message"), field("id", first_id.clone().into())],
-            }, QuerySelect::Fields { fields: vec!["data.user".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
+            }, QuerySelect::Fields { fields: vec!["data.user".into(), "data.blocks".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
             let QueryOutput::Rows { rows } = input.result else { return Err(()); };
             let Some(row) = rows.first() else { return Err(()); };
-            let [QueryValue::Value { value }] = row.values.as_slice() else { return Err(()); };
-            let first: UserInput = serde_json::from_value(value.clone()).map_err(|_| ())?;
+            let [user, blocks] = row.values.as_slice() else { return Err(()); };
+            let source = match (user, blocks) {
+                (QueryValue::Value { value: user }, _) => {
+                    let input: UserInput = serde_json::from_value(user.clone()).map_err(|_| ())?;
+                    input.content.iter().filter_map(|block| match block {
+                        ContentBlock::Text { text, .. } => Some(text.as_str()), _ => None,
+                    }).collect::<Vec<_>>().join("\n")
+                }
+                (_, QueryValue::Value { value: blocks }) => goal_objective(blocks).ok_or(())?,
+                _ => return Ok("skipped"),
+            };
             let configured = self.tree.query("main".into(), request(Some(through), kind("context/configured"),
                 QuerySelect::Fields { fields: vec!["data.settings.providerId".into(), "data.settings.modelId".into()] },
                 Some(QueryPick::Last))).await.map_err(|_| ())?;
@@ -361,9 +369,7 @@ impl Owner {
             entered = true;
             let document = document?;
             let stored = stored.map_err(|_| ())?;
-            let text = first.content.iter().filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()), _ => None,
-            }).collect::<Vec<_>>().join("\n").chars().take(2000).collect::<String>();
+            let text: String = source.chars().take(2000).collect();
             if text.trim_matches(space).is_empty() {
                 self.state.lock().unwrap().no_text = true;
                 return Ok("skipped");
@@ -541,6 +547,79 @@ impl Owner {
         ))
     }
 }
+
+/// The applied inputs that may title a Session (SessionTitle.md §0.1, A10): an
+/// operator `input/message` with `data.user`, or Goal's applied `goal:state`
+/// record, which states the objective.
+fn eligible_input() -> QueryFilter {
+    QueryFilter::Or {
+        conditions: vec![
+            QueryFilter::Present {
+                value: QueryOperand::Field {
+                    path: "data.user".into(),
+                },
+            },
+            QueryFilter::Any {
+                field: "data.blocks".into(),
+                condition: Box::new(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Element { path: "key".into() },
+                            values: vec!["goal:state".into()],
+                        },
+                        QueryFilter::Prefix {
+                            value: QueryOperand::Element {
+                                path: "text".into(),
+                            },
+                            prefix: "<dim-goal ".into(),
+                        },
+                        QueryFilter::Contains {
+                            value: QueryOperand::Element {
+                                path: "text".into(),
+                            },
+                            text: "<objective>".into(),
+                        },
+                    ],
+                }),
+            },
+        ],
+    }
+}
+
+/// The objective an applied Goal state record states (Goal.md A.5): the block
+/// keyed `goal:state` whose marker is Goal's and whose body carries the
+/// `<objective>` element. SessionTitle reads the documented format and takes
+/// no dependency on Goal's implementation.
+fn goal_objective(blocks: &Value) -> Option<String> {
+    let blocks: Vec<InputBlock> = serde_json::from_value(blocks.clone()).ok()?;
+    blocks.iter().find_map(|block| {
+        let InputBlock::Raw { text, key, retire } = block;
+        if *retire || key.as_deref() != Some("goal:state") {
+            return None;
+        }
+        let rest = text.strip_prefix("<dim-goal ")?;
+        let end = rest.find('>')?;
+        if !rest[..end]
+            .split_whitespace()
+            .any(|attribute| attribute == "kind=\"state\"")
+        {
+            return None;
+        }
+        let body = &rest[end + 1..];
+        let start = body.find("<objective>\n")? + "<objective>\n".len();
+        let end = start + body[start..].find("\n</objective>")?;
+        let objective = unescape(&body[start..end]);
+        (!objective.trim().is_empty()).then_some(objective)
+    })
+}
+
+fn unescape(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+}
+
 fn fallback_title(text: &str, max_length: usize) -> String {
     let text = SPACE.replace_all(text, " ");
     let text: String = text.trim_matches(space).chars().take(max_length).collect();
