@@ -369,3 +369,20 @@ async fn goal_objective_excerpt_falls_back_without_a_model() {
     flow.titled("Fallback objective", "auto").await;
     flow.idle().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn goal_objective_round_trips_every_escaped_character() {
+    let (base, mut requests) = scripted().await;
+    let store = Store::new();
+    let (mut flow, _server) = Flow::start(&store, &base, true).await;
+
+    // Goal escapes `<`, `>`, `&` and `"` in the record it writes (Goal.md A.5);
+    // the title source must arrive decoded, an entity-like run included.
+    let objective = r#"Ship <this> & "that" &amp; done"#;
+    flow.goal(objective).await;
+    let (request, release) = held(&mut requests).await;
+    assert_eq!(request["messages"][1]["content"], objective);
+    release.send("Escaped objective title".into()).unwrap();
+    flow.titled("Escaped objective title", "auto").await;
+    flow.idle().await;
+}

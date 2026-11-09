@@ -403,7 +403,7 @@ A1–A12 是首版实现采用的策略。
 | A7 | Session fork 不复制标题 | 判断 | fork 显示源标题 |
 | A8 | 不含文本的第一条用户输入不产生自动标题 | 决定：标题取自第一条用户输入 | 使用后续输入或占位符 |
 | A9 | 生成等待输入被采用（`input/applied`）；被删除的输入从不产生标题 | 维护者决定 | 被删除的文本可能发给辅助模型 |
-| A10 | “用户输入”指带 `user` 内容的操作者输入，或 Goal 已采用的 `goal:state` 记录，后者陈述 objective。Collaboration 与 ShellInput 只写 raw 块；Scheduler 与 Workflow 的输入带 `user` 内容，但运行在非交互 Session 中，SessionTitle 不为其命名。Goal 优先的 Session 用其 objective 命名，之后的用户 turn 不重新命名。 | 判断 | Goal 创建的 Session 一直无标题，客户端需要第二个标题来源 |
+| A10 | “用户输入”指带 `user` 内容的操作者输入，或 Goal 已采用的 `goal:state` 记录，后者陈述 objective。该记录的格式归 Goal ([Goal A.5](Goal.md#a5-模型可见文本))：SessionTitle 只解码它，不拥有第二份契约，格式变更由 Goal 负责并在同一次变更中更新本读取方。Collaboration 与 ShellInput 只写 raw 块；Scheduler 与 Workflow 的输入带 `user` 内容，但运行在非交互 Session 中，SessionTitle 不为其命名。Goal 优先的 Session 用其 objective 命名，之后的用户 turn 不重新命名。历史早于该记录的 Goal 优先 Session (只有旧的 `goal:objective`/`goal:status` 键) 保持既有行为：在其第一条操作者输入前不命名，或等到之后某次 Goal 变更写出记录；Goal 在加载时不补写记录 ([Goal A.3](Goal.md#a3-读取目标))。 | 判断 | Goal 创建的 Session 一直无标题，客户端需要第二个标题来源 |
 | A11 | SessionStore 用 Session 广播通知宣布标题变更；未订阅的客户端在下一次 `session.summaries` 时看到变更 | 原则 §4 第 9 条 | 客户端轮询 `session.summaries` |
 | A12 | 仅用户作用域文件 session-title.json，不合并项目来源；原生 Settings 记录 user/session-title | 既有 S8b 原行来源机制，A.3 | 不同来源/作用域须明确确认 |
 

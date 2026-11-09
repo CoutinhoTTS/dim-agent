@@ -588,8 +588,9 @@ fn eligible_input() -> QueryFilter {
 
 /// The objective an applied Goal state record states (Goal.md A.5): the block
 /// keyed `goal:state` whose marker is Goal's and whose body carries the
-/// `<objective>` element. SessionTitle reads the documented format and takes
-/// no dependency on Goal's implementation.
+/// `<objective>` element. Goal owns the format; SessionTitle follows it and
+/// owns no second contract (SessionTitle.md A10), and takes no dependency on
+/// Goal's implementation.
 fn goal_objective(blocks: &Value) -> Option<String> {
     let blocks: Vec<InputBlock> = serde_json::from_value(blocks.clone()).ok()?;
     blocks.iter().find_map(|block| {
@@ -613,6 +614,8 @@ fn goal_objective(blocks: &Value) -> Option<String> {
     })
 }
 
+/// The inverse of Goal's `escape` (Goal.md A.5): Goal owns the encoding, and
+/// SessionTitle mirrors the inverse here rather than calling Goal.
 fn unescape(text: &str) -> String {
     text.replace("&quot;", "\"")
         .replace("&gt;", ">")
