@@ -1100,6 +1100,37 @@ async fn every_successful_delete_announces_the_session_and_a_close_does_not() {
         ]
     );
 
+    // A Session whose Agent was closed: `agent.close` forgets that Agent's
+    // Session versions while the rows and the ownership row stay, so the
+    // notice's `agentId` can only come from the store (EventHub §9.1).
+    let owner = client.rpc("agent.create", json!({})).await["result"]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut params = create(json!(["wait"]));
+    params["agentId"] = json!(owner);
+    let forgotten = client.rpc("session.create", params).await["result"]["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ok(&client.rpc("agent.close", json!({"agentId": owner})).await);
+    assert_ok(
+        &other
+            .rpc("session.delete", json!({"sessionId": forgotten}))
+            .await,
+    );
+    assert_eq!(
+        seen(),
+        vec![
+            loaded.clone(),
+            unloaded.clone(),
+            closed.clone(),
+            orphan.clone(),
+            ownerless.clone(),
+            forgotten.clone()
+        ]
+    );
+
     let recorded: Vec<(String, bool, String, serde_json::Value)> = notices
         .lock()
         .unwrap()
@@ -1126,6 +1157,12 @@ async fn every_successful_delete_announces_the_session_and_a_close_does_not() {
             session_id == ownerless,
             "{session_id} names its owner when one is recorded: {json}"
         );
+        if session_id == forgotten {
+            assert_eq!(
+                agent_id, owner,
+                "the closed Agent's Session names the store's owner: {json}"
+            );
+        }
     }
 
     drop((client, other, agent));
