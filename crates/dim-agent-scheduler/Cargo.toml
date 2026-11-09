@@ -26,7 +26,7 @@ chrono-tz = "0.10"
 croner = "4"
 
 [features]
-# Hooks flow tests hold an operation open with.
+# Flow tests hold a target-gone disable between its read and its write.
 testing = []
 
 [dev-dependencies]
