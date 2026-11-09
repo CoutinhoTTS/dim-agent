@@ -264,7 +264,10 @@ fixed main-branch history. Existing files are never overwritten.
 
 `/queue` opens the shown line's unconsumed messages in either terminal mode.
 Up/Down selects a row; Enter steers a held message and `x` deletes it. Applied
-messages are labelled Incorporating and cannot be withdrawn; a raced operation
+messages are labelled Incorporating while running, or Unread while idle with
+a hint that they wait for the next message, and cannot be withdrawn. Only a
+held selection advertises steer and delete; an applied-only strip offers viewing
+without edit or steer shortcuts. A raced operation
 reports that the input has already left the queue. Esc closes the panel.
 Shift+Left keeps messages with images or multiple content blocks queued with a
 notice rather than losing attachments. Esc interrupt withdraws every held message

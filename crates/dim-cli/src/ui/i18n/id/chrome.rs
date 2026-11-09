@@ -12,6 +12,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Held" => "Ditahan",
         "Incorporating" => "Sedang dimasukkan",
+        "Unread" => "Belum dibaca",
+        "Unread · waiting for your next message" => {
+            "Belum dibaca · menunggu pesan Anda berikutnya"
+        }
+        "/queue view · awaiting model consumption" => {
+            "/queue lihat · menunggu pemrosesan oleh model"
+        }
+        "/queue view · waiting for your next message" => {
+            "/queue lihat · menunggu pesan Anda berikutnya"
+        }
         "Enter export · Esc cancel" => "Enter ekspor · Esc batal",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Pesan dengan lampiran tetap dalam antrean; gunakan /queue untuk steer atau menghapusnya"
@@ -19,9 +29,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/queue manage · shift+← edit last · ctrl+s steer now" => {
             "/queue kelola · shift+← edit terakhir · ctrl+s steer kini"
         }
-        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
-            "+{count} lagi · /queue kelola · shift+← edit terakhir · ctrl+s steer kini"
-        }
+        "+{count} more · {hint}" => "+{count} lagi · {hint}",
         "steer or delete queued messages" => "steer atau hapus pesan dalam antrean",
         "export this conversation" => "ekspor percakapan ini",
         "That message has already left the queue." => "Pesan itu sudah keluar dari antrean.",

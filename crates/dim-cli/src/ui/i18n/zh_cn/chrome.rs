@@ -6,6 +6,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No queued messages." => "队列中没有消息。",
         "Held · awaiting application" => "暂存中 · 等待应用",
         "Incorporating · awaiting model consumption" => "纳入中 · 等待模型读取",
+        "Unread · waiting for your next message" => "未读取 · 等待你的下一条消息",
+        "Unread" => "未读取",
+        "/queue view · awaiting model consumption" => "/queue 查看 · 等待模型读取",
+        "/queue view · waiting for your next message" => "/queue 查看 · 等待你的下一条消息",
+        "+{count} more · {hint}" => "还有 {count} 条 · {hint}",
         "Held" => "暂存中",
         "Incorporating" => "纳入中",
         "Enter export · Esc cancel" => "Enter 导出 · Esc 取消",
@@ -14,9 +19,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "/queue manage · shift+← edit last · ctrl+s steer now" => {
             "/queue 管理 · shift+← 编辑最后一条 · ctrl+s 立即 steer"
-        }
-        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
-            "还有 {count} 条 · /queue 管理 · shift+← 编辑最后一条 · ctrl+s 立即 steer"
         }
         "steer or delete queued messages" => "对队列消息执行 steer 或删除",
         "export this conversation" => "导出此对话",
