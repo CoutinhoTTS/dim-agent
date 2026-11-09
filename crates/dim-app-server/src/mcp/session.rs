@@ -536,6 +536,11 @@ impl Lease {
     fn hold(&self, connection: &Arc<McpConnection>) {
         *self.0.lock().unwrap() = Some(connection.clone());
     }
+    /// Drops the hold: a discovery that ended on its own error leaves nothing
+    /// using the generation, so it retires (ADR 004).
+    fn release(&self) {
+        *self.0.lock().unwrap() = None;
+    }
 }
 
 async fn reconcile(
@@ -820,6 +825,11 @@ async fn discover(
         }
     }.await;
     let withdrawn = held.take().is_some_and(|held| held.withdrawn());
+    // The replacement owns the slot once this discovery is cancelled; only a
+    // discovery that ended on its own error releases the generation.
+    if result.is_err() && !cancel.is_cancelled() {
+        lease.release();
+    }
     match result {
         Ok(()) => {}
         Err(error) if withdrawn || matches!(error, McpError::Disabled) => {

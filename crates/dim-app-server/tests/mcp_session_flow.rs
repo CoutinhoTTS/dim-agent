@@ -68,6 +68,8 @@ struct Remote {
     session_check: AtomicBool,
     /// Answers every `initialize` with HTTP 503, a failed start.
     refuse_start: AtomicBool,
+    /// Answers every `tools/list` with a JSON-RPC error.
+    fail_listing: AtomicBool,
     /// Expires the session once on `lookup/item`.
     expire_once: AtomicBool,
     /// Adds a tool when the client has connected a second time.
@@ -103,6 +105,7 @@ impl Remote {
             session: AtomicUsize::new(0),
             session_check: AtomicBool::new(false),
             refuse_start: AtomicBool::new(false),
+            fail_listing: AtomicBool::new(false),
             expire_once: AtomicBool::new(false),
             grown: AtomicBool::new(false),
             seen: Mutex::default(),
@@ -185,6 +188,18 @@ async fn rpc(
             }
             if remote.invalid.load(Ordering::SeqCst) {
                 return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+            if remote.fail_listing.load(Ordering::SeqCst) {
+                let mut response = Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": -32603, "message": "listing failed"}
+                }))
+                .into_response();
+                response
+                    .headers_mut()
+                    .insert("mcp-session-id", response_session.parse().unwrap());
+                return response;
             }
             let mut tools = vec![
                 json!({"name":"lookup/item","description":format!("Subtract two numbers, revision {}", remote.revision.load(Ordering::SeqCst)),"inputSchema":{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"integer"},"rule":{"oneOf":[{"type":"object","properties":{"kind":{"type":"string","const":"manual"}},"required":["kind"],"additionalProperties":false},{"type":"object","properties":{"kind":{"type":"string","const":"minutes"},"every":{"type":"integer","minimum":1}},"required":["kind","every"],"additionalProperties":false}]}},"required":["a","b"]}}),
@@ -1735,6 +1750,41 @@ async fn a_refresh_during_a_failed_start_keeps_its_cooldown() {
         2,
         "exactly one attempt follows the cooldown"
     );
+    env.close().await;
+}
+
+/// A discovery that ends on its own error releases the generation it
+/// initialized: the next refresh starts a new one instead of re-listing on the
+/// connection the failure left behind.
+#[tokio::test]
+async fn a_refresh_after_a_failed_discovery_starts_a_new_generation() {
+    let env = Env::new().await;
+    env.remote.fail_listing.store(true, Ordering::SeqCst);
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    let message = failure(&session).await;
+    assert!(
+        message.contains("request failed"),
+        "the listing failed on a connected server: {message}"
+    );
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        1,
+        "the first discovery initialized"
+    );
+    env.remote.fail_listing.store(false, Ordering::SeqCst);
+    session
+        .session_service::<McpSession>()
+        .unwrap()
+        .refresh()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while env.remote.initializes.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the refresh starts a new generation");
+    ready(&session).await;
     env.close().await;
 }
 
