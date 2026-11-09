@@ -1823,6 +1823,17 @@
       ]
     },
     {
+      "id": "dim_agent_scheduler::runs::tests",
+      "crate": "dim_agent_scheduler",
+      "parent": "dim_agent_scheduler::runs",
+      "file": "crates/dim-agent-scheduler/src/runs.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "serde_json::json"
+      ]
+    },
+    {
       "id": "dim_agent_scheduler::session",
       "crate": "dim_agent_scheduler",
       "parent": "dim_agent_scheduler",
@@ -19693,6 +19704,13 @@
     },
     {
       "from": "dim_agent_scheduler::runs",
+      "to": "dim_agent_scheduler::runs::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::runs",
       "to": "dim_agent_types::permission",
       "references": [
         "path PermissionPolicy",
@@ -19712,6 +19730,14 @@
         "path PluginFileTransactions",
         "use dim_app_server::plugin_files::PluginFileError",
         "use dim_app_server::plugin_files::PluginFileTransactions"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::runs::tests",
+      "to": "dim_agent_scheduler::runs",
+      "references": [
+        "path Delivery",
+        "path SessionOrigin::Reuse"
       ]
     },
     {
