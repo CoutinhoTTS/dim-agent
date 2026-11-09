@@ -1383,6 +1383,18 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools::files",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/files.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::workspace_tools::files::codec",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::workspace_tools::files",
@@ -16879,6 +16891,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::files",
+      "to": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
+      "references": [
+        "mod bounded_search_tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files",
       "to": "dim_agent_capabilities::workspace_tools::files::codec",
       "references": [
         "mod codec"
@@ -16958,6 +16977,57 @@
         "use dim_agent_types::ToolDefinition",
         "use dim_agent_types::ToolEffect",
         "use dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
+      "to": "dim_agent_capabilities::workspace_tools::file_reads",
+      "references": [
+        "path FileReads",
+        "path FileReads::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path FileToolBoundary",
+        "path FileTools",
+        "path FileTools::with_boundary",
+        "use crate::workspace_tools::files::FileToolBoundary",
+        "use crate::workspace_tools::files::FileTools"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline::new",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
+      "to": "dim_agent_runtime::memory_timeline_store",
+      "references": [
+        "path MemoryTimelineStore::default",
+        "use dim_agent_runtime::MemoryTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineKey",
+        "use dim_agent_runtime::TimelineKey"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::bounded_search_tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolResult"
       ]
     },
     {
@@ -17375,8 +17445,13 @@
       "references": [
         "path Access::Read",
         "path FileTools",
+        "path SearchHook",
+        "path Target::for_read",
+        "path TargetError::Io",
+        "path TargetError::Refused",
         "path blocking",
         "path cancelled",
+        "path expand_tilde",
         "path failed",
         "path field",
         "path inside",
@@ -17386,8 +17461,13 @@
         "path super::FileToolBoundary",
         "use super::Access",
         "use super::FileTools",
+        "use super::NotRegular",
+        "use super::SearchHook",
+        "use super::Target",
+        "use super::TargetError",
         "use super::blocking",
         "use super::cancelled",
+        "use super::expand_tilde",
         "use super::failed",
         "use super::field",
         "use super::inside",
