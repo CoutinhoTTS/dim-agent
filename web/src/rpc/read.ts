@@ -257,6 +257,8 @@ export function readHistory(value: unknown): HistoryPage {
     through: num(source, "through", "session.history"),
     nextAfter: num(source, "nextAfter", "session.history"),
     done: bool(source, "done", "session.history"),
+    ...(source.nextBefore === undefined ? {} : { nextBefore: num(source, "nextBefore", "session.history") }),
+    ...(source.turnStart === undefined ? {} : { turnStart: num(source, "turnStart", "session.history") }),
   }
 }
 
@@ -505,6 +507,8 @@ function content(type: string, name: string, data: Json, at: string): EventConte
     }
     case "input/applied":
       return { kind: "input-applied", inputId: str(data, "input_id", at) }
+    case "input/consumed":
+      return { kind: "input-consumed", inputId: str(data, "input_id", at) }
     case "permission/changed":
       return { kind: "permission-changed", policy: readPermissionPolicy(data.policy, `${at}.policy`) }
     case "input/deleted":
@@ -569,7 +573,7 @@ function content(type: string, name: string, data: Json, at: string): EventConte
       }
     }
     case "step/tool-completed":
-      return { kind: "tool-completed", callId: str(data, "call_id", at), result: toolResult(data.result, `${at}.result`) }
+      return { kind: "tool-completed", requestId: str(data, "request_id", at), callId: str(data, "call_id", at), result: toolResult(data.result, `${at}.result`) }
     case "step/tool-result":
       return {
         kind: "tool-result",
@@ -822,4 +826,110 @@ export function readSubmit(value: unknown): import("./protocol").SubmitResult {
 }
 export function readInterrupt(value: unknown): import("./protocol").InterruptResult {
   return { sequence: num(obj(value, "session.stop"), "sequence", "session.stop") }
+}
+
+export type BranchEntry = {
+  branchId: string
+  parentBranchId?: string
+  branchPoint?: number
+  state: string
+  head: number
+  purpose?: string
+  cutMessages?: number
+  end?: { source: { kind: string }; ancestor?: string }
+}
+
+export function readBranchEntry(value: unknown): BranchEntry {
+  const at = "branch"
+  const source = obj(value, at)
+  const branchId = str(source, "branchId", at)
+  const end = source.end === undefined || source.end === null ? undefined : obj(source.end, `${at}.end`)
+  return {
+    branchId,
+    parentBranchId: branchId === "main" ? undefined : str(source, "parentBranchId", at),
+    branchPoint: branchId === "main" ? undefined : num(source, "branchPoint", at),
+    state: str(source, "state", at), head: num(source, "head", at),
+    purpose: optStr(source, "purpose", at),
+    cutMessages: source.cutMessages === undefined || source.cutMessages === null ? undefined : num(source, "cutMessages", at),
+    end: end === undefined ? undefined : {
+      source: { kind: str(obj(end.source, `${at}.end.source`), "kind", `${at}.end.source`) },
+      ancestor: optStr(end, "ancestor", `${at}.end`),
+    },
+  }
+}
+
+export function readBranches(value: unknown): BranchEntry[] {
+  return arr(obj(value, "session.branches").branches, "session.branches.branches").map(readBranchEntry)
+}
+
+export function readBranchDetail(value: unknown): BranchEntry {
+  return readBranchEntry(value)
+}
+
+export function readAttached(value: unknown): ModelId {
+  return modelId(obj(value, "session.attach").model, "session.attach.model")
+}
+
+export type InputPage = { branchId: string; through: number; inputs: import("./protocol").QueuedInput[]; next: unknown }
+
+export function readPendingInputs(value: unknown): InputPage {
+  const at = "session.input.pending"
+  const source = obj(value, at)
+  const inputs = arr(source.inputs, `${at}.inputs`).flatMap((item, index) => {
+    const rowAt = `${at}.inputs[${index}]`
+    const row = obj(item, rowAt)
+    if (row.user === null) return []
+    const user = readUserInput(obj(row.user, `${rowAt}.user`), `${rowAt}.user`)
+    const display = userText(user.content, `${rowAt}.user.content`)
+    return [{ id: str(row, "inputId", rowAt), text: display.text, skills: display.skills, user }]
+  })
+  return { branchId: str(source, "branchId", at), through: num(source, "through", at), inputs, next: source.next }
+}
+
+export type QuestionPage = { branchId: string; through: number; asks: Array<{ requestId: string; callId: string; questions: AskQuestion[] }>; next: unknown }
+
+export function readPendingQuestions(value: unknown): QuestionPage {
+  const at = "session.question.pending"
+  const source = obj(value, at)
+  const asks = arr(source.batches, `${at}.batches`).flatMap((item, index) => {
+    const rowAt = `${at}.batches[${index}]`
+    const batch = obj(item, rowAt)
+    return readAsks(arr(batch.calls, `${rowAt}.calls`), `${rowAt}.calls`).map(ask => ({ requestId: str(batch, "requestId", rowAt), ...ask }))
+  })
+  return { branchId: str(source, "branchId", at), through: num(source, "through", at), asks, next: source.next }
+}
+
+export function readTurn(value: unknown) {
+  const at = "session.turn.get"
+  const source = obj(value, at)
+  const turn = source.turn === null ? undefined : obj(source.turn, `${at}.turn`)
+  const output = source.output === null ? undefined : obj(source.output, `${at}.output`)
+  return {
+    branchId: str(source, "branchId", at), through: num(source, "through", at),
+    turn: turn === undefined ? undefined : { sequence: num(turn, "sequence", `${at}.turn`), ended: bool(turn, "ended", `${at}.turn`) },
+    output: output === undefined ? undefined : { requestId: str(output, "requestId", `${at}.output`), textCharacters: num(output, "textCharacters", `${at}.output`), thinkingCharacters: num(output, "thinkingCharacters", `${at}.output`) },
+  }
+}
+
+export function readGoal(value: unknown): import("../goal").Goal | undefined {
+  const at = "session.goal.get"
+  const source = obj(value, at)
+  if (source.goal === null) return undefined
+  const goal = obj(source.goal, `${at}.goal`)
+  const status = obj(goal.status, `${at}.goal.status`)
+  const kind = str(status, "kind", `${at}.goal.status`)
+  if (!["active", "paused", "completed", "blocked", "none"].includes(kind)) return fail(`${at}.goal.status.kind`, "a goal status")
+  return {
+    objective: str(goal, "objective", `${at}.goal`), evaluator: bool(goal, "evaluator", `${at}.goal`),
+    status: kind === "paused" ? { kind, reason: str(status, "reason", `${at}.goal.status`) } : { kind: kind as "active" | "completed" | "blocked" | "none" },
+  }
+}
+
+export function readTool(value: unknown) {
+  const at = "session.tool.get"
+  const source = obj(value, at)
+  if (source.call === null) return undefined
+  const data = obj(source.call, `${at}.call`)
+  const call = obj(data.call, `${at}.call.call`)
+  return { requestId: str(data, "request_id", `${at}.call`), callId: str(call, "id", `${at}.call.call`), name: str(call, "name", `${at}.call.call`), input: obj(call.input, `${at}.call.call.input`) }
 }

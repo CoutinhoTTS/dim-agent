@@ -24,7 +24,7 @@ Public behavior tests belong to this plugin crate and use `dim-client` and the A
 public APIs; fixtures install the plugin explicitly. App Server tests have no dependency on
 SessionTitle and cover generic host behavior. Verification uses the native flow
 [`native_flow.rs`](../../../crates/dim-session-title/tests/native_flow.rs) without
-language runtimes. It exercises fixed-prefix history, settings validation, RPC, HTTP auxiliary
+language runtimes. It exercises fixed-cut property queries, settings validation, RPC, HTTP auxiliary
 execution, Unicode bounds, concurrent adoption, title notices, manual-over-auto conflicts,
 restore, fork and closing settlement. The Node-backed
 [`scheduler_flow.rs`](../../../crates/dim-session-title/tests/scheduler_flow.rs) exercises
@@ -34,7 +34,7 @@ only outcome and duration.
 | Boundary | Current contract and Ready decision |
 | --- | --- |
 | Observation | Read the Session id from `sessionIdentity`, the creation configuration from `sessionConfig` and closing from `sessionLifecycle` ([plugin contract](../plugin-contract.md#9-requirements-raised-to-mechanism-owners) R2), then the records on its Session's `session/{sessionId}` channel. C4 broadcast #180 is delivered; #63/#168 are closed. |
-| History | Use the implemented process sessions.history service, not private TimelineTree reads or branch (C5) bindings. |
+| Timeline reads | Use the Session’s branch query facade on `main`, with a fixed published cutoff. Read only the adopted input identity, its user content and the adopted model fields (§0.1). |
 | Configuration | Existing named Settings and row source declaration, user scope only (A.3/A12). Read settings.read({source:"session-title",scope:"user"}) at each decision and use its validated/defaulted document directly. |
 | Metadata/notice | S5b #60/#96 defines the process service `sessionMetadata` (`read` and `setTitle`, both async), its errors `conflict`/`not_found`/`storage`, the handover and the v3 list fields `title`/`titleSource`/`titleRevision` ([title metadata](../appserver/session-title-metadata.md)); A.2 restates that contract. After each commit SessionStore calls `session_broadcast::notify`, and Rpc forwards the record to attached v3 clients as `session.notice {sessionId, source, kind, data}` (C6 #49/#85, [Session broadcast notices](../appserver/session-notices.md)). Names, modes, handover and errors follow S5b. |
 | Auxiliary request | The profile's model-selection owner implements AuxiliaryModelHost and its named `auxiliaryModel.complete` HostDispatch/catalog binding: Provider in the product profile, ConfiguredModels in the model-config profile. Inject it through ordinary C4 dependencies; credentials stay with that owner ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)). |
@@ -45,21 +45,30 @@ required providers keep the Session part Pending under existing rules, including
 Session use continues. Only `sessionTitleGenerator` is optional (§3.3); rename retains its required owner services.
 
 The C4 leaf callback filters `main` adoption on its own Session's channel, registers an owned task and returns;
-it does not await Settings/history/model work. Native EventReader delivers only published events,
-and SessionBroadcast forwards that Dispatcher stream. Thus the existing history({atLeast:N}) read
-can capture published T >= N while the branch exists: no extra publication wait, polling or Core
-API. Retain T and page with through=T and after=the last returned sequence; never send atLeast and
-through together. Use native HistoryPage/AgentEvent data. The existing named sessions service reads the current index on each call, so index reload does not reload this consumer.
+it does not await Settings, queries or model work. SessionBroadcast forwards published Dispatcher events.
+The first query captures published T; T must include the triggering adoption N. Subsequent queries use that
+same T. Queries use the Session's public branch facade; SessionTitle does not inject a branch service or
+read the store directly.
+
+### 0.1 Fields read for one title attempt
+
+1. Select the first `input/applied` whose `data.input_id` names an `input/message` with `data.user` present. Return only `data.input_id`. The adoption's position defines “first”; creation order does not.
+2. Check that the triggering input id names an operator `input/message` at T. Return only its id. A sourced input without `user` does not trigger generation.
+3. Read the selected first input's `data.user` by id. This is the only message body read.
+4. Select the last `context/configured` at T and read its adopted provider/model identifiers. With no adopted configuration, use the existing excerpt fallback.
+
+Each query returns at most one row. No full-history page or input map is retained. User content is still
+bounded to the existing 2,000-character excerpt before generation. Query results are released after the attempt.
 
 Use the [plugin binding contract](../rutis-usage.md): the plugin's one row injects `partRegistry`
 and registers the Session part; each Session mounts a copy. The part injects
 `sessionMethods` and registers `session.rename` with it from `apply`; it provides no service.
 `apply` reads the Session identity and creation configuration and registers observation/cleanup;
 it does not start an asynchronous initialization job. Its creation configuration is immutable.
-The plugin depends on the existing public Rust Settings and SessionStore bindings; it does not expose or alter their implementations. Named history replies are decoded once at this plugin boundary. Plugin behavior and cross-plugin title flows live in this crate's tests and use the public client and host APIs. App Server tests have no dependency on this crate and install no title plugin implicitly.
+The plugin depends on the existing public Rust Settings and SessionStore bindings; it does not expose or alter their implementations. Plugin behavior and cross-plugin title flows live in this crate's tests and use the public client and host APIs. App Server tests have no dependency on this crate and install no title plugin implicitly.
 
-The part injects its required dependencies: the process services `sessions`,
-`settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services `sessionIdentity`,
+The part injects its required dependencies: the process services
+`settings`, `sessionMetadata` and `auxiliaryModel`, and the Session services branch queries, `sessionIdentity`,
 `sessionConfig`, `sessionLifecycle` and `sessionMethods`. The optional `sessionTitleGenerator`
 is read by name when used, without injection or a readiness gate, under the
 [required/optional binding contract](../rutis-usage.md#3-services-by-name).
@@ -87,15 +96,15 @@ flowchart LR
     META["SessionStore title metadata"]
     Settings["Settings source session-title"]
     Rpc["Rpc"]
-    TT["sessions (S2): published main history"]
   end
   subgraph SESS["Session"]
     ST["SessionTitle"]:::new
     SB["Session broadcast"]
+    TT["Session branch queries: published main properties"]
     CFG["SessionConfig"]
   end
   ST -->|"listen: input/applied on main"| SB
-  ST -->|"read fixed prefix T >= N"| TT
+  ST -->|"query required fields at T >= N"| TT
   ST --> CFG
   ST -->|"optional generate(providerId, text)"| GEN["sessionTitleGenerator (DimOAuth)"]
   ST -->|"complete(model, text)"| AUX
@@ -110,9 +119,9 @@ flowchart LR
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
 | `session-title` | Process | Settings and part registry | Registers the Settings source and Session part |
-| `SessionTitle` | Session | Session services `sessionIdentity`, `sessionConfig`, `sessionLifecycle` and `sessionMethods`; process sessions history, Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (a profile without an owner of model selection keeps the row Pending); optional `sessionTitleGenerator` read at use | Registers session.rename with sessionMethods |
+| `SessionTitle` | Session | Session services `sessionIdentity`, `sessionConfig`, `sessionLifecycle` and `sessionMethods`; Session branch queries; process Settings, title metadata `sessionMetadata` (S5b) and required `auxiliaryModel` (a profile without an owner of model selection keeps the row Pending); optional `sessionTitleGenerator` read at use | Registers session.rename with sessionMethods |
 
-Dependencies stay in the Session or enclosing process. C4/S2/Settings supply existing observation, prefix reads and configuration; S5b supplies title metadata and C6 the notices; the profile's model-selection owner supplies the named auxiliary operation. The plugin's row registers its source in its `apply`. Real provider reloads cancel the row's work (ADR 002 D3); S2 index reload does not. Business data changes never reload the plugin (D4).
+Dependencies stay in the Session or enclosing process. Session observation, branch queries and Settings supply observation, field reads and configuration; S5b supplies title metadata and C6 the notices; the profile's model-selection owner supplies the named auxiliary operation. The plugin's row registers its source in its `apply`. Real provider reloads cancel the row's work (ADR 002 D3); SessionStore index reload does not. Business data changes never reload the plugin (D4).
 
 ## 2. Data and state
 
@@ -136,7 +145,7 @@ flowchart TB
   classDef new fill:#d3f9d8,stroke:#2b8a3e,color:#000
 ```
 
-SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads Settings first and skips disabled generation before metadata or history; otherwise it reads metadata and the fixed prefix. An image-only first input is remembered for the loaded generation. In-memory state is lost on reload or Session unload, which only allows another attempt.
+SessionStore owns the title: it keeps the text, source and revision counter and accepts changes only through its typed `setTitle` operation, which SessionTitle alone calls. After each committed change SessionStore emits a title notice on the Session broadcast (A11); the title never enters the Timeline. Each decision reads Settings first and skips disabled generation before metadata or Timeline queries; otherwise it reads metadata and the required fields at a fixed cutoff. An image-only first input is remembered for the loaded generation. In-memory state is lost on reload or Session unload, which only allows another attempt.
 
 ## 3. Flows
 
@@ -149,14 +158,14 @@ sequenceDiagram
   participant ST as SessionTitle
   participant Settings as Settings
   participant Meta as SessionStore metadata
-  participant Sessions as sessions (S2)
+  participant Queries as Session branch queries
   participant Gen as Generation path (§3.3)
   TL-->>SB: input/applied at N, branch main
   SB-->>ST: Event
   Note over ST: interactive leader, none in flight
   ST->>Settings: read session-title; skip if disabled
   ST->>Meta: metadata: no title, revision r
-  ST->>Sessions: history(main, atLeast N), page fixed T: first adopted operator text
+  ST->>Queries: select first adopted operator id, user content and model at fixed T >= N
   ST->>Gen: generate from adopted input
   Gen-->>ST: title or excerpt fallback
   ST->>Meta: setTitle(expected r, auto)
@@ -305,7 +314,7 @@ post-commit title notices. SessionTitle consumes these delivered contracts.
 | Effect on sequence, batch, interrupt, reload | No sequence number and no batch; not replayed: a client that resubscribes reads current state through the owner's query (`session.summaries`); interrupts do not apply; a reload of the emitter only stops notices. |
 | Owner and issue | Runtime C6 [#49](https://github.com/arcships/dim/issues/49), implemented in [#85](https://github.com/arcships/dim/pull/85): the record, `session_broadcast::notify` and Rpc's `session.notice` ([Session broadcast notices](../appserver/session-notices.md)). SessionStore emits the title notice ([S5b](../appserver/session-title-metadata.md), the supplement in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins)). |
 
-**#4: None.** Observation uses the Session services and the Session channel; history, Settings, `sessionMetadata` and the auxiliary model are process services. SessionTitle injects no branch service.
+**#4: None.** Observation uses the Session services and the Session channel; branch queries are Session services; Settings, `sessionMetadata` and the auxiliary model are process services. SessionTitle injects no branch service.
 
 **The model-selection owner (S4): the named `auxiliaryModel` binding.** Provider (product) and ConfiguredModels (model-config) bind their existing `AuxiliaryModelHost` operation for C4 injection ([S4 §4.3](../appserver/auxiliary-model.md#43-named-binding)). A profile without such an owner keeps SessionTitle's row Pending through its ordinary required dependency. No core mechanism is needed.
 
@@ -356,7 +365,7 @@ omits `maxOutputTokens`, using S4's existing model limit; the 30 s budget remain
 | Eligibility | C4 creation snapshot: `interactive !== false && collaborationRole === "leader"`; native omission means true |
 | Trigger | On `input/applied` at `N`: skip if not eligible, disabled, in flight or failed attempts ≥ 3 (A5); otherwise start a generation task owned by the plugin's lifetime |
 | Check | `sessionMetadata.read({sessionId})`: skip if any title exists; keep revision `r` |
-| Read | Existing sessions.history with atLeast=N fixes published T >= N, then through=T pages (S2 A.5). Select the first operator input with user content and input/applied; no such input/text means no title (A8/A10) |
+| Read | The four field queries in §0.1 share published T >= N. No adopted operator input/text means no title (A8/A10). |
 | Generate | Route and fall back under §3.3 within the shared 30 s budget (A4); normalize the first line, remove quotes and trailing punctuation, collapse whitespace, cut at `maxLength`, trim again |
 | Write | `setTitle({sessionId, expectedRevision: r, title: {text, source: "auto"}})`; `conflict` or `not_found` discards |
 | Timeline | No writes, no Dispatcher registration, no `StateCell` |
@@ -413,7 +422,7 @@ Flow tests through the default native product assembly without language runtimes
 8. Reload before store handover cancels generation without writing; the next adopted input may trigger. Reload after admission leaves settlement to SessionStore; reread metadata after a lost reply without repeating the write. Three failed attempts to obtain settings or commit metadata stop attempts; generation failure uses the excerpt fallback (§3.3).
 9. Invalid rename method/type, empty text and control characters return `invalid_params` even when Settings cannot be read; the length check uses the validated Settings document.
 10. A first input withdrawn before it is applied (`session.input.withdraw`) produces no title and is never sent to the auxiliary model; the next adopted input titles the Session from its own text.
-11. Missing Settings documents yield the declared defaults; invalid persisted settings fail without rewriting them. Updates use existing Settings CAS, reject invalid ranges/shapes, and affect the next title/rename decision without reloading the row. Project scope is rejected. Disabled generation reads neither metadata nor history across repeated inputs. Cover non-BMP text at the excerpt/title limits, punctuation before first-line trailing spaces and whitespace at the truncation boundary in the title flow.
+11. Missing Settings documents yield the declared defaults; invalid persisted settings fail without rewriting them. Updates use existing Settings CAS, reject invalid ranges/shapes, and affect the next title/rename decision without reloading the row. Project scope is rejected. Disabled generation reads neither metadata nor Timeline queries across repeated inputs. Cover non-BMP text at the excerpt/title limits, punctuation before first-line trailing spaces and whitespace at the truncation boundary in the title flow.
 
 12. Optional generation service absent or withdrawn: ordinary model generation and rename remain available. Nonmatching provider uses only the model; a matching service success avoids a duplicate model request. Explicit model bypasses the service. Unavailable, failed and invalid responses fall back to the model; model failure or deadline uses the excerpt. Closing while the service is pending cancels and settles it without model fallback or metadata writes.
 
@@ -438,7 +447,7 @@ A1–A12 are the policies for the first implementation.
 
 ## Appendix F. Open questions
 
-None. Session list fields follow S5b; observation, history, Settings, metadata and the named
+None. Session list fields follow S5b; observation, Timeline queries, Settings, metadata and the named
 auxiliary binding use the owner contracts in §0. The optional service contract is owned here (§3.3); no Core change is required.
 
 ## Appendix G. Rust binding
@@ -446,7 +455,7 @@ auxiliary binding use the owner contracts in §0. The optional service contract 
 | Neutral | Rust |
 | --- | --- |
 | Namespace `session.rename` registered with `sessionMethods` | The Session part calls `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` on a `Key<SessionMethods>` dependency |
-| Published history | The existing named `sessions.history` HostDispatch contract; decode the external reply at the plugin boundary |
+| Published branch properties | Required `Key<TreeCommands>`; `TreeCommands::query("main", TimelineQuery)` with branch scope, `include_publishing: false` and one-row `QuerySelect::Fields` results. Configuration paths are `data.settings.providerId` and `data.settings.modelId`. |
 | Title metadata | `SessionStore::metadata` and `SessionStore::set_title` |
 | Auxiliary call | `AuxiliaryModelHost.0.complete` with its cancellation token |
 | Optional generation | `ctx.get_at(&host_key("sessionTitleGenerator"))` at use; `HostDispatch.generate` with a cancellable callback promise, using the request/reply types exported by `dim-session-title` |

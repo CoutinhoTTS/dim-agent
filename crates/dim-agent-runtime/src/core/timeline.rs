@@ -693,9 +693,28 @@ impl Timeline {
     pub async fn batch_end(&self, sequence: u64) -> Result<()> {
         self.0.store.batch_end(&self.0.key, sequence).await
     }
+    /// Returns the containing batch's end, including the branch's committed tail.
+    #[service(skip)]
+    pub async fn batch_end_at(&self, sequence: u64) -> Result<u64> {
+        self.bound(sequence)?;
+        if sequence == 0 {
+            return Ok(0);
+        }
+        {
+            let data = self.0.data.lock().unwrap();
+            if let Some(record) = data
+                .hot
+                .iter()
+                .find(|record| record.event.sequence == sequence)
+            {
+                return Ok(record.batch_end);
+            }
+        }
+        self.0.store.batch_end_at(&self.0.key, sequence).await
+    }
+    #[service(skip)]
     /// The branch chain the context covers, root first: each ancestor to its
     /// fixed cut and the local branch to `through`.
-    #[service(skip)]
     pub fn segments(&self, through: u64) -> Result<Vec<(String, u64)>> {
         let through = self.through(Some(through))?;
         Ok(self

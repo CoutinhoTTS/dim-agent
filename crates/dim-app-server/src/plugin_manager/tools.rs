@@ -41,8 +41,8 @@ const COMMANDS: [(&str, &str, &str); 9] = [
     ),
     (
         "install",
-        "install <path|git-url> [--ref R] [--id ID] [--no-enable]",
-        "Installs the plugin directory at <path> (relative to the Session's working directory; used in place; quote a path with spaces, a backslash is taken as is) or clones <git-url> (https:// or ssh://, optionally at --ref), and turns it on unless --no-enable. The directory has a dim-plugin.json manifest. The id defaults to the manifest name lowercased; give --id when it is taken. The result has the id, name and load status.",
+        "install <path|git-url> [--ref R] [--id ID] [--no-enable] | install --optional <name> [--id ID] [--no-enable]",
+        "Installs the plugin directory at <path> (relative to the Session's working directory; used in place; quote a path with spaces, a backslash is taken as is) or clones <git-url> (https:// or ssh://, optionally at --ref), and turns it on unless --no-enable. --optional installs a plugin this release ships but does not install, by its name, together with the dependencies its lock lists. The directory has a dim-plugin.json manifest. The id defaults to the manifest name lowercased; give --id when it is taken. The result has the id, name and load status.",
     ),
     (
         "enable",
@@ -148,27 +148,39 @@ impl Command {
         Ok(match (name, rest) {
             ("list", []) => Command::Method("plugin.list", json!({})),
             ("install", _) => {
-                let (mut source, mut reference, mut id, mut enable) = (None, None, None, true);
+                let (mut source, mut reference, mut id, mut enable, mut optional) =
+                    (None, None, None, true, None);
                 let mut args = rest.iter();
                 while let Some(arg) = args.next() {
                     match arg.as_str() {
                         "--ref" => reference = Some(args.next().ok_or(malformed)?),
                         "--id" => id = Some(args.next().ok_or(malformed)?),
+                        "--optional" => optional = Some(args.next().ok_or(malformed)?),
                         "--no-enable" => enable = false,
                         _ if !plain(arg) || source.is_some() => return Err(malformed),
                         _ => source = Some(arg),
                     }
                 }
-                let source = source.ok_or(malformed)?;
-                let source = if source.contains("://") {
-                    match reference {
-                        Some(reference) => json!({"git": source, "ref": reference}),
-                        None => json!({"git": source}),
+                let source = match (source, optional) {
+                    (Some(_), Some(_)) | (None, None) => return Err(malformed),
+                    (Some(source), None) => {
+                        if source.contains("://") {
+                            match reference {
+                                Some(reference) => json!({"git": source, "ref": reference}),
+                                None => json!({"git": source}),
+                            }
+                        } else if reference.is_some() {
+                            return Err(malformed);
+                        } else {
+                            json!({"path": PathBuf::from(cwd).join(source)})
+                        }
                     }
-                } else if reference.is_some() {
-                    return Err(malformed);
-                } else {
-                    json!({"path": PathBuf::from(cwd).join(source)})
+                    (None, Some(optional)) => {
+                        if reference.is_some() {
+                            return Err(malformed);
+                        }
+                        json!({"optional": optional})
+                    }
                 };
                 let mut params = json!({"source": source, "enable": enable});
                 if let Some(id) = id {
@@ -351,7 +363,7 @@ impl ToolHandler for Plugin {
             let reply = match command {
                 Command::Method(method, params) => self
                     .manager
-                    .call(method, params, None)
+                    .call(method, params, None, &cancel)
                     .await
                     .map_err(|error| error.to_string()),
                 Command::Config { name, set } => self.config(&name, set, &cancel).await,

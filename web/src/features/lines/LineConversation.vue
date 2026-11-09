@@ -124,6 +124,10 @@ function noModel(): void {
     <template v-else>
       <TimelineView
         :rows="rows"
+        :earlier="branch.earlier"
+        :loading-earlier="branch.loadingEarlier"
+        :history-error="branch.historyError"
+        @earlier="chat.loadEarlier(sessionId, branchId)"
         :running="running"
         :quotable="open && !approval && questions.length === 0"
         :branchable="open && !approval && questions.length === 0"
