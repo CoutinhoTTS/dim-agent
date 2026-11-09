@@ -204,6 +204,9 @@ mod workflow;
 #[path = "transport_flow/questions.rs"]
 mod questions;
 
+#[path = "transport_flow/codemode.rs"]
+mod codemode;
+
 #[path = "transport_flow/timeline_export.rs"]
 mod timeline_export;
 
