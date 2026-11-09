@@ -640,6 +640,12 @@ async fn evaluate(options: &Options) -> Result<String> {
         return Err("a live evaluation needs --model-config: the run's server is served in its own process from the model configuration it names (isolate each live scenario run)".into());
     }
     let cancel = CancellationToken::new();
+    // The differential native probe runs once per evaluation, before the
+    // first run: one child served exactly as a run child is served but
+    // without the plugin defaults, so its probe Session declares the
+    // assembly's native tool set. Every run's tools-product check reads its
+    // declared set against it.
+    let native = native_probe(options, &cancel).await?;
     let instrument = Instrument::new(options);
     // Every run keeps its own instrument, merged in schedule order below, so
     // nothing in the report depends on which run finished first.
@@ -656,6 +662,7 @@ async fn evaluate(options: &Options) -> Result<String> {
                 "current" => &current,
                 _ => &candidate,
             };
+            let native = &native;
             async move {
                 let record = run_once(
                     options,
@@ -664,6 +671,7 @@ async fn evaluate(options: &Options) -> Result<String> {
                     &scenarios[scenario],
                     run,
                     cancel,
+                    native,
                     &mut measured,
                 )
                 .await?;
@@ -2129,6 +2137,16 @@ struct ChildParams {
     /// tools-product check.
     #[serde(default)]
     extra_tool: bool,
+    /// The native probe's declared set: the assembly served without the
+    /// plugin defaults. Each run's `tools-product` check reads its own
+    /// declared set against it.
+    #[serde(default)]
+    native_tools: Vec<(String, ToolSource)>,
+    /// This child is the evaluation's differential native probe: it serves
+    /// the assembly without the plugin defaults and prints the probe
+    /// Session's declared tool set instead of driving a run.
+    #[serde(default)]
+    probe_only: bool,
 }
 
 /// One preflight check's outcome.
@@ -2224,6 +2242,17 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
     augment_model_config(&params.model_config, &preflight_url, &config_path)?;
     let mut params = params;
     params.model_config = config_path;
+    if params.probe_only {
+        // The differential native probe: the assembly served without the
+        // plugin defaults, its probe Session's declared set printed for the
+        // parent's runs to check against.
+        let declared = native_probe_child(&params).await?;
+        println!(
+            "{}",
+            serde_json::to_string(&json!({"nativeTools": declared}))?
+        );
+        return Ok(());
+    }
     println!(
         "{}",
         serde_json::to_string(&child_outcome(&params, &provider).await)?
@@ -2298,6 +2327,58 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
         outcome.duration_ms = duration_ms;
     }
     outcome
+}
+
+/// The native probe child: the assembly served as a run child is served —
+/// the same home, workspace and boundary — but without the plugin defaults,
+/// and one probe Session whose declared set the child prints for the
+/// parent's runs. The probe's one turn is answered by the child's own
+/// loopback provider and calls no tool.
+async fn native_probe_child(params: &ChildParams) -> Result<Vec<(String, ToolSource)>> {
+    let settings = RunSettings {
+        overrides: child_overrides(&params.overrides),
+        model_config: Some(params.model_config.clone()),
+        unix_path: Some(params.socket.clone()),
+        defaults: None,
+        node: None,
+        js_runtime: None,
+        boundary: params.boundary.clone(),
+        plugin_tools: false,
+    };
+    let server = app_server::serve_home(
+        &params.home,
+        &params.workspace,
+        params.output_root.clone(),
+        settings.clone(),
+        |builder| {
+            if params.extra_tool {
+                install_extra_tool(builder);
+            }
+        },
+    )
+    .await
+    .map_err(|error| format!("the native probe server failed to start: {error}"))?;
+    let connected: std::result::Result<_, String> = async {
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("the child has no own executable: {error}"))?;
+        let mut client = Client::connect(&ConnectionConfig {
+            endpoint: params.socket.clone(),
+            server: WireServer {
+                program: executable,
+                embedded: true,
+            },
+            profile: None,
+            client_kind: "other",
+            client_name: "scenario-eval",
+        })
+        .await
+        .map_err(|error| format!("cannot connect to the served App Server: {error}"))?;
+        product_probe(&mut client, params, &settings.database(&params.home)).await
+    }
+    .await;
+    server.shutdown();
+    let _ = server.join().await;
+    Ok(connected?)
 }
 
 /// The drive half of the child, after the run's server is up.
@@ -2831,6 +2912,16 @@ async fn preflight_session(
     Ok((checks, ceiling))
 }
 
+/// A tool source's name as the checks' detail prints it.
+fn source_name(source: ToolSource) -> &'static str {
+    match source {
+        ToolSource::Static => "static",
+        ToolSource::Builtin => "builtin",
+        ToolSource::Extension => "extension",
+        ToolSource::Dynamic => "dynamic",
+    }
+}
+
 /// The checks over the preflight Session's tool results and the model
 /// request it declared.
 fn preflight_checks(
@@ -2874,29 +2965,40 @@ fn preflight_checks(
             )
         },
     );
-    // The product's declared set, each tool's origin its source: the host's
-    // own tools (`builtin`/`static`) are the product's and must be named by
-    // `RUN_TOOLS`, where a contributed tool (`extension`/`dynamic`) beyond
-    // the run list is the run's plugin defaults' contribution — the harness
-    // names those plugins, never the model — and only while the run names
-    // plugin defaults at all. A product tool the run list does not name
-    // would silently leave a live run without it, and a listed tool the
-    // product stopped serving would silently whitelist a name nobody
-    // registers; this check catches both at run time, where CI's eval-tests
-    // gating cannot hide them.
+    // The tool set, by contribution: the native probe child served the same
+    // assembly without the plugin defaults, so its declared set N is what
+    // the product's own parts contribute, and the run child's set D is N
+    // plus what the run's plugin defaults contribute. A tool in N the run
+    // list does not name is a native tool the assembly added unreviewed,
+    // whatever a defaults file says; a tool in D beyond the run list, the
+    // scenario's reply tools and N is the run's plugin defaults'
+    // contribution — the harness names those plugins, never the model. A
+    // product tool the run list does not name would silently leave a live
+    // run without it, and a listed tool the product stopped serving would
+    // silently whitelist a name nobody registers; this check catches both
+    // at run time, where CI's eval-tests gating cannot hide them. `source`
+    // labels the contributed tools in the detail; it is not what decides
+    // them.
     let declared_names: BTreeSet<&str> = declared.iter().map(|(name, _)| name.as_str()).collect();
     let expected_set: BTreeSet<&str> = expected.iter().map(String::as_str).collect();
-    let mut unreviewed: Vec<&str> = Vec::new();
-    let mut contributed: Vec<&str> = Vec::new();
+    let native: BTreeSet<&str> = params
+        .native_tools
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let run_list: BTreeSet<&str> = RUN_TOOLS.iter().copied().collect();
+    let unreviewed: Vec<&str> = native
+        .difference(&run_list)
+        .filter(|name| **name != PLUGIN_TOOL)
+        .copied()
+        .collect();
+    let mut contributed: Vec<(&str, ToolSource)> = Vec::new();
     for (name, source) in declared {
         if name == PLUGIN_TOOL || expected_set.contains(name.as_str()) {
             continue;
         }
-        let host = matches!(source, ToolSource::Builtin | ToolSource::Static);
-        if host || params.defaults.is_none() {
-            unreviewed.push(name);
-        } else {
-            contributed.push(name);
+        if !native.contains(name.as_str()) {
+            contributed.push((name.as_str(), *source));
         }
     }
     let requested: BTreeSet<&str> = product.iter().map(String::as_str).collect();
@@ -2907,18 +3009,31 @@ fn preflight_checks(
         .as_deref()
         .map(plugin_default_names)
         .unwrap_or_default();
+    // The attributed contributions, in both outcomes: a reader sees what the
+    // run's plugin defaults added even when another tool failed the check.
+    let contributed_detail = |detail: &mut String| {
+        if contributed.is_empty() {
+            return;
+        }
+        if !detail.is_empty() {
+            detail.push_str("; ");
+        }
+        let listed: Vec<String> = contributed
+            .iter()
+            .map(|(name, source)| format!("{name} ({})", source_name(*source)))
+            .collect();
+        detail.push_str(&format!(
+            "the run's plugin defaults ({}) contribute: {}",
+            plugins.join(", "),
+            listed.join(", ")
+        ));
+    };
     check(
         "tools-product",
         unreviewed.is_empty() && absent.is_empty() && agree,
         if unreviewed.is_empty() && absent.is_empty() && agree {
             let mut detail = "the product offered the run's tool set".to_owned();
-            if !contributed.is_empty() {
-                detail.push_str(&format!(
-                    "; the run's plugin defaults ({}) contribute: {}",
-                    plugins.join(", "),
-                    contributed.join(", ")
-                ));
-            }
+            contributed_detail(&mut detail);
             detail
         } else {
             let mut detail = String::new();
@@ -2932,7 +3047,7 @@ fn preflight_checks(
                     detail.push_str("; ");
                 }
                 detail.push_str(&format!(
-                    "the product offers tools the run list does not name: {}; update RUN_TOOLS after review",
+                    "the product's native assembly offers tools the run list does not name: {}; update RUN_TOOLS after review",
                     unreviewed.join(", ")
                 ));
             }
@@ -2945,6 +3060,7 @@ fn preflight_checks(
                     absent.join(", ")
                 ));
             }
+            contributed_detail(&mut detail);
             detail
         },
     );
@@ -3121,6 +3237,7 @@ fn preflight_checks(
     checks
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_once(
     options: &Options,
     arm: &'static str,
@@ -3128,6 +3245,7 @@ async fn run_once(
     scenario: &Scenario,
     run: usize,
     cancel: &CancellationToken,
+    native: &[(String, ToolSource)],
     instrument: &mut Instrument,
 ) -> Result<RunRecord> {
     let run_directory = run_root(options, arm, scenario, run);
@@ -3184,6 +3302,7 @@ async fn run_once(
         scenario,
         run,
         cancel,
+        native,
         &run_home,
         &workspace_of(&run_directory),
         &env_home,
@@ -3260,6 +3379,7 @@ async fn isolate_run(
     scenario: &Scenario,
     run: usize,
     cancel: &CancellationToken,
+    native: &[(String, ToolSource)],
     run_home: &Path,
     workspace: &Path,
     env_home: &Path,
@@ -3270,26 +3390,7 @@ async fn isolate_run(
     // and adds it to the run's model configuration; the parent only names
     // the configuration the operator gave the evaluation.
     let operator_home = std::env::var_os("HOME").map(PathBuf::from);
-    let boundary = if options.isolate {
-        let mut read_only_roots = platform_roots();
-        read_only_roots.sort();
-        read_only_roots.dedup();
-        // The read tools compare canonical paths, so the roots must be
-        // canonical too: `/var` and its firmlink `/private/var` resolve to
-        // one real path, and a non-canonical root would refuse everything
-        // under it.
-        Some(
-            FileToolBoundary {
-                workspace: workspace.to_owned(),
-                home: env_home.to_owned(),
-                read_only_roots,
-            }
-            .canonicalize()
-            .map_err(|error| format!("cannot canonicalize the run's file roots: {error}"))?,
-        )
-    } else {
-        None
-    };
+    let boundary = run_boundary(options, workspace, env_home)?;
     let credentials = augmented_credentials(options);
     let params = ChildParams {
         home: run_home.to_owned(),
@@ -3316,6 +3417,8 @@ async fn isolate_run(
         fail_preflight: options.fail_preflight,
         offer_plugin: options.offer_plugin,
         extra_tool: options.extra_tool,
+        native_tools: native.to_vec(),
+        probe_only: false,
     };
     let params_path = options
         .out
@@ -3328,6 +3431,94 @@ async fn isolate_run(
     let outcome = spawn_child(options, &params_path, &params, cancel).await?;
     let record = child_record(arm, scenario, run, &outcome, instrument)?;
     Ok((record, outcome))
+}
+
+/// The file-tool root boundary of a run's sessions: the workspace (writes),
+/// the disposable home and the platform's fixed roots (reads); `None` when
+/// the run is not isolated (the offline ablation).
+fn run_boundary(
+    options: &Options,
+    workspace: &Path,
+    env_home: &Path,
+) -> Result<Option<FileToolBoundary>> {
+    if !options.isolate {
+        return Ok(None);
+    }
+    let mut read_only_roots = platform_roots();
+    read_only_roots.sort();
+    read_only_roots.dedup();
+    // The read tools compare canonical paths, so the roots must be
+    // canonical too: `/var` and its firmlink `/private/var` resolve to one
+    // real path, and a non-canonical root would refuse everything under it.
+    let boundary = FileToolBoundary {
+        workspace: workspace.to_owned(),
+        home: env_home.to_owned(),
+        read_only_roots,
+    }
+    .canonicalize()
+    .map_err(|error| format!("cannot canonicalize the run's file roots: {error}"))?;
+    Ok(Some(boundary))
+}
+
+/// The differential native probe: one child served exactly as a run child is
+/// served, but without the plugin defaults, whose probe Session declares the
+/// assembly's native tool set. Its set N tells each run's `tools-product`
+/// check which declared tools the product's own parts contribute: a tool in
+/// N beyond `RUN_TOOLS` fails the check, and a tool beyond both the run list
+/// and N is what the run's plugin defaults added.
+async fn native_probe(
+    options: &Options,
+    cancel: &CancellationToken,
+) -> Result<Vec<(String, ToolSource)>> {
+    let root = options.out.join("native-probe");
+    private_directory(&root)?;
+    let workspace = root.join("workspace");
+    private_directory(&workspace)?;
+    let env_home = root.join("env/home");
+    private_directory(&env_home)?;
+    for directory in ["tmp", "xdg-config", "xdg-cache", "xdg-data"] {
+        private_directory(&root.join("env").join(directory))?;
+    }
+    let home = options.out.join("homes").join("native-probe");
+    private_directory(&home)?;
+    let socket = options.out.join("sockets").join("native-probe.sock");
+    private_directory(socket.parent().expect("a socket has a parent"))?;
+    let socket = bindable_socket(&socket)?;
+    let params = ChildParams {
+        home,
+        workspace: workspace.clone(),
+        env_home: env_home.clone(),
+        output_root: options.out.join("command-output"),
+        socket,
+        model_config: options.model_config.clone().ok_or(
+            "an evaluation needs --model-config: the model configuration \
+             names the model under test and the credential its calls use",
+        )?,
+        // The one difference from a run child: no plugin defaults, so the
+        // probe Session declares the assembly's native tools only.
+        defaults: None,
+        node: None,
+        js_runtime: None,
+        overrides: json!({}),
+        scenario: json!({}),
+        model: options.model.clone(),
+        judge: options.judge.clone(),
+        boundary: run_boundary(options, &workspace, &env_home)?,
+        outputs: root.clone(),
+        credentials: augmented_credentials(options),
+        operator_home: std::env::var_os("HOME").map(PathBuf::from),
+        isolate: options.isolate,
+        fail_preflight: false,
+        offer_plugin: false,
+        extra_tool: options.extra_tool,
+        native_tools: Vec::new(),
+        probe_only: true,
+    };
+    let params_path = root.join("params.json");
+    std::fs::write(&params_path, serde_json::to_string_pretty(&params)?)?;
+    let outcome = spawn_child_json(options, &params_path, &params, cancel, "nativeTools").await?;
+    serde_json::from_value(outcome["nativeTools"].clone())
+        .map_err(|error| format!("the native probe printed no tool set: {error}").into())
 }
 
 /// The endpoint path the run's server binds: the out-relative socket when
@@ -3568,6 +3759,20 @@ async fn spawn_child(
     params: &ChildParams,
     cancel: &CancellationToken,
 ) -> Result<ChildOutcome> {
+    let outcome = spawn_child_json(options, params_path, params, cancel, "judgeOutcome").await?;
+    Ok(serde_json::from_value(outcome)?)
+}
+
+/// Spawns a child and reads the JSON object of the output line that names
+/// `marker`: a run's child prints its outcome under `judgeOutcome`, the
+/// native probe's child its declared tool set under `nativeTools`.
+async fn spawn_child_json(
+    options: &Options,
+    params_path: &Path,
+    params: &ChildParams,
+    cancel: &CancellationToken,
+    marker: &str,
+) -> Result<Value> {
     let (executable, args, test_binary) = child_command(params_path);
     let env = child_environment(options, params, params_path, test_binary)?;
     let mut child = tokio::process::Command::new(&executable)
@@ -3612,8 +3817,13 @@ async fn spawn_child(
     }
     let line = text
         .lines()
-        .find(|line| line.contains("\"judgeOutcome\""))
-        .ok_or_else(|| format!("the run's serve child printed no outcome: {}", text.trim()))?;
+        .find(|line| line.contains(marker))
+        .ok_or_else(|| {
+            format!(
+                "the run's serve child printed no {marker} line: {}",
+                text.trim()
+            )
+        })?;
     // A test-binary child runs under the test harness, which opens its
     // output line with the test's name; the outcome is the rest of the
     // line.
@@ -9042,13 +9252,16 @@ mod tests {
         let mut scenarios = read_scenarios(&fixture.scenarios).unwrap();
         let scenario = scenarios.remove(0);
         let mut instrument = Instrument::new(options);
+        let cancel = CancellationToken::new();
+        let native = native_probe(options, &cancel).await.unwrap();
         run_once(
             options,
             arm,
             overrides,
             &scenario,
             run,
-            &CancellationToken::new(),
+            &cancel,
+            &native,
             &mut instrument,
         )
         .await
@@ -11895,6 +12108,107 @@ mod tests {
         let checks = recorded_checks(&aborted, "current");
         let product = check(&checks, "tools-product");
         assert!(!product.passed, "{product:?}");
+    }
+
+    /// The differential probe's child: served as a run child is served but
+    /// without the plugin defaults, its probe Session declares the assembly's
+    /// native tool set — the run list, without `plugin`. Its one tool-free
+    /// turn is the evaluation's fixed cost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_native_probe_child_declares_the_run_list() {
+        let fixture = Fixture::start(
+            "native-probe",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let started = std::time::Instant::now();
+        let native = native_probe(&options, &CancellationToken::new())
+            .await
+            .unwrap();
+        println!("native probe: {} ms", started.elapsed().as_millis());
+        let names: Vec<&str> = native.iter().map(|(name, _)| name.as_str()).collect();
+        for tool in RUN_TOOLS {
+            assert!(
+                names.contains(tool),
+                "the native set declares {tool}: {names:?}"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            RUN_TOOLS.len(),
+            "the native set is the run list: {names:?}"
+        );
+        assert!(
+            !names.contains(&PLUGIN_TOOL),
+            "the served process registers no plugin tool: {names:?}"
+        );
+    }
+
+    /// A defaults file exempts nothing by its presence: with an empty
+    /// defaults (`{"plugins":{}}`) the run's declared set equals the native
+    /// set, so a harness-contributed native tool the run list does not name
+    /// still fails `tools-product` — the case a source-based exemption let
+    /// through. The run is unisolated, so the failed check is recorded and
+    /// the run proceeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_a_run_with_empty_defaults_rejects_a_native_tool() {
+        let fixture = Fixture::start(
+            "plugin-empty-defaults",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let defaults = fixture.directory.join("empty-defaults.json");
+        std::fs::write(&defaults, json!({"plugins": {}}).to_string()).unwrap();
+        let mut options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        options.isolate = false;
+        options.extra_tool = true;
+        let _ = fixture.evaluate(&options).await.unwrap();
+        let checks = recorded_checks(&options.out, "current");
+        let product = check(&checks, "tools-product");
+        assert!(!product.passed, "{product:?}");
+        assert!(product.detail.contains("fixture_extra"), "{product:?}");
+    }
+
+    /// A run's plugin defaults are attributed by the differential probe, not
+    /// by a tool's source: with the text-injector defaults, the plugin's
+    /// `fixture_prompt` is accepted as the defaults' contribution, and the
+    /// harness's native `fixture_extra` — the same Extension source — is
+    /// refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+    async fn node_a_run_with_plugin_defaults_refuses_an_unattributed_tool() {
+        let fixture = Fixture::start(
+            "plugin-defaults-extra",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let defaults = fixture.directory.join("plugin-defaults.json");
+        std::fs::write(
+            &defaults,
+            json!({"plugins": {"text-injector": repository().join("runtime/fixtures/text-injector")}})
+                .to_string(),
+        )
+        .unwrap();
+        let mut options = fixture.plugin_options(fixture.directory.join("out"), defaults);
+        options.isolate = false;
+        options.extra_tool = true;
+        let _ = fixture.evaluate(&options).await.unwrap();
+        let checks = recorded_checks(&options.out, "current");
+        let product = check(&checks, "tools-product");
+        assert!(!product.passed, "{product:?}");
+        assert!(product.detail.contains("fixture_extra"), "{product:?}");
+        assert!(
+            product.detail.contains("fixture_prompt (extension)"),
+            "the defaults' contribution is accepted: {product:?}"
+        );
     }
 
     /// A model-created collaboration member cannot mount the `plugin`
