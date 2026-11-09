@@ -554,12 +554,19 @@ fn build_job(
     cap: CapCapture,
     now: DateTime<Utc>,
 ) -> Result<Job, SchedulerError> {
-    let policy_cap = match cap {
-        CapCapture::Management(cap) => {
-            if let Some(Target::Launch {
-                policy: Some(preset),
-                ..
-            }) = &input.target
+    // The legacy fields keep their bytes: the only one a save writes is
+    // `policy_cap`, and only on a `launch` target, where the retained launch
+    // route keeps its save-time cap (A.1, Appendix F).
+    let launch_preset = match &input.target {
+        Some(Target::Launch { policy, .. }) => *policy,
+        _ => None,
+    };
+    let target = input
+        .target
+        .or_else(|| previous.and_then(|before| before.target.clone()));
+    let policy_cap = match (&target, cap) {
+        (Some(Target::Launch { .. }), CapCapture::Management(cap)) => {
+            if let Some(preset) = launch_preset
                 && preset.rank() > cap.preset.rank()
             {
                 return Err(SchedulerError::new(
@@ -569,7 +576,7 @@ fn build_job(
             }
             Some(cap)
         }
-        CapCapture::Tool => previous.and_then(|before| before.policy_cap.clone()),
+        _ => previous.and_then(|before| before.policy_cap.clone()),
     };
     let enabled = input
         .enabled
@@ -579,9 +586,6 @@ fn build_job(
         (true, Some(before)) if before.enabled => before.enabled_at.clone(),
         (true, _) => Some(stamp(now)),
     };
-    let target = input
-        .target
-        .or_else(|| previous.and_then(|before| before.target.clone()));
     let job = Job {
         id: previous
             .map(|before| before.id.clone())

@@ -2103,6 +2103,56 @@ async fn a_pause_and_resume_between_the_disable_read_and_write_supersedes_it() {
     server.join().await.unwrap();
 }
 
+/// A management save writes `policy_cap` only on a `launch` target, where
+/// the retained launch route keeps its save-time cap; a `session` target
+/// stores no legacy field of its own (A.1, Appendix F).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_target_save_stores_no_policy_cap() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    save_session_job(
+        &mut client,
+        "session-target",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"name": "launch-target",
+                "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Work.",
+                "target": {"kind": "launch", "cwd": home.path()}}}),
+        )
+        .await
+        .unwrap();
+    let document = stored_document(home.path());
+    let jobs = document["jobs"].as_array().unwrap();
+    let session_job = jobs
+        .iter()
+        .find(|job| job["name"] == "session-target")
+        .unwrap();
+    assert!(
+        session_job.get("policy_cap").is_none(),
+        "a session target stores no policy cap: {session_job}"
+    );
+    let launch_job = jobs
+        .iter()
+        .find(|job| job["name"] == "launch-target")
+        .unwrap();
+    assert!(
+        launch_job.get("policy_cap").is_some(),
+        "the launch route keeps its save-time cap: {launch_job}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// A save that sends the legacy `reuse` binding's mapped target explicitly
 /// has not replaced it: nothing is released, before or after a retention
 /// pass (A.7).
