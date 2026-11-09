@@ -603,7 +603,7 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 
 每次投递转换使用既有 `scope.withLock` 读/改/`file.replace` 事务。`delivering` 记录先于输入或 launch 的输入持久化；在进行任何 `sessions` 调用之前释放文件事务。不增加 JavaScript 互斥、存储服务、日志或会成为另一权威的内存副本。读取或替换失败会停止新的投递并暴露存储失败；它不是空历史，也不是已确认的转换。清理停止新窗口、结算自有操作与待写记录，然后关闭文件作用域。
 
-保留期遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)。按 `ended_at` 为每个现存任务选择最近 100 条终态投递，以 `run_id` 作为稳定次序，并保留所有 `delivering` 记录；A.6 限制了它保持未结的时长，因此本设计写出的每条记录最终都会成为终态并可被清理，包括在恢复时计数耗尽的那条。终态投递的停止定时器必须先结束，其记录才可被清理；这是在线 I/O 所有权，不是持久化的待办状态。
+保留期遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)。按 `ended_at` 为每个现存任务选择最近 100 条终态投递，以 `run_id` 作为稳定次序，并保留所有 `delivering` 记录；A.6 限制了它保持未结的时长，因此本设计写出的每条记录最终都会成为终态并可被清理，包括在恢复时计数耗尽的那条。本次变更之前写入的非终态记录——`submitted`、`running` 或 `launching`——按原样解码并保留：没有东西结算它，最近 100 条终态选择永远不会选中它，它也永不被清理。这以这类记录的数量为上限，拥有它们的任务是仅草稿期的旧任务(#317)。终态投递的停止定时器必须先结束，其记录才可被清理；这是在线 I/O 所有权，不是持久化的待办状态。
 
 只有来自 Scheduler 自己成功 `sessions.launch` 回复的 Session 身份才会被删除。`session` 目标指向的 Session 永不被删除，投向 `session` 目标的投递所命名的 Session 同样如此。旧 `reuse` 任务启动的 Session 仍归该任务所有：删除任务会删除它，而改变该任务目标的保存会转而释放它。运行记录决定是哪一个 Session(§2.3)：记录带 launch 来源的 Session 属于启动方，任务只是复用的 Session 是外来的，永不被删除。fork 与外部提供的 Session 身份永不被删除。在移除最后一条携带该自有 Session 身份的过期记录之前调用既有 `sessions.delete`，且只在 Session 的停止时刻之后。失败或不确定的删除保留该记录并暴露其失败；下一次保留期通道重新读取它，而不是使用单独的清理队列。删除确认后，原子地移除过期记录。因此删除与记录移除之间崩溃会留下可用于对账的身份。失败的清理可能暂时保留超过 100 条终态记录。没有持久化 Session 身份的丢失启动仍是附录 F 的已知限制。
 
@@ -624,8 +624,9 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 投递进行中目标 Session 被删除 | — | 写入失败 `session_closed`，或已提交并发布；两种结果都归入记录 | Agents |
 | 投递与读取之间目标 Session 空闲卸载 | — | 没有读取会失败：下一个窗口的 `sessions.input` acquire 并恢复它 | Agents |
 | Agents 索引重载 | — | `reloading`；`delivering` 记录由查询结算 | Agents |
-| `unknown`、`reloading` 或传输失败持续 | — | 查询在五次不带事实的回答后停止并结算 `lost`，计数跨重启保留；其间到期的窗口为 `missed: previous_delivery_unsettled`；每条记录都是终态且可清理 | Scheduler、Agents |
+| `unknown`、`reloading` 或传输失败持续 | — | 查询在五次不带事实的回答后停止并结算 `lost`，计数跨重启保留；其间到期的窗口为 `missed: previous_delivery_unsettled`；本设计写出的每条记录都是终态且可清理 | Scheduler、Agents |
 | 第五次尝试已持久化后崩溃 | — | 恢复在不再次查询的情况下把记录结算为 `lost` 并带 `detail: lookup_budget_exhausted`；分支已接受的输入记为 `lost`，且绝不写两次 | Scheduler |
+| `submitted`、`running` 或 `launching` 的旧记录 | — | 按原样解码并保留；保留期永不选中也永不清理；以仅草稿期的旧任务(#317)为上限 | Scheduler |
 | Scheduler 重载或重启 | — | `delivering` 记录由查询结算；窗口不会被写两次 | Scheduler |
 | 守护进程跨过窗口停机 | — | `missed`；不补做 | Scheduler |
 | 启动被拒(cwd 缺失、未知 Agent、策略拒绝) | — | `failed: <code>`；无输入 | Agents、Scheduler |
