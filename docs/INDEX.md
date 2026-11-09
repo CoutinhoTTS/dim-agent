@@ -84,6 +84,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [F5 HostPlatform process isolation boundary](design/host-platform-isolation.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
+- [Child tool batches across clients](design/appserver/child-tool-batches.md) (#1326): v4 child events, v3 visibility, TUI/CLI/web grouping and the Code Mode session gate
 - [Management methods](design/appserver/management-methods.md)
 - [Provider management for Desktop and CLI](design/appserver/provider-management.md) (#329)（[中文](zh/design/appserver/provider-management.md)）
 - [Settings service](design/appserver/settings-service.md)（[中文](zh/design/appserver/settings-service.md)）

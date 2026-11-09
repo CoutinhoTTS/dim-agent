@@ -28,7 +28,7 @@
 | [Notifications](Notifications.md) | — | Session 观察、`notify` 工具 | — | 已撤回 |
 | [Scheduler](Scheduler.md) | 触发、运行历史（任务在 Settings 中） | `schedule` 工具 | — | P2 |
 | [Workflow](Workflow.md) | 运行（定义在 Settings 或项目文件中） | `workflow` 工具 | — | P2 |
-| [Code Mode](../../../design/plugins/CodeMode.md) | `CodeMode`：结构上限、branch runner 映射、程序信号量和部件注册（安装时） | `codemode` 工具 | 一次性 QuickJS 程序执行、子调用批次、effects 和取消 | Draft P3；原生 crate `crates/dim-codemode/`；[#1276](https://github.com/arcships/dim/issues/1276) |
+| [Code Mode](../../../design/plugins/CodeMode.md) | `CodeMode`：结构上限、branch runner 映射、程序信号量和部件注册（安装时） | `codemode` 工具（仅 v4 客户端） | 一次性 QuickJS 程序执行、子调用批次、effects 和取消；客户端边界见 [child tool batches](../../../design/appserver/child-tool-batches.md) | Draft P3；原生 crate `crates/dim-codemode/`；[#1276](https://github.com/arcships/dim/issues/1276) |
 | [Collaboration](Collaboration.md) | 成员关系与临时 agent | `agent` 工具（含列出新成员可选模型的 `models` 动作）、报告与消息；两个标记的指南条目 | 委派的事实、唤醒输入与结算 | #551 |
 | [ExternalAgent](ExternalAgent.md) | 外部会话、Collaboration 成员类型 `external-agent`；每节点一个桥接行 | —（委派与决定归 Collaboration） | — | P3 |
 | [AcpGateway](AcpGateway.md) | 接入方宿主插件：ACP/RPC 连接、请求与清理；位于 daemon 外 | — | — | 支持子集已实现，未发布（#436，PR #441；[验收](../../../design/acp-gateway-acceptance.md)） |

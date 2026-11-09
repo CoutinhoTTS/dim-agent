@@ -10,10 +10,11 @@ collects the results and returns one ordinary tool result. A program's tool call
 calls on the branch Timeline, not a second model batch. The design reuses `step/tool-call` and
 `step/tool-result`; the only event-envelope addition is an optional `parent_call_id`.
 
-The host installs the plugin with `dim_codemode::install`. The App Server product profile installs
-the plugin after the child-batch work in this design, the Questions/TUI read path, the
-Branch/Recall/Hooks joins, the storage step and the cancellation/reload tests. A host that does not
-want the tool omits the call.
+The host installs the plugin with `dim_codemode::install`. The App Server product profile may
+install the plugin, but only a protocol v4 Session is offered the `codemode` tool; v1–v3
+connections do not receive child events and cannot start a Code Mode program. The client boundary
+is specified in [child tool batches](../appserver/child-tool-batches.md). A host that does not want
+the tool omits the call.
 
 Issue: [#1276](https://github.com/arcships/dim/issues/1276).
 Rules: [design rules](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md), [plugin contract](../plugin-contract.md).
@@ -275,27 +276,29 @@ rebuild to the child batches and their terminal results.
 ## 4. Questions and TUI
 
 - A child `ask_user` call is a normal `step/tool-call` batch with `parent_call_id`. The batch is
-  visible to v3 clients; v1 and v2 clients receive the batch without `parent_call_id`.
+  visible only to v4 clients; v1–v3 clients receive only the outer result and are not offered the
+  `codemode` tool.
 - `session.question.pending` queries every `step/tool-call` with an `ask_user` call and no
   `step/tool-result` whose `call_event_id` is that batch. Top-level batches and child batches use
   the same query.
 - The pending reply returns the batch event id, `request_id` and each child call id.
 - `session.question.respond` uses `request_id` and the child call id; the waiter key is unchanged.
 - ToolExecutor writes the answer as the child batch's `step/tool-result`.
-- TUI displays events in `sequence` order. A child batch is one `step/tool-call` event; TUI groups
-  the child batch under `parent_call_id`.
+- TUI displays events in `sequence` order. A v4 TUI groups the child batch under
+  `parent_call_id`; a child event whose parent is outside the loaded window is hidden, never
+  promoted to a top-level row.
 - A child batch may hold one or more calls; parallel child calls may be separate child batches. The
   pending query returns each batch; TUI queues `ask_user` calls in batch order, as TUI already does
   for a model batch.
 - TUI must not treat a child batch as a model request. `parent_call_id` is the distinction.
 
-## 5. Branch, Recall and Hooks
+## 5. Branch and Hooks
 
 - A child `branch` call is in a child `step/tool-call` batch. `BranchSource::Tool.call_id` is the
   child call id; the child batch exists on the Timeline.
-- Recall and Hooks read every `step/tool-call` call, including batches with `parent_call_id`.
-  Recall groups a child call under its parent call; Hooks reports the child call id as
-  `tool_use_id`.
+- Hooks read every `step/tool-call` call, including batches with `parent_call_id`, and report the
+  child call id as `tool_use_id`. Recall is not extended to child calls in this delivery; its
+  current model tool-use projection is unchanged, and the child-grouping claim is removed.
 - Query results and hooks payloads must not filter child batches out.
 - `branch` default `at` keeps the existing request cut: the branch tool finds the outer request's
   `step/tool-use` and the preceding `step/model-start`. The child batch provides the source call,
@@ -315,7 +318,7 @@ child tools.call(name)
 
 Child approvals reuse `approval/request`, `approval/respond` and cancellation.
 `ApprovalRequestData.source` is `BranchSource::Tool { call_id: childCallId, turn_id, request_id }`.
-The child call id is present in the child `step/tool-call`, so clients, Hooks and Recall resolve the
+The child call id is present in the child `step/tool-call`, so v4 clients and Hooks resolve the
 source. `approval_id` remains the only key accepted by the response operation. A response authorizes
 only that child call; a response never authorizes a sibling, a future call or the outer `codemode`
 call.
@@ -332,15 +335,15 @@ The outer approval (when the outer call asks) has no `parent_call_id`.
   batch semantics. The step number is the next free number at implementation time; the marker table
   `CHECK` and its single row advance, while business tables, columns, indexes and rows do not.
 - An older binary refuses the newer marker, preserves the store byte-for-byte and never downgrades.
-- v1 and v2 clients receive child `step/tool-call`/`step/tool-result` events with `parent_call_id`
-  omitted. The child batch keeps the existing `ToolCallData`/`ToolResultData` shapes; older clients
-  see an ordinary tool batch and can answer a child `ask_user` prompt, but cannot group child
-  batches.
-- v3 clients receive child batches with `parent_call_id`. TUI and dim-electron decoders must accept
-  the optional property and group child batches.
+- v1, v2 and v3 clients never receive child `step/tool-call`/`step/tool-result` events. The App
+  Server filters them at the wire boundary; their event allowlists and outer tool projection are
+  unchanged. They are also not offered the `codemode` tool, because a child `ask_user` or child
+  approval could not be surfaced.
+- v4 clients receive child batches with `parent_call_id`. They must group the child under its
+  parent or hide it; rich child detail is optional.
 - The upgrade/downgrade fixture includes a top-level batch, a child batch, a child result and a
-  child background result. The v1/v2 projection fixture proves `parent_call_id` is omitted and the
-  child batch still reaches the client.
+  child background result. The v3 projection fixture proves the child events are absent and the
+  outer events still reach the client; the v4 fixture proves the parent property is present.
 
 ## 8. Dependencies
 
@@ -385,18 +388,18 @@ facade access or a Node/TypeScript runtime.
 | Problem | The TUI question path assumes every `step/tool-call` with `ask_user` is a model batch. A child `ask_user` call is a `step/tool-call` batch with `parent_call_id`; the current TUI does not receive or group child batches, so the prompt cannot be shown or answered reliably. |
 | Existing mechanisms considered | The existing pending query already selects `step/tool-call` rows; the waiter table and `session.question.respond` key already use `request_id` + `call_id`. |
 | Generic capability | The pending query includes child batches; the reply returns the child call id; TUI receives child batches, displays them in sequence order and queues `ask_user` calls. |
-| Sequence, batch, interruption and reload | The child batch is visible to v3 clients. The waiter key is `(branch, request, child call id)`. The child result closes the batch. Reload settles a waiting child through ToolExecutor's failure rule. |
+| Sequence, batch, interruption and reload | The child batch is visible only to v4 clients, and only v4 Sessions are offered `codemode`. The waiter key is `(branch, request, child call id)`. The child result closes the batch. Reload settles a waiting child through ToolExecutor's failure rule. |
 | Owner and issue | Questions owner; [#1276](https://github.com/arcships/dim/issues/1276). |
 
-### R4. Branch, Recall and Hooks child batches
+### R4. Branch and Hooks child batches
 
 | Field | Content |
 | --- | --- |
-| Problem | Branch source lookup, Recall call joins and Hooks `tool_use_id` assume every call is in a top-level model batch. |
+| Problem | Branch source lookup and Hooks `tool_use_id` assume every call is in a top-level model batch. Recall keeps its separate model tool-use projection. |
 | Existing mechanisms considered | The child call is a normal `step/tool-call` batch with `parent_call_id`; the call id is unchanged. |
-| Generic capability | These consumers read every `step/tool-call`, including child batches; `BranchSource::Tool.call_id` and `tool_use_id` use the child call id; Recall groups child calls under the parent call. |
+| Generic capability | Branch and Hooks read every `step/tool-call`, including child batches; `BranchSource::Tool.call_id` and `tool_use_id` use the child call id. Recall keeps its model tool-use projection; child Recall is a separate design. |
 | Sequence, batch, interruption and reload | Child batches are terminal before the outer result; reload uses the child result written by ToolExecutor. |
-| Owner and issue | Branch, Recall and Hooks owners; [#1276](https://github.com/arcships/dim/issues/1276). |
+| Owner and issue | Branch and Hooks owners; [#1276](https://github.com/arcships/dim/issues/1276). Recall child grouping is a separate design. |
 
 ### R5. Event envelope, storage and v1 projection
 
@@ -404,7 +407,7 @@ facade access or a Node/TypeScript runtime.
 | --- | --- |
 | Problem | `step/tool-call` and `step/tool-result` need a parent relation; the retrieval layer must distinguish child batches without decoding `ToolCallData`; v1 and v2 projections must not expose the new envelope property. |
 | Existing mechanisms considered | An optional top-level `AgentEvent.parent_call_id`; the existing `step/tool-call`/`step/tool-result` shapes. |
-| Generic capability | The event envelope carries optional `parent_call_id`; the native store advances one format step; v1/v2 projections omit the property; v3 clients and TUI read the property. |
+| Generic capability | The event envelope carries optional `parent_call_id`; the native store advances one format step; v1–v3 projections omit parented events at the wire boundary; v4 clients and TUI read the property. |
 | Sequence, batch, interruption and reload | The property is written at commit time with the event; the upgrade/downgrade fixture covers a top-level batch, a child batch, a child result and a child background result. |
 | Owner and issue | Timeline/event and App Server owners; [#1276](https://github.com/arcships/dim/issues/1276). |
 
@@ -476,5 +479,6 @@ CodeModeBranch::run(outer_call_id, code, context, cancel):
 
 The host adds the process row with `dim_codemode::install`; `install_required` also makes both
 parts required for a Session that must publish only after the tool is registered. The product
-profile installs the plugin by default only after the child-batch, Questions/TUI, Branch/Recall/
-Hooks, storage and reload tests in this design pass.
+profile may install the plugin by default once the v4 protocol, TUI/web grouping and the
+`AgentLoop` rebuild filter in [child tool batches](../appserver/child-tool-batches.md) land. The
+Session gate keeps `codemode` out of v3 connections even when the plugin is installed.
