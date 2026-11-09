@@ -925,6 +925,19 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::prompt::recovery",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::prompt",
+      "file": "crates/dim-agent-capabilities/src/prompt/recovery.rs",
+      "unexpandedMacros": [
+        "json",
+        "matches",
+        "tokio::select",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::prompt_guide",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -975,10 +988,7 @@
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/prompt_state.rs",
-      "unexpandedMacros": [
-        "unreachable",
-        "vec"
-      ]
+      "unexpandedMacros": []
     },
     {
       "id": "dim_agent_capabilities::prompt_suggestion",
@@ -9989,7 +9999,6 @@
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot",
-        "path PromptSnapshot::read",
         "path scope_is_visible",
         "use crate::prompt_state::PromptSnapshot",
         "use crate::prompt_state::scope_is_visible"
@@ -13299,14 +13308,6 @@
     },
     {
       "from": "dim_agent_capabilities::prompt",
-      "to": "dim_agent_capabilities::branch_input",
-      "references": [
-        "path append_own",
-        "use crate::branch_input::append_own"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_capabilities::context_block",
       "references": [
         "path context_block::element",
@@ -13338,6 +13339,18 @@
     },
     {
       "from": "dim_agent_capabilities::prompt",
+      "to": "dim_agent_capabilities::prompt::recovery",
+      "references": [
+        "mod recovery",
+        "path recovery::KEY",
+        "path recovery::Projection",
+        "path recovery::Projection::default",
+        "path recovery::Projection::restore",
+        "path recovery::SCHEMA"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_capabilities::prompt_guide",
       "references": [
         "path GuideEntries",
@@ -13350,7 +13363,6 @@
       "references": [
         "path PromptSnapshot",
         "path PromptSnapshot::default",
-        "path PromptSnapshot::read",
         "use crate::prompt_state::PromptSnapshot"
       ]
     },
@@ -13447,13 +13459,13 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path EventKind::BranchStart",
+        "path EventKind::ContextScope",
+        "path EventKind::Extension",
         "path EventKind::PromptConfigureRequest",
         "path EventKind::PromptConfigureResult",
-        "path EventKind::StopInterrupt",
+        "path EventKind::TurnEnd",
         "path InputBlock",
-        "path InputMessageData",
-        "path InputMode::Append",
-        "path InterruptScope::Branch",
         "path PromptConfigureControlData",
         "path events"
       ]
@@ -13469,7 +13481,9 @@
       "from": "dim_agent_capabilities::prompt",
       "to": "dim_agent_types::prompt",
       "references": [
+        "path ContextScopeStatus::Ended",
         "path ModelSelection",
+        "path PromptChange",
         "path PromptChange::Revoke",
         "path PromptChange::Set",
         "path PromptDelivery::State",
@@ -13480,6 +13494,141 @@
         "path PromptScope::Task",
         "path PromptScope::Turn",
         "path prompt"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_capabilities::prompt",
+      "references": [
+        "path Key",
+        "path Prompt",
+        "path context_changes"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_capabilities::prompt_state",
+      "references": [
+        "path PromptSnapshot"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path row",
+        "path rows"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path BranchPhase::Active"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::fault",
+        "path Result",
+        "path error"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_runtime::memory_timeline_store::query",
+      "references": [
+        "path query"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_runtime::scope",
+      "references": [
+        "path scope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_runtime::state",
+      "references": [
+        "path state"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope",
+        "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryComparison::Eq",
+        "path QueryFilter",
+        "path QueryFilter::And",
+        "path QueryFilter::Compare",
+        "path QueryFilter::In",
+        "path QueryOperand::Field",
+        "path QueryOperand::Value",
+        "path QueryOutput::Rows",
+        "path QueryPage",
+        "path QueryPick::Last",
+        "path QueryRows::Elements",
+        "path QuerySelect::Fields",
+        "path QuerySpec",
+        "path QueryValue::Value",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryRows"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path EventDraft",
+        "path EventKind",
+        "path EventKind::ContextConfigured",
+        "path EventKind::Extension",
+        "path EventKind::InputMessage",
+        "path EventKind::PromptChanged",
+        "path ExtensionEvent::new",
+        "path InputBlock",
+        "path InputMessageData",
+        "path InputMode::Append",
+        "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path ContextConfiguredData",
+        "path PromptChange::Revoke",
+        "path PromptChange::Set",
+        "path PromptEntry",
+        "path PromptReference",
+        "path PromptScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt::recovery",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path kind"
       ]
     },
     {
@@ -13755,48 +13904,7 @@
       "from": "dim_agent_capabilities::prompt_state",
       "to": "dim_agent_runtime::core::timeline",
       "references": [
-        "path Timeline",
-        "path dim_agent_runtime::ContextHistory",
-        "use dim_agent_runtime::Timeline"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt_state",
-      "to": "dim_agent_runtime::error",
-      "references": [
-        "path dim_agent_runtime::Result"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt_state",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path TimelineQueryScope::Chain",
-        "use dim_agent_runtime::TimelineQueryScope"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::prompt_state",
-      "to": "dim_agent_runtime::timeline_query::properties",
-      "references": [
-        "path QueryFilter::In",
-        "path QueryOperand::Field",
-        "path QueryOutput::Rows",
-        "path QueryPage",
-        "path QueryPick::Last",
-        "path QuerySelect::Fields",
-        "path QuerySpec",
-        "path QueryValue::Value",
-        "path TimelineQuery",
-        "use dim_agent_runtime::QueryFilter",
-        "use dim_agent_runtime::QueryOperand",
-        "use dim_agent_runtime::QueryOutput",
-        "use dim_agent_runtime::QueryPage",
-        "use dim_agent_runtime::QueryPick",
-        "use dim_agent_runtime::QuerySelect",
-        "use dim_agent_runtime::QuerySpec",
-        "use dim_agent_runtime::QueryValue",
-        "use dim_agent_runtime::TimelineQuery"
+        "path dim_agent_runtime::ContextHistory"
       ]
     },
     {
@@ -13812,6 +13920,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path EventKind",
         "path EventKind::BranchStart",
         "path EventKind::ContextConfigured",
         "path EventKind::ContextScope",
@@ -13825,8 +13934,6 @@
       "from": "dim_agent_capabilities::prompt_state",
       "to": "dim_agent_types::prompt",
       "references": [
-        "path ContextConfiguredData",
-        "path ContextScopeStatus",
         "path ContextScopeStatus::Ended",
         "path ContextScopeStatus::Started",
         "path ModelConfiguration",

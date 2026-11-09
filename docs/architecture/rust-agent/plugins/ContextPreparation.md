@@ -31,8 +31,9 @@ compaction start/result and turn start/end. Produces `model/call` on success or
 `step/model-output-end` on failure, with `context/compaction-start` and one `context/compaction` around
 each strategy call. A `context/prepare` may carry `failure_chain
 {from_request_id, attempts, waited_ms}`; preparation copies it into `model/call`
-unchanged, as it copies `configuration` and `prompt`. `usage` reads the head's budget without writing. Its publisher commits prompt changes, adopted inputs and
-`context/configured` atomically; it composes the System at every adoption that
+unchanged, as it copies `configuration` and `prompt`. `usage` reads the head's budget without writing. Its publisher receives the adopted Snapshot and configuration explicitly from
+Prompt, then commits prompt changes, adopted inputs and `context/configured`
+atomically; it composes the System at every adoption that
 publishes a configuration. A change that renders the System composes the new
 source text, and a model- or tool-only or guide update re-renders the guide over
 the source text the configuration records (`system_source`), so a writer that

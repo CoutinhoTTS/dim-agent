@@ -2658,7 +2658,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
                 || matches!(event.kind, EventKind::InputApplied(_))
                 || matches!(
                     event.kind.key(),
-                    "input-queue/node" | "input-queue/recovered"
+                    "input-queue/node" | "input-queue/recovered" | "prompt-state/recovered"
                 )
         }),
         "model progress does not persist facts: {appended:?}"

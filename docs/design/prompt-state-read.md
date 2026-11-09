@@ -36,7 +36,7 @@ Branch 当前 StateCell 仍持有实际 PromptSnapshot，服务现有采用比�
 | prompt/changed | 按 changes 原下标顺序应用；有效 Set 替换引用，Revoke 移除引用；保留原 revision/System 规则。 |
 | turn/start、turn/end | 更新活动 turn，结束时移除属于它的条目。 |
 | context/scope | 更新 task 活动性；结束清除该生命周期的条目，后续重启不复活旧 Set。 |
-| branch/start | 沿用原 turn 清理与祖先可见性。 |
+| branch/start、branch/resume | start 沿用原 turn 清理；两者在处理源位置时固定 opening Snapshot，供异步加载使用，resume 不修改有效条目。 |
 | context/configured | 更新配置事件身份和原 Snapshot 配置。 |
 
 条目失效在 owner 处理该源事实时确定，不交给 SQL 重新解释所有生命周期。Set 时不活动的 scope 不登记引用。结果与当次必需退役输入同批提交；退役输出仍经过原采用入口。
@@ -87,6 +87,8 @@ page.limit = 128
 | ConfigurationPublisher.adopt_guide | 先按配置身份判断；无配置直接结束。有配置时使用其 System/source 和 owner 的 System 版本。 |
 
 ConfigurationPublisher 不反向依赖 Prompt StateCell，避免加载环。当前状态由 Prompt 作为显式类型参数传入；不新建读取包装。发布后 owner 处理实际提交的事件，不能只应用变换前草稿。工具采用在 Dispatcher 尚未启动的装配阶段也不等待 Dispatcher：沿用同步调用的恢复/采用步骤推进已提交状态，后续派发按源确认跳过。普通输入任务仍等 activated，closing 不启动新的采用。
+
+普通源由 handler 同步更新当前状态、登记恢复批次后返回，不等待数据库，不排队完整 changes。结果发布后更新 StateCell。既有采用任务只负责需要等待的加载与采用；在装配阶段 Dispatcher 尚未开始时，按已完成位置补读新源，每页最多 128 个身份，按身份逐对象取得需要的正文并立即消费。正常采用等待既有 Dispatcher 到达固定源位置，再使用当前投影，不重复查询它已经消费的源正文。scope 结束和 interrupt 在 handler 立即取消受影响的加载。opening 的 Snapshot 在处理该源位置时单独固定，交给采用任务后释放该临时引用。
 
 同一 owner 的采用串行；若 load 完成时源状态或 scope 已变化，用当前有效状态比较候选，不重放历史。写入前的竞争按已有提交注册检查处理，不能拿旧 Snapshot 覆盖新配置。
 

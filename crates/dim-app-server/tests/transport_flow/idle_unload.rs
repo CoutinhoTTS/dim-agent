@@ -836,7 +836,8 @@ async fn an_unload_writes_nothing_and_the_restore_only_records_housekeeping() {
                     && ((event["name"] == "applied" && event["data"]["mode"] == "append")
                         || (event["name"] == "message" && event["data"]["user"].is_null())))
                     || (event["type"] == "input-queue"
-                        && matches!(event["name"].as_str(), Some("node" | "recovered"))))
+                        && matches!(event["name"].as_str(), Some("node" | "recovered")))
+                    || (event["type"] == "prompt-state" && event["name"] == "recovered"))
             })
             .map(|event| format!("{}/{}", event["type"], event["name"]).replace('"', ""))
             .collect();

@@ -41,6 +41,9 @@ mod worktrees;
 #[path = "storage_flow/queue_recovery.rs"]
 mod queue_recovery;
 
+#[path = "storage_flow/prompt_recovery.rs"]
+mod prompt_recovery;
+
 const INTERPRETER: &str = "dim/context-projection/v4";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {

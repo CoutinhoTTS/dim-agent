@@ -55,16 +55,17 @@ impl ConfigurationPublisher {
     /// text, and a model- or tool-only update re-renders the guide over the
     /// previously adopted source text, so an entry a loading writer
     /// registered is in force at the adoption that loads it.
+    /// `adopted` comes from one consumed prefix of Prompt's owner state.
     pub(crate) async fn publish(
         &self,
+        adopted: (&PromptSnapshot, Option<&ContextConfiguredData>),
         changes: Vec<PromptChange>,
         model: Option<ModelSelection>,
         tools: Option<ToolSetAdoption>,
         inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot) -> Vec<InputBlock> + Send,
         register: impl FnOnce(&[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> + Send,
     ) -> dim_agent_runtime::Result<Option<u64>> {
-        let (before, previous_configuration) =
-            PromptSnapshot::read(&self.timeline, self.timeline.sequence()).await?;
+        let (before, previous_configuration) = adopted;
         let ancestry: Vec<_> = self
             .timeline
             .ancestors()
@@ -94,9 +95,7 @@ impl ConfigurationPublisher {
                 ));
             }
         }
-        let base = previous_configuration
-            .as_ref()
-            .map(|data| (*data.settings).clone());
+        let base = previous_configuration.map(|data| (*data.settings).clone());
         let configuration = match (model, tools) {
             (None, None) => None,
             (model, tools) => {
@@ -124,11 +123,9 @@ impl ConfigurationPublisher {
                 Some(settings)
             }
         };
-        let effective_configuration = configuration.clone().or_else(|| {
-            previous_configuration
-                .as_ref()
-                .map(|data| (*data.settings).clone())
-        });
+        let effective_configuration = configuration
+            .clone()
+            .or_else(|| previous_configuration.map(|data| (*data.settings).clone()));
         let mut drafts: Vec<EventDraft> = Vec::new();
         if !changes.is_empty() {
             let revision = Uuid::new_v4().to_string();
@@ -145,7 +142,7 @@ impl ConfigurationPublisher {
             };
             let mut after = before.clone();
             after.changed(&data.timeline, &data.revision, &data.changes);
-            let blocks = inputs(&before, &after);
+            let blocks = inputs(before, &after);
             drafts.push(EventKind::PromptChanged(data).into());
             drafts.extend(blocks.into_iter().map(|block| {
                 EventKind::InputMessage(InputMessageData {
@@ -163,7 +160,7 @@ impl ConfigurationPublisher {
                     EventKind::ContextConfigured(ContextConfiguredData {
                         timeline: self.identity.branch_id.clone(),
                         revision: Uuid::new_v4().to_string(),
-                        previous: previous_configuration.as_ref().map(|data| PromptReference {
+                        previous: previous_configuration.map(|data| PromptReference {
                             timeline: data.timeline.clone(),
                             revision: data.revision.clone(),
                         }),
@@ -180,15 +177,12 @@ impl ConfigurationPublisher {
             }
         }
         if let Some(settings) = configuration
-            && previous_configuration
-                .as_ref()
-                .is_none_or(|previous| *previous.settings != settings)
+            && previous_configuration.is_none_or(|previous| *previous.settings != settings)
             && !drafts
                 .iter()
                 .any(|draft| matches!(draft.kind, EventKind::ContextConfigured(_)))
         {
-            let data =
-                self.rerendered_configuration(&before, previous_configuration.as_ref(), settings);
+            let data = self.rerendered_configuration(before, previous_configuration, settings);
             drafts.push(EventKind::ContextConfigured(data).into());
         }
         if drafts.is_empty() {
@@ -210,17 +204,19 @@ impl ConfigurationPublisher {
     /// did not move. Nothing is recorded on a branch that is closing: its
     /// writers are withdrawing because it is shutting down, and the System
     /// they leave behind is not one the branch ever ran with.
-    pub(crate) async fn adopt_guide(&self) -> dim_agent_runtime::Result<()> {
+    pub(crate) async fn adopt_guide(
+        &self,
+        before: &PromptSnapshot,
+        previous: Option<&ContextConfiguredData>,
+    ) -> dim_agent_runtime::Result<()> {
         if self.closing() {
             return Ok(());
         }
-        let (before, previous) =
-            PromptSnapshot::read(&self.timeline, self.timeline.sequence()).await?;
         let Some(previous) = previous else {
             return Ok(());
         };
         let data =
-            self.rerendered_configuration(&before, Some(&previous), (*previous.settings).clone());
+            self.rerendered_configuration(before, Some(previous), (*previous.settings).clone());
         if data.system == previous.system {
             return Ok(());
         }
@@ -279,7 +275,7 @@ impl ConfigurationPublisher {
 
     /// Waits until the batch ending at `sequence` is published, so a commit
     /// failure reaches the caller before the next adoption runs.
-    async fn await_published(&self, sequence: u64) -> dim_agent_runtime::Result<u64> {
+    pub(crate) async fn await_published(&self, sequence: u64) -> dim_agent_runtime::Result<u64> {
         let mut publication = self.timeline.watch();
         while publication.borrow().0 < sequence {
             if let Some(error) = self.timeline.failure() {

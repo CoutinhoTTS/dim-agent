@@ -177,7 +177,7 @@ async fn a_fork_copies_main_through_a_rest_point_and_starts_nothing() {
                     && !matches!(event.kind, EventKind::InputApplied(_))
                     && !matches!(
                         event.kind.key(),
-                        "input-queue/node" | "input-queue/recovered"
+                        "input-queue/node" | "input-queue/recovered" | "prompt-state/recovered"
                     )
             })
             .count(),

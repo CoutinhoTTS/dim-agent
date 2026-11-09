@@ -1,5 +1,6 @@
+mod recovery;
+
 use crate::{
-    branch_input::append_own,
     context_block,
     context_preparation::{ConfigurationPublisher, ToolSetAdoption},
     host::{HostError, PromptHost},
@@ -81,6 +82,7 @@ enum Adoption {
     /// content before the branch takes input.
     Open {
         event: Arc<AgentEvent>,
+        snapshot: Box<PromptSnapshot>,
         reply: oneshot::Sender<Result<()>>,
     },
     /// The entries in force changed: adopt the guide if its composition over
@@ -116,6 +118,7 @@ pub struct Prompt {
     initial: Arc<InitialPromptConfiguration>,
     publisher: Arc<ConfigurationPublisher>,
     timeline: Arc<Timeline>,
+    dispatcher: Arc<Dispatcher>,
     faults: Arc<FaultReporter>,
     identity: Arc<TimelineIdentity>,
     lifecycle: CancellationToken,
@@ -126,6 +129,8 @@ pub struct Prompt {
     guide: Arc<GuideEntries>,
     tasks: TaskTracker,
     state: Mutex<PromptState>,
+    snapshot: Arc<StateCell<PromptSnapshot>>,
+    projection: Mutex<recovery::Projection>,
     adoption: tokio::sync::mpsc::UnboundedSender<Adoption>,
 }
 
@@ -399,9 +404,9 @@ impl Prompt {
         if cancel.is_cancelled() {
             return Ok(ToolAdoptOutcome::Superseded);
         }
+        self.advance(self.timeline.sequence()).await?;
         let published = self
-            .publisher
-            .publish(
+            .adopt(
                 Vec::new(),
                 None,
                 Some(tools),
@@ -474,22 +479,27 @@ impl Prompt {
         });
     }
 
-    /// Runs one guide adoption and reports a failure the way the queue
-    /// reports it: a branch that closed while the adoption ran is not a
-    /// fault, so the item is dropped with the others.
-    async fn adopt_guide(&self) {
-        let result = AssertUnwindSafe(self.publisher.adopt_guide())
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|panic| Err(AgentError::fault("Prompt", panic_message(panic))));
-        if let Err(error) = result
-            && !matches!(
-                error,
-                AgentError::Storage(_) | AgentError::Closed(_) | AgentError::Cancelled(_)
-            )
-        {
-            self.faults.report(error);
+    async fn adopt_guide(&self) -> Result<()> {
+        if self.projection.lock().unwrap().configuration.is_none() {
+            return Ok(());
         }
+        AssertUnwindSafe(async {
+            self.advance(self.timeline.sequence()).await?;
+            let (snapshot, configuration) = {
+                let projection = self.projection.lock().unwrap();
+                (
+                    projection.snapshot.clone(),
+                    projection.configuration.clone(),
+                )
+            };
+            self.publisher
+                .adopt_guide(&snapshot, configuration.as_ref())
+                .await?;
+            self.advance(self.timeline.sequence()).await
+        })
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|panic| Err(AgentError::fault("Prompt", panic_message(panic))))
     }
 
     fn schedule_adoption(self: &Arc<Self>, event: Arc<AgentEvent>) -> Result<()> {
@@ -543,14 +553,11 @@ impl Prompt {
             self.finish(id, Ok(ConfigureOutcome::Superseded));
             return Ok(());
         }
-        let (current, _) =
-            match PromptSnapshot::read(&self.timeline, self.timeline.sequence()).await {
-                Ok(context) => context,
-                Err(error) => {
-                    self.finish(id, Err(error));
-                    return Ok(());
-                }
-            };
+        if let Err(error) = self.advance(self.timeline.sequence()).await {
+            self.finish(id, Err(error.clone()));
+            return Err(error);
+        }
+        let current = self.projection.lock().unwrap().snapshot.clone();
         if update
             .sources
             .iter()
@@ -574,8 +581,7 @@ impl Prompt {
             }
         }
         match self
-            .publisher
-            .publish(changes, update.model, None, context_rules, |events| {
+            .adopt(changes, update.model, None, context_rules, |events| {
                 let mut state = self.state.lock().unwrap();
                 let valid = !state.closed
                     && state
@@ -601,9 +607,44 @@ impl Prompt {
             Ok(Some(_)) => {}
             Ok(None) => self.finish(id, Ok(ConfigureOutcome::Unchanged)),
             Err(AgentError::Cancelled(_)) => self.finish(id, Ok(ConfigureOutcome::Superseded)),
-            Err(error) => self.finish(id, Err(error)),
+            Err(error) => {
+                self.finish(id, Err(error.clone()));
+                return Err(error);
+            }
         }
         Ok(())
+    }
+
+    async fn adopt(
+        &self,
+        changes: Vec<PromptChange>,
+        model: Option<ModelSelection>,
+        tools: Option<ToolSetAdoption>,
+        inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot) -> Vec<InputBlock> + Send,
+        register: impl FnOnce(&[Arc<AgentEvent>]) -> Result<()> + Send,
+    ) -> Result<Option<u64>> {
+        let (snapshot, configuration) = {
+            let projection = self.projection.lock().unwrap();
+            (
+                projection.snapshot.clone(),
+                projection.configuration.clone(),
+            )
+        };
+        let sequence = self
+            .publisher
+            .publish(
+                (&snapshot, configuration.as_ref()),
+                changes,
+                model,
+                tools,
+                inputs,
+                register,
+            )
+            .await?;
+        if let Some(sequence) = sequence {
+            self.advance(sequence).await?;
+        }
+        Ok(sequence)
     }
 
     fn settle_consumed(&self, sequence: u64) {
@@ -744,11 +785,13 @@ impl DynPlugin for PromptPlugin {
                 return Ok(Effect::Done);
             }
             let (adoption, mut adoptions) = tokio::sync::mpsc::unbounded_channel();
+            let state = Arc::new(StateCell::new(PromptSnapshot::default()));
             let service = Arc::new(Prompt {
                 host,
                 initial,
                 publisher,
                 timeline: timeline.clone(),
+                dispatcher: dispatcher.clone(),
                 faults,
                 identity,
                 lifecycle: ctx.cancellation_token(),
@@ -758,6 +801,8 @@ impl DynPlugin for PromptPlugin {
                 guide,
                 tasks: TaskTracker::new(),
                 state: Mutex::new(PromptState::default()),
+                snapshot: state.clone(),
+                projection: Mutex::new(recovery::Projection::default()),
                 adoption,
             });
 
@@ -786,93 +831,9 @@ impl DynPlugin for PromptPlugin {
                 Ok(())
             })?;
 
-            let owner = service.clone();
-            service.tasks.spawn(async move {
-                loop {
-                    let item = tokio::select! {
-                        biased;
-                        _ = owner.lifecycle.cancelled() => break,
-                        item = adoptions.recv() => item,
-                    };
-                    let event = match item {
-                        None => break,
-                        Some(Adoption::Event(event)) => event,
-                        Some(Adoption::Open { event, reply }) => {
-                            let (changes, composed) = owner.guide_watch();
-                            let result = AssertUnwindSafe(owner.open(&event))
-                                .catch_unwind()
-                                .await
-                                .unwrap_or_else(|panic| {
-                                    Err(AgentError::fault("Prompt", panic_message(panic)))
-                                });
-                            let opened = result.is_ok();
-                            owner.opened.send_replace(Some(result.clone()));
-                            // The reconciliation is part of the open: a fork
-                            // inherits its parent's configuration and a
-                            // restore finds whatever its writers registered at
-                            // load, so the branch reports itself open only
-                            // once it has adopted the entries in force, and
-                            // the first request after the open carries them.
-                            // The baseline is a composition, not the System
-                            // the branch carries; an unchanged System
-                            // publishes nothing, and every successful open
-                            // pays one context read whatever the configuration
-                            // it carries. The listener starts before that
-                            // adoption, so a change made during it is queued
-                            // as an adoption behind this arm.
-                            owner.listen_guide(changes, composed);
-                            if opened {
-                                owner.adopt_guide().await;
-                            }
-                            let _ = reply.send(result);
-                            continue;
-                        }
-                        Some(Adoption::Guide) => {
-                            owner.adopt_guide().await;
-                            continue;
-                        }
-                        Some(Adoption::Tools {
-                            tools,
-                            cancel,
-                            reply,
-                        }) => {
-                            let result = AssertUnwindSafe(owner.publish_tools(tools, &cancel))
-                                .catch_unwind()
-                                .await
-                                .unwrap_or_else(|panic| {
-                                    Err(AgentError::fault("Prompt", panic_message(panic)))
-                                });
-                            let _ = reply.send(result);
-                            continue;
-                        }
-                    };
-                    let result = AssertUnwindSafe(async {
-                        match &event.kind {
-                            EventKind::PromptConfigureRequest(data) => {
-                                owner.start(&data.operation_id)
-                            }
-                            EventKind::PromptConfigureResult(data) => {
-                                owner.consume_result(&data.operation_id).await
-                            }
-                            _ => unreachable!("only adoption events are queued"),
-                        }
-                    })
-                    .catch_unwind()
-                    .await
-                    .unwrap_or_else(|panic| Err(AgentError::fault("Prompt", panic_message(panic))));
-                    if let Err(error) = &result
-                        && !matches!(error, AgentError::Storage(_))
-                    {
-                        owner.faults.report(error.clone());
-                    }
-                }
-            });
-
-            let state = Arc::new(StateCell::new(PromptSnapshot::default()));
             let gate = Arc::new(tokio::sync::Mutex::new(0u64));
             let mut projecting = gate.lock().await;
             let handler_gate = gate.clone();
-            let observable = state.clone();
             let prompt = service.clone();
             dispatcher.subscribe(
                 ctx,
@@ -888,9 +849,9 @@ impl DynPlugin for PromptPlugin {
                     "branch/resume",
                     "context/scope",
                     "stop/interrupt",
+                    recovery::KEY,
                 ],
                 move |event| {
-                    let observable = observable.clone();
                     let prompt = prompt.clone();
                     let gate = handler_gate.clone();
                     Box::pin(async move {
@@ -898,57 +859,38 @@ impl DynPlugin for PromptPlugin {
                         if event.sequence <= projected_through {
                             return Ok(());
                         }
-                        match &event.kind {
-                            EventKind::PromptConfigureRequest(_)
-                            | EventKind::PromptConfigureResult(_) => {
-                                prompt.schedule_adoption(event.clone())?;
-                            }
-                            EventKind::StopInterrupt(data)
-                                if data.scope == InterruptScope::Branch =>
-                            {
-                                let state = prompt.state.lock().unwrap();
-                                for pending in state.pending.values() {
-                                    pending.cancel.cancel();
-                                }
-                            }
-                            _ => {}
-                        }
-                        let before = observable.get();
-                        observable.update(|snapshot| snapshot.apply(&event));
-                        if matches!(
-                            event.kind,
-                            EventKind::TurnEnd(_)
-                                | EventKind::ContextScope(_)
-                                | EventKind::BranchStart(_)
-                        ) {
-                            let snapshot = observable.get();
-                            for block in context_changes(&before, &snapshot, true) {
-                                append_own(
-                                    &prompt.timeline,
-                                    InputMessageData {
-                                        blocks: vec![block],
-                                        mode: Some(InputMode::Append),
-                                        ..Default::default()
-                                    },
-                                    Vec::new(),
-                                )?;
-                            }
+                        {
                             let state = prompt.state.lock().unwrap();
                             for pending in state.pending.values() {
-                                if pending
-                                    .update
-                                    .sources
-                                    .iter()
-                                    .any(|target| !snapshot.active(&target.scope))
-                                {
+                                let expired = pending.update.sources.iter().any(|target| match &event.kind {
+                                    EventKind::TurnEnd(data) => matches!(&target.scope, PromptScope::Turn {id,..} if id == &data.turn_id),
+                                    EventKind::BranchStart(_) => matches!(target.scope, PromptScope::Turn {..}),
+                                    EventKind::ContextScope(data) if data.status == ContextScopeStatus::Ended => target.scope == data.scope,
+                                    _ => false,
+                                });
+                                if expired || matches!(&event.kind,EventKind::StopInterrupt(data) if data.scope == InterruptScope::Branch) {
                                     pending.cancel.cancel();
                                 }
                             }
                         }
-                        if matches!(
-                            event.kind,
-                            EventKind::BranchStart(_) | EventKind::BranchResume(_)
-                        ) {
+                        let opening = {
+                            let mut projection = prompt.projection.lock().unwrap();
+                            if event.kind.key() == recovery::KEY {
+                                let EventKind::Extension(data) = &event.kind else { unreachable!("private recovery event") };
+                                if data.data().get("schema").and_then(serde_json::Value::as_str) != Some(recovery::SCHEMA) {
+                                    return Err(AgentError::fault("Prompt", "unsupported recovery schema"));
+                                }
+                                projection.publish(&prompt, event.sequence);
+                            } else {
+                                projection.step(&prompt, &event.id, event.sequence, &event.kind)?;
+                            }
+                            if matches!(event.kind,EventKind::BranchStart(_) | EventKind::BranchResume(_)) {
+                                let (sequence,snapshot) = projection.opening.take().ok_or_else(||AgentError::fault("Prompt","missing opening snapshot"))?;
+                                if sequence != event.sequence {return Err(AgentError::fault("Prompt","opening snapshot has advanced"));}
+                                Some(snapshot)
+                            } else { None }
+                        };
+                        if let Some(snapshot) = opening {
                             let (reply, opened) = oneshot::channel();
                             prompt.opening.register(Box::pin(async move {
                                 opened
@@ -959,20 +901,110 @@ impl DynPlugin for PromptPlugin {
                                 .adoption
                                 .send(Adoption::Open {
                                     event: event.clone(),
+                                    snapshot: Box::new(snapshot),
                                     reply,
                                 })
                                 .map_err(|_| AgentError::Closed("Prompt".into()))?;
                         }
-                        prompt.settle_consumed(event.sequence);
+                        else if matches!(event.kind, EventKind::PromptConfigureRequest(_) | EventKind::PromptConfigureResult(_)) {
+                            prompt.schedule_adoption(event)?;
+                        }
                         Ok(())
                     })
                 },
             )?;
             let projected_through = timeline.sequence();
-            let (snapshot, _) = PromptSnapshot::read(&timeline, projected_through).await?;
-            state.set(snapshot);
+            let (projection, initialize) =
+                recovery::Projection::restore(&service, projected_through).await?;
+            state.set(projection.snapshot.clone());
+            *service.projection.lock().unwrap() = projection;
+            if initialize && projected_through > 0 {
+                service
+                    .projection
+                    .lock()
+                    .unwrap()
+                    .checkpoint(&service, Vec::new())?;
+            }
+            service.recover_sources(projected_through).await?;
             *projecting = projected_through;
             drop(projecting);
+            let owner = service.clone();
+            service.tasks.spawn(async move {
+                loop {
+                    let item = tokio::select! {
+                        biased;
+                        _ = owner.lifecycle.cancelled() => break,
+                        item = adoptions.recv() => item,
+                    };
+                    let result = match item {
+                        None => break,
+                        Some(Adoption::Event(event)) => AssertUnwindSafe(async {
+                            match &event.kind {
+                                EventKind::PromptConfigureRequest(data) => {
+                                    owner.start(&data.operation_id)
+                                }
+                                EventKind::PromptConfigureResult(data) => {
+                                    owner.consume_result(&data.operation_id).await
+                                }
+                                _ => unreachable!("only configure controls retain an event"),
+                            }
+                        })
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|panic| {
+                            Err(AgentError::fault("Prompt", panic_message(panic)))
+                        }),
+                        Some(Adoption::Open {
+                            event,
+                            snapshot,
+                            reply,
+                        }) => {
+                            let (changes, composed) = owner.guide_watch();
+                            let mut result =
+                                AssertUnwindSafe(async { owner.open(&event, *snapshot).await })
+                                    .catch_unwind()
+                                    .await
+                                    .unwrap_or_else(|panic| {
+                                        Err(AgentError::fault("Prompt", panic_message(panic)))
+                                    });
+                            if result.is_ok() {
+                                owner.listen_guide(changes, composed);
+                                result = owner.adopt_guide().await;
+                            }
+                            owner.opened.send_replace(Some(result.clone()));
+                            let _ = reply.send(result.clone());
+                            result
+                        }
+                        Some(Adoption::Guide) => owner.adopt_guide().await,
+                        Some(Adoption::Tools {
+                            tools,
+                            cancel,
+                            reply,
+                        }) => {
+                            let result = AssertUnwindSafe(owner.publish_tools(tools, &cancel))
+                                .catch_unwind()
+                                .await
+                                .unwrap_or_else(|panic| {
+                                    Err(AgentError::fault("Prompt", panic_message(panic)))
+                                });
+                            let _ = reply.send(result.clone());
+                            result.map(|_| ())
+                        }
+                    };
+                    if let Err(error) = result
+                        && !matches!(
+                            error,
+                            AgentError::Cancelled(_)
+                                | AgentError::Closed(_)
+                                | AgentError::InvalidInput(_)
+                        )
+                    {
+                        owner.faults.report(error);
+                        break;
+                    }
+                }
+            });
+
             ctx.provide_at(self.state.clone(), state)?;
             ctx.provide_at::<Prompt>(self.prompt.clone(), service.clone())?;
             ctx.provide_at::<dyn ConfigureControl>(self.configure.clone(), service)?;
@@ -997,7 +1029,7 @@ impl Prompt {
 
     /// Delivers what the Session's sources hold now, compared with what this
     /// branch already has. A new Session also adopts its model.
-    async fn open(&self, event: &AgentEvent) -> Result<()> {
+    async fn open(&self, event: &AgentEvent, current: PromptSnapshot) -> Result<()> {
         let Some(initial) = self.initial.get() else {
             return Ok(());
         };
@@ -1033,7 +1065,6 @@ impl Prompt {
         {
             return Err(AgentError::Cancelled("initial prompt".into()));
         }
-        let (current, _) = PromptSnapshot::read(&self.timeline, event.sequence).await?;
         if update
             .sources
             .iter()
@@ -1064,20 +1095,20 @@ impl Prompt {
                 }
             })
             .collect();
-        self.publisher
-            .publish(changes, update.model.clone(), None, context_rules, |_| {
-                if cancel.is_cancelled()
-                    || matches!(
-                        self.branch_phase.phase(),
-                        BranchPhase::Closing | BranchPhase::Closed
-                    )
-                {
-                    Err(AgentError::Cancelled("initial prompt".into()))
-                } else {
-                    Ok(())
-                }
-            })
-            .await?;
+        self.advance(self.timeline.sequence()).await?;
+        self.adopt(changes, update.model.clone(), None, context_rules, |_| {
+            if cancel.is_cancelled()
+                || matches!(
+                    self.branch_phase.phase(),
+                    BranchPhase::Closing | BranchPhase::Closed
+                )
+            {
+                Err(AgentError::Cancelled("initial prompt".into()))
+            } else {
+                Ok(())
+            }
+        })
+        .await?;
         Ok(())
     }
 }
