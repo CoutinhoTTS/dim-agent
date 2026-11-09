@@ -1182,6 +1182,16 @@ LIMIT :page_size;
 
 多个源类型分别定位后按原位置合并，附加属性只在这个范围求值；SQL 页游标继续约束位置下界。已完成前缀不进入候选。捕获的 publishing tail 只合并范围内、尚未落盘的源，不能有尾部就扫描历史。普通 pending 仍先按指定 through 取得成员根，再遍历当前成员。
 
+已知事件身份使用既有 `timeline_events_by_id(session_id, event_id)` 定位：
+
+```sql
+SELECT branch_id, sequence
+FROM timeline_events
+WHERE session_id = :session AND event_id IN (:id_1, :id_2);
+```
+
+这里的两个 ID 只是批量参数示例，本改造的 owner 每批至多提交 128 个，不为通用 query 增加新的 ID 数量限制。定位后先核对每个逻辑位置属于运行时传入的固定读取范围，再投影必要属性；不先读取正文再判断祖先可见性。未命中的 ID 不触发类型历史查询。合并输出中的逻辑事件沿其既有逻辑身份定位合同处理，不能把物理行起点当成所查询事件的位置。owner 以私有事实保存的数字/状态节点也使用同一身份路径，不新增节点专用读取接口；Store 内部的 pending 成员节点仍按成员索引合同读取。
+
 Prompt 已有引用转成成对的定位键，例如：
 
 ```sql
