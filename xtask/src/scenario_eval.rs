@@ -3070,9 +3070,10 @@ fn preflight_checks(
     // product tool the run list does not name would silently leave a live
     // run without it, and a listed tool the product stopped serving would
     // silently whitelist a name nobody registers; this check catches both
-    // at run time, where CI's eval-tests gating cannot hide them. A
-    // contribution no named plugin owns fails the check, so an empty
-    // defaults file — or none at all — exempts nothing. `source` labels the
+    // at run time, where CI's eval-tests gating cannot hide them. With no
+    // named plugin nothing is exempt; with a named plugin a contribution is
+    // the defaults' as a whole — the check proves that the defaults name a
+    // plugin, not which one contributes the tool. `source` labels the
     // contributed tools in the detail; it is not what decides them.
     let declared_names: BTreeSet<&str> = declared.iter().map(|(name, _)| name.as_str()).collect();
     let expected_set: BTreeSet<&str> = expected.iter().map(String::as_str).collect();
@@ -3104,10 +3105,12 @@ fn preflight_checks(
         .as_deref()
         .map(plugin_default_names)
         .unwrap_or_default();
-    // Nothing is exempt without an owner: when the run's defaults name no
-    // plugin, a declared tool beyond the run list, the reply tools and N
-    // has no defaults plugin to attribute it to, so it fails the check
-    // instead of reading as a contribution from plugins that do not exist.
+    // Nothing is exempt without a named plugin: the harness keeps no
+    // per-tool owner record, so the check can only prove that the defaults
+    // name at least one plugin, not which one contributes a tool. With no
+    // plugin named, a declared tool beyond the run list, the reply tools
+    // and N fails the check; with one named, a contribution is the
+    // defaults' as a whole.
     let unowned = plugins.is_empty() && !contributed.is_empty();
     let passed = unreviewed.is_empty() && absent.is_empty() && agree && !unowned;
     // The attributed contributions, in both outcomes: a reader sees what the
@@ -3170,7 +3173,7 @@ fn preflight_checks(
                     .map(|(name, source)| format!("{name} ({})", source_name(*source)))
                     .collect();
                 detail.push_str(&format!(
-                    "no plugin default owns the contributed tools: {}",
+                    "the defaults name no plugin, so nothing is exempt: {}",
                     listed.join(", ")
                 ));
             } else {
@@ -3828,6 +3831,15 @@ fn child_environment(
             env.push((OsString::from(name), value));
         }
     };
+    // The names a run's child keeps from the operator's environment: the
+    // globals its sessions' processes need. `PATH`, `LANG`, `LC_ALL`,
+    // `LC_CTYPE` and `TERM` are how a shell and its tools run.
+    // `DEVELOPER_DIR`: the sandbox's developer-directory read root comes
+    // from it (host_platform/isolation.rs `baseline_read_paths`).
+    // `NO_COLOR`: no reader in the child; its exec sessions force `1`.
+    // `PAGER`: no reader in the child; its exec sessions force `cat`.
+    // `GIT_PAGER`: no reader in the child; its exec sessions force `cat`.
+    // `GH_PAGER`: no reader in the child; its exec sessions force `cat`.
     for name in [
         "PATH",
         "LANG",
@@ -12478,10 +12490,7 @@ mod tests {
         let product = check(&checks, "tools-product");
         assert!(!product.passed, "{product:?}");
         assert!(product.detail.contains("fixture_extra"), "{product:?}");
-        assert!(
-            product.detail.contains("no plugin default owns"),
-            "{product:?}"
-        );
+        assert!(product.detail.contains("nothing is exempt"), "{product:?}");
         let owned = directory.join("owned.json");
         std::fs::write(
             &owned,
