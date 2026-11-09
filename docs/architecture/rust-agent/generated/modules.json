@@ -1540,6 +1540,7 @@
       "unexpandedMacros": [
         "format",
         "tokio::select",
+        "tracing::error",
         "tracing::info_span",
         "vec"
       ]
