@@ -1794,3 +1794,112 @@ async fn an_uncertain_write_looks_up_only_its_own_delivery() {
     );
     assert_eq!(earlier["state"], "delivering", "{earlier}");
 }
+
+/// A target-gone claim belongs to the enable that recorded it: a successful
+/// re-enable or save does not replay it (zerob13 4512306129, Simon).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_re_enable_does_not_replay_the_old_target_gone_claim() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let re_enabled = create_session(&mut client, home.path(), true).await;
+    let saved = create_session(&mut client, home.path(), true).await;
+    let re_enabled_job = save_session_job(
+        &mut client,
+        "re-enable",
+        &re_enabled,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    let saved_job = save_session_job(
+        &mut client,
+        "save-enable",
+        &saved,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    // Both targets answer target-gone: their Sessions are closed, and a
+    // closed Session with rows is restorable.
+    for session in [&re_enabled, &saved] {
+        client
+            .rpc("session.close", json!({"sessionId": session}))
+            .await
+            .unwrap();
+    }
+    for job in [&re_enabled_job, &saved_job] {
+        let accepted: Value = client
+            .typed("schedule.run_now", json!({"job_id": job}))
+            .await
+            .unwrap();
+        let run = settled(&mut client, job, accepted["run_id"].as_str().unwrap()).await;
+        assert_eq!(run["state"], "failed", "{run}");
+        assert_eq!(run["detail"], "session_closed", "{run}");
+        wait_for_job(&mut client, job).await;
+    }
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // A fresh generation restores the closed Sessions on their next use.
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let listed_job = |listed: &Value, id: &str| {
+        listed["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    client
+        .typed::<Value>(
+            "schedule.set_enabled",
+            json!({"job_id": re_enabled_job, "enabled": true}),
+        )
+        .await
+        .unwrap();
+    // The timer pass must not read the old claim back once the enable landed.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+    let job = listed_job(&listed, &re_enabled_job);
+    assert_eq!(job["enabled"], true, "{listed}");
+    assert!(job["disabled_reason"].is_null(), "{listed}");
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": re_enabled_job}))
+        .await
+        .unwrap();
+    let run = settled(
+        &mut client,
+        &re_enabled_job,
+        accepted["run_id"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(run["state"], "delivered", "{run}");
+
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": saved_job, "enabled": true}}),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+    let job = listed_job(&listed, &saved_job);
+    assert_eq!(job["enabled"], true, "{listed}");
+    assert!(job["disabled_reason"].is_null(), "{listed}");
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": saved_job}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &saved_job, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "delivered", "{run}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+

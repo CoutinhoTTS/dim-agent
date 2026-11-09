@@ -253,6 +253,7 @@ pub async fn tick(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
             && run.state == DeliveryState::Failed
             && target_gone(&run.detail)
             && same_target(job, run)
+            && claim_on_current_enable(job, run)
         {
             let at = run
                 .ended_at
@@ -342,6 +343,15 @@ fn latest_terminal<'a>(history: &'a [Delivery], job_id: &str) -> Option<&'a Deli
         .iter()
         .filter(|run| run.job_id == job_id && run.state.is_terminal())
         .max_by(|a, b| a.ended_at.cmp(&b.ended_at).then(a.run_id.cmp(&b.run_id)))
+}
+
+/// Whether the target-gone claim belongs to the enable that recorded it: a
+/// failure older than the job's current `enabled_at` was superseded by a
+/// successful save or re-enable, and the timer pass must not replay it (A.3).
+fn claim_on_current_enable(job: &Job, run: &Delivery) -> bool {
+    let enabled_at = job.enabled_at.as_deref().and_then(canonical_instant);
+    let ended_at = run.ended_at.as_deref().and_then(canonical_instant);
+    matches!((enabled_at, ended_at), (Some(enabled_at), Some(ended_at)) if ended_at >= enabled_at)
 }
 
 /// A `session` delivery settled `failed` with a target-gone code disables the
