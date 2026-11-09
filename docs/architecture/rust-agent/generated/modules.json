@@ -34693,6 +34693,7 @@
       "to": "dim_cli::plugin_command",
       "references": [
         "path parse",
+        "use super::list_line",
         "use super::parse"
       ]
     },
