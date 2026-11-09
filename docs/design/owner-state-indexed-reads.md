@@ -101,3 +101,90 @@ owner 自写且也属于自己源范围的事实，统一作为后续输入按�
 验收覆盖提交前后崩溃、回调丢失、同批多输入、self-output 中间夹入外部输入、重复恢复、关闭、fork 和 schema 升级。固定 U 和当前状态，增加十倍已完成历史，源查询必须出现位置上下界，不增加旧源扫描和正文读取。
 
 删去逐输入确认数组、确认关联表和恢复源成员树：按序完成与 source_through 已经表示完整已处理前缀。保留公共 pending 成员树是为定位乱序结束的业务对象；保留状态结果是为不重做已经完成的计算。两者不能混为一种查询。
+
+## 8. 查询绑定示例
+
+以下 JSON 使用现有 TimelineQuery / QuerySpec 的字段。调用方已经选定 Session 和分支；请求内不重复传 Session ID。示例分支为 main，本次源截止为 10,000。结果类型和 state 字段仍由对应 owner 定义，不在通用 query 中增加 owner 名称或状态枚举。
+
+### 8.1 读取最后结果
+
+假定本地 opening 位于 40，当前可见读头为 10,005：
+
+```json
+{
+  "scope": "branch",
+  "from": {"branch_id": "main", "sequence": 41},
+  "through": 10005,
+  "include_publishing": false,
+  "query": {
+    "filter": {
+      "op": "in",
+      "value": {"kind": "field", "path": "kind"},
+      "values": ["goal/recovered"]
+    },
+    "select": {
+      "kind": "fields",
+      "fields": ["data.schema", "data.source_through", "data.state"]
+    },
+    "group_by": [],
+    "pick": "last",
+    "order_by": []
+  },
+  "page": {"limit": 1, "after": null}
+}
+```
+
+查询只选一条结果。owner 检查这条记录的 schema 和状态；不添加 schema 条件去寻找更旧的兼容记录。若其 source_through 为 9,980，下一步从 9,981 查询源事实，不能从结果自身的提交位置继续。
+
+### 8.2 读取未处理输入的身份
+
+下面以 ContextUsage 的 input/consumed 源为例。其它源类型使用其设计声明的完整类型集合，不把该示例的单一类型当作全部统计输入。
+
+```json
+{
+  "scope": "branch",
+  "from": {"branch_id": "main", "sequence": 9981},
+  "through": 10000,
+  "include_publishing": false,
+  "query": {
+    "filter": {
+      "op": "in",
+      "value": {"kind": "field", "path": "kind"},
+      "values": ["input/consumed"]
+    },
+    "select": {
+      "kind": "fields",
+      "fields": ["id", "kind", "position", "data.input_id"]
+    },
+    "group_by": [],
+    "pick": null,
+    "order_by": [{"key": {"kind": "position"}, "direction": "ascending"}]
+  },
+  "page": {"limit": 128, "after": null}
+}
+```
+
+只有回复包含 next 才续页；续页保持原请求，只把 after 改为该 next。不能把读取到的最后一条事件位置当成新的业务截止，也不能在分页之间更新 through。
+
+### 8.3 已知身份的正文与节点读取
+
+收到 input/consumed 后，其 input_id 指向的 input/message 可能早于 9,981。点查这个输入使用原业务可见范围，而不是未处理源的窄范围：
+
+| 参数 | 取值 |
+| --- | --- |
+| scope | 输入允许来自祖先时用 chain；只允许本地时用 branch。 |
+| from | null；不能沿用源后缀的 9,981。 |
+| through | 同一次业务处理的固定截止 10,000。 |
+| filter | In(Field("id"), [input_id])。 |
+| select | Fields；只列实际计数需要的 blocks、user 等属性，由 ContextUsage 的投影合同确定。 |
+| page | limit=1，after=null。 |
+
+这里的 In / Field / Fields 是上述 JSON 结构的缩写，不是新 API。Store 先按身份定位并检查范围，再读取正文；不能为了找到一个 ID 扫描类型历史。数字或成员节点同样按 ID 批查，每批最多 128 个；读取范围须包含引用实际所属的祖先切点，不能凭 ID 绕过可见范围。
+
+Fields 返回 QueryRow / QueryValue，不构造缺少字段的 AgentEvent。只有业务确实需要完整事件时才使用 Events；返回正文用完即释放，不放入共享 Reader。
+
+### 8.4 仅判断是否有新源
+
+结束分支的 getter 只需确认结果之后是否还有源时，沿用 §8.2 的固定范围和源条件，将 select 改为 `{"kind":"exists"}`，清空 order_by，page 设为 null。调用方只使用 exists；不取身份页再检查非空。
+
+Exists 只证明是否有新源，不计算新状态。存在新源时按该 owner 的未就绪或恢复合同处理，不能直接把旧结果当作当前结果返回。pending 不使用这个替换：它需要固定 through 下的当前成员，读取方案见[成员索引设计](appserver/timeline-member-index.md#5-读取)。
