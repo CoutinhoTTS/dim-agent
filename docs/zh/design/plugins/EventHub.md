@@ -39,9 +39,9 @@ flowchart LR
 | --- | --- | --- |
 | EventHub 进程部件 | 进程 | 已声明来源与事件类型的目录，位于内存，每次声明绑定到声明它的那一行；订阅，持久保存；发布与投递；`eventHub` 服务；`eventhub` 管理命名空间 |
 | EventHub 通知行 | 进程，每代一个 | `eventhub/ready` 通知；由进程部件在 `apply` 里创建的降级(子)行，不是 loader 行 |
-| EventHub Session 部件 | Session | 为它写出的标记登记的指南条目，经 `guideEntries` 登记；`events` 工具 |
+| EventHub Session 部件 | Session | 为它写出的标记登记的指南条目，经 `guideEntries` 登记；`events` 工具，经 `eventSubscriptions` 到达进程部件 |
 
-没有分支部件：EventHub 不折叠任何分支事实，也不持有任何分支状态。`events` 工具经进程部件声明的一个进程服务到达进程部件的订阅核心，见 [设计规则 §4 第 7 条](../../../architecture/rust-agent/principles.md)，而不是经共享状态；那个服务的名字由 `events` 工具自己的设计给出。
+没有分支部件：EventHub 不折叠任何分支事实，也不持有任何分支状态。`events` 工具经 `eventSubscriptions` 到达进程部件的订阅核心，这是进程部件声明的一个进程服务，见 [设计规则 §4 第 7 条](../../../architecture/rust-agent/principles.md)，而不是经共享状态。
 
 EventHub 是一个内置原生插件，位于新 crate `crates/dim-event-hub`。产品装配像安装 Scheduler 那样安装它，即 `dim_agent_scheduler::install` 的同一位置 `crates/dimcode/src/main.rs:31`，并通过 `AgentBuilder::optional_plugin` 作为可选功能安装 `crates/dim-agent-runtime/src/assembly.rs:300-311`，所以缺少它所需服务的宿主仍能启动并打开 Session。它的插件行名为 `eventhub`，即 PluginManager 使用的行 id，因此 PluginManager 可以像关闭其他内置插件一样关闭它，见 [PluginManager §2](PluginManager.md)。关掉之后，生产方拿不到 `eventHub` 服务，其他一切不变。
 
@@ -253,13 +253,14 @@ sequenceDiagram
 
 | 接口 | 种类 | 用途 |
 | --- | --- | --- |
-| `eventHub` | 进程服务，无 key，见 [§3.1](../overview.md#31-合同形式) | 只有给生产方的 `declare` 与 `publish`，没有别的：生产方的行不能创建或移除另一个 Session 的订阅，而对客户端来说管理平面是唯一的授权入口，见 7。`events` 工具与 `eventhub.*` 方法调用进程部件自己的订阅核心，不经过这个服务；`events` 工具经进程部件声明的一个进程服务到达该核心，见 [设计规则 §4 第 7 条](../../../architecture/rust-agent/principles.md)，而不是经共享状态，那个服务的名字由 `events` 工具自己的设计给出 |
+| `eventHub` | 进程服务，无 key，见 [§3.1](../overview.md#31-合同形式) | 只有给生产方的 `declare` 与 `publish`，没有别的：生产方的行不能创建或移除另一个 Session 的订阅，而对客户端来说管理平面是唯一的授权入口，见 7。`events` 工具与 `eventhub.*` 方法调用进程部件自己的订阅核心，不经过这个服务；`events` 工具经 `eventSubscriptions` 到达该核心，这是进程部件声明的一个进程服务，见 [设计规则 §4 第 7 条](../../../architecture/rust-agent/principles.md)，而不是经共享状态 |
+| `eventSubscriptions` | 进程服务，无 key，仅 Rust，不是共享名字 | `events` 工具的订阅核心，作用域为调用方自己的 Session |
 | `eventhub.sources`、`eventhub.subscriptions`、`eventhub.subscribe`、`eventhub.unsubscribe` | `managementMethods`，命名空间 `eventhub` | 客户端读取目录、管理任意 Session 的订阅 |
 | `eventhub/ready` | 进程总线事件，无 key | 告诉在进程里 EventHub 第一次 `apply` 之前就已装载的生产方：`eventHub` 服务已提供且可读，现在声明，见 2.1 |
 | `events` | 向 `toolRegistry` 登记的工具，Session | 模型读取目录、管理自己 Session 的订阅 |
 | `dim-event`、`dim-event-guide` | EventHub 写出的原始块标记 | 事件与来源指南唯一的模型可见形式 |
 
-EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前缀 `eventhub:`、提交 id `eventhub:<source>:<eventId>`、`eventhub-guide:<subscriptionId>:<source>`、`eventhub-guide-retire:<subscriptionId>:<source>` 与 `eventhub-guide-refresh:<source>:<uuid>`、存储文件 `eventhub/subscriptions.json`、Session 文件名 `event.txt`，以及总线事件 `eventhub/ready`。
+EventHub 占有的名字：服务名 `eventSubscriptions`、标记元素、键前缀 `eventhub:guide:`、id 前缀 `eventhub:`、提交 id `eventhub:<source>:<eventId>`、`eventhub-guide:<subscriptionId>:<source>`、`eventhub-guide-retire:<subscriptionId>:<source>` 与 `eventhub-guide-refresh:<source>:<uuid>`、存储文件 `eventhub/subscriptions.json`、Session 文件名 `event.txt`，以及总线事件 `eventhub/ready`。
 
 `eventHub` 服务是生产方唯一需要的名字。Rust 部件只在它存在时用 `ctx.get_at` 与进程 key 读取，Cordis 行同样用 `ctx.get` 读取，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字) 与 A.3；两者都不 inject 它。用 TypeScript SDK 的 `definePlugin` 写成的行则 inject 它，因为它读不到没有 inject 的名字，见 2.1。EventHub 不依赖任何生产方。
 
@@ -284,7 +285,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前�
 | §4.4 核心机制不带业务含义 | Timeline、Dispatcher、InputQueue、Loop 与 Rpc 都不增加任何东西。标记是 EventHub 写出的文字，只有 EventHub 的条目解释它；核心从不解析它 |
 | §4.5 决定前读完整个批次 | 不适用：EventHub 不依据 Timeline 事实做决定；它的目标来自自己的订阅存储 |
 | §4.6 模型上下文只来自交接后的事件 | 唯一的模型可见内容是 EventHub 写入的输入，以及它经 Prompt 的路由登记的指南条目；不向请求注入任何东西 |
-| §4.7 只通过公开事件与服务交互 | EventHub 使用 `sessions`、`sessionFiles`、`pluginFiles`、`managementMethods`、`partRegistry`、`guideEntries` 与 `toolRegistry`，不读其他插件的状态。生产方在它存在时按公开名字找到它 |
+| §4.7 只通过公开事件与服务交互 | EventHub 使用 `sessions`、`sessionFiles`、`pluginFiles`、`managementMethods`、`partRegistry`、`guideEntries` 与 `toolRegistry`，它的 `events` 工具经 `eventSubscriptions` 到达它自己的进程部件，这是进程部件声明的服务，而不是经共享状态。它不读其他插件的状态；生产方在它存在时按公开名字找到它 |
 | §4.8 基础设施默认不变 | 不向运行时、rutis 或 loader 提任何要求。唯一的需求，即 Agents 的删除通知，见 §9，来自机制自身职责：Agents 已经宣布一种删除，却没有宣布另一种 |
 | §4.9 只有后续决定要用的事实才进 Timeline | 不新增 Timeline 事件。订阅、目录和失败记录都是 EventHub 自己存储里的进程状态。写入的事实只有普通输入 |
 | §1 插件、部件与 Capability 边界 | 没有部件是 Capability：进程部件不折叠任何东西，Session 部件登记一个指南条目和一个工具。App Server 里不放任何业务代码 |
@@ -389,6 +390,19 @@ publish { source: "im",
 
 工具只作用于它自己的 Session。Session id 取自 `sessionIdentity`。分支默认取宿主提供的 `ToolExecutionContext.branch_id`，见 `crates/dim-agent-capabilities/src/host.rs:787-791`；显式的 `branchId` 允许，但必须命名调用方自己 Session 的一条分支，否则调用为 `branch_missing`。
 
+```text
+events { action: "sources" | "subscribe" | "unsubscribe" | "list",
+         types?: ["im.message" | "im.*"],       // subscribe：1 到 16 项，每项为精确类型或 "<source>.*"
+         match?: { "<attr>": "<value>" },       // subscribe：至多 16 对，用 A.2 的属性名语法
+         mode?: "queue" | "steer" | "append",   // subscribe
+         branchId?: "main",                     // subscribe；默认是调用方所在分支
+         subscriptionId?: "sub_…" }             // unsubscribe
+```
+
+schema 是封闭的，即 `additionalProperties: false`。动作不接收的参数回答 `invalid_params`：`types`、`match`、`mode` 与 `branchId` 属于 `subscribe`，`subscriptionId` 属于 `unsubscribe`，`sources` 与 `list` 不接收任何参数。
+
+`types` 在 schema 中是可选的，因为 `sources`、`unsubscribe` 与 `list` 都不接受它；`subscribe` 不带它、给出空列表或超过 16 项都回答 `invalid_params`。
+
 | 动作 | 参数 | 结果 |
 | --- | --- | --- |
 | `sources` | 无 | 已声明的来源及其类型，同 `eventhub.sources` |
@@ -396,7 +410,17 @@ publish { source: "im",
 | `unsubscribe` | `{subscriptionId}` | `{}`；另一个 Session 的 id 回答 `subscription_unknown` |
 | `list` | 无 | 本 Session 的全部订阅 |
 
-声明的 schema 与结果形状属于协议；它的描述与协调语句属于策略，随承载它的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 §9.2。拒绝在结果第一行回答与 A.3 相同的码，形式为 `<code>: <message>`。
+成功就是回复的 JSON：`sources` 为 `{sources: [...]}`，`subscribe` 为 `{subscriptionId}`，`unsubscribe` 为 `{}`，`list` 为 `{subscriptions: [...]}`。调用自身校验或状态的拒绝以 `<code>: <message>` 开头，码与 A.3 相同，且不含任何关于另一个 Session 订阅的信息；下一段中的生命周期拒绝是固定句子，不带码。
+
+定义的 risk 是 `session`；处理函数的 `risk()` 对 `subscribe` 与 `unsubscribe` 回答 `persistent_configuration`，见 7。处理函数在调用前后各检查一次本代的取消，与 Scheduler 的工具相同：调用前是 "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider."；调用后是 "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider."。后者说明调用可能已经发生，所以模型先检查再重复。参数解析之后、调用之前，一次被取消的调用以自己的 token 回答 `events: cancelled before handover`，不发起任何调用。
+
+描述是 `EventHubTexts.tool`，由工厂配置携带，如同 `entry`，见 [面向模型的提示词 §9.2](../model-prompts.md#92-每个写入面向模型文字的能力)；代码里不再保留第二份：
+
+```text
+Manage this session's event subscriptions. sources lists the sources that publish events and their event types. subscribe subscribes a branch of this session, this branch unless branchId names another, to event types, each an exact type or <source>.*; match keeps only events whose attributes equal every given pair. unsubscribe removes one of this session's subscriptions by subscriptionId, and list shows them. Each event arrives on the branch as a <dim-event> message. mode decides when: queue waits until the current turn ends, steer reaches the running turn at its next step and ends a running wait, and append adds the event without starting a turn; without mode, the type's declared mode applies. Subscribe only when the user asks you to follow events. If you will wait for an event within this turn, subscribe with mode steer.
+```
+
+声明的 schema 与结果形状属于协议。A.6 逐句给出描述的类别：两句是策略，随承载它们的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 §9.2，其余都是协议。调用自身校验或状态的拒绝在结果第一行回答与 A.3 相同的码，形式为 `<code>: <message>`；上一段中的生命周期拒绝是固定句子，不带码。
 
 ### A.5 订阅文件
 
@@ -430,6 +454,21 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 | "Nothing written in this conversation reaches an event's source; only a tool that the source's guide names does." | 协议：回复路径 |
 
 条目现在只承载协议：EventHub 只向内投递，回答只经生产方登记的工具离开，所以回复路径是关于运行时的陈述。以后再加进条目的策略句子——例如面向操作者的回答该怎样写——按 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 判定。协议句子只随它所描述的标记一起改动，并与断言它的流程测试落在同一次改动里，见 [面向模型的提示词 §4](../model-prompts.md#4-协议与策略)。
+
+`events` 工具的描述(A.4)按同样的方式逐句分类：
+
+| 描述中的句子 | 类别 |
+| --- | --- |
+| "Manage this session's event subscriptions." | 协议：对象是调用方自己的 Session |
+| "`sources` lists the sources that publish events and their event types." | 协议：`sources` 动作 |
+| "`subscribe` subscribes a branch of this session, this branch unless `branchId` names another, to event types, each an exact type or `<source>.*`; `match` keeps only events whose attributes equal every given pair." | 协议：`subscribe` 动作、它的目标与匹配 |
+| "`unsubscribe` removes one of this session's subscriptions by `subscriptionId`, and `list` shows them." | 协议：`unsubscribe` 与 `list` 动作 |
+| "Each event arrives on the branch as a `<dim-event>` message." | 协议：投递形式，即条目所解释的标记 |
+| "`mode` decides when: `queue` waits until the current turn ends, `steer` reaches the running turn at its next step and ends a running wait, and `append` adds the event without starting a turn; without `mode`, the type's declared mode applies." | 协议：三种模式与类型声明的默认值 |
+| "Subscribe only when the user asks you to follow events." | 策略：是否订阅 |
+| "If you will wait for an event within this turn, subscribe with `mode steer`." | 策略：让本轮内的 wait 结束的模式选择 |
+
+处理函数的两句收尾(A.4)同样是协议：每一句说明本代卸载对这次调用意味着什么，并随该机制改动，而不随描述改动。交接前被取消的那句话 `events: cancelled before handover` 也是协议：它说明调用没有发生，并随取消机制改动。描述中的协议句子只随它们所描述的行为改动，并与断言它的流程测试落在同一次改动里；两句策略句子随承载它们的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 [§4](../model-prompts.md#4-协议与策略)。
 
 ## 附录 B. 完整冲突表
 
@@ -541,10 +580,11 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 合同在 §6 与 A.1 到 A.4；本节是它的写法，见 [rutis 用法附录 A](../rutis-usage.md#附录-a-rust-绑定)。
 
 - **服务。** `EventHub` 是一个 Rust 类型，名字为 `eventHub`，即 `names::name_of`，见 `crates/dim-agent-runtime/src/names.rs:24-53`；它的安装函数在进程上登记该名字，见 `names::register::<EventHub>(builder.catalog_mut(), None)` 与 `crates/dim-agent-runtime/src/names.rs:63-89`，正如 Scheduler 登记自己的名字 `crates/dim-agent-scheduler/src/lib.rs:70-71`。进程部件在 `names.key::<EventHub>()` 上为 Rust 调用方提供它，并在 `host_key("eventHub")` 上为其他语言提供一个 `HostDispatch`，这就是 `guideEntries` 采用的形式，见 `crates/dim-agent-capabilities/src/prompt_guide.rs:376-382`。
+- **订阅服务。** `EventSubscriptions` 是一个 Rust 类型，名字为 `eventSubscriptions`，以同样的方式登记 (`names::register::<EventSubscriptions>(builder.catalog_mut(), None)`)，并由进程部件用 `provide_as` 与 `EventHub` 并列提供。它不是共享名字，也没有宿主 dispatch，所以只有 Rust 能到达它，另一种语言的行不能管理 Session 的订阅。它的方法回答管理核心所回答的内容，只加上调用方的作用域：`sources()`、带 origin `tool` 的 `subscribe(session_id, branch_id, request)`、`unsubscribe(session_id, subscription_id)` 与 `list(session_id)`，各自与 A.3 和 2.2 定义的对应管理调用相同。
 - **身份。** `declare` 与 `publish` 接收调用方的 `ctx`，即 `EventHub::declare(&self, ctx: &Ctx, request)`。dispatch 在 `invoke` 内读取 `rutis_bridge::session::caller_row()` 并使用该行的上下文，与 `ForeignGuideEntries` 相同，见 `crates/dim-agent-capabilities/src/prompt_guide.rs:266-298`；取不到行的调用是 `no_caller_row`。声明登记为调用方上下文的一个 effect，因此随该行结束。
 - **可选读取。** Rust 生产方持有 `Key<EventHub>`，每次调用用 `ctx.get_at(&key)` 读取；EventHub 未安装、Pending 或重载时它回答 `None`，所以依赖不门控任何东西，见 [rutis 用法 A.3](../rutis-usage.md#a3-已定的问题)。`definePlugin` 行则 inject 该名字，见 2.1。同一形式用于读取 `sessionFiles`，即 `Key<SessionFilesHost>`，见 `crates/dim-agent-capabilities/src/host.rs:1002-1038`，以及 `sessions`，即在 `host_key("sessions")` 上的 `Key<dyn HostDispatch>`，见 `crates/dim-agent-scheduler/src/methods.rs:44,56`。
 - **声明通知。** Rust 或 Cordis 生产方先监听再读取：`ctx.listen::<dim_event_hub::Ready>()`，即名字为 `eventhub/ready` 的公开 `Event` 类型，然后 `ctx.get_at(&key)`；收到通知时再次读取该 key 并声明，见 2.1。`definePlugin` 行不需要这条通知：它 inject 该名字并在 `apply` 里声明，见 2.1。监听器持有一个类型，而不是一个运行中的 EventHub，所以在 EventHub 之前装载的生产方也能听到第一次提供它的那次 `apply`。通知本身由进程部件的一个依赖行发出，而不是在它的 `apply` 里：一行的服务只在部件活跃时才可被其他行读取，而部件在 `apply` 返回时才变为活跃。每次通知都声明不会增加 effect，因为重复声明是原地替换，见 A.1。
 - **投递。** `sessions.input` 就是在 `Key<dyn HostDispatch>` 上的一次 `invoke("input", json!([args]))`，见 `crates/dim-agent-scheduler/src/engine.rs:611-633`；回复是 `{inputId, sequence}`，错误码见 [session access A.6](../contracts/session-access.md#a6-错误)。
 - **存储。** 订阅文件使用 `PluginFileTransactions`，即 `dim_app_server::plugin_files::PluginFileTransactions`，见 `crates/dim-agent-scheduler/src/runs.rs:7,221-240`。
-- **Session 部件** 注入 `guideEntries` 与 `toolRegistry`，读取 `sessionIdentity` 与 `sessionConfig`，并在 `apply` 中登记条目，与 Scheduler 的部件相同，见 `crates/dim-agent-scheduler/src/session.rs:147-201`。
+- **Session 部件** 注入 `guideEntries`、`toolRegistry`、`sessionIdentity` 与 `eventSubscriptions`，并在 `apply` 中登记条目与 `events` 工具，与 Scheduler 的部件相同，见 `crates/dim-agent-scheduler/src/session.rs:147-201`。
 - **TypeScript。** `npm/plugin.d.ts` 在 `sessions` 旁边声明这个服务：`EventHub`(`declare` 与 `publish`)、A.1 与 A.2 的请求和回复类型，以及列出附录 C 全部码的 `EventHubErrorThrown`。用 `definePlugin` 写成的行 inject `eventHub`，并用 `ctx.use<EventHub>('eventHub')` 读取它，在 `apply` 里声明；原始 Cordis 行则用 `ctx.get('eventHub')` 读取，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字)。

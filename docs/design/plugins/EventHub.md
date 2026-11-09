@@ -39,9 +39,9 @@ flowchart LR
 | --- | --- | --- |
 | EventHub process part | Process | the catalog of declared sources and event types, in memory, each declaration tied to its declaring row; the subscriptions, durable; publish and delivery; the `eventHub` service; the `eventhub` management namespace |
 | EventHub announcer | Process, one per generation | the `eventhub/ready` notice; a child fiber the process part creates in its `apply`, not a loader row |
-| EventHub Session part | Session | the guide entry for its markers, registered through `guideEntries`; the `events` tool |
+| EventHub Session part | Session | the guide entry for its markers, registered through `guideEntries`; the `events` tool, which reaches the process part through `eventSubscriptions` |
 
-There is no branch part: EventHub folds no branch fact and holds no branch state. The `events` tool reaches the process part's subscription core through a process service the process part declares ([design rules §4 rule 7](../../architecture/rust-agent/principles.md)), not through shared state; the tool's own design names that service.
+There is no branch part: EventHub folds no branch fact and holds no branch state. The `events` tool reaches the process part's subscription core through `eventSubscriptions`, the process service the process part declares ([design rules §4 rule 7](../../architecture/rust-agent/principles.md)), not through shared state.
 
 EventHub is a built-in native plugin in a new crate, `crates/dim-event-hub`. The product profile installs it the way it installs Scheduler (`dim_agent_scheduler::install`, `crates/dimcode/src/main.rs:31`), as an optional feature through `AgentBuilder::optional_plugin` (`crates/dim-agent-runtime/src/assembly.rs:300-311`), so a host without the services it needs still starts and opens Sessions. Its plugin row is named `eventhub`, the row id PluginManager uses, so PluginManager turns it off like any other built-in ([PluginManager §2](PluginManager.md)). Without it, producers get no `eventHub` service, and nothing else changes.
 
@@ -253,13 +253,14 @@ The marker is the only channel an event uses. Nothing is injected into a request
 
 | Interface | Kind | Purpose |
 | --- | --- | --- |
-| `eventHub` | Process service, no key ([§3.1](../overview.md#31-contract-form)) | `declare` and `publish`, for producers, and nothing else: a producer row must not create or remove another Session's subscriptions, and the management plane is the only authorization for clients (7). The `events` tool and the `eventhub.*` methods call the process part's own subscription core, not the service; the `events` tool reaches that core through a process service the process part declares ([design rules §4 rule 7](../../architecture/rust-agent/principles.md)), not through shared state, and the tool's own design names that service |
+| `eventHub` | Process service, no key ([§3.1](../overview.md#31-contract-form)) | `declare` and `publish`, for producers, and nothing else: a producer row must not create or remove another Session's subscriptions, and the management plane is the only authorization for clients (7). The `events` tool and the `eventhub.*` methods call the process part's own subscription core, not the service; the `events` tool reaches that core through `eventSubscriptions`, the process service the process part declares ([design rules §4 rule 7](../../architecture/rust-agent/principles.md)), not through shared state |
+| `eventSubscriptions` | Process service, no key, Rust only (not a shared name) | The subscription core for the `events` tool, scoped to the caller's own Session |
 | `eventhub.sources`, `eventhub.subscriptions`, `eventhub.subscribe`, `eventhub.unsubscribe` | `managementMethods`, namespace `eventhub` | Clients read the catalog and manage any Session's subscriptions |
 | `eventhub/ready` | Process bus event, no key | Tells a producer that applied before EventHub's first apply in the process that the `eventHub` service is provided and readable, so it declares now (2.1) |
 | `events` | Tool registered with `toolRegistry` (Session) | The model reads the catalog and manages its own Session's subscriptions |
 | `dim-event`, `dim-event-guide` | Raw-block markers written by EventHub | The only model-visible form of an event and of a source's guide |
 
-Names EventHub owns: the marker elements, the key prefix `eventhub:guide:`, the id prefix `eventhub:`, the submission ids `eventhub:<source>:<eventId>`, `eventhub-guide:<subscriptionId>:<source>`, `eventhub-guide-retire:<subscriptionId>:<source>` and `eventhub-guide-refresh:<source>:<uuid>`, the storage file `eventhub/subscriptions.json`, the Session file name `event.txt`, and the bus event `eventhub/ready`.
+Names EventHub owns: the service name `eventSubscriptions`, the marker elements, the key prefix `eventhub:guide:`, the id prefix `eventhub:`, the submission ids `eventhub:<source>:<eventId>`, `eventhub-guide:<subscriptionId>:<source>`, `eventhub-guide-retire:<subscriptionId>:<source>` and `eventhub-guide-refresh:<source>:<uuid>`, the storage file `eventhub/subscriptions.json`, the Session file name `event.txt`, and the bus event `eventhub/ready`.
 
 The `eventHub` service is the only name a producer needs. A Rust part reads it only if present with `ctx.get_at` and the process key, and a Cordis row does the same with `ctx.get`; neither injects it ([rutis usage §3.5](../rutis-usage.md#35-how-each-runtime-resolves-a-name), A.3). A row written with the TypeScript SDK's `definePlugin` injects it instead, because it cannot read a name it does not inject (2.1). EventHub depends on no producer.
 
@@ -284,7 +285,7 @@ The `eventHub` service is the only name a producer needs. A Rust part reads it o
 | §4 rule 4 No business meaning in core | Timeline, Dispatcher, InputQueue, Loop and Rpc gain nothing. The marker is text EventHub writes and only EventHub's entry explains; the core never parses it |
 | §4 rule 5 Read the whole batch before deciding | Not applicable: EventHub takes no decision on a Timeline fact; its targets come from its own subscription store |
 | §4 rule 6 Context only from handed-over events | The only model-visible content is the input EventHub writes and the guide entry it registers through Prompt's route; nothing is injected into a request |
-| §4 rule 7 Public events and services only | EventHub uses `sessions`, `sessionFiles`, `pluginFiles`, `managementMethods`, `partRegistry`, `guideEntries` and `toolRegistry`, and reads no other plugin's state. Producers reach it by its public name, if present |
+| §4 rule 7 Public events and services only | EventHub uses `sessions`, `sessionFiles`, `pluginFiles`, `managementMethods`, `partRegistry`, `guideEntries` and `toolRegistry`, and its `events` tool reaches its own process part through `eventSubscriptions`, the service the process part declares, not through shared state. It reads no other plugin's state; producers reach it by its public name, if present |
 | §4 rule 8 Infrastructure unchanged | Nothing is asked of the runtime, rutis or the loader. The one requirement, the Agents deletion notice (§9), comes from the mechanism's own responsibility: Agents already announces one kind of deletion and not the other |
 | §4 rule 9 Only facts later decisions use | No Timeline event is added. Subscriptions, the catalog and the failure records are process state in EventHub's own store. The only facts written are ordinary inputs |
 | §1 Capability and App Server boundary | No part is a Capability: the process part folds nothing and the Session part registers a guide entry and a tool. No business code goes into the App Server |
@@ -389,6 +390,19 @@ publish { source: "im",
 
 The tool acts on its own Session only. The Session id comes from `sessionIdentity`. The branch defaults to the host-supplied `ToolExecutionContext.branch_id` (`crates/dim-agent-capabilities/src/host.rs:787-791`); an explicit `branchId` is allowed and must name a branch of the caller's own Session, otherwise the call is `branch_missing`.
 
+```text
+events { action: "sources" | "subscribe" | "unsubscribe" | "list",
+         types?: ["im.message" | "im.*"],       // subscribe: 1..16, each an exact type or "<source>.*"
+         match?: { "<attr>": "<value>" },       // subscribe: at most 16 pairs, A.2's attribute-name grammar
+         mode?: "queue" | "steer" | "append",   // subscribe
+         branchId?: "main",                     // subscribe; defaults to the caller's branch
+         subscriptionId?: "sub_…" }             // unsubscribe
+```
+
+The schema is closed (`additionalProperties: false`). An argument the action does not take answers `invalid_params`: `types`, `match`, `mode` and `branchId` belong to `subscribe`, `subscriptionId` to `unsubscribe`, and `sources` and `list` take none.
+
+`types` is optional in the schema because `sources`, `unsubscribe` and `list` take none; `subscribe` without it, with an empty list or with more than 16 entries answers `invalid_params`.
+
 | Action | Arguments | Result |
 | --- | --- | --- |
 | `sources` | none | the declared sources and their types, as `eventhub.sources` |
@@ -396,7 +410,17 @@ The tool acts on its own Session only. The Session id comes from `sessionIdentit
 | `unsubscribe` | `{subscriptionId}` | `{}`; another Session's id answers `subscription_unknown` |
 | `list` | none | every subscription of its own Session |
 
-The declaration's schema and result shape are protocol; its description and the coordination sentences are policy, evaluated with the behaviour it ships ([model-facing prompts §8](../model-prompts.md#8-judging-a-change), §9.2). Refusals answer the same codes as A.3 in the first line of the result, `<code>: <message>`.
+A success is the reply as JSON: `{sources: [...]}` for `sources`, `{subscriptionId}` for `subscribe`, `{}` for `unsubscribe` and `{subscriptions: [...]}` for `list`. A refusal of the call's own validation or state starts with `<code>: <message>`, with the codes A.3 documents and nothing about another Session's subscriptions; the lifecycle refusals in the paragraph below are fixed sentences without a code.
+
+The definition's risk is `session`; the handler's `risk()` answers `persistent_configuration` for `subscribe` and `unsubscribe` (7). The handler checks the generation's cancellation before and after the call, as Scheduler's tool does: before it, "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider."; after it, "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider." The second says the call may have run, so the model checks before repeating it. After the arguments parse and before the call, a cancelled call's own token answers `events: cancelled before handover` and makes no call.
+
+The description is `EventHubTexts.tool`, carried by factory configuration as `entry` is ([model-facing prompts §9.2](../model-prompts.md#92-every-capability-that-writes-model-facing-text)); the code keeps no second copy:
+
+```text
+Manage this session's event subscriptions. sources lists the sources that publish events and their event types. subscribe subscribes a branch of this session, this branch unless branchId names another, to event types, each an exact type or <source>.*; match keeps only events whose attributes equal every given pair. unsubscribe removes one of this session's subscriptions by subscriptionId, and list shows them. Each event arrives on the branch as a <dim-event> message. mode decides when: queue waits until the current turn ends, steer reaches the running turn at its next step and ends a running wait, and append adds the event without starting a turn; without mode, the type's declared mode applies. Subscribe only when the user asks you to follow events. If you will wait for an event within this turn, subscribe with mode steer.
+```
+
+The declaration's schema and result shape are protocol. A.6 classifies the description sentence by sentence: two sentences are policy, judged with the behaviour they ship ([model-facing prompts §8](../model-prompts.md#8-judging-a-change), §9.2), and the rest are protocol. A refusal of the call's own validation or state answers the same codes as A.3 in the first line of the result, `<code>: <message>`; the lifecycle refusals above are fixed sentences without a code.
 
 ### A.5 The subscription file
 
@@ -430,6 +454,21 @@ The text is 953 bytes, under the 4096-byte bound of [Prompt §2](Prompt.md#2-the
 | "Nothing written in this conversation reaches an event's source; only a tool that the source's guide names does." | Protocol: the reply path |
 
 The entry now carries protocol only: EventHub delivers inward only, and an answer leaves only through a tool the producer registers, so the reply path is a statement about the runtime. A policy sentence added to the entry later — how an operator-facing answer should read, for example — is judged by [model-facing prompts §8](../model-prompts.md#8-judging-a-change). The protocol sentences change only with the marker they describe, in the same change as the flow test that asserts them ([model-facing prompts §4](../model-prompts.md#4-protocol-and-policy)).
+
+The `events` tool's description (A.4) is classified the same way, sentence by sentence:
+
+| Sentence in the description | Class |
+| --- | --- |
+| "Manage this session's event subscriptions." | Protocol: the subject, the caller's own Session |
+| "`sources` lists the sources that publish events and their event types." | Protocol: the `sources` action |
+| "`subscribe` subscribes a branch of this session, this branch unless `branchId` names another, to event types, each an exact type or `<source>.*`; `match` keeps only events whose attributes equal every given pair." | Protocol: the `subscribe` action, its target and its matching |
+| "`unsubscribe` removes one of this session's subscriptions by `subscriptionId`, and `list` shows them." | Protocol: the `unsubscribe` and `list` actions |
+| "Each event arrives on the branch as a `<dim-event>` message." | Protocol: the delivery form, the marker the entry explains |
+| "`mode` decides when: `queue` waits until the current turn ends, `steer` reaches the running turn at its next step and ends a running wait, and `append` adds the event without starting a turn; without `mode`, the type's declared mode applies." | Protocol: the modes and the declared default |
+| "Subscribe only when the user asks you to follow events." | Policy: whether to subscribe at all |
+| "If you will wait for an event within this turn, subscribe with `mode steer`." | Policy: the mode choice that makes an in-turn wait end |
+
+The handler's two closing sentences (A.4) are protocol too: each says what the generation's unload means for the call, and they change with that mechanism, not with the description. So is its cancelled-before-handover sentence, `events: cancelled before handover`: it says the call was not made, and it changes with the cancellation mechanism. The description's protocol sentences change only with the behaviour they describe, in the same change as the flow test that asserts it; its two policy sentences are judged with the behaviour they ship ([model-facing prompts §8](../model-prompts.md#8-judging-a-change), [§4](../model-prompts.md#4-protocol-and-policy)).
 
 ## Appendix B. Full conflict table
 
@@ -541,10 +580,11 @@ The implementation's flow tests cover:
 The contract is §6, A.1 to A.4; this section is its spelling ([rutis usage appendix A](../rutis-usage.md#appendix-a-rust-binding)).
 
 - **The service.** `EventHub` is a Rust type whose name is `eventHub` (`names::name_of`, `crates/dim-agent-runtime/src/names.rs:24-53`), registered at the process by its install function (`names::register::<EventHub>(builder.catalog_mut(), None)`, `crates/dim-agent-runtime/src/names.rs:63-89`, as Scheduler registers its names at `crates/dim-agent-scheduler/src/lib.rs:70-71`). The process part provides it at `names.key::<EventHub>()` for Rust callers and a `HostDispatch` at `host_key("eventHub")` for other languages, the form `guideEntries` uses (`crates/dim-agent-capabilities/src/prompt_guide.rs:376-382`).
+- **The subscription service.** `EventSubscriptions` is a Rust type whose name is `eventSubscriptions`, registered the same way (`names::register::<EventSubscriptions>(builder.catalog_mut(), None)`) and provided by the process part with `provide_as`, beside `EventHub`. It is not a shared name and has no host dispatch, so only Rust reaches it and a row of another language cannot manage a Session's subscriptions. Its methods answer what the management core answers, adding only the caller's scope: `sources()`, `subscribe(session_id, branch_id, request)` with origin `tool`, `unsubscribe(session_id, subscription_id)` and `list(session_id)`, each as A.3 and 2.2 define the corresponding management call.
 - **Identity.** `declare` and `publish` take the caller's `ctx`: `EventHub::declare(&self, ctx: &Ctx, request)`. The dispatch reads `rutis_bridge::session::caller_row()` inside `invoke` and uses that row's context, as `ForeignGuideEntries` does (`crates/dim-agent-capabilities/src/prompt_guide.rs:266-298`); a call with no row is `no_caller_row`. The declaration is registered as an effect of the caller's context, so it ends with that row.
 - **An optional read.** A Rust producer keeps `Key<EventHub>` and reads it per call with `ctx.get_at(&key)`, which answers `None` while EventHub is not installed, Pending or reloading, so the dependency gates nothing ([rutis usage A.3](../rutis-usage.md#a3-settled-questions)). A `definePlugin` row injects the name instead (2.1). The same pattern reads `sessionFiles` (`Key<SessionFilesHost>`, `crates/dim-agent-capabilities/src/host.rs:1002-1038`) and `sessions` (`Key<dyn HostDispatch>` at `host_key("sessions")`, `crates/dim-agent-scheduler/src/methods.rs:44,56`).
 - **The declaration notice.** A Rust or Cordis producer listens before it reads: `ctx.listen::<dim_event_hub::Ready>()`, the public `Event` whose name is `eventhub/ready`, then `ctx.get_at(&key)`; on the notice it reads the key again and declares (2.1). A `definePlugin` row needs no notice: it injects the name and declares at `apply` (2.1). The listener holds a type, not a running EventHub, so a producer that applied before EventHub still hears the first `apply` that provides it. The notice comes from a dependent row of the process part, not from inside its `apply`: a part's services are readable to other rows only while the part is active, and a part becomes active when its `apply` returns. Declaring on every notice adds no effect, because a repeated declaration replaces in place (A.1).
 - **Delivery.** `sessions.input` is one `invoke("input", json!([args]))` over `Key<dyn HostDispatch>` (`crates/dim-agent-scheduler/src/engine.rs:611-633`); the reply is `{inputId, sequence}` and the error codes are [session access A.6](../contracts/session-access.md#a6-errors).
 - **Storage.** The subscription file uses `PluginFileTransactions` (`dim_app_server::plugin_files::PluginFileTransactions`, `crates/dim-agent-scheduler/src/runs.rs:7,221-240`).
-- **The Session part** injects `guideEntries` and `toolRegistry` and reads `sessionIdentity` and `sessionConfig`, registering the entry from `apply` as Scheduler's part does (`crates/dim-agent-scheduler/src/session.rs:147-201`).
+- **The Session part** injects `guideEntries`, `toolRegistry`, `sessionIdentity` and `eventSubscriptions`, and registers the entry and the `events` tool from `apply` as Scheduler's part does (`crates/dim-agent-scheduler/src/session.rs:147-201`).
 - **TypeScript.** `npm/plugin.d.ts` declares the service beside `sessions`: `EventHub` with `declare` and `publish`, the request and reply types of A.1 and A.2, and `EventHubErrorThrown` with every code of Appendix C. A `definePlugin` row injects `eventHub` and reads it with `ctx.use<EventHub>('eventHub')`; it declares at `apply`. A raw Cordis row reads it with `ctx.get('eventHub')` instead ([rutis usage §3.5](../rutis-usage.md#35-how-each-runtime-resolves-a-name)).

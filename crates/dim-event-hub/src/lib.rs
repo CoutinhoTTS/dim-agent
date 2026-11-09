@@ -4,7 +4,8 @@
 //! The process owner keeps the catalog of declared sources in memory, holds
 //! the subscriptions in `eventhub/subscriptions.json`, and delivers each
 //! published event to its target branches through Agents' `sessions.input`.
-//! The Session part registers the guide entry that explains the markers.
+//! The Session part registers the guide entry that explains the markers and
+//! the `events` tool.
 mod bridge;
 mod catalog;
 mod error;
@@ -16,6 +17,7 @@ mod session;
 mod state;
 mod store;
 mod subscribe;
+mod subscriptions;
 mod text;
 
 use dim_agent_runtime::{AgentBuilder, Names, PartRegistry, PartScope};
@@ -36,6 +38,7 @@ pub use model::{
 };
 pub use state::InstanceState;
 pub use store::{GuideRecord, LastFailure, SUBSCRIPTIONS_FILE, Subscription};
+pub use subscriptions::EventSubscriptions;
 pub use text::{ENTRY, EventHubTexts};
 
 /// The process bus event that says the `eventHub` service is provided and
@@ -87,11 +90,15 @@ pub fn install(builder: &mut AgentBuilder) {
     install_with(builder, EventHubTexts::default());
 }
 
-/// [`install`] with `texts` in place of the shipped guide entry: a candidate
-/// replaces it at the factory, so the code keeps no second copy (design A.6,
-/// model-prompts §8.1).
+/// [`install`] with `texts` in place of the shipped texts: a candidate
+/// replaces the guide entry and the tool description at the factory, so the
+/// code keeps no second copy (design A.4, A.6, model-prompts §8.1).
 pub fn install_with(builder: &mut AgentBuilder, texts: EventHubTexts) {
     dim_agent_runtime::names::register::<EventHub>(builder.catalog_mut(), None);
+    // The `events` tool's subscription core (design §6, Appendix F): a Rust
+    // type only, with no shared name, so no row of another language reaches
+    // it and `eventHub` stays producer-only.
+    dim_agent_runtime::names::register::<EventSubscriptions>(builder.catalog_mut(), None);
     // Producers of every language read the service (design Appendix F): the
     // shared name lets a row of another runtime be leased the dispatcher this
     // part provides at `host_key("eventHub")`.
@@ -120,8 +127,8 @@ pub struct EventHubPlugin {
     /// The install's state, captured by the factory (design §2.1): nothing
     /// install-lifetime is created in `new` or `apply`.
     state: Arc<InstanceState>,
-    /// The guide entry the Session part registers (design A.6), from the
-    /// row's factory configuration.
+    /// The texts the Session part registers (design A.4, A.6), from the row's
+    /// factory configuration.
     texts: Arc<EventHubTexts>,
 }
 
@@ -177,6 +184,11 @@ impl DynPlugin for EventHubPlugin {
             ctx.provide_as::<EventHub>(Arc::new(EventHub {
                 shared: shared.clone(),
             }))?;
+            // Beside `eventHub`: the `events` tool's core, scoped per call to
+            // the caller's own Session (design §6).
+            ctx.provide_as::<EventSubscriptions>(Arc::new(EventSubscriptions::new(
+                shared.clone(),
+            )))?;
             ctx.provide_at::<dyn HostDispatch>(
                 host_key("eventHub"),
                 Arc::new(bridge::ForeignEventHub {
