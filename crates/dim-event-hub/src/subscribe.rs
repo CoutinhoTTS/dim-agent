@@ -71,9 +71,18 @@ pub(crate) async fn subscribe(
         last_failure: None,
     };
     let sources = named_sources(&subscription);
-    let mut written = BTreeMap::new();
+    // Every guide is read before the first is written: a source that is no
+    // longer declared refuses the subscribe here, with nothing written
+    // (design §3.3). The reads are synchronous, so no unload can slip
+    // between the creation check and them.
+    let mut guides = Vec::new();
     for source in &sources {
         let (guide, digest) = source_guide(shared, source)?;
+        guides.push((source.clone(), guide, digest));
+    }
+    let mut written = BTreeMap::new();
+    for (source, guide, digest) in guides {
+        let source = &source;
         match write_guide(shared, &target, &subscription.id, source, &guide).await {
             Ok(()) => {
                 written.insert(source.clone(), digest);
@@ -118,13 +127,11 @@ pub(crate) async fn subscribe(
     match outcome {
         Ok(()) => Ok(json!({ "subscriptionId": subscription.id })),
         Err(error) => {
-            if error.code == "storage" {
-                // The file write failed after the guide inputs were written:
-                // retire them for each source no stored subscription on that
-                // branch names, then answer `storage` (design §3.3,
-                // Appendix C).
-                retire_unguarded(shared, &target, &subscription.id, written.keys()).await;
-            }
+            // Any refusal after the guide inputs were written retires them,
+            // for each source no stored subscription on that branch names
+            // (design §3.3, Appendix C): the re-check's `limit_reached` as
+            // much as a failed write.
+            retire_unguarded(shared, &target, &subscription.id, written.keys()).await;
             Err(error)
         }
     }

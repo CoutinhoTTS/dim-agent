@@ -187,6 +187,105 @@ async fn a_retry_while_the_first_append_is_paused_answers_repeated() {
     assert_eq!(files.puts().len(), 1, "one put for the one event");
 }
 
+/// A refusal the store re-check answers after the guide inputs were written
+/// retires them too, not only a failed write (design §3.3, Appendix C). Two
+/// Sessions race for the total limit's last slot; the loser leaves one guide
+/// write and its retire on its branch, and no stored subscription.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_limit_refusal_retires_the_guide_the_subscribe_wrote() {
+    let fixture = LoaderFixture::mount().await;
+    fixture.producer.declare(im_declaration()).await.unwrap();
+    let mut other = im_declaration();
+    other.source = "other".into();
+    other.guide = "The other guide.".into();
+    other.types = vec![TypeDeclaration {
+        r#type: "other.note".into(),
+        description: "A note".into(),
+        mode: InputMode::Queue,
+    }];
+    fixture.producer.declare(other).await.unwrap();
+
+    // The total limit is 1024: the view starts at 1023, so the two subscribes
+    // below both pass the early check and only the store re-check refuses one.
+    let subscriptions: Vec<serde_json::Value> = (0..1023)
+        .map(|index| {
+            json!({
+                "id": format!("sub_seed_{index}"),
+                "types": ["im.*"],
+                "target": {"sessionId": format!("seed-{index}"), "branchId": "main"},
+                "origin": "client",
+                "createdAt": "2026-11-08T09:15:04.120Z",
+            })
+        })
+        .collect();
+    let text = json!({"version": 1, "subscriptions": subscriptions}).to_string();
+    std::fs::write(
+        fixture.file(),
+        serde_json::to_vec(&json!({"version": 1, "text": text})).unwrap(),
+    )
+    .unwrap();
+    fixture.host.loader().restart("eventhub").await.unwrap();
+    assert_eq!(
+        fixture.subscriptions(None).await.len(),
+        1023,
+        "the seeded view"
+    );
+
+    let (first, second) = tokio::join!(
+        fixture.subscribe("a", &["im.*"], None),
+        fixture.subscribe("b", &["other.*"], None)
+    );
+    let (loser_session, loser_source, winner_session) = match (&first, &second) {
+        (Ok(_), Err(error)) => ("b", "other", "a"),
+        (Err(error), Ok(_)) => ("a", "im", "b"),
+        other => panic!("one subscribe wins the last slot: {other:?}"),
+    };
+    let loser_error = match (&first, &second) {
+        (_, Err(error)) | (Err(error), _) => error,
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        loser_error
+            .data
+            .as_ref()
+            .map(|data| data.app_error.as_str()),
+        Some("limit_reached")
+    );
+
+    let calls = fixture.sessions.calls();
+    let loser: Vec<_> = calls
+        .iter()
+        .filter(|call| call.session_id == loser_session)
+        .collect();
+    assert_eq!(
+        loser.len(),
+        2,
+        "one guide write and its retire on {loser_session}: {loser:?}"
+    );
+    assert_eq!(loser[0].key_use(), Some("live"), "{loser:?}");
+    assert_eq!(
+        loser[0].key_name(),
+        Some(format!("eventhub:guide:{loser_source}").as_str())
+    );
+    assert_eq!(loser[1].key_use(), Some("retire"), "{loser:?}");
+    assert_eq!(
+        loser[1].key_name(),
+        Some(format!("eventhub:guide:{loser_source}").as_str())
+    );
+    let winner: Vec<_> = calls
+        .iter()
+        .filter(|call| call.session_id == winner_session)
+        .collect();
+    assert_eq!(winner.len(), 1, "the winner keeps its guide: {winner:?}");
+    assert_eq!(winner[0].key_use(), Some("live"), "{winner:?}");
+
+    assert_eq!(
+        fixture.subscriptions(None).await.len(),
+        1024,
+        "only the winner's subscription was stored"
+    );
+}
+
 /// A delivery in flight outlives an EventHub generation: its change lands in
 /// the install's subscription view, so the next generation lists and routes
 /// by what the file now holds (design §2.1, A.5).

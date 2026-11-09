@@ -372,6 +372,62 @@ async fn another_rows_source_is_duplicate_and_an_unloaded_source_loses_its_types
     assert_eq!(stored[0]["id"], json!(subscription));
 }
 
+/// Every guide a subscribe names is read before the first guide is written:
+/// a source whose producer unloads while the first write is held does not
+/// refuse the subscribe, because its guide was already in hand
+/// (design §3.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscribe_reads_every_guide_before_it_writes_one() {
+    let (_directory, fixture) = mounted().await;
+    let (second, view) = fixture.producer_row("EventHubLateProducer").await;
+    let mut other = im_declaration();
+    other.source = "other".into();
+    other.guide = "The other guide.".into();
+    other.types = vec![TypeDeclaration {
+        r#type: "other.note".into(),
+        description: "A note".into(),
+        mode: InputMode::Queue,
+    }];
+    second.declare(other).await.unwrap();
+    let fixture = Arc::new(fixture);
+    fixture.sessions.clear();
+    let gate = fixture.sessions.gate();
+    let subscribing = {
+        let fixture = fixture.clone();
+        tokio::spawn(async move {
+            fixture
+                .subscribe("branch", &["im.*", "other.*"], None)
+                .await
+        })
+    };
+    wait_for("the first guide write held", || gate.max() >= 1).await;
+    // The second source's producer unloads while the first write is held.
+    view.shutdown().await.unwrap();
+    gate.release();
+    let subscription = subscribing.await.unwrap().unwrap();
+    let calls = fixture.sessions.calls();
+    assert_eq!(calls.len(), 2, "both guides were written: {calls:?}");
+    assert!(
+        calls.iter().all(|call| call.key_use() == Some("live")),
+        "no guide is retired: {calls:?}"
+    );
+    let written: Vec<&str> = calls.iter().filter_map(|call| call.key_name()).collect();
+    assert_eq!(
+        written,
+        vec!["eventhub:guide:im", "eventhub:guide:other"],
+        "{calls:?}"
+    );
+    assert_eq!(
+        fixture.subscriptions(None).await.len(),
+        1,
+        "the subscription is stored"
+    );
+    assert_eq!(
+        fixture.subscriptions(None).await[0]["id"],
+        json!(subscription)
+    );
+}
+
 /// A missed deletion notice leaves a subscription that fails
 /// `session_closed` and shows its failure (design §3.4, Appendix D item 9).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
