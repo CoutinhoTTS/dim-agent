@@ -63,7 +63,7 @@ EventHub 是一个内置原生插件，位于新 crate `crates/dim-event-hub`。
 | `guide` | 至多 4096 字节：该来源写给模型的手册，说明它的事件是什么意思、该怎样应对，例如用哪个工具回复一条 IM 消息 |
 | `types` | 1 到 64 项，每项 `{type, description, mode}`：`type` 是 `<source>.<name>`，其中 `name` 匹配 `[a-z][a-z0-9_-]{0,31}`；`description` 至多 512 字节；`mode` 是该类型的默认投递模式 |
 
-**状态的所有者。** `install` 创建一份实例状态，行的构建函数捕获它，正如 `PluginManagerPlugin` 持有它的 `Arc<State>`(`crates/dim-app-server/src/lib.rs:941-951`)。状态持有目录、订阅视图(A.5)、Session 锁(3.3)、事件锁(2.4)与投递预算(2.5)。它挺过行的每一次重新 apply——Agents、`pluginFiles`、`managementMethods` 或 `partRegistry` 重载之后，以及 `eventhub` 行被关闭再打开之后——并随进程结束。由此有两个行为，且只陈述一次：关闭再打开 EventHub 保留每一条声明，所以生产方不会再次声明；EventHub 关闭期间，生产方找不到服务，也无法发布。声明只随它的生产方行结束，靠声明时登记的那个 effect 撤回。同一行再次声明会原地替换指南与类型：保留该声明的 token，不再登记第二个 effect，所以生产方可以在每次通知时都声明一次。另一行的来源仍然是 `duplicate_source`，见 A.1。
+**状态的所有者。** `install` 创建一份实例状态，行的构建函数捕获它，正如 `PluginManagerPlugin` 持有它的 `Arc<State>`(`crates/dim-app-server/src/lib.rs:941-951`)。状态持有目录、订阅视图(A.5)、Session 锁(3.3)、事件锁(2.4)与投递预算(2.5)。它挺过行的每一次重新 apply——Agents、`pluginFiles`、`managementMethods` 或 `partRegistry` 重载之后，以及 `eventhub` 行被关闭再打开之后——并随进程结束。由此有两个行为，且只陈述一次：关闭再打开 EventHub 保留每一条声明，所以生产方不会再次声明；EventHub 关闭期间，生产方找不到服务，也无法发布。在行关闭之前准入的发布照常运行到结束(2.4)。声明只随它的生产方行结束，靠声明时登记的那个 effect 撤回。同一行再次声明会原地替换指南与类型：保留该声明的 token，不再登记第二个 effect，所以生产方可以在每次通知时都声明一次。另一行的来源仍然是 `duplicate_source`，见 A.1。
 
 Rust 部件或 Cordis 行声明来源时不要求 EventHub 在场。它先登记 `eventhub/ready` 的监听器，再读取服务；只要找到服务就声明，无论是在自己的 `apply` 里还是在收到这条通知时；`publish` 回答 `unknown_source` 时再声明一次。先监听意味着两步之间发出的通知不会被错过；而错过一条通知只会推迟声明，`unknown_source` 的回答会补上它，这正是 [插件合同 §5.3](../plugin-contract.md#53-总线事件) 允许的。`eventhub/ready` 只留一种情形：生产方在进程里 EventHub 的第一次 `apply` 之前就已装载。配合 `unknown_source`，这条通知是这类生产方完成声明的唯一路径。它在每次 `apply` 提供出服务、且该提供可被读取之后发出：一行只在提供方活跃时才能读到另一行的服务，而部件在 `apply` 返回时才变为活跃，所以这条通知来自进程部件在 `apply` 里创建的那个依赖的通知行，rutis 在服务可读的那一刻装载它，见 1、6。
 
@@ -468,7 +468,7 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 | `eventhub` 行被关闭再打开 | — | 安装的状态持有目录，所以每一条声明都保留，生产方不再声明；关闭期间生产方读不到服务、不发布；再次打开后无需新声明即可发布 | EventHub、PluginManager |
 | 生产方在 EventHub 第一次 `apply` 之前装载 | — | 它当时读不到服务；收到 `eventhub/ready` 后声明，它的事件随之到达 | 生产方 |
 | 同一行再次声明 | — | 原地替换指南与类型并保留 token，该行不因此增加 effect | EventHub |
-| EventHub 关闭 | — | 生产方读不到服务，不发布；已存储的订阅保留，它恢复后继续投递，无需新的声明 | 生产方、EventHub |
+| EventHub 关闭 | — | 生产方读不到服务，不发布；已存储的订阅保留，它恢复后继续投递，无需新的声明。在行关闭之前准入的发布照常运行到结束(2.4) | 生产方、EventHub |
 | EventHub 部件启动失败 | — | 生产方读不到服务；`eventhub.*` 调用报告该行的状态 | EventHub |
 | 生产方卸载而订阅仍在 | — | 目录失去它的声明；已存储的订阅保留，事件停止到达，直到有生产方再次声明 | EventHub |
 | 两个创建者争最后一个订阅名额 | — | 一个成功，另一个 `limit_reached`，在存储锁下决定 | EventHub |
