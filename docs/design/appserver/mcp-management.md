@@ -201,7 +201,12 @@ that failed.
   callable, and keeps the reason in both `mcp.inspect` and `session.mcp`. `session.mcp` reports
   such a server as `disconnected`, with the reason as its `message`. A failed start is `failed`
   only while its cooldown holds; the cooldown moves it to `disconnected`, and discovery starts
-  the server again after each cooldown. The reason stays until a connection succeeds.
+  the server again after each cooldown. The reason stays until a connection succeeds. A
+  generation retries its own start: a discovery attempt during the cooldown, a
+  `session.mcp.refresh` included, reuses the generation that recorded it and keeps its count,
+  and only a successful connection clears them. Disabling or removing the entry, changing its
+  configuration, `mcp.disconnect`, or the owning Session closing retires the generation, and
+  the next one starts again at one second.
   Diagnostic text is bounded to 4 KiB on UTF-8 boundaries. A stdio failure may include
   up to 20 recent stderr lines within that bound; server-emitted text may contain
   secrets and is exposed only to management/status clients, never model requests or logs.
