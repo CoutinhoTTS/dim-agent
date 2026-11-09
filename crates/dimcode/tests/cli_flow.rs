@@ -376,7 +376,12 @@ impl Wire {
     /// Answers `hello`, advertising `extra` methods besides the Session basics.
     fn hello(&mut self, extra: &[&str]) {
         let hello = self.read("hello");
-        assert_eq!(hello["params"]["protocolVersion"], 4);
+        let version = if hello["params"]["clientName"] == "AcpGateway" {
+            3
+        } else {
+            4
+        };
+        assert_eq!(hello["params"]["protocolVersion"], version);
         let mut features = vec![
             "session.create",
             "session.history",
@@ -389,7 +394,7 @@ impl Wire {
             features.push("session.methods");
         }
         features.extend(extra);
-        self.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":features}));
+        self.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":version,"daemonProfile":{"kind":"product"},"features":features}));
     }
     fn created(&mut self) -> Value {
         let create = self.read("session.create");
