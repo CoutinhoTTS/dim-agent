@@ -401,6 +401,8 @@ events { action: "sources" | "subscribe" | "unsubscribe" | "list",
 
 schema 是封闭的，即 `additionalProperties: false`。动作不接收的参数回答 `invalid_params`：`types`、`match`、`mode` 与 `branchId` 属于 `subscribe`，`subscriptionId` 属于 `unsubscribe`，`sources` 与 `list` 不接收任何参数。
 
+`types` 在 schema 中是可选的，因为 `sources`、`unsubscribe` 与 `list` 都不接受它；`subscribe` 不带它、给出空列表或超过 16 项都回答 `invalid_params`。
+
 | 动作 | 参数 | 结果 |
 | --- | --- | --- |
 | `sources` | 无 | 已声明的来源及其类型，同 `eventhub.sources` |
@@ -408,7 +410,7 @@ schema 是封闭的，即 `additionalProperties: false`。动作不接收的参�
 | `unsubscribe` | `{subscriptionId}` | `{}`；另一个 Session 的 id 回答 `subscription_unknown` |
 | `list` | 无 | 本 Session 的全部订阅 |
 
-成功就是回复的 JSON：`sources` 为 `{sources: [...]}`，`subscribe` 为 `{subscriptionId}`，`unsubscribe` 为 `{}`，`list` 为 `{subscriptions: [...]}`。拒绝的第一行是 `<code>: <message>`，码与 A.3 相同，且不含任何关于另一个 Session 订阅的信息。
+成功就是回复的 JSON：`sources` 为 `{sources: [...]}`，`subscribe` 为 `{subscriptionId}`，`unsubscribe` 为 `{}`，`list` 为 `{subscriptions: [...]}`。调用自身校验或状态的拒绝以 `<code>: <message>` 开头，码与 A.3 相同，且不含任何关于另一个 Session 订阅的信息；下一段中的生命周期拒绝是固定句子，不带码。
 
 定义的 risk 是 `session`；处理函数的 `risk()` 对 `subscribe` 与 `unsubscribe` 回答 `persistent_configuration`，见 7。处理函数在调用前后各检查一次本代的取消，与 Scheduler 的工具相同：调用前是 "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider."；调用后是 "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider."。后者说明调用可能已经发生，所以模型先检查再重复。参数解析之后、调用之前，一次被取消的调用以自己的 token 回答 `events: cancelled before handover`，不发起任何调用。
 
@@ -418,7 +420,7 @@ schema 是封闭的，即 `additionalProperties: false`。动作不接收的参�
 Manage this session's event subscriptions. sources lists the sources that publish events and their event types. subscribe subscribes a branch of this session, this branch unless branchId names another, to event types, each an exact type or <source>.*; match keeps only events whose attributes equal every given pair. unsubscribe removes one of this session's subscriptions by subscriptionId, and list shows them. Each event arrives on the branch as a <dim-event> message. mode decides when: queue waits until the current turn ends, steer reaches the running turn at its next step and ends a running wait, and append adds the event without starting a turn; without mode, the type's declared mode applies. Subscribe only when the user asks you to follow events. If you will wait for an event within this turn, subscribe with mode steer.
 ```
 
-声明的 schema 与结果形状属于协议。A.6 逐句给出描述的类别：两句是策略，随承载它们的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 §9.2，其余都是协议。拒绝在结果第一行回答与 A.3 相同的码，形式为 `<code>: <message>`。
+声明的 schema 与结果形状属于协议。A.6 逐句给出描述的类别：两句是策略，随承载它们的行为一起评测，见 [面向模型的提示词 §8](../model-prompts.md#8-一次改动怎样判定) 与 §9.2，其余都是协议。调用自身校验或状态的拒绝在结果第一行回答与 A.3 相同的码，形式为 `<code>: <message>`；上一段中的生命周期拒绝是固定句子，不带码。
 
 ### A.5 订阅文件
 

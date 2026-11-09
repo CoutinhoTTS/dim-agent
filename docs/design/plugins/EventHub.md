@@ -401,6 +401,8 @@ events { action: "sources" | "subscribe" | "unsubscribe" | "list",
 
 The schema is closed (`additionalProperties: false`). An argument the action does not take answers `invalid_params`: `types`, `match`, `mode` and `branchId` belong to `subscribe`, `subscriptionId` to `unsubscribe`, and `sources` and `list` take none.
 
+`types` is optional in the schema because `sources`, `unsubscribe` and `list` take none; `subscribe` without it, with an empty list or with more than 16 entries answers `invalid_params`.
+
 | Action | Arguments | Result |
 | --- | --- | --- |
 | `sources` | none | the declared sources and their types, as `eventhub.sources` |
@@ -408,7 +410,7 @@ The schema is closed (`additionalProperties: false`). An argument the action doe
 | `unsubscribe` | `{subscriptionId}` | `{}`; another Session's id answers `subscription_unknown` |
 | `list` | none | every subscription of its own Session |
 
-A success is the reply as JSON: `{sources: [...]}` for `sources`, `{subscriptionId}` for `subscribe`, `{}` for `unsubscribe` and `{subscriptions: [...]}` for `list`. A refusal's first line is `<code>: <message>`, with the codes A.3 documents and nothing about another Session's subscriptions.
+A success is the reply as JSON: `{sources: [...]}` for `sources`, `{subscriptionId}` for `subscribe`, `{}` for `unsubscribe` and `{subscriptions: [...]}` for `list`. A refusal of the call's own validation or state starts with `<code>: <message>`, with the codes A.3 documents and nothing about another Session's subscriptions; the lifecycle refusals in the paragraph below are fixed sentences without a code.
 
 The definition's risk is `session`; the handler's `risk()` answers `persistent_configuration` for `subscribe` and `unsubscribe` (7). The handler checks the generation's cancellation before and after the call, as Scheduler's tool does: before it, "tool provider generation is unloading; this call was not made. The tool is offered again once its provider is active; a later request uses the current provider."; after it, "tool provider generation is unloading; this call may already have taken effect. Check the operation's state before repeating it with the current provider." The second says the call may have run, so the model checks before repeating it. After the arguments parse and before the call, a cancelled call's own token answers `events: cancelled before handover` and makes no call.
 
@@ -418,7 +420,7 @@ The description is `EventHubTexts.tool`, carried by factory configuration as `en
 Manage this session's event subscriptions. sources lists the sources that publish events and their event types. subscribe subscribes a branch of this session, this branch unless branchId names another, to event types, each an exact type or <source>.*; match keeps only events whose attributes equal every given pair. unsubscribe removes one of this session's subscriptions by subscriptionId, and list shows them. Each event arrives on the branch as a <dim-event> message. mode decides when: queue waits until the current turn ends, steer reaches the running turn at its next step and ends a running wait, and append adds the event without starting a turn; without mode, the type's declared mode applies. Subscribe only when the user asks you to follow events. If you will wait for an event within this turn, subscribe with mode steer.
 ```
 
-The declaration's schema and result shape are protocol. A.6 classifies the description sentence by sentence: two sentences are policy, judged with the behaviour they ship ([model-facing prompts §8](../model-prompts.md#8-judging-a-change), §9.2), and the rest are protocol. Refusals answer the same codes as A.3 in the first line of the result, `<code>: <message>`.
+The declaration's schema and result shape are protocol. A.6 classifies the description sentence by sentence: two sentences are policy, judged with the behaviour they ship ([model-facing prompts §8](../model-prompts.md#8-judging-a-change), §9.2), and the rest are protocol. A refusal of the call's own validation or state answers the same codes as A.3 in the first line of the result, `<code>: <message>`; the lifecycle refusals above are fixed sentences without a code.
 
 ### A.5 The subscription file
 
