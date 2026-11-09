@@ -8387,6 +8387,7 @@ mod tests {
                 profile: None,
                 client_kind: "other",
                 client_name: "scenario-eval",
+                protocol_version: 4,
             },
             false,
         )
