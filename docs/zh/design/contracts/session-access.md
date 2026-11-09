@@ -9,7 +9,7 @@
 | 补充 | 所有者 | 使用方 |
 | --- | --- | --- |
 | `sessions` 服务：按名称、纯数据地访问 Session | Agents | Scheduler、Workflow 进程部分 |
-| 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow |
+| 生效策略按启动方策略或宿主上限收拢的 `launch` | Agents | Scheduler、Workflow |
 | `SessionConfig` 字段 `interactive` | Agents | 从所属 Session 的 `SessionConfig` 读取它的插件（Questions、SessionTitle） |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 分支部分写入相同形式，Hooks 分支部分（待设计）也会如此 |
 | 固定前缀读取 | 运行时门面（`sequence` 与 `history`）与分页读 `AgentIndex::history_page`（A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |

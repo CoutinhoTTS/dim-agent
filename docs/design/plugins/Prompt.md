@@ -118,7 +118,7 @@ Each built-in entry moves verbatim to the capability that writes its markers, an
 | 80 | `dim-summary` | ContextCompaction's summary strategy part | session | What a summary is |
 | 90 | `dim-digest` | ContextCompaction's context-preparation part | branch | What a digest is |
 | 100 | `dim-shell-input` | ShellInput | session | The operator's own shell command and its output |
-| 110 | `dim-scheduler` | Scheduler's Session part | session | The scheduled-run prompt and the run outcome report |
+| 110 | `dim-scheduler` | Scheduler's Session part | session | The delivered prompt of a scheduled job, and a wakeup's prompt |
 | 120 | `dim-workflow` | Workflow's Session part | session | The run's report and its stage markers |
 | 130 | `dim-event`, `dim-event-guide` | EventHub's Session part | session | The delivered event, and the guide of the source that delivered it |
 

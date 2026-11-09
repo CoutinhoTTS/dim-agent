@@ -9,7 +9,7 @@ Process plugins reach Sessions the way Collaboration already does: through Agent
 | Supplement | Owner | Used by |
 | --- | --- | --- |
 | `sessions` service: named, data-only access to Sessions | Agents | Scheduler, Workflow process parts |
-| `launch` with a policy capped by the starter | Agents | Scheduler, Workflow |
+| `launch` with a policy capped by the starter or the host bound | Agents | Scheduler, Workflow |
 | `SessionConfig` field `interactive` | Agents | Plugins that read it from the Session's `SessionConfig` (Questions, SessionTitle) |
 | Input with source raw blocks (marker, keys, `submissionId`) | InputQueue data contract, runtime facade | Scheduler, Workflow; Goal branch parts write the same form, and Hooks branch parts (to be designed) would too |
 | Fixed-prefix read | Runtime facade (`sequence` and `history`) and the page read `AgentIndex::history_page` (A.5) | Process callers and branch parts deciding from Timeline facts |

@@ -118,7 +118,7 @@ Prompt 自己的两个调用点留在原处：ContextPreparation 放置它发布
 | 80 | `dim-summary` | ContextCompaction 的摘要策略部件 | Session | 摘要是什么 |
 | 90 | `dim-digest` | ContextCompaction 的上下文准备部件 | 分支 | 清单是什么 |
 | 100 | `dim-shell-input` | ShellInput | Session | 操作者自己运行的 shell 命令及其输出 |
-| 110 | `dim-scheduler` | Scheduler 的 Session 部件 | Session | 定时运行携带的提示词与运行结果报告 |
+| 110 | `dim-scheduler` | Scheduler 的 Session 部件 | Session | 定时任务投递的提示词与 wakeup 的提示词 |
 | 120 | `dim-workflow` | Workflow 的 Session 部件 | Session | 运行的报告与阶段标记 |
 | 130 | `dim-event`、`dim-event-guide` | EventHub 的 Session 部件 | Session | 被投递的事件，以及投递它的来源的指南 |
 

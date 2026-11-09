@@ -126,10 +126,7 @@ ModelProvider's, inside the continuation request.
 
 ## 5. Observers
 
-Goal, Scheduler and Workflow observe the turn; a continuation writes no
-intermediate `turn/end`, so each sees one `turn/end` for the turn and does
-not treat the failed request as the end of the work. If the continuation also
-fails, the terminal `turn/end` carries that failure and is the one they read.
+Goal and Workflow observe the turn; a continuation writes no intermediate `turn/end`, so each sees one `turn/end` for the turn and does not treat the failed request as the end of the work. If the continuation also fails, the terminal `turn/end` carries that failure and is the one they read.
 
 ## 6. Rule check
 
