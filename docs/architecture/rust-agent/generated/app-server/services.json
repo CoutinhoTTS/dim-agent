@@ -3218,6 +3218,12 @@
         "removing": false
       },
       {
+        "service": "dim_event_hub::subscriptions::EventSubscriptions",
+        "provider": 69,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_modality::engine::ModalityTasks#modalityTasks",
         "provider": 66,
         "generation": 1,

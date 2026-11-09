@@ -302,7 +302,7 @@ recovery from it:
 | The branch Timeline ([core/timeline.rs](../../../crates/dim-agent-runtime/src/core/timeline.rs)), through `Session::input` and `Session::lookup` (`sessions.input`, `sessions.lookup`, Rpc's `session.submit` and `session.input_lookup`) | — | Accepts each id once per branch; `accepted`, `unknown` or `ambiguous` for lookup |
 | Goal parts ([crates/dim-goal](../../../crates/dim-goal)) | `goal:<uuid>`, through `TreeCommands::input` | Nothing |
 | Workflow ([engine.ts](../../../runtime/plugins/workflow/engine.ts)) | `workflow:<uuid>` for each stage input and report, stored in its run file before the write | A retry, by the same or a replacement generation, resubmits the same id and settles from the reply |
-| Scheduler ([A.5](../plugins/Scheduler.md#a5-timeline-and-capability-mechanics); runtime in draft [#317](https://github.com/arcships/dim/pull/317)) | `scheduler:<run_id>` and `scheduler-report:<run_id>` | `submitted` or `lost`, never a second write; a report is never written twice |
+| Scheduler ([A.5](../plugins/Scheduler.md#a5-timeline-and-capability-mechanics), [A.6](../plugins/Scheduler.md#a6-run-outcome-delivery); runtime in draft [#317](https://github.com/arcships/dim/pull/317)) | `scheduler:<run_id>`, one per delivery | An uncertain reply is settled by lookup (A.6); a window is never written twice |
 | `dimcode` and the Rust TUI ([#312](https://github.com/arcships/dim/pull/312)) | A new UUID for each submit | Nothing yet: an uncertain submit is reported to the user, not looked up |
 | S5c fork ([§6.6](session-deletion-and-fork.md#66-identity-provenance-and-paths)) | Copies it with the event | — (lookup on the fork finds copied inputs) |
 | InputQueue, Loop, the history projection, Goal's fold, the model | — | Never read it |
@@ -555,8 +555,7 @@ roughly 86 MB of allocations and 12,000 tasks, and each later creation is slower
 - **Scope.** It applies to every Session, not only launched ones.
 - **Open questions it owns.** Those #57 left open: whether detached work blocks the unload, and when to check (when
   the last lease drops, and when a Session without leases becomes idle).
-- **Dependency order.** S2, then idle unload (Agents lane, [#126](https://github.com/arcships/dim/issues/126); it
-  reopens S3/#57 with this measurement), then Scheduler's `create`-mode jobs at volume (P6).
+- **Dependency order.** S2, then idle unload (Agents lane, [#126](https://github.com/arcships/dim/issues/126); it reopens S3/#57 with this measurement), then Scheduler's launch-target jobs at volume (P6).
 
 S2 needs no change for it. Every call holds a lease, `sessions` keeps no state in a loaded Session, and an `idle` wait
 ends at the first idle point, so a stale wait never pins a Session past it.
@@ -570,13 +569,8 @@ D2).
 Idle unload bounds memory, but every launched Session also stays in storage and in every client's Session list. One
 job every five minutes adds about 288 a day. So the consumers delete them (D14):
 
-- **Who and when.** The consumer that launched a Session deletes it when it drops the last record that names it.
-  Scheduler does so when a run falls out of its run history (A8, the last 100 runs per job) or when the job is
-  deleted; a `reuse` Session is named by its job, so it goes with the job. Workflow does so when a run record falls
-  out of its retention (A9, the last 100 runs); the record names every stage Session of the run.
-- **Finished runs only.** A delete closes the Session and so stops its turn. A consumer deletes a run's Session only
-  once the run is terminal; a run that outlives its job's deletion (Scheduler A14) has its Session deleted when it
-  ends.
+- **Who and when.** The consumer that launched a Session deletes it when it drops the last record that names it. Scheduler does so when a launched Session's delivery falls out of its delivery history (A8, the last 100 deliveries per job) and the Session's stop time has passed, or when the job is deleted. A job's target Session that Scheduler did not launch is never deleted; a Session Scheduler launched for a legacy `reuse` job goes with the job, and a Session the job only reused is never deleted. Workflow does so when a run record falls out of its retention (A9, the last 100 runs); the record names every stage Session of the run.
+- **Finished runs only.** A delete closes the Session and so stops its turn. A consumer deletes a run's Session only once the run is terminal; Scheduler's launch target stops its Session at the job's saved maximum and deletes it only after that stop time. A run that outlives its job's deletion (Scheduler A14) has its Session deleted when it ends.
 - **Order.** The consumer deletes the Session first and drops the record after. A failed delete keeps the record, so
   the next pass retries; a delete of a Session that is already gone succeeds, so a crash between the two steps is
   harmless.
@@ -736,7 +730,7 @@ it was raised; §17 lists what S2 adapted.
 | Existing mechanisms considered | Closing runs: ends the Session for every user of it (D12). `Session::unload_if_idle`: exists, but has no caller |
 | Generic capability | §8.6: the host unloads a loaded Session when it is idle and no lease holds it; `acquire` restores it |
 | Effect on sequence, batch, interrupt, reload | None on the Timeline: idle release records no events, and the next use restores the Session |
-| Owner and issue | Agents lane (yyhhyyyyyy), [#126](https://github.com/arcships/dim/issues/126), reopening S3 ([#57](https://github.com/arcships/dim/issues/57)); due before Scheduler's create-mode jobs ship |
+| Owner and issue | Agents lane (yyhhyyyyyy), [#126](https://github.com/arcships/dim/issues/126), reopening S3 ([#57](https://github.com/arcships/dim/issues/57)); due before Scheduler's launch-target jobs ship |
 
 Nothing is raised to rutis.
 
@@ -747,22 +741,15 @@ For the Scheduler and Workflow design reviews (zerob13); S2 does not edit those 
 - **Rust binding.** Their Appendix G's `AgentIndex::launch -> SessionUse` and `service::<InputQueue>` become the named
   service (§5); `SessionUse` is internal to Agents.
 - **Model.** `model` is `{providerId, modelId}`.
-- **Starter.** The cap holds only for a consumer that passes `starter` whenever a Session started the run (§11): the
-  Session that created a Scheduler job (A15), or a Workflow run's starter branch.
-- **Policy reads.** `sessions` has no policy read. A launch caps the policy and replies with the effective one (D6). A
-  cap captured at save (Scheduler A15) or Workflow's start-time check needs the starter's policy from the calling
-  Session's own part, or a read method proposed in their review. The same holds for Scheduler's reuse check.
+- **Starter.** The cap holds only for a consumer that passes `starter` whenever a Session started the run (§11), such as a Workflow run's starter branch. Scheduler passes no starter: its launch supplies only an optional preset, which the host bound caps (Scheduler §3.3).
+- **Policy reads.** `sessions` has no policy read. A launch caps the policy and replies with the effective one (D6). A cap captured at save or Workflow's start-time check needs the starter's policy from the calling Session's own part, or a read method proposed in their review. Scheduler reads no policy: its save stores a preset and its launch caps it.
 - **History.** `sessions.history` pages with `after` and `limit`.
 - **Reloads.** `inject: ['sessions']` does not reload with the Agents index (D1), so a run no longer has to end
   `interrupted` on an Agents reload; an in-flight call fails `reloading`, except an admitted `launch` and a `delete`,
   which reply their own outcome (§8.3).
 - **Loaded Sessions.** Agents unloads a run Session that no lease has held for the grace period, and the next call
   restores it (§8.6, [#126](https://github.com/arcships/dim/issues/126)). `launch` is not idempotent (§6.1).
-- **Deleting run Sessions.** A requirement on both designs (§8.7): Scheduler and Workflow delete each Session they
-  launched when they drop the last record that names it (Scheduler: a run leaving the last 100 of its job, or the job
-  deleted; Workflow: a run leaving the last 100), once the run is terminal, Session first and record after, through
-  `sessions.delete`. Users keep a run by forking it, and remove the Sessions of lost `launch` replies with the CLI's
-  cleanup.
+- **Deleting run Sessions.** A requirement on both designs (§8.7): Scheduler and Workflow delete each Session they launched when they drop the last record that names it (Scheduler: a delivery leaving the last 100 of its job, or the job deleted, and never before the launch target's stop time; Workflow: a run leaving the last 100), Session first and record after, through `sessions.delete`. Users keep a run by forking it, and remove the Sessions of lost `launch` replies with the CLI's cleanup.
 - **Waiting again.** "Not consumed yet, wait again" must not loop on `idle`: on an idle branch it returns at once.
   An input with neither result at the cutoff is held (§6.4, item 2).
 

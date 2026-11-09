@@ -21,6 +21,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `connectionHub` | process | Connection | Rust-only | — |
 | `credentialVariablesHost` | process | root | Rust-only | — |
 | `eventHub` | process | eventhub | yes | `declare` async, `publish` async |
+| `eventSubscriptions` | process | eventhub | Rust-only | — |
 | `executionSettingsHost` | process | ExecutionSettings | Rust-only | — |
 | `fileStorage` | process | FileStorage | Rust-only | — |
 | `grokOAuthService` | process | GrokOAuth | Rust-only | — |

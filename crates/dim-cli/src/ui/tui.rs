@@ -7423,6 +7423,26 @@ mod tests {
         }
     }
 
+    /// A short terminal cannot show the whole live region. The rows cut from
+    /// its top must not carry the composer's caret down onto the status row.
+    #[test]
+    fn caret_stays_in_the_composer_of_a_short_terminal_with_a_pending_tail() {
+        let size = (80, 5);
+        let mut drawn = Drawn::new(size, None, true);
+        show(&mut drawn, vec![message(true)]);
+        let live = drawn.app.frame(size).live.len();
+        assert!(
+            live > size.1 as usize,
+            "the live region must be taller than the terminal: {live} rows"
+        );
+        let rows = drawn.emu.rows_text();
+        let caret = rows.get(drawn.emu.cy).map_or("", String::as_str);
+        assert!(
+            caret.contains(t(COMPOSER_PLACEHOLDER)),
+            "caret on {caret:?} of {rows:?}"
+        );
+    }
+
     #[test]
     fn composer_tracks_git_switches_in_repositories_and_worktrees() {
         let root = tempfile::tempdir().unwrap();
