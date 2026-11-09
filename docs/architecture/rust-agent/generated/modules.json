@@ -1284,6 +1284,16 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::tool_registry::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::tool_registry",
+      "file": "crates/dim-agent-capabilities/src/tool_registry.rs",
+      "unexpandedMacros": [
+        "assert",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::toolchain",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -16073,6 +16083,13 @@
     },
     {
       "from": "dim_agent_capabilities::tool_registry",
+      "to": "dim_agent_capabilities::tool_registry::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path dim_agent_runtime::SESSION_GROUP"
@@ -16126,6 +16143,39 @@
         "path ToolResult",
         "path ToolSource::Builtin",
         "path tool"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "path ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolHandler",
+        "path ToolRegistry",
+        "path ToolSourcesState::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolResult",
+        "path ToolResult::text"
       ]
     },
     {
