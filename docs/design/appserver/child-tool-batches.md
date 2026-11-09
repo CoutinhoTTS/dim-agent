@@ -165,10 +165,9 @@ bundle is refused rather than served an event shape it cannot read.
 The product profile may install `dim_codemode`, but a Session created by a connection below
 protocol 4 must not see the `codemode` tool. This is a tool-exposure rule, not an event filter:
 
-- `session.create` (and any list of Session tools derived from the connection) omits `codemode`
-  for a v3 or older connection;
-- a client request that explicitly asks for `codemode` on a v3 connection is rejected with the
-  existing invalid-tool error;
+- a v3 or older `session.create` records `codemode` in `SessionConfig.excluded_tools`;
+- `ToolRegistry` removes an excluded name even when `SessionConfig.tools` is absent, so the
+  default all-tools path cannot bypass the gate;
 - a v4 connection gets the tool when the plugin is installed and the request asks for it.
 
 A v3 client must not be able to start a Code Mode program whose child `ask_user` it cannot answer

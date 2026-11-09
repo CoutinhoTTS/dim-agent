@@ -1760,9 +1760,9 @@ impl Connection {
             config.tools = Some(tools);
         }
         if self.protocol_version() < 4
-            && let Some(tools) = &mut config.tools
+            && !config.excluded_tools.iter().any(|name| name == "codemode")
         {
-            tools.retain(|name| name != "codemode");
+            config.excluded_tools.push("codemode".into());
         }
         if let Some(policy) = params.permission_policy {
             config.permission_policy = policy;

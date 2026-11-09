@@ -40,6 +40,11 @@ pub struct SessionConfig {
     /// tool's call runs, without changing what is declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<String>>,
+    /// Tool names this Session never mounts, even when `tools` is absent or
+    /// names them. The App Server uses it to keep the pre-v4 `codemode` tool
+    /// out of a Session whose client cannot read child batches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_tools: Vec<String>,
     /// Fixed at creation; only the collaboration host creates members.
     #[serde(default)]
     pub collaboration_role: CollaborationRole,
@@ -93,6 +98,7 @@ impl Default for SessionConfig {
             },
             system_prompt: String::new(),
             tools: Some(vec!["echo".into(), "wait".into(), "branch".into()]),
+            excluded_tools: Vec::new(),
             collaboration_role: CollaborationRole::Leader,
             interactive: default_interactive(),
         }
