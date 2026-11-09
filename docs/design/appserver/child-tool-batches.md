@@ -87,18 +87,19 @@ no orphan rows.
 
 The current CLI draws one `ToolGroup` per model request. Collapsed is one row; `summary` adds one
 row per call; `expanded` adds the call rows and their details. The disclosure is `▸` or `▾`; the
-outcome marks are `✓`, `✗` and the running mark; nested sections already use a header at indent 2
-and their rows at indent 3. A child batch currently has no parent in `ViewRow`, so an unchanged
-client would open a second top-level group. That is the rendering bug this design removes.
+outcome marks are `✓`, `✗` and the running mark; sections already use a header at indent 2 and
+their rows at indent 3. A child batch currently has no parent in `ViewRow`, so an unchanged client
+would open a second top-level group. That is the rendering bug this design removes.
 
-The v4 shape nests a child `ToolGroup` under the outer `codemode` call:
+The v4 shape adds a **program section inside the existing group**, not a second group or a second
+disclosure. The program is the group's subject; child calls are its rows:
 
 ```text
-✓ Ran 1 tool · 4 child calls · 2 running ................................ ▸
+✓ Ran 1 program · 4 tool calls .................................. ▸
 ```
 
 ```text
-✓ Ran 1 tool · 4 child calls · 2 running ................................ ▾
+✓ Ran 1 program · 4 tool calls .................................. ▾
   ✓ Read CodeMode.md
   ✓ Grep parent_call_id
   · Ran cargo test -p dim-codemode
@@ -106,25 +107,28 @@ The v4 shape nests a child `ToolGroup` under the outer `codemode` call:
 ```
 
 ```text
-✓ Ran 1 tool · 4 child calls ........................................... ▾
-  ✓ codemode
-    ✓ Ran 2 tools, read 2 files ........................................ ▾
-      ✓ Read CodeMode.md
-      ✓ Grep parent_call_id
-    · Ran 1 command .................................................... ▾
-      · cargo test -p dim-codemode
-    · ask_user ......................................................... ▾
-      Which line?
-      [1] main  [2] child  [c] custom
+✓ Ran 1 program · 4 tool calls .................................. ▾
+  Program
+    const [doc, hits] = await Promise.all([...]);
+  ✓ Read CodeMode.md
+  ✓ Grep parent_call_id
+  · Ran cargo test -p dim-codemode
+  · ask_user  Which line?
+    [1] main  [2] child  [c] custom
 ```
 
-This reuses the existing header, summary rows, nested section indent and outcome marks. It does
-not add a new card style or a second transcript. A pending `ask_user` uses the running mark; the
-question itself uses the existing question surface. A child approval uses the existing approval
-surface and names `child <call> of codemode <parent>`.
+If the same request also calls an ordinary tool, the header says `Ran 1 program, ran 1 command`
+and the ordinary tool keeps its existing section. The program section is flat; there is no
+`codemode` card inside a card and no second `▸`/`▾` target.
 
-Implementation consequence: `ViewRow` carries the parent call id and the projection builds child
-groups; changing only the renderer would still leave the child as a separate group.
+This reuses the existing header, summary rows, section indent and outcome marks. It does not add a
+new card style or a second transcript. A pending `ask_user` uses the running mark; the question
+itself uses the existing question surface. A child approval uses the existing approval surface and
+names `child <call> of codemode <parent>`.
+
+Implementation consequence: `ViewRow` carries the parent call id and the projection folds child
+rows into the outer request group as a program section; changing only the renderer would still
+leave the child as a separate group.
 
 ### 2.4 TUI and CLI
 
