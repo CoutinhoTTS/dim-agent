@@ -92,7 +92,7 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 
 | 名字 | 目标 | 备注 |
 | --- | --- | --- |
-| `scheduleJobs` | 新数据面 `scheduleJobs.call(ToolRequest)` | 按 [Scheduler](plugins/Scheduler.md) 已接受的 `ToolRequest`/`Caller`/`JobReply`；`ToolRequest` 已有 `Deserialize`，`Caller`/`JobReply` 缺 serde，随迁移补 |
+| `scheduleJobs` | 新数据面 `scheduleJobs.call {request: ToolRequest, caller: Caller}` | 按 [Scheduler](plugins/Scheduler.md) 的 `JobRequest`/`JobReply`；实现是 `call(request, caller)`。`ToolRequest` 已有 `Deserialize`，`Caller`/`JobReply` 缺 serde，随迁移补 |
 | `workflowRuns` | 新数据面 `workflowRuns.call(RunRequest)` | 按 [Workflow](plugins/Workflow.md) 已接受的 `RunRequest`/`RunReply`；Workflow 未实现，接口预留 |
 | `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
 | `managedSearch` | 新数据面，只含 `search` | `managedProviders` 保持 internal(secret)，账号/token 不出去 |
@@ -100,6 +100,8 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 `settingsService` 和 `modelHost` **不进第一批**：它们保留类型化调用。`settings.read` 会新建取消 token、并返回 `SettingsResult` 信封；GoalBranch 需要自己的 stop token，改成数据面会丢取消。`auxiliaryModel.complete` 没有 tools、config 和 cached prefix；PromptSuggestion 克隆的是整轮 `ModelRequest`，换过去是行为变化，不只是形状。它们已有数据兄弟给其他消费者；有 leaf 消费者时再按 §4 的规则扩展。
 
 ### 3.3 所有者 API，已有数据兄弟
+
+本组统一 reason `owner-api`。
 
 | 名字 | 数据兄弟 | 说明 |
 | --- | --- | --- |
@@ -170,12 +172,14 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 按 [Scheduler](plugins/Scheduler.md) 已接受的形状，不在这里重定义：
 
 ```text
-scheduleJobs.call(ToolRequest)
-  ToolRequest = {action, job_id?, job?, enabled?, limit?, caller: Caller}
+scheduleJobs.call {request: ToolRequest, caller: Caller}
+  ToolRequest = {action, job_id?, job?, enabled?, limit?}
   Caller = {sessionId, branchId, cwd}
-  -> JobReply
+  -> JobReply = {content, records}
   -> error {code, message}
 ```
+
+Scheduler 文档把 `request` 和 `caller` 合称 `JobRequest`；实现是 `call(request, caller)`，这里按实现写，不造一个同名 Rust 类型。
 
 改动：
 
@@ -190,7 +194,8 @@ scheduleJobs.call(ToolRequest)
 
 ```text
 workflowRuns.call(RunRequest)
-  -> RunReply
+  RunRequest = {action, name?, source?, params?, run_id?, caller: {sessionId, branchId, callId, cwd}}
+  -> RunReply = {content, structured?}
   -> error {code, message}
 ```
 
