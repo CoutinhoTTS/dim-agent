@@ -1645,7 +1645,7 @@ impl ContextPolicy {
             .resolve(request.clone(), cancel.clone())
             .await?;
         check_cancel(&cancel)?;
-        let events: Vec<Arc<AgentEvent>> = estimate_events(&self.timeline)
+        let events: Vec<Arc<AgentEvent>> = estimate_events(&self.timeline, self.timeline.sequence())
             .await
             .map_err(|error| HostError::failed(error.to_string()))?
             .into_iter()
@@ -2649,8 +2649,8 @@ pub(crate) fn check_cancel(cancel: &CancellationToken) -> Result<(), HostError> 
 /// completed compaction and the newest adopted configuration. One page each.
 pub(crate) async fn estimate_events(
     timeline: &Timeline,
+    through: u64,
 ) -> dim_agent_runtime::Result<Vec<EstimateEvent>> {
-    let through = timeline.sequence();
     let mut facts: Vec<EstimateEvent> = Vec::new();
     let usage = timeline
         .query(newest_chain(

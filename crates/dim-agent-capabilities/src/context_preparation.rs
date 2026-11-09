@@ -753,7 +753,7 @@ impl ContextPreparation {
             ContextOpError::Model(HostError::failed("Context compaction is not available"))
         })?;
         let through = self.timeline.sequence();
-        let events = estimate_events(&self.timeline)
+        let events = estimate_events(&self.timeline, through)
             .await
             .map_err(ContextOpError::Read)?;
         if let Some(request) = canary_request(&events) {
@@ -775,6 +775,36 @@ impl ContextPreparation {
                     baseline_source: BaselineSource::ProviderBaseline,
                 });
             }
+        }
+        let configured = self
+            .timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Chain,
+                from: None,
+                through: Some(through),
+                include_publishing: false,
+                query: QuerySpec {
+                    rows: None,
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["context/configured".into()],
+                    }),
+                    select: QuerySelect::Exists,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: None,
+            })
+            .await
+            .map_err(ContextOpError::Read)?;
+        let QueryOutput::Exists { exists } = configured.result else {
+            unreachable!("configuration existence")
+        };
+        if !exists {
+            return Err(ContextOpError::NotConfigured);
         }
         let streamed = self
             .history
@@ -961,7 +991,7 @@ impl ContextPreparation {
         };
         match &self.policy {
             Some(policy) => {
-                let events = estimate_events(&self.timeline)
+                let events = estimate_events(&self.timeline, self.timeline.sequence())
                     .await
                     .map_err(|error| HostError::failed(error.to_string()))?
                     .into_iter()

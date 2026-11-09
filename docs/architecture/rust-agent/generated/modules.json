@@ -10133,6 +10133,7 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
@@ -10148,10 +10149,12 @@
         "path QueryOperand::Outer",
         "path QueryOperand::Value",
         "path QueryOutput::Events",
+        "path QueryOutput::Exists",
         "path QueryOutput::Rows",
         "path QueryPage",
         "path QueryPick::Last",
         "path QuerySelect::Events",
+        "path QuerySelect::Exists",
         "path QuerySelect::Fields",
         "path QuerySpec",
         "path QueryValue::Missing",

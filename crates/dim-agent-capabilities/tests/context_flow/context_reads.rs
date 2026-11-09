@@ -459,6 +459,74 @@ impl TimelineStore for CountContextReads {
     }
 }
 
+#[tokio::test]
+async fn unconfigured_usage_does_not_project_legacy_messages() {
+    let store = Arc::new(CountContextReads::default());
+    store
+        .create_session("unconfigured", &SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "unconfigured".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    timeline
+        .append(
+            EventKind::BranchStart(BranchStartData {
+                parent: None,
+                create_event: None,
+            })
+            .into(),
+        )
+        .unwrap();
+    for _ in 0..256 {
+        let input = timeline
+            .append(EventKind::InputMessage(InputMessageData::text("x".repeat(4096), None)).into())
+            .unwrap();
+        timeline
+            .append(
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: input.id.clone(),
+                })
+                .into(),
+            )
+            .unwrap();
+    }
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    let mut builder = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context::default(),
+    );
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session("unconfigured".into()).await.unwrap();
+    let preparation = session
+        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+        .unwrap();
+    store.context_pages.lock().unwrap().clear();
+    let reply = preparation.usage(CancellationToken::new()).await;
+    assert!(
+        matches!(
+            reply,
+            Err(dim_agent_capabilities::context_preparation::ContextOpError::NotConfigured)
+        ),
+        "{reply:?}"
+    );
+    assert!(
+        store.context_pages.lock().unwrap().is_empty(),
+        "an unavailable usage read must not reconstruct legacy context"
+    );
+    agent.close().await.unwrap();
+}
+
 /// `/usage` reads what the branch has published: a fact that holds its
 /// sequence but is not published yet is not a read point the policy refuses,
 /// and the usage is answered while it is in flight.
