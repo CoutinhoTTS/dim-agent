@@ -154,7 +154,7 @@ classDiagram
 | `delivered` | 目标分支已发布该输入；`input_event_id` 是回执。 | 是 |
 | `failed` | 该窗口没有写入输入，或要写入的 Session 无法创建。`detail` 携带原因。 | 是 |
 | `lost` | 写入结果当前无法确定，且该窗口不重试。`detail` 携带诊断。 | 是 |
-| `missed` | 守护进程没有在宽限内观察到该窗口(A.4)。 | 是 |
+| `missed` | 守护进程没有在宽限内观察到该窗口(A.4)，或该窗口因该任务的上一条投递仍未结算而被跳过(§3.1)；`detail` 说明是哪一种。 | 是 |
 
 投递到达终态后永不更新，Scheduler 永不重发一个窗口。`session_id` 与 `branch_id` 命名实际使用的目标；对 `launch`，它们命名启动的 Session 及其 `main` 分支，`deadline_at` 是其停止时刻。`session` 目标以及从未启动运行的投递没有 `deadline_at`。
 
@@ -171,7 +171,7 @@ classDiagram
 | `created_by` 是用户，`mode: "reuse"`，有存储的 `session_id` | 该 Session `main` 的 `session` 目标 |
 | `created_by` 是用户，`mode: "reuse"`，无 `session_id` | 用存储字段组成 `launch` 目标 |
 
-工具保存的任务无论旧 `mode` 是什么都映射到其保存分支：旧形状会启动 Session，而工具保存的任务必须不再这样做。旧 `reuse` 任务已经绑定的 Session 仍归该任务所有，并随它一起删除(A.7)，与之前相同；改变该任务目标的保存会释放这份所有权，其他所有目标 Session 都是外来的，永不被删除。
+工具保存的任务无论旧 `mode` 是什么都映射到其保存分支：旧形状会启动 Session，而工具保存的任务必须不再这样做。对旧 `reuse` 任务，运行记录区分两种 Session 情形。出现在带 launch 来源的运行里的 Session 是 Scheduler 在首次运行时启动并绑定的：它仍归该任务所有，并随它一起删除(A.7)。任务只是复用的 Session 属于用户，永不被删除。改变该任务目标的保存会释放这份启动所有权。
 
 投递存储保持内层 v1：记录旧的 `state` 名称按写入时原样解码，新记录使用 §2.2 的词表。不重写任何字节，也不改版本(A.7)。
 
@@ -215,6 +215,10 @@ sequenceDiagram
 窗口求值遵循 `settings/schedule`、墙钟分钟变化、当前分钟内最早剩余窗口与已接受投递的结算。自有定时器每秒检查这些截止时刻，空闲节拍既不读 Settings 也不读存储。
 
 `delivering` 记录先于任何外部效果持久化，因此重启靠查询结算它，而不是再写一次。一个窗口至多写入一次：分支对每个 `submissionId` 只接受一次([sessions 服务 §6.2](../appserver/sessions-service.md#62-input))，以同一 id 重试返回同一回执。
+
+**重叠。** 该任务的上一条投递仍是 `delivering` 时，窗口被跳过：不写输入，并记录一条带 `detail: previous_delivery_unsettled` 的 `missed` 投递(A.6)，它计入保留期(A.7)。`schedule.run_now` 遵循同一规则，因此未结算的投递绝不会得到第二次写入。跳过持续的时间不超过上一条记录保持未结的时间，下面的上限固定了它。
+
+**上限。** 一条 `delivering` 记录至多进行五次 `sessions.lookup` 尝试，每个定时器节拍一次。`reloading`、`ambiguous` 与传输失败计入这五次；`accepted` 在任一次尝试都把它结算为 `delivered`。第五次尝试即使得不到可用回答也会结算记录：此时 `unknown` 记为 `lost` 而不是 `failed`，其他任何非 `accepted` 的结果同样记为 `lost`。`lost` 是终态且可清理(A.7)，因此没有记录永久未结，跳过规则也不会超过这五次尝试。
 
 ### 3.2 完成与超时
 
@@ -262,7 +266,7 @@ sequenceDiagram
 | Agents 索引重载 | — | 写入回答 `reloading`；进行中的投递由查询结算(A.6) | Agents |
 | Scheduler 重载或重启 | — | `delivering` 记录由 `sessions.lookup` 结算；窗口不会被写两次 | Scheduler |
 | 守护进程跨过窗口停机 | — | `missed`；不补做(E5) | Scheduler |
-| 同一时刻两个窗口到期 | — | 每个窗口一条投递；超过宽限的窗口为 `missed` | Scheduler |
+| 同一时刻两个窗口到期 | — | 每个窗口一条投递；超过宽限或在上一条投递未结时到期的窗口为 `missed` | Scheduler |
 | 任务删除时 launch Session 仍在运行 | — | 投递有效，Session 运行到停止时刻，之后由保留期删除(A14) | Scheduler |
 | 任务被保存为新目标 | — | 后续窗口使用新目标；已记录投递不变 | Scheduler |
 | 目标 Session 中创建了子分支 | — | 忽略；一条投递只命名一个分支 | Scheduler |
@@ -519,7 +523,7 @@ Scheduler 的记录是进程状态，没有 Timeline 事实，因此要展示它
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-`create` 在调用方 Session 与分支保存一个 `session` 目标：工具不能命名目标、不能设置 `launch` 目标，也不能选择模型、Agent 或策略。一个 Session 通过工具创建的任务至多 16 条(A13)；之后的 create 为 `schedule_invalid`。`update` 只改动 `job` 中的字段并保留存储的目标，因此它可以编辑客户端保存的任务，但不能重定向它。`input_mode` 默认 `queue`。保存时不捕获权限：投递的输入在目标分支自己的 Permission 状态下端运行(§3.3)。
+`create` 在调用方 Session 与分支保存一个 `session` 目标：工具不能命名目标、不能设置 `launch` 目标，也不能选择模型、Agent 或策略。一个 Session 通过工具创建的任务至多 16 条(A13)；之后的 create 为 `schedule_invalid`。上限计的是任务条数，且没有最小间隔。保存是持久配置，因此在除 FullAccess 外的每种预设下，用户都批准了该任务、它的调度与提示词；此后每个窗口投递的正是这份已保存的提示词，模型不经另一次获批的保存无法改变它；上一条投递未结算时窗口被跳过(§3.1)，因此一个任务永远不会同时有两次未结写入；而每分钟一次的任务是用户有意提出的请求，最小间隔会拒绝它，只是把数字挪个位置。在 FullAccess 下，用户已对所有工具放弃审批，这个工具也不例外(E1)。`update` 只改动 `job` 中的字段并保留存储的目标，因此它可以编辑客户端保存的任务，但不能重定向它。`input_mode` 默认 `queue`。保存时不捕获权限：投递的输入在目标分支自己的 Permission 状态下端运行(§3.3)。
 
 把任务与投递 id、以及模型后续动作所需的全部记录放进 `ToolResult.content`。`structuredContent` 只用于持久化/UI。校验失败返回 `isError`，不把服务/协议失败伪装成成功结果。工具列表省略提示词正文。其他任务结果使用至多 4 KiB 的 UTF-8 提示词预览与显式 `prompt_truncated` 标志；任务名至多 256 字节，运行原因至多 512 字节。任务与投递身份留在 `content`，管理与结构化记录保留完整数据。这些是逐字段上限；列表输出仍随任务数量增长。
 
@@ -531,9 +535,9 @@ Scheduler 的记录是进程状态，没有 Timeline 事实，因此要展示它
 | --- | --- | --- |
 | `schedule.list` | `{}` | 带 `next_window` 与最近一次投递的任务，使用规范化记录形状 |
 | `schedule.save` | `{job, revision?}` | 规范化记录形状的已保存任务；新任务需要 `name`、`schedule`、`prompt` 与 `target`，更新在省略 `target` 时保留存储的目标；可选 `revision` 检查 `Job.revision`，内部写入同时使用 Settings 文档 CAS；任一冲突 → `schedule_conflict`。保存清除 `disabled_reason`。 |
-| `schedule.delete` | `{job_id}` | 从 Settings 移除任务；按 A.7 退役其终态投递与 launch 自有 Session。已在运行的 launch Session 运行到其停止时刻(A14)，旧绑定 Session 随任务一起删除。 |
+| `schedule.delete` | `{job_id}` | 从 Settings 移除任务；按 A.7 退役其终态投递与 launch 自有 Session。已在运行的 launch Session 运行到其停止时刻(A14)；旧 `reuse` 任务启动的 Session 随任务一起删除，任务只是复用的 Session 永不被删除。 |
 | `schedule.set_enabled` | `{job_id, enabled}` | 暂停/恢复。启用会清除 `disabled_reason`。 |
-| `schedule.run_now` | `{job_id}` | 为手动窗口接受的投递：`run_id`、`job_id`、`window`、`state`、`detail`、`created_at`、`ended_at`、`submission_id`，以及 A.1 定义的、该投递实际具有的可选字段 |
+| `schedule.run_now` | `{job_id}` | 为手动窗口记录的投递，包括被 §3.1 重叠规则跳过的那一种：`run_id`、`job_id`、`window`、`state`、`detail`、`created_at`、`ended_at`、`submission_id`，以及 A.1 定义的、该投递实际具有的可选字段 |
 | `schedule.history` | `{job_id, limit?}` | 投递，新的在前 |
 | `schedule.watch` | `{}` | `{}`。注册调用连接的观察并在观察期间保持打开（§11.2）；同一连接的第二次观察让前一个调用回答 `{}` 并接管 |
 
@@ -579,11 +583,13 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 目标拒绝 | `failed: <code>` | 没有写入，或没有创建 Session；`detail` 携带代码 |
 | 目标已消失 | `failed: session_closed` / `branch_missing` / `branch_ended`，且任务被禁用 | 没有写入；任务需要新目标 |
 | 回复丢失而查询找到了输入 | `delivered` | 查询的 `{inputId,sequence}` 确认了那一次写入 |
-| 回复丢失而查询回答 `unknown` | `failed: not_delivered` | 分支从未接受该输入；该窗口不重试 |
-| 查询本身无法回答 | 记录保持 `delivering`；定时器重试查询 | 在记录未结期间不尝试第二次写入 |
+| 回复丢失而查询在第五次尝试之前回答 `unknown` | `failed: not_delivered` | 分支从未接受该输入；该窗口不重试 |
+| 查询回答 `reloading`、`ambiguous` 或传输失败 | 记录保持 `delivering`；定时器重试查询，每次尝试计入上限 | 在记录未结期间不尝试第二次写入 |
+| 第五次尝试返回 `accepted` 之外的任何结果 | `lost`，带 `detail`；此处的 `unknown` 记为 `lost` 而不是 `failed` | 结果已无法得知；记录是终态且可清理(A.7) |
+| 上一条投递仍为 `delivering` 时窗口到期 | `missed: previous_delivery_unsettled` | 不写输入；该窗口不重试，记录可清理(A.7) |
 | 守护进程错过了窗口 | `missed` | 不启动、不写输入 |
 
-恢复绝不重写已结算记录，也绝不重发窗口。在持久化 `delivering` 与输入回复之间崩溃，由下次启动时的 `sessions.lookup` 结算；在 launch Session 已创建、其身份尚未记录时崩溃，会留下一条没有记录命名的 Session(附录 F 的已知限制)。查询一直失败的 `delivering` 记录留在存储中并每分钟重试一次；在未结期间永不被清理。
+恢复绝不重写已结算记录，也绝不重发窗口。在持久化 `delivering` 与输入回复之间崩溃，由下次启动时的 `sessions.lookup` 结算；在 launch Session 已创建、其身份尚未记录时崩溃，会留下一条没有记录命名的 Session(附录 F 的已知限制)。每条 `delivering` 记录每个定时器节拍查询一次，至多五次；第五次尝试结算它(§3.1)。“未结期间永不被清理”因此仍然成立，同时有了上限：目标持续失败的任务，既不会无界增长记录，也不会写两次。
 
 ### A.7 运行存储与保留期
 
@@ -595,9 +601,9 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 
 每次投递转换使用既有 `scope.withLock` 读/改/`file.replace` 事务。`delivering` 记录先于输入或 launch 的输入持久化；在进行任何 `sessions` 调用之前释放文件事务。不增加 JavaScript 互斥、存储服务、日志或会成为另一权威的内存副本。读取或替换失败会停止新的投递并暴露存储失败；它不是空历史，也不是已确认的转换。清理停止新窗口、结算自有操作与待写记录，然后关闭文件作用域。
 
-保留期遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)。按 `ended_at` 为每个现存任务选择最近 100 条终态投递，以 `run_id` 作为稳定次序，并保留所有 `delivering` 记录。终态投递的停止定时器必须先结束，其记录才可被清理；这是在线 I/O 所有权，不是持久化的待办状态。
+保留期遵循 [S2 §8.7](../appserver/sessions-service.md#87-删除运行用的-session)。按 `ended_at` 为每个现存任务选择最近 100 条终态投递，以 `run_id` 作为稳定次序，并保留所有 `delivering` 记录；A.6 限制了它保持未结的时长，因此每条记录最终都会成为终态并可被清理。终态投递的停止定时器必须先结束，其记录才可被清理；这是在线 I/O 所有权，不是持久化的待办状态。
 
-只有来自 Scheduler 自己成功 `sessions.launch` 回复的 Session 身份才会被删除。`session` 目标指向的 Session 永不被删除，投向 `session` 目标的投递所命名的 Session 同样如此。旧 `reuse` 任务绑定的 Session 仍归该任务所有：删除任务会删除它，而改变该任务目标的保存会转而释放它。fork 与外部提供的 Session 身份永不被删除。在移除最后一条携带该自有 Session 身份的过期记录之前调用既有 `sessions.delete`，且只在 Session 的停止时刻之后。失败或不确定的删除保留该记录并暴露其失败；下一次保留期通道重新读取它，而不是使用单独的清理队列。删除确认后，原子地移除过期记录。因此删除与记录移除之间崩溃会留下可用于对账的身份。失败的清理可能暂时保留超过 100 条终态记录。没有持久化 Session 身份的丢失启动仍是附录 F 的已知限制。
+只有来自 Scheduler 自己成功 `sessions.launch` 回复的 Session 身份才会被删除。`session` 目标指向的 Session 永不被删除，投向 `session` 目标的投递所命名的 Session 同样如此。旧 `reuse` 任务启动的 Session 仍归该任务所有：删除任务会删除它，而改变该任务目标的保存会转而释放它。运行记录决定是哪一个 Session(§2.3)：记录带 launch 来源的 Session 属于启动方，任务只是复用的 Session 是外来的，永不被删除。fork 与外部提供的 Session 身份永不被删除。在移除最后一条携带该自有 Session 身份的过期记录之前调用既有 `sessions.delete`，且只在 Session 的停止时刻之后。失败或不确定的删除保留该记录并暴露其失败；下一次保留期通道重新读取它，而不是使用单独的清理队列。删除确认后，原子地移除过期记录。因此删除与记录移除之间崩溃会留下可用于对账的身份。失败的清理可能暂时保留超过 100 条终态记录。没有持久化 Session 身份的丢失启动仍是附录 F 的已知限制。
 
 在启动恢复、每次投递结算与 `schedule.delete` 之后运行一次保留期通道。若失败清理后仍有过期记录，经所有者的定时器每分钟重试一次，即使没有剩余任务或新投递。每次通道先读投递快照，再读当前 Settings 任务引用；任一读取失败就跳过删除与清理，保留全部记录并报告失败。不可用的 Settings 文档绝不意味着 reuse 任务已被删除。因读取失败跳过的通道按同一分钟节奏重试。
 
@@ -605,8 +611,8 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 
 | 场景 | 顺序 | 结果 | 所有者 |
 | --- | --- | --- | --- |
-| 窗口投递进行中执行 `run_now` | — | 两条投递，各自有自己的 `run_id` 与提交 id；两条都写入 | Scheduler |
-| 一个节拍里两个窗口到期 | — | 每个窗口一条投递；超过宽限的窗口为 `missed` | Scheduler |
+| 窗口投递进行中执行 `run_now` | — | 手动窗口记为 `missed: previous_delivery_unsettled`；不写第二次(A.6) | Scheduler |
+| 一个节拍里两个窗口到期 | — | 每个窗口一条投递；超过宽限或在上一条投递未结时到期的窗口为 `missed` | Scheduler |
 | 目标分支忙 | 先前事实 < 运行输入 | 输入排队；在运行中的回合结束后被消费(A5) | InputQueue、Loop |
 | 目标分支等待审批 | — | 输入排在该回合之后；Scheduler 不参与 | Approval、InputQueue |
 | 用户中断或撤回已投递输入 | input < interrupt 或 withdraw | 输入被删除或随回合结束；投递保持 `delivered` | Loop、InputQueue |
@@ -615,6 +621,7 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 投递进行中目标 Session 被删除 | — | 写入失败 `session_closed`，或已提交并发布；两种结果都归入记录 | Agents |
 | 投递与读取之间目标 Session 空闲卸载 | — | 没有读取会失败：下一个窗口的 `sessions.input` acquire 并恢复它 | Agents |
 | Agents 索引重载 | — | `reloading`；`delivering` 记录由查询结算 | Agents |
+| `reloading` 或传输失败持续 | — | 查询在五次尝试后停止并结算 `lost`；其间到期的窗口为 `missed: previous_delivery_unsettled`；每条记录都是终态且可清理 | Scheduler、Agents |
 | Scheduler 重载或重启 | — | `delivering` 记录由查询结算；窗口不会被写两次 | Scheduler |
 | 守护进程跨过窗口停机 | — | `missed`；不补做 | Scheduler |
 | 启动被拒(cwd 缺失、未知 Agent、策略拒绝) | — | `failed: <code>`；无输入 | Agents、Scheduler |
@@ -638,8 +645,8 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 投递写入失败 `reloading`，或回复丢失 | 记录保持 `delivering`；由查询结算(A.6) |
 | 投递写入失败 `session_closed`、`branch_missing` 或 `branch_ended` | `failed: <code>`，任务以该原因被禁用 |
 | 投递写入因其他原因失败 | `failed: <code>`；任务保持启用 |
-| 查询回答 `unknown` | `failed: not_delivered`；该窗口不重试 |
-| 查询无法回答 | 记录保持 `delivering`，每分钟重试 |
+| 查询在第五次尝试之前回答 `unknown` | `failed: not_delivered`；该窗口不重试 |
+| 查询无法回答 | 记录保持 `delivering`，每分钟重试；第五次尝试结算为 `lost` |
 | 启动失败 | `failed: <code>`；该窗口不重试 |
 | 停止定时器调用失败 | 在记录仍命名该 Session 期间每分钟重试；投递不变 |
 | 存储不可读或未知格式版本 | Scheduler 应用失败(不静默重置) |
@@ -657,14 +664,16 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 4. 管理 `schedule.save` 设置 `launch` 目标；到期窗口用保存的 Agent 与收拢后的预设启动一个非交互 Session，向 `main` 写入一条输入，并记录带截止时刻的 `delivered`。验证 Session 在停止时刻被停止，且不早于它。
 5. 超过宽限的窗口记为一条 `missed`，不启动、不写输入。跨窗口重启守护进程得到 `missed`。
 6. 触发时目标已消失的投递以对应代码结算 `failed` 并禁用任务；`schedule.list` 显示原因，保存清除它，后续窗口不再触发。
-7. 丢失的投递回复由查询结算：已接受 → `delivered` 且无第二条输入；`unknown` → `failed: not_delivered`；查询无回答则保持 `delivering` 重试且不写入。
-8. 带 `delivering` 记录重启：无重复输入、无重复启动。带停止时刻已过的 `delivered` launch 记录重启：停止该 Session，绝不在其停止时刻之前删除它。
-9. 旧文档：任何旧 `mode` 的工具保存任务投递到其保存 Session 与分支；用户 `create` 任务映射为 launch 目标；有 Session 的用户 `reuse` 任务映射为该 Session 的 `main`；没有的用户 `reuse` 任务映射为 launch。每种都能读取、投递并往返，且不重写旧字节。旧 `reuse` Session 仍随其任务；其他所有目标 Session 在任务删除后存活。
-10. `schedule.history` 读取新词表，并且仍能解码本次变更之前写下的记录；非法内层字节被保留。
-11. 保留期保留未结的 `delivering` 记录与每个任务最近 100 条终态投递；启动的 Session 只在其停止时刻之后被删除；删除失败保留记录并重试。
-12. `schedule.watch` 以新运行词表流式送出，每个状态一项，最后一项 `terminal` 为 true。
-13. 工具创建的任务在非交互与成员 Session 中被拒绝；`schedule` 在 WorkspaceWrite 下被询问，在 FullAccess 下被允许。
-14. 缺失或失败的 Scheduler 行不阻塞原生 Session；管理命名空间回答 `service_unavailable`，工具回答卸载通知。
+7. 丢失的投递回复由查询结算：已接受 → `delivered` 且无第二条输入；第五次尝试之前回答 `unknown` → `failed: not_delivered`；查询无回答则保持 `delivering` 重试且不写入(第 9 项)。
+8. **未结重叠。** 任务的投递仍为 `delivering` 时，它的下一个到期窗口记录 `missed: previous_delivery_unsettled`，不写输入，且该记录计入保留期；同一状态下的 `schedule.run_now` 也记录同样的 `missed` 投递并不写入。
+9. **有界查询。** 查询持续回答 `reloading`、`ambiguous` 或传输失败的 `delivering` 记录，在第五次尝试时结算为 `lost`；该次尝试回答 `unknown` 也结算为 `lost` 而不是 `failed`；记录可清理，且不再写入任何输入。
+10. 带 `delivering` 记录重启：无重复输入、无重复启动。带停止时刻已过的 `delivered` launch 记录重启：停止该 Session，绝不在其停止时刻之前删除它。
+11. 旧文档：任何旧 `mode` 的工具保存任务投递到其保存 Session 与分支；用户 `create` 任务映射为 launch 目标；有 Session 的用户 `reuse` 任务映射为该 Session 的 `main`；没有的用户 `reuse` 任务映射为 launch。每种都能读取、投递并往返，且不重写旧字节。旧 `reuse` 任务启动的 Session 仍随其任务；任务只是复用的 Session，以及其他所有目标 Session，在任务删除后存活。
+12. `schedule.history` 读取新词表，并且仍能解码本次变更之前写下的记录；非法内层字节被保留。
+13. 保留期保留未结的 `delivering` 记录与每个任务最近 100 条终态投递；启动的 Session 只在其停止时刻之后被删除；删除失败保留记录并重试。
+14. `schedule.watch` 以新运行词表流式送出，每个状态一项，最后一项 `terminal` 为 true。
+15. 工具创建的任务在非交互与成员 Session 中被拒绝；`schedule` 在 WorkspaceWrite 下被询问，在 FullAccess 下被允许。
+16. 缺失或失败的 Scheduler 行不阻塞原生 Session；管理命名空间回答 `service_unavailable`，工具回答卸载通知。
 
 ## 附录 E. 假设
 
@@ -680,7 +689,7 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | A9 | 工具只在交互式 leader Session 可用；其他处处理函数拒绝 | [Overview §6.2](../overview.md#62-约束) 约束 15；判断 | 启动的 Session 也能创建任务 |
 | A10 | 所有动作一个风险类别 | [Overview §6.2](../overview.md#62-约束) 约束 7 | 拆分只读工具 |
 | A11 | 工具创建的任务使用调用方的资源节点 | 判断（overview §6.3） | 允许其他节点 |
-| A13 | 每个 Session 通过工具保存的任务至多 16 条 | 判断；为 agent 反复自我排程设界 | 工具创建任务无上限 |
+| A13 | 每个 Session 通过工具保存的任务至多 16 条，且工具保存的任务没有最小间隔 | 判断；条数限制的是 agent 能留下多少任务，而每次保存都是获批的持久变更、其提示词模型无法改动，且一个任务永远不会同时有两次未结写入(A.2、§3.1) | 工具创建任务无上限 |
 | A14 | 删除任务不停止正在运行的 launch Session | 判断 | 删除即停止 Session |
 
 已定：投递是任务的唯一效果；一个任务一个目标；工具不能设置 launch 目标，也不能设置任何模型、Agent 或策略；`queue` 为默认模式；目标消失会禁用任务；§2.3 的旧记录映射；运行历史存于 `pluginFiles`；不投递运行结果；启动的 Session 权限是经实时收拢的预设(E2)；FullAccess 允许 `persistent_configuration`(E1)；守护进程存活(E5)；作用域([ADR 002](../../adr/002-plugin-scope.md))。
