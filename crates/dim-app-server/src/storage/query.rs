@@ -894,7 +894,9 @@ impl<'a> Compiler<'a> {
         let lower = format!(
             "coalesce((SELECT max(p.sequence) FROM timeline_events p WHERE p.session_id={session} AND p.branch_id=s.branch AND p.sequence<=s.lo),s.lo)"
         );
-        let bound = if let Some((limit, descending)) = self.candidate_limit {
+        let bound = if self.physical_candidates.is_none()
+            && let Some((limit, descending)) = self.candidate_limit
+        {
             let direction = if descending { "DESC" } else { "ASC" };
             let predicate = predicate.replace("e.", "candidate.");
             let limit = self.bind(limit.min(i64::MAX as u64) as i64);
@@ -1259,6 +1261,7 @@ fn sources<'a>(
     fn inline_filters<'a>(
         filter: &'a QueryFilter,
         known: Option<&[Value]>,
+        related: bool,
         result: &mut Vec<&'a QueryFilter>,
     ) {
         let known = kind_values(filter).or(known);
@@ -1267,26 +1270,27 @@ fn sources<'a>(
                 field,
                 partition_by,
                 ..
-            } if (field == "data"
-                && partition_by.is_empty()
-                && known.is_some_and(|kinds| {
-                    kinds.iter().all(|kind| {
-                        kind.as_str().is_some_and(|kind| {
-                            super::text::indexed(kind, "data")
-                                && !matches!(kind, "step/text" | "step/thinking")
+            } if related
+                && ((field == "data"
+                    && partition_by.is_empty()
+                    && known.is_some_and(|kinds| {
+                        kinds.iter().all(|kind| {
+                            kind.as_str().is_some_and(|kind| {
+                                super::text::indexed(kind, "data")
+                                    && !matches!(kind, "step/text" | "step/thinking")
+                            })
                         })
-                    })
-                }))
-                || (field == "data.delta" && partition_by == &["kind", "data.request_id"]) =>
+                    }))
+                    || (field == "data.delta" && partition_by == &["kind", "data.request_id"])) =>
             {
                 result.push(filter)
             }
             QueryFilter::And { conditions } | QueryFilter::Or { conditions } => {
                 for filter in conditions {
-                    inline_filters(filter, known, result);
+                    inline_filters(filter, known, related, result);
                 }
             }
-            QueryFilter::Exists { condition } => inline_filters(condition, None, result),
+            QueryFilter::Exists { condition } => inline_filters(condition, None, true, result),
             _ => (),
         }
     }
@@ -1295,7 +1299,7 @@ fn sources<'a>(
         && compiler.relation_scope
         && let Some(filter) = &query.filter
     {
-        inline_filters(filter, None, &mut inline);
+        inline_filters(filter, None, false, &mut inline);
     }
     let mut text = Vec::new();
     if let Some(filter) = &query.filter {
@@ -1789,13 +1793,10 @@ fn after(
 fn selected_properties(
     connection: &Connection,
     scope: &TimelineReadScope,
-    ordinal: usize,
-    sequence: u64,
+    positions: &[(usize, u64)],
     fields: &[&str],
-) -> Result<Vec<QueryValue>> {
-    if fields.is_empty() {
-        return Ok(Vec::new());
-    }
+    #[cfg(feature = "testing")] statistics: &Statistics,
+) -> Result<Vec<Vec<QueryValue>>> {
     let mut compiler = Compiler {
         fields: Vec::new(),
         parameters: Vec::new(),
@@ -1813,13 +1814,18 @@ fn selected_properties(
     let point = TimelineReadScope {
         key: scope.key.clone(),
         through: scope.through,
-        segments: vec![dim_agent_runtime::TimelineReadSegment {
-            branch_id: scope.segments[ordinal].branch_id.clone(),
-            from: sequence,
-            through: sequence,
-            stored_through: sequence,
-            tail: Vec::new(),
-        }],
+        segments: positions
+            .iter()
+            .map(
+                |&(ordinal, sequence)| dim_agent_runtime::TimelineReadSegment {
+                    branch_id: scope.segments[ordinal].branch_id.clone(),
+                    from: sequence,
+                    through: sequence,
+                    stored_through: sequence,
+                    tail: Vec::new(),
+                },
+            )
+            .collect(),
     };
     let base = compiler.base(&point, "1");
     let columns=fields.iter().map(|field| {
@@ -1831,45 +1837,64 @@ fn selected_properties(
                FROM (SELECT (({array} -> ('$[' || e.key || ']')) -> {remaining}) AS value FROM json_each({array}) e)) END")
         } else { compiler.inline(field,"b",false) }
     }).collect::<Vec<_>>().join(",");
-    let encoded = connection
-        .prepare_cached(&format!("{base} SELECT {columns} FROM base b"))
-        .map_err(error)?
-        .query_row(params_from_iter(&compiler.parameters), |row| {
+    let sql = format!("{base} SELECT {columns} FROM base b ORDER BY b.ord");
+    let mut statement = connection.prepare(&sql).map_err(error)?;
+    let encoded = statement
+        .query_map(params_from_iter(&compiler.parameters), |row| {
             (0..fields.len())
                 .map(|i| row.get::<_, Option<String>>(i))
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
+        .map_err(error)?
+        .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(error)?;
-    fields
-        .iter()
-        .zip(encoded)
-        .map(|(field, encoded)| {
-            if !field.contains("[]") {
-                return property(encoded).map_err(error);
-            }
-            let Some(encoded) = encoded else {
-                return Ok(QueryValue::Missing);
-            };
-            #[derive(serde::Deserialize)]
-            struct Element {
-                present: u8,
-                value: Value,
-            }
-            let elements: Vec<Element> = serde_json::from_str(&encoded).map_err(error)?;
-            Ok(QueryValue::Elements {
-                values: elements
-                    .into_iter()
-                    .map(|element| {
-                        if element.present != 0 {
-                            QueryValue::Value {
-                                value: element.value,
-                            }
-                        } else {
-                            QueryValue::Missing
-                        }
+    #[cfg(feature = "testing")]
+    record_statement(
+        statistics,
+        connection,
+        &statement,
+        &sql,
+        &compiler.parameters,
+        "selected_properties",
+    )?;
+    if encoded.len() != positions.len() {
+        return Err(error("selected property positions are missing"));
+    }
+    encoded
+        .into_iter()
+        .map(|encoded| {
+            fields
+                .iter()
+                .zip(encoded)
+                .map(|(field, encoded)| {
+                    if !field.contains("[]") {
+                        return property(encoded).map_err(error);
+                    }
+                    let Some(encoded) = encoded else {
+                        return Ok(QueryValue::Missing);
+                    };
+                    #[derive(serde::Deserialize)]
+                    struct Element {
+                        present: u8,
+                        value: Value,
+                    }
+                    let elements: Vec<Element> = serde_json::from_str(&encoded).map_err(error)?;
+                    Ok(QueryValue::Elements {
+                        values: elements
+                            .into_iter()
+                            .map(|element| {
+                                if element.present != 0 {
+                                    QueryValue::Value {
+                                        value: element.value,
+                                    }
+                                } else {
+                                    QueryValue::Missing
+                                }
+                            })
+                            .collect(),
                     })
-                    .collect(),
-            })
+                })
+                .collect()
         })
         .collect()
 }
@@ -2158,6 +2183,7 @@ pub(super) fn execute(
     let mut last = None;
     let mut more = false;
     let mut count = 0;
+    let mut positions = Vec::new();
     while let Some(row) = selected.next().map_err(error)? {
         cancelled(cancel)?;
         if count == page.limit.get() {
@@ -2180,6 +2206,52 @@ pub(super) fn execute(
             binding: binding.clone(),
             keys: cursor_keys,
         });
+        positions.push((ordinal, sequence, total, group));
+    }
+    drop(selected);
+    #[cfg(feature = "testing")]
+    record_statement(
+        statistics,
+        connection,
+        &statement,
+        &sql,
+        &compiler.parameters,
+        "selection",
+    )?;
+    let fields: Vec<_> = if let QuerySelect::Fields { fields } = &query.select {
+        fields
+            .iter()
+            .filter(|field| !references(field))
+            .map(String::as_str)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut properties = Vec::new();
+    if !fields.is_empty() {
+        let stored: Vec<_> = positions
+            .iter()
+            .filter(|&&(ordinal, sequence, _, _)| {
+                sequence <= scope.segments[ordinal].stored_through
+            })
+            .map(|&(ordinal, sequence, _, _)| (ordinal, sequence))
+            .collect();
+        for batch in stored.chunks(128) {
+            cancelled(cancel)?;
+            let values = selected_properties(
+                connection,
+                scope,
+                batch,
+                &fields,
+                #[cfg(feature = "testing")]
+                statistics,
+            )?;
+            properties.extend(values);
+        }
+    }
+    let mut properties = properties.into_iter();
+    for (ordinal, sequence, total, group) in positions {
+        cancelled(cancel)?;
         let segment = &scope.segments[ordinal];
         let tail = if sequence > segment.stored_through {
             Some(
@@ -2202,15 +2274,12 @@ pub(super) fn execute(
             QuerySelect::Fields { fields } => {
                 let mut values = Vec::with_capacity(fields.len());
                 let mut wire = None;
-                let inline = if tail.is_some() {
+                let inline = if tail.is_some() || fields.iter().all(|field| references(field)) {
                     Vec::new()
                 } else {
-                    let fields: Vec<_> = fields
-                        .iter()
-                        .filter(|field| !references(field))
-                        .map(String::as_str)
-                        .collect();
-                    selected_properties(connection, scope, ordinal, sequence, &fields)?
+                    properties
+                        .next()
+                        .expect("stored property rows preserve selection order")
                 };
                 let mut inline = inline.into_iter();
                 for field in fields {
@@ -2266,16 +2335,6 @@ pub(super) fn execute(
             }
         }
     }
-    drop(selected);
-    #[cfg(feature = "testing")]
-    record_statement(
-        statistics,
-        connection,
-        &statement,
-        &sql,
-        &compiler.parameters,
-        "selection",
-    )?;
     Ok(QueryResult {
         result: if matches!(query.select, QuerySelect::Events) {
             QueryOutput::Events { events }

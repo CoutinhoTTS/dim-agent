@@ -1149,64 +1149,103 @@ async fn indexed_text_hits_and_misses_do_not_scan_the_growing_history() {
             .await
             .unwrap();
         let append_ms = begin.elapsed().as_secs_f64() * 1000.;
+        append(
+            &store,
+            key("properties", "main"),
+            vec![record(
+                size + 1,
+                EventKind::InputDeleted(InputDeletedData {
+                    input_id: format!("event-{size}"),
+                }),
+            )],
+        )
+        .await
+        .unwrap();
         let mut measured = Vec::new();
         for (term, expected) in [("uniqueneedle", 1), ("absentwordxyz", 0)] {
-            let mut query = fields(&["id"]);
-            query.filter = Some(QueryFilter::And {
-                conditions: vec![
-                    eq("kind", json!("input/message")),
-                    QueryFilter::TextCandidate {
-                        field: "data".into(),
-                        partition_by: vec![],
-                        terms: vec![term.into()],
-                    },
-                ],
-            });
-            store.record_query_statistics();
-            let result = store
-                .query(&scope(size), &query, Some(&page(2)))
-                .await
-                .unwrap();
-            let stats = store.take_query_statistics();
-            let dim_agent_runtime::QueryOutput::Rows { rows } = result.result else {
-                panic!("candidate rows")
-            };
-            assert_eq!(rows.len(), expected);
-            println!("candidate size={size} term={term} stats={stats:?}");
-            assert!(
-                stats
-                    .iter()
-                    .any(|statement| statement.stage == "text_candidates"
-                        && statement
-                            .plan
-                            .iter()
-                            .any(|line| line.contains("VIRTUAL TABLE INDEX"))),
-                "{stats:?}"
-            );
-            assert!(
-                stats
-                    .iter()
-                    .map(|statement| statement.full_scan_steps)
-                    .sum::<i32>()
-                    < 100,
-                "a selective word must not scan event or metadata history: {stats:?}"
-            );
-            measured.push(
-                stats
-                    .iter()
-                    .map(|statement| statement.vm_steps)
-                    .sum::<i32>(),
-            );
-            query.select = QuerySelect::Count;
-            let dim_agent_runtime::QueryOutput::Count { count } = store
-                .query(&scope(size), &query, None)
-                .await
-                .unwrap()
-                .result
-            else {
-                panic!("candidate count")
-            };
-            assert_eq!(count, expected as u64);
+            for (related, through, expected) in [
+                (false, size, expected),
+                (true, size, expected),
+                (true, size + 1, 0),
+            ] {
+                let mut query = fields(&["id"]);
+                query.filter = Some(QueryFilter::And {
+                    conditions: vec![
+                        eq("kind", json!("input/message")),
+                        QueryFilter::TextCandidate {
+                            field: "data".into(),
+                            partition_by: vec![],
+                            terms: vec![term.into()],
+                        },
+                    ],
+                });
+                if related {
+                    let QueryFilter::And { conditions } = query.filter.as_mut().unwrap() else {
+                        unreachable!()
+                    };
+                    conditions.push(QueryFilter::Not {
+                        condition: Box::new(QueryFilter::Exists {
+                            condition: Box::new(QueryFilter::And {
+                                conditions: vec![
+                                    eq("kind", json!("input/deleted")),
+                                    QueryFilter::Compare {
+                                        left: QueryOperand::Field {
+                                            path: "data.input_id".into(),
+                                        },
+                                        comparison: QueryComparison::Eq,
+                                        right: QueryOperand::Outer { path: "id".into() },
+                                    },
+                                ],
+                            }),
+                        }),
+                    });
+                }
+                store.record_query_statistics();
+                let result = store
+                    .query(&scope(through), &query, Some(&page(2)))
+                    .await
+                    .unwrap();
+                let stats = store.take_query_statistics();
+                let dim_agent_runtime::QueryOutput::Rows { rows } = result.result else {
+                    panic!("candidate rows")
+                };
+                assert_eq!(rows.len(), expected);
+                println!("candidate size={size} term={term} stats={stats:?}");
+                assert!(
+                    stats
+                        .iter()
+                        .any(|statement| statement.stage == "text_candidates"
+                            && statement
+                                .plan
+                                .iter()
+                                .any(|line| line.contains("VIRTUAL TABLE INDEX"))),
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .iter()
+                        .map(|statement| statement.full_scan_steps)
+                        .sum::<i32>()
+                        < 100,
+                    "a selective word must not scan event or metadata history: {stats:?}"
+                );
+                measured.push(
+                    stats
+                        .iter()
+                        .map(|statement| statement.vm_steps)
+                        .sum::<i32>(),
+                );
+                query.select = QuerySelect::Count;
+                let dim_agent_runtime::QueryOutput::Count { count } = store
+                    .query(&scope(through), &query, None)
+                    .await
+                    .unwrap()
+                    .result
+                else {
+                    panic!("candidate count")
+                };
+                assert_eq!(count, expected as u64);
+            }
         }
         store.close().await.unwrap();
         db.close().await.unwrap();
