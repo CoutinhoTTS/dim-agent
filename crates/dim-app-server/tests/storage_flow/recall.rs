@@ -124,11 +124,10 @@ async fn sqlite_recall_verifies_indexed_candidates_and_fallbacks_against_the_sam
                 assert!(
                     statistics
                         .iter()
-                        .any(|statement| statement.stage == "text_candidates"
-                            && statement
-                                .plan
-                                .iter()
-                                .any(|line| line.contains("VIRTUAL TABLE INDEX"))),
+                        .any(|statement| statement.plan.iter().any(|line| {
+                            line.contains("timeline_text_fts")
+                                && line.contains("VIRTUAL TABLE INDEX")
+                        })),
                     "{statistics:?}"
                 );
             }

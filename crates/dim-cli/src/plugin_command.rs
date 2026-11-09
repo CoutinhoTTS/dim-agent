@@ -198,18 +198,23 @@ fn text(value: &Value) -> String {
 /// One name: what it uses, its status and the other candidates.
 fn list_line(item: &Value) -> String {
     let mut line = format!("{}  use={}", text(&item["name"]), text(&item["use"]));
-    if let Some(status) = item["status"].as_str() {
-        line.push_str(&format!("  {}", safe(status)));
-    }
-    if item["locked"] == true {
-        line.push_str("  locked");
-    }
     let candidates: Vec<String> = item["candidates"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|candidate| text(&candidate["id"]))
         .collect();
+    // An optional plugin the home does not have yet comes without a status:
+    // say what it is, and name the command that installs it below.
+    let installable = item["optional"] == true && candidates.is_empty();
+    if installable {
+        line.push_str("  optional, not installed");
+    } else if let Some(status) = item["status"].as_str() {
+        line.push_str(&format!("  {}", safe(status)));
+    }
+    if item["locked"] == true {
+        line.push_str("  locked");
+    }
     line.push_str(&format!("  candidates={}", candidates.join(",")));
     if let Some(error) = item["error"].as_str() {
         line.push_str(&format!("\n    error: {}", safe(error)));
@@ -217,6 +222,18 @@ fn list_line(item: &Value) -> String {
     if let Some(waiting) = item["waitingFor"].as_array().filter(|w| !w.is_empty()) {
         let names: Vec<String> = waiting.iter().map(text).collect();
         line.push_str(&format!("\n    waiting for: {}", names.join(", ")));
+    }
+    if installable {
+        line.push_str(&format!(
+            "\n    install: dimcode plugin install --optional {}",
+            text(&item["name"])
+        ));
+    }
+    if let Some(version) = item["update"]["version"].as_str() {
+        line.push_str(&format!("\n    update: {}", safe(version)));
+    }
+    if let Some(error) = item["update"]["error"].as_str() {
+        line.push_str(&format!("\n    update failed: {}", safe(error)));
     }
     line
 }
@@ -238,7 +255,7 @@ fn summary(method: &str, result: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{list_line, parse};
     use serde_json::{Value, json};
 
     fn parsed(args: &[&str]) -> Result<(String, Value), String> {
@@ -348,5 +365,92 @@ mod tests {
         ] {
             assert!(parsed(&args).is_err(), "{args:?}");
         }
+    }
+
+    /// An optional plugin the home does not have says so where its status
+    /// would go, and the detail line names the command that installs it.
+    #[test]
+    fn an_uninstalled_optional_item_shows_its_install_command() {
+        let item = json!({
+            "name": "light-ocr",
+            "use": null,
+            "off": true,
+            "locked": false,
+            "candidates": [],
+            "optional": true,
+        });
+        assert_eq!(
+            list_line(&item),
+            concat!(
+                "light-ocr  use=-  optional, not installed  candidates=\n",
+                "    install: dimcode plugin install --optional light-ocr",
+            )
+        );
+    }
+
+    /// An installed plugin with an update shows its version, and no failed
+    /// line when the update has no error.
+    #[test]
+    fn an_installed_item_with_an_update_shows_its_version() {
+        let item = json!({
+            "name": "light-ocr",
+            "use": "light-ocr",
+            "status": "running",
+            "locked": false,
+            "candidates": [{"id": "light-ocr"}],
+            "optional": true,
+            "update": {"version": "1.1.0"},
+        });
+        assert_eq!(
+            list_line(&item),
+            concat!(
+                "light-ocr  use=light-ocr  running  candidates=light-ocr\n",
+                "    update: 1.1.0",
+            )
+        );
+    }
+
+    /// An update that failed keeps its version line and adds the error.
+    #[test]
+    fn a_failed_update_shows_both_lines() {
+        let item = json!({
+            "name": "light-ocr",
+            "use": "light-ocr",
+            "status": "running",
+            "locked": false,
+            "candidates": [{"id": "light-ocr"}],
+            "update": {"version": "1.1.0", "error": "network unreachable"},
+        });
+        assert_eq!(
+            list_line(&item),
+            concat!(
+                "light-ocr  use=light-ocr  running  candidates=light-ocr\n",
+                "    update: 1.1.0\n",
+                "    update failed: network unreachable",
+            )
+        );
+    }
+
+    /// An item with neither field prints exactly what it printed before the
+    /// optional and update columns existed.
+    #[test]
+    fn an_item_without_optional_or_update_prints_as_before() {
+        let item = json!({
+            "name": "web",
+            "use": "web",
+            "status": "running",
+            "locked": true,
+            "candidates": [{"id": "web"}],
+            "error": "last start failed",
+            "waitingFor": ["node"],
+        });
+        assert_eq!(
+            list_line(&item),
+            concat!(
+                "web  use=web  running  locked  candidates=web\n",
+                "    error: last start failed\n",
+                "    waiting for: node",
+            )
+        );
     }
 }

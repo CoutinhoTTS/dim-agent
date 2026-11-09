@@ -109,7 +109,7 @@ test('workflow actions use immutable commits',()=>{
   }
 });
 
-test('the default list stages only its content plugin and runs no npm ci', {skip:process.platform==='win32'}, (t)=>{
+test('the default list stages its content and optional plugins and runs no npm ci', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
@@ -123,13 +123,16 @@ test('the default list stages only its content plugin and runs no npm ci', {skip
   assert.equal(existsSync(log),false,'no default plugin needs npm ci');
   const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json'),'utf8'));
   assert.equal(record.schemaVersion,1);
-  assert.deepEqual(Object.keys(record.plugins),['plugin-authoring']);
+  assert.deepEqual(Object.keys(record.plugins),['plugin-authoring','light-ocr']);
   for (const name of ['goal','workflow']) {
     assert.equal(existsSync(path.join(output,'plugins',name)),false,name);
   }
   assert(existsSync(path.join(output,'plugins/plugin-authoring/dim-plugin.json')));
+  assert(existsSync(path.join(output,'plugins/light-ocr/index.ts')));
+  assert.equal(existsSync(path.join(output,'plugins/light-ocr/node_modules')),false,'an optional plugin stages without dependencies');
   const defaults=JSON.parse(readFileSync(path.join(output,'default-plugins.json')));
   assert.deepEqual(Object.keys(defaults.plugins),['plugin-authoring']);
+  assert.deepEqual(Object.keys(defaults.optional),['light-ocr']);
 });
 
 test('staging a package plugin update is incremental and never leaves a half stage', {skip:process.platform==='win32'}, (t)=>{
@@ -708,7 +711,46 @@ test('the current default plugins pass the portable check', {skip:process.platfo
   assert.equal(staged.status,0,staged.stderr);
   const defaults=JSON.parse(readFileSync(path.join(output,'default-plugins.json')));
   assert.deepEqual(Object.keys(defaults.plugins),['plugin-authoring']);
-  assert.deepEqual(readdirSync(path.join(output,'plugins')),['plugin-authoring']);
+  // The portable check covers default plugins only: the optional plugin
+  // ships too, its platform packages are the install's business.
+  assert.deepEqual(readdirSync(path.join(output,'plugins')).sort(),['light-ocr','plugin-authoring']);
+});
+
+/// The repository's own optional map: every entry is a complete plugin
+/// directory, and staging copies it without its dependencies (LightOcr
+/// Appendix D item 9, on the real tree).
+test('the shipped optional plugins are complete and stage without dependencies', {skip:process.platform==='win32'}, (t)=>{
+  const runtime=path.join(root,'runtime');
+  const {plugins,optional}=JSON.parse(readFileSync(path.join(runtime,'default-plugins.json'),'utf8'));
+  const names=Object.keys(optional??{});
+  assert(names.length>0,'the default list ships at least one optional plugin');
+  for (const name of names) {
+    const directory=path.join(runtime,optional[name]);
+    assert(existsSync(directory),`${name}: ${optional[name]} does not exist`);
+    const manifest=JSON.parse(readFileSync(path.join(directory,'dim-plugin.json'),'utf8'));
+    assert.equal(manifest.name,name,`${name}: dim-plugin.json names ${manifest.name}`);
+    assert.match(manifest.version??'',/^\d+\.\d+\.\d+$/,`${name}: version ${manifest.version}`);
+    if (manifest.dependencies==='npm') {
+      for (const file of ['package.json','package-lock.json']) {
+        assert(existsSync(path.join(directory,file)),`${name}: declares npm dependencies without ${file}`);
+      }
+    }
+    assert.equal(Object.hasOwn(plugins,name),false,`${name} is listed as both a default and an optional plugin`);
+    assert.equal(readdirSync(directory).includes('node_modules'),false,`${name}: the shipped directory carries node_modules`);
+  }
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nexit 1\n',{mode:0o755});
+  const output=path.join(temporary,'staged');
+  const staged=run('stage-plugins.mjs',[output],{PATH:`${bin}:${process.env.PATH}`});
+  assert.equal(staged.status,0,staged.stderr);
+  for (const name of names) {
+    const shipped=readdirSync(path.join(runtime,optional[name])).sort();
+    const copied=readdirSync(path.join(output,optional[name])).sort();
+    assert.deepEqual(copied,shipped,`${name}: the stage does not carry the shipped files`);
+    assert.equal(existsSync(path.join(output,optional[name],'node_modules')),false,`${name}: the stage carries node_modules`);
+  }
 });
 
 test('stages public native payload, packs it and rejects modified content', {skip:process.platform==='win32'}, (t)=>{
@@ -762,7 +804,7 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   writeFileSync(path.join(npmBin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules/@arcships/rutis"\nexit 0\n',{mode:0o755});
   const selected=run('stage-plugins.mjs',[plugins],{PATH:`${npmBin}:${process.env.PATH}`});
   assert.equal(selected.status,0,selected.stderr);
-  assert.deepEqual(readdirSync(path.join(plugins,'plugins')),['plugin-authoring']);
+  assert.deepEqual(readdirSync(path.join(plugins,'plugins')).sort(),['light-ocr','plugin-authoring']);
   assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'empty'),version,commit,'--plugins',bin]).status,0);
   const stage=path.join(temporary,'stage');
   assert.notEqual(run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins]).status,0);

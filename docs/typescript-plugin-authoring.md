@@ -822,7 +822,7 @@ parts.
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `consume(name, keys, rebuild, handler)` registers an ordered consumer on the calling part's context. It subscribes first and holds the matching facts, calls `rebuild` once — the part reads the facts it folds through `timeline.query` including its publishing facts and returns the cutoff that read took — then delivers the held facts above the cutoff and each later matching fact, in sequence order, and none twice. `listen(name, keys, handler)` registers a live consumer only, for a part that does not rebuild. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
+| `dispatcher` | `consume(name, keys, rebuild, handler)` registers an ordered consumer on the calling part's context. It subscribes first and holds the matching facts, calls `rebuild` once — the part reads the facts it folds through `timeline.query` including its publishing facts and returns the cutoff that read took — then delivers the held facts above the cutoff and each later matching fact, in sequence order, and none twice. `listen(name, keys, handler)` registers a live consumer only, for a part that does not rebuild. A handler's throw/rejection follows the native branch failure path. `committed()` returns the committed cutoff; read facts and properties through `timeline.query`. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
@@ -882,9 +882,7 @@ branch part and is rebuilt on each generation.
 
 The kind list of the read is the kinds the rebuild folds, which are not always the keys the part
 consumes: a rebuild may fold the terminals of the operations its part issues. A part that reads
-nothing may use `listen` instead, which delivers live facts only; a read of `local` or `history`
-inside a rebuild works too, and the [real Node part](../runtime/fixtures/branch-part.ts) reads that
-way.
+nothing may use `listen` instead, which delivers live facts only. The [real Node part](../runtime/fixtures/branch-part.ts) also rebuilds through `timeline.query`.
 
 Callbacks can run on opening facts before publication. Register long work in the part's owned
 tasks and return; do not wait for dispatch, activation or a child creation whose progress depends
@@ -930,7 +928,7 @@ appending their events. The branch's Timeline is closed by the branch itself, so
 `close`.
 
 Extension events behave like any other branch event. `dispatcher.consume` with a key such as
-`myplugin/*` delivers them in order, `local` and `history` return them, they are persisted and
+`myplugin/*` delivers them in order, `timeline.query` returns them, they are persisted and
 restored with the branch, and a restored generation rebuilds from them. They never reach the
 model's context; write an adopted input or return a tool result when the model needs content
 ([ADR 001](adr/001-harness-foundation.md#events-and-ownership-issue-2)). Existing v1-v3 client

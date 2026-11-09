@@ -101,7 +101,7 @@ the directory usable and reports the failure for that selection.
 
 ### Opening a conversation with a bounded window
 
-CLI main, line mode, branch side panels, member conversations and ACP load/resume
+CLI main, line mode, branch side panels, member conversations, Web and ACP load/resume
 open with `session.history {latestTurn: true, limit: 256}`, then use
 `{before: nextBefore, through, limit: 256}` without `latestTurn`. The capability
 name is `session.history.latestTurn`; it is not a separate RPC method. Every page
@@ -126,7 +126,7 @@ advances. `done` from `latestTurn` ends that turn window, not the branch's histo
 JSON exec emits live wire notifications and has no historical transcript; it reads
 one window page to pin the cursor without decoding historical event bodies.
 Earlier transcript is loaded only on user request. Export keeps its full fixed
-prefix; reconnect catch-up starts from the last consumed cursor.
+prefix. CLI/ACP reconnect catch-up starts from the last consumed cursor; Web replaces each opened transcript with a fresh bounded window.
 
 ```text
 attach -> latest page -> older page(s), at most 4 total -> draw -> live

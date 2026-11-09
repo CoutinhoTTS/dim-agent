@@ -42,7 +42,7 @@ function busy(branchId: string): boolean {
 
 function showDot(branchId: string): boolean {
   const state = line(branchId)?.state.kind
-  return busy(branchId) || state === "ended-itself" || state === "ended-by-operation" || state === "ended-with" || state === "creation-failed"
+  return busy(branchId) || state === "ending" || state === "ended" || state === "ended-itself" || state === "ended-by-operation" || state === "ended-with" || state === "creation-failed"
 }
 
 function openLines(): void {

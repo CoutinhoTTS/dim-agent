@@ -1,17 +1,12 @@
-/**
- * The Session's lines, folded from the branch facts in every branch's history.
- *
- * A line is a Timeline of the same Session. It has one parent, a cut in that
- * parent, and a purpose from its opening input. This registry owns the tree,
- * the cut's user-message count and the line state; the transcript stays in
- * `Projection`.
- */
 import type { SessionEvent } from "./rpc/protocol"
+import type { BranchEntry } from "./rpc/read"
 
 export type LineState =
   | { kind: "main" }
   | { kind: "working" }
   | { kind: "waiting" }
+  | { kind: "ending" }
+  | { kind: "ended" }
   | { kind: "ended-itself" }
   | { kind: "ended-by-operation" }
   | { kind: "ended-with"; ancestor: string }
@@ -24,7 +19,7 @@ export type LineView = {
   purpose: string
   state: LineState
   /** Where it was cut from its parent; `null` for main. */
-  cut: { sequence: number; messages: number } | null
+  cut: { sequence: number; messages: number | undefined } | null
   depth: number
 }
 
@@ -34,6 +29,7 @@ type LineNode = {
   purpose: string
   at: number
   order: number
+  cutMessages?: number
   failed: boolean
   ended: LineState | undefined
 }
@@ -43,20 +39,29 @@ const endsByOperation = { kind: "ended-by-operation" } as const
 
 export class Lines {
   private nodes = new Map<string, LineNode>()
-  private messages = new Map<string, Map<string, number>>()
   private running = new Set<string>()
-  private nextOrder = 0
+
+  directory(entries: readonly BranchEntry[]): void {
+    this.nodes.clear()
+    for (const entry of entries) this.detail(entry)
+  }
+
+  detail(entry: BranchEntry): void {
+    if (entry.branchId === "main") return
+    const previous = this.nodes.get(entry.branchId)
+    this.nodes.set(entry.branchId, {
+      id: entry.branchId, parentId: entry.parentBranchId!, at: entry.branchPoint!,
+      purpose: entry.purpose === undefined ? previous?.purpose ?? "" : firstLine(entry.purpose),
+      cutMessages: entry.cutMessages ?? previous?.cutMessages,
+      order: previous?.order ?? this.nodes.size, failed: entry.state === "creation_failed",
+      ended: entry.state === "ending" ? { kind: "ending" } : entry.end === undefined ? (entry.state === "ended" ? { kind: "ended" } : previous?.ended) : endedState(entry.end.source, entry.end.ancestor),
+    })
+  }
 
   /** Folds one event of `branchId` into the tree. Repeated facts are idempotent. */
   apply(branchId: string, event: SessionEvent): void {
     const content = event.content
     switch (content.kind) {
-      case "input":
-        this.addMessage(branchId, event.id, event.sequence)
-        break
-      case "input-deleted":
-        this.messages.get(branchId)?.delete(content.inputId)
-        break
       case "branch-create": {
         if (this.nodes.has(content.branchId)) return
         this.nodes.set(content.branchId, {
@@ -64,7 +69,7 @@ export class Lines {
           parentId: branchId,
           purpose: firstLine(content.prompt),
           at: content.at ?? event.sequence,
-          order: this.nextOrder++,
+          order: this.nodes.size,
           failed: false,
           ended: undefined,
         })
@@ -76,12 +81,17 @@ export class Lines {
           parentId: branchId,
           purpose: "",
           at: event.sequence,
-          order: this.nextOrder++,
+          order: this.nodes.size,
           failed: false,
           ended: undefined,
         }
         node.failed = true
         this.nodes.set(node.id, node)
+        break
+      }
+      case "branch-end": {
+        const node = this.nodes.get(branchId)
+        if (node !== undefined) node.ended = { kind: "ending" }
         break
       }
       case "branch-ended": {
@@ -127,7 +137,7 @@ export class Lines {
           parentId: node.parentId,
           purpose: node.purpose,
           state: this.stateOf(node),
-          cut: { sequence: node.at, messages: this.cutMessages(node) },
+          cut: { sequence: node.at, messages: node.cutMessages },
           depth,
         })
         walk(node.id, depth + 1)
@@ -142,18 +152,12 @@ export class Lines {
         parentId: node.parentId,
         purpose: node.purpose,
         state: this.stateOf(node),
-        cut: { sequence: node.at, messages: this.cutMessages(node) },
+        cut: { sequence: node.at, messages: node.cutMessages },
         depth: 1,
       })
       walk(node.id, 2)
     }
     return out
-  }
-
-  private addMessage(branchId: string, inputId: string, sequence: number): void {
-    const messages = this.messages.get(branchId) ?? new Map<string, number>()
-    messages.set(inputId, sequence)
-    this.messages.set(branchId, messages)
   }
 
   private stateOf(node: LineNode): LineState {
@@ -162,21 +166,7 @@ export class Lines {
     return this.running.has(node.id) ? { kind: "working" } : { kind: "waiting" }
   }
 
-  private cutMessages(node: LineNode): number {
-    const parent = this.nodes.get(node.parentId)
-    const inherited = parent === undefined ? 0 : this.cutMessages(parent)
-    return inherited + this.messagesThrough(node.parentId, node.at)
-  }
-
-  private messagesThrough(branchId: string, sequence: number): number {
-    let count = 0
-    for (const at of this.messages.get(branchId)?.values() ?? []) {
-      if (at <= sequence) count++
-    }
-    return count
-  }
 }
-
 function firstLine(text: string): string {
   return text.split("\n")[0]?.trim() ?? ""
 }

@@ -124,6 +124,28 @@ pub trait TimelineStore: Send + Sync + 'static {
     /// a batch. An interior sequence is invalid input; a sequence the branch
     /// does not store is a storage error.
     fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>>;
+    /// Returns the end of the batch containing `sequence`, without decoding event content.
+    /// Zero denotes the position before the first event.
+    fn batch_end_at<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(async move {
+            let mut end = sequence;
+            loop {
+                match self.batch_end(key, end).await {
+                    Ok(()) => return Ok(end),
+                    Err(crate::AgentError::InvalidInput(_)) => {
+                        end = end.checked_add(1).ok_or_else(|| {
+                            crate::AgentError::Storage("batch sequence overflow".into())
+                        })?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+    }
     /// Range starts may be inside a batch; the end must be a batch boundary.
     fn read<'a>(
         &'a self,
@@ -152,27 +174,16 @@ pub trait TimelineStore: Send + Sync + 'static {
                     "future Timeline cursor".into(),
                 ));
             }
-            let records = self.read(key, after.max(1)..=through).await?;
-            if after > 0
-                && records
-                    .first()
-                    .is_some_and(|record| record.batch_end != after)
-            {
-                return Err(crate::AgentError::InvalidInput(
-                    "cursor is inside an atomic batch".into(),
-                ));
-            }
-            if limit == 0 {
+            self.batch_end(key, after).await?;
+            self.batch_end(key, through).await?;
+            if limit == 0 || after == through {
                 return Ok(vec![]);
             }
-            let mut records: Vec<_> = records
-                .into_iter()
-                .filter(|record| record.event.sequence > after)
-                .collect();
-            if let Some(record) = records.get(limit - 1) {
-                let end = record.batch_end;
-                records.retain(|record| record.event.sequence <= end);
-            }
+            let target = after
+                .saturating_add(u64::try_from(limit).unwrap_or(u64::MAX))
+                .min(through);
+            let end = self.batch_end_at(key, target).await?;
+            let records = self.read(key, after + 1..=end).await?;
             Ok(records)
         })
     }

@@ -2,12 +2,14 @@ use dim_agent_capabilities::{
     host::{AuxiliaryModelHost, AuxiliaryRequest},
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, reply},
     session_broadcast::{SessionBroadcast, SessionBroadcastEvent, session_channel},
+    timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    AgentBuilder, CollaborationRole, Names, PartRegistry, PartScope, SessionConfig,
-    SessionIdentity, SessionLifecycle,
+    AgentBuilder, CollaborationRole, Names, PartRegistry, PartScope, QueryFilter, QueryOperand,
+    QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, SessionConfig,
+    SessionIdentity, SessionLifecycle, TimelineQuery, TimelineQueryScope,
 };
-use dim_agent_types::{AgentEvent, ContentBlock, EventKind, Message, ModelId, Role, UserInput};
+use dim_agent_types::{ContentBlock, EventKind, Message, ModelId, Role, UserInput};
 use dim_app_server::{
     settings::{SettingsScope, SettingsService, SourceDeclaration},
     storage::{MetadataError, SessionStore, Title, TitleSource},
@@ -15,11 +17,11 @@ use dim_app_server::{
 use regex::Regex;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
-use rutis_bridge::session::{HostDispatch, Value as ServiceValue, arg, host_key, settle};
+use rutis_bridge::session::{Value as ServiceValue, arg, host_key, settle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    num::NonZeroU64,
     sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
@@ -133,7 +135,7 @@ impl DynPlugin for SessionTitlePlugin {
 
 struct SessionTitle {
     settings: Key<SettingsService>,
-    sessions: Key<dyn HostDispatch>,
+    tree: Key<TreeCommands>,
     store: Key<SessionStore>,
     auxiliary: Key<AuxiliaryModelHost>,
     identity: Key<SessionIdentity>,
@@ -145,7 +147,7 @@ impl SessionTitle {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
-            sessions: host_key("sessions"),
+            tree: names.key()?,
             store: names.key()?,
             auxiliary: names.key()?,
             identity: names.key()?,
@@ -162,7 +164,7 @@ impl DynPlugin for SessionTitle {
     fn injects(&self) -> Vec<TypeKey> {
         vec![
             self.settings.erase(),
-            self.sessions.erase(),
+            self.tree.erase(),
             self.store.erase(),
             self.auxiliary.erase(),
             self.identity.erase(),
@@ -180,7 +182,7 @@ impl DynPlugin for SessionTitle {
                 ctx: ctx.clone(),
                 id: identity.session_id.clone(),
                 settings: ctx.require_at(&self.settings)?,
-                sessions: ctx.require_at(&self.sessions)?,
+                tree: ctx.require_at(&self.tree)?,
                 store: ctx.require_at(&self.store)?,
                 auxiliary: ctx.require_at(&self.auxiliary)?,
                 state: Mutex::new(State::default()),
@@ -269,7 +271,7 @@ struct Owner {
     ctx: Ctx,
     id: String,
     settings: Arc<SettingsService>,
-    sessions: Arc<dyn HostDispatch>,
+    tree: Arc<TreeCommands>,
     store: Arc<SessionStore>,
     auxiliary: Arc<AuxiliaryModelHost>,
     state: Mutex<State>,
@@ -296,45 +298,60 @@ impl Owner {
             if !self.current(epoch) || document.as_ref().is_ok_and(|d| !d.enabled) { return Ok("skipped"); }
             let stored = self.store.metadata(&self.id).await;
             if !self.current(epoch) || stored.as_ref().is_ok_and(|m| m.title.is_some()) { return Ok("skipped"); }
-            let mut first = None;
-            let mut model = None;
-            let mut operator = false;
-            let mut inputs = HashMap::<String, UserInput>::new();
-            let mut after = None;
-            let mut through = None;
-            loop {
-                let call = self.sessions.invoke("history", json!([{
-                    "sessionId": self.id, "branchId":"main", "after":after, "through":through,
-                    "atLeast":through.is_none().then_some(sequence),
-                }]).into()).map_err(|_| ())?;
-                let mut page = settle(call).await.map_err(|_| ())?.json().map_err(|_| ())?;
-                if page["ok"] != true { return Err(()); }
-                let page = page.get_mut("value").ok_or(())?;
-                let head = page["through"].as_u64().ok_or(())?;
-                let events: Vec<AgentEvent> = serde_json::from_value(page["events"].take()).map_err(|_| ())?;
-                through = Some(head);
-                for event in &events {
-                    match &event.kind {
-                        EventKind::InputMessage(message) => {
-                            if let Some(user) = &message.user {
-                                operator |= event.id == input_id;
-                                if first.is_none() { inputs.insert(event.id.clone(), user.clone()); }
-                            }
+            let kind = |value: &str| QueryFilter::In {
+                value: QueryOperand::Field { path: "kind".into() }, values: vec![value.into()],
+            };
+            let field = |path: &str, value: Value| QueryFilter::In {
+                value: QueryOperand::Field { path: path.into() }, values: vec![value],
+            };
+            let request = |through, filter, select, pick| TimelineQuery {
+                scope: TimelineQueryScope::Branch, from: None, through, include_publishing: false,
+                query: QuerySpec { filter: Some(filter), select, group_by: vec![], pick, order_by: vec![] },
+                page: Some(QueryPage { limit: NonZeroU64::MIN, after: None }),
+            };
+            let first = self.tree.query("main".into(), request(None, QueryFilter::And {
+                conditions: vec![kind("input/applied"), QueryFilter::Exists {
+                    condition: Box::new(QueryFilter::And { conditions: vec![
+                        kind("input/message"),
+                        QueryFilter::Compare {
+                            left: QueryOperand::Field { path: "id".into() },
+                            comparison: dim_agent_runtime::QueryComparison::Eq,
+                            right: QueryOperand::Outer { path: "data.input_id".into() },
                         },
-                        EventKind::InputApplied(applied) if first.is_none() => first = inputs.remove(&applied.input_id),
-                        EventKind::ContextConfigured(configured) => model = Some(ModelId {
-                            provider_id: configured.settings.provider_id.clone(),
-                            model_id: configured.settings.model_id.clone(),
-                        }),
-                        _ => {},
-                    }
+                        QueryFilter::Present { value: QueryOperand::Field { path: "data.user".into() } },
+                    ] }),
+                }],
+            }, QuerySelect::Fields { fields: vec!["data.input_id".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
+            let through = first.through;
+            if through < sequence { return Err(()); }
+            let QueryOutput::Rows { rows } = first.result else { return Err(()); };
+            let Some(first) = rows.first() else { return Ok("skipped"); };
+            let [QueryValue::Value { value: Value::String(first_id) }] = first.values.as_slice() else { return Err(()); };
+            let operator = self.tree.query("main".into(), request(Some(through), QueryFilter::And {
+                conditions: vec![kind("input/message"), field("id", input_id.into()),
+                    QueryFilter::Present { value: QueryOperand::Field { path: "data.user".into() } }],
+            }, QuerySelect::Fields { fields: vec!["id".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = operator.result else { return Err(()); };
+            if rows.is_empty() { return Ok("skipped"); }
+            let input = self.tree.query("main".into(), request(Some(through), QueryFilter::And {
+                conditions: vec![kind("input/message"), field("id", first_id.clone().into())],
+            }, QuerySelect::Fields { fields: vec!["data.user".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = input.result else { return Err(()); };
+            let Some(row) = rows.first() else { return Err(()); };
+            let [QueryValue::Value { value }] = row.values.as_slice() else { return Err(()); };
+            let first: UserInput = serde_json::from_value(value.clone()).map_err(|_| ())?;
+            let configured = self.tree.query("main".into(), request(Some(through), kind("context/configured"),
+                QuerySelect::Fields { fields: vec!["data.settings.providerId".into(), "data.settings.modelId".into()] },
+                Some(QueryPick::Last))).await.map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = configured.result else { return Err(()); };
+            let model = match rows.first() {
+                None => None,
+                Some(row) => {
+                    let [QueryValue::Value { value: Value::String(provider_id) }, QueryValue::Value { value: Value::String(model_id) }] = row.values.as_slice() else { return Err(()); };
+                    Some(ModelId { provider_id: provider_id.clone(), model_id: model_id.clone() })
                 }
-                let Some(last) = events.last() else { break; };
-                after = Some(last.sequence);
-                if last.sequence >= head { break; }
-            }
-            if !self.current(epoch) || !operator { return Ok("skipped"); }
-            let Some(first) = first else { return Ok("skipped"); };
+            };
+            if !self.current(epoch) { return Ok("skipped"); }
             {
                 let mut state = self.state.lock().unwrap();
                 if state.epoch != epoch || self.stop.is_cancelled() { return Ok("skipped"); }
