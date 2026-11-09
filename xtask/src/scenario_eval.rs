@@ -193,13 +193,11 @@
 //!   event is still to be published, except an `afterSubscribedSeconds`
 //!   event whose clock never started: a model that never subscribed cannot
 //!   make it fire, so it is never published and never holds the run open.
-//!   A delivery starts a turn unless its mode is `append`. An
-//!   `afterSubscribedSeconds` event's mode is the strongest effective mode
-//!   among the subscriptions its delivery lists, each one's own `mode` or
-//!   else the type's declared mode, read from `eventhub.subscriptions`
-//!   just before the publish; a timed or triggered event's mode is the
-//!   scenario's own subscription's, otherwise the type's declared mode. A
-//!   delivered receipt carries no mode of its own.
+//!   A delivery starts a turn unless its mode is `append`. For every
+//!   trigger, a delivery's mode is the strongest effective mode among the
+//!   subscriptions its delivery lists, each one's own `mode` or else the
+//!   type's declared mode, read from `eventhub.subscriptions` just before
+//!   the publish. A delivered receipt carries no mode of its own.
 //! - `message` is the operator's first message, submitted to `main`. A steer
 //!   is one more operator message to `main`, sent when the run reaches
 //!   `afterSeconds` of wall clock or, for `whenToolCall`, when a
@@ -1459,13 +1457,6 @@ pub(crate) struct EventSpec {
     /// that sets none (EventHub design §3.1).
     #[serde(skip)]
     pub(crate) declared_mode: InputMode,
-    /// The mode a timed or tool-triggered event arrives with: the scenario's
-    /// own subscription's mode, otherwise the event type's declared mode. An
-    /// `afterSubscribedSeconds` event takes its mode from the receipt
-    /// instead, whose deliveries list the subscriptions that directed each
-    /// branch (EventHub design §3.1, A.2).
-    #[serde(skip)]
-    pub(crate) mode: InputMode,
 }
 #[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1675,15 +1666,9 @@ fn into_scenario(
                 event.id, event.r#type, event.source
             ));
         };
-        // The mode the delivery arrives with: the scenario's subscription's,
-        // otherwise the event type's declared mode (EventHub design §3.1).
-        // A model-created subscription sets its own, which the receipt does
-        // not carry.
-        event.mode = source
-            .subscribe
-            .as_ref()
-            .and_then(|subscribe| subscribe.mode)
-            .unwrap_or(declared.mode);
+        // The type's declared mode applies to a delivery whose subscription
+        // sets none; a subscription's own mode wins, from the snapshot the
+        // publish's receipt is read against (EventHub design §3.1).
         event.declared_mode = declared.mode;
     }
     if raw.probes.is_empty() {
@@ -2419,7 +2404,7 @@ async fn drive(
                 return driven;
             }
         }
-        match fire_events_due(producer, &mut events, started).await {
+        match fire_events_due(client, producer, &mut events, started).await {
             Ok((published, starts)) => {
                 awaiting |= starts;
                 if published {
@@ -2528,7 +2513,7 @@ async fn drive(
                                 return driven;
                             }
                         }
-                        match fire_events_triggered(producer, &mut events, &event).await {
+                        match fire_events_triggered(client, producer, &mut events, &event).await {
                             Ok((published, starts)) => {
                                 awaiting |= starts;
                                 if published {
@@ -2819,7 +2804,7 @@ impl ProducerState {
     async fn publish(
         &self,
         event: &EventSpec,
-        subscriptions: Option<&BTreeMap<String, Option<InputMode>>>,
+        subscriptions: &BTreeMap<String, Option<InputMode>>,
     ) -> std::result::Result<bool, String> {
         let hub = self
             .hub()
@@ -2873,12 +2858,7 @@ impl ProducerState {
         // delivery's mode is the strongest effective mode among the
         // subscriptions it lists: an id names one the snapshot took just
         // before the publish, its own `mode` or else the type's declared
-        // mode. An `afterSubscribedSeconds` event reads them from the
-        // snapshot, because the model made them; a timed or triggered event
-        // has the scenario's own subscription only, which `event.mode` says.
-        let Some(subscriptions) = subscriptions else {
-            return Ok(starts_turn(event.mode));
-        };
+        // mode.
         let mut starts = false;
         for delivery in &deliveries {
             let mode = delivery["subscriptionIds"]
@@ -3162,9 +3142,34 @@ async fn declare_sources(
     Ok(())
 }
 
+/// The snapshot a publish's receipt is read against: each subscription's own
+/// `mode`, absent when the type's declared mode applies (EventHub design
+/// §3.1, A.2), read with the management call `eventhub.subscriptions` just
+/// before the publish.
+async fn subscription_modes(
+    client: &mut Client,
+) -> std::result::Result<BTreeMap<String, Option<InputMode>>, String> {
+    let reply = client
+        .rpc("eventhub.subscriptions", json!({}))
+        .await
+        .map_err(|error| format!("eventhub.subscriptions failed: {error}"))?;
+    let mut snapshot = BTreeMap::new();
+    for subscription in reply["subscriptions"].as_array().into_iter().flatten() {
+        let Some(id) = subscription["id"].as_str() else {
+            continue;
+        };
+        let mode = subscription["mode"]
+            .as_str()
+            .and_then(|mode| serde_json::from_value(json!(mode)).ok());
+        snapshot.insert(id.to_owned(), mode);
+    }
+    Ok(snapshot)
+}
+
 /// Publishes the timed events that are due; answers whether it published one
 /// and whether one starts a turn.
 async fn fire_events_due(
+    client: &mut Client,
     producer: &ProducerState,
     events: &mut [(EventSpec, bool)],
     started: Instant,
@@ -3177,7 +3182,8 @@ async fn fire_events_due(
             .is_some_and(|after| started.elapsed().as_secs_f64() >= after);
         if due && !*fired {
             *fired = true;
-            starts |= producer.publish(event, None).await?;
+            let snapshot = subscription_modes(client).await?;
+            starts |= producer.publish(event, &snapshot).await?;
             published = true;
         }
     }
@@ -3188,6 +3194,7 @@ async fn fire_events_due(
 /// `step/tool-use` event carries; answers whether it published one and
 /// whether one starts a turn.
 async fn fire_events_triggered(
+    client: &mut Client,
     producer: &ProducerState,
     events: &mut [(EventSpec, bool)],
     notice: &Value,
@@ -3205,7 +3212,8 @@ async fn fire_events_triggered(
             .is_some_and(|trigger| data.contains(trigger.as_str()));
         if triggered && !*fired {
             *fired = true;
-            starts |= producer.publish(event, None).await?;
+            let snapshot = subscription_modes(client).await?;
+            starts |= producer.publish(event, &snapshot).await?;
             published = true;
         }
     }
@@ -3284,34 +3292,20 @@ async fn fire_events_after_subscribe(
             }
         }
     }
-    let mut snapshot: BTreeMap<String, Option<InputMode>> = BTreeMap::new();
     let due = events
         .iter()
         .any(|(event, fired)| !*fired && subscribed_due(event));
-    if due {
-        let reply = client
-            .rpc("eventhub.subscriptions", json!({}))
-            .await
-            .map_err(|error| format!("eventhub.subscriptions failed: {error}"))?;
-        // The snapshot the publish's receipt is read against: each
-        // subscription's own `mode`, absent when the type's declared mode
-        // applies (EventHub design §3.1, A.2).
-        for subscription in reply["subscriptions"].as_array().into_iter().flatten() {
-            let Some(id) = subscription["id"].as_str() else {
-                continue;
-            };
-            let mode = subscription["mode"]
-                .as_str()
-                .and_then(|mode| serde_json::from_value(json!(mode)).ok());
-            snapshot.insert(id.to_owned(), mode);
-        }
-    }
+    let snapshot = if due {
+        subscription_modes(client).await?
+    } else {
+        BTreeMap::new()
+    };
     let mut published = false;
     let mut starts = false;
     for (event, fired) in events.iter_mut() {
         if !*fired && subscribed_due(event) {
             *fired = true;
-            starts |= producer.publish(event, Some(&snapshot)).await?;
+            starts |= producer.publish(event, &snapshot).await?;
             published = true;
         }
     }
@@ -4533,12 +4527,11 @@ mod tests {
         assert_eq!(both.goal_continuation.as_deref(), Some("second"));
     }
 
-    /// A delivery starts a turn unless its mode is `append`, and the mode is
-    /// the subscription's when it sets one, otherwise the event type's
-    /// declared mode: a delivered receipt carries none of its own (EventHub
-    /// design §3.1).
+    /// An event records its type's declared mode, whatever mode the
+    /// scenario's own subscription names: a delivery's effective mode comes
+    /// from the subscriptions the receipt lists (EventHub design §3.1, A.2).
     #[test]
-    fn an_event_starts_a_turn_unless_its_mode_is_append() {
+    fn an_event_keeps_its_type_declared_mode() {
         fn event_mode(
             directory: &std::path::Path,
             subscribe: Value,
@@ -4565,7 +4558,7 @@ mod tests {
             }))
             .unwrap();
             let scenario = into_scenario("case".into(), directory.to_path_buf(), file).unwrap();
-            let mode = scenario.events[0].mode;
+            let mode = scenario.events[0].declared_mode;
             (mode, starts_turn(mode))
         }
         let directory = std::env::temp_dir().join(format!(
@@ -4575,13 +4568,18 @@ mod tests {
         std::fs::create_dir_all(directory.join("workspace")).unwrap();
         assert_eq!(
             event_mode(&directory, json!("append"), json!("queue")),
-            (InputMode::Append, false),
-            "the subscription's mode wins over the type's, and append starts no turn"
+            (InputMode::Queue, true),
+            "the scenario's subscription mode stays out of the event; the type's mode is kept"
         );
         assert_eq!(
             event_mode(&directory, Value::Null, json!("queue")),
             (InputMode::Queue, true),
-            "without a subscription mode the declared one applies, and queue starts a turn"
+            "without a subscription the type's declared mode applies"
+        );
+        assert_eq!(
+            event_mode(&directory, json!("steer"), json!("append")),
+            (InputMode::Append, false),
+            "an append-typed event starts no turn"
         );
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -9459,6 +9457,157 @@ mod tests {
             record.events.is_empty(),
             "the event was never published: {:?}",
             record.events
+        );
+    }
+
+    /// A timed delivery's mode comes from the subscriptions that directed it:
+    /// a model that subscribes with `append` to a type declared `queue`
+    /// receives the `afterSeconds` event as an `append` input, which starts
+    /// no turn, so the run ends idle rather than at its seconds budget
+    /// (EventHub design §3.1, A.2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_timed_append_delivery_starts_no_turn() {
+        /// The judge's verdict, the `events` subscribe call until its result
+        /// is in the request, and plain text after.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| {
+                (!text.contains("sub_")).then(|| {
+                    tool_call(
+                        "events",
+                        &json!({"action": "subscribe", "types": ["ci.failure"], "mode": "append"})
+                            .to_string(),
+                    )
+                })
+            })
+        }
+        let fixture = Fixture::start(
+            "eventhub-tool-timed-append",
+            answers,
+            json!({
+                "message": "Subscribe to CI failures with append, then finish.",
+                "sources": [{
+                    "name": "ci",
+                    "guide": "CI publishes a failure notice when a build breaks.",
+                    "types": [{
+                        "type": "ci.failure",
+                        "description": "A failed build.",
+                        "mode": "queue"
+                    }]
+                }],
+                "events": [{
+                    "source": "ci",
+                    "type": "ci.failure",
+                    "id": "f-1",
+                    "title": "The build failed",
+                    "body": "The build failed on the release branch.",
+                    "afterSeconds": 1
+                }],
+                "budget": {"turns": 4, "seconds": 30, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let record = run_arm(&fixture, &options, "current", &Overrides::default(), 0).await;
+        assert_eq!(record.error, None);
+        assert!(
+            !record.failed,
+            "the delivery is correct and nothing is outstanding"
+        );
+        assert_eq!(
+            record.stop, "idle",
+            "an append delivery starts no turn: {:?}",
+            record.events
+        );
+        assert_eq!(record.events.len(), 1, "one event was published");
+        let receipt = &record.events[0].receipt;
+        assert_eq!(
+            receipt["deliveries"][0]["status"],
+            json!("delivered"),
+            "{receipt}"
+        );
+        assert!(
+            receipt["deliveries"][0]["subscriptionIds"]
+                .as_array()
+                .is_some_and(|ids| !ids.is_empty()),
+            "the model's own subscription carried the event: {receipt}"
+        );
+    }
+
+    /// The same for a tool-triggered delivery: the trigger's tool call
+    /// publishes the event of a model `append` subscription, which starts no
+    /// turn (EventHub design §3.1, A.2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_triggered_append_delivery_starts_no_turn() {
+        /// The judge's verdict, the `events` subscribe call until its result
+        /// is in the request, the trigger's `read` until its result is, and
+        /// plain text after.
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| {
+                if !text.contains("sub_") {
+                    return Some(tool_call(
+                        "events",
+                        &json!({"action": "subscribe", "types": ["ci.failure"], "mode": "append"})
+                            .to_string(),
+                    ));
+                }
+                (!text.contains("build output"))
+                    .then(|| tool_call("read", r#"{"path":"build.txt"}"#))
+            })
+        }
+        let fixture = Fixture::start(
+            "eventhub-tool-triggered-append",
+            answers,
+            json!({
+                "message": "Subscribe to CI failures with append, then read build.txt.",
+                "sources": [{
+                    "name": "ci",
+                    "guide": "CI publishes a failure notice when a build breaks.",
+                    "types": [{
+                        "type": "ci.failure",
+                        "description": "A failed build.",
+                        "mode": "queue"
+                    }]
+                }],
+                "events": [{
+                    "source": "ci",
+                    "type": "ci.failure",
+                    "id": "f-1",
+                    "title": "The build failed",
+                    "body": "The build failed on the release branch.",
+                    "whenToolCall": "read"
+                }],
+                "budget": {"turns": 4, "seconds": 30, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[("build.txt", "build output\n")],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let record = run_arm(&fixture, &options, "current", &Overrides::default(), 0).await;
+        assert_eq!(record.error, None);
+        assert!(
+            !record.failed,
+            "the delivery is correct and nothing is outstanding"
+        );
+        assert_eq!(
+            record.stop, "idle",
+            "an append delivery starts no turn: {:?}",
+            record.events
+        );
+        assert_eq!(record.events.len(), 1, "one event was published");
+        let receipt = &record.events[0].receipt;
+        assert_eq!(
+            receipt["deliveries"][0]["status"],
+            json!("delivered"),
+            "{receipt}"
+        );
+        assert!(
+            receipt["deliveries"][0]["subscriptionIds"]
+                .as_array()
+                .is_some_and(|ids| !ids.is_empty()),
+            "the model's own subscription carried the event: {receipt}"
         );
     }
 
