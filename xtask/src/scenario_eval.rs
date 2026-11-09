@@ -6873,20 +6873,34 @@ mod tests {
             "function":{"name":name,"arguments":arguments}
         }]},"finish_reason":"tool_calls"}]})
     }
+    /// Several tool calls in one answer: the stream shape the provider
+    /// speaks when a response asks for them together.
+    fn tool_calls(calls: &[(&str, &str)]) -> Value {
+        let calls: Vec<Value> = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (name, arguments))| {
+                json!({
+                    "index": index,
+                    "id": format!("call-{}", index + 1),
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments}
+                })
+            })
+            .collect();
+        json!({
+            "id": "fixture",
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": calls},
+                "finish_reason": "tool_calls"
+            }]
+        })
+    }
     /// The judge's answer to a judge request, and `None` for any other.
     fn judged(text: &str) -> Option<Value> {
         text.contains("You check statements")
             .then(|| content(r#"[{"id":"ran","verdict":"present","quote":"turn/end"}]"#))
-    }
-    /// The first subscription id a request carries: the `events` tool's
-    /// subscribe answer.
-    fn subscription_id(text: &str) -> Option<String> {
-        let start = text.find("sub_")? + "sub_".len();
-        let rest = &text[start..];
-        let end = rest
-            .find(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
-            .unwrap_or(rest.len());
-        (end > 0).then(|| format!("sub_{}", &rest[..end]))
     }
     /// Every distinct subscription id a request carries, first seen first:
     /// the `events` tool's subscribe answers, in the order they arrived.
@@ -9142,28 +9156,28 @@ mod tests {
         );
     }
 
-    /// A model that unsubscribes before its event fires leaves the publish
-    /// with no deliveries; that is the run's outcome, recorded, not a failed
-    /// run (EventHub design A.3, A.4).
+    /// A subscription whose `match` excludes the event directs no delivery:
+    /// a started clock whose publish matches nobody is the run's outcome,
+    /// recorded, not a failed run (EventHub design A.3, A.4).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_event_the_model_unsubscribed_from_is_recorded_not_failed() {
+    async fn an_event_no_subscription_takes_is_recorded_not_failed() {
         const GUIDE: &str = "CI publishes a failure notice when a build breaks.";
-        /// The judge's verdict, an `events` subscribe call, an `unsubscribe`
-        /// of the id it answered, and plain text after.
+        /// The judge's verdict, one `events` subscribe whose `match`
+        /// excludes the event, and plain text after.
         fn answers(text: &str) -> Option<Value> {
-            judged(text).or_else(|| match text.matches("sub_").count() {
-                0 => Some(tool_call(
-                    "events",
-                    &json!({"action": "subscribe", "types": ["ci.*"], "mode": "steer"}).to_string(),
-                )),
-                1 => {
-                    let id = subscription_id(text).expect("the subscribe result carries an id");
-                    Some(tool_call(
+            judged(text).or_else(|| {
+                (!text.contains("sub_")).then(|| {
+                    tool_call(
                         "events",
-                        &json!({"action": "unsubscribe", "subscriptionId": id}).to_string(),
-                    ))
-                }
-                _ => None,
+                        &json!({
+                            "action": "subscribe",
+                            "types": ["ci.*"],
+                            "match": {"branch": "release"},
+                            "mode": "steer"
+                        })
+                        .to_string(),
+                    )
+                })
             })
         }
         let fixture = Fixture::start(
@@ -9186,6 +9200,7 @@ mod tests {
                     "id": "f-1",
                     "title": "The build failed",
                     "body": "The build failed on the release branch.",
+                    "attributes": {"branch": "main"},
                     "afterSubscribedSeconds": 1
                 }],
                 "budget": {"turns": 6, "seconds": 30, "window": 24000},
@@ -9337,26 +9352,27 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_delivery_takes_its_mode_from_the_subscriptions_that_directed_it() {
         const GUIDE: &str = "CI publishes a failure notice when a build breaks.";
-        /// The judge's verdict, a `steer` subscribe whose `match` excludes
-        /// the event, an `append` subscribe, and plain text after.
+        /// The judge's verdict, both subscribes in one answer, and plain
+        /// text after.
         fn answers(text: &str) -> Option<Value> {
-            judged(text).or_else(|| match text.matches("sub_").count() {
-                0 => Some(tool_call(
-                    "events",
-                    &json!({
-                        "action": "subscribe",
-                        "types": ["ci.*"],
-                        "match": {"branch": "release"},
-                        "mode": "steer"
-                    })
-                    .to_string(),
-                )),
-                1 => Some(tool_call(
-                    "events",
-                    &json!({"action": "subscribe", "types": ["ci.failure"], "mode": "append"})
-                        .to_string(),
-                )),
-                _ => None,
+            judged(text).or_else(|| {
+                if text.contains("sub_") {
+                    return None;
+                }
+                let steer = json!({
+                    "action": "subscribe",
+                    "types": ["ci.*"],
+                    "match": {"branch": "release"},
+                    "mode": "steer"
+                })
+                .to_string();
+                let append =
+                    json!({"action": "subscribe", "types": ["ci.failure"], "mode": "append"})
+                        .to_string();
+                Some(tool_calls(&[
+                    ("events", steer.as_str()),
+                    ("events", append.as_str()),
+                ]))
             })
         }
         let fixture = Fixture::start(
