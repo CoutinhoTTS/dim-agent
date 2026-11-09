@@ -176,7 +176,7 @@ A delivery records one window. Its state is `delivering` while the write is unse
 | `delivered` | The target branch published the input; `input_event_id` is its receipt. | yes |
 | `failed` | The window wrote no input, or the Session to write to could not be created. `detail` carries the reason. | yes |
 | `lost` | The write's outcome cannot be determined now, and the window is not retried. `detail` carries the diagnostic. | yes |
-| `missed` | The daemon did not observe the window within its grace (A.4), or the window was skipped while the job's previous delivery was still unsettled (§3.1); `detail` says which. | yes |
+| `missed` | The daemon did not observe the window within its grace (A.4), or the window was skipped while the job had an unsettled delivery (§3.1); `detail` says which. | yes |
 
 A delivery is never updated after it reaches a terminal state, and Scheduler never resends a window. `session_id` and `branch_id` name the target that was used; for `launch` they name the launched Session and its `main` branch, and `deadline_at` is its stop time. `deadline_at` is absent for a `session` target and for a run that never launched.
 
@@ -238,11 +238,11 @@ Window evaluation follows `settings/schedule`, wall-clock minute changes, the ea
 
 The `delivering` record is persisted before any external effect, so a restart settles it by lookup instead of writing again. A window is written at most once: the branch accepts each `submissionId` once ([sessions service §6.2](../appserver/sessions-service.md#62-input)), and a retry with the same id returns the same receipt.
 
-**Overlap.** A window is skipped while that job's previous delivery is still `delivering`. It writes no input and records one `missed` delivery with `detail: previous_delivery_unsettled` (A.6), which counts toward retention (A.7). `schedule.run_now` obeys the same rule, so an unsettled delivery never gets a second write. The skip lasts no longer than the previous record can stay unsettled, and the bound below fixes that.
+**Overlap.** A window is skipped while that job has any `delivering` record, so a job has at most one `delivering` record at a time. The skipped window writes no input and records one `missed` delivery with `detail: previous_delivery_unsettled` (A.6), which counts toward retention (A.7). That record is terminal and does not by itself admit the next window: the condition is the job's `delivering` record, not the delivery before it. `schedule.run_now` obeys the same rule; it records its own delivery for the manual window, with its own `run_id` and `window`, and never returns the timer path's record, so a manual window the rule skips returns that `missed` record. The skip lasts no longer than the `delivering` record can stay unsettled, and the bound below fixes that.
 
 **Bound.** A `delivering` record gets at most five `sessions.lookup` attempts, one per timer pass. `reloading`, `ambiguous` and a transport failure count toward the five; `accepted` settles it `delivered` at any attempt. The fifth attempt settles the record even when it answers nothing usable: `unknown` there is `lost` rather than `failed`, and any other non-`accepted` result is `lost` too. A `lost` record is terminal and prunable (A.7), so no record stays unsettled for ever and the skip rule cannot outlast those five attempts.
 
-**Queued inputs.** Scheduler bounds its own writes: one input per window per job, and none while that job's previous delivery is unsettled. How many inputs a target branch holds is that branch's InputQueue's concern, not Scheduler's. InputQueue has no bound today ([input_queue.rs](../../../crates/dim-agent-capabilities/src/input_queue.rs)), so a `queue` job whose target stays busy adds one queued input per window until the branch consumes them. A queue bound would apply to every producer that writes to a branch, so it belongs to an InputQueue design, not to this one.
+**Queued inputs.** Scheduler bounds its own writes: one input per window per job, and none while the job has an unsettled delivery. How many inputs a target branch holds is that branch's InputQueue's concern, not Scheduler's. InputQueue has no bound today ([input_queue.rs](../../../crates/dim-agent-capabilities/src/input_queue.rs)), so a `queue` job whose target stays busy adds one queued input per window until the branch consumes them. A queue bound would apply to every producer that writes to a branch, so it belongs to an InputQueue design, not to this one.
 
 ### 3.2 Completion and timeout
 
@@ -290,7 +290,7 @@ Scheduler learns nothing after the write. Every disagreement between a delivery 
 | Agents index reload | — | The write answers `reloading`; a delivery in flight settles by lookup (A.6) | Agents |
 | Scheduler reload or restart | — | `delivering` records settle by `sessions.lookup`; no window is written twice | Scheduler |
 | Daemon down over a window | — | `missed`; no catch-up (E5) | Scheduler |
-| Two windows due at once | — | One delivery per window; a window beyond its grace or due while the previous delivery is unsettled is `missed` | Scheduler |
+| Two windows due at once | — | One delivery per window; a window beyond its grace or due while the job has an unsettled delivery is `missed` | Scheduler |
 | Job deleted while a launch Session runs | — | The delivery stands and the Session keeps running to its stop time, then retention deletes it (A14) | Scheduler |
 | Job saved with a new target | — | Later windows use the new target; recorded deliveries are unchanged | Scheduler |
 | Child branch created in the target Session | — | Ignored; a delivery names one branch | Scheduler |
@@ -550,7 +550,7 @@ Specified `scheduleJobs`, process scope: `call(JobRequest): async -> JobReply`, 
 | `enabled` | bool | `set_enabled` |
 | `limit` | integer ≤ 50 | `history` |
 
-A `create` saves a `session` target at the calling Session and branch: the tool cannot name a target, set a `launch` target, or choose a model, an Agent or a policy. A Session may create at most 16 jobs through the tool (A13); a later create is `schedule_invalid`. The bound counts jobs and there is no minimum interval. A save is persistent configuration, so under every preset except FullAccess the user approves the job, its schedule and its prompt; each window then delivers that saved prompt, which the model cannot change without another approved save; a window is skipped while the previous delivery is unsettled (§3.1), so one job never has two writes outstanding; and a per-minute job is a request users make on purpose, which a minimum interval would refuse while only moving the number. Under FullAccess the user has waived approvals for every tool, this one included (E1). An `update` changes only the fields in `job` and keeps the stored target, so it can edit a job a client saved but cannot retarget it. `input_mode` defaults to `queue`. Save-time authority is not captured: the delivered input runs under the target branch's own Permission state (§3.3).
+A `create` saves a `session` target at the calling Session and branch: the tool cannot name a target, set a `launch` target, or choose a model, an Agent or a policy. A Session may create at most 16 jobs through the tool (A13); a later create is `schedule_invalid`. The bound counts jobs and there is no minimum interval. A save is persistent configuration, so under every preset except FullAccess the user approves the job, its schedule and its prompt; each window then delivers that saved prompt, which the model cannot change without another approved save; a window is skipped while the job has an unsettled delivery (§3.1), so one job never has two writes outstanding; and a per-minute job is a request users make on purpose, which a minimum interval would refuse while only moving the number. Under FullAccess the user has waived approvals for every tool, this one included (E1). An `update` changes only the fields in `job` and keeps the stored target, so it can edit a job a client saved but cannot retarget it. `input_mode` defaults to `queue`. Save-time authority is not captured: the delivered input runs under the target branch's own Permission state (§3.3).
 
 Put job and delivery ids and all records needed for subsequent model actions in `ToolResult.content`. `structuredContent` is only persistence/UI data. Validation failures return `isError`, without disguising service/protocol failures as successful results. Tool lists omit prompt bodies. Other job results use a UTF-8 prompt preview of at most 4 KiB and an explicit `prompt_truncated` flag; job names use at most 256 bytes and run reasons at most 512 bytes. Job and delivery identities stay in `content`, while management and structured records retain the full data. These are per-field limits; list output still scales with job count.
 
@@ -564,7 +564,7 @@ Namespace `schedule`, registered with `managementMethods`: its declarations list
 | `schedule.save` | `{job, revision?}` | The saved job in the normalised record shape; a new job needs `name`, `schedule`, `prompt` and `target`, an update keeps the stored target when `target` is omitted; optional `revision` checks `Job.revision`, while the internal write also uses the Settings document CAS; either conflict → `schedule_conflict`. A save clears `disabled_reason`. |
 | `schedule.delete` | `{job_id}` | Removes the job from Settings; retires its terminal deliveries and its launch-owned Sessions under A.7. A launch Session already running keeps running to its stop time (A14); a legacy `reuse` job's launched Session goes with the job, and a Session the job only reused is never deleted. |
 | `schedule.set_enabled` | `{job_id, enabled}` | Pause/resume. Enabling clears `disabled_reason`. |
-| `schedule.run_now` | `{job_id}` | The delivery recorded for the manual window, including one skipped by §3.1's overlap rule: `run_id`, `job_id`, `window`, `state`, `detail`, `created_at`, `ended_at`, `submission_id`, plus the optional fields A.1 defines, as that delivery has them |
+| `schedule.run_now` | `{job_id}` | The delivery it records for the manual window: `run_id`, `job_id`, `window`, `state`, `detail`, `created_at`, `ended_at`, `submission_id`, plus the optional fields A.1 defines, as that delivery has them. It records its own delivery with its own `run_id` and `window` and never returns the timer path's record; a manual window §3.1's overlap rule skips returns that `missed` record |
 | `schedule.history` | `{job_id, limit?}` | Deliveries, newest first |
 | `schedule.watch` | `{}` | `{}`. Registers the calling connection's watch and stays open while it watches (§11.2); a second watch on the same connection answers the earlier call `{}` and takes over |
 
@@ -613,7 +613,7 @@ Scheduler delivers no run outcome to a Session, and no notification is sent. A r
 | The reply was lost and lookup answered `unknown`, before the fifth attempt | `failed: not_delivered` | The branch never accepted the input; the window is not retried |
 | Lookup answers `reloading`, `ambiguous` or a transport failure | the record stays `delivering`; the timer retries the lookup, and each attempt counts toward the bound | No second write is attempted while the record is unsettled |
 | The fifth attempt returns anything but `accepted` | `lost`, with `detail`; `unknown` here is `lost`, not `failed` | The outcome is no longer knowable; the record is terminal and prunable (A.7) |
-| A window is due while the job's previous delivery is `delivering` | `missed: previous_delivery_unsettled` | No input; the window is not retried, and the record is prunable (A.7) |
+| A window is due while the job has a `delivering` delivery | `missed: previous_delivery_unsettled` | No input; the window is not retried, and the record is prunable (A.7) |
 | The daemon missed the window | `missed` | No launch and no input |
 
 Recovery never rewrites a settled record and never resends a window. A crash between persisting `delivering` and the input's reply is settled by `sessions.lookup` at the next start; a crash after a launched Session was created but before its identity was recorded leaves a Session named by no record (the known limit in Appendix F). Each `delivering` record is looked up once per timer pass and at most five times; the fifth attempt settles it (§3.1). "Never pruned while unsettled" therefore stays true and becomes bounded: a job whose target keeps failing neither grows records without bound nor writes twice.
@@ -639,7 +639,7 @@ Run a retention pass after startup recovery, each settled delivery and `schedule
 | Scenario | Sequence order | Outcome | Owner |
 | --- | --- | --- | --- |
 | `run_now` while a window delivery is in flight | — | The manual window is `missed: previous_delivery_unsettled`; no second write (A.6) | Scheduler |
-| Two windows due in one tick | — | One delivery per window; a window past its grace or due while the previous delivery is unsettled is `missed` | Scheduler |
+| Two windows due in one tick | — | One delivery per window; a window past its grace or due while the job has an unsettled delivery is `missed` | Scheduler |
 | Target branch busy | prior facts < run input | The input is queued; it is consumed after the running turn (A5) | InputQueue, Loop |
 | A `queue` job's target branch stays busy | — | One queued input per window; InputQueue has no bound (§3.1) | InputQueue |
 | Target branch waiting on an approval | — | The input waits behind the turn; Scheduler is not involved | Approval, InputQueue |
@@ -693,7 +693,7 @@ Verify actual flows through the management methods and the `schedule` tool, with
 5. A window past its grace is one `missed` record with no launch and no input. A daemon restart over a window yields `missed`.
 6. A target that is gone at firing settles `failed` with its code and disables the job; `schedule.list` shows the reason, a save clears it, and later windows do not fire.
 7. A lost delivery reply is settled by lookup: accepted → `delivered` with no second input; `unknown` before the fifth attempt → `failed: not_delivered`; an unanswered lookup keeps `delivering` and retries without writing (item 9).
-8. **Unsettled overlap.** While a job's delivery is `delivering`, its next due window records `missed: previous_delivery_unsettled`, writes no input, and the record counts toward retention; `schedule.run_now` in the same state records the same `missed` delivery and writes nothing.
+8. **Unsettled overlap.** While a job has a `delivering` delivery, its next due window records `missed: previous_delivery_unsettled`, writes no input, and the record counts toward retention; `schedule.run_now` in the same state records its own `missed` delivery for the manual window and writes nothing.
 9. **Bounded lookup.** A `delivering` record whose lookups keep answering `reloading`, `ambiguous` or a transport failure settles `lost` on the fifth attempt; an `unknown` on that attempt settles `lost` rather than `failed`; the record is prunable and no further input is written.
 10. Restart with a `delivering` record: no duplicate input and no duplicate launch. Restart with a `delivered` launch record whose stop time has passed stops the Session, never deletes it before its stop time.
 11. Legacy documents: a tool-saved job of either old mode delivers to its saving Session and branch; a user `create` job maps to a launch target; a user `reuse` job with a Session maps to that Session's `main`; a user `reuse` job without one maps to launch. Each reads, delivers and round-trips without rewriting legacy bytes. A legacy `reuse` job's launched Session still goes with its job; a Session the job only reused, and every other target Session, survives job deletion.
@@ -702,6 +702,7 @@ Verify actual flows through the management methods and the `schedule` tool, with
 14. `schedule.watch` streams the new run vocabulary, one item per state, and `terminal` on the last.
 15. Tool-created jobs are refused in non-interactive and member Sessions; `schedule` is asked under WorkspaceWrite and allowed under FullAccess.
 16. Missing or failed Scheduler rows do not block native Sessions; the management namespace answers `service_unavailable` and the tool answers the unloading notices.
+17. **One unsettled write per job.** Delivery R1 is `delivering` when window B is due and still `delivering` when window C is due. B and C each record `missed: previous_delivery_unsettled` and write no input; R1 stays `delivering` until a lookup settles it.
 
 ## Appendix E. Assumptions
 
