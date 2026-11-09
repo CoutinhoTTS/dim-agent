@@ -3,6 +3,112 @@
 //! generation owed before any live fact.
 mod support;
 
+#[tokio::test]
+async fn an_invalid_latest_goal_result_never_uses_an_older_result() {
+    use dim_agent_types::{BranchStartData, EventKind, ExtensionEvent};
+    let env = Env::start_refusing().await;
+    env.goal("get", serde_json::json!({})).await.unwrap();
+    let original = env
+        .all_events("main")
+        .await
+        .into_iter()
+        .find_map(|event| match &event.kind {
+            EventKind::Extension(data) if data.key() == "goal/recovered" => {
+                Some(data.data().clone())
+            }
+            _ => None,
+        })
+        .expect("the producer's initial recovery result");
+    for (case, expected) in [
+        ("schema", "unsupported recovery schema"),
+        ("node", "missing or ambiguous"),
+        ("position", "invalid recovery source position"),
+        ("missing-field", "missing field"),
+    ] {
+        let mut seed = env.seed_new(case).await;
+        seed.append(
+            "main",
+            EventKind::BranchStart(BranchStartData {
+                parent: None,
+                create_event: None,
+            }),
+        );
+        seed.append(
+            "main",
+            EventKind::Extension(
+                ExtensionEvent::new("goal", "recovered", original.clone()).unwrap(),
+            ),
+        );
+        let mut invalid = original.clone();
+        match case {
+            "schema" => invalid["schema"] = serde_json::json!("goal/future"),
+            "node" => invalid["state"]["driving_root"] = serde_json::json!("missing-node"),
+            "position" => invalid["source_through"] = serde_json::json!(9),
+            "missing-field" => {
+                invalid["state"]["fold"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("objective");
+            }
+            _ => unreachable!(),
+        }
+        seed.append(
+            "main",
+            EventKind::Extension(ExtensionEvent::new("goal", "recovered", invalid).unwrap()),
+        );
+        seed.finish().await;
+        let error = tokio::time::timeout(Duration::from_secs(15), env.restore_failure(case))
+            .await
+            .unwrap_or_else(|_| panic!("{case}: restore did not report its failure"));
+        assert!(error.to_string().contains(expected), "{case}: {error}");
+    }
+    env.close().await;
+}
+
+#[tokio::test]
+async fn recovery_keeps_only_current_driving_members_and_consumes_them_once() {
+    use dim_agent_types::{EventKind, InputConsumedData};
+    let env = Env::start_refusing().await;
+    env.set_limit(1);
+    let goal = env.set("ship it").await;
+    let mut inputs = vec![goal.id];
+    for index in 0..256 {
+        let input = env.emit("main", user(&format!("pending {index}"), InputMode::Queue));
+        inputs.push(input.id.clone());
+    }
+    env.goal("get", serde_json::json!({})).await.unwrap();
+    let before = env.reads().len();
+    let env = env.restore().await;
+    env.goal("get", serde_json::json!({})).await.unwrap();
+    let reads = env.reads();
+    assert!(
+        reads[before..].iter().all(|read| !matches!(&read.select, dim_agent_runtime::QuerySelect::Fields { fields } if fields.iter().any(|field| field == "data.blocks"))),
+        "saved-state recovery does not read pending input bodies"
+    );
+    for id in inputs {
+        env.emit(
+            "main",
+            EventKind::InputConsumed(InputConsumedData { input_id: id }),
+        );
+    }
+    let end = env.turn_ids("main", &[]);
+    let continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    assert_eq!(
+        continuation.text,
+        texts::continuation("main", 1, Some(1), 0, end.sequence)
+    );
+    let env = env.restore().await;
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"kind="continuation""#))
+            .count(),
+        1
+    );
+    env.close().await;
+}
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1313,24 +1419,20 @@ async fn e3_a_rebuild_restates_the_state_a_deletion_left_published() {
         full.is_empty(),
         "deletion restores properties, not the complete event fold: {reads:?}"
     );
-    let scan = ["input/message"]
-        .iter()
-        .map(|kind| (*kind).to_owned())
-        .collect::<Vec<_>>();
     assert!(
-        reads
-            .iter()
-            .any(|read| read.kinds == scan && read.direction == TimelineQueryDirection::Descending),
-        "the scan classified the deletion's branch: {reads:?}"
+        reads.iter().any(|read| read.kinds == ["goal/recovered"]),
+        "restore first checks for a saved local result: {reads:?}"
     );
 
-    // It settles once: the published block now agrees with the fold.
+    let before = env.reads().len();
     let env = env.restore().await;
     assert_eq!(
         env.writes("main").await.len(),
         5,
         "a second load writes nothing"
     );
+    assert!(env.reads()[before..].iter().all(|read| !matches!(&read.select, dim_agent_runtime::QuerySelect::Fields { fields } if fields.iter().any(|field| field == "data.blocks"))),
+        "a saved result must not replay Goal blocks: {:?}", &env.reads()[before..]);
     let keys = env.keys("main").await;
     assert_eq!(keys[0].1, first_state, "and the state still holds");
     env.close().await;

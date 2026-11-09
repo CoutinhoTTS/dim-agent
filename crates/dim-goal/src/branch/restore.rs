@@ -37,8 +37,13 @@ impl Owner {
             fold.copied_live = Some(self.copied_keys(opening).await?);
         }
         let mut query = request(
-            QueryFilter::And {
-                conditions: vec![kind("input/message"), input_relation("input/deleted")],
+            QueryFilter::Or {
+                conditions: vec![
+                    kind("input/deleted"),
+                    QueryFilter::And {
+                        conditions: vec![kind("input/message"), input_relation("input/deleted")],
+                    },
+                ],
             },
             &["position.sequence"],
             None,
@@ -52,7 +57,7 @@ impl Owner {
                 let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
                     unreachable!("input position")
                 };
-                fold.deleted_sequences
+                fold.invalidated_after
                     .insert(sequence.as_u64().expect("sequence"));
             }
             let Some(next) = reply.next else { break };
@@ -279,28 +284,19 @@ impl Owner {
                     }),
                 }),
             });
-            let mut query = request(
-                live_inputs(QueryFilter::And { conditions }),
-                &["id", "position.sequence"],
-                None,
-            );
+            let mut query = request(live_inputs(QueryFilter::And { conditions }), &["id"], None);
             loop {
                 let reply = self.timeline.query(query.clone()).await?;
                 let QueryOutput::Rows { rows } = reply.result else {
                     unreachable!("selected fields")
                 };
                 for row in rows {
-                    let [
-                        QueryValue::Value { value: id },
-                        QueryValue::Value { value: sequence },
-                    ] = row.values.as_slice()
-                    else {
+                    let [QueryValue::Value { value: id }] = row.values.as_slice() else {
                         unreachable!("driving input fields")
                     };
                     let id = id.as_str().expect("input id").to_owned();
                     if at == 0 {
-                        fold.driving
-                            .insert(id, sequence.as_u64().expect("sequence"));
+                        fold.driving.insert(id);
                     } else {
                         at_starts.entry(at).or_default().insert(id);
                     }
@@ -630,103 +626,6 @@ fn input_relation(name: &str) -> QueryFilter {
 }
 
 impl Owner {
-    pub(super) async fn open_evaluations(
-        &self,
-        through: u64,
-        opening: Option<u64>,
-        fold: &mut Fold,
-    ) -> Result<(), AgentError> {
-        let mut query = TimelineQuery {
-            scope: TimelineQueryScope::Branch,
-            from: opening.map(|sequence| TimelinePosition {
-                branch_id: self.branch_id.clone(),
-                sequence,
-            }),
-            through: Some(through),
-            include_publishing: true,
-            query: QuerySpec {
-                rows: None,
-                filter: Some(QueryFilter::And {
-                    conditions: vec![
-                        kind("branch/create"),
-                        QueryFilter::In {
-                            value: QueryOperand::Field {
-                                path: "data.source.kind".into(),
-                            },
-                            values: vec!["host".into()],
-                        },
-                        QueryFilter::Prefix {
-                            value: QueryOperand::Field {
-                                path: "data.source.operation_id".into(),
-                            },
-                            prefix: "goal:evaluate:".into(),
-                        },
-                        QueryFilter::Not {
-                            condition: Box::new(QueryFilter::Exists {
-                                condition: Box::new(QueryFilter::And {
-                                    conditions: vec![
-                                        QueryFilter::In {
-                                            value: QueryOperand::Field {
-                                                path: "kind".into(),
-                                            },
-                                            values: vec![
-                                                "branch/ended".into(),
-                                                "branch/create-failed".into(),
-                                            ],
-                                        },
-                                        QueryFilter::Compare {
-                                            left: QueryOperand::Field {
-                                                path: "data.branch".into(),
-                                            },
-                                            comparison: QueryComparison::Eq,
-                                            right: QueryOperand::Outer {
-                                                path: "data.branch".into(),
-                                            },
-                                        },
-                                    ],
-                                }),
-                            }),
-                        },
-                    ],
-                }),
-                select: QuerySelect::Fields {
-                    fields: vec!["data.source.operation_id".into(), "data.branch".into()],
-                },
-                group_by: vec![],
-                pick: None,
-                order_by: vec![],
-            },
-            page: Some(QueryPage {
-                limit: NonZeroU64::new(SCAN_PAGE).unwrap(),
-                after: None,
-            }),
-        };
-        loop {
-            let reply = self.timeline.query(query.clone()).await?;
-            let QueryOutput::Rows { rows } = reply.result else {
-                unreachable!("selected fields")
-            };
-            for row in rows {
-                let [
-                    QueryValue::Value { value: operation },
-                    QueryValue::Value { value: branch },
-                ] = row.values.as_slice()
-                else {
-                    unreachable!("evaluation identity")
-                };
-                if let Some(evaluation) =
-                    fold::evaluation_of_operation(operation.as_str().expect("operation id"))
-                {
-                    fold.evaluations
-                        .insert(evaluation, branch.as_str().expect("branch id").to_owned());
-                }
-            }
-            let Some(next) = reply.next else { break };
-            query.page.as_mut().unwrap().after = Some(next);
-        }
-        Ok(())
-    }
-
     async fn withdrawn_change(
         &self,
         from: u64,
@@ -950,15 +849,26 @@ impl Owner {
                     .map_err(|_| AgentError::Reloading("Goal".into()))?;
             }
             let opening = self.opening(through).await?;
-            let (fold, start) = self.restore_at(through, opening).await?;
             let (from, recorded) = {
                 let state = self.state.lock().unwrap();
                 (
                     state.refresh_from.expect("deletion starts refresh"),
-                    state.recorded.max(fold.record_after),
+                    state.recorded.max(state.fold.record_after),
                 )
             };
-            let compensation = self.withdrawn_change(from, through, recorded).await?;
+            let (fold, start, compensation) = match self
+                .restore_deleted(through, opening, from, recorded)
+                .await?
+            {
+                Some(restored) => restored,
+                None => {
+                    let (fold, start) = self.restore_at(through, opening).await?;
+                    let compensation = self
+                        .withdrawn_change(from, through, recorded.max(fold.record_after))
+                        .await?;
+                    (fold, start, compensation)
+                }
+            };
             {
                 let mut state = self.state.lock().unwrap();
                 if *self.stepped.borrow() > through {
@@ -966,6 +876,7 @@ impl Owner {
                 }
                 state.fold = fold;
                 state.start = start;
+                state.source_through = through;
                 state.decisions = CancellationToken::new();
                 state.refresh_from = compensation.map(|(at, _)| at);
                 let _ = self.fresh.send_replace(Ok(true));
@@ -976,7 +887,10 @@ impl Owner {
                     Box::pin(async move { owner.record(at, None, false, Some(withdrawn)).await })
                 });
             } else {
-                self.reconcile(through).await?;
+                let pending = self.reconcile(through).await?;
+                let mut state = self.state.lock().unwrap();
+                state.checkpoint_blocked = pending || !matches!(*self.fresh.borrow(), Ok(true));
+                state.checkpoint(self, None)?;
             }
             self.resume_decisions();
             return Ok(());

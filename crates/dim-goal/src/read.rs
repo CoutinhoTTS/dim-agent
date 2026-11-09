@@ -17,6 +17,84 @@ pub(crate) async fn current(
     branch_id: &str,
     cancel: &CancellationToken,
 ) -> Result<GoalRead, AgentError> {
+    let opening = crate::branch::recovery::request(
+        branch_id,
+        None,
+        u64::MAX,
+        &["branch/start", "session/forked"],
+        &["position.sequence"],
+    );
+    let mut opening = opening;
+    opening.through = None;
+    opening.include_publishing = false;
+    opening.query.pick = Some(QueryPick::Last);
+    opening.page.as_mut().unwrap().limit = NonZeroU64::MIN;
+    let reply = tree.query(branch_id.to_owned(), opening).await?;
+    let through = reply.through;
+    let QueryOutput::Rows { rows } = reply.result else {
+        unreachable!("opening position")
+    };
+    let start = rows.first().map(|row| match &row.values[0] {
+        QueryValue::Value { value } => value.as_u64().expect("opening position"),
+        _ => unreachable!("opening position"),
+    });
+    let mut query = crate::branch::recovery::request(
+        branch_id,
+        start,
+        through,
+        &[crate::branch::recovery::KEY],
+        &["position.sequence", "data"],
+    );
+    query.include_publishing = false;
+    query.query.pick = Some(QueryPick::Last);
+    query.page.as_mut().unwrap().limit = NonZeroU64::MIN;
+    let QueryOutput::Rows { mut rows } = tree.query(branch_id.to_owned(), query).await?.result
+    else {
+        unreachable!("Goal recovery fields")
+    };
+    if let Some(row) = rows.pop() {
+        let [
+            QueryValue::Value { value: position },
+            QueryValue::Value { value: data },
+        ] = <[_; 2]>::try_from(row.values).expect("Goal recovery fields")
+        else {
+            unreachable!("Goal recovery values")
+        };
+        let recovered = crate::branch::recovery::decode(
+            data,
+            position.as_u64().expect("recovery position"),
+            through,
+        )?;
+        if recovered.state.opening != start {
+            return Err(AgentError::fault("Goal", "recovery opening mismatch"));
+        }
+        let mut query = crate::branch::recovery::request(
+            branch_id,
+            Some(recovered.source_through.saturating_add(1)),
+            through,
+            super::branch::KEYS,
+            &[],
+        );
+        query.include_publishing = false;
+        query.query.select = QuerySelect::Exists;
+        query.page = None;
+        let QueryOutput::Exists { exists } = tree.query(branch_id.to_owned(), query).await?.result
+        else {
+            unreachable!("remaining Goal sources")
+        };
+        if exists {
+            return Err(AgentError::Reloading("Goal recovery".into()));
+        }
+        return Ok(view(branch_id, through, &recovered.state.fold));
+    }
+    legacy_current(tree, branch_id, cancel).await
+}
+
+async fn legacy_current(
+    tree: &TreeCommands,
+    branch_id: &str,
+    cancel: &CancellationToken,
+) -> Result<GoalRead, AgentError> {
     let mut query = TimelineQuery {
         scope: TimelineQueryScope::Branch,
         from: None,
@@ -79,6 +157,9 @@ pub(crate) async fn current(
             },
         ],
     });
+    query.query.filter = Some(QueryFilter::Or {
+        conditions: vec![kind("input/deleted"), query.query.filter.take().unwrap()],
+    });
     let mut fold = Fold::default();
     loop {
         if cancel.is_cancelled() {
@@ -92,7 +173,7 @@ pub(crate) async fn current(
             let QueryValue::Value { value } = &row.values[0] else {
                 unreachable!("input position")
             };
-            fold.deleted_sequences
+            fold.invalidated_after
                 .insert(value.as_u64().expect("input sequence"));
         }
         query.page.as_mut().unwrap().after = page.next;
@@ -160,20 +241,32 @@ pub(crate) async fn current(
     {
         pair(tree, branch_id, &query, &mut fold, next).await?;
     }
-    Ok(GoalRead {
+    Ok(view(branch_id, through, &fold))
+}
+
+pub(crate) fn view(branch_id: &str, through: u64, fold: &Fold) -> GoalRead {
+    GoalRead {
         branch_id: branch_id.into(),
         through,
-        goal: fold.objective.map(|objective| GoalView {
-            objective,
-            status: match fold.state {
-                text::State::Active => GoalViewStatus::Active,
-                text::State::Paused(reason) => GoalViewStatus::Paused(reason),
-                text::State::Completed(_) => GoalViewStatus::Completed,
-                text::State::Blocked(_) => GoalViewStatus::Blocked,
-                text::State::None => GoalViewStatus::None,
-            },
-            evaluator: fold.judge == text::Judge::Evaluator,
-        }),
+        goal: goal(fold.objective.clone(), &fold.state, fold.judge),
+    }
+}
+
+pub(crate) fn goal(
+    objective: Option<String>,
+    state: &text::State,
+    judge: text::Judge,
+) -> Option<GoalView> {
+    objective.map(|objective| GoalView {
+        objective,
+        status: match state {
+            text::State::Active => GoalViewStatus::Active,
+            text::State::Paused(reason) => GoalViewStatus::Paused(reason.clone()),
+            text::State::Completed(_) => GoalViewStatus::Completed,
+            text::State::Blocked(_) => GoalViewStatus::Blocked,
+            text::State::None => GoalViewStatus::None,
+        },
+        evaluator: judge == text::Judge::Evaluator,
     })
 }
 

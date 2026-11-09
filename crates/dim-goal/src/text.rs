@@ -7,6 +7,7 @@
 //! written.
 
 use dim_agent_types::{InputBlock, InputMessageData, InputMode};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// The key Goal writes its state under (§2, A.2).
@@ -125,7 +126,8 @@ pub fn input(blocks: Vec<Block>, mode: InputMode) -> InputMessageData {
 
 /// The status a state record states (A.5). `None` is an objective without a
 /// status, which `edit` on a branch with no goal leaves.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "text", rename_all = "snake_case")]
 pub enum State {
     Active,
     Paused(String),
@@ -165,7 +167,7 @@ impl State {
 /// Which of Goal's keys the inherited prefix left live (§3.4). A state record
 /// retires `goal:state`; the start clear also retires the old keys when they
 /// are still live.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Live {
     pub state: bool,
     pub objective: bool,
@@ -662,7 +664,8 @@ pub fn tool_schema() -> Value {
 }
 
 /// Which judge decides completion (Pursuit §3).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Judge {
     #[default]
     Model,

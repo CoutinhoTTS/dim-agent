@@ -621,45 +621,49 @@ flowchart LR
   m617["dim_client::wire"]
   m618["dim_goal"]
   m619["dim_goal::branch"]
-  m620["dim_goal::branch::restore"]
-  m621["dim_goal::fold"]
-  m622["dim_goal::fold::tests"]
-  m623["dim_goal::read"]
-  m624["dim_goal::session"]
-  m625["dim_goal::session::tests"]
-  m626["dim_goal::text"]
-  m627["dim_migration"]
-  m628["dim_migration::accounts"]
-  m629["dim_migration::archives"]
-  m630["dim_migration::engine"]
-  m631["dim_migration::inventory"]
-  m632["dim_migration::ledger"]
-  m633["dim_migration::native"]
-  m634["dim_migration::native::tests"]
-  m635["dim_migration::providers"]
-  m636["dim_migration::scheduler"]
-  m637["dim_migration::settings"]
-  m638["dim_migration::settings::permissions"]
-  m639["dim_migration::settings::skills"]
-  m640["dim_migration::settings::web"]
-  m641["dim_migration::source"]
-  m642["dim_migration::terminal"]
-  m643["dim_modality"]
-  m644["dim_modality::adapter"]
-  m645["dim_modality::engine"]
-  m646["dim_modality::engine::tests"]
-  m647["dim_modality::realtime"]
-  m648["dim_modality::task"]
-  m649["dim_modality::task::tests"]
-  m650["dim_ocr"]
-  m651["dim_ocr::args"]
-  m652["dim_ocr::contract"]
-  m653["dim_ocr::helper"]
-  m654["dim_ocr::pdf"]
-  m655["dim_ocr::platform"]
-  m656["dim_ocr::plugin"]
-  m657["dim_ocr::vision"]
-  m658["dim_session_title"]
+  m620["dim_goal::branch::recovery"]
+  m621["dim_goal::branch::recovery::deletion"]
+  m622["dim_goal::branch::recovery::nodes"]
+  m623["dim_goal::branch::restore"]
+  m624["dim_goal::driving"]
+  m625["dim_goal::fold"]
+  m626["dim_goal::fold::tests"]
+  m627["dim_goal::read"]
+  m628["dim_goal::session"]
+  m629["dim_goal::session::tests"]
+  m630["dim_goal::text"]
+  m631["dim_migration"]
+  m632["dim_migration::accounts"]
+  m633["dim_migration::archives"]
+  m634["dim_migration::engine"]
+  m635["dim_migration::inventory"]
+  m636["dim_migration::ledger"]
+  m637["dim_migration::native"]
+  m638["dim_migration::native::tests"]
+  m639["dim_migration::providers"]
+  m640["dim_migration::scheduler"]
+  m641["dim_migration::settings"]
+  m642["dim_migration::settings::permissions"]
+  m643["dim_migration::settings::skills"]
+  m644["dim_migration::settings::web"]
+  m645["dim_migration::source"]
+  m646["dim_migration::terminal"]
+  m647["dim_modality"]
+  m648["dim_modality::adapter"]
+  m649["dim_modality::engine"]
+  m650["dim_modality::engine::tests"]
+  m651["dim_modality::realtime"]
+  m652["dim_modality::task"]
+  m653["dim_modality::task::tests"]
+  m654["dim_ocr"]
+  m655["dim_ocr::args"]
+  m656["dim_ocr::contract"]
+  m657["dim_ocr::helper"]
+  m658["dim_ocr::pdf"]
+  m659["dim_ocr::platform"]
+  m660["dim_ocr::plugin"]
+  m661["dim_ocr::vision"]
+  m662["dim_session_title"]
   m0 --> m1
   m0 -.-> m2
   m0 -.-> m3
@@ -3295,9 +3299,9 @@ flowchart LR
   m375 --> m402
   m375 --> m581
   m375 --> m605
-  m375 --> m627
-  m375 --> m641
-  m375 --> m642
+  m375 --> m631
+  m375 --> m645
+  m375 --> m646
   m376 --> m327
   m376 --> m328
   m376 --> m377
@@ -4347,10 +4351,11 @@ flowchart LR
   m618 --> m286
   m618 --> m287
   m618 --> m619
-  m618 -.-> m621
-  m618 -.-> m623
-  m618 --> m624
-  m618 --> m626
+  m618 -.-> m624
+  m618 -.-> m625
+  m618 -.-> m627
+  m618 --> m628
+  m618 --> m630
   m619 --> m95
   m619 --> m110
   m619 --> m141
@@ -4361,224 +4366,256 @@ flowchart LR
   m619 --> m153
   m619 --> m161
   m619 --> m162
+  m619 --> m163
   m619 --> m177
   m619 --> m180
+  m619 --> m184
   m619 --> m286
-  m619 -.-> m620
-  m619 --> m621
-  m619 --> m626
+  m619 --> m620
+  m619 -.-> m623
+  m619 --> m625
+  m619 --> m630
   m620 --> m147
   m620 --> m161
   m620 --> m162
   m620 --> m177
   m620 --> m180
+  m620 --> m184
   m620 --> m619
-  m620 --> m621
-  m620 --> m626
+  m620 -.-> m621
+  m620 --> m622
+  m620 --> m624
+  m620 --> m625
+  m620 --> m627
+  m621 --> m147
+  m621 --> m162
   m621 --> m180
-  m621 -.-> m622
-  m621 --> m626
-  m622 --> m180
-  m622 --> m621
-  m622 --> m626
-  m623 --> m110
+  m621 --> m619
+  m621 --> m620
+  m621 --> m625
+  m622 --> m147
+  m622 --> m162
+  m622 --> m619
+  m622 --> m620
+  m622 --> m624
   m623 --> m147
   m623 --> m161
   m623 --> m162
   m623 --> m177
   m623 --> m180
-  m623 --> m184
   m623 --> m619
-  m623 --> m621
-  m623 --> m626
-  m624 --> m59
-  m624 --> m74
-  m624 --> m83
-  m624 --> m110
-  m624 --> m116
-  m624 --> m153
-  m624 --> m197
-  m624 --> m619
-  m624 -.-> m625
-  m624 --> m626
+  m623 --> m625
+  m623 --> m630
+  m624 --> m147
+  m624 --> m180
+  m625 --> m180
   m625 --> m624
+  m625 -.-> m626
+  m625 --> m630
   m626 --> m180
-  m627 --> m49
-  m627 -.-> m628
-  m627 -.-> m629
+  m626 --> m625
+  m626 --> m630
+  m627 --> m110
+  m627 --> m147
+  m627 --> m161
+  m627 --> m162
+  m627 --> m177
+  m627 --> m180
+  m627 --> m184
+  m627 --> m619
+  m627 --> m620
+  m627 --> m625
   m627 --> m630
-  m627 --> m631
-  m627 --> m632
-  m627 -.-> m633
-  m627 -.-> m635
-  m627 -.-> m636
-  m627 -.-> m637
-  m627 --> m641
-  m627 -.-> m642
-  m628 --> m49
-  m628 --> m146
-  m628 --> m175
-  m628 --> m627
+  m628 --> m59
+  m628 --> m74
+  m628 --> m83
+  m628 --> m110
+  m628 --> m116
+  m628 --> m141
+  m628 --> m153
+  m628 --> m163
+  m628 --> m197
+  m628 --> m619
+  m628 -.-> m629
   m628 --> m630
-  m628 --> m633
-  m628 --> m641
-  m629 --> m627
-  m629 --> m641
-  m630 --> m178
-  m630 --> m627
-  m630 --> m628
-  m630 --> m629
-  m630 --> m631
-  m630 --> m633
-  m630 --> m635
-  m630 --> m636
-  m630 --> m637
-  m630 --> m641
+  m629 --> m628
+  m630 --> m180
   m631 --> m49
-  m631 --> m627
-  m631 --> m630
-  m631 --> m641
+  m631 -.-> m632
+  m631 -.-> m633
+  m631 --> m634
+  m631 --> m635
+  m631 --> m636
+  m631 -.-> m637
+  m631 -.-> m639
+  m631 -.-> m640
+  m631 -.-> m641
+  m631 --> m645
+  m631 -.-> m646
   m632 --> m49
-  m632 --> m627
-  m632 --> m641
-  m633 --> m49
-  m633 --> m141
-  m633 --> m142
-  m633 --> m146
-  m633 --> m163
-  m633 --> m178
-  m633 --> m180
-  m633 --> m186
-  m633 --> m190
-  m633 --> m192
-  m633 --> m193
-  m633 --> m197
-  m633 --> m238
-  m633 --> m295
-  m633 --> m301
-  m633 --> m307
-  m633 --> m308
-  m633 --> m627
-  m633 -.-> m634
-  m633 --> m641
+  m632 --> m146
+  m632 --> m175
+  m632 --> m631
+  m632 --> m634
+  m632 --> m637
+  m632 --> m645
+  m633 --> m631
+  m633 --> m645
+  m634 --> m178
+  m634 --> m631
+  m634 --> m632
   m634 --> m633
-  m635 --> m255
-  m635 --> m268
-  m635 --> m272
-  m635 --> m627
-  m635 --> m630
-  m635 --> m633
-  m635 --> m641
-  m636 --> m627
-  m636 --> m630
-  m636 --> m633
-  m636 --> m641
+  m634 --> m635
+  m634 --> m637
+  m634 --> m639
+  m634 --> m640
+  m634 --> m641
+  m634 --> m645
+  m635 --> m49
+  m635 --> m631
+  m635 --> m634
+  m635 --> m645
+  m636 --> m49
+  m636 --> m631
+  m636 --> m645
   m637 --> m49
+  m637 --> m141
+  m637 --> m142
+  m637 --> m146
+  m637 --> m163
+  m637 --> m178
+  m637 --> m180
+  m637 --> m186
+  m637 --> m190
+  m637 --> m192
+  m637 --> m193
+  m637 --> m197
   m637 --> m238
-  m637 --> m627
-  m637 --> m630
-  m637 --> m633
-  m637 --> m638
-  m637 --> m639
-  m637 --> m640
-  m637 --> m641
-  m638 --> m192
-  m638 --> m627
-  m638 --> m633
+  m637 --> m295
+  m637 --> m301
+  m637 --> m307
+  m637 --> m308
+  m637 --> m631
+  m637 -.-> m638
+  m637 --> m645
   m638 --> m637
-  m638 --> m641
-  m639 --> m627
-  m639 --> m633
+  m639 --> m255
+  m639 --> m268
+  m639 --> m272
+  m639 --> m631
+  m639 --> m634
   m639 --> m637
-  m640 --> m627
-  m640 --> m630
-  m640 --> m633
+  m639 --> m645
+  m640 --> m631
+  m640 --> m634
   m640 --> m637
-  m640 --> m641
+  m640 --> m645
   m641 --> m49
-  m641 --> m178
-  m641 --> m193
-  m641 --> m267
-  m641 --> m627
-  m642 --> m627
-  m643 --> m59
-  m643 --> m60
-  m643 --> m74
-  m643 --> m95
-  m643 --> m139
-  m643 --> m153
-  m643 --> m190
-  m643 --> m193
-  m643 --> m253
-  m643 --> m260
-  m643 --> m267
-  m643 --> m286
-  m643 --> m644
-  m643 --> m645
-  m643 --> m647
-  m643 --> m648
-  m643 --> m655
-  m643 --> m656
-  m644 --> m59
-  m644 --> m193
+  m641 --> m238
+  m641 --> m631
+  m641 --> m634
+  m641 --> m637
+  m641 --> m642
+  m641 --> m643
+  m641 --> m644
+  m641 --> m645
+  m642 --> m192
+  m642 --> m631
+  m642 --> m637
+  m642 --> m641
+  m642 --> m645
+  m643 --> m631
+  m643 --> m637
+  m643 --> m641
+  m644 --> m631
+  m644 --> m634
+  m644 --> m637
+  m644 --> m641
+  m644 --> m645
   m645 --> m49
-  m645 --> m59
-  m645 --> m60
-  m645 --> m61
-  m645 --> m74
+  m645 --> m178
   m645 --> m193
-  m645 --> m260
-  m645 --> m286
-  m645 --> m643
-  m645 --> m644
-  m645 -.-> m646
-  m645 --> m648
-  m645 --> m652
-  m645 --> m655
-  m645 --> m656
-  m646 --> m61
-  m646 --> m645
+  m645 --> m267
+  m645 --> m631
+  m646 --> m631
   m647 --> m59
+  m647 --> m60
   m647 --> m74
+  m647 --> m95
+  m647 --> m139
+  m647 --> m153
+  m647 --> m190
   m647 --> m193
-  m647 --> m643
-  m647 --> m644
-  m647 --> m645
+  m647 --> m253
+  m647 --> m260
+  m647 --> m267
+  m647 --> m286
+  m647 --> m648
+  m647 --> m649
+  m647 --> m651
+  m647 --> m652
+  m647 --> m659
+  m647 --> m660
+  m648 --> m59
   m648 --> m193
-  m648 --> m260
-  m648 --> m644
-  m648 -.-> m649
+  m649 --> m49
+  m649 --> m59
+  m649 --> m60
+  m649 --> m61
+  m649 --> m74
+  m649 --> m193
+  m649 --> m260
+  m649 --> m286
+  m649 --> m647
   m649 --> m648
-  m650 --> m651
-  m650 --> m652
-  m650 --> m653
-  m650 -.-> m654
-  m650 --> m655
-  m650 --> m656
-  m650 -.-> m657
-  m651 --> m652
-  m653 --> m651
+  m649 -.-> m650
+  m649 --> m652
+  m649 --> m656
+  m649 --> m659
+  m649 --> m660
+  m650 --> m61
+  m650 --> m649
+  m651 --> m59
+  m651 --> m74
+  m651 --> m193
+  m651 --> m647
+  m651 --> m648
+  m651 --> m649
+  m652 --> m193
+  m652 --> m260
+  m652 --> m648
+  m652 -.-> m653
   m653 --> m652
-  m653 --> m654
-  m653 --> m657
-  m654 --> m652
-  m657 --> m652
+  m654 --> m655
+  m654 --> m656
+  m654 --> m657
+  m654 -.-> m658
+  m654 --> m659
+  m654 --> m660
+  m654 -.-> m661
+  m655 --> m656
   m657 --> m655
-  m658 --> m59
-  m658 --> m74
-  m658 --> m93
-  m658 --> m95
-  m658 --> m110
-  m658 --> m139
-  m658 --> m141
-  m658 --> m153
-  m658 --> m155
-  m658 --> m161
-  m658 --> m162
-  m658 --> m178
-  m658 --> m180
-  m658 --> m193
-  m658 --> m286
-  m658 --> m287
-  m658 --> m303
-  m658 --> m309
+  m657 --> m656
+  m657 --> m658
+  m657 --> m661
+  m658 --> m656
+  m661 --> m656
+  m661 --> m659
+  m662 --> m59
+  m662 --> m74
+  m662 --> m93
+  m662 --> m95
+  m662 --> m110
+  m662 --> m139
+  m662 --> m141
+  m662 --> m153
+  m662 --> m155
+  m662 --> m161
+  m662 --> m162
+  m662 --> m178
+  m662 --> m180
+  m662 --> m193
+  m662 --> m286
+  m662 --> m287
+  m662 --> m303
+  m662 --> m309

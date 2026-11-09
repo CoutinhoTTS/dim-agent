@@ -512,6 +512,71 @@ async fn d3_a_deleted_answered_command_writes_the_state_again() {
     env.close().await;
 }
 
+#[tokio::test]
+async fn deleting_two_changes_does_not_reapply_an_earlier_compensation() {
+    let env = Env::start_refusing().await;
+    let first = env.set("first objective").await;
+    env.goal("set", json!({"objective":"second objective"}))
+        .await
+        .unwrap();
+    let second = env
+        .writes("main")
+        .await
+        .into_iter()
+        .find(|block| {
+            block.marker.contains(r#"kind="goal" op="set""#)
+                && block.text.contains("second objective")
+        })
+        .expect("the second set trigger");
+    env.settled("main").await;
+    let first_delete = env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData {
+            input_id: first.id.clone(),
+        }),
+    );
+    env.wait_for(
+        "main",
+        &format!(
+            r#"kind="state" status="active" after="{}""#,
+            first_delete.sequence
+        ),
+    )
+    .await;
+    let second_delete = env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData {
+            input_id: second.id.clone(),
+        }),
+    );
+    let compensation = env
+        .wait_for("main", &format!(r#"after="{}""#, second_delete.sequence))
+        .await;
+    assert_eq!(
+        compensation.text,
+        texts::cleared("main", &texts::Answer::After(second_delete.sequence)),
+        "neither deleted change contributes an objective"
+    );
+    env.refusing().arm("main");
+    let reads = env.reads().len();
+    assert!(env.goal("get", json!({})).await.unwrap()["goal"].is_null());
+    assert_eq!(env.refusing().refused(), 0, "live get reads owner state");
+    assert_eq!(env.reads().len(), reads, "live get performs no query");
+    env.refusing().disarm();
+    let env = env.restore().await;
+    assert!(env.goal("get", json!({})).await.unwrap()["goal"].is_null());
+    let duplicate = env.emit(
+        "main",
+        EventKind::InputDeleted(InputDeletedData {
+            input_id: first.id.clone(),
+        }),
+    );
+    env.wait_for("main", &format!(r#"after="{}""#, duplicate.sequence))
+        .await;
+    assert!(env.goal("get", json!({})).await.unwrap()["goal"].is_null());
+    env.close().await;
+}
+
 /// R2: the record answering a change can be committed while the change is
 /// withdrawn, so the fold sees it only after the deletion. It is superseded by
 /// the compensation, which is the newest live record and states the state the
