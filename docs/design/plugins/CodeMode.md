@@ -24,16 +24,16 @@ Rules: [design rules](../../architecture/rust-agent/principles.md), [ADR 002](..
 
 | Part | Scope | Owns |
 | --- | --- | --- |
-| `CodeMode` | Process | The structural `CodeModeConfig` bounds, the process `CodeModeRuns` map from `(session id, branch id)` to its runner, and the registrations of the Session and branch parts. |
+| `CodeMode` | Process | The structural `CodeModeConfig` bounds, the process `CodeModeRuns` map from `(session id, branch id)` to its runner, the program semaphore, and the registrations of the Session and branch parts. |
 | `CodeModeSession` | Session | The `codemode` tool declaration and handler. The handler resolves the caller's `(session id, branch id)` in `CodeModeRuns`; it does not read Session state to find a branch. |
-| `CodeModeBranch` | branch | The one-shot QuickJS program, the `tools` bridge, the child-call admission gate and the confirmed child effects copied onto the outer result. |
+| `CodeModeBranch` | branch | The one-shot QuickJS program, the `tools` bridge, the parent gate use and the confirmed child effects copied onto the outer result. |
 | ToolExecutor nested invocation | branch, mechanism owner | The pinned `ToolBinding` lookup, the child `step/tool-call` command, nested execution, Approval admission and the child terminal result. This is not Code Mode business state. |
 | QuickJS runtime | branch | The execution boundary for model code. It receives only the serializable `tools` bridge. |
 
 `CodeMode` is a process plugin, not a `Feature`: it provides `CodeModeRuns` and registers the two
-parts. `CodeModeSession` and `CodeModeBranch` are plain parts. `CodeModeBranch` is the only Code
-Mode Capability: it owns the one-shot execution state and its child-call gate on the branch. The
-outer and child `step/tool-call`/`step/tool-result` facts remain ToolExecutor's facts.
+parts. `CodeModeSession` and `CodeModeBranch` are plain parts. `CodeModeBranch` is not a Capability
+in this delivery: the part owns runtime-only execution state and the parent gate use, while
+ToolExecutor owns the child `step/tool-call`/`step/tool-result` facts.
 
 The bounds are structural `CodeModeConfig` values. A user `codemode` Settings source is deferred; no
 part invents defaults from another source.
@@ -97,9 +97,14 @@ max_runtime_ms          30 s
 max_calls               64
 max_parallel_calls      4
 max_memory_bytes        256 MiB
+max_programs            2
 max_output_bytes        1 MiB
 max_single_result_bytes 256 KiB
 ```
+
+`max_programs` bounds concurrent programs in one process. `CodeModeRuns` holds the program
+semaphore; aggregate QuickJS memory is bounded by `max_programs * max_memory_bytes`. A program
+waiting for a slot is cancelled by the outer call token.
 
 The outer tool is declared with risk `session`. The outer call enters the normal ToolExecutor
 admission path under the Session's permission preset. Approving the outer call does **not** approve
@@ -149,11 +154,12 @@ The Timeline keeps one call event type:
 App Server read the same property.
 
 Events produced while one child call executes carry `parent_call_id` set to the child
-`ToolCall.id`. This includes asynchronous callbacks, background `task/*` results, child
-`approval/*` events and child question events. The rule is:
+`ToolCall.id`. This includes asynchronous callbacks, background `task/*` results and child
+`approval/*` events. A child `ask_user` call is itself a `step/tool-call`, so the child
+`ask_user` batch carries the outer call id like every other child batch. The rule is:
 
-- For `step/tool-call` and `step/tool-result`, `parent_call_id` is the call whose batch contains the
-  event: the outer call for a child batch, the child call for a grandchild batch.
+- For `step/tool-call` and its `step/tool-result`, `parent_call_id` is the call that spawned the
+  batch: the outer call for a child batch, the child call for a grandchild batch.
 - For every other event produced by one call, `parent_call_id` is that call's `ToolCall.id`.
 
 The sequence is the commit order; `parent_call_id` is the structure. No reader infers a parent from
@@ -207,8 +213,9 @@ open(parent_call_id)
   -> close(reason)        // rejects new children and waits for every committed child
 ```
 
-`close` runs for normal return, program failure, host timeout, cancellation and reload. `close`
-stops new admission, cancels children that have not started, and waits for a terminal
+`close` runs for normal return, program failure, host timeout and cancellation. On reload,
+ToolExecutor's rebuild applies the reload rule in §3.6 instead. `close` stops new admission, cancels
+children that have not started or that the program no longer awaits, and waits for a terminal
 `step/tool-result` for every committed child before the outer result is written. A child waiting for
 Approval is cancelled through the existing Approval contract.
 
@@ -221,12 +228,15 @@ result unchanged under the Session boundary contract.
 ### 3.5 Cancellation and timeout
 
 - The parent gate closes admission.
-- A child that has not started settles as `cancelled` or `notExecuted`.
+- A child that has not started settles with an error `ToolResult` whose text names cancelled or not
+  executed; the design adds no separate status field.
 - A started child receives the child cancellation token; ToolExecutor writes its terminal result.
 - The outer result follows the parent gate; confirmed child effects are included.
 - Every child call uses a per-program child `CancellationToken`; the token is cancelled whenever the
   program returns, times out or is cancelled. A dropped Approval admission is removed and writes
-  `approval/cancelled`; a pending question is settled with the same child token.
+  `approval/cancelled`; a pending question is settled with the same child token. Approval admission
+  needs a drop guard: dropping the admission future removes the pending request and writes
+  `approval/cancelled`.
 - A call the program starts and never awaits is still a committed child. The parent gate joins the
   child; the program cannot finish with an unjoined child.
 
@@ -236,7 +246,7 @@ The reload rule is stated once, here:
 
 - A child `step/tool-call` with a matching `step/tool-result` uses the written result and effects.
 - A child `step/tool-call` without a terminal result counts as started but not finished. ToolExecutor
-  writes a failure result for the child and no confirmed effects.
+  writes an error `ToolResult` for the child and no confirmed effects.
 - The outer `codemode` call counts as started but not finished when batch A has no terminal result.
   ToolExecutor writes a failure result with an effect-may-have-happened warning and the confirmed
   effects from terminal child results.
@@ -250,7 +260,7 @@ rebuild to the child batches and their terminal results.
 ## 4. Questions and TUI
 
 - A child `ask_user` call is a normal `step/tool-call` batch with `parent_call_id`. The batch is
-  visible to v3 clients.
+  visible to v3 clients; v1 and v2 clients receive the batch without `parent_call_id`.
 - `session.question.pending` queries every `step/tool-call` with an `ask_user` call and no
   `step/tool-result` whose `call_event_id` is that batch. Top-level batches and child batches use
   the same query.
@@ -259,8 +269,9 @@ rebuild to the child batches and their terminal results.
 - ToolExecutor writes the answer as the child batch's `step/tool-result`.
 - TUI displays events in `sequence` order. A child batch is one `step/tool-call` event; TUI groups
   the child batch under `parent_call_id`.
-- A child batch with several `ask_user` calls returns one pending batch; TUI queues the calls in
-  batch order, as TUI already does for a model batch.
+- A child batch may hold one or more calls; parallel child calls may be separate child batches. The
+  pending query returns each batch; TUI queues `ask_user` calls in batch order, as TUI already does
+  for a model batch.
 - TUI must not treat a child batch as a model request. `parent_call_id` is the distinction.
 
 ## 5. Branch, Recall and Hooks
@@ -271,9 +282,9 @@ rebuild to the child batches and their terminal results.
   Recall groups a child call under its parent call; Hooks reports the child call id as
   `tool_use_id`.
 - Query results and hooks payloads must not filter child batches out.
-- `branch` default `at` uses the child batch event sequence as the branch position. The branch tool
-  reads the child batch that contains the calling child call; the branch tool no longer assumes the
-  calling call is a model `step/tool-use`.
+- `branch` default `at` keeps the existing request cut: the branch tool finds the outer request's
+  `step/tool-use` and the preceding `step/model-start`. The child batch provides the source call,
+  not the cut.
 
 ## 6. Approval and Permission
 
@@ -294,8 +305,9 @@ source. `approval_id` remains the only key accepted by the response operation. A
 only that child call; a response never authorizes a sibling, a future call or the outer `codemode`
 call.
 
-A child approval, child question and background result carry `parent_call_id = childCallId` on the
-event envelope. The outer approval (when the outer call asks) has no `parent_call_id`.
+A child approval and background result carry `parent_call_id = childCallId` on the event envelope.
+A child `ask_user` batch carries `parent_call_id = outerCallId`, like every child `step/tool-call`.
+The outer approval (when the outer call asks) has no `parent_call_id`.
 
 ## 7. Storage and client compatibility
 
@@ -305,12 +317,15 @@ event envelope. The outer approval (when the outer call asks) has no `parent_cal
   batch semantics. The step number is the next free number at implementation time; the marker table
   `CHECK` and its single row advance, while business tables, columns, indexes and rows do not.
 - An older binary refuses the newer marker, preserves the store byte-for-byte and never downgrades.
-- v1 clients exclude child batches and events whose `parent_call_id` points to a child call. The v1
-  event projection stays closed.
-- v3 clients receive child `step/tool-call`/`step/tool-result` events and the `parent_call_id`
-  property. TUI and dim-electron decoders must accept the optional property.
+- v1 and v2 clients receive child `step/tool-call`/`step/tool-result` events with `parent_call_id`
+  omitted. The child batch keeps the existing `ToolCallData`/`ToolResultData` shapes; older clients
+  see an ordinary tool batch and can answer a child `ask_user` prompt, but cannot group child
+  batches.
+- v3 clients receive child batches with `parent_call_id`. TUI and dim-electron decoders must accept
+  the optional property and group child batches.
 - The upgrade/downgrade fixture includes a top-level batch, a child batch, a child result and a
-  child background result. The v1 projection fixture proves child batches do not reach v1.
+  child background result. The v1/v2 projection fixture proves `parent_call_id` is omitted and the
+  child batch still reaches the client.
 
 ## 8. Dependencies
 
@@ -334,8 +349,8 @@ facade access or a Node/TypeScript runtime.
 | --- | --- |
 | Problem | A branch part must run an adopted tool while its own outer tool call is current. Calling a handler or `ToolHost` directly bypasses the pinned binding and Permission. A second top-level `step/tool-call` makes Loop and ToolExecutor treat the child as a model batch. |
 | Existing mechanisms considered | `ToolBinding.handler` alone bypasses Approval; a second top-level `step/tool-call` fails with "concurrent tool batches"; a Session-side registry read is not the request snapshot. |
-| Generic capability | A branch-scoped nested invocation service that writes child `step/tool-call` batches with `parent_call_id`, executes the child calls through the request-pinned binding, Permission and Approval, writes child `step/tool-result` events, and exposes `open`/`invoke`/`close` to the caller. |
-| Sequence, batch, interruption and reload | Child batches do not take a model batch slot. The parent gate closes admission and waits for every committed child before the outer result. Cancellation uses a per-program child token. Reload uses the rule in §3.6: terminal child results are used; started-but-unfinished children fail; the outer call fails with the effect-may-have-happened warning and confirmed child effects. |
+| Generic capability | A branch-scoped nested invocation service that writes child `step/tool-call` batches with `parent_call_id`, executes the child calls through the request-pinned binding, Permission and Approval, writes child `step/tool-result` events, and exposes `open`/`invoke`/`close` to the caller. The service refuses a call when the outer batch is closed, interrupted or not the current batch; a closed or interrupted executor never exposes the nested surface. |
+| Sequence, batch, interruption and reload | Child batches do not take a model batch slot. The parent gate closes admission and waits for every committed child before the outer result. Cancellation uses a per-program child token; Approval admission has a drop guard that removes a pending request and writes `approval/cancelled`. Reload uses the rule in §3.6: terminal child results are used; started-but-unfinished children fail; the outer call fails with the effect-may-have-happened warning and confirmed child effects. |
 | Owner and issue | Dim runtime / ToolExecutor mechanism owner; [#1276](https://github.com/arcships/dim/issues/1276). |
 
 ### R2. QuickJS execution boundary
@@ -352,9 +367,9 @@ facade access or a Node/TypeScript runtime.
 
 | Field | Content |
 | --- | --- |
-| Problem | `session.question.pending` queries only `step/tool-call` batches written for a model request. A child `ask_user` call is a `step/tool-call` batch with `parent_call_id`; the current TUI path does not know child batches. |
-| Existing mechanisms considered | The existing pending query and waiter table; the child batch is already a `step/tool-call`. |
-| Generic capability | The pending query reads every `step/tool-call` with `ask_user`, including batches with `parent_call_id`; the reply returns the child call id; TUI displays child batches in sequence order. |
+| Problem | The TUI question path assumes every `step/tool-call` with `ask_user` is a model batch. A child `ask_user` call is a `step/tool-call` batch with `parent_call_id`; the current TUI does not receive or group child batches, so the prompt cannot be shown or answered reliably. |
+| Existing mechanisms considered | The existing pending query already selects `step/tool-call` rows; the waiter table and `session.question.respond` key already use `request_id` + `call_id`. |
+| Generic capability | The pending query includes child batches; the reply returns the child call id; TUI receives child batches, displays them in sequence order and queues `ask_user` calls. |
 | Sequence, batch, interruption and reload | The child batch is visible to v3 clients. The waiter key is `(branch, request, child call id)`. The child result closes the batch. Reload settles a waiting child through ToolExecutor's failure rule. |
 | Owner and issue | Questions owner; [#1276](https://github.com/arcships/dim/issues/1276). |
 
@@ -372,9 +387,9 @@ facade access or a Node/TypeScript runtime.
 
 | Field | Content |
 | --- | --- |
-| Problem | `step/tool-call` and `step/tool-result` need a parent relation; the retrieval layer must distinguish child batches without decoding `ToolCallData`; v1 clients cannot decode child batches. |
+| Problem | `step/tool-call` and `step/tool-result` need a parent relation; the retrieval layer must distinguish child batches without decoding `ToolCallData`; v1 and v2 projections must not expose the new envelope property. |
 | Existing mechanisms considered | An optional top-level `AgentEvent.parent_call_id`; the existing `step/tool-call`/`step/tool-result` shapes. |
-| Generic capability | The event envelope carries optional `parent_call_id`; the native store advances one format step; v1 excludes child batches; v3 clients and TUI read the property. |
+| Generic capability | The event envelope carries optional `parent_call_id`; the native store advances one format step; v1/v2 projections omit the property; v3 clients and TUI read the property. |
 | Sequence, batch, interruption and reload | The property is written at commit time with the event; the upgrade/downgrade fixture covers a top-level batch, a child batch, a child result and a child background result. |
 | Owner and issue | Timeline/event and App Server owners; [#1276](https://github.com/arcships/dim/issues/1276). |
 
@@ -382,8 +397,8 @@ facade access or a Node/TypeScript runtime.
 
 | Rule | How this design complies |
 | --- | --- |
-| §1 Capability boundary | `CodeModeBranch` is the only Code Mode Capability. `CodeModeSession` only registers a tool; `CodeMode` only owns process configuration and registrations. |
-| §4.1 split by state owner | Process owns `CodeModeRuns` and the bounds; Session owns the tool declaration; Branch owns the one-shot QuickJS execution and parent gate; ToolExecutor owns child batches, admission and terminal facts. |
+| §1 Capability boundary | `CodeModeBranch` is a branch part with runtime-only execution state, not a Capability in this delivery. `CodeModeSession` only registers a tool; `CodeMode` only owns process configuration and registrations. |
+| §4.1 split by state owner | Process owns `CodeModeRuns`, the program semaphore and the bounds; Session owns the tool declaration; Branch owns the one-shot QuickJS execution and parent gate use; ToolExecutor owns child batches, admission and terminal facts. |
 | §4.2 command and handoff | A child `step/tool-call` with `parent_call_id` is the durable handoff command. The parent gate closes admission and joins every committed child before the outer result. |
 | §4.3 handlers register work and return | The `codemode` handler awaits the QuickJS program and the parent gate; the branch owns runtime waiters and settles them before returning. |
 | §4.4 core mechanism has no business meaning | The nested invocation service and `parent_call_id` are generic; the contract names no Code Mode type. |
@@ -415,6 +430,7 @@ CodeMode::apply(ctx):
   partRegistry.register(Branch,  "CodeModeBranch",  |names| CodeModeBranch::new(names, config))
 
 CodeModeSession::apply(ctx):
+  session_id = sessionIdentity.session_id
   tools.register(declaration = {
     name: "codemode",
     risk: "session",
@@ -423,18 +439,24 @@ CodeModeSession::apply(ctx):
     runner = runs.get(session_id, context.branch_id) or error
     runner.run(call.id, call.code, call.timeoutMs, call.maxCalls, context, cancel))
 
-CodeModeBranch::run(...):
+CodeModeBranch::run(outer_call_id, code, timeout_ms, max_calls, context, cancel):
+  child_cancel = cancel.child_token()
+  program_slot = runs.acquire_program(child_cancel) or error
   runtime = AsyncRuntime::new(); runtime.set_memory_limit(max)
   runtime.set_interrupt_handler(deadline || child_cancel)
-  context = AsyncContext::full(runtime)
-  gate = toolExecutor.open(parent_call_id = outerCallId)
-  context.async_with(|ctx|:
-    install tools.list / tools.describe from executor.definitions(context.request_id)
-    install tools.call = Async(|name, args| gate.invoke(ToolCall{name, args}, context, child_cancel))
-    promise = ctx.eval(async function body)
-    value = promise.into_future()
+  quickjs = AsyncContext::full(runtime)
+  gate = toolExecutor.open(outer_call_id)
+  result = try:
+    quickjs.async_with(|ctx|:
+      install tools.list / tools.describe from executor.definitions(context.request_id)
+      install tools.call = Async(|name, args| gate.invoke(ToolCall{name, args}, context, child_cancel))
+      promise = ctx.eval(async function body)
+      return promise.into_future())
+  finally:
+    child_cancel.cancel()
     gate.close(reason)
-    return ToolResult { content: JSON(value), effects: collected_effects })
+    drop(program_slot)
+  return ToolResult { content: JSON(result), effects: collected_effects }
 ```
 
 The host adds the process row with `dim_codemode::install`; `install_required` also makes both
