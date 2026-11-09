@@ -91,15 +91,15 @@ outcome marks are `✓`, `✗` and the running mark; sections already use a head
 their rows at indent 3. A child batch currently has no parent in `ViewRow`, so an unchanged client
 would open a second top-level group. That is the rendering bug this design removes.
 
-The v4 shape adds a **program section inside the existing group**, not a second group or a second
-disclosure. The program is the group's subject; child calls are its rows:
+The v4 shape adds child rows to the existing group. It does not show the code body and does not add
+a second group or a second disclosure:
 
 ```text
-✓ Ran 1 program · 4 tool calls .................................. ▸
+✓ Ran code · 4 tool calls ...................................... ▸
 ```
 
 ```text
-✓ Ran 1 program · 4 tool calls .................................. ▾
+✓ Ran code · 4 tool calls ...................................... ▾
   ✓ Read CodeMode.md
   ✓ Grep parent_call_id
   · Ran cargo test -p dim-codemode
@@ -107,19 +107,21 @@ disclosure. The program is the group's subject; child calls are its rows:
 ```
 
 ```text
-✓ Ran 1 program · 4 tool calls .................................. ▾
-  Program
-    const [doc, hits] = await Promise.all([...]);
+✓ Ran code · 4 tool calls ...................................... ▾
   ✓ Read CodeMode.md
+    result: 455 lines
   ✓ Grep parent_call_id
+    result: 7 matches
   · Ran cargo test -p dim-codemode
+    running 42s
   · ask_user  Which line?
     [1] main  [2] child  [c] custom
 ```
 
-If the same request also calls an ordinary tool, the header says `Ran 1 program, ran 1 command`
-and the ordinary tool keeps its existing section. The program section is flat; there is no
-`codemode` card inside a card and no second `▸`/`▾` target.
+If the same request also calls an ordinary tool, the header says `Ran code, ran 1 command` and the
+ordinary tool keeps its existing section. The code body is not rendered: there is no `Program` or
+`Code` block in the transcript and no second `▸`/`▾` target. The outer call is the group header;
+expanded shows only the child calls and their details.
 
 This reuses the existing header, summary rows, section indent and outcome marks. It does not add a
 new card style or a second transcript. A pending `ask_user` uses the running mark; the question
@@ -127,8 +129,8 @@ itself uses the existing question surface. A child approval uses the existing ap
 names `child <call> of codemode <parent>`.
 
 Implementation consequence: `ViewRow` carries the parent call id and the projection folds child
-rows into the outer request group as a program section; changing only the renderer would still
-leave the child as a separate group.
+rows into the outer request group; changing only the renderer would still leave the child as a
+separate group. The `codemode` input is omitted from the drawn group.
 
 ### 2.4 TUI and CLI
 
