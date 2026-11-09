@@ -1,9 +1,7 @@
 //! The process owner: the `schedule` management namespace over the `schedule`
 //! settings document and the delivery history file ([design §1.3, A.3](../../../docs/design/plugins/Scheduler.md)).
 use crate::{
-    document::{
-        Job, MAX_TOOL_JOBS_PER_SESSION, Mode, Origin, Schedule, Target, canonical_instant,
-    },
+    document::{Job, MAX_TOOL_JOBS_PER_SESSION, Mode, Origin, Schedule, Target, canonical_instant},
     runs::{self, Delivery, DeliveryState, SchedulerError, SessionOrigin, stamp},
 };
 use chrono::{DateTime, Duration, Utc};

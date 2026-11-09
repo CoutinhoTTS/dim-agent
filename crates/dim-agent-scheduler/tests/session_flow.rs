@@ -991,7 +991,8 @@ fn legacy_delivery_record(run_id: &str, job_id: &str, state: &str) -> Value {
     ) {
         record["session_id"] = json!("legacy-session");
         record["session_origin"] = json!("reuse");
-        record["policy"] = json!({"preset": "read-only", "allowedTools": [], "disallowedTools": []});
+        record["policy"] =
+            json!({"preset": "read-only", "allowedTools": [], "disallowedTools": []});
         record["input_event_id"] = json!(format!("{run_id}-input"));
     }
     record
@@ -999,7 +1000,14 @@ fn legacy_delivery_record(run_id: &str, job_id: &str, state: &str) -> Value {
 
 /// The eight state names this change decodes from earlier builds.
 const LEGACY_STATES: [&str; 8] = [
-    "skipped", "submitted", "running", "completed", "cancelled", "timed_out", "lost", "launching",
+    "skipped",
+    "submitted",
+    "running",
+    "completed",
+    "cancelled",
+    "timed_out",
+    "lost",
+    "launching",
 ];
 
 /// The delivery file's inner text, as the store holds it.
@@ -1056,7 +1064,11 @@ async fn legacy_deliveries_load_show_in_history_and_keep_their_bytes() {
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
-    assert_eq!(seeded, runs_text(home.path()), "the records keep their bytes");
+    assert_eq!(
+        seeded,
+        runs_text(home.path()),
+        "the records keep their bytes"
+    );
 }
 
 /// Retention keeps the newest 100 terminal deliveries per existing job; a
@@ -1237,12 +1249,17 @@ async fn an_explicit_target_ignores_the_legacy_top_level_fields() {
             .typed("schedule.run_now", json!({"job_id": id}))
             .await
             .unwrap();
-        let run = run_where(&mut client, id, accepted["run_id"].as_str().unwrap(), |run| {
-            !matches!(
-                run["state"].as_str(),
-                Some("launching" | "submitted" | "running" | "delivering")
-            )
-        })
+        let run = run_where(
+            &mut client,
+            id,
+            accepted["run_id"].as_str().unwrap(),
+            |run| {
+                !matches!(
+                    run["state"].as_str(),
+                    Some("launching" | "submitted" | "running" | "delivering")
+                )
+            },
+        )
         .await;
         // The stale Agent would make the launch fail; the stale policy would
         // be the effect the Session received.
@@ -1373,7 +1390,8 @@ async fn a_session_target_writes_a_non_main_branch() {
     let home = home();
     let server = start(home.path(), Arc::new(Script::default())).await;
     let mut client = support::connect(&server).await;
-    let session = create_session_with(&mut client, home.path(), &["schedule", "branch"], true).await;
+    let session =
+        create_session_with(&mut client, home.path(), &["schedule", "branch"], true).await;
     let agent = server.agent().expect("the default Agent");
     let at = agent
         .get_session(&session)
@@ -1411,8 +1429,7 @@ async fn a_session_target_writes_a_non_main_branch() {
     let inputs = branch_events_on(&mut client, &session, &branch).await;
     assert!(
         inputs.iter().any(|event| {
-            event["type"] == "input"
-                && event["data"]["submission_id"] == run["submission_id"]
+            event["type"] == "input" && event["data"]["submission_id"] == run["submission_id"]
         }),
         "the target branch takes the delivery: {inputs:?}"
     );
@@ -1459,9 +1476,9 @@ async fn a_failed_target_gone_disable_is_retried() {
     // A conflicting write: hold the settings revision, let the delivery's
     // read see it, then commit the bump so the CAS loses.
     let lock = rusqlite::Connection::open(home.path().join("dimcode.sqlite")).unwrap();
-    lock.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
-    lock.execute_batch("BEGIN IMMEDIATE")
+    lock.busy_timeout(std::time::Duration::from_secs(5))
         .unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
     lock.execute(
         "UPDATE settings_documents SET version = version + 1 WHERE source = 'user/schedule'",
         [],

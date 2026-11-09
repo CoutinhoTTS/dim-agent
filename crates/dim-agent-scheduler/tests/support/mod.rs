@@ -119,11 +119,7 @@ pub async fn start(home: &Path, model: Arc<Script>) -> RunningServer {
 
 /// [`start`] with the host's Session defaults, so a flow can set the role or
 /// the authority bound a Session is created under.
-pub async fn start_with(
-    home: &Path,
-    model: Arc<Script>,
-    defaults: SessionConfig,
-) -> RunningServer {
+pub async fn start_with(home: &Path, model: Arc<Script>, defaults: SessionConfig) -> RunningServer {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_hosts_with_model(&mut builder, HistoryRenderer::default(), model);
