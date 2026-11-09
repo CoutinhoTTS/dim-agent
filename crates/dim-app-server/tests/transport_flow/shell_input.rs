@@ -1059,6 +1059,7 @@ impl Shell {
             &mut builder,
             ModelProviderPlugin::new,
             WorkspaceToolsConfig {
+                boundary: None,
                 output_root: target.join("outputs"),
             },
             dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),

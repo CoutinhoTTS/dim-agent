@@ -600,6 +600,7 @@ impl Daemon {
             &mut builder,
             ModelProviderPlugin::new,
             WorkspaceToolsConfig {
+                boundary: None,
                 output_root: native.join("outputs"),
             },
             dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
