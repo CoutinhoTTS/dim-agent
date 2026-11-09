@@ -646,9 +646,7 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
     for session_id in &references {
         let owner = runs
             .iter()
-            .filter(|run| {
-                run.session_id.as_deref() == Some(session_id) && is_launched(run)
-            })
+            .filter(|run| run.session_id.as_deref() == Some(session_id) && is_launched(run))
             .max_by(|a, b| {
                 a.created_at
                     .cmp(&b.created_at)
