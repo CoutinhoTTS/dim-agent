@@ -221,13 +221,19 @@ impl From<PathError> for String {
     }
 }
 
-/// The roots a host configures for a session's file tools. The roots bound
-/// the model's file-tool calls when a host configures them; they make no
-/// sandbox claim (ADR 010 owns the sandbox). The paths are absolute and
-/// canonical: the evaluation harness resolves them from directories it
-/// created, and a root reached through a symlink would answer `starts_with`
-/// with its lexical path. The product passes `None`, so its behaviour does
-/// not change (ADR 014 keeps deciding file access for it).
+/// The roots a host configures for a session's file tools: they bound the
+/// model's file-tool calls — `read`, `write`, `edit`, `glob` and `grep` —
+/// when a host configures them. They make no sandbox claim: `exec` is
+/// bounded by the sandbox (ADR 010 owns it). Client-initiated file paths —
+/// `@` mention expansion and the App Server's `session.files.*` methods —
+/// are outside the roots, because the model cannot make those calls: in a
+/// run it has only its tools, and the run's App Server socket is outside
+/// every root and unreachable from a sandboxed command. The paths are
+/// absolute and canonical: the evaluation harness resolves them from
+/// directories it created, and a root reached through a symlink would
+/// answer `starts_with` with its lexical path. The product passes `None`,
+/// so its behaviour does not change (ADR 014 keeps deciding file access for
+/// it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileToolBoundary {
     /// The session's workspace: reads and writes. A model's cwd is inside
