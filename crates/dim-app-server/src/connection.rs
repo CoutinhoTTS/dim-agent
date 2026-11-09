@@ -1765,6 +1765,9 @@ impl Connection {
         if let Some(interactive) = params.interactive {
             config.interactive = interactive;
         }
+        if let Some(language) = params.language {
+            config.language = Some(language);
+        }
         let origin = match params.origin {
             None | Some(SessionOrigin::Client) => SessionOrigin::Client,
             Some(SessionOrigin::Acp) => SessionOrigin::Acp,
