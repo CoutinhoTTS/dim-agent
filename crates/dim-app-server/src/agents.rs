@@ -194,7 +194,8 @@ pub(crate) enum DeleteOutcome {
 }
 
 /// What a delete leaves for its caller to announce once the admission gate
-/// is released ([EventHub §9.1](../design/plugins/EventHub.md#91-delete)): a
+/// is released
+/// ([EventHub §9.1](../../../docs/design/plugins/EventHub.md#91-agents-announces-every-successful-delete)): a
 /// listener may take the EventHub Session lock, which a `subscribe` holds
 /// across `sessions.input`, and `sessions.input` waits for that gate in
 /// [`AgentIndex::acquire`].
