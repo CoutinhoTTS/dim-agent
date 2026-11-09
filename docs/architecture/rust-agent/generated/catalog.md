@@ -50,6 +50,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `publication` | process | McpPublication | Rust-only | — |
 | `reservedMethods` | process | — | Rust-only | — |
 | `rutis/loader` | process | rutis-loader | yes | `create` async, `reload` async, `remove` async, `status` async |
+| `scheduleJobs` | process | Scheduler | Rust-only | — |
 | `selectableModelsHost` | process | Provider | Rust-only | — |
 | `serverControl` | process | ServerControl | Rust-only | — |
 | `sessionClientsHost` | process | Connection | Rust-only | — |
@@ -65,6 +66,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `toolchainSourceHost` | process | ToolchainSource | Rust-only | — |
 | `uiExtensions` | process | UiExtensions | Rust-only | — |
 | `uiHost` | process | UiHost | Rust-only | — |
+| `wakeups` | process | Scheduler | Rust-only | — |
 | `workflowFiles` | process | Settings | yes | `createDirectory` async, `list` async, `read` async, `replace` async |
 | `worktreeAssociations` | process | SessionStore | Rust-only | — |
 | `agentConfig` | session | SessionScope | Rust-only | — |

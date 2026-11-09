@@ -5869,6 +5869,7 @@ dependencies = [
  "dim-agent-capabilities",
  "dim-agent-questions",
  "dim-agent-runtime",
+ "dim-agent-scheduler",
  "dim-agent-types",
  "dim-app-server",
  "dim-client",

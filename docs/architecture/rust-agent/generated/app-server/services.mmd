@@ -3,10 +3,11 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p71["Attachments"]
-    p70["goal"]
-    p69["eventhub"]
-    p72["eventhub-ready"]
+    p72["Attachments"]
+    p71["goal"]
+    p70["eventhub"]
+    p73["eventhub-ready"]
+    p69["Scheduler"]
     p68["Questions"]
     p67["PromptSuggestion"]
     p66["Modality"]
@@ -74,14 +75,20 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
+  p44 -->|"dim_agent_runtime::parts::PartRegistry"| p72
   p44 -->|"dim_agent_runtime::parts::PartRegistry"| p71
+  p18 -->|"dim_app_server::settings::SettingsService"| p71
   p44 -->|"dim_agent_runtime::parts::PartRegistry"| p70
-  p18 -->|"dim_app_server::settings::SettingsService"| p70
+  p9 -->|"dim_app_server::methods::ManagementMethods"| p70
+  p13 -->|"dim_app_server::plugin_files::PluginFileTransactions"| p70
+  p36 -->|"dyn rutis_bridge::session::services::HostDispatch#sessions"| p70
+  p70 -->|"dim_event_hub::bridge::EventHub"| p73
   p44 -->|"dim_agent_runtime::parts::PartRegistry"| p69
+  p36 -->|"dim_app_server::agents::sessions::SessionPermissions"| p69
   p9 -->|"dim_app_server::methods::ManagementMethods"| p69
   p13 -->|"dim_app_server::plugin_files::PluginFileTransactions"| p69
+  p18 -->|"dim_app_server::settings::SettingsService"| p69
   p36 -->|"dyn rutis_bridge::session::services::HostDispatch#sessions"| p69
-  p69 -->|"dim_event_hub::bridge::EventHub"| p72
   p44 -->|"dim_agent_runtime::parts::PartRegistry"| p68
   p44 -->|"dim_agent_runtime::parts::PartRegistry"| p67
   p17 -->|"dim_agent_capabilities::host::ModelSelectionHost"| p66

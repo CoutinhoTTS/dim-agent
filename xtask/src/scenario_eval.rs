@@ -378,6 +378,10 @@ const TEXTS: &[(&str, TextMember)] = &[
         "eventhub/tool",
         TextMember::Rust(|overrides, text| overrides.eventhub_tool = Some(text)),
     ),
+    (
+        "scheduler/description",
+        TextMember::Rust(|overrides, text| overrides.scheduler_description = Some(text)),
+    ),
 ];
 
 pub async fn run() -> Result<()> {
@@ -4636,6 +4640,78 @@ mod tests {
             workspace_files(&never_ending.directory),
             "flooding and never-ending start from one workspace"
         );
+    }
+
+    /// The scheduler set parses through the runner's own reader (Scheduler
+    /// §5.1): three scenarios, each with a statement to see and a statement
+    /// not to see, and no EventHub source, since the subject is the `schedule`
+    /// tool. No model runs, so CI catches a schema or layout drift before a
+    /// manual run.
+    #[test]
+    fn the_scheduler_scenario_set_parses() {
+        let root = repository()
+            .join("xtask")
+            .join("scenario-eval")
+            .join("scheduler");
+        let scenarios = read_scenarios(&root).unwrap();
+        let ids: Vec<_> = scenarios
+            .iter()
+            .map(|scenario| scenario.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "a-target-the-tool-cannot-set",
+                "recurring-job-from-a-request",
+                "rename-an-existing-job",
+            ],
+            "the committed set is the three scenarios"
+        );
+        for scenario in &scenarios {
+            assert!(
+                scenario.sources.is_empty() && scenario.events.is_empty(),
+                "{}: the schedule tool is the subject, not an EventHub source",
+                scenario.id
+            );
+            assert!(
+                scenario
+                    .probes
+                    .iter()
+                    .any(|probe| probe.kind == ProbeKind::MustShow),
+                "{}: a statement to see",
+                scenario.id
+            );
+            assert!(
+                scenario
+                    .probes
+                    .iter()
+                    .any(|probe| probe.kind == ProbeKind::MustNotShow),
+                "{}: a statement not to see",
+                scenario.id
+            );
+        }
+    }
+
+    /// The `schedule` description is injected through the product's own
+    /// factory member (Scheduler §5.1, model-prompts §8.1): `--text
+    /// scheduler/description` lands on the `Overrides` field
+    /// [`app_server::serve_home`] hands `SchedulerTexts`, never on a
+    /// product string patched for the evaluation.
+    #[test]
+    fn the_schedule_description_is_a_factory_member() {
+        let overrides = overrides_in(
+            TEXTS,
+            &[(
+                "scheduler/description".to_owned(),
+                Arc::from("candidate description"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            overrides.scheduler_description.as_deref(),
+            Some("candidate description")
+        );
+        assert!(overrides.branch_description.is_none());
     }
 
     /// Every file under a scenario's `workspace/`, by path under it.

@@ -489,6 +489,10 @@
   },
   {
     "from": "xtask",
+    "to": "dim-agent-scheduler"
+  },
+  {
+    "from": "xtask",
     "to": "dim-agent-types"
   },
   {
