@@ -187,6 +187,48 @@ async fn a_retry_while_the_first_append_is_paused_answers_repeated() {
     assert_eq!(files.puts().len(), 1, "one put for the one event");
 }
 
+/// A delivery in flight outlives an EventHub generation: its change lands in
+/// the install's subscription view, so the next generation lists and routes
+/// by what the file now holds (design §2.1, A.5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_delivery_in_flight_updates_the_view_the_next_generation_reads() {
+    let fixture = LoaderFixture::mount().await;
+    fixture.producer.declare(im_declaration()).await.unwrap();
+    fixture.subscribe("branch", &["im.*"], None).await.unwrap();
+    fixture.sessions.fail("branch", "branch_ended");
+    let gate = fixture.sessions.gate();
+    let publishing = {
+        let producer = fixture.producer.clone();
+        tokio::spawn(async move { producer.publish(event("gone")).await })
+    };
+    wait_for("the delivery in flight", || gate.max() >= 1).await;
+
+    // Only EventHub is rebuilt; the publish task holds the old generation's
+    // file handle, so its change must land in the install's view.
+    fixture.host.loader().restart("eventhub").await.unwrap();
+    wait_for("the next generation", || fixture.producer.hub().is_some()).await;
+
+    gate.release();
+    let receipt = publishing.await.unwrap().unwrap();
+    assert_eq!(
+        receipt["deliveries"][0]["status"],
+        json!("gone"),
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["deliveries"][0]["code"],
+        json!("branch_ended"),
+        "{receipt}"
+    );
+
+    assert!(
+        fixture.subscriptions(None).await.is_empty(),
+        "the next generation lists no subscription the file dropped"
+    );
+    let receipt = fixture.producer.publish(event("after")).await.unwrap();
+    assert_eq!(receipt["deliveries"], json!([]), "{receipt}");
+}
+
 /// A redeclared source's new guide is written to a subscribed branch before
 /// its next event, and a later publish writes no guide again (design §3.3,
 /// Appendix D item 15).

@@ -1,19 +1,21 @@
 //! The subscription file `eventhub/subscriptions.json` (design §2.2, A.5):
 //! one inner v1 JSON document inside the host's `{version, text}` envelope,
 //! which [`PluginFileTransactions`] reads and writes. The part reads the file
-//! once when it applies, holds the subscriptions and the guide records in
-//! memory, and every change writes the file under the lock and then replaces
-//! the in-memory copy.
+//! once when it applies; the subscriptions and the guide records live in the
+//! install's state, and every change writes the file through the running
+//! generation's handle under the install's change lock and then replaces that
+//! copy.
 use crate::{
     error::EventHubError,
     model::{Origin, Target, source_of},
+    state::InstanceState,
 };
 use dim_agent_types::InputMode;
 use dim_app_server::plugin_files::{PluginFileError, PluginFileTransactions};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::Arc,
 };
 
 pub const SUBSCRIPTIONS_FILE: &str = "eventhub/subscriptions.json";
@@ -223,53 +225,45 @@ fn encode(document: &Document) -> String {
     .expect("subscription records contain only serializable fields")
 }
 
-/// The file, the lock every change takes, and the in-memory copy publish
-/// reads.
+/// This generation's file handle and the install's subscription view. The
+/// view lives in [`InstanceState`](crate::state::InstanceState), so a change
+/// a detached publish still runs after its generation ended lands where the
+/// next generation reads it (design §2.1, A.5).
 pub(crate) struct Store {
     files: Arc<PluginFileTransactions>,
-    /// Serializes every change: the write and the in-memory replacement. A
-    /// publish reads the document without it.
-    change: tokio::sync::Mutex<()>,
-    state: RwLock<Document>,
+    state: Arc<InstanceState>,
 }
 
 impl Store {
-    pub(crate) fn new(files: Arc<PluginFileTransactions>) -> Self {
-        Self {
-            files,
-            change: tokio::sync::Mutex::new(()),
-            state: RwLock::new(Document::default()),
-        }
+    pub(crate) fn new(files: Arc<PluginFileTransactions>, state: Arc<InstanceState>) -> Self {
+        Self { files, state }
     }
 
-    /// Reads the file once, when the part applies. A missing file is no
-    /// subscriptions and no guide records; a corrupt one is an error, and its
-    /// bytes stay unchanged.
-    pub(crate) async fn load(&self) -> Result<Document, String> {
-        self.files
+    /// Reads the file once, when the part applies, and replaces the install's
+    /// view with what it holds. The change lock holds across both, so an old
+    /// generation's change cannot interleave (design A.5). A missing file is
+    /// no subscriptions and no guide records; a corrupt one is an error, and
+    /// its bytes stay unchanged.
+    pub(crate) async fn reload(&self) -> Result<(), String> {
+        let _guard = self.state.change_lock().await;
+        let document = self
+            .files
             .transact(SUBSCRIPTIONS_FILE, |current| (None, decode(current)))
             .await
-            .map_err(|error| error.to_string())?
-    }
-
-    /// Replaces the in-memory copy, after a load or a successful change.
-    pub(crate) fn replace(&self, document: Document) {
-        *self.state.write().expect("the subscription set") = document;
+            .map_err(|error| error.to_string())??;
+        self.state.replace_subscriptions(document);
+        Ok(())
     }
 
     /// The subscriptions as they are now: what a publish matches against.
     pub(crate) fn read(&self) -> Vec<Subscription> {
-        self.state
-            .read()
-            .expect("the subscription set")
-            .subscriptions
-            .clone()
+        self.state.subscriptions().subscriptions
     }
 
     /// The whole document as it is now: the subscriptions and the guide
     /// records a publish compares (design §2.2).
     pub(crate) fn document(&self) -> Document {
-        self.state.read().expect("the subscription set").clone()
+        self.state.subscriptions()
     }
 
     /// Applies `change` under the store's lock. `change` returns whether it
@@ -285,7 +279,7 @@ impl Store {
     where
         R: Send + 'static,
     {
-        let _guard = self.change.lock().await;
+        let _guard = self.state.change_lock().await;
         let outcome = self
             .files
             .transact(SUBSCRIPTIONS_FILE, move |current| {
@@ -311,7 +305,7 @@ impl Store {
         };
         let (document, value) = outcome?;
         if let Some(document) = document {
-            self.replace(document);
+            self.state.replace_subscriptions(document);
         }
         Ok(value)
     }

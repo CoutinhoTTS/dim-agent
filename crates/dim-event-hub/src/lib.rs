@@ -159,15 +159,14 @@ impl DynPlugin for EventHubPlugin {
         Box::pin(async move {
             let files = ctx.require_at(&self.files)?;
             let sessions = ctx.require_at(&self.sessions)?;
-            let store = Arc::new(store::Store::new(files));
-            // The file is read once; a corrupt one fails this part and leaves
-            // its bytes unchanged (design A.5).
-            let loaded = store.load().await.map_err(|error| {
+            let store = Arc::new(store::Store::new(files, self.state.clone()));
+            // The file is read once, into the install's view; a corrupt one
+            // fails this part and leaves its bytes unchanged (design A.5).
+            store.reload().await.map_err(|error| {
                 rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
                     format!("event hub subscriptions: {error}").into(),
                 ))
             })?;
-            store.replace(loaded);
             let shared = Arc::new(Shared {
                 ctx: ctx.clone(),
                 sessions: sessions.clone(),

@@ -4,10 +4,10 @@
 //! dependency reload, or an off and on of the row — keeps every declaration,
 //! and an in-flight change of one generation still serializes with the next
 //! generation's. The state ends with the process.
-use crate::catalog::Catalog;
+use crate::{catalog::Catalog, store::Document};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
@@ -15,10 +15,19 @@ use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 /// (design §2.5).
 pub(crate) const MAX_DELIVERIES_IN_FLIGHT: usize = 8;
 
-/// The catalog, the Session locks, the event locks and the delivery budget,
-/// shared by every generation of the process part (design §2.1).
+/// The catalog, the subscription view, the Session locks, the event locks
+/// and the delivery budget, shared by every generation of the process part
+/// (design §2.1).
 pub struct InstanceState {
     catalog: Arc<Catalog>,
+    /// The subscriptions and guide records every generation reads and
+    /// changes (design §2.1, A.5): a change a detached publish still runs
+    /// after its generation ended lands here, where the next generation
+    /// reads it.
+    subscriptions: RwLock<Document>,
+    /// Serializes every change of the subscription view, the file write and
+    /// the in-memory replacement alike, across generations (design A.5).
+    change: tokio::sync::Mutex<()>,
     /// One lock per target Session (design §3.3).
     sessions: KeyedLocks,
     /// One lock per submission id (design §2.4).
@@ -31,6 +40,8 @@ impl Default for InstanceState {
     fn default() -> Self {
         Self {
             catalog: Arc::new(Catalog::default()),
+            subscriptions: RwLock::new(Document::default()),
+            change: tokio::sync::Mutex::new(()),
             sessions: KeyedLocks::default(),
             events: KeyedLocks::default(),
             budget: Arc::new(Semaphore::new(MAX_DELIVERIES_IN_FLIGHT)),
@@ -41,6 +52,24 @@ impl Default for InstanceState {
 impl InstanceState {
     pub(crate) fn catalog(&self) -> &Arc<Catalog> {
         &self.catalog
+    }
+
+    /// The subscription view as it is now.
+    pub(crate) fn subscriptions(&self) -> Document {
+        self.subscriptions
+            .read()
+            .expect("the subscription set")
+            .clone()
+    }
+
+    /// Replaces the subscription view, after a load or a successful change.
+    pub(crate) fn replace_subscriptions(&self, document: Document) {
+        *self.subscriptions.write().expect("the subscription set") = document;
+    }
+
+    /// Waits for the change lock and holds it until the guard drops.
+    pub(crate) async fn change_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.change.lock().await
     }
 
     /// Waits for the lock of `session_id` and holds it until the guard drops
