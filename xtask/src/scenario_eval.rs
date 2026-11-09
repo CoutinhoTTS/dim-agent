@@ -227,9 +227,10 @@
 //! and `XDG_*` under the run root, `PATH` and the one credential variable the
 //! model configuration names, and nothing else of the operator's environment
 //! — the execution settings document turns the sandbox on, the file tools
-//! carry the root boundary, and a preflight Session checks the five things
-//! before the model's first turn. A run whose preflight fails, or a host
-//! with no sandbox backend, is a harness failure, not a model result.
+//! carry the root boundary, and a preflight Session checks the run's
+//! isolation and its tool set before the model's first turn. A run whose
+//! preflight fails, or a host with no sandbox backend, is a harness failure,
+//! not a model result.
 //!
 //! The runner copies the scenario's workspace into a fresh run root for every
 //! run — `workspace/` and the disposable environment directories, and nothing
@@ -450,8 +451,8 @@ fn offered_tools(request: &str) -> Vec<String> {
 }
 
 /// The served preflight endpoint of one run: a loopback OpenAI-chat provider
-/// whose scripted answers drive the run's preflight Session through its
-/// nine checks. Every request after the first is answered as the step whose number
+/// whose scripted answers drive the run's preflight Session through every
+/// check. Every request after the first is answered as the step whose number
 /// of executed tool results the request already holds, so the replies need no
 /// state: the requests carry the full conversation, and each executed step's
 /// tool result appears in it exactly once, as its `tool_call_id`. (The
@@ -620,10 +621,7 @@ pub async fn run() -> Result<()> {
 }
 
 /// Runs the evaluation and writes `runs.jsonl` and `scenario.md`; returns the
-/// report. `observe` sees every run's App Server builder before it is served,
-/// the seam [`app_server::serve_home`] gives a caller that places its own
-/// values; the flow tests point a run's process facts at a home of their own
-/// instead of the developer's.
+/// report.
 async fn evaluate(options: &Options) -> Result<String> {
     if options.defaults.is_some() {
         if options.node.is_none() {
@@ -2256,6 +2254,7 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
         node: params.node.clone(),
         js_runtime: params.js_runtime.clone(),
         boundary: params.boundary.clone(),
+        plugin_tools: false,
     };
     // The scenario's event producers run in the child, whose process
     // publishes what the run's Session subscribes to (EventHub design A.1).
@@ -2688,8 +2687,8 @@ fn plugin_default_names(path: &Path) -> Vec<String> {
 }
 
 /// The preflight Session: the product probe, then a scripted Session against
-/// the run's preflight provider that checks the five things before the live
-/// model's first turn — the disposable `HOME`, the absence of credential
+/// the run's preflight provider that checks the run's isolation before the
+/// live model's first turn — the disposable `HOME`, the absence of credential
 /// names, an outside read refused for `exec` and for a file tool, the
 /// operator's home refused for both, and the run's socket unreachable. Any
 /// failure aborts the run and is reported as a harness failure.
@@ -2832,7 +2831,7 @@ async fn preflight_session(
     Ok((checks, ceiling))
 }
 
-/// The nine checks over the preflight Session's tool results and the model
+/// The checks over the preflight Session's tool results and the model
 /// request it declared.
 fn preflight_checks(
     results: &[Value],
@@ -3354,26 +3353,11 @@ fn bindable_socket(out_relative: &Path) -> Result<PathBuf> {
 }
 
 /// The platform's fixed read-only roots, as the sandbox and the file-tool
-/// boundary share them (ADR 014).
+/// boundary share them (ADR 014): the one list lives in the capabilities
+/// crate, and this expands its requested paths and canonical forms.
 fn platform_roots() -> Vec<PathBuf> {
-    let roots: &[&str] = if cfg!(target_os = "macos") {
-        &[
-            "/System",
-            "/usr",
-            "/bin",
-            "/sbin",
-            "/Library/Apple",
-            "/private/etc",
-            "/etc",
-            "/var/select",
-        ]
-    } else if cfg!(unix) {
-        &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"]
-    } else {
-        &[]
-    };
     let mut out = Vec::new();
-    for path in roots {
+    for path in dim_agent_capabilities::host_platform::PLATFORM_ROOTS {
         let path = PathBuf::from(path);
         if !out.contains(&path) {
             out.push(path.clone());

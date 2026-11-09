@@ -59,7 +59,7 @@ pub struct Overrides {
 /// What one run adds to the product assembly: the overrides above, the model
 /// configuration file `dim-app-server --model-config` serves, and the local
 /// endpoint a client connects to. The product path leaves every field empty.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RunSettings {
     pub overrides: Overrides,
     pub model_config: Option<PathBuf>,
@@ -76,6 +76,26 @@ pub struct RunSettings {
     /// in the workspace, the disposable home and the system roots, writes
     /// only in the workspace. The product path leaves it empty.
     pub boundary: Option<dim_agent_capabilities::workspace_tools::FileToolBoundary>,
+    /// Whether the served process registers the `plugin` management tool.
+    /// The product and the other evaluations keep it; an isolated scenario
+    /// run turns it off, so the tools the process registers are the ceiling
+    /// its Sessions can declare.
+    pub plugin_tools: bool,
+}
+
+impl Default for RunSettings {
+    fn default() -> Self {
+        Self {
+            overrides: Overrides::default(),
+            model_config: None,
+            unix_path: None,
+            defaults: None,
+            node: None,
+            js_runtime: None,
+            boundary: None,
+            plugin_tools: true,
+        }
+    }
 }
 
 impl RunSettings {
@@ -141,11 +161,11 @@ pub async fn serve_home(
         } else {
             home.clone()
         }),
-        // A served profile (a model configuration) never offers a model the
-        // `plugin` management tool: the registered tools are the ceiling a
-        // run's Sessions can declare, members included. The product path
-        // keeps the tool.
-        plugin_tools: product,
+        // The served profile's option: an isolated scenario run turns it
+        // off, so the tools the process registers are the ceiling a run's
+        // Sessions can declare, members included. The product path and the
+        // other evaluations keep the tool.
+        plugin_tools: run.plugin_tools,
         ..Default::default()
     };
     config.session_defaults.cwd = cwd.to_string_lossy().into_owned();
