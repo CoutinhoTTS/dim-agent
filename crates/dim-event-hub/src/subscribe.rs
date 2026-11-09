@@ -177,7 +177,7 @@ pub(crate) async fn unsubscribe(
     Ok(json!({}))
 }
 
-fn subscription_unknown(id: &str) -> EventHubError {
+pub(crate) fn subscription_unknown(id: &str) -> EventHubError {
     EventHubError::new("subscription_unknown", format!("no subscription {id}"))
 }
 

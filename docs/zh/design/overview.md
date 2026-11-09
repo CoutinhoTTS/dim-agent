@@ -265,31 +265,28 @@ sequenceDiagram
 
 ### 5.5 经 Agents 的定时运行
 
-[Scheduler](plugins/Scheduler.md) 的设计状态以其所有者文档为准，可选包及其公开流程验证已实现（[#317](https://github.com/arcships/dim/pull/317)），安装按其 §1.3 显式进行。图示为其自持的 create 模式运行流程。S2、Settings 与 pluginFiles 的[公开装配](../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。
+[Scheduler](plugins/Scheduler.md) 的设计状态以其所有者文档为准，可选包及其公开流程验证已实现（[#317](https://github.com/arcships/dim/pull/317)），安装按其 §1.3 显式进行。图示为其设计规定的投递流程。S2、Settings 与 pluginFiles 的[公开装配](../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。
 
 ```mermaid
 sequenceDiagram
   participant SC as Scheduler（进程）
   participant AI as Agents sessions
   participant PF as Scheduler pluginFiles
-  SC->>PF: 持久化运行 launching
-  SC->>AI: launch（S2 创建非交互 Session）
-  AI-->>SC: sessionId、有效 policy
-  SC->>PF: 持久化 launch 回复
+  SC->>PF: 持久化投递 delivering
+  opt launch 目标
+    SC->>AI: launch(S2 创建非交互 Session)
+    AI-->>SC: sessionId、有效 policy
+    SC->>PF: 持久化 Session 与停止时刻
+  end
   SC->>AI: input Queue，带 dim-scheduler 标记
   AI-->>SC: 已发布输入 receipt
-  SC->>PF: 持久化 submitted
-  loop 本运行输入尚未到达终态
-    SC->>AI: history(main)，固定已发布前缀并分页
-    AI-->>SC: 本输入的消费与轮次事实
-  end
-  SC->>PF: 持久化运行终态
-  opt A.6 选定的报告
-    SC->>AI: 向记录的报告分支 input Steer
+  SC->>PF: 持久化 delivered
+  opt launch 目标
+    SC->>AI: 到停止时刻停止
   end
 ```
 
-跟踪器按 [§3.2](plugins/Scheduler.md#32-完成与超时) 读取自己输入的已发布历史，不保留原生 idle 等待。先保存运行终态，再按 [A.6](plugins/Scheduler.md#a6-运行结果投递) 尝试一次报告；失败记录后不补发。结果经目标分支正常消费输入进入模型上下文。
+一条投递向目标分支写入一条输入，之后什么都不读([Scheduler §3.1](plugins/Scheduler.md#31-窗口到期)、[A.5](plugins/Scheduler.md#a5-timeline-与-capability-机制))。launch 目标先启动，记录其停止时刻，并在到点时停止([§3.2](plugins/Scheduler.md#32-完成与超时))。投递记录就是结果，不写任何报告。目标分支正常消费该输入后，其文本进入模型上下文。
 
 ### 5.6 Collaboration 委派给外部 Agent
 

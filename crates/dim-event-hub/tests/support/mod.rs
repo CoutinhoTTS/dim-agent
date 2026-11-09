@@ -50,6 +50,16 @@ impl Script {
     pub fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
+    /// The tool names the newest request offers.
+    pub fn tools(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap()
+            .last()
+            .and_then(|request| request.tools.as_ref())
+            .map(|tools| tools.iter().map(|tool| tool.name.clone()).collect())
+            .unwrap_or_default()
+    }
     /// The `file` path an event marker in `rendered` names, once.
     fn read_call(&self, rendered: &str) -> Option<ToolCall> {
         let (start, escaped) = match rendered.find("file=\\\"") {
@@ -370,6 +380,24 @@ pub async fn create_session(client: &mut Client, home: &Path) -> String {
             json!({
                 "cwd": home,
                 "tools": ["read", "branch"],
+                "interactive": true,
+                "permissionPolicy": {"preset": "full-access", "allowedTools": [], "disallowedTools": []}
+            }),
+        )
+        .await
+        .unwrap();
+    created["sessionId"].as_str().unwrap().to_owned()
+}
+
+/// [`create_session`] with `events` in its mount list: the tool the Session
+/// part registers (design A.4).
+pub async fn create_events_session(client: &mut Client, home: &Path) -> String {
+    let created = client
+        .rpc(
+            "session.create",
+            json!({
+                "cwd": home,
+                "tools": ["read", "branch", "events"],
                 "interactive": true,
                 "permissionPolicy": {"preset": "full-access", "allowedTools": [], "disallowedTools": []}
             }),
