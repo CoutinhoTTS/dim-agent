@@ -1728,7 +1728,14 @@ impl AgentIndex {
         let version = self
             .version_of(source)
             .ok_or_else(|| AgentError::Closed(source.into()))?;
-        let config = session.config().clone();
+        // The record is the Session's current configuration: an in-place
+        // update (`session.language.update`) rewrites it, while the live
+        // Session keeps the value its apply ran with at creation.
+        let config = store
+            .timeline_store()
+            .session_config(source)
+            .await?
+            .ok_or_else(|| AgentError::Closed(source.to_owned()))?;
         let source = source.to_owned();
         let (id, prepare) = self.prepared(config.cwd.clone(), move |fork| {
             Box::pin(async move { store.fork_session(&source, &fork, at).await })
@@ -2144,6 +2151,20 @@ impl DynPlugin for AgentsPlugin {
                     Ok(Some(
                         Box::new(configuration::AgentsSessionPlugin::new(mount.names)?)
                             as Box<dyn DynPlugin>,
+                    ))
+                },
+            )?;
+            let with_store = self.stored.is_some();
+            parts.register(
+                ctx,
+                dim_agent_runtime::PartScope::Session,
+                "SessionLanguage",
+                move |mount| {
+                    Ok(Some(
+                        Box::new(crate::session_language::SessionLanguagePlugin::new(
+                            mount.names,
+                            with_store,
+                        )?) as Box<dyn DynPlugin>,
                     ))
                 },
             )?;

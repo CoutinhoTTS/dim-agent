@@ -15,8 +15,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
-    StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
+    AgentError, BoxFuture, BranchRecord, PublishCallback, ReplyLanguage, Result, SessionConfig,
+    StoredBranch, StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, ContextCompactionResult, EventKind, ModelRequest, RecoverySnapshot,
@@ -1095,6 +1095,38 @@ impl SessionStore {
                         params![id, path],
                     )
                     .map_err(error)?;
+                Ok(())
+            })
+            .await
+    }
+    /// Writes the Session's reply language into its config record as one JSON
+    /// member; the rest of the record is unchanged. A missing Session is
+    /// `Closed`.
+    pub async fn set_session_language(
+        &self,
+        session_id: &str,
+        language: Option<ReplyLanguage>,
+    ) -> Result<()> {
+        let session = session_id.to_owned();
+        self.timeline
+            .db
+            .run(move |connection| {
+                let changed = match language {
+                    Some(language) => connection.execute(
+                        "UPDATE agent_sessions SET config = json_set(config, '$.language', ?2) \
+                         WHERE session_id = ?1",
+                        params![&session, language.code()],
+                    ),
+                    None => connection.execute(
+                        "UPDATE agent_sessions SET config = json_remove(config, '$.language') \
+                         WHERE session_id = ?1",
+                        params![&session],
+                    ),
+                }
+                .map_err(error)?;
+                if changed != 1 {
+                    return Err(AgentError::Closed(session));
+                }
                 Ok(())
             })
             .await
