@@ -65,7 +65,7 @@ ContextUsage 是现有上下文功能的独立分支部件，拥有当前有效�
 
 按 Dispatcher 的恢复与实时交接规则处理。与 ContextPreparation 的状态消费不互相等待对方处理同一事实，避免出现派发顺序死锁。缺口读取和数值保存由本部件登记任务，等待 activated 后开始，closing 取消；不在 handler 中等待 I/O。
 
-ContextPreparation 对最终请求的专有增补或 host 变换单独核验，不能把“基准覆盖的上下文”视作“最终请求完全相同”。CLI 读取异步发出，返回时更新读数；断线和切换不将旧结果写到新 Session。
+ContextPreparation 对最终请求的专有增补或 host 变换单独核验，不能把“基准覆盖的上下文”视作“最终请求完全相同”。CLI 的异步读取和会话切换归 [Tui §3.7](Tui.md#37-context-usage-reads)。
 
 ## 5. Requirements raised to mechanism owners
 

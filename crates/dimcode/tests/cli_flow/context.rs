@@ -12,6 +12,19 @@ fn failed(wire: &mut Wire, request: &Value) {
          "data":{"appError":"unknown_method"}}}));
 }
 
+fn hold_initial_usage(wire: &mut Wire) -> Value {
+    let mut usage = None;
+    for _ in 0..2 {
+        let request = wire.read_any();
+        match request["method"].as_str() {
+            Some("account.providers") => wire.reply(&request, json!([])),
+            Some("session.context.usage") => usage = Some(request),
+            method => panic!("unexpected request {method:?}"),
+        }
+    }
+    usage.expect("initial context request")
+}
+
 fn event_on(wire: &mut Wire, branch: &str, sequence: u64, name: &str, data: Value) {
     wire.notice(
         "session.event",
@@ -19,6 +32,118 @@ fn event_on(wire: &mut Wire, branch: &str, sequence: u64, name: &str, data: Valu
             {"id":format!("event-{branch}-{sequence}"),"sequence":sequence,"create_at":1,
              "type":"step","name":name,"data":data}}),
     );
+}
+
+#[test]
+fn tui_displays_history_and_handles_input_while_context_usage_is_pending() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (release, waiting) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            let pending = hold_initial_usage(wire);
+            wire.reply(&history, json!({"events":[{
+                "id":"old-text","sequence":7,"create_at":1,"type":"step","name":"text",
+                "data":{"turn_id":"old","request_id":"old","delta":"restored while usage waits"}
+            }],"through":8,"nextAfter":8,"done":true}));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "still responsive");
+            wire.reply(&submit, json!({"event":{}}));
+            wire.event(9, "text", json!({"turn_id":"new","request_id":"new","delta":"live while usage waits"}));
+            event_on(wire, "main", 10, "model-output-end", json!({
+                "turn_id":"new","request_id":"new","status":"completed","finish_reason":"end_turn"
+            }));
+            waiting.recv_timeout(PATIENCE).unwrap();
+            wire.reply(&pending, usage(40000.));
+            let refresh = wire.read("session.context.usage");
+            wire.reply(&refresh, usage(64000.));
+            assert!(wire.trailing_request().is_none(), "refreshes must coalesce");
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("restored while usage waits");
+        terminal.write(b"still responsive\r");
+        terminal.until("live while usage waits");
+        release.send(()).unwrap();
+        terminal.until("64K / 256K");
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
+fn tui_discards_a_previous_sessions_delayed_context_report() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.create.modelFromSession"]);
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let old = hold_initial_usage(wire);
+            let create = wire.read("session.create");
+            assert_eq!(create["params"]["modelFromSession"], "session");
+            wire.reply(&create, json!({"sessionId":"next","sequence":8,"model":{"providerId":"test","modelId":"model"}}));
+            let detach = wire.read("session.detach");
+            wire.reply(&detach, json!({}));
+            let attach = wire.read("session.attach");
+            assert_eq!(attach["params"]["sessionId"], "next");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["sessionId"], "next");
+            wire.reply(&submit, json!({"event":{}}));
+            let current = wire.read("session.context.usage");
+            assert_eq!(current["params"]["sessionId"], "next");
+            wire.reply(&current, usage(64000.));
+            wire.reply(&old, usage(128000.));
+            wire.notice("session.event", json!({"sessionId":"next","branchId":"main","event":{
+                "id":"new-session-text","sequence":9,"create_at":1,"type":"step","name":"text",
+                "data":{"turn_id":"next-turn","request_id":"next-request","delta":"next session ready"}
+            }}));
+            assert!(wire.trailing_request().is_none(), "no stale context refresh");
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.write(b"/usage\r");
+        terminal.write(b"/new\r");
+        terminal.until("─ new session ─");
+        terminal.write(b"next\r");
+        terminal.until("next session ready");
+        terminal.until_anywhere("64K / 256K");
+        assert!(
+            !terminal.transcript.contains("128K / 256K"),
+            "{}",
+            terminal.transcript
+        );
+        assert!(
+            !terminal.transcript.contains("Context:"),
+            "{}",
+            terminal.transcript
+        );
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
 }
 
 #[test]

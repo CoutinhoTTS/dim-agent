@@ -303,6 +303,7 @@ struct Worker {
     /// finished, a run on main ended, a compaction result arrived on main, or
     /// the session or its model changed.
     context_stale: bool,
+    context_request: Option<(u64, bool)>,
     /// The last `model/usage` on main, folded from the events so `/usage`
     /// can report its cache read share.
     last_usage: Option<LastUsage>,
@@ -436,6 +437,7 @@ async fn run(
         login: None,
         login_callbacks: unbounded_channel(),
         context_stale: false,
+        context_request: None,
         last_usage: None,
         compact_requests: Vec::new(),
         refilled_catalogs: Default::default(),
@@ -1319,29 +1321,7 @@ impl Worker {
             }
             Command::CloseSessions => self.cancel_catalog().await?,
             Command::Usage => {
-                let reading = self.context_usage().await;
-                // Pages land oldest first: until `main`'s history has
-                // finished loading, an earlier page's older request is not
-                // the newest, so the segment waits for `done`.
-                let loaded = self
-                    .task_history
-                    .get("main")
-                    .is_some_and(|history| history.done);
-                let cached = self
-                    .last_usage
-                    .filter(|_| loaded)
-                    .and_then(|usage| usage.percent());
-                match reading {
-                    Ok(usage) => {
-                        let mut line = usage.describe();
-                        if let Some(cached) = cached {
-                            line.push_str(" · last request cached ");
-                            line.push_str(&cached);
-                        }
-                        self.report(line, false)
-                    }
-                    Err(error) => self.report(error.to_string(), true),
-                }
+                self.request_context(true).await;
                 if self
                     .model
                     .as_ref()
@@ -1976,42 +1956,36 @@ impl Worker {
             )
     }
 
-    /// The main branch's context window as `session.context.usage`
-    /// estimates it.
-    async fn context_usage(&mut self) -> crate::Result<ContextUsage> {
-        self.client
-            .typed(
+    async fn request_context(&mut self, report: bool) {
+        if let Some((_, requested_report)) = &mut self.context_request {
+            *requested_report |= report;
+            return;
+        }
+        self.context_stale = false;
+        match self
+            .client
+            .send(
                 "session.context.usage",
                 json!({"sessionId": self.session_id, "branchId": "main"}),
             )
             .await
-            .map_err(
-                |error| match error.downcast_ref::<client::RpcError>().and_then(app_error) {
-                    Some("context_not_configured") => {
-                        "Context usage is known once a model has answered in this session".into()
-                    }
-                    Some("context_model_failed") => {
-                        "Context usage needs the model's capabilities; select the model again"
-                            .into()
-                    }
-                    Some("unknown_method") => "This daemon does not track context usage".into(),
-                    _ => error,
-                },
-            )
+        {
+            Ok(request) => self.context_request = Some((request, report)),
+            Err(error) => {
+                self.send(Update::Context(None));
+                if report {
+                    self.report(error.to_string(), true);
+                }
+            }
+        }
     }
 
     /// Refreshes the composer's context reading once it is stale; a session
     /// whose usage is unknown shows none.
     async fn poll_context(&mut self) {
-        if !std::mem::take(&mut self.context_stale) || self.session_id.is_empty() {
-            return;
+        if self.context_stale && !self.session_id.is_empty() && self.context_request.is_none() {
+            self.request_context(false).await;
         }
-        let reading = self.context_usage().await.ok().map(|usage| ContextReading {
-            input: usage.input(),
-            window: usage.window(),
-            threshold: tokens(usage.threshold_tokens),
-        });
-        self.send(Update::Context(reading));
     }
 
     /// Asks the shown line to compact; committed outcomes reach its transcript.
@@ -3738,6 +3712,62 @@ impl Worker {
         id: u64,
         result: Result<serde_json::Value, client::RpcError>,
     ) -> crate::Result<()> {
+        if self
+            .context_request
+            .as_ref()
+            .is_some_and(|(request, _)| *request == id)
+        {
+            let (_, report) = self
+                .context_request
+                .take()
+                .expect("matched context request");
+            let reading = result
+                .map_err(|error| match app_error(&error) {
+                    Some("context_not_configured") => {
+                        "Context usage is known once a model has answered in this session"
+                            .to_owned()
+                    }
+                    Some("context_model_failed") => {
+                        "Context usage needs the model's capabilities; select the model again"
+                            .to_owned()
+                    }
+                    Some("unknown_method") => "This daemon does not track context usage".to_owned(),
+                    _ => error.to_string(),
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<ContextUsage>(value)
+                        .map_err(|error| format!("Invalid context usage reply: {error}"))
+                });
+            self.send(Update::Context(reading.as_ref().ok().map(|usage| {
+                ContextReading {
+                    input: usage.input(),
+                    window: usage.window(),
+                    threshold: tokens(usage.threshold_tokens),
+                }
+            })));
+            if report {
+                match reading {
+                    Ok(usage) => {
+                        let mut line = usage.describe();
+                        let loaded = self
+                            .task_history
+                            .get("main")
+                            .is_some_and(|history| history.done);
+                        if let Some(cached) = self
+                            .last_usage
+                            .filter(|_| loaded)
+                            .and_then(|usage| usage.percent())
+                        {
+                            line.push_str(" · last request cached ");
+                            line.push_str(&cached);
+                        }
+                        self.report(line, false);
+                    }
+                    Err(error) => self.report(error, true),
+                }
+            }
+            return Ok(());
+        }
         if self
             .catalog_request
             .as_ref()

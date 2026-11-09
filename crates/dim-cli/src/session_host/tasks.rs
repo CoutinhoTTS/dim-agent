@@ -63,6 +63,8 @@ impl Worker {
         self.session_title = None;
         self.title_revision = 0;
         self.last_usage = None;
+        self.context_request = None;
+        self.context_stale = false;
         self.cursors.clear();
         self.focus = "main".into();
         self.side = None;
