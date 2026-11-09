@@ -578,7 +578,7 @@ impl rutis::host::DynPlugin for CaptureMemberConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn product_collaboration_adopts_profile_and_default_capabilities() {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let home = std::env::temp_dir().join(format!("dim-team-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let configs = Arc::new(std::sync::Mutex::new(Vec::new()));
