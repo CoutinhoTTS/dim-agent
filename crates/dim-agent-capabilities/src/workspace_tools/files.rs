@@ -153,18 +153,27 @@ impl Cancelled {
     }
 }
 
+/// Whether a resolved path is admitted for reading or writing: reads may
+/// enter the workspace, the configured home and the read-only roots; writes
+/// only the workspace.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Access {
+    Read,
+    Write,
+}
+
 /// Resolves a model-supplied file path (TS `path.ts`, design §7.2): `~`
 /// expansion, Windows corrections, join onto cwd, lexical `.`/`..`
 /// removal, then realpath of the longest existing prefix. With `boundary`
-/// configured, a resolved path outside the roots is refused for `write`
-/// (workspace only) or for reads (workspace, home and the read-only
+/// configured, a resolved path outside the roots is refused for `Access::Write`
+/// (workspace only) or for `Access::Read` (workspace, home and the read-only
 /// roots); the check compares the canonical path, so a symlink out of the
 /// roots is refused as well.
 pub(crate) fn resolve_path(
     cwd: &Path,
     home: &Path,
     boundary: Option<&FileToolBoundary>,
-    write: bool,
+    access: Access,
     input: &str,
 ) -> Result<PathBuf, PathError> {
     let expanded = if input == "~" {
@@ -175,7 +184,7 @@ pub(crate) fn resolve_path(
         windows_path(input)?
     };
     match canonical_prefix(lexical(&cwd.join(expanded))) {
-        Ok(path) if boundary.is_some_and(|boundary| !inside(boundary, &path, write)) => {
+        Ok(path) if boundary.is_some_and(|boundary| !inside(boundary, &path, access)) => {
             Err(PathError::Refused(path))
         }
         Ok(path) => Ok(path),
@@ -248,13 +257,13 @@ impl FileToolBoundary {
     }
 }
 
-/// Whether a canonicalized path lies inside the roots for the mode: reads in
-/// the workspace, the home and the read-only roots; writes only in the
+/// Whether a canonicalized path lies inside the roots for the access: reads
+/// in the workspace, the home and the read-only roots; writes only in the
 /// workspace.
-fn inside(boundary: &FileToolBoundary, path: &Path, write: bool) -> bool {
+fn inside(boundary: &FileToolBoundary, path: &Path, access: Access) -> bool {
     if path.starts_with(&boundary.workspace) {
         true
-    } else if write {
+    } else if access == Access::Write {
         false
     } else {
         path.starts_with(&boundary.home)

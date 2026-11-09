@@ -3,8 +3,9 @@
 use super::super::file_reads::{FileReads, TextEncoding, TextFileBinding};
 use super::codec::{self, CodecError};
 use super::{
-    Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking, cancelled, failed,
-    field, hex, invalid_input, js_len, not_regular, object, refused, resolve_path, succeeded,
+    Access, Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking,
+    cancelled, failed, field, hex, invalid_input, js_len, not_regular, object, refused,
+    resolve_path, succeeded,
 };
 use crate::host::HostError;
 use crate::images::{self, ImageKind, ImageRefusal, ImageSize, ScaledImage, Sniffed};
@@ -134,7 +135,7 @@ pub(super) async fn run(
         tools.boundary.clone(),
     );
     let outcome = blocking(move || {
-        let path = match resolve_path(&cwd, &home, boundary.as_ref(), false, &input.path) {
+        let path = match resolve_path(&cwd, &home, boundary.as_ref(), Access::Read, &input.path) {
             Ok(path) => path,
             Err(PathError::Refused(path)) => return Ok((refused(&path), None)),
             Err(PathError::Message(message)) => return Ok((invalid_input(message), None)),

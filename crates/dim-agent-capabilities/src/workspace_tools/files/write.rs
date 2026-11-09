@@ -5,8 +5,9 @@ use super::super::file_reads::{
 };
 use super::codec;
 use super::{
-    Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking, cancelled, failed,
-    field, hex, invalid_input, not_regular, refused, resolve_path, revision, wrote,
+    Access, Cancelled, FileTools, NotRegular, PathError, Target, TargetError, blocking,
+    cancelled, failed, field, hex, invalid_input, not_regular, refused, resolve_path, revision,
+    wrote,
 };
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolEffect, ToolResult};
@@ -60,7 +61,7 @@ pub(super) async fn run(
         tools.boundary.clone(),
     );
     let path =
-        match blocking(move || resolve_path(&cwd, &home, boundary.as_ref(), true, &requested))
+        match blocking(move || resolve_path(&cwd, &home, boundary.as_ref(), Access::Write, &requested))
             .await?
         {
             Ok(path) => path,

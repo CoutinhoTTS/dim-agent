@@ -4,7 +4,9 @@
 //! traversal (`--hidden`, ignore files, the default exclusions), the same
 //! per-file and preview limits, and the same output.
 
-use super::{FileTools, blocking, cancelled, failed, field, inside, js_len, lexical, succeeded};
+use super::{
+    Access, FileTools, blocking, cancelled, failed, field, inside, js_len, lexical, succeeded,
+};
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolResult};
 use grep_matcher::Matcher;
@@ -249,7 +251,7 @@ fn resolve_scope(
         std::fs::File::open(&absolute).map_err(|_| unreadable())?;
         if let Some(boundary) = boundary {
             let canonical = std::fs::canonicalize(&absolute).map_err(|_| unreadable())?;
-            if !inside(boundary, &canonical, false) {
+            if !inside(boundary, &canonical, Access::Read) {
                 return Err(refused_scope(&canonical));
             }
         }
@@ -269,7 +271,7 @@ fn resolve_scope(
         ));
     }
     if let Some(boundary) = boundary
-        && !inside(boundary, &canonical, false)
+        && !inside(boundary, &canonical, Access::Read)
     {
         return Err(refused_scope(&canonical));
     }

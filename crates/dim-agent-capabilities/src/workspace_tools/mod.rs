@@ -273,7 +273,7 @@ impl ToolDriver for WorkspaceTools {
                     path.to_owned(),
                 );
                 let target = tokio::task::spawn_blocking(move || {
-                    files::resolve_path(&cwd, &home, None, false, &path)
+                    files::resolve_path(&cwd, &home, None, files::Access::Write, &path)
                 });
                 let path = tokio::select! {
                     result = target => result.map_err(|error| HostError::failed(error.to_string()))?
