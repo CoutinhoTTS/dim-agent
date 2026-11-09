@@ -37,7 +37,7 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
             serde_json::from_str(&read.next_line().await.unwrap().unwrap()).unwrap();
         let replies = format!(
             "{}\n{}\n",
-            json!({"jsonrpc":"2.0","id":second["id"],"result":{"order":2}}),
+            json!({"jsonrpc":"2.0","id":second["id"],"result":null}),
             json!({"jsonrpc":"2.0","id":first["id"],"result":{"order":1}})
         );
         write.write_all(replies.as_bytes()).await.unwrap();
@@ -49,6 +49,12 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
         resumed.await.unwrap();
         write
             .write_all(b"{\"text\":\"complete\"}}\n")
+            .await
+            .unwrap();
+        let missing: Value =
+            serde_json::from_str(&read.next_line().await.unwrap().unwrap()).unwrap();
+        write
+            .write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":missing["id"]})).as_bytes())
             .await
             .unwrap();
     });
@@ -68,7 +74,7 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
     let second = client.send("session.second", json!({})).await.unwrap();
     assert_eq!(client.response(first).await.unwrap(), json!({"order":1}));
     assert!(
-        matches!(client.next().await.unwrap(), Message::Response { id, result: Ok(_) } if id == second)
+        matches!(client.next().await.unwrap(), Message::Response { id, result: Ok(Value::Null) } if id == second)
     );
     written.await.unwrap();
     assert!(
@@ -79,6 +85,14 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
     resume.send(()).unwrap();
     assert!(
         matches!(client.next().await.unwrap(), Message::Notice { method, params } if method == "session.notice" && params == json!({"text":"complete"}))
+    );
+    assert_eq!(
+        client
+            .rpc("session.missing", json!({}))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "Invalid App Server response identity"
     );
     server.await.unwrap();
     client.wait_closed().await.unwrap();
