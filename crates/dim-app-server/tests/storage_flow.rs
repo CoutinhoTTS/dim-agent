@@ -417,6 +417,9 @@ const V37_ADDITIONS: &[&str] = &[
     "CREATE TABLE timeline_member_origins (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, index_id TEXT NOT NULL, match_key BLOB NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0), group_key BLOB NOT NULL, PRIMARY KEY(session_id,branch_id,index_id,match_key,sequence,group_key))",
     "CREATE TABLE timeline_member_terminals (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, index_id TEXT NOT NULL, match_key BLOB NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0), PRIMARY KEY(session_id,branch_id,index_id,match_key))",
 ];
+const V39_ADDITIONS: &[&str] = &[
+    "CREATE TABLE timeline_array_elements (session_id TEXT NOT NULL, array_id TEXT NOT NULL, element_index INTEGER NOT NULL CHECK(element_index >= 0), content_ref TEXT NOT NULL, array_length INTEGER, PRIMARY KEY(session_id, array_id, element_index), CHECK((element_index = 0 AND array_length IS NOT NULL AND array_length > 0) OR (element_index > 0 AND array_length IS NULL)))",
+];
 fn schema_of(version: u32) -> Vec<String> {
     let mut statements: Vec<String> = V13_SCHEMA
         .iter()
@@ -433,6 +436,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V35_ADDITIONS.iter().filter(|_| version >= 35))
         .chain(V36_ADDITIONS.iter().filter(|_| version >= 36))
         .chain(V37_ADDITIONS.iter().filter(|_| version >= 37))
+        .chain(V39_ADDITIONS.iter().filter(|_| version >= 39))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {

@@ -3217,6 +3217,16 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::storage::arrays",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/arrays.rs",
+      "unexpandedMacros": [
+        "format",
+        "params"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::catalog",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -3343,6 +3353,18 @@
         "tracing::error",
         "unreachable",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::storage::query::arrays",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage::query",
+      "file": "crates/dim-app-server/src/storage/query/arrays.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "params",
+        "unreachable"
       ]
     },
     {
@@ -29804,6 +29826,13 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::arrays",
+      "references": [
+        "mod arrays"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::catalog",
       "references": [
         "mod catalog",
@@ -29902,6 +29931,37 @@
         "use timeline::SqliteTimelineStore",
         "use timeline::TurnWindow",
         "use timeline::WorktreeUsage"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::arrays",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::arrays",
+      "to": "dim_app_server::storage::codec",
+      "references": [
+        "path hash",
+        "use super::codec::hash"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::arrays",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error",
+        "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::arrays",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path super::timeline::Row"
       ]
     },
     {
@@ -30138,6 +30198,19 @@
       "references": [
         "path ToolDefinition",
         "use dim_agent_types::ToolDefinition"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::codec",
+      "to": "dim_app_server::storage::arrays",
+      "references": [
+        "path arrays::Element",
+        "path arrays::Reference",
+        "path arrays::check",
+        "path arrays::content_ref",
+        "path arrays::encode",
+        "path arrays::fingerprint",
+        "use super::arrays"
       ]
     },
     {
@@ -30683,6 +30756,14 @@
     },
     {
       "from": "dim_app_server::storage::query",
+      "to": "dim_app_server::storage::query::arrays",
+      "references": [
+        "mod arrays",
+        "path arrays::expand"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path error",
@@ -30696,6 +30777,73 @@
         "path super::text::candidates",
         "path super::text::indexed",
         "path super::text::trigrams"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query::arrays",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query::arrays",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryDirection::Descending"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query::arrays",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryPage",
+        "path QueryPick::First",
+        "path QueryPick::Last",
+        "path QuerySpec",
+        "path QueryValue::Value"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query::arrays",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineReadScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query::arrays",
+      "to": "dim_app_server::storage::arrays",
+      "references": [
+        "path crate::storage::arrays::Reference"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query::arrays",
+      "to": "dim_app_server::storage::codec",
+      "references": [
+        "path Reader"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query::arrays",
+      "to": "dim_app_server::storage::query",
+      "references": [
+        "path Compiler",
+        "path Statistics",
+        "path Temporary",
+        "path after",
+        "path before_element_value",
+        "path cancelled",
+        "path equality_values",
+        "path record_statement"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::query::arrays",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error"
       ]
     },
     {
@@ -30723,6 +30871,14 @@
       "to": "dim_app_server::provider",
       "references": [
         "path crate::provider::rewrite_stored_limits"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::storage::arrays",
+      "references": [
+        "path super::arrays::SCHEMA",
+        "path super::arrays::backfill"
       ]
     },
     {
@@ -30766,6 +30922,13 @@
     },
     {
       "from": "dim_app_server::storage::text",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path dim_agent_runtime::QueryValue::Value"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::text",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
         "path TimelineReadScope",
@@ -30781,6 +30944,13 @@
     },
     {
       "from": "dim_app_server::storage::text",
+      "to": "dim_app_server::storage::codec",
+      "references": [
+        "path super::codec::Reader::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::text",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path error",
@@ -30791,6 +30961,9 @@
       "from": "dim_app_server::storage::text",
       "to": "dim_app_server::storage::timeline",
       "references": [
+        "path super::timeline::Row",
+        "path super::timeline::Row::Event",
+        "path super::timeline::Row::Output",
         "path super::timeline::read_sequence"
       ]
     },
@@ -30957,6 +31130,15 @@
     },
     {
       "from": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::arrays",
+      "references": [
+        "path super::arrays::Reference",
+        "path super::arrays::check",
+        "path super::arrays::check_elements"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::catalog",
       "references": [
         "path super::catalog::activity",
@@ -30974,6 +31156,7 @@
         "path ListReferences",
         "path Previous",
         "path Reader",
+        "path Reader::for_validation",
         "path Reader::new",
         "path Reader::without_request_bodies",
         "path RequestBodies",

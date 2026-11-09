@@ -1,3 +1,4 @@
+mod arrays;
 mod catalog;
 mod codec;
 mod export;

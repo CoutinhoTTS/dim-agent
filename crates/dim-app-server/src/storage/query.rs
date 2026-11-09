@@ -1,3 +1,5 @@
+mod arrays;
+
 use super::{
     codec::{Reader, WireEvent},
     sqlite::error,
@@ -127,6 +129,37 @@ pub(super) fn register(connection: &Connection) -> Result<()> {
         })
         .map_err(error)?;
     connection
+        .create_scalar_function("query_array_length", 4, flags, |ctx| {
+            let id: Option<String> = ctx.get(0)?;
+            let length: Option<i64> = ctx.get(1)?;
+            let stored: Option<i64> = ctx.get(2)?;
+            let inline: bool = ctx.get(3)?;
+            match (id, length, stored) {
+                (None, None, None) => Ok(None),
+                (Some(_), Some(length), Some(stored))
+                    if length > 0 && length == stored && !inline =>
+                {
+                    Ok(Some(length))
+                }
+                _ => Err(rusqlite::Error::UserFunctionError(
+                    "invalid array reference".into(),
+                )),
+            }
+        })
+        .map_err(error)?;
+    connection
+        .create_scalar_function("query_array_slot", 1, flags, |ctx| {
+            let kind: Option<String> = ctx.get(0)?;
+            if kind.as_deref() == Some("array-element") {
+                Ok(true)
+            } else {
+                Err(rusqlite::Error::UserFunctionError(
+                    "missing or invalid array element reference".into(),
+                ))
+            }
+        })
+        .map_err(error)?;
+    connection
         .create_scalar_function("query_characters", 1, flags, |ctx| {
             Ok(match property(ctx.get(0)?)? {
                 QueryValue::Value {
@@ -210,6 +243,8 @@ struct Compiler<'a> {
     direct_relations: bool,
     physical_candidates: Option<String>,
     physical_ids: Option<Vec<String>>,
+    array_rows: bool,
+    element_values: bool,
     resolved_relations: Vec<(&'a QueryFilter, String)>,
 }
 
@@ -251,6 +286,70 @@ fn prefix_filters<'a>(filter: &'a QueryFilter, prefixes: &mut Vec<&'a QueryFilte
     }
 }
 
+fn equality_values(filter: &QueryFilter, field: &str) -> Option<Vec<Value>> {
+    match filter {
+        QueryFilter::Compare {
+            left: QueryOperand::Field { path },
+            comparison: QueryComparison::Eq,
+            right: QueryOperand::Value { value },
+        }
+        | QueryFilter::Compare {
+            right: QueryOperand::Field { path },
+            comparison: QueryComparison::Eq,
+            left: QueryOperand::Value { value },
+        } if path == field => Some(vec![value.clone()]),
+        QueryFilter::In {
+            value: QueryOperand::Field { path },
+            values,
+        } if path == field => Some(values.clone()),
+        QueryFilter::And { conditions } => conditions
+            .iter()
+            .find_map(|condition| equality_values(condition, field)),
+        QueryFilter::Or { conditions } => conditions
+            .iter()
+            .map(|condition| equality_values(condition, field))
+            .collect::<Option<Vec<_>>>()
+            .map(|values| values.into_iter().flatten().collect()),
+        _ => None,
+    }
+}
+
+fn uses_element_value(filter: &QueryFilter) -> bool {
+    let operand = |operand: &QueryOperand| matches!(operand,QueryOperand::Field {path}|QueryOperand::Outer {path} if path.starts_with("element.value"));
+    match filter {
+        QueryFilter::Compare { left, right, .. } => operand(left) || operand(right),
+        QueryFilter::In { value, .. }
+        | QueryFilter::Present { value }
+        | QueryFilter::Prefix { value, .. }
+        | QueryFilter::Contains { value, .. } => operand(value),
+        QueryFilter::And { conditions } | QueryFilter::Or { conditions } => {
+            conditions.iter().any(uses_element_value)
+        }
+        QueryFilter::Not { condition } | QueryFilter::Exists { condition } => {
+            uses_element_value(condition)
+        }
+        QueryFilter::Any { field, condition } => {
+            field.starts_with("element.value") || uses_element_value(condition)
+        }
+        QueryFilter::TextCandidate { .. } => false,
+    }
+}
+
+fn before_element_value(filter: &QueryFilter) -> Option<QueryFilter> {
+    match filter {
+        QueryFilter::And { conditions } => Some(QueryFilter::And {
+            conditions: conditions.iter().filter_map(before_element_value).collect(),
+        }),
+        QueryFilter::Or { conditions } => conditions
+            .iter()
+            .map(before_element_value)
+            .collect::<Option<Vec<_>>>()
+            .map(|conditions| QueryFilter::Or { conditions }),
+        _ if !uses_element_value(filter) => Some(filter.clone()),
+        _ => None,
+    }
+}
+
 impl<'a> Compiler<'a> {
     fn new(query: &'a QuerySpec) -> Self {
         let mut fields = BTreeMap::new();
@@ -277,8 +376,12 @@ impl<'a> Compiler<'a> {
                     .value = true;
             }
         }
+        let element_values = fields.keys().any(|path| path.starts_with("element.value"))
+            || query.filter.as_ref().is_some_and(uses_element_value);
         fields.retain(|path, _| !path.starts_with("element."));
-        if let Some(QueryRows::Elements { field }) = &query.rows {
+        let array_rows =
+            matches!(&query.rows,Some(QueryRows::Elements {field}) if field=="data.changes");
+        if !array_rows && let Some(QueryRows::Elements { field }) = &query.rows {
             fields
                 .entry(field.as_str())
                 .or_insert_with(Requirement::default)
@@ -302,6 +405,8 @@ impl<'a> Compiler<'a> {
             direct_relations: false,
             physical_candidates: None,
             physical_ids: None,
+            array_rows,
+            element_values,
             resolved_relations: Vec::new(),
         }
     }
@@ -1065,6 +1170,11 @@ impl<'a> Compiler<'a> {
                     format!("{row}.wire -> {path}")
                 };
                 let value = format!("CASE WHEN {row}.output THEN {output} ELSE {input} END");
+                if presence && field == "data.changes" {
+                    return format!(
+                        "CASE WHEN json_type({row}.wire,'$.record.changes')='object' THEN 'true' ELSE {value} END"
+                    );
+                }
                 if presence && matches!(field, "data.request.tools" | "data.request.system") {
                     let reference = if field.ends_with("tools") {
                         "tools"
@@ -1144,6 +1254,9 @@ fn required_filter<'a>(filter: &'a QueryFilter, fields: &mut BTreeMap<&'a str, R
 
 fn references(field: &str) -> bool {
     matches!(field, "data" | "data.request")
+        || field
+            .strip_prefix("data.changes")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.') || rest.starts_with('['))
         || ["messages", "tools", "system"].iter().any(|name| {
             field
                 .strip_prefix(&format!("data.request.{name}"))
@@ -1157,6 +1270,7 @@ fn inline_presence(field: &str) -> bool {
     matches!(
         field,
         "data"
+            | "data.changes"
             | "data.request"
             | "data.request.messages"
             | "data.request.tools"
@@ -1601,38 +1715,11 @@ fn sources<'a>(
             })
         })
     {
-        fn identities(filter: &QueryFilter) -> Option<Vec<String>> {
-            match filter {
-                QueryFilter::Compare {
-                    left: QueryOperand::Field { path },
-                    comparison: QueryComparison::Eq,
-                    right:
-                        QueryOperand::Value {
-                            value: Value::String(id),
-                        },
-                }
-                | QueryFilter::Compare {
-                    right: QueryOperand::Field { path },
-                    comparison: QueryComparison::Eq,
-                    left:
-                        QueryOperand::Value {
-                            value: Value::String(id),
-                        },
-                } if path == "id" => Some(vec![id.clone()]),
-                QueryFilter::In {
-                    value: QueryOperand::Field { path },
-                    values,
-                } if path == "id" => Some(
-                    values
-                        .iter()
-                        .filter_map(|value| value.as_str().map(str::to_owned))
-                        .collect(),
-                ),
-                QueryFilter::And { conditions } => conditions.iter().find_map(identities),
-                _ => None,
-            }
-        }
-        compiler.physical_ids = identities(filter).map(|mut ids| {
+        compiler.physical_ids = equality_values(filter, "id").map(|values| {
+            let mut ids: Vec<_> = values
+                .into_iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect();
             ids.sort();
             ids.dedup();
             ids
@@ -1676,8 +1763,16 @@ fn sources<'a>(
             format!(",query_prefix({value},{prefix}) AS t{index}")
         })
         .collect::<String>();
+    let metadata = if compiler.array_rows {
+        let inline = compiler.inline("data.changes", "b", false);
+        format!(
+            ",json_extract(b.wire,'$.record.changes.id') AS array_id,json_extract(b.wire,'$.record.changes.length') AS array_length,{inline} AS array_inline"
+        )
+    } else {
+        String::new()
+    };
     let inline = format!(
-        "{base}, inline AS NOT MATERIALIZED (SELECT b.ord,b.branch,b.seq{columns}{tests} FROM base b)"
+        "{base}, inline AS NOT MATERIALIZED (SELECT b.ord,b.branch,b.seq{columns}{tests}{metadata} FROM base b)"
     );
     let referenced: Vec<_> = fields
         .iter()
@@ -1710,7 +1805,7 @@ fn sources<'a>(
                 .join(" OR ")
         };
         let sql = format!("{inline} SELECT b.ord,b.seq,json_remove(json_extract(b.wire,'$.record'),'$.trace') FROM base b JOIN inline i USING(ord,seq)
-          WHERE b.kind IN ('context/prepare','model/call') AND ({candidates})");
+          WHERE (b.kind IN ('context/prepare','model/call') OR json_type(b.wire,'$.record.changes')='object') AND ({candidates})");
         let mut statement = connection.prepare(&sql).map_err(error)?;
         let mut rows = statement
             .query(params_from_iter(&compiler.parameters))
@@ -1759,13 +1854,21 @@ fn sources<'a>(
         let columns = (0..fields.len())
             .map(|i| format!(",p{i} TEXT"))
             .chain((0..prefixes.len()).map(|i| format!(",t{i} INTEGER")))
+            .chain(
+                compiler
+                    .array_rows
+                    .then_some(",array_id TEXT,array_length INTEGER,array_inline TEXT".to_owned()),
+            )
             .collect::<String>();
         let table = temporary.table(&format!(
             "ord INTEGER,branch TEXT,seq INTEGER{columns},PRIMARY KEY(ord,seq)"
         ))?;
-        let placeholders = std::iter::repeat_n("?", fields.len() + prefixes.len() + 3)
-            .collect::<Vec<_>>()
-            .join(",");
+        let placeholders = std::iter::repeat_n(
+            "?",
+            fields.len() + prefixes.len() + 3 + 3 * usize::from(compiler.array_rows),
+        )
+        .collect::<Vec<_>>()
+        .join(",");
         let mut insert = connection
             .prepare(&format!("INSERT INTO {table} VALUES({placeholders})"))
             .map_err(error)?;
@@ -1797,6 +1900,13 @@ fn sources<'a>(
                     let matched = matches!(event_property(event,&segment.branch_id,path)?,QueryValue::Value { value:Value::String(value) } if value.starts_with(prefix));
                     values.push(SqlValue::Integer(i64::from(matched)));
                 }
+                if compiler.array_rows {
+                    values.extend([
+                        SqlValue::Null,
+                        SqlValue::Null,
+                        value_text(event_property(event, &segment.branch_id, "data.changes")?)?,
+                    ]);
+                }
                 insert.execute(params_from_iter(values)).map_err(error)?;
             }
         }
@@ -1816,7 +1926,13 @@ fn sources<'a>(
     let tests = (0..prefixes.len())
         .map(|index| format!(",i.t{index}"))
         .collect::<String>();
-    let columns = columns + &tests;
+    let columns = columns
+        + &tests
+        + if compiler.array_rows {
+            ",i.array_id,i.array_length,i.array_inline"
+        } else {
+            ""
+        };
     let join = content.map_or(String::new(), |table| {
         format!("LEFT JOIN {table} c USING(ord,seq)")
     });
@@ -1983,6 +2099,8 @@ fn selected_properties(
         direct_relations: false,
         physical_candidates: None,
         physical_ids: None,
+        array_rows: false,
+        element_values: false,
         resolved_relations: Vec::new(),
     };
     let point = TimelineReadScope {
@@ -2262,20 +2380,38 @@ pub(super) fn execute(
     let (source, row_source) = if let Some(QueryRows::Elements { field }) = &query.rows {
         let conditions = event_conditions
             .into_iter()
-            .map(|condition| compiler.filter(condition, "a", None, None))
+            .map(|condition| compiler.filter(&condition, "a", None, None))
             .collect::<Vec<_>>();
         let condition = if conditions.is_empty() {
             "1".to_owned()
         } else {
             conditions.join(" AND ")
         };
-        let array = compiler.column("a", field);
-        (
-            format!(
-                "{source}, expanded AS (SELECT a.*,CAST(element.key AS INTEGER) AS element_index,({array} -> ('$[' || element.key || ']')) AS element_value FROM events a,json_each(CASE WHEN ({condition}) THEN query_array({array}) END) element)"
-            ),
-            "expanded",
-        )
+        if compiler.array_rows {
+            arrays::expand(
+                connection,
+                scope,
+                query,
+                page,
+                &mut compiler,
+                &mut temporary,
+                reader,
+                cancel,
+                &source,
+                &condition,
+                &after,
+                #[cfg(feature = "testing")]
+                statistics,
+            )?
+        } else {
+            let array = compiler.column("a", field);
+            (
+                format!(
+                    "{source}, expanded AS (SELECT a.*,CAST(element.key AS INTEGER) AS element_index,({array} -> ('$[' || element.key || ']')) AS element_value FROM events a,json_each(CASE WHEN ({condition}) THEN query_array({array}) END) element)"
+                ),
+                "expanded",
+            )
+        }
     } else {
         (source, "events")
     };
@@ -2300,6 +2436,7 @@ pub(super) fn execute(
                 "(SELECT coalesce(sum(query_characters({})),0) FROM filtered f)",
                 compiler.column("f", field)
             ),
+            QuerySelect::Count if row_source=="array_events" => "(SELECT coalesce(sum(coalesce(checked_length,json_array_length(checked_array),0)),0) FROM array_events)".into(),
             QuerySelect::Count => "(SELECT count(*) FROM filtered)".into(),
             _ => "EXISTS(SELECT 1 FROM filtered)".into(),
         };

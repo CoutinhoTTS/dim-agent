@@ -302,7 +302,7 @@ async fn indexed_pending_sets_keep_old_pages_and_do_not_read_closed_or_other_gro
             drop(db);
             if size == 128 {
                 let connection = Connection::open(&database.0).unwrap();
-                connection.execute_batch("DROP TABLE timeline_member_roots; DROP TABLE timeline_member_origins; DROP TABLE timeline_member_terminals; DROP TABLE timeline_member_nodes; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 36)); INSERT INTO agent_store_format VALUES (36);").unwrap();
+                connection.execute_batch("DROP TABLE timeline_array_elements; DROP TABLE timeline_member_roots; DROP TABLE timeline_member_origins; DROP TABLE timeline_member_terminals; DROP TABLE timeline_member_nodes; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 36)); INSERT INTO agent_store_format VALUES (36);").unwrap();
                 for sql in V36_ADDITIONS
                     .iter()
                     .filter(|sql| sql.starts_with("CREATE INDEX "))

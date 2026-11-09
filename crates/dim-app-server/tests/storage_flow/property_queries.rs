@@ -40,7 +40,7 @@ async fn v37_text_upgrade_removes_opaque_documents_without_losing_query_candidat
     drop(store);
     drop(db);
     let connection = Connection::open(&database.0).unwrap();
-    connection.execute_batch("DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37)); INSERT INTO agent_store_format VALUES(37);").unwrap();
+    connection.execute_batch("DROP TABLE timeline_array_elements; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37)); INSERT INTO agent_store_format VALUES(37);").unwrap();
     for sql in V36_ADDITIONS
         .iter()
         .filter(|sql| sql.starts_with("CREATE INDEX "))
@@ -1030,7 +1030,7 @@ async fn a_v34_submission_index_upgrade_preserves_duplicate_identities_and_reope
     let connection = Connection::open(&database.0).unwrap();
     connection
         .execute_batch(
-            "BEGIN; DROP TABLE timeline_member_roots; DROP TABLE timeline_member_origins; DROP TABLE timeline_member_terminals; DROP TABLE timeline_member_nodes; DROP INDEX timeline_events_requests; DROP INDEX timeline_events_inputs; DROP INDEX timeline_events_users; DROP TRIGGER timeline_text_delete; DROP TABLE timeline_text; DROP TABLE timeline_text_fts; DROP TABLE timeline_text_tails; DROP INDEX timeline_input_submissions;
+            "BEGIN; DROP TABLE timeline_array_elements; DROP TABLE timeline_member_roots; DROP TABLE timeline_member_origins; DROP TABLE timeline_member_terminals; DROP TABLE timeline_member_nodes; DROP INDEX timeline_events_requests; DROP INDEX timeline_events_inputs; DROP INDEX timeline_events_users; DROP TRIGGER timeline_text_delete; DROP TABLE timeline_text; DROP TABLE timeline_text_fts; DROP TABLE timeline_text_tails; DROP INDEX timeline_input_submissions;
         DROP TABLE agent_store_format;
         CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
         INSERT INTO agent_store_format VALUES (34); COMMIT;",
@@ -1317,7 +1317,7 @@ async fn text_candidates_survive_output_merging_reopen_fork_and_session_deletion
             .unwrap(),
         0
     );
-    connection.execute_batch("DROP TABLE timeline_member_roots; DROP TABLE timeline_member_origins; DROP TABLE timeline_member_terminals; DROP TABLE timeline_member_nodes; DROP INDEX timeline_events_requests; DROP INDEX timeline_events_inputs; DROP INDEX timeline_events_users; DROP TRIGGER timeline_text_delete; DROP TABLE timeline_text; DROP TABLE timeline_text_fts; DROP TABLE timeline_text_tails; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 35)); INSERT INTO agent_store_format VALUES(35);").unwrap();
+    connection.execute_batch("DROP TABLE timeline_array_elements; DROP TABLE timeline_member_roots; DROP TABLE timeline_member_origins; DROP TABLE timeline_member_terminals; DROP TABLE timeline_member_nodes; DROP INDEX timeline_events_requests; DROP INDEX timeline_events_inputs; DROP INDEX timeline_events_users; DROP TRIGGER timeline_text_delete; DROP TABLE timeline_text; DROP TABLE timeline_text_fts; DROP TABLE timeline_text_tails; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 35)); INSERT INTO agent_store_format VALUES(35);").unwrap();
     drop(connection);
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(

@@ -1,5 +1,11 @@
 # Rust 会话存储格式
 
+## v39：大数组按元素引用
+
+v39 增加本文件末尾[数组元素方案](#提案状态读取索引与数组元素)定义的 locator 表及 array-element 内容编码；v38 的 FTS、关联及成员索引合同不变。公开事件、trace 与 query 回复不增加存储字段。旧程序必须拒读 v39，不能把数组引用当成原内容读取。
+
+大数组在写入事务内拆出；FTS 使用拆出之前的公开数据。已有数组版本按数组身份和长度复用，不重新保存它的元素。格式升级同事务建立元素存储并改写相应 wire，保留原事实身份、位置、批次和既有文本索引。失败回滚全部变化；普通打开不重复编码。只读旧格式导出仍按旧内联数组读取，不触发升级。
+
 ## v38：收窄全文与关联索引的写入范围
 
 v38 保留 v37 的事件编码与 SQL 表，收窄索引的写入范围。`data` 全文索引覆盖核心保留域的事件，仍排除 context/prepare、model/call 和 context/compaction；不为不透明扩展事实建立全文倒排项。`data.delta` 的 step/text 索引不变。域集合复用事件信封合同，不在 Store 列出 Goal、InputQueue 或统计插件的类型。
@@ -35,7 +41,7 @@ v36 的文本索引和事件编码合同继续适用。
 
 后续提案：[状态读取索引与数组元素](#提案状态读取索引与数组元素)。数组元素编码采用独立新格式；owner 结果复用既有事件索引。
 
-The current native format is **v38**, with versioned unfinished-member indexes, property text-candidate indexes, a submission identity index, a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
+The current native format is **v39**, with directly addressed large-array elements, versioned unfinished-member indexes, property text-candidate indexes, a submission identity index, a Session's activity time following its own activity, worktree directory and Session usage records, source-owned `settings_documents`,
 SessionStore's Session-file rows, its title metadata, request messages stored
 as lists of content-addressed nodes, extension event rows, Session
 configurations and Agent profiles that may omit their mount list, the two
@@ -44,10 +50,10 @@ omit `type`, the Session catalog projection, a configuration's System source,
 a model limit that only a declaration writes, a delegation's Agent owner and
 member leader, a Session's creation origin, Session file grants, command output
 ownership and the two context reading switches on timeline events. Startup
-requires the exact v38 SQL schema and a single
-format marker of 38 before writable PRAGMAs, or the exact v37, v36, v35, v34, v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
+requires the exact v39 SQL schema and a single
+format marker of 39 before writable PRAGMAs, or the exact v38, v37, v36, v35, v34, v33, v32, v31, v30, v29, v28, v27, v26, v25, v24, v23,
 v22, v21, v20, v19, v18, v17, v16, v15 or v13 schema with its own marker,
-which the same startup transaction upgrades in place to v38 one step after
+which the same startup transaction upgrades in place to v39 one step after
 another ([v36 text candidates](#v36-property-text-candidates), [v35 submission index](#v35-submission-identity-index), [#1099 v34 decision](#1099-v34-格式决定), [#911 v33 decision](#911-v33-格式决定), [#605 v32 decision](#605-v32-格式决定), [#708 v31 decision](#708-v31-格式决定), [#557 v30 decision](#557-v30-格式决定), [ADR 013 v29 decision](#adr-013-v29-格式决定), [#717 v28 decision](#717-v28-格式决定), [#593 v27 decision](#593-v27-格式决定),
 [S5a v15 decision](#s5a-v15-格式决定),
 [S5b v16 decision](#s5b-v16-格式决定), [#193 v17 decision](#193-v17-格式决定),
@@ -61,7 +67,7 @@ branch-only v14 `user_configuration` format are unsupported and preserved, never
 migrated, downgraded or interpreted as an admitted format.
 No migration API or startup option is provided. S5c (Session deletion and fork)
 kept v15 unchanged ([S5c decision](#s5c-格式决定)). v13 document bytes remain
-valid in v38, and v16 request rows stay readable as written.
+valid in v39, and v16 request rows stay readable as written.
 除格式自身的 SQL 外，每次打开都接受派生索引：`timeline_history_anchors`
 （`(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'input/message')`，
 [latest-turn 窗口 §5.1](session-history-window.md#51-the-derived-index)）、
@@ -71,7 +77,7 @@ valid in v38, and v16 request rows stay readable as written.
 读取事件而不碰事件体，[ADR 019](../../adr/019-event-query.md) D4）：读写打开在启动事务内用
 `CREATE INDEX IF NOT EXISTS` 创建或补建，只读导出只接受它们。它们不含数据，可从
 `timeline_events` 重新推导，读同一份事件不因它们有无而不同，因此不属于格式：启动门禁的
-精确结构比较忽略这些名字，格式标记不变（当前 v38）；其余任何多余对象仍按原规则拒绝。代价是早于
+精确结构比较忽略这些名字，格式标记不变（当前 v39）；其余任何多余对象仍按原规则拒绝。代价是早于
 该变更的二进制不认识这些名字，会以 "unsupported SQLite schema … preserved" 拒绝已有该
 索引的库（行不变，新二进制可再次打开）。
 Storage versions are independent of RPC versions. Private MCP/Skill business documents do not belong
@@ -196,7 +202,7 @@ fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内�
 
 | 表.列 | SQLite 类型 | 可空 | 默认 | 约束与含义 |
 | --- | --- | --- | --- | --- |
-| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 38)`; exactly one row |
+| `agent_store_format.version` | `INTEGER` | No | — | Primary key, `CHECK(version = 39)`; exactly one row |
 | `settings_documents.source` | `TEXT` | No | — | Primary key; `user/mcp`, `user/skills`, `user/mcp-projects` or `user/mcp-plugins`; workspace files are not mirrored |
 | `settings_documents.version` | `INTEGER` | No | — | Positive per-source CAS revision; token `native:<source>:<version>` |
 | `settings_documents.document` | `TEXT` | No | — | Plain business payload JSON, without a `{kind, document}` envelope; unknown business fields are preserved |
@@ -1124,7 +1130,7 @@ to retain the event ID value without its column affinity. Plan acceptance requir
 
 ## 提案：状态读取索引与数组元素
 
-Status: Draft. 本节提出 v38 之后的扩展；实现时须确定未占用的新版本号，并经格式决定确认。不能把新表、索引或编码当作 v38 的可选对象加入。基础 member 结构沿用本文件开头的 v37 决定，不重新建立第二套成员树。
+Status: Draft. 本节定义下一格式 v39 的数组编码；不能把它加入已提交的 v38。基础 member 结构沿用本文件开头的 v37 决定，不重新建立第二套成员树。
 
 ### 范围
 
@@ -1138,7 +1144,7 @@ Status: Draft. 本节提出 v38 之后的扩展；实现时须确定未占用的
 | member_nodes | 沿用 v37 的不可变 AVL 节点及主键；引用位置和左右节点，不复制事件正文。 |
 | member_origins | session、branch、index_id、关联键、原位置的反向定位，含成员分组。 |
 | member_terminals | session、branch、index_id、关闭键的定位，保留最早终态位置。 |
-| array_elements | 主键 session、branch、逻辑 sequence、property、element_index；值为内容节点引用。 |
+| timeline_array_elements | 主键 session_id、array_id、element_index；值为 content_ref。下标 0 另存正整数 array_length，其余行该列为 NULL；不另建根表。事件及 trace 各自在自己的 wire 中保存数组身份和长度。 |
 
 最后结果复用既有 `timeline_events_by_kind(session_id, branch_id, kind, sequence, event_id)`；不新建 result_positions 表或表达式索引。schema 与 source_through 在选中一条结果后读取，不参与跳过记录。
 
@@ -1179,24 +1185,29 @@ LIMIT :page_size;
 Prompt 已有引用转成成对的定位键，例如：
 
 ```sql
-WITH wanted(sequence, element_index) AS (VALUES (:a, 2), (:b, 7))
-SELECT w.sequence, w.element_index, a.content_ref
+WITH wanted(array_id, element_index) AS (VALUES (:a_array, 2), (:b_array, 7))
+SELECT w.array_id, w.element_index, a.content_ref
 FROM wanted w
-JOIN array_elements a
-  ON a.session_id = :session AND a.branch_id = :branch
- AND a.sequence = w.sequence AND a.property = 'data.changes'
+LEFT JOIN timeline_array_elements a
+  ON a.session_id = :session AND a.array_id = w.array_id
  AND a.element_index = w.element_index;
 ```
 
-事件 ID 先通过既有身份索引取得逻辑位置，并核对固定查询范围；之后只加载所选 content_ref。这条路径不用 json_each 展开未选中元素，也不读取整份原数组。所有辅助定位与内容加载都计入查询成本，不能仅统计最终 SELECT 的行数。
+事件 ID 先通过既有身份索引取得逻辑位置及小体积的 wire 数组引用，并核对固定查询范围；之后只加载所选 content_ref。原下标在长度内但 locator 或内容缺失时返回损坏错误；长度外仍是原查询的缺失值。这条路径不展开未选中元素，也不读取整份原数组。所有辅助定位与内容加载都计入查询成本，不能仅统计最终 SELECT 的行数。
 
 ### 数组编码
 
-首版对公开字段 data.changes 提供元素寻址，编码机制只处理 JSON 数组，不解释 Set/Revoke。大数组的每个元素沿用内容地址节点保存，array_elements 登记原下标；事件 wire 保存长度和数组引用，不再同时内联整数组。元素内容是原数组的存储表示，不是第二份业务状态。
+首版对公开字段 data.changes 提供元素寻址，编码机制只处理 JSON 数组，不解释 Set/Revoke。序列化后不超过 4 KiB 的数组继续内联，避免小变更新增内容行；更大数组移出 event.data.changes。WireEvent 和 WireDraft 各增加可选 changes 引用，保存 id、length；无引用时省略该字段，旧 wire 仍可读。
+
+array_id 是原数组 JSON 序列化的内容哈希，使用 array 内容域。每个 array-element 内容节点保存 array、index、value，并对这个完整对象计算内容哈希；locator 表登记该节点引用。单元素读取检查节点哈希及其数组身份、原下标，不能把其它数组或位置的合法节点冒作本元素。完整读取还校验数量、顺序和原数组哈希。正文只在元素节点保存一次，不另存一份完整数组。
+
+数组身份代替来源 sequence 作为 locator 键，是为了同时覆盖 before trace 的不同草稿；这些草稿共用事件身份，却可能有不同的 changes。相同内容可共享同一个数组版本。分支位置和 property 由原事件 wire 解析，不再增加 trace 路径列或另一套草稿索引。插件仍只保存事件 ID 和原下标，不接触这些内部身份。
 
 完整事件读取按原顺序还原数组；字段读取还原所需公开属性；elements 行按原下标只取选中节点。新编码下的 Any、Fields、Count、关联和完整 Events 必须与旧逻辑事件一致。不能让 inline JSON 路径把引用标记看作公共值或缺失字段。
 
-节点的序列化、哈希、共享与损坏错误沿用内容存储的验证边界；增加数组节点的编码种类须纳入严格 schema/codec 校验。查询游标只含公开位置与元素身份，不含内容哈希。FTS 仍基于还原的公开属性，不能索引数组引用标记代替原内容。
+节点的序列化、哈希、共享与损坏错误沿用内容存储的验证边界。首开对 Session 的 locator 元数据检查一次数量、下标连续性和内容引用存在性；每个 wire 引用按主键核对下标 0 的长度，不因同一数组被多次引用而反复扫描它。所选正文在读取时解码和验哈希；导出完整重建。查询游标只含公开位置与元素身份，不含内容哈希。FTS 在写入时消费移出数组前的公开数据；升级保留已有倒排项，复制时使用原数组内容，不索引引用标记。
+
+元素条件先以事件身份和原下标筛选，再读取确实需要判断或返回的正文。只带事件条件的 Count 合计数组长度；Exists 取得一个匹配位置即可。无正文条件的位置分页先按当前下标在 locator 主键中取本页及一项续页证据，不能每页从数组末端或开头重新扫描。涉及值筛选、分组或排序时，按实际候选计费，不把这类计算伪装成单点读取。
 
 ### 事务与升级
 

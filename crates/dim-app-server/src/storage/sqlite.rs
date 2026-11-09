@@ -16,7 +16,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 38;
+pub const FORMAT: u32 = 39;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -55,7 +55,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 38))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 39))",
     ),
     (
         "settings_documents",
@@ -229,7 +229,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 24] = [
+const UPGRADES: [(u32, &[&str]); 25] = [
     (
         13,
         &[
@@ -324,6 +324,7 @@ const UPGRADES: [(u32, &[&str]); 24] = [
         ],
     ),
     (37, &[]),
+    (38, &["timeline_array_elements"]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -338,6 +339,7 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
         .iter()
         .chain(super::text::SCHEMA)
         .chain(super::members::SCHEMA)
+        .chain(super::arrays::SCHEMA)
         .copied()
         .chain(
             LEGACY_INDEXES
@@ -793,6 +795,7 @@ impl SqliteStorage {
                 .iter()
                 .chain(super::text::SCHEMA)
                 .chain(super::members::SCHEMA)
+                .chain(super::arrays::SCHEMA)
             {
                 tx.execute_batch(sql).map_err(storage)?;
             }
@@ -866,6 +869,7 @@ impl SqliteStorage {
                         .iter()
                         .chain(super::text::SCHEMA)
                         .chain(super::members::SCHEMA)
+                        .chain(super::arrays::SCHEMA)
                         .filter(|(name, _)| added.contains(name))
                     {
                         tx.execute_batch(sql).map_err(storage)?;
@@ -892,6 +896,9 @@ impl SqliteStorage {
                             tx.execute_batch(&format!("DROP INDEX {name}; {sql}"))
                                 .map_err(storage)?;
                         }
+                    }
+                    if *from == 38 {
+                        super::arrays::backfill(&tx)?;
                     }
                     if *from == 24 {
                         tx.execute_batch("DROP INDEX timeline_events_by_end")

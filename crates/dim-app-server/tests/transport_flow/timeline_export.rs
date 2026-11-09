@@ -17,6 +17,46 @@ const SUMMARIZER: &str = "You summarize a coding session";
 const CREDENTIAL: &str = "credential-marker-7f3a";
 const SETTING: &str = "settings-marker-91c2";
 
+fn without_array_references(database: &Path) {
+    let connection = rusqlite::Connection::open(database).unwrap();
+    let records = connection
+        .prepare("SELECT session_id,branch_id,sequence,body FROM timeline_events WHERE json_extract(body,'$.encoding')='event'")
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,String>(3)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for (session, branch, sequence, body) in records {
+        let mut row: Value = serde_json::from_str(&body).unwrap();
+        let record = &mut row["record"];
+        let inline = |wire: &mut Value| {
+            let Some(array) = wire.as_object_mut().unwrap().remove("changes") else {
+                return;
+            };
+            let values = connection
+                .prepare("SELECT c.body FROM timeline_array_elements a JOIN timeline_content c ON c.session_id=a.session_id AND c.hash=a.content_ref WHERE a.session_id=?1 AND a.array_id=?2 ORDER BY a.element_index")
+                .unwrap()
+                .query_map(rusqlite::params![session,array["id"].as_str().unwrap()], |row| row.get::<_,String>(0))
+                .unwrap()
+                .map(|body| serde_json::from_str::<Value>(&body.unwrap()).unwrap()["value"].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(values.len() as u64, array["length"].as_u64().unwrap());
+            wire["event"]["data"]["changes"] = json!(values);
+        };
+        inline(record);
+        if let Some(trace) = record.get_mut("trace").filter(|trace| !trace.is_null()) {
+            inline(&mut trace["original"]);
+            for step in trace["steps"].as_array_mut().unwrap() {
+                if let Some(result) = step.get_mut("result").filter(|result| !result.is_null()) {
+                    inline(result);
+                }
+            }
+        }
+        connection.execute("UPDATE timeline_events SET body=?4 WHERE session_id=?1 AND branch_id=?2 AND sequence=?3",rusqlite::params![session,branch,sequence,row.to_string()]).unwrap();
+    }
+    connection.execute_batch("DELETE FROM timeline_content WHERE kind='array-element'; DROP TABLE timeline_array_elements;").unwrap();
+}
+
 /// An OpenAI-compatible provider: the first conversation request reads a
 /// file, the summarizer gets a summary, every other request an answer.
 #[derive(Default)]
@@ -441,6 +481,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (35, "", false),
             (36, "", false),
             (37, "", false),
+            (38, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -490,18 +531,19 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
                 DROP TABLE timeline_text;
                 DROP TABLE timeline_text_fts;
                 DROP TABLE timeline_text_tails;"
-            } else { "
+            } else if version < 38 { "
                 DROP INDEX timeline_events_requests;
                 DROP INDEX timeline_events_inputs;
                 DROP INDEX timeline_events_users;
                 CREATE INDEX timeline_events_requests ON timeline_events(session_id, branch_id, kind, coalesce(json_extract(body,'$.record.event.data.request_id'),json_extract(body,'$.request_id')), sequence);
                 CREATE INDEX timeline_events_inputs ON timeline_events(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence);
                 CREATE INDEX timeline_events_users ON timeline_events(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence);"
-            };
+            } else {""};
             changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees} {submission} {members} {text}
                 DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
+            without_array_references(&older);
             if version < 31 {
                 without_switch_columns(&older);
             } else if version == 31 {

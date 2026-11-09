@@ -452,8 +452,9 @@ impl QuerySpec {
 }
 
 impl QueryFilter {
-    /// Conjuncts split into event-only and expanded-element conditions, in that order.
-    pub fn row_conditions(&self) -> (Vec<&Self>, Vec<&Self>) {
+    /// Necessary event conditions are evaluated before array expansion; the
+    /// remaining conditions apply to expanded rows.
+    pub fn row_conditions(&self) -> (Vec<Self>, Vec<&Self>) {
         fn row_operand(value: &QueryOperand) -> bool {
             matches!(value, QueryOperand::Field { path } | QueryOperand::Outer { path } if path.starts_with("element."))
         }
@@ -487,7 +488,7 @@ impl QueryFilter {
         }
         fn collect<'a>(
             filter: &'a QueryFilter,
-            events: &mut Vec<&'a QueryFilter>,
+            events: &mut Vec<QueryFilter>,
             elements: &mut Vec<&'a QueryFilter>,
         ) {
             match filter {
@@ -496,8 +497,30 @@ impl QueryFilter {
                         collect(condition, events, elements);
                     }
                 }
-                _ if depends_on_row(filter) => elements.push(filter),
-                _ => events.push(filter),
+                _ if depends_on_row(filter) => {
+                    if let Some(event) = necessary(filter) {
+                        events.push(event);
+                    }
+                    elements.push(filter);
+                }
+                _ => events.push(filter.clone()),
+            }
+        }
+        fn necessary(filter: &QueryFilter) -> Option<QueryFilter> {
+            if !depends_on_row(filter) {
+                return Some(filter.clone());
+            }
+            match filter {
+                QueryFilter::And { conditions } => {
+                    let conditions = conditions.iter().filter_map(necessary).collect::<Vec<_>>();
+                    (!conditions.is_empty()).then_some(QueryFilter::And { conditions })
+                }
+                QueryFilter::Or { conditions } => conditions
+                    .iter()
+                    .map(necessary)
+                    .collect::<Option<Vec<_>>>()
+                    .map(|conditions| QueryFilter::Or { conditions }),
+                _ => None,
             }
         }
         let (mut events, mut elements) = (Vec::new(), Vec::new());

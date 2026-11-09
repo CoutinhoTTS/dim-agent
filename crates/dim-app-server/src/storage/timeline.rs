@@ -1580,6 +1580,12 @@ pub(super) enum Row {
     },
 }
 impl Row {
+    pub(super) fn wires_mut(&mut self) -> &mut [WireEvent] {
+        match self {
+            Row::Event { record } => std::slice::from_mut(record),
+            Row::Output { records, .. } => records,
+        }
+    }
     pub(super) fn wires(&self) -> &[WireEvent] {
         match self {
             Row::Event { record } => std::slice::from_ref(record),
@@ -1640,6 +1646,16 @@ fn write_batch(
         sequence += 1;
         let mut wire = codec::encode(record, lists.iter().cloned())?;
         let kind = record.event.kind.key();
+        if !output_row(kind) {
+            super::text::event(
+                connection,
+                &batch.key.session_id,
+                &batch.key.branch_id,
+                sequence,
+                &wire.event,
+            )?;
+        }
+        wire.externalize_arrays(connection, &batch.key.session_id)?;
         match &record.event.kind {
             EventKind::Text(data) | EventKind::Thinking(data) => {
                 if !outputs.contains_key(&batch.key.branch_id) {
@@ -1703,6 +1719,13 @@ fn write_batch(
                     kind,
                     record.event.kind.context_flags(),
                     &row,
+                )?;
+                super::text::event(
+                    connection,
+                    &batch.key.session_id,
+                    &batch.key.branch_id,
+                    sequence,
+                    &serde_json::to_value(&record.event).map_err(error)?,
                 )?;
                 outputs.insert(
                     batch.key.branch_id.clone(),
@@ -1808,34 +1831,6 @@ fn insert_event(
             i64::from(flags.1),
         ])
         .map_err(error)?;
-    match row {
-        Row::Event { record } => super::text::event(
-            connection,
-            &key.session_id,
-            &key.branch_id,
-            sequence,
-            &record.event,
-        )?,
-        Row::Output {
-            turn_id,
-            request_id,
-            records,
-            ..
-        } => {
-            for record in records {
-                let mut event = record.event.clone();
-                event["data"]["turn_id"] = turn_id.clone().into();
-                event["data"]["request_id"] = request_id.clone().into();
-                super::text::event(
-                    connection,
-                    &key.session_id,
-                    &key.branch_id,
-                    sequence,
-                    &event,
-                )?;
-            }
-        }
-    }
     Ok(body.len())
 }
 /// A stored row whose records are decoded in order, across connection holds.
@@ -2104,14 +2099,16 @@ impl SqliteTimelineStore {
     /// fork visible, and the writer's commits and publications run between
     /// the others.
     pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
-        let references = fork_references(&self.db, source, at).await?;
+        let (references, arrays) = fork_references(&self.db, source, at).await?;
         let content: Vec<String> = content_closure(&self.db, source, references)
             .await?
             .into_iter()
             .collect();
         let (source, fork) = (source.to_owned(), fork.to_owned());
         self.db
-            .run_copy(move |connection| copy_fork(connection, &source, &fork, at, &content))
+            .run_copy(move |connection| {
+                copy_fork(connection, &source, &fork, at, &content, &arrays)
+            })
             .await
     }
 
@@ -2167,8 +2164,9 @@ fn copy_fork(
     fork: &str,
     at: u64,
     content: &[String],
+    arrays: &BTreeMap<String, u64>,
 ) -> Result<()> {
-    let copied = copy_fork_rows(connection, source, fork, at, content);
+    let copied = copy_fork_rows(connection, source, fork, at, content, arrays);
     if copied.is_err()
         && let Err(cleanup) = drop_session(connection, fork)
     {
@@ -2183,6 +2181,7 @@ fn copy_fork_rows(
     fork: &str,
     at: u64,
     content: &[String],
+    arrays: &BTreeMap<String, u64>,
 ) -> Result<()> {
     let cut = sql_sequence(at)?;
     // Intermediate chunks need no sync of their own: the final transaction
@@ -2231,6 +2230,33 @@ fn copy_fork_rows(
         }
         Ok(())
     })?;
+    for (array, length) in arrays {
+        let mut after = 0;
+        while after < *length {
+            let end = after.saturating_add(COPY_CONTENT as u64).min(*length);
+            chunk(connection, |tx| {
+                let copied=tx.execute("INSERT INTO timeline_array_elements(session_id,array_id,element_index,content_ref,array_length) SELECT ?2,array_id,element_index,content_ref,array_length FROM timeline_array_elements WHERE session_id=?1 AND array_id=?3 AND element_index>=?4 AND element_index<?5",params![source,fork,array,sql_sequence(after)?,sql_sequence(end)?]).map_err(error)?;
+                if u64::try_from(copied).map_err(error)? != end - after {
+                    return Err(error("incomplete array during fork"));
+                }
+                Ok(())
+            })?;
+            after = end;
+        }
+    }
+    for hashes in content.chunks(COPY_CONTENT) {
+        let hashes = serde_json::to_string(hashes).map_err(error)?;
+        chunk(connection, |tx| {
+            tx.execute(
+                "INSERT INTO timeline_content (session_id, hash, kind, body) \
+                 SELECT ?2, hash, kind, body FROM timeline_content \
+                 WHERE session_id=?1 AND hash IN (SELECT value FROM json_each(?3))",
+                params![source, fork, hashes],
+            )
+            .map_err(error)?;
+            Ok(())
+        })?;
+    }
     let mut after = 0;
     while after < at {
         let end = (after + COPY_EVENTS).min(at);
@@ -2266,19 +2292,6 @@ fn copy_fork_rows(
             Ok(())
         })?;
         after = end;
-    }
-    for hashes in content.chunks(COPY_CONTENT) {
-        let hashes = serde_json::to_string(hashes).map_err(error)?;
-        chunk(connection, |tx| {
-            tx.execute(
-                "INSERT INTO timeline_content (session_id, hash, kind, body) \
-                 SELECT ?2, hash, kind, body FROM timeline_content \
-                 WHERE session_id=?1 AND hash IN (SELECT value FROM json_each(?3))",
-                params![source, fork, hashes],
-            )
-            .map_err(error)?;
-            Ok(())
-        })?;
     }
     let mut after = 0;
     while after < at {
@@ -2358,6 +2371,7 @@ fn copy_fork_rows(
                 branch_id: "main".into(),
             };
             let wire = codec::encode(&forked, std::iter::empty())?;
+            super::text::event(tx, fork, "main", at + 1, &wire.event)?;
             insert_event(
                 tx,
                 &key,
@@ -2429,6 +2443,7 @@ fn drop_session(connection: &mut Connection, session: &str) -> Result<usize> {
         "timeline_snapshots",
         "timeline_events",
         "timeline_content",
+        "timeline_array_elements",
     ] {
         loop {
             let deleted = chunk(connection, |tx| {
@@ -2455,8 +2470,9 @@ async fn fork_references(
     db: &Arc<SqliteStorage>,
     source: &str,
     at: u64,
-) -> Result<BTreeSet<String>> {
+) -> Result<(BTreeSet<String>, BTreeMap<String, u64>)> {
     let mut references = BTreeSet::new();
+    let mut arrays = BTreeMap::new();
     let mut after = 0;
     loop {
         let (session, start, limit) = (source.to_owned(), after, sql_sequence(at)?);
@@ -2485,11 +2501,42 @@ async fn fork_references(
             let row: Row = serde_json::from_str(body).map_err(error)?;
             for wire in row.wires() {
                 references.extend(wire.references().map(str::to_owned));
+                for array in wire.array_references() {
+                    if arrays
+                        .insert(array.id.clone(), array.length)
+                        .is_some_and(|length| length != array.length)
+                    {
+                        return Err(error("array references disagree on length"));
+                    }
+                }
             }
         }
         after = *last;
     }
-    Ok(references)
+    for (id, length) in &arrays {
+        let array = super::arrays::Reference {
+            id: id.clone(),
+            length: *length,
+        };
+        let session = source.to_owned();
+        db.run_read(move |connection| super::arrays::check(connection, &session, &array))
+            .await?;
+        let mut after = 0;
+        while after < *length {
+            let end = after.saturating_add(COPY_CONTENT as u64).min(*length);
+            let (session, id) = (source.to_owned(), id.clone());
+            let hashes=db.run_read(move |connection| {
+                connection.prepare_cached("SELECT content_ref FROM timeline_array_elements WHERE session_id=?1 AND array_id=?2 AND element_index>=?3 AND element_index<?4 ORDER BY element_index").map_err(error)?
+                    .query_map(params![session,id,sql_sequence(after)?,sql_sequence(end)?],|row|row.get::<_,String>(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)
+            }).await?;
+            if u64::try_from(hashes.len()).map_err(error)? != end - after {
+                return Err(error("incomplete array during fork"));
+            }
+            references.extend(hashes);
+            after = end;
+        }
+    }
+    Ok((references, arrays))
 }
 
 /// The content rows the references reach through node parents, read in one
@@ -2666,7 +2713,7 @@ impl TimelineStore for SqliteTimelineStore {
                     }
                 };
             }
-            let mut reader = self.reader(RequestBodies::Unused);
+            let mut reader = Reader::for_validation(self.content_budget);
             let result = validate_session(&self.db, session_id, &directory, &mut reader).await;
             match result {
                 Ok(branches) => {
@@ -2981,6 +3028,7 @@ pub(super) async fn read_directory(
 struct ValidationPass {
     rows: Option<Rows>,
     references: BTreeSet<String>,
+    arrays: bool,
 }
 
 /// Fails unless every content row `references` names exists in `session`,
@@ -3078,6 +3126,7 @@ pub(super) async fn validate_session(
     let mut event_ids = BTreeSet::new();
     let mut created = BTreeSet::new();
     let mut completions = vec![];
+    let mut arrays = false;
     for (id, _info, sequence) in &directory.branches {
         let mut next = 1;
         let mut batch_end = 0;
@@ -3092,15 +3141,18 @@ pub(super) async fn validate_session(
                     None => {
                         let mut query = connection.prepare_cached("SELECT sequence, last_sequence, kind, body, event_id FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 ORDER BY sequence LIMIT 64").map_err(error)?;
                         let mut references = BTreeSet::new();
+                        let mut arrays = false;
                         let fetched = query.query_map(params![key.session_id, key.branch_id, sql_sequence(next)?], |row| Ok((
                             read_sequence(row,0)?, read_sequence(row,1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<String>>(4)?
                         ))).map_err(error)?.map(|row| {
                             let (first, last, kind, body, event_id) = row.map_err(error)?;
                             let fetched = Fetched::parse(first, last, kind, &body, event_id)?;
                             references.extend(fetched.wires.iter().flat_map(|wire| wire.references().map(str::to_owned)));
+                            arrays |= fetched.wires.iter().any(|wire| wire.array_references().next().is_some());
                             Ok(fetched)
                         }).collect::<Result<_>>()?;
                         pass.references = references;
+                        pass.arrays = arrays;
                         pass.rows.insert(Rows { fetched, decoded: vec![] })
                     }
                 };
@@ -3108,6 +3160,7 @@ pub(super) async fn validate_session(
                 check_references(connection, &key.session_id, &mut pass.references)?;
                 Ok(done)
             }).await?;
+            arrays |= pass.arrays;
             let page = pass.rows.expect("a finished pass fetched its rows").decoded;
             if page.is_empty() {
                 break;
@@ -3224,6 +3277,11 @@ pub(super) async fn validate_session(
                 .await
                 .map_err(|_| error("compaction preparation boundary is inside an atomic batch"))?;
         }
+    }
+    if arrays {
+        let session = session.to_owned();
+        db.run_read(move |connection| super::arrays::check_elements(connection, &session))
+            .await?;
     }
     Ok(branches.into_values().collect())
 }
