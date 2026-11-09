@@ -28,7 +28,10 @@ use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -36,7 +39,7 @@ use tokio_util::sync::CancellationToken;
 pub const LAYER: &str = "plugins";
 
 /// A refused call: its wire code (A.2) and message.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PluginError {
     pub code: &'static str,
     pub message: String,
@@ -163,6 +166,16 @@ pub(crate) struct State {
     /// time, so the cleanup never runs between an acquisition's rename and
     /// its record write, and no two acquisitions interleave.
     fs: tokio::sync::Mutex<()>,
+    /// §3.6: the last re-acquisition failure of each installed id, shown by
+    /// `plugin.list` as `update.error`. In memory only.
+    update_errors: Mutex<BTreeMap<String, PluginError>>,
+    /// §3.1 step 4: whether startup content has run, and the signal the one
+    /// background re-acquisition waits on so it acts only after it.
+    content_started: AtomicBool,
+    content_ready: tokio::sync::Notify,
+    /// §3.1 step 4: whether this process's re-acquisition task has been
+    /// started. A reload of PluginManager's row does not start another one.
+    reacquire_started: AtomicBool,
 }
 
 /// The `plugins` layer startup reconciles with (§3.1).
@@ -237,6 +250,10 @@ impl State {
             catalog: OnceLock::new(),
             applying: tokio::sync::Mutex::new(()),
             fs: tokio::sync::Mutex::new(()),
+            update_errors: Mutex::new(BTreeMap::new()),
+            content_started: AtomicBool::new(false),
+            content_ready: tokio::sync::Notify::new(),
+            reacquire_started: AtomicBool::new(false),
         }))
     }
 
@@ -360,6 +377,21 @@ impl State {
     /// content owner to the record.
     pub(crate) async fn startup_content(&self, owners: &Owners) {
         self.reconcile_content(owners, &CONTENT).await;
+        // §3.1 step 4: the re-acquisition waits for this, so it acts only
+        // once every owner was brought to the record.
+        self.content_started.store(true, Ordering::Release);
+        self.content_ready.notify_one();
+    }
+
+    /// Waits until startup content has run (§3.1 step 4).
+    async fn after_content_start(&self) {
+        loop {
+            let ready = self.content_ready.notified();
+            if self.content_started.load(Ordering::Acquire) {
+                return;
+            }
+            ready.await;
+        }
     }
 
     /// Brings what the present owners hold of `kinds` to the record (§3.7):
@@ -1523,6 +1555,8 @@ impl Manager {
         self.state
             .dirs
             .remove_python_link(&python_package(&entry.id));
+        // §3.6: a removed plugin has no re-acquisition failure to show.
+        self.state.update_errors.lock().unwrap().remove(&entry.id);
         Ok(json!({}))
     }
 
@@ -1764,8 +1798,35 @@ impl Manager {
     /// its current version into a new `<version>+<suffix>` directory,
     /// installs its dependencies, and switches the record; the reply carries
     /// `version`. At an unchanged version the new copy gets its own
-    /// directory, and a failure keeps the old copy.
+    /// directory, and a failure keeps the old copy. The outcome is kept for
+    /// `plugin.list`'s `update.error` (§3.6): a success clears it.
     async fn update_optional(
+        &self,
+        entry: Installed,
+        optional: String,
+        phase: &(dyn Fn(&str) + Sync),
+        cancel: &CancellationToken,
+    ) -> Result<Value, PluginError> {
+        let id = entry.id.clone();
+        let result = self
+            .update_optional_copy(entry, optional, phase, cancel)
+            .await;
+        let mut errors = self.state.update_errors.lock().unwrap();
+        match &result {
+            Ok(_) => {
+                errors.remove(&id);
+            }
+            // §3.5: a cancelled attempt is not a failure — it says nothing
+            // about the plugin, so it neither records nor clears.
+            Err(_) if cancel.is_cancelled() => {}
+            Err(error) => {
+                errors.insert(id, error.clone());
+            }
+        }
+        result
+    }
+
+    async fn update_optional_copy(
         &self,
         entry: Installed,
         optional: String,
@@ -1834,6 +1895,113 @@ impl Manager {
         }
         reply.insert("version".into(), json!(version));
         Ok(Value::Object(reply))
+    }
+
+    /// §3.1 step 4: once per process start, after content startup, brings an
+    /// installed `{optional}` plugin whose shipped version changed to the
+    /// shipped one through `plugin.update`'s path, one at a time. The old
+    /// copy keeps serving until the new one is recorded; a failure keeps it
+    /// and `plugin.list` shows `update.error` (§3.6). A reload of the row
+    /// does not start another one: the retry is the next start or
+    /// `plugin.update`.
+    async fn reacquire_optional(&self, cancel: &CancellationToken) {
+        // §3.1 step 4: an unload before content startup ends the task, so
+        // it never outlives the row's generation.
+        tokio::select! {
+            () = self.state.after_content_start() => {}
+            () = cancel.cancelled() => return,
+        }
+        let installed: Vec<Installed> = self.state.record.lock().unwrap().installed.clone();
+        for entry in installed {
+            if cancel.is_cancelled() {
+                return;
+            }
+            let Source::Optional { optional } = &entry.source else {
+                continue;
+            };
+            let Some(shipped) = self.state.defaults.optional.get(optional).cloned() else {
+                continue;
+            };
+            if !self.optional_version_differs(&entry, &shipped) {
+                continue;
+            }
+            let _fs = self.state.fs.lock().await;
+            if cancel.is_cancelled() {
+                return;
+            }
+            // A client may have removed or updated the plugin, and the
+            // shipped directory may have changed, while this waited for the
+            // file system queue.
+            let current = self
+                .state
+                .record
+                .lock()
+                .unwrap()
+                .installed(&entry.id)
+                .cloned();
+            let Some(current) = current else {
+                continue;
+            };
+            let Source::Optional { optional } = current.source.clone() else {
+                continue;
+            };
+            let Some(shipped) = self.state.defaults.optional.get(&optional).cloned() else {
+                continue;
+            };
+            if !self.optional_version_differs(&current, &shipped) {
+                continue;
+            }
+            if let Err(error) = self
+                .update_optional(current, optional, &(|_: &str| {}), cancel)
+                .await
+            {
+                tracing::warn!(plugin = %entry.id, %error, "optional plugin re-acquisition failed");
+            }
+        }
+    }
+
+    /// §3.1 step 4, §2.3: whether the shipped manifest names a version other
+    /// than the installed one. A directory or manifest that cannot be read,
+    /// or one without a version, offers no update: it is logged and left
+    /// alone.
+    fn optional_version_differs(&self, entry: &Installed, shipped: &Path) -> bool {
+        // §2.3: the map is not canonicalized at startup, so this is where
+        // the directory is resolved.
+        let shipped = match std::fs::canonicalize(shipped) {
+            Ok(dir) => dir,
+            Err(error) => {
+                tracing::warn!(
+                    plugin = %entry.id,
+                    path = %shipped.display(),
+                    %error,
+                    "optional plugin re-acquisition skipped: the shipped directory cannot be read"
+                );
+                return false;
+            }
+        };
+        let manifest = match Manifest::read(&shipped) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::warn!(
+                    plugin = %entry.id,
+                    path = %shipped.display(),
+                    %error,
+                    "optional plugin re-acquisition skipped: the shipped manifest cannot be read"
+                );
+                return false;
+            }
+        };
+        match manifest.version {
+            Some(version) => Some(&version) != entry.version.as_ref(),
+            None => {
+                tracing::warn!(
+                    plugin = %entry.id,
+                    path = %shipped.display(),
+                    "optional plugin re-acquisition skipped: the shipped manifest names no version"
+                );
+                false
+            }
+        }
     }
 
     /// Brings the loader to the record (§3): derives the `plugins` layer
@@ -2058,11 +2226,26 @@ impl Manager {
                         optional: shipped_name,
                     } = &entry.source
                     && let Some(dir) = self.state.defaults.optional.get(shipped_name)
-                    && let Ok(manifest) = Manifest::read(dir)
+                    && let Ok(dir) = std::fs::canonicalize(dir)
+                    && let Ok(manifest) = Manifest::read(&dir)
                     && let Some(version) = manifest.version
                     && Some(&version) != entry.version.as_ref()
                 {
-                    fields.insert("update".into(), json!({"version": version}));
+                    let mut update = json!({"version": version});
+                    if let Some(error) = self
+                        .state
+                        .update_errors
+                        .lock()
+                        .unwrap()
+                        .get(entry.id.as_str())
+                    {
+                        // §3.6, A.2: the message is the error's own, and the
+                        // code lets the client boundary replace it with the
+                        // static description.
+                        update["error"] = json!(error.message);
+                        update["reason"] = json!(error.code);
+                    }
+                    fields.insert("update".into(), update);
                 }
                 match &used {
                     None if choice.off => {
@@ -2220,6 +2403,7 @@ impl DynPlugin for PluginManagerPlugin {
                     })
                 }),
             )?;
+            let background = manager.clone();
             let parts = ctx.require_at(&self.parts)?;
             parts.register(ctx, PartScope::Session, "PluginTools", move |mount| {
                 Ok(Some(Box::new(tools::PluginTools::new(
@@ -2227,6 +2411,16 @@ impl DynPlugin for PluginManagerPlugin {
                     manager.clone(),
                 )?)))
             })?;
+            // §3.1 step 4: the one background re-acquisition of this
+            // process. It waits for startup content, and the row's
+            // generation owns it: an unload cancels it, which also cancels
+            // npm through the cancellation `installPackages` takes.
+            if !self.state.reacquire_started.swap(true, Ordering::AcqRel) {
+                let cancel = ctx.cancellation_token();
+                tokio::spawn(async move {
+                    background.reacquire_optional(&cancel).await;
+                });
+            }
             Ok(Effect::Done)
         })
     }

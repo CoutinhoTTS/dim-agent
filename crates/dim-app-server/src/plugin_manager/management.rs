@@ -4,7 +4,14 @@ use dim_agent_capabilities::methods::RpcError;
 use serde_json::{Map, Value};
 
 pub(super) fn error(error: PluginError) -> RpcError {
-    let message = match error.code {
+    RpcError::service(error.code, description(error.code))
+}
+
+/// A.2: the static client description of a plugin error code. Every error
+/// text a client reads comes from here, so a path or a credential its raw
+/// message names stays inside.
+pub(super) fn description(code: &str) -> &'static str {
+    match code {
         "invalid_params" => "Invalid plugin request; check the required fields",
         "invalid_source" => {
             "Use a local directory or an https:// or ssh:// Git URL; check the source and ref"
@@ -37,8 +44,7 @@ pub(super) fn error(error: PluginError) -> RpcError {
         }
         "record_unreadable" => "Plugin configuration could not be read",
         _ => "Plugin operation failed",
-    };
-    RpcError::service(error.code, message)
+    }
 }
 
 pub(super) fn reply(method: &str, mut value: Value) -> Value {
@@ -66,6 +72,13 @@ pub(super) fn reply(method: &str, mut value: Value) -> Value {
 fn outcome(fields: &mut Map<String, Value>) {
     if let Some(error) = fields.get_mut("error") {
         *error = Value::String("Plugin content or runtime failed".into());
+    }
+    // A.2: a re-acquisition failure's client text is the static description
+    // of its code; the code member itself stays inside.
+    if let Some(Value::Object(update)) = fields.get_mut("update")
+        && let Some(Value::String(code)) = update.remove("reason")
+    {
+        update.insert("error".into(), Value::String(description(&code).into()));
     }
     if let Some(Value::Array(refused)) = fields.get_mut("refused") {
         for refusal in refused {
@@ -103,6 +116,9 @@ pub(super) fn without_reasons(value: &mut Value) {
                         entry.remove("reason");
                     }
                 }
+            }
+            if let Some(Value::Object(update)) = fields.get_mut("update") {
+                update.remove("reason");
             }
         }
         _ => {}

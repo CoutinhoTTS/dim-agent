@@ -203,7 +203,7 @@ TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 Plug
    - 被关闭的内置行，App Server 把它们从变为 Active 所需的行中去掉。
 2. App Server 对 `[assembly, plugins]` 进行 reconcile。被关闭的内置插件从不启动。
 3. PluginManager 的行 apply，向 `managementMethods` 登记 `plugin`，向 `partRegistry` 登记 `PluginTools`。
-4. 进程行就绪且内容启动完成之后，已安装的 `{optional}` 插件若记录的 `version` 与随发行清单的不同，就在后台重新获取，做法与 Git 插件的 `plugin.update` 相同：新副本进入暂存目录，安装其依赖，改名为 `<version>+<suffix>`，切换记录并 reconcile 层，旧目录留在原处交给下次启动的清理。在成功之前旧副本继续使用。失败时保留旧副本，为 `plugin.list` 记录 `update.error`，并在下次启动或 `plugin.update {id}` 时重试。重新获取不阻塞客户端接入。
+4. 进程行就绪且内容启动完成之后，已安装的 `{optional}` 插件若记录的 `version` 与随发行清单的不同，就在后台重新获取，做法与 Git 插件的 `plugin.update` 相同：新副本进入暂存目录，安装其依赖，改名为 `<version>+<suffix>`，切换记录并 reconcile 层，旧目录留在原处交给下次启动的清理。在成功之前旧副本继续使用。失败时保留旧副本，为 `plugin.list` 记录 `update.error`，并在下次启动或 `plugin.update {id}` 时重试。随发行目录或清单读不了、或清单没有版本时，不重新获取也不提供 `update`：以 `warn` 记录插件与路径。重新获取不阻塞客户端接入。它每个进程启动只开始一次，并属于 PluginManager 行的这一代：卸载会取消它，也通过 `installPackages` 接受的取消令牌取消正在运行的 npm；重载该行不会再开始一个，重试是下次启动或 `plugin.update {id}`。
 
 默认插件或已安装插件的行失败时，启动不失败；`plugin.list` 把它显示为失败，并带上 rutis 的错误。正在使用的插件，其清单无法读取时什么都不运行：它没有行，每种内容都从每个存在的所有者那里撤回。进程行全部就绪之后、接纳客户端之前，App Server 调用 PluginManager 的内容启动步骤，让每个存在的所有者与记录一致（§3.7）。
 
@@ -241,7 +241,7 @@ TypeScript 的行以入口文件的绝对路径命名。Python 插件通过 Plug
 
 ### 3.5 更新
 
-Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit，检查后放入一个新目录，在记录变更前在那里安装它声明的依赖，写入新的 `commit` 和 `dir`（`<commit>+<suffix>`），然后，如果插件正在使用，就 reconcile 推导出的层（入口路径变了，层里的行带着新路径）。依赖安装失败会删除新目录，保留旧 commit 且不做任何改动。旧目录留在原处，由下次启动的清理删除。对 `{optional}` 插件，`plugin.update {id}` 按当前版本重新复制随发行的目录——修复失败的重新获取，并采用新的发行版本——步骤相同：暂存、安装依赖、改名为 `<version>+<suffix>`、切换记录、正在使用时 reconcile、旧目录交给下次启动的清理；失败保留旧副本并记录 `update.error`。因此在版本未变时，新副本会得到自己的 `<version>+<suffix>` 目录，而不是替换正在使用的那一个。本地路径插件没有可更新的东西（`not_updatable`）；重新加载它即可。是否要求用户确认更新，是客户端的事。
+Git 插件使用 `plugin.update {id, ref?}`：像 §3.2 那样获取新 commit，检查后放入一个新目录，在记录变更前在那里安装它声明的依赖，写入新的 `commit` 和 `dir`（`<commit>+<suffix>`），然后，如果插件正在使用，就 reconcile 推导出的层（入口路径变了，层里的行带着新路径）。依赖安装失败会删除新目录，保留旧 commit 且不做任何改动。旧目录留在原处，由下次启动的清理删除。对 `{optional}` 插件，`plugin.update {id}` 按当前版本重新复制随发行的目录——修复失败的重新获取，并采用新的发行版本——步骤相同：暂存、安装依赖、改名为 `<version>+<suffix>`、切换记录、正在使用时 reconcile、旧目录交给下次启动的清理；失败保留旧副本并记录 `update.error`，被取消的尝试不记录 `update.error`。因此在版本未变时，新副本会得到自己的 `<version>+<suffix>` 目录，而不是替换正在使用的那一个。本地路径插件没有可更新的东西（`not_updatable`）；重新加载它即可。是否要求用户确认更新，是客户端的事。
 
 ### 3.6 移除和列出
 

@@ -4250,3 +4250,495 @@ async fn plugin_refusal_replaces_the_owner_refusal() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// Rewrites the shipped optional fixture's manifest version.
+fn set_shipped_version(dir: &Path, version: &str) {
+    let path = dir.join("dim-plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["version"] = json!(version);
+    std::fs::write(&path, manifest.to_string()).unwrap();
+}
+
+/// The npm body a re-acquisition's dependency install runs: it leaves
+/// `node_modules` behind.
+const INSTALL_FIXTURE_DEP: &str = "mkdir -p node_modules/fixture-dep\necho 'export default 1' > node_modules/fixture-dep/index.js";
+
+/// §3.1 step 4: a shipped optional plugin whose version changed between two
+/// starts is re-acquired in the background after content startup, behind the
+/// file system queue. The old copy keeps serving until the new one is
+/// recorded, clients are not blocked meanwhile, and the next start deletes
+/// the replaced copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_changed_shipped_version_is_re_acquired_after_startup() {
+    let home = home();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", true);
+    let first = FixtureNode::with("24.21.0", INSTALL_FIXTURE_DEP);
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        first.search_path(),
+    );
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    let old = recorded_dir(&home, "ocr-fixture");
+    assert!(name_of(&old).starts_with("1.0.0+"), "{old:?}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // The shipped version changes, and the re-acquisition's npm waits.
+    set_shipped_version(&shipped, "1.1.0");
+    let started = home.join("npm-started");
+    let release = home.join("npm-release");
+    let gate = FixtureNode::with(
+        "24.21.0",
+        &format!(
+            "touch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\n{INSTALL_FIXTURE_DEP}",
+            started.display(),
+            release.display()
+        ),
+    );
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        gate.search_path(),
+    );
+    let (server, _, _) = start(config.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "npm never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // While npm waits, the old copy is in use, the row runs, the update is
+    // offered, and clients are not blocked (§3.1 step 4).
+    assert_eq!(
+        recorded_dir(&home, "ocr-fixture"),
+        old,
+        "the old copy is in use"
+    );
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let listed = item(&list, "ocr-fixture");
+    // The fixture Node supplies the runtime service but cannot start the
+    // session bridge, so a code row waits on `session-node` rather than
+    // running; it is up and not failed.
+    assert_eq!(listed["status"], "pending", "{list}");
+    assert_eq!(listed["waitingFor"], json!(["session-node"]), "{list}");
+    assert_eq!(listed["update"]["version"], "1.1.0", "{list}");
+    assert!(listed["update"].get("error").is_none(), "{list}");
+    let runtimes = client.rpc("runtime.list", json!({})).await;
+    assert!(runtimes.get("error").is_none(), "{runtimes}");
+
+    std::fs::write(&release, "").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let new = loop {
+        let dir = recorded_dir(&home, "ocr-fixture");
+        if name_of(&dir).starts_with("1.1.0+") {
+            break dir;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the record never switched: {dir:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        new.join("node_modules/fixture-dep/index.js").is_file(),
+        "{new:?}"
+    );
+    assert!(old.exists(), "the replaced copy stays until the next start");
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "ocr-fixture").get("update").is_none(), "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // The next start's cleanup deletes the copy no entry names.
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        gate.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let client = Client::new_version(&server, false, 3).await;
+    assert_eq!(recorded_dir(&home, "ocr-fixture"), new);
+    assert!(!old.exists(), "the next start deletes the replaced copy");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.1 step 4, §3.5: a failed re-acquisition keeps the old copy and records
+/// `update.error`, which the client reads as the A.2 description of the
+/// failure; fixing the fixture and calling `plugin.update` repairs it and
+/// clears the error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_re_acquisition_keeps_the_old_copy_until_an_update_repairs_it() {
+    let home = home();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", true);
+    let first = FixtureNode::with("24.21.0", INSTALL_FIXTURE_DEP);
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        first.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    let old = recorded_dir(&home, "ocr-fixture");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    set_shipped_version(&shipped, "1.1.0");
+    let broken = FixtureNode::with("24.21.0", "exit 1");
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        broken.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let listed = loop {
+        let list = call(&mut client, "plugin.list", json!({})).await;
+        let listed = item(&list, "ocr-fixture").clone();
+        if listed["update"].get("error").is_some() {
+            break listed;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no update.error: {list}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    // A.2: the client reads the static description, not npm's message.
+    assert_eq!(
+        listed["update"]["error"],
+        "The plugin's locked dependencies could not be installed; check network access",
+        "{listed}"
+    );
+    assert_eq!(listed["status"], "pending", "{listed}");
+    assert_eq!(
+        recorded_dir(&home, "ocr-fixture"),
+        old,
+        "the old copy keeps serving"
+    );
+    assert_eq!(
+        copies(&home, "ocr-fixture"),
+        [name_of(&old)],
+        "a failed re-acquisition leaves no new copy"
+    );
+
+    // Fixing the fixture and updating repairs the plugin and clears the
+    // error (§3.5, §3.6).
+    broken.npm(INSTALL_FIXTURE_DEP);
+    let updated = call(&mut client, "plugin.update", json!({"id": "ocr-fixture"})).await;
+    assert_ok(&updated);
+    assert_eq!(updated["result"]["version"], "1.1.0", "{updated}");
+    let new = recorded_dir(&home, "ocr-fixture");
+    assert!(name_of(&new).starts_with("1.1.0+"), "{new:?}");
+    assert!(new.join("node_modules/fixture-dep/index.js").is_file());
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "ocr-fixture").get("update").is_none(), "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.1 step 4, §3.6: re-acquisition acts on an installed optional plugin
+/// whether or not its name is in use, so a failure on a name that is off is
+/// still reported as `update.error` on that name's item.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_re_acquisition_while_the_plugin_is_off_shows_its_error() {
+    let home = home();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", true);
+    let first = FixtureNode::with("24.21.0", INSTALL_FIXTURE_DEP);
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        first.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.disable",
+            json!({"name": "ocr-fixture"}),
+        )
+        .await,
+    );
+    let old = recorded_dir(&home, "ocr-fixture");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    set_shipped_version(&shipped, "1.1.0");
+    let broken = FixtureNode::with("24.21.0", "exit 1");
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        broken.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let listed = loop {
+        let list = call(&mut client, "plugin.list", json!({})).await;
+        let listed = item(&list, "ocr-fixture").clone();
+        if listed["update"].get("error").is_some() {
+            break listed;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no update.error: {list}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(listed["off"], true, "{listed}");
+    assert_eq!(listed["use"], Value::Null, "{listed}");
+    assert_eq!(listed["update"]["version"], "1.1.0", "{listed}");
+    // A.2: the client reads the static description, not npm's message.
+    assert_eq!(
+        listed["update"]["error"],
+        "The plugin's locked dependencies could not be installed; check network access",
+        "{listed}"
+    );
+    assert_eq!(
+        recorded_dir(&home, "ocr-fixture"),
+        old,
+        "the old copy keeps serving"
+    );
+    assert_eq!(
+        copies(&home, "ocr-fixture"),
+        [name_of(&old)],
+        "a failed re-acquisition leaves no new copy"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.1 step 4, §3.6: an unchanged shipped version starts no re-acquisition
+/// and offers no `update`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unchanged_shipped_version_is_not_re_acquired() {
+    let home = home();
+    optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", false);
+    let first = FixtureNode::with("24.21.0", INSTALL_FIXTURE_DEP);
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        first.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    let dir = recorded_dir(&home, "ocr-fixture");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        first.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    // A re-acquisition of an unchanged version would draw a second copy and
+    // switch the record; give the background task a window to (not) do it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        assert_eq!(
+            copies(&home, "ocr-fixture"),
+            [name_of(&dir)],
+            "a copy exists for an unchanged version"
+        );
+        assert_eq!(
+            recorded_dir(&home, "ocr-fixture"),
+            dir,
+            "the record changed for an unchanged version"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    assert!(item(&list, "ocr-fixture").get("update").is_none(), "{list}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §2.3, §3.1 step 4: a shipped directory that cannot be read is left alone
+/// at startup: nothing is re-acquired, no `update` is offered, and the start
+/// is normal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreadable_shipped_directory_is_not_re_acquired() {
+    let home = home();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", false);
+    let first = FixtureNode::with("24.21.0", INSTALL_FIXTURE_DEP);
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        first.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    let dir = recorded_dir(&home, "ocr-fixture");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    std::fs::remove_dir_all(&shipped).unwrap();
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        first.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let listed = item(&list, "ocr-fixture");
+    assert_eq!(listed["optional"], true, "{list}");
+    assert!(listed.get("update").is_none(), "{list}");
+    assert_eq!(copies(&home, "ocr-fixture"), [name_of(&dir)]);
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// §3.5: a cancelled attempt records no `update.error`. Reloading
+/// PluginManager's row cancels the background re-acquisition in flight,
+/// which kills npm; `plugin.list` still offers the update without a
+/// failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_re_acquisition_records_no_error() {
+    let home = home();
+    let shipped = optional_plugin(&home.join("shipped"), "ocr-fixture", "1.0.0", true);
+    let first = FixtureNode::with("24.21.0", INSTALL_FIXTURE_DEP);
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        first.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &call(
+            &mut client,
+            "plugin.install",
+            json!({"source": {"optional": "ocr-fixture"}}),
+        )
+        .await,
+    );
+    let old = recorded_dir(&home, "ocr-fixture");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    set_shipped_version(&shipped, "1.1.0");
+    let started = home.join("npm-started");
+    let release = home.join("npm-release");
+    let gate = FixtureNode::with(
+        "24.21.0",
+        &format!(
+            "touch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.05; done\n{INSTALL_FIXTURE_DEP}",
+            started.display(),
+            release.display()
+        ),
+    );
+    let config = runtime_config(
+        &home,
+        defaults_file(json!({}), json!({"ocr-fixture": "shipped/ocr-fixture"})),
+        gate.search_path(),
+    );
+    let (server, _, _) = start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(tokio::time::Instant::now() < deadline, "npm never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Reloading the row ends the generation the task belongs to: the token
+    // fires, npm is killed, and the staging directory is deleted.
+    let loader = server.service::<rutis_loader::Loader>().unwrap();
+    loader.restart("PluginManager").await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let staged = std::fs::read_dir(home.join("plugins/.staging"))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        if staged == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the cancelled re-acquisition never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Give the cancelled call's Err a moment to reach the error map.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let list = call(&mut client, "plugin.list", json!({})).await;
+    let listed = item(&list, "ocr-fixture");
+    assert_eq!(listed["update"]["version"], "1.1.0", "{list}");
+    assert!(
+        listed["update"].get("error").is_none(),
+        "a cancelled attempt recorded a failure: {list}"
+    );
+    assert_eq!(
+        recorded_dir(&home, "ocr-fixture"),
+        old,
+        "the old copy is still in use"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
