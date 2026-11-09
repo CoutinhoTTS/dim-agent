@@ -91,7 +91,7 @@ async fn launch_codemode() -> RunningServer {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_product_style_app_server_runs_codemode_and_writes_child_facts() {
     let server = launch_codemode().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client
         .rpc(
             "session.create",

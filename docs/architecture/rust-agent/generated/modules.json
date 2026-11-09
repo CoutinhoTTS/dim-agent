@@ -21236,6 +21236,13 @@
     },
     {
       "from": "dim_app_server::agent_records",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path crate::protocol::PROTOCOL_VERSION"
+      ]
+    },
+    {
+      "from": "dim_app_server::agent_records",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path SqliteStorage",
@@ -30637,7 +30644,6 @@
         "path ApprovalCallData",
         "path ApprovalDecision",
         "path BranchSource",
-        "path EventKind",
         "path EventKind::ApprovalCancelled",
         "path EventKind::ApprovalRequest",
         "path EventKind::ApprovalRespond",

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) async fn canonical_cwd(cwd: &str) -> Result<std::path::PathBuf, RpcError> {

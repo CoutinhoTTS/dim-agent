@@ -31,7 +31,7 @@ This design does not own:
 
 - Code Mode execution, child batching, effects, cancellation or reload; those stay in
   [CodeMode](../plugins/CodeMode.md) and [ToolExecution](../../architecture/rust-agent/plugins/ToolExecution.md);
-- the native store format; v37 already carries the envelope property;
+- the native store format; v37 carries the envelope property and v38 stores protocol 4;
 - rich child-detail UI. A client may hide child details; it may not misclassify them;
 - dim-electron's UI implementation; that repository consumes the protocol at its own release
   cadence.
@@ -151,9 +151,11 @@ the existing child facts.
 ### 2.5 Web
 
 `web/src/rpc/protocol.ts` uses protocol version 4. `web/src/rpc/read.ts` reads the optional
-`parent_call_id` into the event view and the chat projection groups child events under the parent
-call. A child event whose parent is outside the current history window is hidden from the card
-list. A child `ask_user` keeps its pending question under the parent card.
+`parent_call_id` into the event view. For this delivery the chat projection hides a child tool row
+instead of promoting it; the parent card remains the outer `codemode` row. Grouping child detail
+inside that card can follow without a wire change. A child event whose parent is outside the
+current history window is hidden from the card list. A child `ask_user` keeps its pending question
+surface.
 
 The web entry manifest and the App Server's exact-version web check move to 4 together; an old web
 bundle is refused rather than served an event shape it cannot read.
@@ -212,7 +214,7 @@ a decision about whether child arguments are recallable at all.
 ## 3. Events and state
 
 No new Timeline event kind or state is introduced. `parent_call_id` is already persisted in the
-v37 envelope; child events keep `context.render = false` and `context.state = false` as specified
+v38 envelope; child events keep `context.render = false` and `context.state = false` as specified
 by [CodeMode](../plugins/CodeMode.md). The only state change is the negotiated protocol version of
 a connection.
 

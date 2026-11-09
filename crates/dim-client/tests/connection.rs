@@ -25,7 +25,7 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
         assert_eq!(hello["params"]["clientKind"], "other");
         assert_eq!(hello["params"]["clientName"], "AcpGateway");
         let reply = json!({"jsonrpc":"2.0","id":hello["id"],"result":{
-            "instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,
+            "instanceId":"fixture","serverVersion":"fixture","protocolVersion":4,
             "daemonProfile":{"kind":"product"},"features":["session.create","session.history"]
         }});
         write

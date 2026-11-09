@@ -43,7 +43,7 @@ async fn browser_flow(cancel: bool, eof: bool) {
         let (read, mut write) = stream.into_split();
         let mut read = BufReader::new(read);
         let hello = frame(&mut read).await;
-        send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.input_lookup","account.providers"]}})).await;
+        send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.input_lookup","account.providers"]}})).await;
         let providers = frame(&mut read).await;
         assert_eq!(providers["method"], "account.providers");
         send(&mut write,json!({"jsonrpc":"2.0","id":providers["id"],"result":[{"providerId":"managed","displayName":"Fixture","loginMethods":["browser"]}]})).await;

@@ -37,7 +37,7 @@ fn hello_result(features: &[&str]) -> Value {
     json!({
         "instanceId": "scripted",
         "serverVersion": "test",
-        "protocolVersion": 3,
+        "protocolVersion": 4,
         "features": features,
         "daemonProfile": {"kind": "product"},
     })

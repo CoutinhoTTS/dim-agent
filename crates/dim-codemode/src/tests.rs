@@ -203,7 +203,7 @@ async fn a_never_settling_promise_is_a_timeout() {
     };
     let result = run_with(config, "await new Promise(() => {}); return 1;").await;
     assert!(text(&result).starts_with("Code Mode program timed out"));
-    assert!(text(&result).contains("Some child calls may have completed"));
+    assert!(!text(&result).contains("Some child calls may have completed"));
 }
 
 #[tokio::test]
@@ -211,7 +211,7 @@ async fn a_javascript_error_keeps_its_message() {
     let result = run(r#"throw new Error("line one")"#).await;
     assert!(text(&result).contains("line one"), "{}", text(&result));
     assert!(
-        text(&result).contains("Some child calls may have completed"),
+        !text(&result).contains("Some child calls may have completed"),
         "{}",
         text(&result)
     );

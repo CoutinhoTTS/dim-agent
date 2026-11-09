@@ -77,11 +77,13 @@ pub struct BranchesResult {
 #[derive(Debug)]
 pub struct ProductEvent {
     event: Arc<AgentEvent>,
-    version: u32,
 }
 impl ProductEvent {
-    /// `version` is the connection's protocol version (2 or 3).
+    /// `version` is the connection's protocol version (2, 3 or 4).
     pub fn new(event: Arc<AgentEvent>, version: u32) -> Option<Self> {
+        if event.parent_call_id.is_some() && version < 4 {
+            return None;
+        }
         let visible = match &event.kind {
             EventKind::ToolUseStart(_) => version >= 3,
             EventKind::ToolResult(data) => version >= 3 || data.call_event_id.is_some(),
@@ -137,7 +139,7 @@ impl ProductEvent {
             // dynamic protocol after host visibility filtering (ADR 001).
             | EventKind::Extension(_) => false,
         };
-        visible.then_some(Self { event, version })
+        visible.then_some(Self { event })
     }
 }
 impl Serialize for ProductEvent {
@@ -164,28 +166,7 @@ impl Serialize for ProductEvent {
             }
             view.serialize(serializer)
         } else {
-            if self.version < 3 && self.event.parent_call_id.is_some() {
-                #[derive(Serialize)]
-                struct Envelope<'a> {
-                    id: &'a str,
-                    sequence: u64,
-                    create_at: u64,
-                    #[serde(skip_serializing_if = "Option::is_none")]
-                    tags: Option<&'a Vec<String>>,
-                    #[serde(flatten)]
-                    kind: &'a EventKind,
-                }
-                Envelope {
-                    id: &self.event.id,
-                    sequence: self.event.sequence,
-                    create_at: self.event.create_at,
-                    tags: self.event.tags.as_ref(),
-                    kind: &self.event.kind,
-                }
-                .serialize(serializer)
-            } else {
-                self.event.serialize(serializer)
-            }
+            self.event.serialize(serializer)
         }
     }
 }
@@ -384,11 +365,9 @@ mod tests {
     use super::*;
     use dim_agent_types::*;
 
-    /// A fork's opening is where an owner that folds the branch's own history
-    /// stops reading the copied facts (Goal A11): v3 delivers it, v2 keeps
-    /// its list.
+    /// A child batch reaches only v4; older clients keep their old projection.
     #[test]
-    fn a_child_batch_parent_is_v3_only() {
+    fn a_child_batch_parent_is_v4_only() {
         let event = Arc::new(AgentEvent {
             id: "child".into(),
             sequence: 2,
@@ -405,10 +384,10 @@ mod tests {
                 }],
             }),
         });
-        let v2 = serde_json::to_value(ProductEvent::new(event.clone(), 2).unwrap()).unwrap();
-        assert!(v2.get("parent_call_id").is_none(), "{v2}");
-        let v3 = serde_json::to_value(ProductEvent::new(event, 3).unwrap()).unwrap();
-        assert_eq!(v3["parent_call_id"], "c1");
+        assert!(ProductEvent::new(event.clone(), 2).is_none());
+        assert!(ProductEvent::new(event.clone(), 3).is_none());
+        let v4 = serde_json::to_value(ProductEvent::new(event, 4).unwrap()).unwrap();
+        assert_eq!(v4["parent_call_id"], "c1");
     }
 
     #[test]
@@ -451,7 +430,6 @@ mod tests {
                     system_source: None,
                 }),
             }),
-            version: 3,
         }
     }
 

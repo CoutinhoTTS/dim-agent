@@ -111,6 +111,7 @@ pub(crate) async fn run_program(
         .map_err(|error| HostError::failed(format!("context: {error}")))?;
     let output_limit = config.max_output_bytes;
     let cancel_after = cancel.clone();
+    let calls_after = calls.clone();
     let gate_after = gate.clone();
     let child_cancel_after = child_cancel.clone();
     let run = context_handle.async_with(async move |ctx| {
@@ -192,30 +193,35 @@ pub(crate) async fn run_program(
 
     match result {
         Some(Ok(output)) => Ok(if output.len() > output_limit {
+            let warn = calls_after.load(Ordering::SeqCst) > 0 || !effects.is_empty();
             failure(
                 format!("Code Mode output exceeds the {output_limit} byte limit"),
                 effects,
+                warn,
             )
         } else {
             with_effects(ToolResult::text(output), effects)
         }),
         Some(Err(message)) => {
+            let warn = calls_after.load(Ordering::SeqCst) > 0 || !effects.is_empty();
             if cancel_after.is_cancelled() {
-                Ok(failure("Code Mode program cancelled", effects))
+                Ok(failure("Code Mode program cancelled", effects, warn))
             } else if instant_passed(deadline) {
-                Ok(failure("Code Mode program timed out", effects))
+                Ok(failure("Code Mode program timed out", effects, warn))
             } else {
                 Ok(failure(
                     format!("Code Mode program failed: {message}"),
                     effects,
+                    warn,
                 ))
             }
         }
         None => {
+            let warn = calls_after.load(Ordering::SeqCst) > 0 || !effects.is_empty();
             if cancel_after.is_cancelled() {
-                Ok(failure("Code Mode program cancelled", effects))
+                Ok(failure("Code Mode program cancelled", effects, warn))
             } else {
-                Ok(failure("Code Mode program timed out", effects))
+                Ok(failure("Code Mode program timed out", effects, warn))
             }
         }
     }
@@ -327,11 +333,14 @@ fn with_effects(mut result: ToolResult, effects: Vec<ToolEffect>) -> ToolResult 
     result
 }
 
-fn failure(message: impl Into<String>, effects: Vec<ToolEffect>) -> ToolResult {
-    with_effects(
-        ToolResult::error(format!("{}\n{EFFECTS_WARNING}", message.into())),
-        effects,
-    )
+fn failure(message: impl Into<String>, effects: Vec<ToolEffect>, warn: bool) -> ToolResult {
+    let message = message.into();
+    let text = if warn {
+        format!("{message}\n{EFFECTS_WARNING}")
+    } else {
+        message
+    };
+    with_effects(ToolResult::error(text), effects)
 }
 
 fn instant_passed(deadline: Instant) -> bool {

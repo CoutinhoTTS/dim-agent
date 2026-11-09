@@ -516,8 +516,12 @@ impl Native {
         )
         .map_err(failure)?;
         tx.execute(
-            "INSERT INTO session_owners VALUES (?1,?2,3)",
-            params![session, agent],
+            "INSERT INTO session_owners VALUES (?1,?2,?3)",
+            params![
+                session,
+                agent,
+                i64::from(dim_app_server::protocol::PROTOCOL_VERSION)
+            ],
         )
         .map_err(failure)?;
         let branch = BranchRecord {

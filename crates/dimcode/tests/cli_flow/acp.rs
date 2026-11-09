@@ -61,7 +61,7 @@ fn recovery_hello(wire: &mut Wire, instance: &str) {
     let hello = wire.read("hello");
     assert_eq!(hello["params"]["clientName"], "AcpGateway");
     wire.2 = true;
-    wire.reply(&hello,json!({"instanceId":instance,"serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input_lookup","session.methods"]}));
+    wire.reply(&hello,json!({"instanceId":instance,"serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input_lookup","session.methods"]}));
 }
 
 /// #557: `session/new` records the editor as its creation origin, on a daemon
@@ -2147,7 +2147,7 @@ fn acp_stdio_correlates_the_consumed_input_and_deduplicates_unicode_progress() {
         wire.2 = true;
         let mut methods = vec!["session.create", "session.history", "session.history.latestTurn"];
         methods.extend_from_slice(METHODS);
-        wire.reply(&hello, json!({"instanceId":"fixture","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":methods}));
+        wire.reply(&hello, json!({"instanceId":"fixture","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":methods}));
         let create = wire.read("session.create");
         wire.reply(&create, json!({"sessionId":"session","sequence":7,"model":{"providerId":"fixture","modelId":"fixture"}}));
         let attach = wire.read("session.attach");

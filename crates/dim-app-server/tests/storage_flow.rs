@@ -405,6 +405,8 @@ const V36_ADDITIONS: &[&str] = &[
     "CREATE TRIGGER timeline_text_delete AFTER DELETE ON timeline_text BEGIN DELETE FROM timeline_text_fts WHERE rowid=old.id; END",
     "CREATE TABLE timeline_text_tails (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, request_id TEXT NOT NULL, tail TEXT NOT NULL, PRIMARY KEY(session_id, branch_id, request_id))",
 ];
+const SESSION_OWNERS_V37: &str = "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)))";
+const SESSION_OWNERS_V38: &str = "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3, 4)))";
 fn schema_of(version: u32) -> Vec<String> {
     let mut statements: Vec<String> = V13_SCHEMA
         .iter()
@@ -440,6 +442,13 @@ fn schema_of(version: u32) -> Vec<String> {
                 sql
             } else {
                 sql.replace(AGENT_SESSIONS_V27, AGENT_SESSIONS_V30)
+            }
+        })
+        .map(|sql| {
+            if version < 38 {
+                sql
+            } else {
+                sql.replace(SESSION_OWNERS_V37, SESSION_OWNERS_V38)
             }
         })
         .collect();
@@ -4130,8 +4139,8 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 38));
-             INSERT INTO agent_store_format VALUES (38);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 39));
+             INSERT INTO agent_store_format VALUES (39);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -4141,10 +4150,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v38"), "{note}");
-    assert!(note.contains("Daemon format: v37"), "{note}");
+    assert!(note.contains("Store format: v39"), "{note}");
+    assert!(note.contains("Daemon format: v38"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v38"), "{note}");
+    assert!(note.contains("Run a build supporting v39"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -4162,7 +4171,7 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29 (schema is v37)"), "{note}");
+    assert!(note.contains("Store format: v29 (schema is v38)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -4206,7 +4215,7 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v37 (format marker is missing or ambiguous)"),
+        note.contains("Store format: v38 (format marker is missing or ambiguous)"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -4305,14 +4314,14 @@ fn a_failed_open_replaces_the_previous_startup_note() {
         .unwrap();
     std::fs::write(
         startup_note(&database.0),
-        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v38\n",
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v39\n",
     )
     .unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     let note = read_startup_note(&database.0);
     assert!(note.contains("Store format: v34"), "{note}");
     assert!(!note.contains("/previous"), "{note}");
-    assert!(!note.contains("v38"), "{note}");
+    assert!(!note.contains("v39"), "{note}");
 }
 
 #[test]

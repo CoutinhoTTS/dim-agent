@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::{collections::VecDeque, io, path::PathBuf, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-const PROTOCOL_VERSION: u32 = 3;
+const PROTOCOL_VERSION: u32 = 4;
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Deserialize)]

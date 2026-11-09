@@ -6,7 +6,7 @@ Client work has so far been designed per feature. This document collects those d
 
 ## 1. Clients
 
-Every client is a protocol v3 client of the App Server daemon. The daemon is headless and shared: one per product home, one executor with many viewers ([Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)). A client owns presentation, protocol adaptation and local interaction; the App Server owns execution, host configuration and persisted Sessions ([feature list](../feature-list.md)).
+Every client is a protocol v4 client of the App Server daemon. The daemon is headless and shared: one per product home, one executor with many viewers ([Tui §3.6](plugins/Tui.md#36-ui-registry-and-ui-leaves)). A client owns presentation, protocol adaptation and local interaction; the App Server owns execution, host configuration and persisted Sessions ([feature list](../feature-list.md)).
 
 ```mermaid
 flowchart TB
@@ -48,7 +48,7 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 
 | Contract | Owner document |
 | --- | --- |
-| Wire protocol v3: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 2); [App Server README](../../crates/dim-app-server/README.md) |
+| Wire protocol v4: framing, `hello` and feature advertisement, notifications | `crates/dim-app-server/src/protocol.rs` (no prose reference exists, §4 item 2); [App Server README](../../crates/dim-app-server/README.md) |
 | Session methods versus management methods, and which entry is served which | [Session boundary](contracts/session-boundary.md) (A.3 entries), [management methods](appserver/management-methods.md) |
 | Reading a Session: `session.attach`, then `session.history` up to a fixed head, then live `session.event`, `session.state`, `session.model.progress`; clients fold these themselves. The attach reply carries that Session's `SessionInfo`, whose `model` follows the Session's latest adopted configuration, so a client that opens a known Session takes the model from it and reads no catalog; `session.summaries` items still report the creation model until [#795](https://github.com/arcships/dim/issues/795) lands. A reload leaves the title fields absent and `running` false, and the notices that follow correct them. The `session.create` and `session.attach` replies also carry `modelPreferences`, the preferences the Session's adopted configuration sends, derived from it and absent when it carries none; `session.summaries` items do not carry it | [Session access](contracts/session-access.md), [CLI commands](cli-commands.md); triage of [#276](https://github.com/arcships/dim/issues/276) |
 | Broadcast notices that are not Timeline facts (`session.notice`, e.g. titles) | [Session notices](appserver/session-notices.md) |
@@ -58,7 +58,7 @@ Dashed boxes are outside this repository (Desktop) or not implemented (remote de
 | Provider management for every client | [Provider management](appserver/provider-management.md) |
 | Child tool batches: v4 envelope, v3 visibility and client grouping | [Child tool batches](appserver/child-tool-batches.md) |
 
-The CLI requires protocol v3 and the `session.create` and `session.history` features; the web client and its assets require an exact protocol match ([web workspace §2.4](web-workspace.md)). The v4 child-batch contract is specified in [child tool batches](appserver/child-tool-batches.md); current clients remain v3 until it lands.
+The CLI requires protocol v4 and the `session.create` and `session.history` features; the web client and its assets require an exact protocol match ([web workspace §2.4](web-workspace.md)). The child-batch contract is specified in [child tool batches](appserver/child-tool-batches.md).
 
 ### Member tool approval
 
@@ -278,7 +278,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 Undesigned capabilities from §3, in feature-list order:
 
 1. Message copying (`/timeline` and its other message actions: [Timeline UI §4.6](timeline-ui.md#46-timeline-jumping-to-a-message)).
-2. A prose reference for protocol v3: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
+2. A prose reference for protocol v4: the wire is defined only in `protocol.rs`, and its description is spread over the App Server README and per-feature designs.
 3. Questions in the Web workspace: it handles approvals but not `ask_user`, and web-workspace §4 does not list it as deferred.
 4. Session list project/all switch, `/debug`, the remaining `/settings` items, `dimcode upgrade`.
 
@@ -328,6 +328,6 @@ flowchart LR
 1. **Fullscreen terminal UI.** The code ships it; the overview says it is out of scope. Either accept it in scope (update the overview and CLI commands, and decide whether rollback and `/stats` stay out) or freeze it.
 2. **Web phase 2 scope**, including whether the loopback web entry may carry management methods for settings pages (web-workspace Q2), and whether Questions is required in the Web workspace.
 3. **Which §4 gaps get designs**, and in which milestone: message copying and the remaining `/timeline` actions.
-4. **A protocol v3 reference** (§4 item 2): write one, or keep the code as the reference.
+4. **A protocol v4 reference** (§4 item 2): write one, or keep the code as the reference.
 5. **Milestones for the open client issues**: [#263](https://github.com/arcships/dim/issues/263) (member transcript cards, subagent model policy runtime), [#264](https://github.com/arcships/dim/issues/264) (Workflow view), [#386](https://github.com/arcships/dim/issues/386) (UI events toward the agent).
 6. **Owner of the client lane** in the roadmap.

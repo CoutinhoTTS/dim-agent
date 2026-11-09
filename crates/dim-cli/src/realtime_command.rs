@@ -196,7 +196,7 @@ mod tests {
         json!({
             "instanceId": "scripted",
             "serverVersion": "test",
-            "protocolVersion": 3,
+            "protocolVersion": 4,
             "features": ["session.create", "session.history"],
             "daemonProfile": {"kind": "product"},
         })

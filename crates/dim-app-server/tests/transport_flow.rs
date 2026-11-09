@@ -1324,13 +1324,13 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
         tokio_tungstenite::connect_async(format!("ws://{}/ws", server.websocket_address.unwrap()))
             .await
             .unwrap();
-    mismatch.send(Message::Text(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":4,"clientKind":"other"}}).to_string().into())).await.unwrap();
+    mismatch.send(Message::Text(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":5,"clientKind":"other"}}).to_string().into())).await.unwrap();
     let error = mismatch.next().await.unwrap().unwrap().into_text().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&error).unwrap()["error"]["data"]["appError"],
         "protocol_version"
     );
-    let mut client = Client::new(&server, false).await;
+    let mut client = Client::new_version(&server, false, 1).await;
     let invalid = client
         .rpc(
             "session.submit",

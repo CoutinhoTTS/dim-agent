@@ -14,6 +14,8 @@ pub struct Event {
     pub sequence: u64,
     /// Unix milliseconds the runtime wrote the event at.
     pub create_at: u64,
+    /// v4 only: the outer call of a child tool batch.
+    pub parent_call_id: Option<String>,
     pub content: EventContent,
 }
 #[derive(Clone, Deserialize)]
@@ -84,6 +86,8 @@ impl<'de> Deserialize<'de> for Event {
             id: String,
             sequence: u64,
             create_at: u64,
+            #[serde(default)]
+            parent_call_id: Option<String>,
             r#type: String,
             name: String,
             data: serde_json::Value,
@@ -200,6 +204,7 @@ impl<'de> Deserialize<'de> for Event {
             id: wire.id,
             sequence: wire.sequence,
             create_at: wire.create_at,
+            parent_call_id: wire.parent_call_id,
             content,
         })
     }
