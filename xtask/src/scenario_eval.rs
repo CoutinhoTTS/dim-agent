@@ -3030,9 +3030,10 @@ fn preflight_checks(
     // product tool the run list does not name would silently leave a live
     // run without it, and a listed tool the product stopped serving would
     // silently whitelist a name nobody registers; this check catches both
-    // at run time, where CI's eval-tests gating cannot hide them. `source`
-    // labels the contributed tools in the detail; it is not what decides
-    // them.
+    // at run time, where CI's eval-tests gating cannot hide them. A
+    // contribution no named plugin owns fails the check, so an empty
+    // defaults file — or none at all — exempts nothing. `source` labels the
+    // contributed tools in the detail; it is not what decides them.
     let declared_names: BTreeSet<&str> = declared.iter().map(|(name, _)| name.as_str()).collect();
     let expected_set: BTreeSet<&str> = expected.iter().map(String::as_str).collect();
     let native: BTreeSet<&str> = params
@@ -3063,6 +3064,12 @@ fn preflight_checks(
         .as_deref()
         .map(plugin_default_names)
         .unwrap_or_default();
+    // Nothing is exempt without an owner: when the run's defaults name no
+    // plugin, a declared tool beyond the run list, the reply tools and N
+    // has no defaults plugin to attribute it to, so it fails the check
+    // instead of reading as a contribution from plugins that do not exist.
+    let unowned = plugins.is_empty() && !contributed.is_empty();
+    let passed = unreviewed.is_empty() && absent.is_empty() && agree && !unowned;
     // The attributed contributions, in both outcomes: a reader sees what the
     // run's plugin defaults added even when another tool failed the check.
     let contributed_detail = |detail: &mut String| {
@@ -3084,8 +3091,8 @@ fn preflight_checks(
     };
     check(
         "tools-product",
-        unreviewed.is_empty() && absent.is_empty() && agree,
-        if unreviewed.is_empty() && absent.is_empty() && agree {
+        passed,
+        if passed {
             let mut detail = "the product offered the run's tool set".to_owned();
             contributed_detail(&mut detail);
             detail
@@ -3114,7 +3121,21 @@ fn preflight_checks(
                     absent.join(", ")
                 ));
             }
-            contributed_detail(&mut detail);
+            if unowned {
+                if !detail.is_empty() {
+                    detail.push_str("; ");
+                }
+                let listed: Vec<String> = contributed
+                    .iter()
+                    .map(|(name, source)| format!("{name} ({})", source_name(*source)))
+                    .collect();
+                detail.push_str(&format!(
+                    "no plugin default owns the contributed tools: {}",
+                    listed.join(", ")
+                ));
+            } else {
+                contributed_detail(&mut detail);
+            }
             detail
         },
     );
@@ -12285,6 +12306,91 @@ mod tests {
             !names.contains(&PLUGIN_TOOL),
             "the served process registers no plugin tool: {names:?}"
         );
+    }
+
+    /// A child's params for the checks that read only the tool sets: the
+    /// native set, the defaults file, and the paths the other checks name;
+    /// no serve child runs.
+    fn products_params(defaults: PathBuf, native: &[&str]) -> ChildParams {
+        ChildParams {
+            home: PathBuf::from("/nonexistent/home"),
+            workspace: PathBuf::from("/nonexistent/workspace"),
+            env_home: PathBuf::from("/nonexistent/env-home"),
+            output_root: PathBuf::from("/nonexistent/output"),
+            socket: PathBuf::from("/nonexistent/socket"),
+            model_config: PathBuf::from("/nonexistent/model.json"),
+            defaults: Some(defaults),
+            node: None,
+            js_runtime: None,
+            overrides: json!({}),
+            scenario: json!({}),
+            model: target("gateway/mock").unwrap(),
+            judge: target("gateway/mock").unwrap(),
+            boundary: None,
+            outputs: PathBuf::from("/nonexistent/outputs"),
+            credentials: Vec::new(),
+            operator_home: None,
+            isolate: false,
+            fail_preflight: false,
+            offer_plugin: false,
+            extra_tool: false,
+            fail_child: false,
+            native_tools: native
+                .iter()
+                .map(|name| ((*name).to_owned(), ToolSource::Builtin))
+                .collect(),
+            probe_only: false,
+        }
+    }
+
+    /// A contribution no named plugin owns fails `tools-product`: with an
+    /// empty defaults file, the declared set is the native set plus one
+    /// stray tool and no plugin is named to own it, so the check fails
+    /// naming the tool; the same input passes once the defaults name a
+    /// plugin, and the detail attributes the tool to it.
+    #[test]
+    fn a_contribution_no_named_plugin_owns_fails_the_check() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-eval-unowned-contribution-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let native = &RUN_TOOLS[..2];
+        let mut declared: Vec<(String, ToolSource)> = native
+            .iter()
+            .map(|name| ((*name).to_owned(), ToolSource::Builtin))
+            .collect();
+        declared.push(("fixture_extra".to_owned(), ToolSource::Extension));
+        let named: Vec<String> = declared.iter().map(|(name, _)| name.clone()).collect();
+        let expected: Vec<String> = native.iter().map(|name| (*name).to_owned()).collect();
+        let empty = directory.join("empty.json");
+        std::fs::write(&empty, json!({"plugins": {}}).to_string()).unwrap();
+        let params = products_params(empty, native);
+        let checks = preflight_checks(&[], &params, &named, &named, &expected, &named, &declared);
+        let product = check(&checks, "tools-product");
+        assert!(!product.passed, "{product:?}");
+        assert!(product.detail.contains("fixture_extra"), "{product:?}");
+        assert!(
+            product.detail.contains("no plugin default owns"),
+            "{product:?}"
+        );
+        let owned = directory.join("owned.json");
+        std::fs::write(
+            &owned,
+            json!({"plugins": {"text-injector": {"path": "nowhere"}}}).to_string(),
+        )
+        .unwrap();
+        let params = products_params(owned, native);
+        let checks = preflight_checks(&[], &params, &named, &named, &expected, &named, &declared);
+        let product = check(&checks, "tools-product");
+        assert!(product.passed, "{product:?}");
+        assert!(product.detail.contains("text-injector"), "{product:?}");
+        assert!(
+            product.detail.contains("fixture_extra (extension)"),
+            "{product:?}"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A defaults file exempts nothing by its presence: with an empty
