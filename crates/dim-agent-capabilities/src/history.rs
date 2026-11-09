@@ -779,14 +779,14 @@ impl HistoryRenderer {
 
 /// One message an input or the projection places, with the in-effect
 /// state it changes: `Some((key, None))` ends a key.
-struct ProjectionEntry {
+pub(crate) struct ProjectionEntry {
     id: String,
-    message: Message,
+    pub(crate) message: Message,
     state: Option<(String, Option<ContextBaselineEntry>)>,
 }
 
 /// Raw blocks in order, then the operator's words; each is one message.
-fn render_input(event: &AgentEvent, input: &InputMessageData) -> Vec<ProjectionEntry> {
+pub(crate) fn render_input(consumed_id: &str, input: &InputMessageData) -> Vec<ProjectionEntry> {
     let mut entries: Vec<_> = input
         .blocks
         .iter()
@@ -795,13 +795,13 @@ fn render_input(event: &AgentEvent, input: &InputMessageData) -> Vec<ProjectionE
             let InputBlock::Raw { text, key, retire } = block;
             let message = Message::text(Role::User, text);
             ProjectionEntry {
-                id: format!("{}:block:{index}", event.id),
+                id: format!("{consumed_id}:block:{index}"),
                 state: key.as_ref().map(|key| {
                     (
                         key.clone(),
                         (!retire).then(|| ContextBaselineEntry {
                             key: key.clone(),
-                            source_event: event.id.clone(),
+                            source_event: consumed_id.to_owned(),
                             message: Arc::new(message.clone()),
                         }),
                     )
@@ -812,7 +812,7 @@ fn render_input(event: &AgentEvent, input: &InputMessageData) -> Vec<ProjectionE
         .collect();
     if let Some(user) = &input.user {
         entries.push(ProjectionEntry {
-            id: event.id.clone(),
+            id: consumed_id.to_owned(),
             message: user_message(user),
             state: None,
         });
@@ -984,7 +984,7 @@ fn replay(
                         data.input_id
                     )
                 })?;
-                for projection in render_input(event, &input) {
+                for projection in render_input(&event.id, &input) {
                     apply(&mut history, &mut delivered_state, projection);
                 }
             }
@@ -1028,35 +1028,33 @@ fn replay(
             }
             EventKind::ModelOutputEnd(data) => {
                 let output = std::mem::take(&mut output);
-                if matches!(data.outcome, ModelOutputOutcome::Completed { .. }) {
-                    history.push(assistant(event.id.clone(), output, baseline.clone()));
-                } else {
-                    history.extend(interrupted(event.id.clone(), output, &baseline));
-                }
+                history.extend(
+                    settled_output_message(
+                        output,
+                        matches!(data.outcome, ModelOutputOutcome::Completed { .. }),
+                    )
+                    .map(|message| entry(event.id.clone(), message, false, baseline.clone())),
+                );
                 output_open = false;
             }
             EventKind::ToolResult(data) => {
                 if data.call_event_id.is_none() && output_open {
-                    history.extend(interrupted(
-                        event.id.clone(),
-                        std::mem::take(&mut output),
-                        &baseline,
-                    ));
+                    history.extend(
+                        settled_output_message(std::mem::take(&mut output), false).map(|message| {
+                            entry(event.id.clone(), message, false, baseline.clone())
+                        }),
+                    );
                     output_open = false;
                 }
                 for (index, item) in data.results.iter().enumerate() {
                     let id = format!("{}:{index}", event.id);
                     history.push(entry(
                         id,
-                        Message {
-                            role: Role::ToolResult,
-                            content: MessageContent::Parts(vec![MessagePart::ToolResult {
-                                tool_use_id: item.call_id.clone(),
-                                content: item.result.content.clone(),
-                                structured_content: None,
-                                is_error: item.result.is_error,
-                            }]),
-                        },
+                        tool_result_message(
+                            &item.call_id,
+                            &item.result.content,
+                            item.result.is_error,
+                        ),
                         false,
                         baseline.clone(),
                     ));
@@ -1615,34 +1613,37 @@ pub async fn validate_context_boundary_in(
     boundary_at(ContextReads::Session(session, branch), through).await
 }
 
-fn assistant(
-    id: String,
-    parts: Vec<MessagePart>,
-    baseline: Arc<[ContextBaselineEntry]>,
-) -> HistoryEntry {
-    entry(
-        id,
-        Message {
-            role: Role::Assistant,
-            content: MessageContent::Parts(parts),
-        },
-        false,
-        baseline,
-    )
+/// Completed output keeps all parts, including an empty assistant message.
+/// Interrupted output discards thinking and omits an empty message.
+pub(crate) fn settled_output_message(output: Vec<MessagePart>, completed: bool) -> Option<Message> {
+    let parts = if completed {
+        output
+    } else {
+        output
+            .into_iter()
+            .filter(|part| !matches!(part, MessagePart::Thinking { .. }))
+            .collect()
+    };
+    (completed || !parts.is_empty()).then_some(Message {
+        role: Role::Assistant,
+        content: MessageContent::Parts(parts),
+    })
 }
 
-/// The committed text and started calls of an output that did not complete,
-/// without its thinking; nothing when neither exists.
-fn interrupted(
-    id: String,
-    output: Vec<MessagePart>,
-    baseline: &Arc<[ContextBaselineEntry]>,
-) -> Option<HistoryEntry> {
-    let parts: Vec<_> = output
-        .into_iter()
-        .filter(|part| !matches!(part, MessagePart::Thinking { .. }))
-        .collect();
-    (!parts.is_empty()).then(|| assistant(id, parts, baseline.clone()))
+pub(crate) fn tool_result_message(
+    call_id: &str,
+    content: &ToolContent,
+    is_error: Option<bool>,
+) -> Message {
+    Message {
+        role: Role::ToolResult,
+        content: MessageContent::Parts(vec![MessagePart::ToolResult {
+            tool_use_id: call_id.to_owned(),
+            content: content.clone(),
+            structured_content: None,
+            is_error,
+        }]),
+    }
 }
 
 fn entry(

@@ -1645,12 +1645,13 @@ impl ContextPolicy {
             .resolve(request.clone(), cancel.clone())
             .await?;
         check_cancel(&cancel)?;
-        let events: Vec<Arc<AgentEvent>> = estimate_events(&self.timeline, self.timeline.sequence())
-            .await
-            .map_err(|error| HostError::failed(error.to_string()))?
-            .into_iter()
-            .map(|(_, event)| event)
-            .collect();
+        let events: Vec<Arc<AgentEvent>> =
+            estimate_events(&self.timeline, self.timeline.sequence())
+                .await
+                .map_err(|error| HostError::failed(error.to_string()))?
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect();
         let input = self.estimate(&request, model.as_ref(), &events)?.input;
         if input <= input_budget(model.as_ref()) {
             return Ok(());
