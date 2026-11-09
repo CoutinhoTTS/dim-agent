@@ -14,6 +14,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `agentIndex` | process | Agents | Rust-only | — |
 | `auxiliaryModel` | process | Provider | yes | `complete` async |
 | `auxiliaryModelHost` | process | Provider | Rust-only | — |
+| `basePromptSettingsHost` | process | PromptSettings | Rust-only | — |
 | `callChannel` | process | CallChannel | yes | `closed` async, `notify` async |
 | `callers` | process | CallChannel | Rust-only | — |
 | `collaboration` | process | Collaboration | Rust-only | — |
@@ -61,7 +62,9 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `settings` | process | Settings | yes | `projects` sync, `read` async, `register` async, `update` async |
 | `settingsService` | process | Settings | Rust-only | — |
 | `skillsCatalog` | process | SkillsCatalog | Rust-only | — |
+| `skillsInstructionsSettingsHost` | process | PromptSettings | Rust-only | — |
 | `sqliteStorage` | process | SqliteStorage | Rust-only | — |
+| `summaryPromptSettingsHost` | process | PromptSettings | Rust-only | — |
 | `toolchainSourceHost` | process | ToolchainSource | Rust-only | — |
 | `uiExtensions` | process | UiExtensions | Rust-only | — |
 | `uiHost` | process | UiHost | Rust-only | — |

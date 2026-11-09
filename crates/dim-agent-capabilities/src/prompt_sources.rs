@@ -324,6 +324,14 @@ pub struct PromptSourcesConfig {
     pub file_encoding_guidance: Option<Arc<str>>,
 }
 
+/// The host's user override of `dim/base`. `None` keeps this plugin's factory
+/// configuration or the built-in text.
+pub trait BasePromptSettings: Send + Sync + 'static {
+    fn base(&self, cancel: CancellationToken) -> HostFuture<'_, Option<Arc<str>>>;
+}
+
+pub struct BasePromptSettingsHost(pub Arc<dyn BasePromptSettings>);
+
 struct Sources {
     platform: Arc<HostPlatform>,
     config: Arc<SessionConfig>,
@@ -411,6 +419,7 @@ pub struct PromptSourcesPlugin {
     platform: Key<HostPlatform>,
     config: Key<SessionConfig>,
     registry: Key<PromptRegistry>,
+    settings: Option<Key<BasePromptSettingsHost>>,
     pub today: Today,
     policy: PromptSourcesConfig,
 }
@@ -429,6 +438,10 @@ impl PromptSourcesPlugin {
             platform: names.key()?,
             config: names.key()?,
             registry: names.key()?,
+            settings: names
+                .registered::<BasePromptSettingsHost>()
+                .then(|| names.key::<BasePromptSettingsHost>())
+                .transpose()?,
             today,
             policy,
         })
@@ -439,23 +452,45 @@ impl DynPlugin for PromptSourcesPlugin {
         "PromptSources"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        vec![
+        let mut keys = vec![
             self.platform.erase(),
             self.config.erase(),
             self.registry.erase(),
-        ]
+        ];
+        keys.extend(self.settings.iter().map(Key::erase));
+        keys
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let platform = ctx.require_at(&self.platform)?;
             let config = ctx.require_at(&self.config)?;
             let registry = ctx.require_at(&self.registry)?;
+            let mut policy = self.policy.clone();
+            if policy.base.is_none() {
+                let settings = match &self.settings {
+                    Some(key) => ctx.get_at(key),
+                    None => None,
+                };
+                if let Some(settings) = settings {
+                    match settings
+                        .0
+                        .base(ctx.cancellation_token().child_token())
+                        .await
+                    {
+                        Ok(Some(base)) => policy.base = Some(base),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "base prompt setting was not read")
+                        }
+                    }
+                }
+            }
             let sources: Arc<dyn LoadPrompt> = Arc::new(Sources {
                 platform,
                 config,
                 today: self.today.clone(),
                 stopped: ctx.cancellation_token(),
-                policy: self.policy.clone(),
+                policy,
             });
             for name in SOURCES {
                 registry.register(ctx, name, sources.clone())?;

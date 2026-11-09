@@ -1155,6 +1155,7 @@
         "serde_json::json",
         "tokio::pin",
         "tokio::select",
+        "tracing::warn",
         "vec"
       ]
     },
@@ -1177,6 +1178,7 @@
       "unexpandedMacros": [
         "format",
         "serde_json::json",
+        "tracing::warn",
         "unreachable",
         "vec"
       ]
@@ -2850,6 +2852,17 @@
         "format",
         "json",
         "matches",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::prompt_settings",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/prompt_settings.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
         "vec"
       ]
     },
@@ -14561,6 +14574,14 @@
     },
     {
       "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
       "to": "dim_agent_capabilities::prompt_sources",
       "references": [
         "path crate::prompt_sources::sha256_version"
@@ -14911,6 +14932,7 @@
         "path SkillsError",
         "path super::INSTRUCTIONS",
         "path super::SkillsConfig",
+        "path super::SkillsInstructionsSettingsHost",
         "use super::SkillDefinition",
         "use super::SkillSummary",
         "use super::SkillView",
@@ -15222,6 +15244,13 @@
         "path SystemPrompt::Text",
         "path Usage",
         "path model"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path prompt"
       ]
     },
     {
@@ -20650,6 +20679,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_capabilities::prompt_sources",
+      "references": [
+        "path dim_agent_capabilities::prompt_sources::BasePromptSettingsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_capabilities::prompt_suggestion",
       "references": [
         "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost"
@@ -20661,6 +20697,20 @@
       "references": [
         "path dim_agent_capabilities::session_broadcast::SessionNotice",
         "path dim_agent_capabilities::session_broadcast::notify"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_agent_capabilities::skills",
+      "references": [
+        "path dim_agent_capabilities::skills::SkillsInstructionsSettingsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_agent_capabilities::summary_strategy",
+      "references": [
+        "path dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost"
       ]
     },
     {
@@ -20972,6 +21022,14 @@
         "path plugin_manager::Owners::new",
         "path plugin_manager::PluginManagerPlugin::new",
         "path plugin_manager::State::read"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::prompt_settings",
+      "references": [
+        "mod prompt_settings",
+        "path prompt_settings::PromptSettingsPlugin::new"
       ]
     },
     {
@@ -27030,6 +27088,79 @@
         "use crate::settings::Writer",
         "use crate::settings::holds_write_only",
         "use crate::settings::without_write_only"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_settings",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::failed",
+        "path HostFuture",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_settings",
+      "to": "dim_agent_capabilities::prompt_sources",
+      "references": [
+        "path BasePromptSettings",
+        "path BasePromptSettingsHost",
+        "use dim_agent_capabilities::prompt_sources::BasePromptSettings",
+        "use dim_agent_capabilities::prompt_sources::BasePromptSettingsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_settings",
+      "to": "dim_agent_capabilities::settings",
+      "references": [
+        "path SettingsScope::User",
+        "use crate::settings::SettingsScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_settings",
+      "to": "dim_agent_capabilities::skills",
+      "references": [
+        "path SkillsInstructionsSettings",
+        "path SkillsInstructionsSettingsHost",
+        "use dim_agent_capabilities::skills::SkillsInstructionsSettings",
+        "use dim_agent_capabilities::skills::SkillsInstructionsSettingsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_settings",
+      "to": "dim_agent_capabilities::summary_strategy",
+      "references": [
+        "path SummaryPromptSettings",
+        "path SummaryPromptSettingsHost",
+        "use dim_agent_capabilities::summary_strategy::SummaryPromptSettings",
+        "use dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_settings",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_settings",
+      "to": "dim_app_server::settings",
+      "references": [
+        "path SettingsService",
+        "use crate::settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server::prompt_settings",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path SourceDeclaration",
+        "use crate::settings::SourceDeclaration"
       ]
     },
     {
