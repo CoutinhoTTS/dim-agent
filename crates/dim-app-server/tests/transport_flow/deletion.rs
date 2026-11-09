@@ -906,6 +906,8 @@ struct DeleteNotice {
     agent_id: String,
     session_id: String,
     rows_gone: bool,
+    /// The notice as a listener receives it on the bus.
+    json: serde_json::Value,
 }
 
 /// Records every `agent/session-deleted` notice and reads SessionStore from
@@ -941,6 +943,7 @@ impl DynPlugin for DeleteProbe {
                     agent_id: event.agent_id.clone(),
                     session_id: event.session_id.clone(),
                     rows_gone,
+                    json: serde_json::to_value(event).unwrap(),
                 });
                 async { Ok(None) }
             })?;
@@ -972,6 +975,27 @@ async fn release(agent: &dim_agent_runtime::Agent, session: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_successful_delete_announces_the_session_and_a_close_does_not() {
     let store = Store::new();
+    // Sessions stored by an earlier run of the daemon: this process loads
+    // them never. One keeps the ownership row the earlier run stored; the
+    // other has no owner recorded at all, so its notice must still arrive,
+    // with an empty `agentId` (EventHub §9.1).
+    let (orphan, ownerless) = {
+        let seeding = launch(Arc::new(MockTools), store.config()).await;
+        let mut client = Client::new_version(&seeding, false, 3).await;
+        let orphan = session(&mut client).await;
+        let ownerless = session(&mut client).await;
+        store
+            .connection()
+            .execute(
+                "DELETE FROM session_owners WHERE session_id=?1",
+                [&ownerless],
+            )
+            .unwrap();
+        drop(client);
+        seeding.shutdown();
+        seeding.join().await.unwrap();
+        (orphan, ownerless)
+    };
     let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
     let probe = notices.clone();
     let database = store.0.join("dimcode.sqlite");
@@ -1041,7 +1065,42 @@ async fn every_successful_delete_announces_the_session_and_a_close_does_not() {
         vec![loaded.clone(), unloaded.clone(), closed.clone()]
     );
 
-    let recorded: Vec<(String, bool, String)> = notices
+    // Stored, but never loaded here: the notice still arrives, and names the
+    // owner the store recorded for it.
+    assert_ok(
+        &other
+            .rpc("session.delete", json!({"sessionId":orphan}))
+            .await,
+    );
+    assert_eq!(
+        seen(),
+        vec![
+            loaded.clone(),
+            unloaded.clone(),
+            closed.clone(),
+            orphan.clone()
+        ]
+    );
+
+    // Stored with no owner recorded anywhere: the notice still arrives, with
+    // an empty `agentId`.
+    assert_ok(
+        &other
+            .rpc("session.delete", json!({"sessionId":ownerless}))
+            .await,
+    );
+    assert_eq!(
+        seen(),
+        vec![
+            loaded.clone(),
+            unloaded.clone(),
+            closed.clone(),
+            orphan.clone(),
+            ownerless.clone()
+        ]
+    );
+
+    let recorded: Vec<(String, bool, String, serde_json::Value)> = notices
         .lock()
         .unwrap()
         .iter()
@@ -1050,12 +1109,23 @@ async fn every_successful_delete_announces_the_session_and_a_close_does_not() {
                 notice.session_id.clone(),
                 notice.rows_gone,
                 notice.agent_id.clone(),
+                notice.json.clone(),
             )
         })
         .collect();
-    for (session_id, rows_gone, agent_id) in recorded {
+    for (session_id, rows_gone, agent_id, json) in recorded {
         assert!(rows_gone, "{session_id} is announced after its rows went");
-        assert!(!agent_id.is_empty(), "{session_id}");
+        assert_eq!(json["sessionId"], json!(session_id), "{json}");
+        assert_eq!(json["agentId"], json!(agent_id), "{json}");
+        assert!(
+            json.get("session_id").is_none() && json.get("agent_id").is_none(),
+            "the design's camelCase field names: {json}"
+        );
+        assert_eq!(
+            agent_id.is_empty(),
+            session_id == ownerless,
+            "{session_id} names its owner when one is recorded: {json}"
+        );
     }
 
     drop((client, other, agent));

@@ -111,9 +111,11 @@ impl Event for UnloadedSessionDeleted {
 /// The end of a Session a successful delete removed its stored rows for,
 /// whether it was loaded or not. Emitted on the process root after
 /// SessionStore removed the rows, so a listener can tell a delete from a
-/// close that keeps the rows ([EventHub §9.1](../design/plugins/EventHub.md),
-/// [sessions service](../design/appserver/sessions-service.md)).
+/// close that keeps the rows
+/// ([EventHub §9.1](../../../docs/design/plugins/EventHub.md),
+/// [sessions service](../../../docs/design/appserver/sessions-service.md)).
 #[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionDeleted {
     pub agent_id: String,
     pub session_id: String,
@@ -1481,6 +1483,13 @@ impl AgentIndex {
             }
         }
         let unloaded = loaded.is_none() && !slot.closed.load(Ordering::Acquire);
+        // The delete notice names the Session's owner even when this process
+        // never loaded it: `session_owners` still holds the row, and the
+        // delete removes it, so it is read here (EventHub §9.1).
+        let recorded_owner = match &self.session_store {
+            Some(store) => store.owner(id).await?,
+            None => None,
+        };
         let stored = match &self.session_store {
             Some(store) => store.delete_session(id).await?,
             None => false,
@@ -1509,8 +1518,14 @@ impl AgentIndex {
         }
         // Every successful delete announces itself, loaded or not: a listener
         // that holds state for the Session removes it, and a close, which
-        // keeps the rows, does not ([EventHub §9.1]).
-        if let Some((agent_id, _)) = owner.filter(|_| deleted) {
+        // keeps the rows, does not ([EventHub §9.1]). The notice carries the
+        // owner the index held, else the store's, and an empty `agentId` when
+        // neither recorded one.
+        if deleted {
+            let agent_id = owner
+                .map(|(agent_id, _)| agent_id)
+                .or(recorded_owner)
+                .unwrap_or_default();
             notices.push(DeletedNotice::Session(SessionDeleted {
                 agent_id,
                 session_id: id.to_owned(),

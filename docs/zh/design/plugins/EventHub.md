@@ -301,7 +301,7 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前�
 
 - **被什么挡住：** EventHub 必须移除被删除 Session 的订阅，而一个保留数据行的关闭不能移除它们。`session_closed` 同时回答这两种情况，见 `crates/dim-app-server/src/agents.rs:817-830` 与 [session access A.6](../contracts/session-access.md#a6-错误)；今天唯一的删除通知是 `agent/unloaded-session-deleted`，且只为未加载的 Session 发出，见 `crates/dim-app-server/src/agents.rs:97-109,1399-1415` 与 [插件契约 §5.3](../plugin-contract.md#53-总线事件)。
 - **考虑过的现有机制：** Session 广播的 `closed` 事件只说明一个 Session 关闭了，不说明它的数据行是否被移除，而 EventHub 不能因关闭而移除；用 `sessions.lookup` 轮询每个被订阅的 Session 时，对一个存在但从未收到输入的 Session 回答 `unknown`，区分不出已删除与可恢复，而且会引入 EventHub 设计明确排除的周期性读取者；`history` 对两种情况以同样的方式失败。
-- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次成功的删除，无论 Session 是否已加载。Collaboration 现有的通知保持原样。两条删除通知都保留，直到 Collaboration 迁移到 `agent/session-deleted`；那次迁移是 Collaboration 的改动。
+- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次成功的删除，无论 Session 是否已加载。它的 `agentId` 是记录下来的 Session 所有者，来自已加载的索引或 `session_owners`，两者都没有记录时为空。Collaboration 现有的通知保持原样。两条删除通知都保留，直到 Collaboration 迁移到 `agent/session-deleted`；那次迁移是 Collaboration 的改动。
 - **对顺序、批次、中断、重载的影响：** 对 Timeline 没有影响；这条通知是总线事件，不是事实。错过的通知由 3.4 的对账修复，在下一次 `apply` 或第一次失败的投递上。
 - **所有者：** Agents，`crates/dim-app-server/src/agents.rs`；它自己的文档陈述这条通知，见 [Sessions 服务](../appserver/sessions-service.md) 与 [删除与分叉](../appserver/session-deletion-and-fork.md)。
 
