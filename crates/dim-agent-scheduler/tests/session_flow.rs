@@ -1903,3 +1903,52 @@ async fn a_re_enable_does_not_replay_the_old_target_gone_claim() {
     server.join().await.unwrap();
 }
 
+/// A lookup that answers target-gone settles the delivery `failed` and
+/// disables the job, the same rule as a direct write (Simon).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_target_gone_lookup_settles_failed_and_disables() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let missing = "00000000-0000-7000-8000-0000000000dd";
+    let job = save_session_job(
+        &mut client,
+        "lookup-gone",
+        missing,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    edit_runs(home.path(), |runs| {
+        runs.push(seeded_delivery(
+            "gone-run",
+            &job,
+            missing,
+            "scheduler:gone-run",
+            None,
+        ));
+    });
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    wait_for("the lookup settles the delivery", || {
+        stored_runs(home.path())
+            .iter()
+            .any(|run| run["run_id"] == "gone-run" && run["state"] == "failed")
+    })
+    .await;
+    let runs = stored_runs(home.path());
+    let run = runs
+        .iter()
+        .find(|run| run["run_id"] == "gone-run")
+        .unwrap();
+    assert_eq!(run["detail"], "session_closed", "{run}");
+    let job = wait_for_job(&mut client, &job).await;
+    assert_eq!(job["disabled_reason"]["code"], "session_closed", "{job}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}

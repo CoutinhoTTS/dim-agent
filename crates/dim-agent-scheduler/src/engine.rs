@@ -904,10 +904,22 @@ async fn write_session(
 /// Settles a `session` delivery `failed` with the code; a target-gone code
 /// also disables the job (A.3, A.6).
 async fn failed(shared: &Arc<Shared>, run: &Delivery, code: &str) -> Result<(), SchedulerError> {
-    finish(shared, &run.run_id, DeliveryState::Failed, code.into()).await?;
     if target_gone(code) {
-        disable_gone(shared, run, code, stamp(Utc::now())).await;
+        return settle_target_gone(shared, run, code).await;
     }
+    finish(shared, &run.run_id, DeliveryState::Failed, code.into()).await
+}
+
+/// The one rule a target-gone answer takes on both paths: the delivery
+/// settles `failed` and the job is disabled with the code (A.3). The write
+/// path reaches it through `failed`; the lookup path calls it directly.
+async fn settle_target_gone(
+    shared: &Arc<Shared>,
+    run: &Delivery,
+    code: &str,
+) -> Result<(), SchedulerError> {
+    finish(shared, &run.run_id, DeliveryState::Failed, code.into()).await?;
+    disable_gone(shared, run, code, stamp(Utc::now())).await;
     Ok(())
 }
 
@@ -1001,6 +1013,9 @@ async fn lookup_once(shared: &Arc<Shared>, run: &Delivery) -> Result<(), Schedul
                     return settle_delivered(shared, &run.run_id, input_id).await;
                 }
                 Ok(Ok(_)) => "unknown".to_owned(),
+                Ok(Err(code)) if target_gone(&code) => {
+                    return settle_target_gone(shared, run, &code).await;
+                }
                 Ok(Err(code)) => code,
                 Err(_) => "transport".to_owned(),
             };
