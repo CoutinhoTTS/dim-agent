@@ -12,6 +12,16 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Held" => "Retenu",
         "Incorporating" => "Intégration en cours",
+        "Unread" => "Non lu",
+        "Unread · waiting for your next message" => {
+            "Non lu · en attente de votre prochain message"
+        }
+        "/queue view · awaiting model consumption" => {
+            "/queue voir · en attente de traitement par le modèle"
+        }
+        "/queue view · waiting for your next message" => {
+            "/queue voir · en attente de votre prochain message"
+        }
         "Enter export · Esc cancel" => "Enter exporter · Esc annuler",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Les messages avec pièces jointes restent en file ; utilisez /queue pour orienter ou les supprimer"
@@ -19,9 +29,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/queue manage · shift+← edit last · ctrl+s steer now" => {
             "/queue gérer · shift+← modifier le dernier · ctrl+s orienter maintenant"
         }
-        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
-            "+{count} de plus · /queue gérer · shift+← modifier le dernier · ctrl+s orienter maintenant"
-        }
+        "+{count} more · {hint}" => "+{count} de plus · {hint}",
         "steer or delete queued messages" => "orienter avec les messages en file ou les supprimer",
         "export this conversation" => "exporter cette conversation",
         "That message has already left the queue." => "Ce message a déjà quitté la file d’attente.",

@@ -215,7 +215,7 @@ Agents 取得该分支的发布观察器，调用 `Session::input`；它像对�
 | 分支 Timeline（[core/timeline.rs](../../../../crates/dim-agent-runtime/src/core/timeline.rs)），经 `Session::input` 与 `Session::lookup`（`sessions.input`、`sessions.lookup`、Rpc 的 `session.submit` 与 `session.input_lookup`） | — | 每个分支对每个标识只接受一次；查找回答 `accepted`、`unknown` 或 `ambiguous` |
 | Goal 的部件（[crates/dim-goal](../../../../crates/dim-goal)） | 经 `TreeCommands::input` 写 `goal:<uuid>` | 不读取 |
 | Workflow（[engine.ts](../../../../runtime/plugins/workflow/engine.ts)） | 每个阶段输入和报告写 `workflow:<uuid>`，写入前先存入运行文件 | 同一代或替换代重试时以同一标识重新提交，按回复结算 |
-| Scheduler（[A.5](../plugins/Scheduler.md#a5-timeline-与-capability-机制)；运行时在 draft [#317](https://github.com/arcships/dim/pull/317)） | `scheduler:<run_id>` 与 `scheduler-report:<run_id>` | `submitted` 或 `lost`，从不重写；报告从不写两次 |
+| Scheduler([A.5](../plugins/Scheduler.md#a5-timeline-与-capability-机制)、[A.6](../plugins/Scheduler.md#a6-运行结果投递)；运行时在 draft [#317](https://github.com/arcships/dim/pull/317)) | `scheduler:<run_id>`，每个投递一个 | 不确定的回复由查询结算(A.6)；同一窗口绝不写两次 |
 | `dimcode` 与 Rust TUI（[#312](https://github.com/arcships/dim/pull/312)） | 每次提交新生成一个 UUID | 目前不读取：不确定的提交只报告给用户，不查找 |
 | S5c 分叉（[§6.6](session-deletion-and-fork.md#66-身份来源与路径)） | 随事件复制 | —（在分叉上查找能找到复制来的输入） |
 | InputQueue、Loop、历史投影、Goal 的折叠、模型 | — | 从不读取 |
@@ -364,7 +364,7 @@ AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引�
 - **卸载。** 当每个分支都空闲、且没有任何 `SessionUse` 持有它时，Agents 卸载这个已装载的 Session。“没有持有”指：没有 attach 的客户端或订阅，没有 Collaboration 成员关系，没有进行中的 Rpc 或 `sessions` 调用。`Session::unload_if_idle` 在各分支的提交锁下检查空闲。下一次 `acquire` 恢复该 Session。
 - **范围。** 适用于所有 Session，不只是启动的 Session。
 - **它负责的开放问题。** 即 #57 留下的问题：脱离工作是否阻止卸载，以及何时检查（最后一个租约释放时，以及没有租约的 Session 变为空闲时）。
-- **依赖顺序。** 先 S2，再空闲卸载（Agents 负责线，[#126](https://github.com/arcships/dim/issues/126)；以本次测量重新打开 S3/#57），然后才是规模化的 Scheduler `create` 模式任务（P6）。
+- **依赖顺序。** 先 S2，再空闲卸载（Agents 负责线，[#126](https://github.com/arcships/dim/issues/126)；以本次测量重新打开 S3/#57），然后才是规模化的 Scheduler launch 目标任务（P6）。
 
 S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装载的 Session 中保存状态，`idle` 等待在第一个空闲点结束，因此过期的等待不会让 Session 在那之后仍被占用。
 
@@ -374,8 +374,8 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 
 空闲卸载约束的是内存，但每个启动的 Session 还留在存储里，也出现在每个客户端的 Session 列表中。每五分钟一个任务，一天就多约 288 个。因此由使用方删除它们（D14）：
 
-- **谁删、何时删。** 启动 Session 的使用方在删掉最后一条指向它的记录时删除它。Scheduler 在一次运行移出其运行历史（A8，每个任务保留最近 100 次）或任务被删除时删除；`reuse` Session 由任务指向，随任务一起删除。Workflow 在一条运行记录移出其保留范围（A9，保留最近 100 次）时删除；这条记录指向该次运行的所有阶段 Session。
-- **只删已结束的运行。** 删除会关闭 Session，从而停止它的 turn。使用方只在运行到达终态后才删除其 Session；任务被删除后仍在进行的运行（Scheduler A14），在它结束时删除其 Session。
+- **谁删、何时删。** 启动 Session 的使用方在删掉最后一条指向它的记录时删除它。Scheduler 在一条启动 Session 的投递移出其投递历史(A8，每个任务保留最近 100 次投递)且该 Session 的停止时刻已过时删除，或任务被删除时删除。Scheduler 没有启动的目标 Session 永不删除；Scheduler 为旧 `reuse` 任务启动的那个 Session 随任务一起删除，任务只是复用的 Session 永不被删除。Workflow 在一条运行记录移出其保留范围(A9，保留最近 100 次)时删除；这条记录指向该次运行的所有阶段 Session。
+- **只删已结束的运行。** 删除会关闭 Session，从而停止它的 turn。使用方只在运行到达终态后才删除其 Session；Scheduler 的 launch 目标在任务保存的最长运行时间处停止其 Session，且只在该停止时刻之后删除它。任务被删除后仍在进行的运行(Scheduler A14)，在它结束时删除其 Session。
 - **顺序。** 使用方先删除 Session，再删掉记录。删除失败时记录保留，下一轮重试；删除一个已经不存在的 Session 也会成功，因此在两步之间崩溃不会造成损害。
 - **保留某次运行。** 想保留某次运行对话的用户可以 fork 它（S5c 的 `session.fork`）。没有记录指向 fork 出的 Session，它会一直保留到用户删除。
 - **留给用户的部分。** `launch` 回复丢失时留下的 Session（§6.1）没有记录指向。用户用 CLI 按时间或数量的清理删除它，该清理由 `session.summaries` 与 `session.delete` 组合而成（S5c §5.1；F6，[#77](https://github.com/arcships/dim/issues/77)）。
@@ -502,7 +502,7 @@ S1 的撤回合同（A.4）、输入约定（A.2）与 `interactive`（A.3）不
 | 考虑过的现有机制 | 关闭运行：为该 Session 的所有使用者结束它（D12）。`Session::unload_if_idle`：已存在，但没有调用方 |
 | 需要的通用能力 | §8.6：已装载的 Session 空闲且没有租约持有时，宿主卸载它；`acquire` 恢复它 |
 | 对序号、批次、中断、重载的影响 | 对 Timeline 无影响：空闲释放不记录事件，下一次使用时恢复 |
-| 负责方与 issue | Agents 负责线（yyhhyyyyyy），[#126](https://github.com/arcships/dim/issues/126)，重新打开 S3（[#57](https://github.com/arcships/dim/issues/57)）；应在 Scheduler 的 create 模式任务上线前完成 |
+| 负责方与 issue | Agents 负责线（yyhhyyyyyy），[#126](https://github.com/arcships/dim/issues/126)，重新打开 S3（[#57](https://github.com/arcships/dim/issues/57)）；应在 Scheduler 的 launch 目标任务上线前完成 |
 
 不向 rutis 提需求。
 
@@ -512,12 +512,12 @@ S1 的撤回合同（A.4）、输入约定（A.2）与 `interactive`（A.3）不
 
 - **Rust 绑定。** 它们附录 G 中的 `AgentIndex::launch -> SessionUse` 与 `service::<InputQueue>` 改为使用具名服务（§5）；`SessionUse` 是 Agents 内部的。
 - **模型。** `model` 为 `{providerId, modelId}`。
-- **启动方。** 只有在运行由某个 Session 发起时都传 `starter` 的使用方，上限才成立（§11）：创建 Scheduler 任务的 Session（A15），或 Workflow 运行的启动方分支。
-- **策略读取。** `sessions` 没有读取策略的方法。启动会取上限并回复生效策略（D6）。保存时记录的上限（Scheduler A15）或 Workflow 启动时的检查，需要从调用方 Session 自己的部分取得启动方策略，或在它们的评审中提出一个读取方法。Scheduler 的 reuse 检查也一样。
+- **启动方。** 只有在运行由某个 Session 发起时都传 `starter` 的使用方，上限才成立(§11)，例如 Workflow 运行的启动方分支。Scheduler 不传启动方：它的启动只带一个可选预设，由宿主上限收拢(Scheduler §3.3)。
+- **策略读取。** `sessions` 没有读取策略的方法。启动会取上限并回复生效策略(D6)。保存时记录的上限或 Workflow 启动时的检查，需要从调用方 Session 自己的部分取得启动方策略，或在它们的评审中提出一个读取方法。Scheduler 不读策略：它的保存只存一个预设，启动时由 S2 收拢。
 - **历史。** `sessions.history` 用 `after` 与 `limit` 分页。
 - **重载。** `inject: ['sessions']` 不随 Agents 索引重载（D1），因此 Agents 重载时运行不必以 `interrupted` 结束；进行中的调用以 `reloading` 失败，已受理的 `launch` 与 `delete` 除外，它们回复自己的结果（§8.3）。
 - **已装载的 Session。** 运行用的 Session 在宽限期内没有被任何租约持有时，Agents 卸载它，下一次调用恢复它（§8.6，[#126](https://github.com/arcships/dim/issues/126)）。`launch` 不是幂等的（§6.1）。
-- **删除运行用的 Session。** 这是对两份设计的需求（§8.7）：Scheduler 与 Workflow 在删掉最后一条指向某个自己启动的 Session 的记录时删除它（Scheduler：一次运行移出该任务最近 100 次，或任务被删除；Workflow：一次运行移出最近 100 次），且只在运行到达终态后，先删 Session 再删记录，经由 `sessions.delete`。用户通过 fork 保留某次运行，并用 CLI 的清理删除 `launch` 回复丢失时留下的 Session。
+- **删除运行用的 Session。** 这是对两份设计的需求（§8.7）：Scheduler 与 Workflow 在删掉最后一条指向某个自己启动的 Session 的记录时删除它（Scheduler：一条投递移出该任务最近 100 次，或任务被删除，且绝不早于 launch 目标的停止时刻；Workflow：一次运行移出最近 100 次），先删 Session 再删记录，经由 `sessions.delete`。用户通过 fork 保留某次运行，并用 CLI 的清理删除 `launch` 回复丢失时留下的 Session。
 - **再次等待。** “尚未消费，再等一次”不能在 `idle` 上循环：分支空闲时它立即返回。截止点时两种结果都没有的输入处于被持有状态（§6.4 第 2 项）。
 
 ## 16. 实现与验收
