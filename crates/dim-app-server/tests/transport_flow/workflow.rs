@@ -1891,7 +1891,10 @@ async fn node_workflow_report_wakes_wait_and_is_adopted_after_its_start_batch() 
             )
             .await,
     );
-    starter.idle("main").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), starter.idle("main"))
+        .await
+        .unwrap()
+        .unwrap();
     let events = branch_events(&starter, "main", ..).await.unwrap();
     let (result, batch) = events
         .iter()
