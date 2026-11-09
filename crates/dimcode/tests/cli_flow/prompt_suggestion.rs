@@ -473,6 +473,11 @@ fn settings_shows_no_suggestion_row_without_the_methods() {
     let daemon = home.daemon(move |wire| {
         opened_with_methods(wire, &["settings.read", "settings.update"], vec![], false);
         ready.recv_timeout(PATIENCE).unwrap();
+        // The settings panel reads the prompt texts too; this test is about
+        // the absent suggestion source.
+        let read = wire.read("settings.read");
+        assert_eq!(read["params"]["source"], "prompts");
+        wire.reply(&read, json!({"revision":"r1","document":{}}));
         wire.quiet(Duration::from_millis(300));
         settled.send(()).unwrap();
         wire.hold();
@@ -513,6 +518,10 @@ fn settings_toggles_the_switch_through_the_daemon() {
             &read,
             json!({"revision":"r1","document":{"enabled":false,"maxChars":80}}),
         );
+        // `/settings` also reads the prompt texts when it opens.
+        let prompts = wire.read("settings.read");
+        assert_eq!(prompts["params"]["source"], "prompts");
+        wire.reply(&prompts, json!({"revision":"r2","document":{}}));
         let update = wire.read("settings.update");
         assert_eq!(
             update["params"],
