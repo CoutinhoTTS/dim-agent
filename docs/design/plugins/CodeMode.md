@@ -77,43 +77,48 @@ error and writes no child Timeline fact.
 
 ```json
 {
-  "code": "const listed = await tools.list(); return listed",
-  "timeoutMs": 30000,
-  "maxCalls": 50
+  "code": "const listed = await tools.list(); return listed"
 }
 ```
 
 | Field | Meaning |
 | --- | --- |
-| `code` | An asynchronous JavaScript function body. It is rejected when absent, not a string or larger than `max_code_bytes`. |
-| `timeoutMs` | Optional wall-clock budget, capped by `max_runtime_ms`. |
-| `maxCalls` | Optional nested-call budget, capped by `max_calls`. |
+| `code` | Raw JavaScript async function body. It is rejected when absent, not a string or larger than `max_code_bytes`. |
+
+The tool has no model-facing timeout, call budget or concurrency parameter. Those are host
+bounds; the model cannot raise or lower them.
 
 `CodeModeConfig` supplies the hard bounds:
 
 ```text
-max_code_bytes          64 KiB
-max_runtime_ms          30 s
-max_calls               64
-max_parallel_calls      4
-max_memory_bytes        256 MiB
+max_code_bytes          256 KiB
+max_runtime_ms          600 s
+max_calls               4096
+max_memory_bytes        1024 MiB
 max_programs            2
-max_output_bytes        1 MiB
-max_single_result_bytes 256 KiB
+max_output_bytes        16 MiB
 ```
 
 `max_programs` bounds concurrent programs in one process. `CodeModeRuns` holds the program
 semaphore; aggregate QuickJS memory is bounded by `max_programs * max_memory_bytes`. A program
-waiting for a slot is cancelled by the outer call token.
+waiting for a slot is cancelled by the outer call token. These bounds are host policy, not tool
+parameters and not prompt text.
 
 The outer tool is declared with risk `session`. The outer call enters the normal ToolExecutor
 admission path under the Session's permission preset. Approving the outer call does **not** approve
 child calls: each child uses the invoked tool's own risk.
 
+The model-visible description states only the contract the model must act on: the raw JavaScript
+function body, top-level `await`/`return`, the `tools.list`/`tools.describe`/`tools.call` shapes,
+`args` as an object, `structuredContent` before `content`, `ToolCallError`, the exclusion of
+`codemode`, the absent host APIs, the JSON return value, and that child results do not enter model
+context. Host bounds, engine name, memory, program count and error-code tables are not prompt text.
+
 The outer result is a normal `ToolResult`. `content` is the program's returned value serialized as
 JSON, or a stable terminal message on failure. `effects`, when present, are the confirmed effects of
 child `ToolResult`s in child sequence order, including effects from an error result. A generated
-timeout or failure result carries the effects that completed before it.
+timeout or failure result carries the effects that completed before it and warns that child calls
+may have completed.
 
 ### 2.2 QuickJS bridge
 
@@ -122,20 +127,22 @@ The program sees only:
 ```text
 tools.list() -> [{name, description}]
 tools.describe(name) -> declaration | undefined
-tools.call(name, arguments) -> Promise<ToolResult>
+tools.call(name, arguments) -> tool value
 ```
 
-The QuickJS context has no `process`, environment, filesystem, network, timer, child-process or
-module loader, and no Rust/host object. `tools.call` serializes arguments as JSON, rejects a
-non-object argument and rejects every name outside the filtered pinned set, so `codemode` cannot
-recurse. A child `ToolResult` with `isError` becomes a catchable program error with `code` and
-`message`; other results are returned as the serialized `ToolResult`.
+`arguments` is a JSON object. `tools.call` returns `structuredContent` when the child result has it,
+otherwise `content`. A child result with `isError` throws `ToolCallError` with `code`, `message` and
+optional `data`. The error object is data, not a second result shape.
 
-The runtime enforces at least `max_code_bytes`, `max_runtime_ms` (a Rust `timeout_at` around the
-program and a QuickJS interrupt handler), `max_memory_bytes` (QuickJS memory limit), `max_calls`,
-`max_parallel_calls` (a semaphore whose wait is selected against cancellation and the deadline),
-`max_single_result_bytes` and `max_output_bytes`. A synchronous loop is interrupted by the QuickJS
-handler; cancellation also sets the interrupt and wins over the program await.
+The context has no `process`, environment, filesystem, network, timer, console, child-process or
+module loader. The host bridge is passed as the function argument; no host object is exposed as a
+global. `tools.call` rejects a non-object argument and every name outside the filtered pinned set,
+so `codemode` cannot recurse.
+
+The runtime enforces `max_code_bytes`, `max_runtime_ms` (a Rust `timeout_at` around the program and
+a QuickJS interrupt handler), `max_memory_bytes` (QuickJS memory limit), `max_calls` and
+`max_output_bytes`. A synchronous loop is interrupted by the QuickJS handler; cancellation also
+sets the interrupt and wins over the program await. These bounds are not written into the prompt.
 
 ## 3. Child calls on the Timeline
 
@@ -426,7 +433,7 @@ The following is semantic pseudocode, not a committed spelling.
 CodeMode::apply(ctx):
   runs = Arc<CodeModeRuns>
   ctx.provide(runs)
-  partRegistry.register(Session, "CodeModeSession", |names| CodeModeSession::new(names, runs))
+  partRegistry.register(Session, "CodeModeSession", |names| CodeModeSession::new(names))
   partRegistry.register(Branch,  "CodeModeBranch",  |names| CodeModeBranch::new(names, config))
 
 CodeModeSession::apply(ctx):
@@ -434,12 +441,12 @@ CodeModeSession::apply(ctx):
   tools.register(declaration = {
     name: "codemode",
     risk: "session",
-    inputSchema: { code, timeoutMs?, maxCalls? }
+    inputSchema: { code }
   }, handler = |call, context, cancel|:
     runner = runs.get(session_id, context.branch_id) or error
-    runner.run(call.id, call.code, call.timeoutMs, call.maxCalls, context, cancel))
+    runner.run(call.id, call.code, context, cancel))
 
-CodeModeBranch::run(outer_call_id, code, timeout_ms, max_calls, context, cancel):
+CodeModeBranch::run(outer_call_id, code, context, cancel):
   child_cancel = cancel.child_token()
   program_slot = runs.acquire_program(child_cancel) or error
   runtime = AsyncRuntime::new(); runtime.set_memory_limit(max)

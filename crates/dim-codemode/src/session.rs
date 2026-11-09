@@ -1,4 +1,4 @@
-use crate::{CODEMODE_TOOL, config::CodeModeConfig, runs::CodeModeRuns};
+use crate::{CODEMODE_TOOL, runs::CodeModeRuns};
 use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
@@ -12,22 +12,33 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-const DESCRIPTION: &str = "Run a bounded JavaScript program in an isolated QuickJS context. The code is an async function body: use `await tools.call(name, arguments)`, `tools.list()` and `tools.describe(name)`; `return` a JSON-serializable value. Only tools from this request are callable; each call keeps its own Permission and Approval. The program cannot access the filesystem, network, process or host objects. The result is the returned value, serialized as JSON.";
+const DESCRIPTION: &str = "Run a raw JavaScript async function body in a fresh context. Top-level await and return are supported.
+
+tools.list() -> [{name, description}]
+tools.describe(name) -> full declaration | undefined
+tools.call(name, args) -> tool value
+  args is a JSON object.
+  Returns structuredContent when present, otherwise content.
+  A failed tool throws ToolCallError with code, message and optional data.
+  Only the request's tools are callable; codemode is excluded.
+
+No Node, filesystem, network, timers or console. The only host surface is `tools`.
+Return a JSON-serializable value; undefined becomes null. Do not JSON.stringify.
+The returned value becomes the outer result content, serialized as JSON.
+Child results never enter the model context.";
 
 pub struct CodeModeSessionPlugin {
     runs: Key<CodeModeRuns>,
     tools: Key<ToolRegistry>,
     identity: Key<SessionIdentity>,
-    config: Arc<CodeModeConfig>,
 }
 
 impl CodeModeSessionPlugin {
-    pub fn with_config(names: &Names<'_>, config: Arc<CodeModeConfig>) -> Result<Self, Error> {
+    pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             runs: names.key()?,
             tools: names.key()?,
             identity: names.key()?,
-            config,
         })
     }
 }
@@ -49,7 +60,7 @@ impl DynPlugin for CodeModeSessionPlugin {
             tools.register(
                 ctx,
                 ToolContribution {
-                    definition: codemode_definition(&self.config),
+                    definition: codemode_definition(),
                     handler: Arc::new(CodeModeTool {
                         runs,
                         session_id: identity.session_id.clone(),
@@ -61,7 +72,7 @@ impl DynPlugin for CodeModeSessionPlugin {
     }
 }
 
-fn codemode_definition(config: &CodeModeConfig) -> dim_agent_types::ToolDefinition {
+fn codemode_definition() -> dim_agent_types::ToolDefinition {
     let mut definition = definition(
         CODEMODE_TOOL,
         DESCRIPTION,
@@ -71,20 +82,7 @@ fn codemode_definition(config: &CodeModeConfig) -> dim_agent_types::ToolDefiniti
                 "code": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": config.max_code_bytes,
-                    "description": "An async JavaScript function body. Use await tools.call(name, arguments); return a JSON-serializable value."
-                },
-                "timeoutMs": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": config.max_runtime_ms,
-                    "description": "Optional wall-clock budget, capped by the host maximum."
-                },
-                "maxCalls": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": config.max_calls,
-                    "description": "Optional nested-call budget, capped by the host maximum."
+                    "description": "Raw JavaScript async function body. Return a JSON-serializable value."
                 }
             },
             "required": ["code"],
@@ -100,10 +98,6 @@ fn codemode_definition(config: &CodeModeConfig) -> dim_agent_types::ToolDefiniti
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CodeModeInput {
     code: String,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-    #[serde(default)]
-    max_calls: Option<u64>,
 }
 
 struct CodeModeTool {
@@ -129,16 +123,7 @@ impl ToolHandler for CodeModeTool {
                 .ok_or_else(|| {
                     HostError::failed("Code Mode is not available on the calling branch")
                 })?;
-            runner
-                .run(
-                    call.id,
-                    input.code,
-                    input.timeout_ms,
-                    input.max_calls,
-                    context,
-                    cancel,
-                )
-                .await
+            runner.run(call.id, input.code, context, cancel).await
         })
     }
 }

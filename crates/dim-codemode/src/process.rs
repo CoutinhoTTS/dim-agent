@@ -42,12 +42,8 @@ impl DynPlugin for CodeModeProcessPlugin {
                 Arc::new(CodeModeRuns::new(self.config.max_programs)),
             )?;
 
-            let session_config = self.config.clone();
             registry.register(ctx, PartScope::Session, "CodeModeSession", move |mount| {
-                Ok(Some(Box::new(CodeModeSessionPlugin::with_config(
-                    mount.names,
-                    session_config.clone(),
-                )?)))
+                Ok(Some(Box::new(CodeModeSessionPlugin::new(mount.names)?)))
             })?;
 
             let branch_config = self.config.clone();

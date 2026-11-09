@@ -253,7 +253,8 @@ fn text(result: &ToolResult) -> &str {
 async fn the_program_calls_a_pinned_tool_and_the_outer_result_carries_its_value() {
     let fixture = Fixture::new().await;
     let session = fixture.session().await;
-    let code = r#"const value = await tools.call("echo", {text: "hello"}); return {content: value.content};"#;
+    let code =
+        r#"const value = await tools.call("echo", {text: "hello"}); return {content: value};"#;
     fixture
         .model
         .push(&[("codemode", "c1", json!({ "code": code }))]);
@@ -298,7 +299,7 @@ async fn a_child_ask_user_waits_and_returns_the_answer() {
             PermissionPolicy::default(),
         )
         .await;
-    let code = r#"const answer = await tools.call("ask_user", {questions: [{id: "q", question: "Pick", options: [{label: "A"}, {label: "B"}]}]}); return {content: answer.content};"#;
+    let code = r#"const answer = await tools.call("ask_user", {questions: [{id: "q", question: "Pick", options: [{label: "A"}, {label: "B"}]}]}); return {selected: answer.answers[0].selected[0]};"#;
     fixture
         .model
         .push(&[("codemode", "c1", json!({ "code": code }))]);
@@ -355,8 +356,8 @@ async fn a_child_ask_user_waits_and_returns_the_answer() {
     .unwrap();
     let result = result(&session, "c1").await;
     let value: serde_json::Value = serde_json::from_str(text(&result)).unwrap();
-    assert!(
-        value["content"].as_str().unwrap().contains("-> A"),
+    assert_eq!(
+        value["selected"], "A",
         "the program sees the answer: {value}"
     );
     fixture.shutdown().await;
@@ -372,7 +373,7 @@ async fn a_child_branch_records_the_child_call_as_its_source() {
             PermissionPolicy::default(),
         )
         .await;
-    let code = r#"const line = await tools.call("branch", {action: "create", prompt: "child line"}); return {content: line.content};"#;
+    let code = r#"const line = await tools.call("branch", {action: "create", prompt: "child line"}); return {content: line};"#;
     fixture
         .model
         .push(&[("codemode", "c1", json!({ "code": code }))]);
@@ -481,7 +482,7 @@ async fn a_child_approval_names_the_child_call() {
             },
         )
         .await;
-    let code = r#"const value = await tools.call("run", {}); return {content: value.content};"#;
+    let code = r#"const value = await tools.call("run", {}); return {content: value};"#;
     fixture
         .model
         .push(&[("codemode", "c1", json!({ "code": code }))]);

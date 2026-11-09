@@ -80,8 +80,6 @@ impl CodeModeRunner for CodeModeBranch {
         &self,
         outer_call_id: String,
         code: String,
-        timeout_ms: Option<u64>,
-        max_calls: Option<u64>,
         context: ToolExecutionContext,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>> {
@@ -92,8 +90,6 @@ impl CodeModeRunner for CodeModeBranch {
                 self.config.clone(),
                 outer_call_id,
                 code,
-                timeout_ms,
-                max_calls,
                 context,
                 cancel,
             )

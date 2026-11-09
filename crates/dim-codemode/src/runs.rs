@@ -18,8 +18,6 @@ pub trait CodeModeRunner: Send + Sync + 'static {
         &self,
         outer_call_id: String,
         code: String,
-        timeout_ms: Option<u64>,
-        max_calls: Option<u64>,
         context: ToolExecutionContext,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>>;
