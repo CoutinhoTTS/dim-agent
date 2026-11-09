@@ -472,6 +472,8 @@ struct Env {
     sources: Arc<Sources>,
     model: Arc<Model>,
     dir: PathBuf,
+    /// The store the host and the tests share, so a test can seed a Session.
+    store: Arc<MemoryTimelineStore>,
     /// The `HooksSession` instance the test can unload, when the harness
     /// mounts it through an owner (`Env::with_mounted_hooks`).
     hooks: Arc<Mutex<Vec<FiberView>>>,
@@ -483,25 +485,51 @@ struct Env {
 }
 impl Env {
     async fn new() -> Self {
-        Self::build(Arc::new(Model::default()), None, false, Extra::None).await
+        Self::build(
+            Arc::new(Model::default()),
+            None,
+            false,
+            Extra::None,
+            Duration::from_secs(10),
+        )
+        .await
     }
 
     async fn with(model: Arc<Model>, strategy: Option<Arc<Small>>) -> Self {
-        Self::build(model, strategy, false, Extra::None).await
+        Self::build(model, strategy, false, Extra::None, Duration::from_secs(10)).await
     }
 
     /// The same host, with `HooksSession` mounted as a child of a test owner
     /// so a test can unload it mid-call.
     async fn with_mounted_hooks(model: Arc<Model>, strategy: Option<Arc<Small>>) -> Self {
-        Self::build(model, strategy, true, Extra::None).await
+        Self::build(model, strategy, true, Extra::None, Duration::from_secs(10)).await
     }
 
     /// A Session whose registry declares `extra` and whose configuration
     /// mounts `mounted`.
     async fn with_tools(extra: Extra, mounted: &[&str]) -> Self {
-        let mut env = Self::build(Arc::new(Model::default()), None, false, extra).await;
+        let mut env = Self::build(
+            Arc::new(Model::default()),
+            None,
+            false,
+            extra,
+            Duration::from_secs(10),
+        )
+        .await;
         env.mounted = mounted.iter().map(|name| (*name).to_owned()).collect();
         env
+    }
+
+    /// The same host with a short opening interval, for rebuild-progress tests.
+    async fn with_startup_timeout(startup_timeout: Duration) -> Self {
+        Self::build(
+            Arc::new(Model::default()),
+            None,
+            false,
+            Extra::None,
+            startup_timeout,
+        )
+        .await
     }
 
     async fn build(
@@ -509,6 +537,7 @@ impl Env {
         strategy: Option<Arc<Small>>,
         mounted_hooks: bool,
         extra: Extra,
+        startup_timeout: Duration,
     ) -> Self {
         let context_model: Option<Arc<dyn ResolveContextModel>> = match &strategy {
             Some(strategy) => {
@@ -541,7 +570,9 @@ impl Env {
         *sources.home.lock().unwrap() = Some(dir.join("home"));
         let rules = Arc::new(TestRules::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
-        builder.timeline_store(Arc::new(MemoryTimelineStore::default()));
+        builder.startup_timeout(startup_timeout);
+        let store = Arc::new(MemoryTimelineStore::default());
+        builder.timeline_store(store.clone());
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))
@@ -647,10 +678,24 @@ impl Env {
             sources,
             model,
             dir,
+            store,
             hooks,
             branch_hooks,
             mounted: vec!["read".into(), "exec".into()],
             probe,
+        }
+    }
+
+    /// The configuration a Session of this environment is created with.
+    fn session_config(&self) -> SessionConfig {
+        SessionConfig {
+            cwd: self.dir.join("work").to_string_lossy().into_owned(),
+            tools: Some(self.mounted.clone()),
+            permission_policy: PermissionPolicy {
+                preset: PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            ..Default::default()
         }
     }
 
@@ -686,13 +731,11 @@ impl Env {
     async fn session_with(&self, preset: PermissionPreset) -> Session {
         self.agent
             .create_session(SessionConfig {
-                cwd: self.dir.join("work").to_string_lossy().into_owned(),
-                tools: Some(self.mounted.clone()),
                 permission_policy: PermissionPolicy {
                     preset,
                     ..Default::default()
                 },
-                ..Default::default()
+                ..self.session_config()
             })
             .await
             .unwrap()
@@ -3967,5 +4010,63 @@ async fn a_prompt_submit_hook_precedes_a_referenced_skill() {
         }),
         "a reference in the recorded hook context loads nothing: {user:?}"
     );
+    env.close().await;
+}
+
+/// #1320: the `HooksBranch` rebuild renews the opening's inactivity interval
+/// with every page of stored events it folds. A page that never returns still
+/// fails inside the interval.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hooks_rebuild_renews_the_opening_interval_per_page() {
+    let interval = Duration::from_millis(200);
+    let env = Env::with_startup_timeout(interval).await;
+    let config = env.session_config();
+    env.store.create_session("rebuilt", &config).await.unwrap();
+    let main = Timeline::new(
+        rutis::Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "rebuilt".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        env.store.clone(),
+    );
+    let events = (0..2_100)
+        .map(|index| {
+            EventKind::InputMessage(InputMessageData::text(
+                format!("input {index}"),
+                Some(InputMode::Append),
+            ))
+            .into()
+        })
+        .collect();
+    main.append_batch_registered(events, |_| Ok(())).unwrap();
+    dim_agent_runtime::core::close_timeline(&main)
+        .await
+        .unwrap();
+
+    // The quiet page: it never completes inside the interval, so the opening
+    // fails even though the rebuild is alive.
+    dim_agent_capabilities::hooks::set_rebuild_page_delay(Some((
+        "rebuilt".into(),
+        Duration::from_millis(300),
+    )));
+    let error = match env.agent.restore_session("rebuilt".into()).await {
+        Ok(_) => panic!("a page that never returns must time out"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("timed out"), "{error}");
+
+    // Every page completes inside the interval: the rebuild outlasts several
+    // intervals in total and still opens.
+    dim_agent_capabilities::hooks::set_rebuild_page_delay(Some((
+        "rebuilt".into(),
+        Duration::from_millis(60),
+    )));
+    env.agent
+        .restore_session("rebuilt".into())
+        .await
+        .expect("a completed page renews the interval");
+    dim_agent_capabilities::hooks::set_rebuild_page_delay(None);
     env.close().await;
 }

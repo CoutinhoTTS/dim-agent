@@ -11127,7 +11127,8 @@
         "path runner::HooksSessionPlugin::new",
         "use runner::HooksBranchPlugin",
         "use runner::HooksRuntime",
-        "use runner::HooksSessionPlugin"
+        "use runner::HooksSessionPlugin",
+        "use runner::set_rebuild_page_delay"
       ]
     },
     {
@@ -11306,6 +11307,13 @@
       "references": [
         "path ToolRegistry",
         "use crate::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::hooks::runner",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path dim_agent_runtime::opening_advanced"
       ]
     },
     {
