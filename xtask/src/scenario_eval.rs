@@ -2623,13 +2623,16 @@ async fn product_probe(
         .map_err(|error| format!("the product probe Session's export failed: {error}"))?;
     let export = String::from_utf8_lossy(&export).into_owned();
     requested_tools(&export)
-        .ok_or_else(|| "the product probe Session's Timeline holds no configured tools".to_owned())
 }
 
 /// The tools a Session's model request declares, in request order, with
 /// each tool's source: the request of the last `model/call` event of an
-/// exported Timeline.
-fn requested_tools(export: &str) -> Option<Vec<(String, ToolSource)>> {
+/// exported Timeline. The request's tools are `ToolDefinition` values
+/// (`ModelRequest::tools`), whose `source` — `ToolDefinition::source` — is
+/// a required field, so a declared tool without one cannot come from the
+/// product: the probe fails, naming the tool, rather than dropping it from
+/// the ceiling silently.
+fn requested_tools(export: &str) -> std::result::Result<Vec<(String, ToolSource)>, String> {
     let mut declared = None;
     for line in export.lines() {
         let Ok(line) = serde_json::from_str::<Value>(line) else {
@@ -2645,19 +2648,21 @@ fn requested_tools(export: &str) -> Option<Vec<(String, ToolSource)>> {
         let Some(tools) = event["data"]["request"]["tools"].as_array() else {
             continue;
         };
-        declared = Some(
-            tools
-                .iter()
-                .filter_map(|tool| {
-                    Some((
-                        tool["name"].as_str()?.to_owned(),
-                        serde_json::from_value(tool["source"].clone()).ok()?,
-                    ))
-                })
-                .collect(),
-        );
+        let mut entries = Vec::with_capacity(tools.len());
+        for tool in tools {
+            let name = tool["name"]
+                .as_str()
+                .ok_or_else(|| "a model request tool entry carries no name".to_owned())?
+                .to_owned();
+            let source = serde_json::from_value(tool["source"].clone()).map_err(|_| {
+                format!("the model request declares the tool {name} without a source")
+            })?;
+            entries.push((name, source));
+        }
+        declared = Some(entries);
     }
     declared
+        .ok_or_else(|| "the product probe Session's Timeline holds no configured tools".to_owned())
 }
 
 /// The plugin names the run's default plugin configuration names: the
@@ -7370,6 +7375,28 @@ mod tests {
             (2, Some("main: the turn failed: provider error".to_owned()))
         );
         assert_eq!(turns_in_export(""), (0, None));
+    }
+
+    /// A declared tool without a source cannot come from the product: the
+    /// request holds `ToolDefinition` values, whose `source` is a required
+    /// field. The probe fails naming the tool instead of dropping it from
+    /// the ceiling, where it would leave the `tools-product` comparison
+    /// silently uncompared.
+    #[test]
+    fn requested_tools_names_a_declared_tool_without_a_source() {
+        let line = |tools: &str| {
+            format!(
+                r#"{{"kind":"event","branch_id":"main","event":{{"type":"model","name":"call","data":{{"request":{{"tools":{tools}}}}}}}}}"#
+            )
+        };
+        let export = [
+            line(r#"[{"name":"read","source":"builtin"},{"name":"write","source":"builtin"}]"#),
+            // The last request is the one the probe's ceiling comes from.
+            line(r#"[{"name":"read","source":"builtin"},{"name":"write"}]"#),
+        ]
+        .join("\n");
+        let error = requested_tools(&export).expect_err("the missing source fails the probe");
+        assert!(error.contains("write"), "the error names the tool: {error}");
     }
 
     /// Every request the judge reads can be rebuilt from its rendered form,
