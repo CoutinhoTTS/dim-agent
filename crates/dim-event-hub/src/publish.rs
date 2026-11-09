@@ -7,13 +7,13 @@ use crate::{
     error::{EventHubError, SessionsFailure, TRANSPORT},
     hub::Shared,
     model::{BODY_LIMIT, PREVIEW_BYTES, PublishRequest, Target, validate_publish},
-    state::{InstanceState, MAX_DELIVERIES_IN_FLIGHT},
+    state::{InstanceState, KeyedLock, MAX_DELIVERIES_IN_FLIGHT},
     store::{Document, GuideRecord, LastFailure, Store, Subscription},
     subscribe::{refresh_submission, write_live_guide},
     text::{digest, preview, stamp},
 };
 use chrono::Utc;
-use dim_agent_capabilities::host::SessionFilesHost;
+use dim_agent_capabilities::host::{SessionFilesHost, StoredSessionFile};
 use dim_agent_types::{InputMode, markup::escaped};
 use futures_util::{StreamExt, stream};
 use rutis::Ctx;
@@ -168,7 +168,7 @@ async fn publish_to_completion(
     let submission = submission_id(&request.source, &event_id);
     // Two publishes of one id never interleave: the second finds the first's
     // inputs and writes no file for a branch that holds one (design §2.4).
-    let _event = shared.state.event_lock(&submission).await;
+    let event = shared.state.event_lock(&submission).await;
     let document = shared.store.document();
     let plans = plan_targets(&document.subscriptions, &request, declared_mode);
     let truncated = request.body.len() > BODY_LIMIT;
@@ -179,7 +179,7 @@ async fn publish_to_completion(
         .filter(|plan| !repeated.contains_key(&(plan.session_id.clone(), plan.branch_id.clone())))
         .collect();
     let files = if truncated {
-        overflow_files(&shared, &pending, &lookup_failed, &request.body).await
+        overflow_files(&shared, &pending, &lookup_failed, &request.body, &event).await
     } else {
         HashMap::new()
     };
@@ -396,7 +396,8 @@ async fn overflow_files(
     plans: &[&PlannedTarget],
     lookup_failed: &HashSet<(String, String)>,
     body: &str,
-) -> HashMap<String, Option<dim_agent_capabilities::host::StoredSessionFile>> {
+    event: &KeyedLock,
+) -> HashMap<String, Option<StoredSessionFile>> {
     let mut sessions: Vec<String> = Vec::new();
     for plan in plans {
         if lookup_failed.contains(&(plan.session_id.clone(), plan.branch_id.clone())) {
@@ -420,6 +421,12 @@ async fn overflow_files(
             let body = body.clone();
             let cancel = shared.stop.clone();
             async move {
+                // A retry in the same process reuses the file the first
+                // attempt stored, under the event lock this publish holds
+                // (design §3.2).
+                if let Some(file) = event.files().get(&session_id).cloned() {
+                    return (session_id, Some(file));
+                }
                 let stored = service
                     .0
                     .put(
@@ -430,6 +437,9 @@ async fn overflow_files(
                     )
                     .await
                     .ok();
+                if let Some(file) = &stored {
+                    event.files().insert(session_id.clone(), file.clone());
+                }
                 (session_id, stored)
             }
         })

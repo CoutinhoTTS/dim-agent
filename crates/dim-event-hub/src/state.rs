@@ -5,9 +5,10 @@
 //! and an in-flight change of one generation still serializes with the next
 //! generation's. The state ends with the process.
 use crate::{catalog::Catalog, store::Document};
+use dim_agent_capabilities::host::StoredSessionFile;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
 };
 use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
@@ -104,45 +105,73 @@ pub(crate) struct KeyedLocks {
 
 #[derive(Default)]
 struct KeyedLocksInner {
-    locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    locks: Mutex<HashMap<String, Arc<LockEntry>>>,
+}
+
+/// One key's lock, and the state that lives exactly as long as the entry: an
+/// event's stored files, per Session, so a retry in the same process reuses
+/// them (design §3.2).
+struct LockEntry {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    files: Mutex<HashMap<String, StoredSessionFile>>,
 }
 
 impl KeyedLocks {
     async fn lock(&self, key: &str) -> KeyedLock {
-        let lock = {
+        let entry = {
             let mut locks = self.inner.locks.lock().expect("the lock map");
-            locks.entry(key.to_owned()).or_default().clone()
+            locks
+                .entry(key.to_owned())
+                .or_insert_with(|| {
+                    Arc::new(LockEntry {
+                        lock: Arc::new(tokio::sync::Mutex::new(())),
+                        files: Mutex::new(HashMap::new()),
+                    })
+                })
+                .clone()
         };
-        let guard = lock.clone().lock_owned().await;
+        let guard = entry.lock.clone().lock_owned().await;
         KeyedLock {
             inner: self.inner.clone(),
             key: key.to_owned(),
-            lock: Some(lock),
+            entry: Some(entry),
             guard: Some(guard),
         }
     }
 }
 
-/// One keyed lock held; dropping it drops the map's entry when this was the
-/// last holder.
+/// One keyed lock held; dropping it drops the map's entry, and with it the
+/// entry's files, when this was the last holder.
 pub(crate) struct KeyedLock {
     inner: Arc<KeyedLocksInner>,
     key: String,
-    lock: Option<Arc<tokio::sync::Mutex<()>>>,
+    entry: Option<Arc<LockEntry>>,
     guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl KeyedLock {
+    /// The files stored under this key so far, while its lock is held.
+    pub(crate) fn files(&self) -> MutexGuard<'_, HashMap<String, StoredSessionFile>> {
+        self.entry
+            .as_ref()
+            .expect("a keyed lock holds its entry until it drops")
+            .files
+            .lock()
+            .expect("the entry's files")
+    }
 }
 
 impl Drop for KeyedLock {
     fn drop(&mut self) {
         self.guard.take();
-        let lock = self
-            .lock
+        let entry = self
+            .entry
             .take()
             .expect("a keyed lock holds its entry until it drops");
         let mut locks = self.inner.locks.lock().expect("the lock map");
         // This guard and the map hold the entry; a waiter, which cloned it
         // before awaiting, would hold a third reference.
-        if Arc::strong_count(&lock) == 2 {
+        if Arc::strong_count(&entry) == 2 {
             locks.remove(&self.key);
         }
     }

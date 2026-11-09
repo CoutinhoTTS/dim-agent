@@ -328,6 +328,52 @@ async fn a_delivery_in_flight_updates_the_view_the_next_generation_reads() {
     assert_eq!(receipt["deliveries"], json!([]), "{receipt}");
 }
 
+/// A partial publish's retry reuses the files the first attempt stored: one
+/// file per Session and event, even across a retry (design §3.2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retry_reuses_the_files_of_a_partial_publish() {
+    let files = Arc::new(CountingSessionFiles::default());
+    let fixture = LoaderFixture::mount_with_session_files(Some(files.clone())).await;
+    fixture.producer.declare(im_declaration()).await.unwrap();
+    fixture.subscribe("ok", &["im.*"], None).await.unwrap();
+    fixture.subscribe("slow", &["im.*"], None).await.unwrap();
+    fixture.sessions.fail("slow", "rejected");
+    let mut request = event("huge");
+    request.body = format!("{}\n{}", "x".repeat(6000), "tail");
+
+    // The first publish is held at its inputs, so the retry waits for the
+    // event lock while that attempt is still in flight.
+    let gate = fixture.sessions.gate();
+    let first = {
+        let producer = fixture.producer.clone();
+        let request = request.clone();
+        tokio::spawn(async move { producer.publish(request).await })
+    };
+    wait_for("the first publish's input in flight", || gate.max() >= 1).await;
+    let retry = {
+        let producer = fixture.producer.clone();
+        tokio::spawn(async move { producer.publish(request).await })
+    };
+    gate.release();
+    let first = first.await.unwrap().unwrap();
+    assert_eq!(
+        first["deliveries"][0]["status"],
+        json!("delivered"),
+        "{first}"
+    );
+    assert_eq!(first["deliveries"][1]["status"], json!("failed"), "{first}");
+    assert_eq!(files.puts().len(), 2, "one file per Session");
+
+    let retry = retry.await.unwrap().unwrap();
+    assert_eq!(retry["deliveries"][0]["repeated"], json!(true), "{retry}");
+    assert_eq!(
+        files.puts().len(),
+        2,
+        "the retry writes no second file: {:?}",
+        files.puts()
+    );
+}
+
 /// A redeclared source's new guide is written to a subscribed branch before
 /// its next event, and a later publish writes no guide again (design §3.3,
 /// Appendix D item 15).
