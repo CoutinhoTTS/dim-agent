@@ -3946,7 +3946,13 @@ async fn spawn_child_json(
         // writing under --out after the report is written.
         .kill_on_drop(true);
     // The child leads its own process group, so the abort path takes the
-    // Node runtimes it started with it, not only the direct child.
+    // members left in it with it — the MCP stdio servers, and the git, npm
+    // and pip children, all spawned without a group of their own. Not a
+    // runtime host: rutis starts it with a stdin it does not inherit, and
+    // that spawn puts it in a group of its own (rutis-bridge pipe/spawn.rs).
+    // Not a shell's exec children either: they setsid. What ends a runtime
+    // host is its channel closing; rutis's own tests show a Node host exit
+    // by itself once its host's channel does.
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command
@@ -3976,8 +3982,8 @@ async fn spawn_child_json(
         result = child.wait() => {
             let status = result?;
             // A child that exited successfully left no process behind; one
-            // that failed may have started its Node runtimes and died
-            // first, so its group stays armed and the failure path kills it.
+            // that failed may have started group members and died first, so
+            // its group stays armed and the failure path kills it.
             #[cfg(unix)]
             if status.success() {
                 group.disarm();
@@ -4001,8 +4007,9 @@ async fn spawn_child_json(
     let text = String::from_utf8_lossy(&output);
     if !status.success() {
         // The child died without reaping what it started: its group may
-        // still hold the Node runtimes it launched, so the group goes with
-        // the error. An empty group answers ESRCH and the kill ignores it.
+        // still hold the MCP servers and git, npm and pip children it
+        // started, so the group goes with the error. An empty group answers
+        // ESRCH and the kill ignores it.
         #[cfg(unix)]
         group.kill();
         // A test hook's child names the event that ended it on a line of
@@ -4038,9 +4045,9 @@ async fn spawn_child_json(
 }
 
 /// The serve child's process group: the child leads it (`process_group(0)`),
-/// so signalling the group takes the Node runtimes it started with it.
-/// Armed until the child exits on its own; dropping the guard kills whatever
-/// the group still holds.
+/// so signalling it takes the members left in it. Armed until the child
+/// exits on its own; dropping the guard kills whatever the group still
+/// holds.
 #[cfg(unix)]
 struct ChildGroup {
     pid: u32,
@@ -4064,8 +4071,8 @@ impl ChildGroup {
             self.armed = false;
             if self.pid != 0 {
                 // SAFETY: the child leads the group its own `process_group
-                // (0)` created, so the negated id signals only this run's
-                // tree.
+                // (0)` created, so the negated id signals only the group the
+                // child leads.
                 unsafe { libc::kill(-(self.pid as libc::pid_t), libc::SIGKILL) };
             }
         }
@@ -12649,10 +12656,12 @@ mod tests {
         );
     }
 
-    /// A child that fails after it started a descendant does not leave it
-    /// behind: the group the child leads is killed on the non-zero exit, so
-    /// the descendant is gone when `evaluate` returns. The failing child
-    /// records its descendant's pid beside the marker before it exits.
+    /// A child that fails after it started a member of its group does not
+    /// leave it behind: the group the child leads is killed on the non-zero
+    /// exit, so the member is gone when `evaluate` returns. The failing
+    /// child records its descendant's pid beside the marker before it
+    /// exits; the descendant is a `sleep` that joins the child's group (it
+    /// starts no session of its own).
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_failed_child_kills_the_group_it_leaves() {
