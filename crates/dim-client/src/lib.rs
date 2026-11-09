@@ -1,4 +1,4 @@
-//! Public RPC v3 transport shared by native Dim clients.
+//! Public RPC transport shared by native Dim clients; each connection negotiates its version.
 
 pub mod callback;
 pub mod question;
@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use std::{collections::VecDeque, io, path::PathBuf, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-const PROTOCOL_VERSION: u32 = 4;
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Deserialize)]
@@ -96,6 +95,9 @@ pub struct ConnectionConfig {
     pub profile: Option<DaemonProfile>,
     pub client_kind: &'static str,
     pub client_name: &'static str,
+    /// The protocol this connection negotiates. The ACP gateway stays on 3
+    /// until its projection can group child batches; other clients use 4.
+    pub protocol_version: u32,
 }
 
 pub struct Client {
@@ -326,10 +328,12 @@ impl Client {
         serde_json::from_value(value).map_err(|_| format!("Invalid {method} response").into())
     }
 
-    /// Negotiates RPC v3, checks the host's explicit model profile and returns the server version.
+    /// Negotiates the configured RPC version, checks the host's explicit model
+    /// profile and returns the server version.
     pub async fn hello(&mut self) -> Result<String> {
-        let hello: Hello = tokio::time::timeout(Duration::from_secs(5), self.typed("hello", json!({"protocolVersion":PROTOCOL_VERSION,"clientKind":self.config.client_kind,"clientName":self.config.client_name}))).await??;
-        if hello.protocol_version != PROTOCOL_VERSION
+        let version = self.config.protocol_version;
+        let hello: Hello = tokio::time::timeout(Duration::from_secs(5), self.typed("hello", json!({"protocolVersion":version,"clientKind":self.config.client_kind,"clientName":self.config.client_name}))).await??;
+        if hello.protocol_version != version
             || hello.instance_id.is_empty()
             || hello.server_version.is_empty()
             || !hello

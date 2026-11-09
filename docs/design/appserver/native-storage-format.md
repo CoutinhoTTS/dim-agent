@@ -1053,7 +1053,7 @@ child `step/tool-call`/`step/tool-result`, and the producing child call for an
 asynchronous callback or background result. No SQL object changes: the marker
 only. A v36 store upgrades in place; v37 is the parent-only step. A v37 store
 then upgrades to v38 for protocol 4; an older binary refuses the v38 marker.
-v1 and v2 projections omit the property; v3 clients read it.
+v1, v2 and v3 projections omit the property; v4 clients read it.
 
 ## v36: property text candidates
 

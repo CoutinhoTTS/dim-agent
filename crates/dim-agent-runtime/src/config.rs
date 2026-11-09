@@ -83,6 +83,16 @@ impl SessionConfig {
         self.clone()
     }
 }
+impl SessionConfig {
+    /// Removes tools a connection below protocol 4 cannot project. The
+    /// App Server calls this on every creation, fork and restore path; the
+    /// stored `excluded_tools` keeps an old Session settled across restart.
+    pub fn exclude_codemode_below(&mut self, protocol_version: u32) {
+        if protocol_version < 4 && !self.excluded_tools.iter().any(|name| name == "codemode") {
+            self.excluded_tools.push("codemode".into());
+        }
+    }
+}
 impl Default for SessionConfig {
     fn default() -> Self {
         let model = AgentConfig::default().model;

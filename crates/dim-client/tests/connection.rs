@@ -61,6 +61,7 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
         profile: Some(DaemonProfile::Product),
         client_kind: "other",
         client_name: "AcpGateway",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     assert_eq!(client.connection_config().endpoint, config.endpoint);

@@ -111,13 +111,22 @@ impl Agent {
     }
     /// Restores the original Session identity and its stored configuration.
     pub async fn restore_session(&self, id: String) -> Result<Session> {
-        let config = self
+        self.restore_session_for_version(id, u32::MAX).await
+    }
+    /// Restores a Session and applies the owner connection's projection gate.
+    pub async fn restore_session_for_version(
+        &self,
+        id: String,
+        protocol_version: u32,
+    ) -> Result<Session> {
+        let mut config = self
             .0
             .assembly
             .store
             .session_config(&id)
             .await?
             .ok_or_else(|| AgentError::Storage(format!("unknown session {id}")))?;
+        config.exclude_codemode_below(protocol_version);
         let session = self.create(id, config, SessionStart::Restore, None).await?;
         crate::memory::trim_if_large();
         Ok(session)

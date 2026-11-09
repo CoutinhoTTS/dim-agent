@@ -83,6 +83,7 @@ impl Script {
             profile: None,
             client_kind: "cli",
             client_name: "dimcode",
+            protocol_version: 4,
         };
         Client::connect(&config).await.unwrap()
     }

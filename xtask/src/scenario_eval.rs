@@ -2041,6 +2041,7 @@ async fn drive_once(
         profile: None,
         client_kind: "other",
         client_name: "scenario-eval",
+        protocol_version: 4,
     })
     .await
     .map_err(|error| format!("cannot connect to the served App Server: {error}"))?;

@@ -21536,6 +21536,7 @@
         "path SessionOrigin",
         "path crate::protocol::Catalog",
         "path crate::protocol::CatalogResult",
+        "path crate::protocol::PROTOCOL_VERSION",
         "path crate::protocol::SessionInfo",
         "use crate::protocol::AgentInfo",
         "use crate::protocol::SessionOrigin"

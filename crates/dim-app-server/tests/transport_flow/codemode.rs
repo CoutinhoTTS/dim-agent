@@ -1,5 +1,6 @@
 use super::*;
 use dim_agent_capabilities::host::{ModelChunk, ModelDriver, ModelStopReason, ModelStream};
+use dim_agent_runtime::SessionConfig;
 use std::sync::Arc;
 
 struct CodeModeModel;
@@ -63,6 +64,10 @@ impl ModelDriver for CodeModeModel {
 }
 
 async fn launch_codemode() -> RunningServer {
+    launch_codemode_with_defaults(SessionConfig::default().tools).await
+}
+
+async fn launch_codemode_with_defaults(tools: Option<Vec<String>>) -> RunningServer {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
     defaults::install(&mut builder);
@@ -81,6 +86,10 @@ async fn launch_codemode() -> RunningServer {
                 "dim-server-test-{}/server.sock",
                 uuid::Uuid::new_v4()
             ))),
+            session_defaults: SessionConfig {
+                tools,
+                ..Default::default()
+            },
             ..Default::default()
         },
     )
@@ -150,6 +159,28 @@ async fn a_product_style_app_server_runs_codemode_and_writes_child_facts() {
         })
         .expect("the child echo batch");
     assert_eq!(child["data"]["calls"][0]["name"], "echo");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v3_default_all_tools_session_does_not_mount_codemode() {
+    let server = launch_codemode_with_defaults(None).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc("session.create", json!({"cwd":std::env::temp_dir()}))
+        .await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    assert!(
+        session
+            .config()
+            .excluded_tools
+            .iter()
+            .any(|name| name == "codemode"),
+        "a pre-v4 all-tools Session must exclude codemode"
+    );
     server.shutdown();
     server.join().await.unwrap();
 }

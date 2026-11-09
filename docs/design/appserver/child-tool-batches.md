@@ -168,6 +168,7 @@ protocol 4 must not see the `codemode` tool. This is a tool-exposure rule, not a
 - a v3 or older `session.create` records `codemode` in `SessionConfig.excluded_tools`;
 - `ToolRegistry` removes an excluded name even when `SessionConfig.tools` is absent, so the
   default all-tools path cannot bypass the gate;
+- an explicit v3 request that names `codemode` is silently excluded, not rejected;
 - a v4 connection gets the tool when the plugin is installed and the request asks for it.
 
 A v3 client must not be able to start a Code Mode program whose child `ask_user` it cannot answer

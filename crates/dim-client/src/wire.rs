@@ -1,4 +1,4 @@
-//! Public RPC v3 product-event and progress boundary types.
+//! Public RPC product-event and progress boundary types.
 //!
 //! These are decoded once at the boundary and handed to the projection and
 //! the scrollback printer as plain values. Nothing else parses these shapes.
