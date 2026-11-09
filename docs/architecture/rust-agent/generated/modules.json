@@ -1196,6 +1196,7 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
       "unexpandedMacros": [
+        "assert_eq",
         "format",
         "matches",
         "serde_json::json",
@@ -15484,11 +15485,8 @@
         "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::StopInterrupt",
-        "path EventKind::Text",
-        "path EventKind::ToolCall",
         "path EventKind::ToolResult",
         "path EventKind::ToolUse",
-        "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path InputBlock",
         "path InputBlock::Raw",
@@ -15498,6 +15496,9 @@
         "path InputMode::Append",
         "path InputMode::Queue",
         "path InputMode::Steer",
+        "path TextData",
+        "path ToolUseStartData",
+        "path TurnEndData",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
@@ -15525,6 +15526,8 @@
       "references": [
         "path ToolCall",
         "path ToolDefinition",
+        "path ToolEffect",
+        "path ToolEffect::shortened",
         "path ToolResult",
         "path ToolResult::error",
         "path ToolResult::text",
@@ -19202,6 +19205,7 @@
       "references": [
         "path Result",
         "path crate::AgentError::InvalidInput",
+        "path crate::AgentError::Storage",
         "use crate::Result"
       ]
     },
@@ -29995,7 +29999,8 @@
       "to": "dim_app_server::storage::text",
       "references": [
         "path super::text::candidates",
-        "path super::text::indexed"
+        "path super::text::indexed",
+        "path super::text::trigrams"
       ]
     },
     {
@@ -47616,6 +47621,14 @@
     },
     {
       "from": "dim_session_title",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_session_title",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
@@ -47656,6 +47669,40 @@
     },
     {
       "from": "dim_session_title",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_session_title",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryFilter::And",
+        "path QueryFilter::In",
+        "path QueryOperand::Field",
+        "path QueryOutput::Rows",
+        "path QueryPage",
+        "path QueryPick::First",
+        "path QueryPick::Last",
+        "path QuerySelect::Fields",
+        "path QuerySpec",
+        "path QueryValue::Value",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryFilter",
+        "use dim_agent_runtime::QueryOperand",
+        "use dim_agent_runtime::QueryOutput",
+        "use dim_agent_runtime::QueryPage",
+        "use dim_agent_runtime::QueryPick",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QuerySpec",
+        "use dim_agent_runtime::QueryValue",
+        "use dim_agent_runtime::TimelineQuery"
+      ]
+    },
+    {
+      "from": "dim_session_title",
       "to": "dim_agent_types::content",
       "references": [
         "path ContentBlock::Text",
@@ -47668,12 +47715,8 @@
       "from": "dim_session_title",
       "to": "dim_agent_types::events",
       "references": [
-        "path AgentEvent",
-        "path EventKind::ContextConfigured",
         "path EventKind::InputApplied",
-        "path EventKind::InputMessage",
         "path UserInput",
-        "use dim_agent_types::AgentEvent",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::UserInput"
       ]

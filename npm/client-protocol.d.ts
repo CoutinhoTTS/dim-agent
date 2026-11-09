@@ -44,6 +44,8 @@ export type SessionSummary = SessionTitle & {
 export type CreateResult = { sessionId: string; model: ModelId; sequence: number }
 
 export type HistoryPage = {
+  nextBefore?: number
+  turnStart?: number
   events: SessionEvent[]
   through: number
   nextAfter: number
@@ -126,6 +128,7 @@ export type WithdrawResult = { status: "deleted" } | { status: "notHeld" }
 export type EventContent =
   | { kind: "input"; text?: string; user?: UserInput; skills?: string[]; blocks: RawBlock[] }
   | { kind: "source-input"; text: string; mode?: string; blocks: RawBlock[] }
+  | { kind: "input-consumed"; inputId: string }
   | { kind: "input-applied"; inputId: string }
   | { kind: "input-deleted"; inputId: string }
   | { kind: "permission-changed"; policy: PermissionPolicy }
@@ -141,7 +144,7 @@ export type EventContent =
   | { kind: "text"; requestId: string; delta: string }
   | { kind: "tool-use"; requestId: string; callId: string; name: string; input: Record<string, unknown> }
   | { kind: "tool-call"; requestId: string; asks: AskCall[] }
-  | { kind: "tool-completed"; callId: string; result: ToolResult }
+  | { kind: "tool-completed"; requestId: string; callId: string; result: ToolResult }
   | { kind: "tool-result"; requestId: string; results: Array<{ callId: string; result: ToolResult }> }
   | { kind: "model-end"; requestId: string; error?: string; presentation?: ProviderPresentation; failure?: ModelFailure }
   | { kind: "context-configured"; model: ModelId }

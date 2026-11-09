@@ -30,7 +30,7 @@ nothing. The tools registry and the calling line's BranchLine are found per
 call; the registration is withdrawn when this part unloads, and a reloaded
 TimelineTree reloads it with the services it injects.
 
-`read` renders one page of the target line's events, one item each: input,
+`read` first resolves the raw page’s complete-batch endpoint through `TreeCommands.page_end`, then queries only display fields within that range through `TreeCommands.query`. It does not decode model requests, tool-call inputs or tool-result content. Both the raw-event limit and continuation remain batch based. It renders one item each: input,
 text, tool call, tool result and turn end. A tool result whose call lies on an
 earlier page carries no name: each page is rendered on its own. A tool
 result with declared effects carries them on its item, absent when the

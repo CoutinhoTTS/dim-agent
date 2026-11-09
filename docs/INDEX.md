@@ -39,6 +39,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Architecture decisions](adr/README.md)
 - [ADR 022 — Timeline 属性查询与正文重建](adr/022-event-property-queries.md)（中文）：目标 API 与模块结构、属性查询、业务状态恢复和正文释放
 - [Timeline 属性查询与消费端改造](design/timeline-property-query.md)（中文）：查询契约、SQL 与内容解码、恢复和请求构造的修改方案
+- [Timeline read consumers and page execution](design/timeline-read-followups.md): bounded Web windows, title/activity field reads and cumulative SQL page costs
 - [输入、轮次及活动输出的当前状态读取](design/input-state-read.md)：输入队列、轮次身份和输出字符水位
 - [Goal 属性查询与状态恢复](design/plugins/Goal-property-queries.md)（中文）：统一状态记录下的查询对象、状态来源、剩余遍历和删除重算提案
 - [Rust agent design documents](architecture/README.md#design-documents)

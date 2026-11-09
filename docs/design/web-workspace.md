@@ -151,9 +151,9 @@ The frontend directory is fixed when the daemon starts (§2.4); a daemon started
 | --- | --- |
 | `rpc/client.ts` | JSON-RPC over `/ws`: `hello` v3 (`clientKind: "web"`), request timeout, heartbeat with `daemon.ping`, reconnect with backoff and re-attach. Strict readers at this boundary; the rest of the app uses typed data |
 | `rpc/protocol.ts` | Hand-written types for the v3 methods and notifications the UI uses (`session.*`, `approval.*`, `session.event`, `session.state`, `session.model.progress`) |
-| `projection.ts` | Folds `session.history` pages, `session.event` and `session.model.progress` into timeline rows (user, assistant text, thinking, tool call and result, approval), following `crates/dim-cli/src/projection.rs`; also tracks the waiting `ask_user` calls of each branch (`step/tool-call` until its batch's `step/tool-result`) and folds each branch's goal (`goal.ts`, a port of `crates/dim-cli/src/goal.rs`) |
+| `projection.ts` | Folds `session.history` pages, `session.event` and `session.model.progress` into timeline rows (user, assistant text, thinking, tool call and result, approval), following `crates/dim-cli/src/projection.rs`; also tracks the waiting `ask_user` calls of each branch (`step/tool-call` until its batch's `step/tool-result`) and applies owner reads for pending inputs/questions and current Goal state |
 | Sidebar | Workspaces group Session summaries by `cwd` after excluding rows with the [internal origin](appserver/session-classification.md#31-the-origin); new Session by `session.create {cwd}` with a typed path or a known workspace |
-| Chat | Timeline (markdown, Shiki) with a message rail (one marker per user message from three messages on, as dim-agent's rail: hover shows the message and its first reply, a click scrolls it into view and marks it for a moment; `/timeline` is not offered, dim-agent has none), composer (submit, stop, model menu and permission preset picker, below), approval prompt (`approval.request` → `approval.respond`; "Allow for this session" → `session.grants.add` and "Always allow" for a simple `exec` command → `permission.set_rules`, both before the allow), question prompt for `ask_user` (`step/tool-call` → `session.question.respond`, closed by `step/tool-result`); the approval and question prompts take the composer's place; queued messages of the main line above the composer (`input/message` until `input/applied` or `input/deleted`; Steer and Remove → `session.input.withdraw`, Steer resends the message's content with the withdrawal); composer attachments: pasted or dropped images are sent as image content blocks (`session.submit` with `user.content`), a paste longer than 16 KiB is stored with `attachment.put` when the Session serves it and its path is named in the message, as the TUI does (`crates/dim-cli/src/attachments.rs`); `@` file mentions: the composer offers the files of the Session's workspace from `session.files.search` (WorkspaceTools; the TUI picker's index and ranking), inserts a file as `@path` and sends it as a Markdown link to its absolute path (`[@path](/abs)`, as the TUI sends it); a directory steps into `@dir/` |
+| Chat | Timeline (markdown, Shiki) with a message rail (one marker per user message from three messages on, as dim-agent's rail: hover shows the message and its first reply, a click scrolls it into view and marks it for a moment; `/timeline` is not offered, dim-agent has none), composer (submit, stop, model menu and permission preset picker, below), approval prompt (`approval.request` → `approval.respond`; "Allow for this session" → `session.grants.add` and "Always allow" for a simple `exec` command → `permission.set_rules`, both before the allow), question prompt for `ask_user` (`step/tool-call` → `session.question.respond`, closed by `step/tool-result`); the approval and question prompts take the composer's place; queued messages of the main line above the composer (`input/message` until `input/consumed` or `input/deleted`; Steer and Remove → `session.input.withdraw`, Steer resends the message's content with the withdrawal); composer attachments: pasted or dropped images are sent as image content blocks (`session.submit` with `user.content`), a paste longer than 16 KiB is stored with `attachment.put` when the Session serves it and its path is named in the message, as the TUI does (`crates/dim-cli/src/attachments.rs`); `@` file mentions: the composer offers the files of the Session's workspace from `session.files.search` (WorkspaceTools; the TUI picker's index and ranking), inserts a file as `@path` and sends it as a Markdown link to its absolute path (`[@path](/abs)`, as the TUI sends it); a directory steps into `@dir/` |
 | Session permissions | The composer and `/permissions` select the `main` preset under [ADR 018](../adr/018-permission-is-the-preset.md) and the [Permission policy contract](../architecture/rust-agent/plugins/Permission.md#policy-contract). The client reads `session.permission.get` and `permission/changed`, displays the preset and tool lists, and preserves both lists in a versioned `session.permission.update`. Conflicts refresh without retrying. Choosing Full access requires confirmation. Process isolation links to its Settings control. |
 | Lines | Right detail panel with a Lines tree and one tab per opened line; each tab folds that line's own history and sends, stops, approves and ends on its `branchId` (§4.1) |
 | i18n | `en` and `zh-CN` |
@@ -177,11 +177,13 @@ Sidebar                   Conversation
                             Approval review
 ```
 
-Features outside the settings scope with no v3 backend are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, rename, goal, workflows, subagent panes, directory picker and git branch menu. Settings and saved-session management follow §4.3.
+Features outside the settings scope with no v3 backend are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, rename, workflows, subagent panes, directory picker and git branch menu. Settings and saved-session management follow §4.3.
 
 ### 4.1 Lines and branch
 
-A line is a Timeline of the same Session ([Timeline branches](timeline-branches.md) §1). The Web workspace keeps the main transcript in the center and follows lines in a right-side detail panel, modeled on the Kimi Code Web `/btw` panel (tabs, a scroll region with a composer, an empty state, and a full-screen panel on narrow shells). Unlike Kimi's read-only side chat, a Dim line continues to run tools and accepts operator input; the panel therefore includes `session.submit`, `session.stop`, approvals and `session.branch_end` for the line.
+A line is a Timeline of the same Session ([Timeline branches](timeline-branches.md) §1). The Web workspace follows [Clients’ bounded-window contract](clients.md#opening-a-conversation-with-a-bounded-window). Main and selected lines load at most four initial wire pages; only an explicit “Load earlier” action reads older content. Reconnect replaces opened transcripts with fresh windows. Raw pages are released after projection.
+
+The Web workspace keeps the main transcript in the center and follows lines in a right-side detail panel, modeled on the Kimi Code Web `/btw` panel (tabs, a scroll region with a composer, an empty state, and a full-screen panel on narrow shells). Unlike Kimi's read-only side chat, a Dim line continues to run tools and accepts operator input; the panel therefore includes `session.submit`, `session.stop`, approvals and `session.branch_end` for the line.
 
 ```
 ┌──────────────┬────────────────────────────────┬─────────────────────────────────┐
@@ -195,15 +197,32 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 
 | Item | Contract |
 | --- | --- |
-| Input | v3 `branch/create`, `branch/create-failed`, `branch/end`, `branch/ended` facts; `session.state` for every branch; each branch's own `session.history` pages |
-| Derived data | `web/src/lines.ts` owns the tree, line state and `after message N` count; `projection.ts` owns each line's transcript; `stores/chat.ts` owns one history cursor and live queue per branch |
+| Input | `session.branches` supplies the directory. Lifecycle facts and `session.state` update it. `session.branch.get` supplies the selected line’s purpose, end details and inherited message count. Only opened lines read their own transcript windows. |
+| Derived data | `lines.ts` keeps directory metadata, not historical input identities. Unknown message counts remain absent. `projection.ts` owns visible rows and live controls. `stores/chat.ts` keeps each opened window’s fixed head, backward cursor and in-flight live queue. |
 | Actions | `session.branch_create {parentBranchId, at, prompt}`, `session.branch_end {branchId}`, `session.submit`/`session.stop` with the line's `branchId`; approvals use the request's `branchId` |
 | Points | A user message's cut is its sequence minus one; a line's end is its newest `turn-end`. `session.branch_create` remains the validator; its refusal is shown in the dialog or line tab |
 | Switching | Opening a line adds or activates a tab; closing a tab does not end the line; main stays the center transcript |
 | Errors | `branch_missing`, `branch_ended`, `input_blocked`, an invalid cut and a disabled Branch tool are shown at the action that raised them; an ended line is read-only |
-| State | Line tabs are per Session and live in `stores/ui.ts`; the tree is rebuilt from facts on reload and reconnect. No line list method or storage format is added |
+| State | Line tabs are per Session and live in `stores/ui.ts`; the tree is read from the existing directory on reload and reconnect. No storage format is added |
 
 **Not in this phase:** session fork, a drawn DAG, compare/adopt and per-line model selection. Each needs its own client design.
+
+#### State outside the window
+
+Before enabling the conversation, read pending inputs with `session.input.pending`, pending questions
+with `session.question.pending` and current execution/output offsets with `session.turn.get` at the
+window's cutoff. Lists use their own keyset continuation and retain that cutoff. Read current Goal
+state through `session.goal.get`; refresh it after Goal commands or relevant live input/deletion facts.
+The browser no longer parses Goal blocks or keeps historical Goal inputs. The attach reply supplies
+the current model; a historical configuration in the window cannot overwrite it.
+
+Questions on unopened branches are restored at their directory heads without reading transcripts.
+Live question terminals update those control states. Directory discovery and background branch notices
+do not open transcripts. Results whose call is outside the window use `session.tool.get` with request
+and call ids; no history search is performed. Live events wait in order while that call is resolved.
+A failed owner read reports failure and leaves the affected conversation unavailable for retry.
+The window capability and pending-input/question/turn methods are required; unsupported servers fail
+explicitly without falling back to full history.
 
 #### Questions
 
@@ -257,7 +276,7 @@ commands are handled locally rather than submitted as model input.
 | `session` | `/compact` | Compact the main line's context (`session.context.compact`); listed when the Session's method table (`session.methods`) lists it. Reports the result as a notice |
 | `session` | `/usage` | Show the main line's context window usage (`session.context.usage`); listed under the same condition as `/compact` |
 | `session` | `/fork` | Fork the Session at its last finished turn (`session.fork {at}`) after a confirmation, then open the new Session; listed when the connection serves `session.fork` and main has a finished turn |
-| `session` | `/goal [words]` | Show the main line's goal, folded from its own events (as the TUI folds it), or write it: `/goal OBJECTIVE`, `set`, `edit`, `pause`, `resume` and `clear` call `session.goal.<call>` with `branchId: main`; listed when the Session's method table lists `session.goal.set`. The menu fills `/goal ` for its words |
+| `session` | `/goal [words]` | Show the main line's current goal through `session.goal.get`, or write it: `/goal OBJECTIVE`, `set`, `edit`, `pause`, `resume` and `clear` call `session.goal.<call>` with `branchId: main`; listed when the Session's method table lists `session.goal.set`. The menu fills `/goal ` for its words |
 | `model` | `/effort [value]` | List the main line model's reasoning effort choices (from `provider.catalog`, when the model advertises reasoning preferences), or set one with `session.model.update {modelPreferences: {reasoningEffort}}`, as `/effort` does in the TUI (`configure.rs`). Listed only when the model has choices. `/fast` is not offered: no model advertises service tiers yet |
 | `model` | `/permissions` | Open the composer's permission selector (below). Listed where the Session serves `session.permission.get` and `session.permission.update` |
 | `session` | `/lines` | Open the existing Session lines panel |

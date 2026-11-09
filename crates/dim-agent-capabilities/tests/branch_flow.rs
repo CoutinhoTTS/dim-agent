@@ -4390,7 +4390,7 @@ impl ToolDriver for EffectTools {
                     signal: None,
                 });
             }
-            let mut result = ToolResult::text("touched");
+            let mut result = ToolResult::text("large result content".repeat(32768));
             result.effects = (!effects.is_empty()).then_some(effects);
             Ok(result)
         })
@@ -4404,9 +4404,12 @@ impl ToolDriver for EffectTools {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_read_carries_the_effects_its_tool_results_declared() {
     let probe = Arc::new(Probe::default());
-    let agent = MinimalHost::start(&builder_with_tools(&probe, Arc::new(EffectTools)))
-        .await
-        .unwrap();
+    let store = Arc::new(TestStore::refusing_ranges(Arc::new(
+        MemoryTimelineStore::default(),
+    )));
+    let mut builder = builder_with_tools(&probe, Arc::new(EffectTools));
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig {
         tools: Some(vec![
             "echo".into(),
@@ -4436,6 +4439,11 @@ async fn a_parent_read_carries_the_effects_its_tool_results_declared() {
         soon(session.idle("main")).await.unwrap();
     }
     let page = page_of(&tool_call(&session, &child, r#"{"action":"read","branch":"main"}"#).await);
+    assert_eq!(
+        store.range_reads(),
+        0,
+        "branch reads must not decode whole stored events"
+    );
     let items = page["items"].as_array().expect("page items");
     let results: Vec<&serde_json::Value> = items
         .iter()
