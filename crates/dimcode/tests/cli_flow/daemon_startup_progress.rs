@@ -442,3 +442,36 @@ fn the_upgrade_line_stays_off_json_stdout() {
     assert!(!stdout.contains("Upgrading the local store"), "{stdout}");
     assert_eq!(stderr.matches(UPGRADING).count(), 1, "{stderr}");
 }
+
+/// #1335: a spawned daemon that finds the store owned by another process
+/// leaves a startup note that says so, and the client prints that sentence
+/// instead of the bare exit status.
+#[test]
+fn a_child_finding_the_store_owned_reports_the_owner() {
+    let home = Home::new();
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.0.join("rust/dimcode.sqlite.lock"))
+        .unwrap();
+    // Another daemon owns the store and writes no progress note: a fresh
+    // store, or one already at this format, upgrades nothing.
+    lease.lock().unwrap();
+    let output = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "15000")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    lease.unlock().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("Another dimcode-server is using the store"),
+        "the client names the owner: {stderr}"
+    );
+    assert!(stderr.contains("Details:"), "{stderr}");
+    assert!(!stderr.contains("App Server exited (exit status"), "{stderr}");
+}
