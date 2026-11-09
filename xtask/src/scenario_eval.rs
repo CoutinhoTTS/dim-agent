@@ -318,6 +318,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
+/// How long a failed run waits for its cancelled siblings to settle before
+/// their futures are dropped (and their children's groups killed with them).
+const SETTLE_BOUND: Duration = Duration::from_secs(30);
 
 const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; every other field of the request appears in full only when it changed, and otherwise reads {\"unchanged\": true}. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
 
@@ -694,8 +697,21 @@ async fn evaluate(options: &Options) -> Result<String> {
         });
     let mut in_flight = futures_util::stream::iter(planned).buffer_unordered(options.jobs);
     while let Some(finished) = in_flight.next().await {
-        let (index, record, measured) = finished?;
-        pending[index] = Some((record, measured));
+        match finished {
+            Ok((index, record, measured)) => pending[index] = Some((record, measured)),
+            Err(error) => {
+                // A failed run cancels its in-flight siblings before the
+                // harness returns: their children drive the model and write
+                // under --out, so they must settle first. The bound keeps a
+                // stuck sibling from holding the harness; a sibling still
+                // unsettled when it expires is dropped, and its child's
+                // process group killed with it.
+                cancel.cancel();
+                let settle = async { while in_flight.next().await.is_some() {} };
+                let _ = tokio::time::timeout(SETTLE_BOUND, settle).await;
+                return Err(error);
+            }
+        }
     }
     drop(in_flight);
     let mut instrument = instrument;
@@ -1239,6 +1255,10 @@ struct Options {
     /// a part the run's plugin defaults do not name, to exercise the
     /// tools-product check.
     extra_tool: bool,
+    /// A test hook that makes one arm's run child exit non-zero after a
+    /// short wait, to exercise a failed run cancelling a still-working
+    /// sibling: the arm's name.
+    fail_child: Option<String>,
     /// The default plugin configuration file both arms load; `None` serves
     /// the assembly without the product's plugins.
     defaults: Option<PathBuf>,
@@ -1402,6 +1422,7 @@ impl Options {
             fail_preflight: false,
             offer_plugin: false,
             extra_tool: false,
+            fail_child: None,
             rejudge,
             select,
             pool,
@@ -2151,6 +2172,10 @@ struct ChildParams {
     /// tools-product check.
     #[serde(default)]
     extra_tool: bool,
+    /// A test hook that makes this child exit non-zero after a short wait,
+    /// so a failed run cancels a sibling still working.
+    #[serde(default)]
+    fail_child: bool,
     /// The native probe's declared set: the assembly served without the
     /// plugin defaults. Each run's `tools-product` check reads its own
     /// declared set against it.
@@ -2257,6 +2282,13 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
     augment_model_config(&params.model_config, &preflight_url, &config_path)?;
     let mut params = params;
     params.model_config = config_path;
+    // A test hook: this child lets its scheduled sibling start and reach
+    // its model call, then exits non-zero, so the sibling is still working
+    // when the harness sees the failure and cancels it.
+    if params.fail_child {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        return Err("the failing-child test hook".into());
+    }
     if params.probe_only {
         // The differential native probe: the assembly served without the
         // plugin defaults, its probe Session's declared set printed for the
@@ -3439,6 +3471,7 @@ async fn isolate_run(
         fail_preflight: options.fail_preflight,
         offer_plugin: options.offer_plugin,
         extra_tool: options.extra_tool,
+        fail_child: options.fail_child.as_deref() == Some(arm),
         native_tools: native.to_vec(),
         probe_only: false,
     };
@@ -3533,6 +3566,7 @@ async fn native_probe(
         fail_preflight: false,
         offer_plugin: false,
         extra_tool: options.extra_tool,
+        fail_child: false,
         native_tools: Vec::new(),
         probe_only: true,
     };
@@ -3795,6 +3829,11 @@ async fn spawn_child(
     Ok(serde_json::from_value(outcome)?)
 }
 
+/// The serve children this test binary started, by their params path: a
+/// test finds the child another run's failure must have taken down.
+#[cfg(test)]
+static SPAWNED: Mutex<Vec<(PathBuf, u32)>> = Mutex::new(Vec::new());
+
 /// Spawns a child and reads the JSON object of the output line that names
 /// `marker`: a run's child prints its outcome under `judgeOutcome`, the
 /// native probe's child its declared tool set under `nativeTools`.
@@ -3807,15 +3846,32 @@ async fn spawn_child_json(
 ) -> Result<Value> {
     let (executable, args, test_binary) = child_command(params_path);
     let env = child_environment(options, params, params_path, test_binary)?;
-    let mut child = tokio::process::Command::new(&executable)
+    let mut command = tokio::process::Command::new(&executable);
+    command
         .args(&args)
         .env_clear()
         .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
+        // The child is the run's only owner: dropped or cancelled, it must
+        // not outlive the harness, or it keeps calling the model and
+        // writing under --out after the report is written.
+        .kill_on_drop(true);
+    // The child leads its own process group, so the abort path takes the
+    // Node runtimes it started with it, not only the direct child.
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("cannot start the run's serve child: {error}"))?;
+    #[cfg(test)]
+    SPAWNED
+        .lock()
+        .unwrap()
+        .push((params_path.to_owned(), child.id().unwrap_or_default()));
+    #[cfg(unix)]
+    let mut group = ChildGroup::new(child.id().unwrap_or_default());
     // Drain the pipe while the child runs: the child may print more than a
     // pipe holds (the run's logged output rides the same stream), and a full
     // pipe would block the child's last print forever, so waiting and then
@@ -3830,8 +3886,16 @@ async fn spawn_child_json(
         })
     });
     let status = tokio::select! {
-        result = child.wait() => result?,
+        result = child.wait() => {
+            // The child exited on its own: its group is not the harness's
+            // to signal.
+            #[cfg(unix)]
+            group.disarm();
+            result?
+        }
         _ = cancel.cancelled() => {
+            #[cfg(unix)]
+            group.kill();
             let _ = child.kill().await;
             let _ = child.wait().await;
             return Err("the evaluation was cancelled".into());
@@ -3863,6 +3927,48 @@ async fn spawn_child_json(
         .find('{')
         .ok_or("the child's outcome line carries no JSON")?..];
     Ok(serde_json::from_str(json)?)
+}
+
+/// The serve child's process group: the child leads it (`process_group(0)`),
+/// so signalling the group takes the Node runtimes it started with it.
+/// Armed until the child exits on its own; dropping the guard kills whatever
+/// the group still holds.
+#[cfg(unix)]
+struct ChildGroup {
+    pid: u32,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl ChildGroup {
+    fn new(pid: u32) -> Self {
+        Self { pid, armed: true }
+    }
+
+    /// The child exited on its own: its group is not the harness's to kill.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Kills every process in the group, once.
+    fn kill(&mut self) {
+        if self.armed {
+            self.armed = false;
+            if self.pid != 0 {
+                // SAFETY: the child leads the group its own `process_group
+                // (0)` created, so the negated id signals only this run's
+                // tree.
+                unsafe { libc::kill(-(self.pid as libc::pid_t), libc::SIGKILL) };
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ChildGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
 }
 
 /// The record of a finished run: the child's outcome with the configs the
@@ -9188,6 +9294,7 @@ mod tests {
                 fail_preflight: false,
                 offer_plugin: false,
                 extra_tool: false,
+                fail_child: None,
                 defaults: None,
                 node: None,
                 js_runtime: None,
@@ -11941,6 +12048,7 @@ mod tests {
             fail_preflight: false,
             offer_plugin: false,
             extra_tool: false,
+            fail_child: None,
             defaults: None,
             node: None,
             js_runtime: None,
@@ -12241,6 +12349,80 @@ mod tests {
             product.detail.contains("fixture_prompt (extension)"),
             "the defaults' contribution is accepted: {product:?}"
         );
+    }
+
+    /// A failed run cancels its in-flight siblings before `evaluate`
+    /// returns: the cancelled run's serve child, and the process group it
+    /// leads, is gone. The child drives the model and writes under `--out`,
+    /// so it must not outlive the harness.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_run_settles_its_in_flight_sibling() {
+        /// Holds the candidate arm's model calls until the failure cancels
+        /// it; the current arm's child never reaches a model call.
+        fn hold_the_candidate(text: &str) -> Option<Duration> {
+            text.contains("/candidate/")
+                .then(|| Duration::from_secs(60))
+        }
+        let fixture = Fixture::holding(
+            "failed-sibling",
+            reads_the_workspace_file,
+            hold_the_candidate,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            24_000,
+        )
+        .await;
+        let directory = fixture.directory.join("out");
+        let mut options = fixture.options(directory.clone());
+        options.jobs = 2;
+        options.fail_child = Some("current".into());
+        let settled = fixture.evaluate(&options).await;
+        assert!(settled.is_err(), "the failing run fails the evaluation");
+        // The sibling was working when the failure landed: its model call
+        // reached the fixture provider and is held there.
+        let working = fixture
+            .provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| request.contains("/candidate/"));
+        assert!(working, "the sibling reached its model call");
+        // Its child, and the group it leads, is gone.
+        let params = directory.join("children/candidate/case/run-0.json");
+        let pid = SPAWNED
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(path, _)| path == &params)
+            .map(|(_, pid)| *pid)
+            .expect("the sibling's serve child was spawned");
+        assert!(
+            child_tree_gone(pid).await,
+            "the sibling's process and its group are gone (pid {pid})"
+        );
+    }
+
+    /// Whether a serve child and the process group it leads have no member
+    /// left, probed for up to five seconds: the harness kills the group, and
+    /// the kill and the reaping of its leader settle a moment later.
+    #[cfg(unix)]
+    async fn child_tree_gone(pid: u32) -> bool {
+        for _ in 0..250 {
+            // SAFETY: signal 0 only probes the process and its group.
+            let process = unsafe { libc::kill(pid as libc::pid_t, 0) };
+            let process_gone = process == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            let group = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+            let group_gone =
+                group == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if process_gone && group_gone {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        false
     }
 
     /// A model-created collaboration member cannot mount the `plugin`

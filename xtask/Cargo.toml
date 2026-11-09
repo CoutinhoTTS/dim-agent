@@ -31,4 +31,10 @@ serde_json.workspace = true
 futures-util.workspace = true
 syn = { version = "2", features = ["full", "visit"] }
 axum = { workspace = true, features = ["json"] }
+# The run child's process group: a cancelled run kills the group, so the
+# Node plugin runtimes it started go with it. std starts the group
+# (`process_group(0)`); signalling it needs the syscall, and no workspace
+# crate re-exports a group kill.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.189"
 [dev-dependencies]
