@@ -1177,6 +1177,26 @@ impl SessionStore {
             })
             .await
     }
+    /// The Agent that owns a stored Session, read from `session_owners`,
+    /// which its delete removes with the Session's other rows. Agents reads
+    /// it before a delete, for the notice of a Session this process never
+    /// loaded (EventHub §9.1).
+    pub async fn owner(&self, id: &str) -> Result<Option<String>> {
+        let id = id.to_owned();
+        self.timeline
+            .db
+            .run_read(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT agent_id FROM session_owners WHERE session_id=?1",
+                        [&id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(error)
+            })
+            .await
+    }
     pub async fn has_records(&self, id: &str) -> Result<bool> {
         let id = id.to_owned();
         self.timeline

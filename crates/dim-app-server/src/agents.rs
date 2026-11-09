@@ -108,6 +108,22 @@ impl Event for UnloadedSessionDeleted {
     const NAME: &'static str = "agent/unloaded-session-deleted";
     type Value = ();
 }
+/// The end of a Session whose stored rows a successful delete removed,
+/// whether it was loaded or not. Emitted on the process root after
+/// SessionStore removed the rows, so a listener can tell a delete from a
+/// close that keeps the rows
+/// ([EventHub §9.1](../../../docs/design/plugins/EventHub.md),
+/// [sessions service](../../../docs/design/appserver/sessions-service.md)).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeleted {
+    pub agent_id: String,
+    pub session_id: String,
+}
+impl Event for SessionDeleted {
+    const NAME: &'static str = "agent/session-deleted";
+    type Value = ();
+}
 
 /// Agent-scoped operations fail before any Session is involved.
 #[derive(Debug, thiserror::Error)]
@@ -175,6 +191,23 @@ pub(crate) enum DeleteOutcome {
     Removed(bool),
     /// Nothing was removed; this says what uses the Session.
     InUse(String),
+}
+
+/// What a delete leaves for its caller to announce once the admission gate
+/// is released
+/// ([EventHub §9.1](../../../docs/design/plugins/EventHub.md#91-agents-announces-every-delete-that-removed-the-stored-rows)): a
+/// listener may take the EventHub Session lock, which a `subscribe` holds
+/// across `sessions.input`, and `sessions.input` waits for that gate in
+/// [`AgentIndex::acquire`].
+struct Removed {
+    deleted: bool,
+    notices: Vec<DeletedNotice>,
+}
+
+/// One notice a delete emits after its gate is released.
+enum DeletedNotice {
+    Unloaded(UnloadedSessionDeleted),
+    Session(SessionDeleted),
 }
 
 struct Entry {
@@ -1371,10 +1404,12 @@ impl AgentIndex {
         Self::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
-        let deleted = self.remove_locked(id, &slot).await?;
+        let removed = self.remove_locked(id, &slot).await?;
+        let deleted = removed.deleted;
         drop(gate);
         drop(slot);
         self.directory.inner.lock().expect("agent index").sweep();
+        self.announce(removed).await;
         Ok(deleted)
     }
 
@@ -1391,13 +1426,21 @@ impl AgentIndex {
         Self::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
-        let outcome = match self.in_use_reason(id).await? {
-            Some(reason) => DeleteOutcome::InUse(reason),
-            None => DeleteOutcome::Removed(self.remove_locked(id, &slot).await?),
+        // One match yields both the outcome and what there is to announce, so
+        // neither an `unreachable!()` arm nor a second decision is needed.
+        let (outcome, removed) = match self.in_use_reason(id).await? {
+            Some(reason) => (DeleteOutcome::InUse(reason), None),
+            None => {
+                let removed = self.remove_locked(id, &slot).await?;
+                (DeleteOutcome::Removed(removed.deleted), Some(removed))
+            }
         };
         drop(gate);
         drop(slot);
         self.directory.inner.lock().expect("agent index").sweep();
+        if let Some(removed) = removed {
+            self.announce(removed).await;
+        }
         Ok(outcome)
     }
 
@@ -1414,12 +1457,13 @@ impl AgentIndex {
 
     /// Removes `id` with its admission gate held: its led members, its owned
     /// Agents, its close, what the store holds of it, and its slot. The
-    /// caller drops the gate and the slot and sweeps after this returns.
+    /// caller drops the gate and the slot and sweeps after this returns,
+    /// then emits [`Removed::notices`] with [`Self::announce`].
     async fn remove_locked(
         &self,
         id: &str,
         slot: &Arc<SessionSlot>,
-    ) -> dim_agent_runtime::Result<bool> {
+    ) -> dim_agent_runtime::Result<Removed> {
         if let Some(records) = &self.records {
             for member in records.led_members(id).await? {
                 Box::pin(self.delete(&member)).await?;
@@ -1439,6 +1483,13 @@ impl AgentIndex {
             }
         }
         let unloaded = loaded.is_none() && !slot.closed.load(Ordering::Acquire);
+        // The delete notice names the Session's owner even when this process
+        // never loaded it: `session_owners` still holds the row, and the
+        // delete removes it, so it is read here (EventHub §9.1).
+        let recorded_owner = match &self.session_store {
+            Some(store) => store.owner(id).await?,
+            None => None,
+        };
         let stored = match &self.session_store {
             Some(store) => store.delete_session(id).await?,
             None => false,
@@ -1458,20 +1509,65 @@ impl AgentIndex {
             let agent_id = agent_id.clone();
             self.release_owned(&agent_id).await;
         }
-        if let Some((agent_id, _)) = owner.filter(|_| unloaded && stored) {
-            let (_, root) = self
-                .loader
-                .get()
-                .expect("AgentsPlugin apply sets the loader");
-            let announcement = Arc::new(UnloadedSessionDeleted {
+        let mut notices = Vec::new();
+        if let Some((agent_id, _)) = owner.clone().filter(|_| unloaded && stored) {
+            notices.push(DeletedNotice::Unloaded(UnloadedSessionDeleted {
                 agent_id,
                 session_id: id.to_owned(),
-            });
-            if let Err(error) = root.parallel(announcement).await {
-                tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
+            }));
+        }
+        // Every delete that removed the Session's stored rows announces
+        // itself, loaded or not: a listener that holds state for the Session
+        // removes it, and a close, which keeps the rows, does not
+        // ([EventHub §9.1]). The notice carries the
+        // owner the index held, else the store's, and an empty `agentId` when
+        // neither recorded one.
+        if deleted {
+            let agent_id = owner
+                .map(|(agent_id, _)| agent_id)
+                .or(recorded_owner)
+                .unwrap_or_default();
+            notices.push(DeletedNotice::Session(SessionDeleted {
+                agent_id,
+                session_id: id.to_owned(),
+            }));
+        }
+        Ok(Removed { deleted, notices })
+    }
+
+    /// Emits a delete's notices. The caller has released the Session's
+    /// admission gate: a listener takes the EventHub Session lock
+    /// (`crates/dim-event-hub/src/hub.rs`), and a `subscribe` holds that
+    /// lock across `sessions.input`, which waits for this gate in
+    /// [`AgentIndex::acquire`]. Emitting under the gate would deadlock the
+    /// two.
+    ///
+    /// A led member's delete goes through [`Self::delete`] and announces
+    /// after the member's own gate is released; the parent's gate is still
+    /// held then. A listener can wait on the parent's gate only through a
+    /// `subscribe` to the parent, which takes the parent's Session lock
+    /// there; the member's notice reaches a listener that takes the
+    /// member's lock alone, so that path does not deadlock.
+    async fn announce(&self, removed: Removed) {
+        let (_, root) = self
+            .loader
+            .get()
+            .expect("AgentsPlugin apply sets the loader");
+        for notice in removed.notices {
+            let (name, error) = match notice {
+                DeletedNotice::Unloaded(notice) => (
+                    "an unloaded Session",
+                    root.parallel(Arc::new(notice)).await.err(),
+                ),
+                DeletedNotice::Session(notice) => (
+                    "a Session delete",
+                    root.parallel(Arc::new(notice)).await.err(),
+                ),
+            };
+            if let Some(error) = error {
+                tracing::warn!(%error, "Deletion was not announced: {name}");
             }
         }
-        Ok(deleted)
     }
     /// Why `id` is in use, for a delete that requires an inactive Session:
     /// its uses, its hold or a line of it, or a Session it leads, recursively.

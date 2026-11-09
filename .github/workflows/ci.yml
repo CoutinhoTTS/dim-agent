@@ -187,6 +187,7 @@ jobs:
           node scripts/run-rust-test.mjs target/test-artifacts.jsonl transport_flow node_ --ignored
           node scripts/run-rust-test.mjs target/test-artifacts.jsonl mcp_http_flow node_ --ignored
           node scripts/run-rust-test.mjs target/test-artifacts.jsonl migration_flow node_ --ignored
+          node scripts/run-rust-test.mjs target/test-artifacts.jsonl hub_flow node_ --ignored
           if [[ '${{ needs.changes.outputs.eval }}' == true ]]; then
             node scripts/run-rust-test.mjs target/test-artifacts.jsonl xtask node_ --ignored
           fi
