@@ -141,6 +141,11 @@ pub async fn serve_home(
         } else {
             home.clone()
         }),
+        // A served profile (a model configuration) never offers a model the
+        // `plugin` management tool: the registered tools are the ceiling a
+        // run's Sessions can declare, members included. The product path
+        // keeps the tool.
+        plugin_tools: product,
         ..Default::default()
     };
     config.session_defaults.cwd = cwd.to_string_lossy().into_owned();

@@ -384,11 +384,17 @@ const PLUGIN_TOOL: &str = "plugin";
 /// without one it declares every host tool and every tool a part registers
 /// (config.rs `SessionConfig::tools`, #364). The list stays explicit on
 /// purpose: a future tool must not reach a live run unreviewed, as
-/// `plugin` shows. The `tools-product` preflight check compares the
-/// product's own declared set with this list at run time, so an addition
-/// or removal surfaces as a failed check, not a silent drift in what an
-/// evaluation offers the model under test; the fixture pin asserts the
-/// mounted order of the set.
+/// `plugin` shows. A served process registers no `plugin` tool at all
+/// (`ServerConfig::plugin_tools` is false there), so the tools it registers
+/// — this list's host tools and the run's named plugin defaults'
+/// contributions — are the whole set any Session of the process can
+/// declare: a Session's tool list selects among registered contributions,
+/// whatever created the Session (an `agent` member with an inline or a
+/// stored profile, a scheduled launch, a branch). The `tools-product`
+/// preflight check compares the probe Session's declared set with this
+/// list at run time, so an addition or removal surfaces as a failed check,
+/// not a silent drift in what an evaluation offers the model under test;
+/// the fixture pin asserts the mounted order of the set.
 const RUN_TOOLS: &[&str] = &[
     "read",
     "write",
@@ -11764,12 +11770,11 @@ mod tests {
         }
     }
 
-    /// The `plugin` tool is not offered: the preflight Session's model
-    /// request carries the run's tool set without it (the tools check),
-    /// and an ablation that leaves the mount list unset — the Session
-    /// would offer the tool — fails the check. With the check enforced,
-    /// the same ablation aborts the run as a harness failure before the
-    /// model's first turn.
+    /// The served process registers no `plugin` tool (`ServerConfig::
+    /// plugin_tools` is false there), so the preflight Session's model
+    /// request carries the run's tool set without it: with the run's mount
+    /// list, and — left unset, the ablation that once offered the tool —
+    /// with every registered tool. Both pass the tools check.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_isolated_run_offers_no_plugin_tool() {
         let fixture = Fixture::start(
@@ -11782,8 +11787,7 @@ mod tests {
         let options = fixture.options(fixture.directory.join("out"));
         let report = fixture.evaluate(&options).await.unwrap();
         assert!(report.contains("candidate is inconclusive"), "{report}");
-        let records = fixture.records(&options.out);
-        for record in &records {
+        for record in fixture.records(&options.out) {
             assert_eq!(record["stop"], "idle", "{record}");
             let checks = recorded_checks(&options.out, "current");
             let tools = check(&checks, "tools");
@@ -11793,38 +11797,20 @@ mod tests {
                 "{tools:?}"
             );
         }
-        // Ablation: the mount list is left unset, so the Session offers
-        // the plugin tool and the tools check fails. The run is unisolated
-        // here so the checks are recorded and the evaluation proceeds.
-        let ablated = fixture.directory.join("ablated");
-        let mut ablated_options = fixture.options(ablated.clone());
-        ablated_options.isolate = false;
-        ablated_options.offer_plugin = true;
-        let _ = fixture.evaluate(&ablated_options).await.unwrap();
-        let checks = recorded_checks(&ablated, "current");
+        // The mount list is not what removes the tool: left unset, the
+        // Session declares every registered tool and still no `plugin`.
+        let unset = fixture.directory.join("unset");
+        let mut unset_options = fixture.options(unset.clone());
+        unset_options.isolate = false;
+        unset_options.offer_plugin = true;
+        let _ = fixture.evaluate(&unset_options).await.unwrap();
+        let checks = recorded_checks(&unset, "current");
         let tools = check(&checks, "tools");
-        assert!(!tools.passed, "{tools:?}");
-        // The same ablation under the enforced preflight aborts the run
-        // as a harness failure, before the model's first turn.
-        let aborted = fixture.directory.join("aborted");
-        let mut aborted_options = fixture.options(aborted.clone());
-        aborted_options.offer_plugin = true;
-        let report = fixture.evaluate(&aborted_options).await.unwrap();
-        assert!(report.contains("candidate is inconclusive"), "{report}");
-        let records = fixture.records(&aborted);
-        for record in &records {
-            assert_eq!(record["stop"], "error", "{record}");
-            assert!(
-                record["error"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("harness failure: preflight"),
-                "{record}"
-            );
-        }
-        let checks = recorded_checks(&aborted, "current");
-        let tools = check(&checks, "tools");
-        assert!(!tools.passed, "{tools:?}");
+        assert!(tools.passed, "{tools:?}");
+        assert!(
+            tools.detail.contains("without the plugin tool"),
+            "{tools:?}"
+        );
     }
 
     /// The product's own tool set is checked at run time: a second
@@ -11895,5 +11881,64 @@ mod tests {
         let checks = recorded_checks(&aborted, "current");
         let product = check(&checks, "tools-product");
         assert!(!product.passed, "{product:?}");
+    }
+
+    /// A model-created collaboration member cannot mount the `plugin`
+    /// management tool: the served process does not register it, so the
+    /// member's own model request declares the profile tools that exist
+    /// (`read`) and not `plugin` (issue #1325). The scripted model asks the
+    /// `agent` tool for a member whose inline profile names `plugin`; the
+    /// member's request is the only one that declares `read` without the
+    /// run's whole set (`exec`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_isolated_run_member_declares_no_plugin_tool() {
+        fn delegates_to_a_member(text: &str) -> Option<Value> {
+            judged(text)
+                .or_else(|| {
+                    text.contains("You summarize a coding session")
+                        .then(|| content("SUMMARY OF EARLIER TURNS"))
+                })
+                .or_else(|| {
+                    // The member's own request (its profile's prompt), and
+                    // the preflight and probe Sessions: answer in text.
+                    (!text.contains("Run the probes.")).then(|| content("the member answered"))
+                })
+                .or_else(|| {
+                    // The leader's first turn: delegate once, then answer.
+                    (!text.contains("\\\"role\\\":\\\"tool\\\"")).then(|| {
+                        tool_call(
+                            "agent",
+                            r#"{"action":"request","profile":{"name":"helper","description":"","systemPrompt":"work","tools":["plugin","read"],"model":{"providerId":"gateway","modelId":"mock"}},"prompt":"work"}"#,
+                        )
+                    })
+                })
+        }
+        let fixture = Fixture::start(
+            "isolated-member",
+            delegates_to_a_member,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(report.contains("candidate is inconclusive"), "{report}");
+        let requests = fixture.provider.requests.lock().unwrap().clone();
+        let member = requests
+            .iter()
+            .find(|request| {
+                let tools = offered_tools(request);
+                tools.iter().any(|tool| tool == "read") && !tools.iter().any(|tool| tool == "exec")
+            })
+            .expect("the member's model request");
+        let offered = offered_tools(member);
+        assert!(
+            offered.iter().any(|tool| tool == "read"),
+            "the member declares the tools its profile names: {offered:?}"
+        );
+        assert!(
+            !offered.iter().any(|tool| tool == "plugin"),
+            "the member declares no plugin tool: {offered:?}"
+        );
     }
 }
