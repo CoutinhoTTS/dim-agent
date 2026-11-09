@@ -204,7 +204,9 @@ that failed.
   the server again after each cooldown. The reason stays until a connection succeeds. A
   generation retries its own start: a discovery attempt during the cooldown, a
   `session.mcp.refresh` included, reuses the generation that recorded it and keeps its count,
-  and only a successful connection clears them. Disabling or removing the entry, changing its
+  and only a successful connection clears them. A refresh replaces the entry's discovery, and
+  the Session keeps the entry's lease across the replacement, so the generation outlives the
+  refresh and its cooldown holds. Disabling or removing the entry, changing its
   configuration, `mcp.disconnect`, or the owning Session closing retires the generation, and
   the next one starts again at one second.
   Diagnostic text is bounded to 4 KiB on UTF-8 boundaries. A stdio failure may include
