@@ -572,6 +572,12 @@ async fn a_delete_announces_after_its_gate_is_released() {
     let connection = rusqlite::Connection::open(home.path().join("dimcode.sqlite")).unwrap();
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
 
+    // Of the two calls, the delete is the one held: this transaction keeps it
+    // inside `delete_session`, its admission gate in hand, so the subscribe
+    // that arrives next takes the EventHub Session lock and waits at the
+    // gate. On a machine slow enough for the delete to reach its store write
+    // only after the commit, no cycle forms and the assertions below pass
+    // without proving the fix; a correct build is never failed by that.
     let mut deleter = connect(&server).await;
     let target = session.clone();
     let deleting = tokio::spawn(async move {
