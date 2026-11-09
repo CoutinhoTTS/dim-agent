@@ -578,6 +578,8 @@ fn request_limit(request: &ClientRequest, entry: Option<Duration>) -> RequestLim
 
 pub struct McpServer {
     transport: TransportConfig,
+    /// The loader reference this instance runs under, for diagnostics.
+    reference: String,
     /// The host a stdio child takes its `PATH` from: the entry's own, else
     /// this host's, with the installed runtimes appended. Read optionally, so
     /// a host without HostPlatform spawns as before.
@@ -652,6 +654,12 @@ impl McpServer {
         retry.attempt = retry.attempt.wrapping_add(1);
         let delay = retry_delay(retry.failures);
         retry.next = Some(Instant::now() + delay);
+        tracing::debug!(
+            reference = %self.reference,
+            failures = retry.failures,
+            next_delay_ms = delay.as_millis() as u64,
+            "MCP server start failed"
+        );
         (delay, retry.attempt)
     }
 
@@ -1347,12 +1355,18 @@ fn http_client() -> Result<Client> {
 
 pub(super) struct McpServerPlugin {
     pub key: Key<McpServer>,
+    reference: String,
     transport: TransportConfig,
     tool_call_timeout: Option<Duration>,
     oauth: Option<(super::auth::CredentialKey, reqwest_mcp::Url)>,
 }
 impl McpServerPlugin {
     pub fn new(id: &str, configuration: McpServerSettings, key: Key<McpServer>) -> Result<Self> {
+        let reference = key
+            .erase()
+            .name()
+            .map(str::to_owned)
+            .unwrap_or_else(|| id.to_owned());
         let oauth = credential_key(id, &configuration);
         let tool_call_timeout = configuration.timeout().map(Duration::from_millis);
         let transport = match &configuration {
@@ -1379,6 +1393,7 @@ impl McpServerPlugin {
         };
         Ok(Self {
             key,
+            reference,
             transport,
             tool_call_timeout,
             oauth,
@@ -1394,6 +1409,7 @@ impl Plugin for McpServerPlugin {
         let state = StateCell::new(McpServerState::Disconnected);
         let service = Arc::new(McpServer {
             transport: self.transport.clone(),
+            reference: self.reference.clone(),
             platform: ctx.get_at(&Key::<HostPlatform>::of()),
             tool_call_timeout: self.tool_call_timeout,
             authorization: self.oauth.clone().map(|(key, server)| Authorization {

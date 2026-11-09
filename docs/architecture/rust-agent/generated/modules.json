@@ -2637,6 +2637,7 @@
         "assert_eq",
         "format",
         "json",
+        "panic",
         "tokio::select",
         "unreachable",
         "vec"
@@ -2653,7 +2654,8 @@
         "matches",
         "serde_json::json",
         "tokio::pin",
-        "tokio::select"
+        "tokio::select",
+        "tracing::debug"
       ]
     },
     {
@@ -25838,6 +25840,7 @@
         "path McpConnection",
         "path McpPlugin::new",
         "path McpService",
+        "path McpSource::User",
         "use crate::mcp::McpChange",
         "use crate::mcp::McpPlugin",
         "use crate::mcp::McpService"
@@ -25860,14 +25863,16 @@
         "path McpOwner",
         "path McpOwner::new",
         "path McpPublication::register",
-        "path McpPublication::standalone_template"
+        "path McpPublication::standalone_template",
+        "path connection"
       ]
     },
     {
       "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server::mcp::server",
       "references": [
-        "path McpServerError::Cleanup"
+        "path McpServerError::Cleanup",
+        "path McpServerError::StartCooldown"
       ]
     },
     {
