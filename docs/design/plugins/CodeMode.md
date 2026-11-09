@@ -10,10 +10,10 @@ collects the results and returns one ordinary tool result. A program's tool call
 calls on the branch Timeline, not a second model batch. The design reuses `step/tool-call` and
 `step/tool-result`; the only event-envelope addition is an optional `parent_call_id`.
 
-The host installs the plugin with `dim_codemode::install`. The App Server product profile keeps the
-plugin opt-in until the child-batch work in this design, the Questions/TUI read path, the
-Branch/Recall/Hooks joins, the storage step and the cancellation/reload tests are in place. After
-that gate, the product profile installs the plugin by default.
+The host installs the plugin with `dim_codemode::install`. The App Server product profile installs
+the plugin after the child-batch work in this design, the Questions/TUI read path, the
+Branch/Recall/Hooks joins, the storage step and the cancellation/reload tests. A host that does not
+want the tool omits the call.
 
 Issue: [#1276](https://github.com/arcships/dim/issues/1276).
 Rules: [design rules](../../architecture/rust-agent/principles.md), [ADR 002](../../adr/002-plugin-scope.md), [plugin contract](../plugin-contract.md).

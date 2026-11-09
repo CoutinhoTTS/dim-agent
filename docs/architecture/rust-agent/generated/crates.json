@@ -133,6 +133,10 @@
   },
   {
     "from": "dim-app-server",
+    "to": "dim-codemode"
+  },
+  {
+    "from": "dim-app-server",
     "to": "rutis"
   },
   {
@@ -150,6 +154,30 @@
   {
     "from": "dim-app-server",
     "to": "dim-modality"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-questions"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-runtime"
   },
   {
     "from": "dim-modality",
@@ -354,30 +382,6 @@
   {
     "from": "dim-goal",
     "to": "dim-client"
-  },
-  {
-    "from": "dim-codemode",
-    "to": "dim-agent-capabilities"
-  },
-  {
-    "from": "dim-codemode",
-    "to": "dim-agent-runtime"
-  },
-  {
-    "from": "dim-codemode",
-    "to": "dim-agent-types"
-  },
-  {
-    "from": "dim-codemode",
-    "to": "rutis"
-  },
-  {
-    "from": "dim-codemode",
-    "to": "dim-agent-questions"
-  },
-  {
-    "from": "dim-codemode",
-    "to": "dim-agent-runtime"
   },
   {
     "from": "dim-modality-aimux",

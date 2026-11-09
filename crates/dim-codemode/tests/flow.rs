@@ -1,6 +1,7 @@
 //! The `codemode` tool through the real Agent runtime: the model calls it,
-//! the program calls `echo` through the branch's pinned ToolBinding and
-//! Approval, and the outer `step/tool-result` carries the program's value.
+//! the program calls pinned tools through the branch `ToolExecutor` gate, and
+//! child `step/tool-call`/`step/tool-result` facts carry the child call and
+//! its effects before the outer result settles.
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
     approval::Approval,
