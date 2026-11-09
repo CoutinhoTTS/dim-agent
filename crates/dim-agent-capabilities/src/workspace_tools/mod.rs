@@ -263,9 +263,13 @@ impl ToolDriver for WorkspaceTools {
                 && let Some(path) = call.input.get("path").and_then(|value| value.as_str())
                 && !path.is_empty()
             {
+                // One effective home: the boundary's when configured, the
+                // platform's otherwise — the same home the executed tool
+                // resolves `~` against, so pre-admission resolution cannot
+                // disagree with execution.
                 let (cwd, home, path) = (
                     self.cwd.clone(),
-                    self.platform.home.clone(),
+                    self.files.home().to_owned(),
                     path.to_owned(),
                 );
                 let target = tokio::task::spawn_blocking(move || {

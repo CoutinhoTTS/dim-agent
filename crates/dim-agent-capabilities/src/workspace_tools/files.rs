@@ -110,6 +110,12 @@ impl FileTools {
         TOOL_NAMES.contains(&name)
     }
 
+    /// The home `~` resolves against: the boundary's when one is configured,
+    /// the platform's otherwise.
+    pub(crate) fn home(&self) -> &Path {
+        &self.home
+    }
+
     pub async fn execute(
         &self,
         call: &ToolCall,

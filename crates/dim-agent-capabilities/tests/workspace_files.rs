@@ -1894,3 +1894,110 @@ fn the_mention_index_drops_roots_whose_walk_is_past_its_ttl() {
     let _ = fs::remove_dir_all(&second);
 }
 
+/// The effective home through the real path: a host's platform home is the
+/// workspace, the boundary's home is a separate read-only sibling, and
+/// `write {path: "~/made.txt"}` is refused with nothing created in the
+/// workspace — the ToolExecutor's pre-admission resolution and the executed
+/// tool agree on the boundary home.
+#[cfg(unix)]
+mod toolhost {
+    use super::*;
+    use dim_agent_capabilities::{
+        defaults,
+        execution_settings::ExecutionSettingsHost,
+        host_platform::{
+            ExecShellRuntime, HostPlatform, OutputEncoding, ShellEdition, ShellSource, ShellStatus,
+        },
+        workspace_tools::{self, FileToolBoundary, WorkspaceToolsConfig},
+    };
+    use dim_agent_runtime::testing::{MinimalHost, chain_events};
+    use dim_agent_runtime::*;
+    use dim_agent_types::*;
+    use rutis::host::CtxHost;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bounded_write_resolves_tilde_against_the_configured_home() {
+        let root = std::env::temp_dir().join(format!("dim-toolhost-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        std::fs::create_dir_all(root.join("home")).unwrap();
+        let root = root.canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let mut platform = HostPlatform::current(ShellStatus::Available(ExecShellRuntime {
+            executable_path: "/bin/sh".into(),
+            edition: ShellEdition::Sh,
+            source: ShellSource::Fallback,
+            output_encoding: OutputEncoding::Utf8,
+        }))
+        .unwrap()
+        .with_execution_settings(ExecutionSettingsHost::fixed(Default::default()));
+        platform.home = workspace.clone();
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        defaults::mock_model_hosts(&mut builder);
+        defaults::install(&mut builder);
+        workspace_tools::install(
+            &mut builder,
+            WorkspaceToolsConfig {
+                boundary: Some(FileToolBoundary {
+                    workspace: workspace.clone(),
+                    home: root.join("home"),
+                    read_only_roots: Vec::new(),
+                }),
+                output_root: root.join("out"),
+            },
+        );
+        let agent = MinimalHost::start_with(&builder, |root, _| {
+            root.provide_as::<HostPlatform>(Arc::new(platform))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let session = agent
+            .create_session(SessionConfig {
+                cwd: workspace.to_string_lossy().into_owned(),
+                tools: Some(vec!["write".into()]),
+                permission_policy: PermissionPolicy {
+                    preset: PermissionPreset::FullAccess,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session
+            .submit(
+                "tool:write {\"path\":\"~/made.txt\",\"content\":\"wrong-home\"}".into(),
+                InputMode::Queue,
+                "main",
+            )
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let results: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::ToolResult(data) => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 1, "one tool call settles once");
+        let result = &results[0].results[0].result;
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["code"], "outside_file_roots", "{result:?}");
+        assert_eq!(
+            structured["path"],
+            root.join("home/made.txt").to_string_lossy().as_ref(),
+            "{result:?}"
+        );
+        assert!(
+            !workspace.join("made.txt").exists(),
+            "nothing is created in the workspace"
+        );
+        assert!(
+            !root.join("home/made.txt").exists(),
+            "the configured home is read-only"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
