@@ -133,7 +133,7 @@ GuideRecord {
 
 ### 2.5 EventHub 不保留什么
 
-没有队列、没有未投递事件、没有重试、没有定时器、没有心跳。`publish` 只在每个目标都有了结果之后才回复，所以需要顺序的生产方逐次等待每个调用；并发的发布之间没有顺序。没能完成的投递由生产方根据回执自行决定。发布持有一份属于整个安装的投递预算，所有发布合计至多同时运行 8 个投递：二十个并发发布合起来仍然至多同时进行 8 次 `sessions.input`，所以发布给许多冷 Session 时会分批恢复它们，而不是一次全部恢复，一次发布也挤不掉另一次；一次恢复需要数秒 (一个 10 万事件、十条打开分支的 Session 约 4 秒，为 #1113 测得)。`publish` 自己没有超时：不能等待的生产方不要 await 它，那样做的同时也就放弃了顺序。
+没有队列、没有未投递事件、没有重试、没有定时器、没有心跳。`publish` 只在每个目标都有了结果之后才回复，所以需要顺序的生产方逐次等待每个调用；并发的发布之间没有顺序。没能完成的投递由生产方根据回执自行决定。发布持有一份属于整个安装的投递预算，所有发布合计至多同时运行 8 个调用。这份预算同时约束 `sessions.lookup` 与 `sessions.input` 调用：二十个并发发布合起来仍然至多同时进行 8 个调用，发布给许多冷 Session 时会分批恢复它们，而不是一次全部恢复，一次发布也挤不掉另一次；一次恢复需要数秒 (一个 10 万事件、十条打开分支的 Session 约 4 秒，为 #1113 测得)。`publish` 自己没有超时：不能等待的生产方不要 await 它，那样做的同时也就放弃了顺序。
 
 实例状态(2.1)就是锁与预算所在：事件锁(2.4)、Session 锁(3.3)与投递预算。它们全是进程内存，所以重启后从空开始，每张映射在最后一个持有者释放时删除对应项。
 
@@ -297,11 +297,11 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前�
 
 ## 9. 向机制所有者提出的需求
 
-### 9.1 Agents 宣布每一次成功的删除
+### 9.1 Agents 宣布每一次移除了数据行的删除
 
 - **被什么挡住：** EventHub 必须移除被删除 Session 的订阅，而一个保留数据行的关闭不能移除它们。`session_closed` 同时回答这两种情况，见 `crates/dim-app-server/src/agents.rs:817-830` 与 [session access A.6](../contracts/session-access.md#a6-错误)；今天唯一的删除通知是 `agent/unloaded-session-deleted`，且只为未加载的 Session 发出，见 `crates/dim-app-server/src/agents.rs:97-109,1399-1415` 与 [插件契约 §5.3](../plugin-contract.md#53-总线事件)。
 - **考虑过的现有机制：** Session 广播的 `closed` 事件只说明一个 Session 关闭了，不说明它的数据行是否被移除，而 EventHub 不能因关闭而移除；用 `sessions.lookup` 轮询每个被订阅的 Session 时，对一个存在但从未收到输入的 Session 回答 `unknown`，区分不出已删除与可恢复，而且会引入 EventHub 设计明确排除的周期性读取者；`history` 对两种情况以同样的方式失败。
-- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次成功的删除，无论 Session 是否已加载。它的 `agentId` 是记录下来的 Session 所有者，来自已加载的索引或 `session_owners`，两者都没有记录时为空。Collaboration 现有的通知保持原样。两条删除通知都保留，直到 Collaboration 迁移到 `agent/session-deleted`；那次迁移是 Collaboration 的改动。
+- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次移除了该 Session 数据行的删除，无论 Session 是否已加载。它的 `agentId` 是记录下来的 Session 所有者，来自已加载的索引或 `session_owners`，两者都没有记录时为空。Collaboration 现有的通知保持原样。两条删除通知都保留，直到 Collaboration 迁移到 `agent/session-deleted`；那次迁移是 Collaboration 的改动。
 - **对顺序、批次、中断、重载的影响：** 对 Timeline 没有影响；这条通知是总线事件，不是事实。错过的通知由 3.4 的对账修复，在下一次 `apply` 或第一次失败的投递上。
 - **所有者：** Agents，`crates/dim-app-server/src/agents.rs`；它自己的文档陈述这条通知，见 [Sessions 服务](../appserver/sessions-service.md) 与 [删除与分叉](../appserver/session-deletion-and-fork.md)。
 

@@ -108,7 +108,7 @@ impl Event for UnloadedSessionDeleted {
     const NAME: &'static str = "agent/unloaded-session-deleted";
     type Value = ();
 }
-/// The end of a Session a successful delete removed its stored rows for,
+/// The end of a Session whose stored rows a successful delete removed,
 /// whether it was loaded or not. Emitted on the process root after
 /// SessionStore removed the rows, so a listener can tell a delete from a
 /// close that keeps the rows
@@ -195,7 +195,7 @@ pub(crate) enum DeleteOutcome {
 
 /// What a delete leaves for its caller to announce once the admission gate
 /// is released
-/// ([EventHub §9.1](../../../docs/design/plugins/EventHub.md#91-agents-announces-every-successful-delete)): a
+/// ([EventHub §9.1](../../../docs/design/plugins/EventHub.md#91-agents-announces-every-delete-that-removed-the-stored-rows)): a
 /// listener may take the EventHub Session lock, which a `subscribe` holds
 /// across `sessions.input`, and `sessions.input` waits for that gate in
 /// [`AgentIndex::acquire`].
@@ -1516,9 +1516,10 @@ impl AgentIndex {
                 session_id: id.to_owned(),
             }));
         }
-        // Every successful delete announces itself, loaded or not: a listener
-        // that holds state for the Session removes it, and a close, which
-        // keeps the rows, does not ([EventHub §9.1]). The notice carries the
+        // Every delete that removed the Session's stored rows announces
+        // itself, loaded or not: a listener that holds state for the Session
+        // removes it, and a close, which keeps the rows, does not
+        // ([EventHub §9.1]). The notice carries the
         // owner the index held, else the store's, and an empty `agentId` when
         // neither recorded one.
         if deleted {

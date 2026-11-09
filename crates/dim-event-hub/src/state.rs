@@ -12,7 +12,8 @@ use std::{
 };
 use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
-/// How many deliveries run at a time across every publish of the install
+/// How many `sessions` calls run at a time across every publish of the
+/// install: the lookups and the inputs share the delivery budget
 /// (design §2.5).
 pub(crate) const MAX_DELIVERIES_IN_FLIGHT: usize = 8;
 

@@ -1,7 +1,7 @@
 //! Publish and delivery (design §2.3–§2.5, §3.1, §3.2, A.2): one input per
-//! target branch, at most eight deliveries at a time across the install, one
-//! receipt, and the publish's subscription changes in one transaction after
-//! its deliveries settle.
+//! target branch, at most eight `sessions` calls at a time across the
+//! install, one receipt, and the publish's subscription changes in one
+//! transaction after its deliveries settle.
 use crate::{
     catalog::Declaration,
     error::{EventHubError, SessionsFailure, TRANSPORT},
@@ -363,8 +363,9 @@ async fn looked_up(
 ) {
     // The lookups run the way the deliveries do: concurrently, at most
     // `MAX_DELIVERIES_IN_FLIGHT` at a time, each under one permit of the
-    // install's budget, so one slow branch does not hold up the others
-    // (design §2.4, §2.5).
+    // install's budget. The budget bounds the lookups and the inputs
+    // together, so one slow branch does not hold up the others and one
+    // publish cannot crowd out another (design §2.4, §2.5).
     let jobs: Vec<(String, String)> = plans
         .iter()
         .map(|plan| (plan.session_id.clone(), plan.branch_id.clone()))
@@ -397,8 +398,9 @@ async fn looked_up(
     (held, failed)
 }
 
-/// One branch's `sessions.lookup`, under one permit of the install's budget
-/// (design §2.4, §2.5).
+/// One branch's `sessions.lookup`, under one permit of the install's
+/// delivery budget, which bounds lookups and inputs together (design §2.4,
+/// §2.5).
 async fn lookup_branch(
     shared: &Shared,
     session_id: String,
