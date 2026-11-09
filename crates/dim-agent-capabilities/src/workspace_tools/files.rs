@@ -599,6 +599,8 @@ fn open_relative(
 ) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let name = c_name(name)?;
+    // SAFETY: `parent` is an open directory handle for the duration of the
+    // call and `name` is a live NUL-terminated string.
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
@@ -610,6 +612,9 @@ fn open_relative(
     if fd < 0 {
         Err(std::io::Error::last_os_error())
     } else {
+        // SAFETY: `fd` is non-negative (checked above) and was just returned
+        // by `openat`, so this takes ownership of a fresh descriptor no other
+        // owner holds.
         Ok(unsafe { std::fs::File::from_raw_fd(fd) })
     }
 }
@@ -656,6 +661,8 @@ impl Parent {
                 Ok(next) => next,
                 Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
                     let part_name = c_name(part)?;
+                    // SAFETY: `dir` is an open directory handle and
+                    // `part_name` a live NUL-terminated string for the call.
                     if unsafe { libc::mkdirat(dir.as_raw_fd(), part_name.as_ptr(), 0o777) } != 0 {
                         let error = std::io::Error::last_os_error();
                         if error.kind() != std::io::ErrorKind::AlreadyExists {
@@ -679,6 +686,8 @@ impl Parent {
         use std::os::fd::AsRawFd;
         let name = c_name(&self.name)?;
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the handle and the NUL-terminated name are live for the
+        // call, and `stat` is a valid uninitialized `libc::stat` buffer.
         let result = unsafe {
             libc::fstatat(
                 self.dir.as_raw_fd(),
@@ -694,6 +703,7 @@ impl Parent {
                 _ => Err(classify(error)),
             };
         }
+        // SAFETY: `fstatat` returned 0 above, so it initialized the struct.
         let stat = unsafe { stat.assume_init() };
         if stat.st_mode & libc::S_IFMT == libc::S_IFLNK {
             return Err(TargetError::Refused);
@@ -734,6 +744,8 @@ impl Parent {
             return false;
         };
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the handle and the NUL-terminated name are live for the
+        // call, and `stat` is a valid uninitialized `libc::stat` buffer.
         let result = unsafe {
             libc::fstatat(
                 self.dir.as_raw_fd(),
@@ -745,6 +757,8 @@ impl Parent {
         if result < 0 {
             return false;
         }
+        // SAFETY: `fstatat` returned 0 (checked above), so it initialized
+        // the struct.
         let stat = unsafe { stat.assume_init() };
         #[allow(clippy::unnecessary_cast)]
         let (device, inode) = (stat.st_dev as u64, stat.st_ino as u64);
@@ -755,6 +769,8 @@ impl Parent {
     fn remove_staged(&self, name: &std::ffi::OsStr) {
         use std::os::fd::AsRawFd;
         if let Ok(name) = c_name(name) {
+            // SAFETY: the handle and the NUL-terminated name are live for
+            // the call.
             unsafe { libc::unlinkat(self.dir.as_raw_fd(), name.as_ptr(), 0) };
         }
     }
@@ -764,6 +780,8 @@ impl Parent {
         let staged = c_name(staged)?;
         let name = c_name(&self.name)?;
         let result = if existing {
+            // SAFETY: both names are live NUL-terminated strings and
+            // `self.dir` is an open directory handle for the call.
             unsafe {
                 libc::renameat(
                     self.dir.as_raw_fd(),
@@ -773,6 +791,8 @@ impl Parent {
                 )
             }
         } else {
+            // SAFETY: both names are live NUL-terminated strings and
+            // `self.dir` is an open directory handle for the call.
             unsafe {
                 libc::linkat(
                     self.dir.as_raw_fd(),
@@ -796,6 +816,8 @@ impl Parent {
             return false;
         };
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: the handle and the NUL-terminated name are live for the
+        // call, and `stat` is a valid uninitialized `libc::stat` buffer.
         let result = unsafe {
             libc::fstatat(
                 self.dir.as_raw_fd(),
@@ -804,6 +826,8 @@ impl Parent {
                 libc::AT_SYMLINK_NOFOLLOW,
             )
         };
+        // SAFETY: the `fstatat` above returned 0 (the left conjunct), so it
+        // initialized the struct.
         result == 0 && unsafe { stat.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFREG
     }
 }
