@@ -1,5 +1,5 @@
-//! The run history file `scheduler/runs.json` (A.1, A.7): one inner v1 JSON
-//! document inside the host's `{version, text}` envelope, which
+//! The delivery history file `scheduler/runs.json` (A.1, A.7): one inner v1
+//! JSON document inside the host's `{version, text}` envelope, which
 //! [`PluginFileTransactions`] reads and writes.
 use crate::document::{canonical_instant, format_instant};
 use chrono::{DateTime, Utc};
@@ -42,44 +42,57 @@ impl From<PluginFileError> for SchedulerError {
     }
 }
 
+/// A delivery's state (design §2.2). `delivering`, `delivered`, `failed`,
+/// `lost` and `missed` are this design's vocabulary; `skipped`, `launching`,
+/// `submitted`, `running`, `completed`, `cancelled` and `timed_out` are
+/// decoded as they were written before the change (A.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RunState {
-    Skipped,
+pub enum DeliveryState {
+    Delivering,
+    Delivered,
+    Failed,
+    Lost,
     Missed,
+    Skipped,
     Launching,
     Submitted,
     Running,
     Completed,
-    Failed,
     Cancelled,
     TimedOut,
-    Lost,
 }
 
-impl RunState {
+impl DeliveryState {
     /// The wire name, as the file and `schedule.history` spell it.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Skipped => "skipped",
+            Self::Delivering => "delivering",
+            Self::Delivered => "delivered",
+            Self::Failed => "failed",
+            Self::Lost => "lost",
             Self::Missed => "missed",
+            Self::Skipped => "skipped",
             Self::Launching => "launching",
             Self::Submitted => "submitted",
             Self::Running => "running",
             Self::Completed => "completed",
-            Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::TimedOut => "timed_out",
-            Self::Lost => "lost",
         }
     }
 
     /// Terminal states carry `ended_at` (A.1).
     pub fn is_terminal(self) -> bool {
-        !matches!(self, Self::Launching | Self::Submitted | Self::Running)
+        !matches!(
+            self,
+            Self::Delivering | Self::Launching | Self::Submitted | Self::Running
+        )
     }
 }
 
+/// The launch origin of a delivery written before this change (A.7). A
+/// Session named by such a record is launch-owned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionOrigin {
@@ -94,18 +107,23 @@ pub struct ReportTo {
     pub branch_id: String,
 }
 
+/// One delivery (A.1): a window's record. New records use §2.2's vocabulary
+/// and omit the fields that no longer apply; records written before the
+/// change keep their old state names and fields (A.7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Run {
+pub struct Delivery {
     pub run_id: String,
     pub job_id: String,
     /// `manual` or a canonical instant.
     pub window: String,
-    pub state: RunState,
+    pub state: DeliveryState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_origin: Option<SessionOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -119,9 +137,21 @@ pub struct Run {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<u32>,
 }
 
-impl Run {
+impl Delivery {
+    /// Whether the record carries the shape written before this change. Only
+    /// `failed`, `lost` and `missed` are reachable in both vocabularies, so
+    /// only they need the test.
+    fn legacy_shape(&self) -> bool {
+        self.deadline_at.is_some()
+            || self.session_origin.is_some()
+            || self.policy.is_some()
+            || self.report_to.is_some()
+    }
+
     /// The record invariants of A.1 and A.7. A violation makes the whole file
     /// invalid, so the bytes stay unchanged.
     pub fn validate(&self) -> Result<(), String> {
@@ -137,7 +167,57 @@ impl Run {
                 .is_some_and(|text| !timestamp(text))
             || (self.window != "manual" && !timestamp(&self.window))
         {
-            return Err(format!("run {} has a non-canonical timestamp", self.run_id));
+            return Err(format!(
+                "delivery {} has a non-canonical timestamp",
+                self.run_id
+            ));
+        }
+        if self.submission_id != format!("scheduler:{}", self.run_id) {
+            return Err(format!("delivery {} has a foreign submission", self.run_id));
+        }
+        let consistent = match self.state {
+            DeliveryState::Delivering => {
+                !self.legacy_shape()
+                    && self.session_id.is_some()
+                    && self.branch_id.is_some()
+                    && self.input_event_id.is_none()
+                    && self.ended_at.is_none()
+            }
+            DeliveryState::Delivered => {
+                !self.legacy_shape()
+                    && self.session_id.is_some()
+                    && self.branch_id.is_some()
+                    && self.input_event_id.is_some()
+                    && self.ended_at.is_some()
+            }
+            DeliveryState::Failed | DeliveryState::Lost if !self.legacy_shape() => {
+                self.session_id.is_some() == self.branch_id.is_some()
+                    && self.input_event_id.is_none()
+                    && self.ended_at.is_some()
+                    && self.deadline_at.is_none()
+                    && !self.detail.is_empty()
+            }
+            DeliveryState::Missed if !self.legacy_shape() => {
+                self.session_id.is_none()
+                    && self.branch_id.is_none()
+                    && self.input_event_id.is_none()
+                    && self.ended_at.is_some()
+                    && !self.detail.is_empty()
+            }
+            _ => self.validate_legacy(),
+        };
+        if consistent {
+            Ok(())
+        } else {
+            Err(format!("delivery {} is inconsistent", self.run_id))
+        }
+    }
+
+    /// The invariants the record was written under before this change
+    /// (A.7): a stored record is validated as it was.
+    fn validate_legacy(&self) -> bool {
+        if self.branch_id.is_some() || self.attempts.is_some() {
+            return false;
         }
         let session_fields = [
             self.session_id.is_some(),
@@ -147,47 +227,44 @@ impl Run {
         .iter()
         .filter(|present| **present)
         .count();
-        let accepted = !matches!(self.state, RunState::Skipped | RunState::Missed);
+        let accepted = !matches!(self.state, DeliveryState::Skipped | DeliveryState::Missed);
         let has_input = self.input_event_id.is_some();
-        let consistent = self.state.is_terminal() == self.ended_at.is_some()
+        self.state.is_terminal() == self.ended_at.is_some()
             && (!accepted || self.deadline_at.is_some())
-            && !(self.state == RunState::Missed && self.deadline_at.is_some())
+            && !(self.state == DeliveryState::Missed && self.deadline_at.is_some())
             && (session_fields == 0 || session_fields == 3)
             && !(matches!(
                 self.state,
-                RunState::Submitted | RunState::Running | RunState::Completed | RunState::Cancelled
+                DeliveryState::Submitted
+                    | DeliveryState::Running
+                    | DeliveryState::Completed
+                    | DeliveryState::Cancelled
             ) && (!has_input || session_fields != 3))
-            && !(self.state == RunState::Launching && has_input)
-            && !(self.state == RunState::Missed
+            && !(self.state == DeliveryState::Launching && has_input)
+            && !(self.state == DeliveryState::Missed
                 && (session_fields != 0 || has_input || self.report_to.is_some()))
-            && !(self.state == RunState::Skipped
+            && !(self.state == DeliveryState::Skipped
                 && (has_input
                     || (self.deadline_at.is_none()
                         && (session_fields != 0 || self.report_to.is_some()))))
             && !(has_input && session_fields != 3)
-            && self.submission_id == format!("scheduler:{}", self.run_id);
-        if consistent {
-            Ok(())
-        } else {
-            Err(format!("run {} is inconsistent", self.run_id))
-        }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RunFile {
+struct DeliveryFile {
     version: u32,
-    runs: Vec<Run>,
+    runs: Vec<Delivery>,
 }
 
 /// Decodes the inner text of the file; `None` is a missing file, which holds
-/// no runs.
-fn decode(text: Option<&str>) -> Result<Vec<Run>, SchedulerError> {
+/// no deliveries.
+fn decode(text: Option<&str>) -> Result<Vec<Delivery>, SchedulerError> {
     let Some(text) = text else {
         return Ok(Vec::new());
     };
-    let file: RunFile = serde_json::from_str(text)
+    let file: DeliveryFile = serde_json::from_str(text)
         .map_err(|error| SchedulerError::invalid_data(format!("runs.json: {error}")))?;
     if file.version != FORMAT_VERSION {
         return Err(SchedulerError::invalid_data(format!(
@@ -208,17 +285,17 @@ fn decode(text: Option<&str>) -> Result<Vec<Run>, SchedulerError> {
     Ok(file.runs)
 }
 
-fn encode(runs: Vec<Run>) -> String {
-    serde_json::to_string(&RunFile {
+fn encode(runs: Vec<Delivery>) -> String {
+    serde_json::to_string(&DeliveryFile {
         version: FORMAT_VERSION,
         runs,
     })
-    .expect("run records contain only serializable fields")
+    .expect("delivery records contain only serializable fields")
 }
 
 /// Reads the history. A file that is not valid v1 is an error, not an empty
 /// history.
-pub async fn read(files: &PluginFileTransactions) -> Result<Vec<Run>, SchedulerError> {
+pub async fn read(files: &PluginFileTransactions) -> Result<Vec<Delivery>, SchedulerError> {
     files
         .transact(RUNS_FILE, |current| (None, decode(current)))
         .await?
@@ -228,7 +305,7 @@ pub async fn read(files: &PluginFileTransactions) -> Result<Vec<Run>, SchedulerE
 /// whether it modified the runs; an unmodified history is not written back.
 pub async fn update<R: Send + 'static>(
     files: &PluginFileTransactions,
-    change: impl FnOnce(&mut Vec<Run>) -> Result<(bool, R), SchedulerError> + Send + 'static,
+    change: impl FnOnce(&mut Vec<Delivery>) -> Result<(bool, R), SchedulerError> + Send + 'static,
 ) -> Result<R, SchedulerError> {
     files
         .transact(RUNS_FILE, move |current| {

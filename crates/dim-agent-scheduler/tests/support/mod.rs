@@ -239,7 +239,7 @@ pub async fn settled(client: &mut Client, job_id: &str, run_id: &str) -> Value {
     run_where(client, job_id, run_id, |run| {
         !matches!(
             run["state"].as_str(),
-            Some("launching" | "submitted" | "running")
+            Some("delivering" | "launching" | "submitted" | "running")
         )
     })
     .await

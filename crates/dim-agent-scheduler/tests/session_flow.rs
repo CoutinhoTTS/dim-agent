@@ -1,0 +1,947 @@
+//! The `session` target end to end through a real App Server (design §3.1,
+//! A.1, A.6): one input per window on the target branch, the delivery
+//! vocabulary, bounded lookup settling, overlap skips, legacy mapping and
+//! retention.
+mod support;
+use serde_json::{Value, json};
+use std::sync::Arc;
+use support::*;
+
+/// Every event of one branch, in order.
+async fn branch_events(client: &mut dim_client::Client, session_id: &str) -> Vec<Value> {
+    let mut events = Vec::new();
+    let mut after = 0;
+    let mut through = None;
+    loop {
+        let mut params = json!({"sessionId": session_id, "branchId": "main", "after": after});
+        if let Some(through) = through {
+            params["through"] = json!(through);
+        }
+        let page: dim_client::wire::History =
+            client.typed("session.history", params).await.unwrap();
+        through = Some(page.through);
+        let next = page.next(after, through).unwrap();
+        events.extend(page.events);
+        match next {
+            Some(next) => after = next,
+            None => break,
+        }
+    }
+    events
+}
+
+/// The scheduler inputs on one branch: their submission id, mode and marker.
+async fn scheduled_inputs(client: &mut dim_client::Client, session_id: &str) -> Vec<Value> {
+    branch_events(client, session_id)
+        .await
+        .into_iter()
+        .filter(|event| {
+            event["type"] == "input"
+                && event["name"] == "message"
+                && event["data"]["submission_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("scheduler:"))
+        })
+        .collect()
+}
+
+/// The job's delivery with `run_id`, once it is no longer `delivering`.
+async fn settled(client: &mut dim_client::Client, job_id: &str, run_id: &str) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let history: Value = client
+                .typed("schedule.history", json!({"job_id": job_id, "limit": 50}))
+                .await
+                .unwrap();
+            if let Some(run) = history["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["run_id"] == run_id)
+                && run["state"] != json!("delivering")
+            {
+                return run.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the delivery settles")
+}
+
+/// Saves a job whose target is `session_id`'s main branch.
+async fn save_session_job(
+    client: &mut dim_client::Client,
+    name: &str,
+    session_id: &str,
+    input_mode: Option<&str>,
+    schedule: Value,
+) -> String {
+    let mut target = json!({"kind": "session", "session_id": session_id, "branch_id": "main"});
+    if let Some(mode) = input_mode {
+        target["input_mode"] = json!(mode);
+    }
+    let saved: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"name": name, "schedule": schedule,
+                "prompt": format!("Work on {name}."), "target": target}}),
+        )
+        .await
+        .unwrap();
+    saved["job"]["id"].as_str().unwrap().to_owned()
+}
+
+/// A delivering record the tests seed into the store: the job's target
+/// branch and a submission id nothing has written yet.
+fn seeded_delivery(
+    run_id: &str,
+    job_id: &str,
+    session_id: &str,
+    submission_id: &str,
+    attempts: Option<u32>,
+) -> Value {
+    let now = "2026-01-01T00:00:00.000Z";
+    let mut record = json!({
+        "run_id": run_id,
+        "job_id": job_id,
+        "window": "manual",
+        "state": "delivering",
+        "session_id": session_id,
+        "branch_id": "main",
+        "submission_id": submission_id,
+        "created_at": now,
+        "detail": "",
+    });
+    if let Some(attempts) = attempts {
+        record["attempts"] = json!(attempts);
+    }
+    record
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_session_job_writes_one_input_to_its_branch_and_no_report() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let other = create_session(&mut client, home.path(), true).await;
+
+    let mut runs = Vec::new();
+    for (name, mode) in [
+        ("queued", None),
+        ("steered", Some("steer")),
+        ("appended", Some("append")),
+    ] {
+        let job_id = save_session_job(
+            &mut client,
+            name,
+            &session,
+            mode,
+            json!({"at": "2030-01-01T00:00:00Z"}),
+        )
+        .await;
+        let accepted: Value = client
+            .typed("schedule.run_now", json!({"job_id": job_id}))
+            .await
+            .unwrap();
+        assert_eq!(accepted["state"], "delivering", "{accepted}");
+        let run = settled(&mut client, &job_id, accepted["run_id"].as_str().unwrap()).await;
+        assert_eq!(run["state"], "delivered", "{run}");
+        assert_eq!(run["session_id"], json!(session), "{run}");
+        assert_eq!(run["branch_id"], "main", "{run}");
+        assert_eq!(run["window"], "manual", "{run}");
+        assert!(run["input_event_id"].is_string(), "{run}");
+        assert!(run["session_origin"].is_null(), "{run}");
+        assert!(run["policy"].is_null(), "{run}");
+        assert!(run["report_to"].is_null(), "{run}");
+        assert_eq!(run["detail"], "", "{run}");
+        runs.push((job_id, run));
+    }
+
+    let inputs = scheduled_inputs(&mut client, &session).await;
+    assert_eq!(inputs.len(), 3, "{inputs:?}");
+    let modes: Vec<&str> = inputs
+        .iter()
+        .map(|input| input["data"]["mode"].as_str().unwrap())
+        .collect();
+    assert_eq!(modes, ["queue", "steer", "append"], "{inputs:?}");
+    for (_, run) in &runs {
+        let submission = run["submission_id"].as_str().unwrap();
+        let matching: Vec<_> = inputs
+            .iter()
+            .filter(|input| input["data"]["submission_id"] == run["submission_id"])
+            .collect();
+        assert_eq!(matching.len(), 1, "one input for {submission}: {inputs:?}");
+        assert_eq!(matching[0]["id"], run["input_event_id"], "{run}");
+        assert!(
+            matching[0]["data"]["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("dim-scheduler kind=\"scheduled-run\""))),
+            "the marker is the first block: {matching:?}"
+        );
+    }
+    assert!(
+        !serde_json::to_string(&inputs)
+            .unwrap()
+            .contains("scheduler-report:"),
+        "a session delivery sends no report"
+    );
+    let other_inputs = scheduled_inputs(&mut client, &other).await;
+    assert!(
+        other_inputs.is_empty(),
+        "nothing is written to another Session: {other_inputs:?}"
+    );
+    let texts = model.texts();
+    assert!(
+        texts.contains("Work on queued."),
+        "the saved prompt reaches the branch"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_past_window_is_missed_and_a_gone_target_fails_and_disables() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+
+    let late = save_session_job(
+        &mut client,
+        "late",
+        &session,
+        None,
+        json!({"at": "2020-01-01T00:00:00Z"}),
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let history: Value = client
+                .typed("schedule.history", json!({"job_id": late}))
+                .await
+                .unwrap();
+            if !history["runs"].as_array().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the past window is recorded");
+    let history: Value = client
+        .typed("schedule.history", json!({"job_id": late}))
+        .await
+        .unwrap();
+    let run = &history["runs"][0];
+    assert_eq!(run["state"], "missed", "{history}");
+    assert_eq!(run["detail"], "missed", "{history}");
+    assert_eq!(run["window"], "2020-01-01T00:00:00.000Z", "{history}");
+    assert!(run["session_id"].is_null(), "{history}");
+    assert!(
+        scheduled_inputs(&mut client, &session).await.is_empty(),
+        "a missed window writes no input"
+    );
+
+    let gone = save_session_job(
+        &mut client,
+        "gone",
+        "no-such-session",
+        None,
+        json!({"every_minutes": 1}),
+    )
+    .await;
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": gone}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &gone, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "failed", "{run}");
+    assert_eq!(run["detail"], "session_closed", "{run}");
+    let job = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+            let job = listed["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|job| job["id"] == gone.as_str())
+                .unwrap()
+                .clone();
+            if job["enabled"] == json!(false) {
+                return job;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the gone target disables the job");
+    assert_eq!(job["enabled"], false, "{job}");
+    assert_eq!(job["disabled_reason"]["code"], "session_closed", "{job}");
+    assert!(job["disabled_reason"]["at"].is_string(), "{job}");
+
+    // Later windows do not fire while the job is disabled.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let history: Value = client
+        .typed("schedule.history", json!({"job_id": gone}))
+        .await
+        .unwrap();
+    assert_eq!(history["runs"].as_array().unwrap().len(), 1, "{history}");
+
+    // A save clears the reason; enabling clears it too.
+    let renamed: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"id": gone, "name": "gone again"}}),
+        )
+        .await
+        .unwrap();
+    assert!(renamed["job"]["disabled_reason"].is_null(), "{renamed}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lookup_settles_a_delivering_delivery_at_any_attempt() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let job_id = save_session_job(
+        &mut client,
+        "nightly",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job_id}))
+        .await
+        .unwrap();
+    let delivered = settled(&mut client, &job_id, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(delivered["state"], "delivered", "{delivered}");
+    let run_id = delivered["run_id"].as_str().unwrap().to_owned();
+    let input_id = delivered["input_event_id"].as_str().unwrap().to_owned();
+    let submission = delivered["submission_id"].as_str().unwrap().to_owned();
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    // A crash left the record unsettled after its input was published and
+    // three lookups had run.
+    edit_runs(home.path(), |runs| {
+        let run = runs
+            .iter_mut()
+            .find(|run| run["run_id"] == run_id.as_str())
+            .unwrap();
+        run["state"] = json!("delivering");
+        run["attempts"] = json!(3);
+        run.as_object_mut().unwrap().remove("ended_at");
+        run.as_object_mut().unwrap().remove("input_event_id");
+    });
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let resumed = settled(&mut client, &job_id, &run_id).await;
+    assert_eq!(resumed["state"], "delivered", "{resumed}");
+    assert_eq!(resumed["input_event_id"], json!(input_id), "{resumed}");
+    assert_eq!(resumed["attempts"], 4, "{resumed}");
+    let inputs = scheduled_inputs(&mut client, &session).await;
+    let matching: Vec<_> = inputs
+        .iter()
+        .filter(|input| input["data"]["submission_id"] == json!(submission))
+        .collect();
+    assert_eq!(matching.len(), 1, "no second input: {inputs:?}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_absent_attempts_field_reads_as_zero() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let job_id = save_session_job(
+        &mut client,
+        "nightly",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job_id}))
+        .await
+        .unwrap();
+    let delivered = settled(&mut client, &job_id, accepted["run_id"].as_str().unwrap()).await;
+    let run_id = delivered["run_id"].as_str().unwrap().to_owned();
+    let input_id = delivered["input_event_id"].as_str().unwrap().to_owned();
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    edit_runs(home.path(), |runs| {
+        let run = runs
+            .iter_mut()
+            .find(|run| run["run_id"] == run_id.as_str())
+            .unwrap();
+        run["state"] = json!("delivering");
+        run.as_object_mut().unwrap().remove("ended_at");
+        run.as_object_mut().unwrap().remove("input_event_id");
+        run.as_object_mut().unwrap().remove("attempts");
+    });
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let resumed = settled(&mut client, &job_id, &run_id).await;
+    assert_eq!(resumed["state"], "delivered", "{resumed}");
+    assert_eq!(resumed["input_event_id"], json!(input_id), "{resumed}");
+    assert_eq!(resumed["attempts"], 1, "the first lookup is attempt one");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_keeps_the_delivery_unsettled_and_the_count_persists() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let job_id = save_session_job(
+        &mut client,
+        "nightly",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+
+    let run_id = "seed-unknown";
+    let submission = format!("scheduler:{run_id}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    edit_runs(home.path(), |runs| {
+        runs.push(seeded_delivery(
+            run_id,
+            &job_id,
+            &session,
+            &submission,
+            None,
+        ));
+    });
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let after_unknown = wait_attempts(home.path(), run_id, 1).await;
+    assert_eq!(after_unknown["state"], "delivering", "{after_unknown}");
+    assert_eq!(after_unknown["attempts"], 1, "{after_unknown}");
+    assert!(
+        scheduled_inputs(&mut client, &session).await.is_empty(),
+        "the delivery wrote nothing"
+    );
+
+    // The answer carried no fact, so the record stays unsettled and a new
+    // pass counts the next attempt.
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let client = support::connect(&server).await;
+    let after_second = wait_attempts(home.path(), run_id, 2).await;
+    assert_eq!(after_second["state"], "delivering", "{after_second}");
+    assert_eq!(after_second["attempts"], 2, "{after_second}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Polls the store until a delivery's persisted attempts reach `attempts`.
+async fn wait_attempts(home: &std::path::Path, run_id: &str, attempts: u32) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(run) = stored_runs(home)
+                .into_iter()
+                .find(|run| run["run_id"] == run_id)
+                && run["attempts"] == json!(attempts)
+            {
+                return run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the lookup pass persists the attempt")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fifth_answer_settles_lost_and_an_exhausted_budget_needs_no_lookup() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let fifth = save_session_job(
+        &mut client,
+        "fifth",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    let exhausted = save_session_job(
+        &mut client,
+        "exhausted",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    edit_runs(home.path(), |runs| {
+        runs.push(seeded_delivery(
+            "seed-fifth",
+            &fifth,
+            &session,
+            "scheduler:seed-fifth",
+            Some(4),
+        ));
+        runs.push(seeded_delivery(
+            "seed-exhausted",
+            &exhausted,
+            &session,
+            "scheduler:seed-exhausted",
+            Some(5),
+        ));
+    });
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let run = settled(&mut client, &fifth, "seed-fifth").await;
+    assert_eq!(run["state"], "lost", "{run}");
+    assert_eq!(run["detail"], "unknown", "{run}");
+    assert_eq!(run["attempts"], 5, "{run}");
+
+    let run = settled(&mut client, &exhausted, "seed-exhausted").await;
+    assert_eq!(run["state"], "lost", "{run}");
+    assert_eq!(run["detail"], "lookup_budget_exhausted", "{run}");
+    assert_eq!(run["attempts"], 5, "{run}");
+    assert!(
+        scheduled_inputs(&mut client, &session).await.is_empty(),
+        "no window wrote an input"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unsettled_delivery_skips_later_windows_and_run_now_records_its_own() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let job_id = save_session_job(
+        &mut client,
+        "inbox",
+        &session,
+        None,
+        json!({"every_minutes": 1}),
+    )
+    .await;
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    edit_runs(home.path(), |runs| {
+        runs.push(seeded_delivery(
+            "seed-open",
+            &job_id,
+            &session,
+            "scheduler:seed-open",
+            None,
+        ));
+    });
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let open = wait_attempts(home.path(), "seed-open", 1).await;
+    assert_eq!(open["state"], "delivering", "{open}");
+
+    let mut skipped = Vec::new();
+    for _ in 0..2 {
+        let run: Value = client
+            .typed("schedule.run_now", json!({"job_id": job_id}))
+            .await
+            .unwrap();
+        assert_eq!(run["state"], "missed", "{run}");
+        assert_eq!(run["detail"], "previous_delivery_unsettled", "{run}");
+        assert_ne!(
+            run["run_id"], "seed-open",
+            "run_now records its own delivery"
+        );
+        skipped.push(run);
+    }
+    assert_ne!(skipped[0]["run_id"], skipped[1]["run_id"], "{skipped:?}");
+    let open = wait_attempts(home.path(), "seed-open", 1).await;
+    assert_eq!(
+        open["state"], "delivering",
+        "the seed stays unsettled: {open}"
+    );
+    assert!(
+        scheduled_inputs(&mut client, &session).await.is_empty(),
+        "a skipped window writes no input"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retention_keeps_an_unsettled_delivery_and_the_newest_hundred_terminal_ones() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let job_id = save_session_job(
+        &mut client,
+        "nightly",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    edit_runs(home.path(), |runs| {
+        for index in 0..102 {
+            let run_id = format!("old-{index:03}");
+            let at = format!("2026-01-01T00:{:02}:{:02}.000Z", index / 60, index % 60);
+            runs.push(json!({
+                "run_id": run_id,
+                "job_id": job_id,
+                "window": "manual",
+                "state": "delivered",
+                "session_id": session,
+                "branch_id": "main",
+                "input_event_id": format!("input-{index}"),
+                "submission_id": format!("scheduler:old-{index:03}"),
+                "created_at": at,
+                "ended_at": at,
+                "detail": "",
+            }));
+        }
+        runs.push(seeded_delivery(
+            "seed-open",
+            &job_id,
+            &session,
+            "scheduler:seed-open",
+            None,
+        ));
+    });
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    wait_attempts(home.path(), "seed-open", 1).await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let stored = stored_runs(home.path());
+            if stored
+                .iter()
+                .filter(|run| run["job_id"] == job_id.as_str())
+                .count()
+                == 101
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("retention leaves the newest hundred terminal deliveries and the unsettled one");
+    let history: Value = client
+        .typed("schedule.history", json!({"job_id": job_id, "limit": 50}))
+        .await
+        .unwrap();
+    assert_eq!(history["runs"].as_array().unwrap().len(), 50, "{history}");
+    let stored = stored_runs(home.path());
+    assert!(
+        stored.iter().any(|run| run["run_id"] == json!("seed-open")),
+        "the delivering record is kept: {stored:?}"
+    );
+    let terminal = stored
+        .iter()
+        .filter(|run| run["job_id"] == job_id.as_str() && run["state"] == json!("delivered"))
+        .count();
+    assert_eq!(terminal, 100, "the newest hundred terminal deliveries stay");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_jobs_map_to_their_targets_and_keep_their_bytes() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let first = create_session(&mut client, home.path(), true).await;
+    let second = create_session(&mut client, home.path(), true).await;
+    // A delivery needs the job to exist before the document is replaced.
+    save_session_job(
+        &mut client,
+        "seed",
+        &first,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let policy_cap = json!({"preset": "read-only", "allowedTools": [], "disallowedTools": []});
+    let job = |id: &str, created_by: Value, mode: &str, session: Option<&str>| {
+        let mut job = json!({
+            "id": id,
+            "name": id,
+            "schedule": {"at": "2030-01-01T00:00:00Z"},
+            "prompt": format!("Work on {id}."),
+            "cwd": home.path(),
+            "mode": mode,
+            "enabled": true,
+            "enabled_at": "2026-01-01T00:00:00.000Z",
+            "revision": 1,
+            "created_by": created_by,
+            "policy_cap": policy_cap.clone(),
+        });
+        if let Some(session) = session {
+            job["session_id"] = json!(session);
+        }
+        job
+    };
+    let legacy = json!({"max_concurrent_runs": 4, "jobs": [
+        job("tool-create", json!({"tool": {"session_id": first, "branch_id": "main"}}), "create", None),
+        job("tool-reuse", json!({"tool": {"session_id": first, "branch_id": "main"}}), "reuse", None),
+        job("user-create", json!("user"), "create", None),
+        job("user-reuse", json!("user"), "reuse", Some(&second)),
+        job("user-reuse-none", json!("user"), "reuse", None),
+    ]});
+    rusqlite::Connection::open(home.path().join("dimcode.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE settings_documents SET document = ?1 WHERE source = 'user/schedule'",
+            [legacy.to_string()],
+        )
+        .unwrap();
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+    let target = |id: &str| {
+        listed["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["id"] == id)
+            .unwrap()["target"]
+            .clone()
+    };
+    assert_eq!(
+        target("tool-create"),
+        json!({"kind": "session", "session_id": first, "branch_id": "main",
+            "input_mode": "queue"}),
+        "{listed}"
+    );
+    assert_eq!(target("tool-reuse"), target("tool-create"), "{listed}");
+    assert_eq!(target("user-create")["kind"], "launch", "{listed}");
+    assert_eq!(
+        target("user-reuse"),
+        json!({"kind": "session", "session_id": second, "branch_id": "main",
+            "input_mode": "queue"}),
+        "{listed}"
+    );
+    assert_eq!(target("user-reuse-none")["kind"], "launch", "{listed}");
+
+    for (id, session) in [("tool-create", &first), ("user-reuse", &second)] {
+        let job_id = listed["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|job| job["id"] == id)
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let accepted: Value = client
+            .typed("schedule.run_now", json!({"job_id": job_id}))
+            .await
+            .unwrap();
+        let run = settled(&mut client, &job_id, accepted["run_id"].as_str().unwrap()).await;
+        assert_eq!(run["state"], "delivered", "{id}: {run}");
+        assert_eq!(run["session_id"], json!(session), "{id}: {run}");
+        assert_eq!(run["branch_id"], "main", "{id}: {run}");
+        let inputs = scheduled_inputs(&mut client, session).await;
+        assert!(
+            inputs
+                .iter()
+                .any(|input| input["data"]["submission_id"] == run["submission_id"]),
+            "{id}: the delivery wrote its branch: {inputs:?}"
+        );
+    }
+    let launch_id = listed["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == "user-create")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": launch_id}))
+        .await
+        .unwrap();
+    let run = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let history: Value = client
+                .typed(
+                    "schedule.history",
+                    json!({"job_id": launch_id, "limit": 50}),
+                )
+                .await
+                .unwrap();
+            if let Some(run) = history["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["run_id"] == accepted["run_id"])
+                && !matches!(
+                    run["state"].as_str(),
+                    Some("launching" | "submitted" | "running")
+                )
+            {
+                return run.clone();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the launch target settles");
+    assert_eq!(run["state"], "completed", "{run}");
+    assert_eq!(run["session_origin"], "launch", "{run}");
+
+    // A save preserves the legacy fields and leaves the stored target absent.
+    let tool_id = listed["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == "tool-create")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": tool_id, "name": "tool-create renamed"}}),
+        )
+        .await
+        .unwrap();
+    let document: String = rusqlite::Connection::open(home.path().join("dimcode.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT document FROM settings_documents WHERE source = 'user/schedule'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let document: Value = serde_json::from_str(&document).unwrap();
+    let stored = document["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == tool_id.as_str())
+        .unwrap();
+    assert_eq!(stored["name"], "tool-create renamed", "{stored}");
+    assert!(stored.get("target").is_none(), "{stored}");
+    assert_eq!(stored["mode"], "create", "{stored}");
+    assert_eq!(stored["cwd"], json!(home.path()), "{stored}");
+    assert_eq!(stored["policy_cap"], policy_cap, "{stored}");
+
+    // A reused Session survives its job's deletion; a launched Session goes.
+    let reused_job = listed["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == "user-reuse")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    client
+        .typed::<Value>("schedule.delete", json!({"job_id": reused_job}))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let catalog = client
+        .rpc(
+            "session.catalog",
+            json!({"withInternal": true, "limit": 100}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        catalog.to_string().contains(&second),
+        "a Session the job only reused survives: {catalog}"
+    );
+    let launched = run["session_id"].as_str().unwrap();
+    client
+        .typed::<Value>("schedule.delete", json!({"job_id": launch_id}))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let catalog = client
+                .rpc(
+                    "session.catalog",
+                    json!({"withInternal": true, "limit": 100}),
+                )
+                .await
+                .unwrap();
+            if !catalog.to_string().contains(launched) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("a launched Session goes with its job");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
