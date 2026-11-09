@@ -722,9 +722,9 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 
 | PR | 范围 |
 | --- | --- |
-| 2 | `session` 目标端到端：任务记录、工具的 schema 与描述、`scheduleJobs` 的目标与 16 条上限、定时器的投递路径、投递记录与 `schedule.history`，同时保留 launch 目标的旧行为 |
+| 2 | `session` 目标端到端：任务记录、工具的 schema 与描述、`scheduleJobs` 的目标与 16 条上限、定时器的投递路径、投递记录与 `schedule.history`，同时保留 launch 目标的旧行为；以及所有客户端对它所改形状的读写，使在它之后切出的版本仍可工作 |
 | 3 | `launch` 目标收敛为一次启动、一条输入与停止定时器；退役运行追踪器、报告、`report_guidance`、guide 条目的 report 种类与保存时策略捕获 |
-| 4 | CLI 与 Web 客户端：带 `target` 的任务文档、新投递词表、移除的模型与 mode 字段 |
+| 4 | PR 3 所改形状的客户端读写：launch 路线退役的字段及其报告 |
 
 已知限制：一次 `launch` 可能在调用方消失、其身份尚未持久化时完成。没有该身份的投递记为 `lost`，永不重启；Scheduler 无法识别由此产生的 Session 用于停止定时器或保留期。为后续统一恢复设计保留这一限制的明确说明，不在此增加幂等、注册表或基础设施闸门。
 

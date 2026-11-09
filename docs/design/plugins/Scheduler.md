@@ -747,9 +747,9 @@ The change ships as four pull requests. The first, this document, is the design 
 
 | PR | Scope |
 | --- | --- |
-| 2 | The `session` target end to end: the job record, the tool's schema and description, `scheduleJobs`'s target and 16-job bound, the timer's delivery path, the delivery record and `schedule.history`, with the launch target's old behaviour retained |
+| 2 | The `session` target end to end: the job record, the tool's schema and description, `scheduleJobs`'s target and 16-job bound, the timer's delivery path, the delivery record and `schedule.history`, with the launch target's old behaviour retained, and every client read or write of the shapes it changes, so a release cut after it works |
 | 3 | The `launch` target reduced to one launch, one input and the stop timer; retirement of the run tracker, the report, `report_guidance`, the guide entry's report kind and the save-time policy capture |
-| 4 | The CLI and web clients: job documents with `target`, the new delivery vocabulary, and the removed model and mode fields |
+| 4 | The client reads and writes of the shapes PR 3 changes: the launch route's retired fields and its report |
 
 Known limit: a `launch` can finish after its caller disappears, before its identity is persisted. A delivery without that identity is recorded `lost` and is never relaunched; Scheduler cannot identify the resulting Session for the stop timer or retention. Keep this limitation explicit for later unified recovery design, without adding idempotency, a registry or an infrastructure gate here.
 
