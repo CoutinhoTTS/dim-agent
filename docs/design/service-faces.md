@@ -80,7 +80,7 @@ impl AgentBuilder {
 
 ## 3. 盘点（#1300）
 
-catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 3 个新名字（`scheduleJobs`、`workflowRuns`、`managedSearch`）；新名字不计入 84。每个现有名字恰好归类一次；§3.3 的“数据兄弟”列是目标名字，不是被盘点的 Rust-only 名字。
+catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`workflowRuns`、`sessionFiles`、`managedSearch`）；新名字不计入 84。每个现有名字恰好归类一次；§3.3 的“数据兄弟”列是目标名字，不是被盘点的 Rust-only 名字。
 
 ### 3.1 已经可以跨，但 catalog 列没体现
 
@@ -94,7 +94,7 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | --- | --- | --- |
 | `scheduleJobs` | 新数据面 `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md) 已接受的 `JobRequest`/`Caller`/`JobReply`；它们现在没有 serde derive，随迁移补 |
 | `workflowRuns` | 新数据面 `workflowRuns.call(RunRequest)` | 按 [Workflow](plugins/Workflow.md) 已接受的 `RunRequest`/`RunReply`；Workflow 未实现，接口预留 |
-| `sessionFilesHost` | 现有名字改 shared + dispatcher | 路径用字符串；不新增 `sessionFiles` |
+| `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
 | `managedSearch` | 新数据面，只含 `search` | `managedProviders` 保持 internal(secret)，账号/token 不出去 |
 
 `settingsService` 和 `modelHost` **不进第一批**：它们保留类型化调用。`settings.read` 会新建取消 token、并返回 `SettingsResult` 信封；GoalBranch 需要自己的 stop token，改成数据面会丢取消。`auxiliaryModel.complete` 没有 tools、config 和 cached prefix；PromptSuggestion 克隆的是整轮 `ModelRequest`，换过去是行为变化，不只是形状。它们已有数据兄弟给其他消费者；有 leaf 消费者时再按 §4 的规则扩展。
@@ -108,7 +108,8 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `modelHost` | `auxiliaryModel` | PromptSuggestion 保留 typed；`auxiliaryModel` 给无 tools 的完成 |
 | `auxiliaryModelHost` | `auxiliaryModel` | 模型调用走 `complete` |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
-| `sessionStore` | `sessionMetadata`、`sessionFilesHost` | 行与文件分开 |
+| `sessionFilesHost` | `sessionFiles` | Rust 绑定；wire 名按 owner 契约 |
+| `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
 | `toolSourcesView` | `toolRegistry` | 工具贡献走注册表 |
 | `callers` | `callChannel` | 调用通道走数据面 |
@@ -126,14 +127,13 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `backgroundExec` | 任务对象 | task id 操作 |
 | `approval`、`permission` | 决策状态 | `decide` 数据面 |
 | `inputQueue` | 队列状态 | `submit`/`withdraw` 数据面 |
+| `wait` | `WaitResult`、`CancellationToken` | `start`/`wait`/`result` 操作面 |
 
 这些面即使有数据接口，实例核心仍默认留在宿主；它们列在这里是为了说明“对象形状”不是永久 internal，而是需要操作化；原因 `object`。
 
 ### 3.5 热路径与顺序：契约上 internal
 
 `agentLoop`、`loopState`、`modelProvider`、`prompt`、`contextPreparation`、`toolBinding`、`toolExecutor`、`branchOpening`、`configurationPublisher`、`configureControl`、`fileReads`、`branchLine`、`submitChecks`、`commandRulesHost`、`promptHost`、`promptRegistry`、`initialPromptConfiguration`、`historyRenderer`、`contextModelHost`、`prepareModelHost`、`prepareContextHost`、`compactionStrategyHost`、`faultReporter`。
-
-`wait` 不在这里：它是操作面候选（`start`/`wait`/`result`）或宿主专用，和 #1299 的分类一致，不作为未标记数据服务。
 
 原因 `hot-path`：每回合/每条输入的状态机、严格本地顺序，或同步回调。跨了要重写顺序和失败语义，收益不成比例。
 
@@ -196,22 +196,22 @@ workflowRuns.call(RunRequest)
 
 Workflow 尚未实现；本项只保留接口，不写半成品。WorkflowSession 的 `toolRegistry` 注册和工具形状不变。
 
-### 4.5 `sessionFilesHost`
+### 4.5 `sessionFiles`
 
-把现有 `sessionFilesHost` 改成 shared + dispatcher，不新增 `sessionFiles` 名字。它已经几乎全是数据（`Vec<u8>`、`String`、标量），只有路径是 `PathBuf`。
+按 owner 契约 [Session files](appserver/session-files.md) §9.1 暴露 `sessionFiles`，委托现有 `SessionFilesHost`；`SessionFilesHost` 保持 Rust 类型键。
 
 ```text
-sessionFilesHost.put {sessionId, name, content: bytes, cancel?}
+sessionFiles.put {sessionId, name, content: base64 string}
   -> {fileId, path, bytes}
-sessionFilesHost.register {sessionId, path, cancel?}
-sessionFilesHost.owns {sessionId, path} -> {owned: bool}
-sessionFilesHost.ownedPaths {sessionId} -> {paths: [string]}
+sessionFiles.register {sessionId, path}
+sessionFiles.owns {sessionId, path} -> {owned: bool}
+sessionFiles.owned_paths {sessionId} -> {paths: [string]}
   -> error {code: not_found | invalid | too_large | node_unavailable | cancelled | storage, message}
 ```
 
-- 路径是 UTF-8 字符串；`content` 用 `rutis_bridge::session::Bytes`。16 MiB 上限不变；先测是否超过 Channel 单条消息上限，超了加 `putBegin`/`putAppend`/`putCommit`，不偷偷截断。
-- 取消：调用方丢弃调用，或传 `cancel` 回调；方法签名写明。
-- 消费者：Attachments（`put`）、WorkspaceTools/ShellSession（`register`）、FileAccessFacts（`owns`/`ownedPaths`）。
+- 名字、`content`（base64）、`owned_paths` 和取消都按 §9.1；取消是协议动作（调用方丢弃调用或发 bridge cancel），不是 `cancel?` 字段。
+- 路径是 UTF-8 字符串。16 MiB 上限不变；先测是否超过 Channel 单条消息上限，超了在 owner 契约里加分块，不偷偷截断。
+- 消费者：Attachments 已声明 `P:sessionFiles`；WorkspaceTools/ShellSession（`register`）、FileAccessFacts（`owns`/`owned_paths`）。
 - 测试：`session_files_flow.rs`、`attachments_flow.rs`，加 loopback。
 
 ### 4.6 `managedSearch`
@@ -238,7 +238,7 @@ managedSearch.search {query, count, cancel?}
 
 ## 6. 风险与开放问题
 
-1. **Channel 单条消息上限**：`sessionFilesHost.put` 的 16 MiB 可能超过限制。先测；超了就分块，不降低上限。
+1. **Channel 单条消息上限**：`sessionFiles.put` 的 16 MiB 可能超过限制。先测；超了就分块，不降低上限。
 2. **secret**：`providerService`、`mcpAuth`、OAuth 服务、`managedProviders` 保持 internal；数据面只暴露操作，不暴露值。
 3. **Workflow 未实现**：`workflowRuns` 是接口预留，不阻塞其余项。
 4. **`Faces` 的传播**：`Names`、`PartRegistry`、`SessionResolver` 都要拿到同一份原因表；独立 host / 测试用空表，检查只在装配和 leaf 加载处生效。
@@ -249,5 +249,5 @@ managedSearch.search {query, count, cancel?}
 
 1. **#1289**：`Faces`、`AgentBuilder::internal`、catalog `face`、双向 `xtask check`、leaf 拒绝、`managementMethods` 注册顺序、`localId`/`loaderService`/`pluginMounter` 的 dispatcher 或去 shared、模板/清单。此 PR 只加检查和标记，不改服务行为。
 2. **#1300**：按 §3 的分组在 catalog 里补齐 reason；`xtask graph` 的 diff 就是盘点结果。此 PR 不改服务。
-3. **#1292**：按 `scheduleJobs` → `sessionFilesHost` → `managedSearch` 的顺序，一项一个 PR；`workflowRuns` 随 Workflow 落地。`settingsService`、`modelHost` 不迁移。
+3. **#1292**：按 `scheduleJobs` → `sessionFiles` → `managedSearch` 的顺序，一项一个 PR；`workflowRuns` 随 Workflow 落地。`settingsService`、`modelHost` 不迁移。
 4. 每项都带现有 flow 测试；不新增适配层，不写第二份逻辑。
