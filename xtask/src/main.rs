@@ -55,6 +55,10 @@ async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("context-breakdown") => context_breakdown().await?,
         Some("summary-eval") => summary_eval::run().await?,
         Some("scenario-eval") => scenario_eval::run().await?,
+        // The hidden serve entry of an isolated scenario run: `run_once`
+        // starts its own binary with this subcommand and a params file, and
+        // the child serves the run, drives it over its socket and judges it.
+        Some("scenario-eval-serve") => scenario_eval::serve_entry(std::env::args().nth(2)).await?,
         Some("prompt-eval") => prompt_eval::run().await?,
         Some("check") => {
             boundaries(false)?;

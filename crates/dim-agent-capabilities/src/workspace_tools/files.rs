@@ -204,7 +204,7 @@ impl From<PathError> for String {
 /// created, and a root reached through a symlink would answer `starts_with`
 /// with its lexical path. The product passes `None`, so its behaviour does
 /// not change (ADR 014 keeps deciding file access for it).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileToolBoundary {
     /// The session's workspace: reads and writes. A model's cwd is inside
     /// it.

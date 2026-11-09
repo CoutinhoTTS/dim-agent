@@ -72,6 +72,10 @@ pub struct RunSettings {
     /// `defaults` is set.
     pub node: Option<PathBuf>,
     pub js_runtime: Option<PathBuf>,
+    /// The file-tool root boundary an isolated run's sessions serve: reads
+    /// in the workspace, the disposable home and the system roots, writes
+    /// only in the workspace. The product path leaves it empty.
+    pub boundary: Option<dim_agent_capabilities::workspace_tools::FileToolBoundary>,
 }
 
 impl RunSettings {
@@ -176,7 +180,7 @@ pub async fn serve_home(
         &mut builder,
         ModelProviderPlugin::process,
         WorkspaceToolsConfig {
-            boundary: None,
+            boundary: run.boundary.clone(),
             output_root,
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig {
