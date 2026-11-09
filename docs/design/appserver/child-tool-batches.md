@@ -83,7 +83,50 @@ The minimum behavior is:
 A v4 client may choose not to expose child details at all. The only mandatory rendering rule is
 no orphan rows.
 
-### 2.3 TUI and CLI
+### 2.3 UI shape and the current renderer
+
+The current CLI draws one `ToolGroup` per model request. Collapsed is one row; `summary` adds one
+row per call; `expanded` adds the call rows and their details. The disclosure is `▸` or `▾`; the
+outcome marks are `✓`, `✗` and the running mark; nested sections already use a header at indent 2
+and their rows at indent 3. A child batch currently has no parent in `ViewRow`, so an unchanged
+client would open a second top-level group. That is the rendering bug this design removes.
+
+The v4 shape nests a child `ToolGroup` under the outer `codemode` call:
+
+```text
+✓ Ran 1 tool · 4 child calls · 2 running ................................ ▸
+```
+
+```text
+✓ Ran 1 tool · 4 child calls · 2 running ................................ ▾
+  ✓ Read CodeMode.md
+  ✓ Grep parent_call_id
+  · Ran cargo test -p dim-codemode
+  · ask_user  Which line?
+```
+
+```text
+✓ Ran 1 tool · 4 child calls ........................................... ▾
+  ✓ codemode
+    ✓ Ran 2 tools, read 2 files ........................................ ▾
+      ✓ Read CodeMode.md
+      ✓ Grep parent_call_id
+    · Ran 1 command .................................................... ▾
+      · cargo test -p dim-codemode
+    · ask_user ......................................................... ▾
+      Which line?
+      [1] main  [2] child  [c] custom
+```
+
+This reuses the existing header, summary rows, nested section indent and outcome marks. It does
+not add a new card style or a second transcript. A pending `ask_user` uses the running mark; the
+question itself uses the existing question surface. A child approval uses the existing approval
+surface and names `child <call> of codemode <parent>`.
+
+Implementation consequence: `ViewRow` carries the parent call id and the projection builds child
+groups; changing only the renderer would still leave the child as a separate group.
+
+### 2.4 TUI and CLI
 
 The CLI projection keeps one tool row per call id. A child event is associated by
 `(request_id, parent_call_id)`; the child call is a nested row of the parent `codemode` row.
@@ -99,7 +142,7 @@ The CLI projection keeps one tool row per call id. A child event is associated b
 The detailed row layout remains a TUI concern. The protocol only supplies the parent identity and
 the existing child facts.
 
-### 2.4 Web
+### 2.5 Web
 
 `web/src/rpc/protocol.ts` uses protocol version 4. `web/src/rpc/read.ts` reads the optional
 `parent_call_id` into the event view and the chat projection groups child events under the parent
@@ -109,7 +152,7 @@ list. A child `ask_user` keeps its pending question under the parent card.
 The web entry manifest and the App Server's exact-version web check move to 4 together; an old web
 bundle is refused rather than served an event shape it cannot read.
 
-### 2.5 App Server Code Mode gate
+### 2.6 App Server Code Mode gate
 
 The product profile may install `dim_codemode`, but a Session created by a connection below
 protocol 4 must not see the `codemode` tool. This is a tool-exposure rule, not an event filter:
@@ -124,7 +167,7 @@ A v3 client must not be able to start a Code Mode program whose child `ask_user`
 and whose child tool cards it cannot group. Keeping the tool out of v3 Sessions is the smallest
 enforcement point.
 
-### 2.6 npm client protocol
+### 2.7 npm client protocol
 
 `npm/client-protocol.d.ts` adds:
 
@@ -138,7 +181,7 @@ export interface AgentEvent {
 The field is optional and only appears in v4 events. A v3 client still compiles and still receives
 the v3 projection without it.
 
-### 2.7 AgentLoop rebuild
+### 2.8 AgentLoop rebuild
 
 `AgentLoop::rebuild` is a recovery path, not a client feature, but it consumes the same events. It
 must select `parent_call_id` and ignore parented `step/tool-call` / `step/tool-result` events when
@@ -150,7 +193,7 @@ the outer result to the wrong batch.
 The live `on_event` path already ignores parented events; rebuild must match it. This is an
 internal correctness fix, independent of which clients receive the events.
 
-### 2.8 Recall
+### 2.9 Recall
 
 Recall groups model tool-use events. Child calls are `step/tool-call` facts, not model tool-use
 events. For this delivery, Recall does not claim child grouping; the Code Mode design's Recall
