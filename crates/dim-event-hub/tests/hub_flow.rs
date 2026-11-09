@@ -901,6 +901,58 @@ async fn a_branch_the_session_lacks_is_refused() {
     server.join().await.unwrap();
 }
 
+/// The schema leaves `types` optional because `sources`, `unsubscribe` and
+/// `list` take none: a `subscribe` without it, with an empty list or with
+/// more than 16 entries answers `invalid_params` and stores nothing (design
+/// A.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscribe_without_a_valid_type_list_is_refused() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let (server, producer) = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_events_session(&mut client, home.path()).await;
+    producer
+        .declare(im_declaration("The IM guide."))
+        .await
+        .unwrap();
+    for (id, input) in [
+        ("events-1", json!({"action": "subscribe"})),
+        ("events-2", json!({"action": "subscribe", "types": []})),
+        (
+            "events-3",
+            json!({"action": "subscribe", "types": vec!["im.*"; 17]}),
+        ),
+    ] {
+        model.push(vec![ToolCall {
+            id: id.into(),
+            name: "events".into(),
+            input: input.as_object().unwrap().clone(),
+        }]);
+    }
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "Subscribe without types."}),
+        )
+        .await
+        .unwrap();
+    wait_for("the three results", || model.count() >= 4).await;
+    let texts = model.texts();
+    assert!(
+        texts.contains("invalid_params: types holds 1 to 16 entries"),
+        "{texts}"
+    );
+    assert!(
+        listed(&mut client, &session).await.is_empty(),
+        "nothing is stored"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// The risk per action on Approval's path (design §7, Appendix D item 10):
 /// `sources` and `list` are admitted under `session`, while `subscribe` and
 /// `unsubscribe` are `persistent_configuration`, which the read-only preset
