@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
-    ManagementRefusal, ManagementRequest, ManagementResult, RenameReply, SessionPort, SubmitMode,
-    SuggestionSetting, SwitchKind, Update,
+    ManagementRefusal, ManagementRequest, ManagementResult, PromptField, PromptSetting,
+    RenameReply, SessionPort, SubmitMode, SuggestionSetting, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -679,6 +679,16 @@ fn run_terminal(
                     title.forget();
                     dirty = true;
                 }
+                Outcome::EditPrompt { field, text } => {
+                    if let Err(code) = edit_prompt(&mut app, &mut terminal, field, text) {
+                        app.host.shutdown();
+                        return code;
+                    }
+                    status.forget();
+                    progress.forget();
+                    title.forget();
+                    dirty = true;
+                }
                 Outcome::Exit(code) => break code,
                 Outcome::Web => {
                     app.host.send(Command::ToggleWeb);
@@ -741,11 +751,88 @@ enum Outcome {
         text: String,
         seed: Option<serde_json::Value>,
     },
+    /// A prompt row's edit: the field and the text the editor opens with.
+    EditPrompt {
+        field: PromptField,
+        text: String,
+    },
     /// `/web`: flip the daemon-owned Web entry switch without leaving.
     Web,
     /// Start the updated CLI from this path on the session.
     Restart(PathBuf),
     Exit(i32),
+}
+
+/// Opens the external editor on a prompt field and sends what it leaves.
+/// `Err` is the code the terminal lost.
+fn edit_prompt(
+    app: &mut App,
+    terminal: &mut Terminal,
+    field: PromptField,
+    text: String,
+) -> std::result::Result<(), i32> {
+    let draft = match app.prompt_draft.as_ref().map(|(kept, _)| *kept) {
+        Some(kept) if kept == field => app.prompt_draft.take().expect("the kept prompt draft").1,
+        _ => match editor::Draft::open_text(&app.home, field.key(), "md", &text) {
+            Ok(draft) => draft,
+            Err(error) => {
+                app.set_notice(error);
+                return Ok(());
+            }
+        },
+    };
+    let path = draft.path().display().to_string();
+    let mut command = editor::command(draft.path());
+    let program = command.get_program().to_string_lossy().into_owned();
+    let ran = match terminal.run_external(&mut command) {
+        Ok(ran) => ran,
+        Err(_) => return Err(terminal.lost()),
+    };
+    match ran {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            app.prompt_draft = Some((field, draft));
+            app.set_notice(format!(
+                "{} Nothing was written. Your text is kept in {path}.",
+                editor::exited(status)
+            ));
+            return Ok(());
+        }
+        Err(error) => {
+            app.prompt_draft = Some((field, draft));
+            app.set_notice(format!("{program}: {error}"));
+            return Ok(());
+        }
+    }
+    let text = match draft.text() {
+        Ok(text) => text,
+        Err(error) => {
+            app.prompt_draft = Some((field, draft));
+            app.set_notice(format!("{error} Your text is kept in {path}."));
+            return Ok(());
+        }
+    };
+    if text.trim().is_empty() {
+        draft.remove();
+        app.set_notice(format!(
+            "An empty draft writes nothing; press r on {} to reset it",
+            field.key()
+        ));
+        return Ok(());
+    }
+    let current = app
+        .prompt_setting
+        .as_ref()
+        .and_then(|setting| setting.text(field))
+        .unwrap_or_default();
+    if text == current {
+        draft.remove();
+        app.set_notice(format!("{}: unchanged", field.key()));
+        return Ok(());
+    }
+    app.pending_prompt = Some((field, draft));
+    app.host.send(Command::SavePromptSetting { field, text });
+    Ok(())
 }
 
 /// Opens the external editor on a management draft and writes what it
@@ -1026,6 +1113,12 @@ struct App {
     /// A flip asked for before the switch was known: the read that answers
     /// it sends the flip.
     suggestion_flip: bool,
+    /// The `prompts` source as last read or written.
+    prompt_setting: Option<PromptSetting>,
+    /// A draft a refused prompt write kept, for the next edit of its field.
+    prompt_draft: Option<(PromptField, editor::Draft)>,
+    /// The draft of a prompt write in flight; removed on success.
+    pending_prompt: Option<(PromptField, editor::Draft)>,
 }
 
 /// An offer the Session made for the message the user would send next.
@@ -1329,6 +1422,9 @@ impl App {
             suggestion_setting: None,
             suggestion_methods: false,
             suggestion_flip: false,
+            prompt_setting: None,
+            prompt_draft: None,
+            pending_prompt: None,
         }
     }
 
@@ -2370,6 +2466,32 @@ impl App {
                     self.set_notice(tf("Prompt suggestion: {error}", &[("error", &error)]));
                 }
             },
+            Update::PromptSettings(result) => match result {
+                Ok(setting) => {
+                    self.prompt_setting = Some(setting.clone());
+                    if let Some((_, draft)) = self.pending_prompt.take() {
+                        draft.remove();
+                    }
+                    if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                        panel.set_prompts(&setting);
+                    }
+                }
+                Err(error) => {
+                    if let Some((field, draft)) = self.pending_prompt.take() {
+                        let path = draft.path().display().to_string();
+                        self.prompt_draft = Some((field, draft));
+                        self.set_notice(tf(
+                            "{field}: {error} Your text is kept in {path}",
+                            &[("field", field.key()), ("error", &error), ("path", &path)],
+                        ));
+                    } else if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                        panel.set_prompts_unavailable();
+                        self.set_notice(tf("Prompts: {error}", &[("error", &error)]));
+                    } else {
+                        self.set_notice(tf("Prompts: {error}", &[("error", &error)]));
+                    }
+                }
+            },
             Update::TurnCompleted { turn_id } => self.turn_completed(&turn_id),
             Update::SuggestionOffer { turn_id, text } => {
                 self.suggestion = Some(Suggestion { turn_id, text });
@@ -3388,6 +3510,34 @@ impl App {
                     self.permissions_return = true;
                 }
             }
+            Effect::EditPrompt(field) => {
+                let text = self
+                    .prompt_setting
+                    .as_ref()
+                    .and_then(|setting| setting.text(field))
+                    .unwrap_or_default()
+                    .to_owned();
+                return Outcome::EditPrompt { field, text };
+            }
+            Effect::ResetPrompt(field) => {
+                if let Some(text) = self
+                    .prompt_setting
+                    .as_ref()
+                    .and_then(|setting| setting.text(field))
+                {
+                    match editor::Draft::open_text(&self.home, field.key(), "md", text) {
+                        Ok(draft) => {
+                            let path = draft.path().display().to_string();
+                            self.set_notice(tf(
+                                "Resetting {field}; the old text is kept in {path}",
+                                &[("field", field.key()), ("path", &path)],
+                            ));
+                        }
+                        Err(error) => self.set_notice(error),
+                    }
+                }
+                self.host.send(Command::ResetPromptSetting { field });
+            }
             Effect::ThemePreview(id) => self.paint_theme(&id),
             Effect::ThemeRestore(id) => {
                 self.prompt = None;
@@ -3635,6 +3785,7 @@ impl App {
                 if self.suggestion_methods {
                     self.host.send(Command::ReadSuggestionSetting);
                 }
+                self.host.send(Command::ReadPromptSettings);
                 self.open_settings(Setting::Theme);
             }
             (Some("recording"), None, None) => {
@@ -3675,9 +3826,19 @@ impl App {
                 .suggestion_setting
                 .as_ref()
                 .map(|setting| setting.document.enabled),
+            prompts: self.prompt_origins(),
             permission: crate::permission::name(self.permission_policy.preset).to_owned(),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
+    }
+
+    /// Each prompt text's origin, as the last read or write reported it.
+    fn prompt_origins(&self) -> [Option<bool>; 3] {
+        PromptField::ALL.map(|field| {
+            self.prompt_setting
+                .as_ref()
+                .map(|setting| setting.text(field).is_some())
+        })
     }
 
     /// Flips a `/settings` switch, or opens the picker behind a row.
@@ -3693,6 +3854,9 @@ impl App {
                 self.open_prompt(Prompt::Language(LanguagePanel::new(i18n::saved_locale(
                     &self.home,
                 ))));
+            }
+            Setting::BasePrompt | Setting::SummaryPrompt | Setting::SkillsPrompt => {
+                self.settings_return = None;
             }
             Setting::Permission => {
                 let panel = ApprovalsPanel::new(&self.permission_policy);
@@ -7983,6 +8147,53 @@ mod tests {
         assert!(row(&mut app).starts_with("on"));
     }
 
+    /// The prompt rows show each text's origin, and Enter and `r` reach the
+    /// editor and the reset without a new slash command.
+    #[test]
+    fn settings_prompt_rows_show_origin_and_edit_or_reset() {
+        use crate::ui::render::panel::strip_escapes;
+
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.apply(Update::PromptSettings(Ok(PromptSetting {
+            revision: "r1".into(),
+            document: serde_json::json!({"summary": "S"}),
+        })));
+        app.run_command("settings", "");
+        let live = strip_escapes(&app.frame((100, 40)).live.join("\n"));
+        for row in ["Base prompt", "Compaction prompt", "Skills instructions"] {
+            assert!(live.contains(row), "{row} is missing: {live}");
+        }
+        assert!(live.contains("custom"), "{live}");
+        for _ in 0..8 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        assert!(matches!(
+            app.handle_input(key(KeyCode::Enter)),
+            Outcome::EditPrompt {
+                field: PromptField::Base,
+                ..
+            }
+        ));
+        app.handle_input(key(KeyCode::Down));
+        app.handle_input(key(KeyCode::Char('r')));
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ResetPromptSetting {
+                field: PromptField::Summary
+            })
+        ));
+    }
+
     /// A read that fails shows that the source is unavailable rather than a
     /// value the client invented.
     #[test]
@@ -8017,9 +8228,9 @@ mod tests {
     fn process_isolation_select_and_save() {
         use crate::model::session::ExecutionSnapshot;
         for (command, steps, via_permissions) in [
-            ("settings", 10, false),
+            ("settings", 12, false),
             ("permissions", 4, false),
-            ("settings", 8, true),
+            ("settings", 11, true),
         ] {
             let home = tempfile::tempdir().unwrap();
             let theme = test_theme();

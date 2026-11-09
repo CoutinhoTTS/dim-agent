@@ -7,6 +7,7 @@
 
 use std::{cell::Cell, collections::BTreeMap};
 
+use crate::model::session::PromptField;
 use crate::question::{Answer, Call, Question};
 use serde_json::Value;
 
@@ -216,6 +217,10 @@ pub enum Effect {
         /// measure the user's edits against: a run's parameters.
         seed: Option<serde_json::Value>,
     },
+    /// Open one prompt override in the external editor.
+    EditPrompt(PromptField),
+    /// Remove one prompt override.
+    ResetPrompt(PromptField),
     /// Change a provider (`/connect`).
     Provider(crate::model::session::ProviderAction),
     /// Begin a sign-in on the worker.

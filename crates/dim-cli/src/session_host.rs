@@ -24,9 +24,9 @@ use crate::model::session::{
     ACCOUNT_NAMESPACE, Account, AccountDescriptor, Command, CompactReply, ContextReading,
     DIM_OAUTH_ID, DraftPart, EmptyProvider, EmptyReason, ExecutionSnapshot, ManagementReply,
     ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider, OauthEvent, OauthStart,
-    PluginItem, PluginReply, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem,
-    RuntimesError, SandboxBackend, SessionItem, SessionPort, SessionsScope, SubagentModelPolicy,
-    SuggestionSetting, SwitchKind, Update, Usage, stored_title,
+    PluginItem, PluginReply, PromptField, PromptSetting, ProviderAction, ProviderEntry,
+    RuntimeAction, RuntimeItem, RuntimesError, SandboxBackend, SessionItem, SessionPort,
+    SessionsScope, SubagentModelPolicy, SuggestionSetting, SwitchKind, Update, Usage, stored_title,
 };
 use crate::model::view::{
     LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
@@ -1559,6 +1559,28 @@ impl Worker {
                     .map_err(|error| error.to_string())
                     .and_then(suggestion_setting);
                 self.send(Update::SuggestionSetting(result));
+            }
+            Command::ReadPromptSettings => {
+                let result = if self.client.supports(&["settings.read", "settings.update"]) {
+                    self.client
+                        .typed(
+                            "settings.read",
+                            json!({"source": "prompts", "scope": "user"}),
+                        )
+                        .await
+                        .map_err(|error| error.to_string())
+                } else {
+                    Err("This daemon does not provide prompt overrides".into())
+                };
+                self.send(Update::PromptSettings(result));
+            }
+            Command::SavePromptSetting { field, text } => {
+                let result = self.write_prompt(field, Some(&text)).await;
+                self.send(Update::PromptSettings(result));
+            }
+            Command::ResetPromptSetting { field } => {
+                let result = self.write_prompt(field, None).await;
+                self.send(Update::PromptSettings(result));
             }
             Command::ReadModelPolicy => self.read_model_policy(false).await,
             Command::SetModelPolicy {
@@ -3216,6 +3238,50 @@ impl Worker {
             empty,
             limits,
         })
+    }
+
+    /// Reads the `prompts` source, replaces or removes one field, and writes
+    /// the whole document with the revision it read.
+    async fn write_prompt(
+        &mut self,
+        field: PromptField,
+        value: Option<&str>,
+    ) -> Result<PromptSetting, String> {
+        if !self.client.supports(&["settings.read", "settings.update"]) {
+            return Err("This daemon does not provide prompt overrides".into());
+        }
+        let snapshot: PromptSetting = self
+            .client
+            .typed(
+                "settings.read",
+                json!({"source": "prompts", "scope": "user"}),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut document = snapshot.document.as_object().cloned().unwrap_or_default();
+        match value {
+            Some(text) => {
+                document.insert(
+                    field.key().into(),
+                    serde_json::Value::String(text.to_owned()),
+                );
+            }
+            None => {
+                document.remove(field.key());
+            }
+        }
+        self.client
+            .typed(
+                "settings.update",
+                json!({
+                    "source": "prompts",
+                    "scope": "user",
+                    "expectedRevision": snapshot.revision,
+                    "document": document,
+                }),
+            )
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Reports the subagent model policy, only to a daemon that manages it.

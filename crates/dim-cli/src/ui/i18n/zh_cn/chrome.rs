@@ -451,6 +451,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Notify when agent needs you" => "需要你时通知",
         "Show ACP sessions" => "显示 ACP 会话",
         "Prompt suggestion" => "提示建议",
+        "Prompts" => "提示词",
+        "Base prompt" => "基础提示",
+        "Compaction prompt" => "压缩提示",
+        "Skills instructions" => "Skills 说明",
+        "custom" => "自定义",
+        "built-in" => "内置",
+        "↑↓ move · Enter select · ←→/Space change · r reset · Esc close" => {
+            "↑↓ 移动 · Enter 选择 · ←→/空格 更改 · r 重置 · Esc 关闭"
+        }
+        "Resetting {field}; the old text is kept in {path}" => {
+            "正在重置 {field}；旧文本保留在 {path}"
+        }
         "Prompt suggestion: {error}" => "提示建议：{error}",
         "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume." => {
             "本会话因提示建议未被采用而暂停。在 /settings 中关闭再开启即可恢复。"

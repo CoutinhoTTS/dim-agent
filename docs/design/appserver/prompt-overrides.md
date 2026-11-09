@@ -102,17 +102,29 @@ are management methods, so only a local connection can edit the texts.
 
 The native client presents each field as plain text rather than JSON:
 
-- `/settings` gains a `Prompts` row that opens a panel listing the three texts with their origin
-  (`built-in` or `custom`) and size; Enter opens the current text in `$VISUAL`/`$EDITOR`, and
-  `r` resets the selected custom text. A saved draft replaces one field and preserves the others;
-  a conflict keeps the draft. The command menu keeps its curated order because no slash command
-  is added.
+- `/settings` lists the three texts under `Prompts`, each showing `built-in`, `custom` or
+  `Not available`. Enter opens the current text in `$VISUAL`/`$EDITOR`, and `r` on a custom row
+  resets it. A saved draft replaces one field and preserves the others; a conflict or a refused
+  write keeps the draft. The command menu keeps its curated order because no slash command is
+  added.
+
+  ```text
+  +------------------------------------------+
+  | Settings                                 |
+  |   Prompts                                |
+  | > Base prompt                built-in >  |
+  |   Compaction prompt          custom >    |
+  |   Skills instructions        built-in >  |
+  | up/down move · Enter edit · r reset      |
+  +------------------------------------------+
+  ```
+
 - `dimcode prompt [show|edit|set|reset] NAME` is the headless and scripted surface: it needs no
   Session, `edit` reuses the management draft and editor, `set` reads a file or stdin, and every
   write uses the revision it read. Empty input is refused; `reset` removes the field.
 
 A saved change says it applies to Sessions started after it. A daemon without the source answers
-the named unsupported-daemon error and the client falls back to nothing.
+the named unsupported-daemon error and the client shows no value.
 
 ## 5. Texts that stay closed
 

@@ -54,6 +54,44 @@ pub struct SuggestionSetting {
     pub document: dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings,
 }
 
+/// One field of the `prompts` source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptField {
+    Base,
+    Summary,
+    Skills,
+}
+
+impl PromptField {
+    pub const ALL: [Self; 3] = [Self::Base, Self::Summary, Self::Skills];
+
+    /// The field's name in the document and on the command line.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Summary => "summary",
+            Self::Skills => "skills",
+        }
+    }
+}
+
+/// The `prompts` source as `settings.read` and `settings.update` answer it.
+/// The document stays a JSON object so a field this client does not know
+/// survives a write.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct PromptSetting {
+    pub revision: String,
+    pub document: serde_json::Value,
+}
+
+impl PromptSetting {
+    pub fn text(&self, field: PromptField) -> Option<&str> {
+        self.document
+            .get(field.key())
+            .and_then(serde_json::Value::as_str)
+    }
+}
+
 /// The host's answer to `host.execution.backend`; the Execution panel shows
 /// the reason when the platform has no sandbox backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -253,6 +291,17 @@ pub enum Command {
         expected_revision: String,
         enabled: bool,
         max_chars: u32,
+    },
+    /// Read the `prompts` source.
+    ReadPromptSettings,
+    /// Replace one prompt field, merging the rest of the document.
+    SavePromptSetting {
+        field: PromptField,
+        text: String,
+    },
+    /// Remove one prompt field, merging the rest of the document.
+    ResetPromptSetting {
+        field: PromptField,
     },
     ClearModelPreferences {
         provider_id: String,
@@ -1150,6 +1199,8 @@ pub enum Update {
     SuggestionMethods(bool),
     /// The `prompt-suggestion` switch, as last read or written.
     SuggestionSetting(Result<SuggestionSetting, String>),
+    /// The `prompts` source, as last read or written.
+    PromptSettings(Result<PromptSetting, String>),
     /// A turn completed on `main`: the interface may ask for the next
     /// message when nothing else has its attention.
     TurnCompleted {
