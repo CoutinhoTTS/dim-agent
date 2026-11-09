@@ -5973,15 +5973,16 @@ impl App {
             return place;
         }
         let room = outer.saturating_sub(6 + status.map_or(0, |label| width_of(label) + 3));
-        let mut label = format!("{} ({count}) · /lines", t("Unread"));
-        if width_of(&label) > room {
-            label = format!("/lines ({count})");
-        }
-        let width = width_of(&label);
-        if width > room {
+        let full = format!("{} ({count}) · /lines", t("Unread"));
+        let compact = format!("/lines ({count})");
+        let Some(label) = [full.as_str(), compact.as_str(), "/lines", "*"]
+            .into_iter()
+            .find(|label| width_of(label) <= room)
+        else {
             return place;
-        }
-        let label = fg(&label, &self.palette.highlight);
+        };
+        let width = width_of(label);
+        let label = fg(label, &self.palette.highlight);
         if width + 2 + width_of(&place) <= room && width_of(&place) != 0 {
             format!("{label}  {place}")
         } else {
@@ -9045,6 +9046,9 @@ mod tests {
             assert_eq!(drawn.app.composer.text(), "keep typing");
             let narrow = drawn.app.frame((24, 24)).live.join("\n");
             assert!(narrow.contains("/lines (1)"), "{narrow}");
+            let compact = drawn.app.frame((16, 24)).live.join("\n");
+            assert!(compact.contains("/lines"), "{compact}");
+            assert!(!compact.contains("/lines (1)"), "{compact}");
 
             drawn.app.run_command("lines", "");
             let frame = drawn.app.frame((80, 24));

@@ -393,56 +393,7 @@ async fn run(
             }
         });
     }
-    let mut worker = Worker {
-        options,
-        client,
-        updates: updates.clone(),
-        ctx,
-        leaf_end: Some(leaf_end),
-        ui_identity: None,
-        session_id: String::new(),
-        session_title: None,
-        title_revision: 0,
-        session_cwd: None,
-        parked: String::new(),
-        model_session: None,
-        projection: Projection::default(),
-        question_responses: Vec::new(),
-        approval_details: Default::default(),
-        cursors: Default::default(),
-        projection_id: 0,
-        focus: "main".into(),
-        side: None,
-        lines: Default::default(),
-        task_history: Default::default(),
-        task_history_queue: Default::default(),
-        task_history_request: None,
-        methods: Default::default(),
-        model_through: 0,
-        task_stops: None,
-        workflow: WorkflowReads::default(),
-        members: Members::default(),
-        output: None,
-        output_request: None,
-        catalog_request: None,
-        publish_at: None,
-        shell: None,
-        ui_id: None,
-        shell_stops: Vec::new(),
-        model: None,
-        mcp_attempt: None,
-        mcp_callbacks: unbounded_channel(),
-        mcp_required: Default::default(),
-        login: None,
-        login_callbacks: unbounded_channel(),
-        context_stale: false,
-        last_usage: None,
-        compact_requests: Vec::new(),
-        refilled_catalogs: Default::default(),
-        refill_requests: Vec::new(),
-        suggestion_methods: None,
-        suggestion_throttle_noted: false,
-    };
+    let mut worker = Worker::new(options, client, updates.clone(), ctx, leaf_end);
     worker.send(Update::Permissions(Ok(dim_agent_types::PermissionPolicy {
         preset: worker
             .options
@@ -673,6 +624,65 @@ struct CancelNotice {
 }
 
 impl Worker {
+    fn new(
+        options: Options,
+        client: Client,
+        updates: mpsc::Sender<Update>,
+        ctx: rutis::Ctx,
+        leaf_end: tokio::sync::oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            options,
+            client,
+            updates,
+            ctx,
+            leaf_end: Some(leaf_end),
+            ui_identity: None,
+            session_id: String::new(),
+            session_title: None,
+            title_revision: 0,
+            session_cwd: None,
+            parked: String::new(),
+            model_session: None,
+            projection: Projection::default(),
+            question_responses: Vec::new(),
+            approval_details: Default::default(),
+            cursors: Default::default(),
+            projection_id: 0,
+            focus: "main".into(),
+            side: None,
+            lines: Default::default(),
+            task_history: Default::default(),
+            task_history_queue: Default::default(),
+            task_history_request: None,
+            methods: Default::default(),
+            model_through: 0,
+            task_stops: None,
+            workflow: WorkflowReads::default(),
+            members: Members::default(),
+            output: None,
+            output_request: None,
+            catalog_request: None,
+            publish_at: None,
+            shell: None,
+            ui_id: None,
+            shell_stops: Vec::new(),
+            model: None,
+            mcp_attempt: None,
+            mcp_callbacks: unbounded_channel(),
+            mcp_required: Default::default(),
+            login: None,
+            login_callbacks: unbounded_channel(),
+            context_stale: false,
+            last_usage: None,
+            compact_requests: Vec::new(),
+            refilled_catalogs: Default::default(),
+            refill_requests: Vec::new(),
+            suggestion_methods: None,
+            suggestion_throttle_noted: false,
+        }
+    }
+
     async fn cancel_catalog(&mut self) -> crate::Result<()> {
         if let Some((request, _, _, _)) = self.catalog_request.take()
             && self.client.offers("session.catalog.cancel")
@@ -4637,6 +4647,113 @@ mod tests {
             transcript_mut(&mut main, &mut lines, "unknown").is_none(),
             "an unknown branch has no transcript"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_unread_replies_follow_focus_and_attachment() {
+        use rutis::host::CtxHost;
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let endpoint = home.path().join("daemon.sock");
+        let _listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let client = Client::open(
+            &dim_client::ConnectionConfig {
+                endpoint,
+                server: dim_client::Server {
+                    program: std::env::current_exe().unwrap(),
+                    embedded: false,
+                },
+                profile: None,
+                client_kind: "cli",
+                client_name: "dim-cli-test",
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let options =
+            Options::parse(["--home".into(), home.path().to_str().unwrap().to_owned()].into_iter())
+                .unwrap();
+        let (updates, receiver) = mpsc::channel();
+        let mut worker = Worker::new(
+            options,
+            client,
+            updates,
+            rutis::Ctx::root().unwrap(),
+            tokio::sync::oneshot::channel().0,
+        );
+        let snapshot = || {
+            receiver
+                .try_iter()
+                .filter_map(|update| match update {
+                    Update::Snapshot(view) => Some(view),
+                    _ => None,
+                })
+                .last()
+                .expect("the worker published a snapshot")
+        };
+        let create = json!({
+            "id": "create", "sequence": 1, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 0}, "branch": "b-7c", "prompt": "Check the parser",
+                "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"}
+            }
+        });
+        let text_event = |sequence, delta| {
+            json!({
+                "id": format!("text-{sequence}"), "sequence": sequence, "create_at": 2000,
+                "type": "step", "name": "text", "data": {"turn_id": "t2", "request_id": "r2", "delta": delta}
+            })
+        };
+        let reply = |sequence, delta| Message::Notice {
+            method: "session.event".into(),
+            params: json!({"sessionId": "s1", "branchId": "b-7c", "event": text_event(sequence, delta)}),
+        };
+
+        worker.session_id = "s1".into();
+        worker.apply("main", serde_json::from_value(create.clone()).unwrap());
+        worker.message(reply(1, " ")).await.unwrap();
+        worker.publish();
+        assert!(snapshot().unread_lines.is_empty());
+
+        worker
+            .message(reply(2, "Parser issue found"))
+            .await
+            .unwrap();
+        worker.publish();
+        assert_eq!(snapshot().unread_lines, ["b-7c".into()].into());
+        worker
+            .command(Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        assert!(snapshot().unread_lines.is_empty());
+
+        worker
+            .command(Command::FocusLine("main".into()))
+            .await
+            .unwrap();
+        worker
+            .message(reply(2, "Parser issue found"))
+            .await
+            .unwrap();
+        worker.publish();
+        assert!(snapshot().unread_lines.is_empty());
+        worker.message(reply(3, "More evidence")).await.unwrap();
+        worker.publish();
+        assert_eq!(snapshot().unread_lines, ["b-7c".into()].into());
+
+        assert_eq!(worker.invalidate_projection(), "s1");
+        worker.session_id = "s1".into();
+        worker.apply("main", serde_json::from_value(create).unwrap());
+        worker.apply(
+            "b-7c",
+            serde_json::from_value(text_event(3, "More evidence")).unwrap(),
+        );
+        worker.publish();
+        assert!(snapshot().unread_lines.is_empty());
     }
 
     /// A `/runtime` change writes the configuration it carries and then

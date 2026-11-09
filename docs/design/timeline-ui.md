@@ -230,7 +230,7 @@ The composer's bottom border shows how many other lines have unread reply text. 
 
 The Session worker derives the indicator from nonblank assistant text in live `session.event` records. Text in the shown transcript or open side panel is already seen. The badge counts lines and stays until each is opened. History pages and repeated events leave the indicator alone. The worker keeps reply and acknowledgment positions for the current attachment. A fresh attachment starts without unread marks and presents existing replies as history. The position used here concerns what the user saw in that line's transcript.
 
-The notification shares the existing bottom border in both TUI modes. Narrow widths favor the notification over the directory label and shorten it to `/lines (N)` when needed. The existing left status in fullscreen keeps priority.
+The notification shares the existing bottom border in both TUI modes. Narrow widths favor the notification over the directory label. It shortens to `/lines (N)`, then `/lines`, then `*` as the room decreases. The existing left status in fullscreen keeps priority.
 
 ## 7. Client data
 
