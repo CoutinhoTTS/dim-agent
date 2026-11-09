@@ -1249,6 +1249,7 @@ impl Branch {
                     through: Some(through),
                     include_publishing: true,
                     query: QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::And {
                             conditions: vec![
                                 QueryFilter::In {

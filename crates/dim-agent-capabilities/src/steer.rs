@@ -25,6 +25,7 @@ impl SteerMark {
             through: Some(through),
             include_publishing: true,
             query: QuerySpec {
+                rows: None,
                 filter: Some(QueryFilter::Compare {
                     left: QueryOperand::Field {
                         path: "kind".into(),

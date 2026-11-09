@@ -39,7 +39,7 @@ pub fn event_property(event: &AgentEvent, branch_id: &str, path: &str) -> Result
         "context.state" => QueryValue::Value {
             value: event.kind.context_flags().1.into(),
         },
-        _ if path.starts_with("tags[]") => match &event.tags {
+        _ if path.starts_with("tags[") => match &event.tags {
             Some(tags) => project_property(tags, &path[4..])?,
             None => QueryValue::Missing,
         },
@@ -56,6 +56,11 @@ pub fn project_property(value: &impl Serialize, path: &str) -> Result<QueryValue
 
 /// Checks a validated event property path without serializing the property's value.
 pub fn event_property_present(event: &AgentEvent, path: &str) -> Result<bool> {
+    if path.starts_with("tags[") {
+        return select_mode(&event.tags, &path[4..], Leaf::Presence)
+            .map(|value| !matches!(value, QueryValue::Missing))
+            .map_err(|error| AgentError::fault("event property", error.to_string()));
+    }
     if path == "data" || path.starts_with("data.") {
         return select_mode(&event.kind, path, Leaf::Presence)
             .map(|value| !matches!(value, QueryValue::Missing))
@@ -76,6 +81,30 @@ pub(crate) fn array_length(event: &AgentEvent, path: &str) -> Result<Option<usiz
         } => Some(length.as_u64().expect("array lengths are integers") as usize),
         _ => None,
     })
+}
+
+pub(crate) fn row_array_length(event: &AgentEvent, path: &str) -> Result<Option<usize>> {
+    if path == "tags" {
+        return Ok(event.tags.as_ref().map(Vec::len));
+    }
+    if path != "data" && !path.starts_with("data.") {
+        return Err(AgentError::InvalidInput(
+            "element rows require an array property".into(),
+        ));
+    }
+    match select_mode(&event.kind, path, Leaf::Length)
+        .map_err(|error| AgentError::fault("event property", error.to_string()))?
+    {
+        QueryValue::Missing | QueryValue::Value { value: Value::Null } => Ok(None),
+        QueryValue::Value {
+            value: Value::Number(length),
+        } => Ok(Some(
+            length.as_u64().expect("array lengths are integers") as usize
+        )),
+        _ => Err(AgentError::InvalidInput(
+            "element rows require an array property".into(),
+        )),
+    }
 }
 
 pub(crate) fn elements(
@@ -172,7 +201,13 @@ impl<'a> PropertySerializer<'a> {
                 .strip_prefix('.')
                 .unwrap_or(&self.path[end..]),
             pending: false,
-            value: QueryValue::Missing,
+            value: if self.path.is_empty() && matches!(self.leaf, Leaf::Length) {
+                QueryValue::Value {
+                    value: false.into(),
+                }
+            } else {
+                QueryValue::Missing
+            },
             leaf: self.leaf,
             whole: false,
         }
@@ -198,7 +233,7 @@ impl<'a> PropertySerializer<'a> {
 macro_rules! missing_scalar {
     ($($method:ident($ty:ty)),* $(,)?) => {
         $(fn $method(self, _: $ty) -> serde_json::Result<QueryValue> {
-            Ok(QueryValue::Missing)
+            Ok(if self.path.is_empty() && matches!(self.leaf, Leaf::Length) { QueryValue::Value { value: false.into() } } else { QueryValue::Missing })
         })*
     };
 }
@@ -243,7 +278,15 @@ impl<'a> Serializer for PropertySerializer<'a> {
         _: u32,
         _: &'static str,
     ) -> serde_json::Result<QueryValue> {
-        Ok(QueryValue::Missing)
+        Ok(
+            if self.path.is_empty() && matches!(self.leaf, Leaf::Length) {
+                QueryValue::Value {
+                    value: false.into(),
+                }
+            } else {
+                QueryValue::Missing
+            },
+        )
     }
 
     fn serialize_newtype_struct<T: Serialize + ?Sized>(
@@ -289,13 +332,14 @@ impl<'a> Serializer for PropertySerializer<'a> {
         variant: &'static str,
         _: usize,
     ) -> serde_json::Result<Self::SerializeTupleVariant> {
+        let whole = self.path.is_empty();
         let map = self.map();
         let mut array = PropertySerializer {
             path: if map.name == variant { map.rest } else { "" },
             leaf: map.leaf,
         }
         .array();
-        array.whole = map.name == variant && map.rest.is_empty();
+        array.whole = whole || (map.name == variant && map.rest.is_empty());
         if array.whole && matches!(map.leaf, Leaf::Value) {
             array.rest = Some("");
         }
@@ -339,7 +383,9 @@ impl<'a> Serializer for PropertySerializer<'a> {
                 Leaf::Presence => QueryValue::Value {
                     value: Value::Bool(true),
                 },
-                Leaf::Length => QueryValue::Missing,
+                Leaf::Length => QueryValue::Value {
+                    value: false.into(),
+                },
             };
         }
         Ok(selected)
@@ -451,6 +497,11 @@ macro_rules! array_serializer {
                                         })
                                         .collect(),
                                 ),
+                            });
+                        }
+                        Leaf::Length if self.length.is_none() => {
+                            return Ok(QueryValue::Value {
+                                value: false.into(),
                             });
                         }
                         Leaf::Length => (),

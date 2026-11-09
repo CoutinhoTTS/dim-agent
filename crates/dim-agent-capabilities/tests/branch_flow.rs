@@ -6541,6 +6541,7 @@ async fn a_host_lines_end_says_nothing_to_main() {
         from: None,
         through: Some(head),
         query: QuerySpec {
+            rows: None,
             filter: None,
             select: QuerySelect::Fields {
                 fields: vec!["id".into()],

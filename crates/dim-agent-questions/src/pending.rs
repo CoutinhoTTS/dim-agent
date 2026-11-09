@@ -39,6 +39,7 @@ pub(super) async fn read(
                 through: p.through,
                 include_publishing: false,
                 query: QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             equal("kind", json!("step/tool-call")),
@@ -123,6 +124,7 @@ pub(super) async fn read(
                     through: Some(selected.through),
                     include_publishing: false,
                     query: QuerySpec {
+                        rows: None,
                         filter: Some(equal("id", id.clone())),
                         select: QuerySelect::Fields { fields },
                         group_by: vec![],

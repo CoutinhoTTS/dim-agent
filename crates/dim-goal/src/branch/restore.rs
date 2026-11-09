@@ -18,6 +18,7 @@ impl Owner {
             through: Some(through),
             include_publishing: true,
             query: QuerySpec {
+                rows: None,
                 filter: Some(filter),
                 select: QuerySelect::Fields {
                     fields: fields.iter().map(|field| (*field).into()).collect(),
@@ -569,6 +570,7 @@ impl Owner {
                 through: Some(through),
                 include_publishing: true,
                 query: QuerySpec {
+                    rows: None,
                     filter: Some(live_inputs(QueryFilter::In {
                         value: QueryOperand::Field {
                             path: "position.sequence".into(),
@@ -643,6 +645,7 @@ impl Owner {
             through: Some(through),
             include_publishing: true,
             query: QuerySpec {
+                rows: None,
                 filter: Some(QueryFilter::And {
                     conditions: vec![
                         kind("branch/create"),
@@ -736,6 +739,7 @@ impl Owner {
             through: Some(through),
             include_publishing: true,
             query: QuerySpec {
+                rows: None,
                 filter: Some(QueryFilter::And {
                     conditions: vec![
                         kind("input/message"),
@@ -816,6 +820,7 @@ impl Owner {
                         through: Some(through),
                         include_publishing: true,
                         query: QuerySpec {
+                            rows: None,
                             filter: Some(QueryFilter::And {
                                 conditions: vec![
                                     kind("input/deleted"),
@@ -910,6 +915,7 @@ impl Owner {
                     through: Some(through),
                     include_publishing: true,
                     query: QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::In {
                             value: QueryOperand::Field {
                                 path: "kind".into(),

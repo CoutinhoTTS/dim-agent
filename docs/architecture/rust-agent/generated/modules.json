@@ -18701,6 +18701,7 @@
       "from": "dim_agent_runtime::event_property",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path Result",
         "use crate::AgentError",
@@ -18851,6 +18852,7 @@
       "references": [
         "path crate::event_property::array_length",
         "path crate::event_property::elements",
+        "path crate::event_property::row_array_length",
         "path crate::event_property_present",
         "path event_property",
         "use crate::event_property"
@@ -18892,6 +18894,7 @@
         "path QueryFilter::Prefix",
         "path QueryFilter::Present",
         "path QueryFilter::TextCandidate",
+        "path QueryFilter::row_conditions",
         "path QueryOperand",
         "path QueryOperand::Element",
         "path QueryOperand::Field",
@@ -18908,6 +18911,7 @@
         "path QueryPick::Last",
         "path QueryResult",
         "path QueryRow",
+        "path QueryRows::Elements",
         "path QuerySelect::Characters",
         "path QuerySelect::Count",
         "path QuerySelect::Events",
@@ -18927,6 +18931,7 @@
         "use crate::QueryPick",
         "use crate::QueryResult",
         "use crate::QueryRow",
+        "use crate::QueryRows",
         "use crate::QuerySelect",
         "use crate::QuerySpec",
         "use crate::QueryValue"
@@ -30302,6 +30307,7 @@
       "from": "dim_app_server::storage::query",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
         "path AgentError::Cancelled",
         "path AgentError::InvalidInput",
         "path Result",
@@ -30351,6 +30357,7 @@
         "path QueryFilter::Prefix",
         "path QueryFilter::Present",
         "path QueryFilter::TextCandidate",
+        "path QueryFilter::row_conditions",
         "path QueryOperand",
         "path QueryOperand::Element",
         "path QueryOperand::Field",
@@ -30368,6 +30375,7 @@
         "path QueryPick::Last",
         "path QueryResult",
         "path QueryRow",
+        "path QueryRows::Elements",
         "path QuerySelect::Characters",
         "path QuerySelect::Count",
         "path QuerySelect::Events",
@@ -30389,6 +30397,7 @@
         "use dim_agent_runtime::QueryPick",
         "use dim_agent_runtime::QueryResult",
         "use dim_agent_runtime::QueryRow",
+        "use dim_agent_runtime::QueryRows",
         "use dim_agent_runtime::QuerySelect",
         "use dim_agent_runtime::QuerySpec",
         "use dim_agent_runtime::QueryValue"

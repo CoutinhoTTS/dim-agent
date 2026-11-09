@@ -16,6 +16,7 @@ fn query(
         through: None,
         include_publishing: false,
         query: QuerySpec {
+            rows: None,
             filter: None,
             select: QuerySelect::Events,
             group_by: vec![],

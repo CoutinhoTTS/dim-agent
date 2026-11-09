@@ -13,6 +13,7 @@ pub(super) fn query(scope: TimelineQueryScope, limit: u64) -> TimelineQuery {
         through: None,
         include_publishing: false,
         query: QuerySpec {
+            rows: None,
             filter: None,
             select: QuerySelect::Events,
             group_by: vec![],

@@ -1,6 +1,8 @@
 #[path = "storage_flow/recall.rs"]
 mod recall;
 
+#[path = "storage_flow/element_rows.rs"]
+mod element_rows;
 #[path = "storage_flow/member_queries.rs"]
 mod member_queries;
 #[path = "storage_flow/property_queries.rs"]

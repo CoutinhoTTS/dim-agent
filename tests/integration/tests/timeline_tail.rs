@@ -354,6 +354,7 @@ fn page(limit: u64, include_publishing: bool) -> TimelineQuery {
         from: None,
         through: None,
         query: QuerySpec {
+            rows: None,
             filter: None,
             select: QuerySelect::Events,
             group_by: vec![],
@@ -617,6 +618,7 @@ async fn property_pages_include_matching_unpublished_facts_at_the_same_cut() {
             through: Some(through),
             include_publishing: true,
             query: QuerySpec {
+                rows: None,
                 filter: Some(QueryFilter::In {
                     value: QueryOperand::Field {
                         path: "kind".into(),

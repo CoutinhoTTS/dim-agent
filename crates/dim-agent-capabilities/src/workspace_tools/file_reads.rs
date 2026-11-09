@@ -156,6 +156,7 @@ impl FileReads {
                 through: Some(now),
                 include_publishing: false,
                 query: QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {
@@ -205,6 +206,7 @@ impl FileReads {
                 through: Some(now),
                 include_publishing: false,
                 query: QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {

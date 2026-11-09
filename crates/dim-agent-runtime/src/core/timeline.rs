@@ -324,6 +324,7 @@ impl Timeline {
                 through: Some(through),
                 include_publishing: true,
                 query: QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::Compare {
@@ -584,6 +585,7 @@ impl Timeline {
             .query(
                 &scope,
                 &QuerySpec {
+                    rows: None,
                     filter: None,
                     select: QuerySelect::Events,
                     group_by: vec![],
@@ -807,6 +809,7 @@ impl Timeline {
                 from: None,
                 through: None,
                 query: QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::In {
                         value: QueryOperand::Field { path: "id".into() },
                         values: vec![resume.event_id.clone().into()],

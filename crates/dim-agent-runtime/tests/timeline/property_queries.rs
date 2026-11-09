@@ -48,6 +48,7 @@ fn scope(through: u64) -> TimelineReadScope {
 
 fn fields(names: &[&str]) -> QuerySpec {
     QuerySpec {
+        rows: None,
         filter: None,
         select: QuerySelect::Fields {
             fields: names.iter().map(|s| (*s).into()).collect(),
@@ -458,7 +459,12 @@ async fn property_query_wire_preserves_expressions_and_rejects_ambiguous_combina
         query: query.clone(),
         page,
     };
-    timeline.append(fact("item", json!({"key":1}))).unwrap();
+    timeline
+        .append(fact(
+            "item",
+            json!({"key":1,"items":[{"key":"a"},null,{"key":"b"}]}),
+        ))
+        .unwrap();
     let mut query = fields(&["data.key"]);
     assert_eq!(
         serde_json::from_value::<QuerySpec>(serde_json::to_value(&query).unwrap()).unwrap(),
@@ -514,5 +520,64 @@ async fn property_query_wire_preserves_expressions_and_rejects_ambiguous_combina
     assert!(matches!(
         timeline.query(request(&query, None)).await.unwrap().result,
         QueryOutput::Exists { exists: true }
+    ));
+    let mut elements = fields(&["element.index", "element.value"]);
+    elements.rows = Some(dim_agent_runtime::QueryRows::Elements {
+        field: "data.items".into(),
+    });
+    let wire = serde_json::to_value(request(&elements, Some(page(1)))).unwrap();
+    let decoded = serde_json::from_value(wire).unwrap();
+    let first = timeline.query(decoded).await.unwrap();
+    assert_eq!(rows(first.result)[0].values[0], value(json!(0)));
+    let mut continuation = request(&elements, Some(page(1)));
+    continuation.through = Some(first.through);
+    continuation.page.as_mut().unwrap().after = first.next;
+    let next = timeline.query(continuation).await.unwrap();
+    assert_eq!(
+        rows(next.result)[0].values,
+        vec![value(json!(1)), value(Value::Null)]
+    );
+    let mut invalid = elements.clone();
+    invalid.rows = None;
+    assert!(matches!(
+        timeline.query(request(&invalid, Some(page(1)))).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    invalid = elements.clone();
+    invalid.select = QuerySelect::Events;
+    assert!(matches!(
+        timeline.query(request(&invalid, Some(page(1)))).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    invalid = elements.clone();
+    invalid.rows = Some(dim_agent_runtime::QueryRows::Elements {
+        field: "data.items[]".into(),
+    });
+    assert!(matches!(
+        timeline.query(request(&invalid, Some(page(1)))).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    for (field, partition_by) in [
+        ("element.value", vec![]),
+        ("data.key", vec!["element.index".into()]),
+    ] {
+        invalid = elements.clone();
+        invalid.filter = Some(QueryFilter::TextCandidate {
+            field: field.into(),
+            partition_by,
+            terms: vec!["value".into()],
+        });
+        assert!(matches!(
+            timeline.query(request(&invalid, Some(page(1)))).await,
+            Err(AgentError::InvalidInput(_))
+        ));
+    }
+    invalid = elements;
+    invalid.filter = Some(QueryFilter::Exists {
+        condition: Box::new(eq("element.index", json!(0))),
+    });
+    assert!(matches!(
+        timeline.query(request(&invalid, Some(page(1)))).await,
+        Err(AgentError::InvalidInput(_))
     ));
 }

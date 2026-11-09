@@ -50,7 +50,7 @@ impl DynPlugin for LoopMethodsPlugin {
                     }
                     let query = TimelineQuery {
                         scope: TimelineQueryScope::Branch, from: None, through: p.through, include_publishing: false,
-                        query: QuerySpec {
+                        query: QuerySpec { rows: None,
                             filter: Some(QueryFilter::And { conditions }),
                             select: QuerySelect::Fields { fields: ["kind", "position.sequence", "data.turn_id"].map(String::from).to_vec() },
                             group_by: vec![], pick: None,
@@ -71,7 +71,7 @@ impl DynPlugin for LoopMethodsPlugin {
                     if let Some(turn) = &turn && turn["ended"] == false && p.turn_id.is_none() {
                         let mut request = TimelineQuery {
                             scope: TimelineQueryScope::Branch, from: None, through: Some(result.through), include_publishing: false,
-                            query: QuerySpec {
+                            query: QuerySpec { rows: None,
                                 filter: Some(QueryFilter::And { conditions: vec![
                                     QueryFilter::In { value: QueryOperand::Field { path: "kind".into() }, values: vec![json!("step/model-start")] },
                                     QueryFilter::In { value: QueryOperand::Field { path: "data.turn_id".into() }, values: vec![turn["turnId"].clone()] },

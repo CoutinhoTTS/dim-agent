@@ -481,6 +481,7 @@ impl TimelineContext {
                 }),
                 through: Some(input.sequence),
                 query: QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::In {
                         value: QueryOperand::Field { path: "id".into() },
                         values: vec![input.id.into()],
@@ -520,6 +521,7 @@ impl TimelineContext {
                 }),
                 through: Some(sequence),
                 query: QuerySpec {
+                    rows: None,
                     filter: None,
                     select: QuerySelect::Events,
                     group_by: vec![],

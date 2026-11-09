@@ -250,6 +250,17 @@ const own: Awaited<ReturnType<Services['timeline']['query']>> = await branch.tim
   query: { select: { kind: 'fields', fields: ['id', 'kind'] } },
   page: { limit: 1n },
 });
+const elements = await branch.timeline.query({
+  scope: 'branch', through: cutoff,
+  query: {
+    rows: { kind: 'elements', field: 'data.changes' },
+    filter: { op: 'compare', left: { kind: 'field', path: 'element.index' },
+      comparison: 'eq', right: { kind: 'value', value: 2 } },
+    select: { kind: 'fields', fields: ['id', 'element.index', 'element.value.entry'] },
+  },
+  page: { limit: 128 },
+});
+void elements;
 void branch.treeCommands.input('main', { blocks: [{ type: 'raw', text: 'source marker' }], mode: 'queue' });
 void branch.treeCommands.create('main', cutoff, { prompt: 'child', source: { kind: 'host', operation_id: 'create-id' } }, cancelled);
 const info = await branch.treeCommands.info('main');

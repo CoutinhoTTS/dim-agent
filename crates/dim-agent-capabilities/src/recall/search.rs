@@ -69,6 +69,7 @@ impl Search<'_> {
             through: Some(self.head),
             include_publishing: false,
             query: QuerySpec {
+                rows: None,
                 filter: Some(filter),
                 select,
                 group_by: vec![],

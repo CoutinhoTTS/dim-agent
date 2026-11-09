@@ -95,6 +95,7 @@ async fn compact(branch: &Branch, cancel: &CancellationToken) -> Result<Value, R
                     }),
                     through: Some(head),
                     query: QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::And {
                             conditions: vec![
                                 QueryFilter::In {

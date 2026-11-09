@@ -20,6 +20,8 @@ pub struct TimelineQuery {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QuerySpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<QueryRows>,
     pub filter: Option<QueryFilter>,
     pub select: QuerySelect,
     #[serde(default)]
@@ -27,6 +29,12 @@ pub struct QuerySpec {
     pub pick: Option<QueryPick>,
     #[serde(default)]
     pub order_by: Vec<QueryOrder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QueryRows {
+    Elements { field: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -373,6 +381,13 @@ pub struct TimelineQueryReply {
 impl QuerySpec {
     /// Rejects invalid expression combinations before any store work starts.
     pub fn validate(&self, page: Option<&QueryPage>) -> Result<()> {
+        let rows = self.rows.is_some();
+        if let Some(QueryRows::Elements { field }) = &self.rows {
+            validate_field(field, false, false)?;
+            if matches!(self.select, QuerySelect::Events) {
+                return invalid("element rows cannot select complete events");
+            }
+        }
         let scalar = self.group_by.is_empty()
             && matches!(
                 self.select,
@@ -399,20 +414,20 @@ impl QuerySpec {
             if !self.group_by.is_empty() {
                 return invalid("character totals do not accept grouping");
             }
-            validate_field(field, false)?;
+            validate_field(field, false, rows)?;
         }
         for field in &self.group_by {
-            validate_field(field, false)?;
+            validate_field(field, false, rows)?;
         }
         if let QuerySelect::Fields { fields } = &self.select {
             for field in fields {
-                validate_field(field, true)?;
+                validate_field(field, true, rows)?;
             }
         }
         for order in &self.order_by {
             match &order.key {
                 QueryOrderKey::Field { path } => {
-                    validate_field(path, false)?;
+                    validate_field(path, false, rows)?;
                     if matches!(self.select, QuerySelect::Count) && !self.group_by.contains(path) {
                         return invalid("group counts can only order by group fields or count");
                     }
@@ -430,13 +445,65 @@ impl QuerySpec {
             return invalid("scalar queries do not accept ordering");
         }
         if let Some(filter) = &self.filter {
-            filter.validate(false, false)?;
+            filter.validate(false, false, rows, false)?;
         }
         Ok(())
     }
 }
 
 impl QueryFilter {
+    /// Conjuncts split into event-only and expanded-element conditions, in that order.
+    pub fn row_conditions(&self) -> (Vec<&Self>, Vec<&Self>) {
+        fn row_operand(value: &QueryOperand) -> bool {
+            matches!(value, QueryOperand::Field { path } | QueryOperand::Outer { path } if path.starts_with("element."))
+        }
+        fn depends_on_row(filter: &QueryFilter) -> bool {
+            match filter {
+                QueryFilter::Compare { left, right, .. } => row_operand(left) || row_operand(right),
+                QueryFilter::In { value, .. }
+                | QueryFilter::Present { value }
+                | QueryFilter::Prefix { value, .. }
+                | QueryFilter::Contains { value, .. } => row_operand(value),
+                QueryFilter::TextCandidate {
+                    field,
+                    partition_by,
+                    ..
+                } => {
+                    field.starts_with("element.")
+                        || partition_by
+                            .iter()
+                            .any(|field| field.starts_with("element."))
+                }
+                QueryFilter::And { conditions } | QueryFilter::Or { conditions } => {
+                    conditions.iter().any(depends_on_row)
+                }
+                QueryFilter::Any { field, condition } => {
+                    field.starts_with("element.") || depends_on_row(condition)
+                }
+                QueryFilter::Not { condition } | QueryFilter::Exists { condition } => {
+                    depends_on_row(condition)
+                }
+            }
+        }
+        fn collect<'a>(
+            filter: &'a QueryFilter,
+            events: &mut Vec<&'a QueryFilter>,
+            elements: &mut Vec<&'a QueryFilter>,
+        ) {
+            match filter {
+                QueryFilter::And { conditions } => {
+                    for condition in conditions {
+                        collect(condition, events, elements);
+                    }
+                }
+                _ if depends_on_row(filter) => elements.push(filter),
+                _ => events.push(filter),
+            }
+        }
+        let (mut events, mut elements) = (Vec::new(), Vec::new());
+        collect(self, &mut events, &mut elements);
+        (events, elements)
+    }
     fn has_text_candidate(&self) -> bool {
         match self {
             Self::TextCandidate { .. } => true,
@@ -449,8 +516,8 @@ impl QueryFilter {
             _ => false,
         }
     }
-    fn validate(&self, related: bool, element: bool) -> Result<()> {
-        let operand = |value: &QueryOperand| value.validate(related, element);
+    fn validate(&self, related: bool, element: bool, rows: bool, outer_rows: bool) -> Result<()> {
+        let operand = |value: &QueryOperand| value.validate(related, element, rows, outer_rows);
         match self {
             Self::Compare { left, right, .. } => {
                 operand(left)?;
@@ -468,12 +535,12 @@ impl QueryFilter {
             }
             Self::And { conditions } | Self::Or { conditions } => conditions
                 .iter()
-                .try_for_each(|condition| condition.validate(related, element)),
+                .try_for_each(|condition| condition.validate(related, element, rows, outer_rows)),
             Self::Not { condition } => {
                 if condition.has_text_candidate() {
                     return invalid("text candidates cannot be negated");
                 }
-                condition.validate(related, element)
+                condition.validate(related, element, rows, outer_rows)
             }
             Self::TextCandidate {
                 field,
@@ -483,9 +550,14 @@ impl QueryFilter {
                 if element {
                     return invalid("text candidates cannot start inside an array condition");
                 }
-                validate_field(field, false)?;
+                if field.starts_with("element.")
+                    || partition_by.iter().any(|path| path.starts_with("element."))
+                {
+                    return invalid("text candidates require event properties");
+                }
+                validate_field(field, false, rows)?;
                 for field in partition_by {
-                    validate_field(field, false)?;
+                    validate_field(field, false, rows)?;
                 }
                 if terms.is_empty() || terms.iter().any(String::is_empty) {
                     return invalid("text candidates require nonempty terms");
@@ -498,24 +570,24 @@ impl QueryFilter {
                         "related queries cannot nest or start inside an array condition",
                     );
                 }
-                condition.validate(true, false)
+                condition.validate(true, false, false, rows)
             }
             Self::Any { field, condition } => {
                 if element {
                     return invalid("array conditions cannot nest");
                 }
-                validate_field(field, false)?;
-                condition.validate(related, true)
+                validate_field(field, false, rows)?;
+                condition.validate(related, true, rows, outer_rows)
             }
         }
     }
 }
 
 impl QueryOperand {
-    fn validate(&self, related: bool, element: bool) -> Result<()> {
+    fn validate(&self, related: bool, element: bool, rows: bool, outer_rows: bool) -> Result<()> {
         match self {
-            Self::Field { path } => validate_field(path, false),
-            Self::Outer { path } if related => validate_field(path, false),
+            Self::Field { path } => validate_field(path, false, rows),
+            Self::Outer { path } if related => validate_field(path, false, outer_rows),
             Self::Element { path } if element => validate_path(path, false, true),
             Self::Outer { .. } => invalid("outer fields require a related query"),
             Self::Element { .. } => invalid("element fields require an array condition"),
@@ -527,7 +599,16 @@ impl QueryOperand {
     }
 }
 
-fn validate_field(path: &str, array: bool) -> Result<()> {
+fn validate_field(path: &str, array: bool, rows: bool) -> Result<()> {
+    if rows {
+        match path {
+            "element.index" | "element.value" => return Ok(()),
+            _ if path.starts_with("element.value.") => {
+                return validate_path(&path[14..], array, false);
+            }
+            _ => (),
+        }
+    }
     match path {
         "kind" | "id" | "create_at" | "tags" | "position" | "position.branch_id"
         | "position.sequence" | "context.render" | "context.state" | "data" => Ok(()),

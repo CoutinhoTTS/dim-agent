@@ -351,6 +351,7 @@ async fn read<R: std::ops::RangeBounds<u64> + Send>(
         through: Some(through),
         include_publishing: matches!(log, Log::Timeline(_)),
         query: QuerySpec {
+            rows: None,
             filter: None,
             select: QuerySelect::Events,
             group_by: vec![],

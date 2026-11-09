@@ -7,7 +7,7 @@ Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 
 ## 1. 决定
 
-沿用 query，不新增读取服务。默认输入仍是一条事件；调用方可以指定一个数组字段，使数组中的每个元素成为一行。本文定义提案，不表示接口已存在。
+沿用 query，不新增读取服务。默认输入仍是一条事件；调用方可以指定一个数组字段，使数组中的每个元素成为一行。本文定义元素行合同；大数组的内容定位另由存储格式设计规定。
 
 这与现有 Fields 的 `[]` 投影不同：原投影保留数组形状；元素行可以独立筛选、分组、排序和分页。
 
@@ -37,7 +37,7 @@ Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 | element.value | 该元素的原始 JSON 值，可读取其子路径。 |
 | 原有事件属性 | 仍指包含该元素的事件。每个元素共享同一事件位置。 |
 
-缺失、null、空数组产生零行；非数组值返回查询类型错误，不能当作空集合。数组内的 null 仍是一行。请求完整 Events 与 elements 不能组合，不能把元素伪装成事件。
+先执行不依赖元素的事件条件，再展开其数组。缺失、null、空数组产生零行；实际展开的非数组值返回输入类型错误，不能当作空集合。数组内的 null 仍是一行。请求完整 Events 与 elements 不能组合，不能把元素伪装成事件。
 
 Fields、Count、Exists 和标量分组可用于元素行。Characters 保留字符串字符单位。组内 First/Last 按分支段、事件序号、元素下标选择；order_by 只排列最终结果。事件行与元素行的游标不能混用。
 
@@ -48,6 +48,8 @@ Fields、Count、Exists 和标量分组可用于元素行。Characters 保留字
 Exists 的内层仍是同一固定范围中的事件，不隐式展开另一个数组。Outer 指外层结果行，因此可以引用外层事件位置和 element.index/value。内层 Any 的 Element 只指它正在判断的数组元素，不指外层元素。需要引用外层元素时必须使用 Outer。
 
 元素行的下标不改变原事件位置，不能用筛选后相邻行代替原数组下标。首版不增加 Any 内的下标操作数、嵌套 Exists、嵌套 Any、任意函数、CASE 或用户 SQL。
+
+TextCandidate 仍只接受事件属性及事件属性分区，不接受 element 字段。它提供 Recall 的事件文本候选，不在元素展开后建立另一套全文分区；元素中的字符串筛选使用原 Compare、Prefix 或 Contains。
 
 Prompt 正常恢复按已保存的事件 ID/下标读取有效 Set，不要求 query 猜测 Set.entry.source 与 Revoke.source 的对应关系。历史初始化才解释两种操作。当前条目的维护与有效性见 [Prompt 设计](prompt-state-read.md)。
 
@@ -77,7 +79,7 @@ Memory 与 SQLite 返回相同元素身份、缺失值和顺序。合并物理�
 - 旧事件行请求及其游标不变；新查询在旧服务端明确报不支持，不改成全历史读取。
 - 历史操作增长十倍、当前有效条目不变时，分别检查元素选择计划和返回量；不得只检查最后输出条数。
 
-## 7. Rust 与跨语言绑定提案
+## 7. Rust 与跨语言绑定
 
 `QuerySpec` 增加可选 `rows: QueryRows`；新增 `QueryRows::Elements { field }`。字段路径校验允许元素行中的 element.index/value；Any 的 Element 合同不变。Outer 的 element.index/value 总是外层输出元素，不新增操作数。
 

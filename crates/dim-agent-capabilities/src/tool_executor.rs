@@ -392,6 +392,7 @@ async fn rebuild(owner: &ToolExecutor, timeline: &Timeline) -> dim_agent_runtime
         through: Some(through),
         include_publishing: true,
         query: QuerySpec {
+            rows: None,
             filter: Some(QueryFilter::In {
                 value: QueryOperand::Field {
                     path: "kind".into(),

@@ -373,6 +373,7 @@ async fn a_latest_turn_waiting_for_dispatch_survives_the_line_ending() {
         from: None,
         through: None,
         query: dim_agent_runtime::QuerySpec {
+            rows: None,
             filter: Some(dim_agent_runtime::QueryFilter::And {
                 conditions: vec![
                     dim_agent_runtime::QueryFilter::In {

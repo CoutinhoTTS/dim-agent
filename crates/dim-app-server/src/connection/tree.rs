@@ -555,6 +555,7 @@ async fn turn_window(
         through: Some(through),
         include_publishing: false,
         query: QuerySpec {
+            rows: None,
             filter: Some(filter),
             select: QuerySelect::Fields {
                 fields: vec!["position.sequence".into()],
@@ -791,6 +792,7 @@ async fn scan_keys(
                 through: Some(through),
                 include_publishing: false,
                 query: QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::In {
                         value: QueryOperand::Field {
                             path: "kind".into(),
@@ -835,6 +837,7 @@ async fn scan_keys(
                     through: Some(through),
                     include_publishing: false,
                     query: QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::And {
                             conditions: vec![
                                 QueryFilter::In {
@@ -1076,6 +1079,7 @@ async fn window_events(
                 through: Some(end),
                 include_publishing: false,
                 query: QuerySpec {
+                    rows: None,
                     filter: None,
                     select: QuerySelect::Events,
                     group_by: vec![],

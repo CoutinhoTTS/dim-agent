@@ -371,6 +371,7 @@ async fn open_page(
                 through: Some(through),
                 include_publishing: false,
                 query: QuerySpec {
+                    rows: None,
                     filter: None,
                     select: QuerySelect::Events,
                     group_by: vec![],
@@ -463,6 +464,7 @@ impl TimelineTree {
                 .query(
                     &scope,
                     &QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::In {
                             value: QueryOperand::Field {
                                 path: "kind".into(),
@@ -643,6 +645,7 @@ impl TimelineTree {
             .query(
                 &scope,
                 &QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {
@@ -846,7 +849,7 @@ impl TimelineTree {
                             let reply = tokio::select! {
                                 result = tokio::time::timeout(owner.factory.startup_timeout(), context.timeline().query(TimelineQuery {
                                     scope: TimelineQueryScope::Branch, from: None, through: Some(head), include_publishing: false,
-                                    query: QuerySpec {
+                                    query: QuerySpec { rows: None,
                                         filter: Some(QueryFilter::In { value: QueryOperand::Field { path: "kind".into() }, values: ["branch/create-failed", "branch/create", "branch/ended"].map(Into::into).to_vec() }),
                                         select: QuerySelect::Fields { fields: ["kind", "data.branch", "data.createEvent", "data.source", "data.endEvent"].map(String::from).to_vec() },
                                         group_by: vec![], pick: None, order_by: vec![],
@@ -1085,6 +1088,7 @@ impl TimelineTree {
             .query(
                 &scope,
                 &QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::Or {
                         conditions: vec![
                             QueryFilter::In {
@@ -1146,6 +1150,7 @@ impl TimelineTree {
                 .query(
                     &scope,
                     &QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::And {
                             conditions: vec![
                                 QueryFilter::In {
@@ -1225,6 +1230,7 @@ impl TimelineTree {
             .query(
                 &scope,
                 &QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::In {
                         value: QueryOperand::Field {
                             path: "kind".into(),
@@ -1274,6 +1280,7 @@ impl TimelineTree {
             .query(
                 &scope,
                 &QuerySpec {
+                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {
@@ -2646,6 +2653,7 @@ impl BranchLine {
                     through: Some(through),
                     include_publishing: true,
                     query: QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::In {
                             value: QueryOperand::Field {
                                 path: "kind".into(),
@@ -3485,6 +3493,7 @@ impl BranchTool {
                     through: Some(through),
                     include_publishing: false,
                     query: QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::And {
                             conditions: vec![
                                 QueryFilter::In {
@@ -3876,6 +3885,7 @@ async fn line_read_items(
                     through: Some(through),
                     include_publishing: false,
                     query: QuerySpec {
+                        rows: None,
                         filter: Some(QueryFilter::In {
                             value: QueryOperand::Field {
                                 path: "kind".into(),
