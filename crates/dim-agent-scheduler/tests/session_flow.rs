@@ -712,6 +712,11 @@ async fn retention_keeps_an_unsettled_delivery_and_the_newest_hundred_terminal_o
     server.join().await.unwrap();
 }
 
+/// The stored jobs document is main's own serialization: its required
+/// fields, `max_run_minutes` always written, `mode` create or reuse, and the
+/// optional fields main omits when empty, for both origins (zerob13). It
+/// loads without a migration, runs from its mapped targets and keeps those
+/// bytes on a save.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_jobs_map_to_their_targets_and_keep_their_bytes() {
     let home = home();
@@ -743,6 +748,7 @@ async fn legacy_jobs_map_to_their_targets_and_keep_their_bytes() {
             "mode": mode,
             "enabled": true,
             "enabled_at": "2026-01-01T00:00:00.000Z",
+            "max_run_minutes": 60,
             "revision": 1,
             "created_by": created_by,
             "policy_cap": policy_cap.clone(),
@@ -955,6 +961,195 @@ async fn legacy_jobs_map_to_their_targets_and_keep_their_bytes() {
     server.join().await.unwrap();
 }
 
+/// One delivery record in the shape the Scheduler wrote before this change
+/// (A.7): the old state names, with the fields each state carried. A
+/// `reuse` origin keeps the records out of launch ownership, which A.7's
+/// session retention tests cover separately.
+fn legacy_delivery_record(run_id: &str, job_id: &str, state: &str) -> Value {
+    let at = "2026-01-01T00:00:00.000Z";
+    let mut record = json!({
+        "run_id": run_id,
+        "job_id": job_id,
+        "window": at,
+        "state": state,
+        "submission_id": format!("scheduler:{run_id}"),
+        "created_at": at,
+        "detail": "legacy",
+    });
+    if matches!(
+        state,
+        "skipped" | "completed" | "cancelled" | "timed_out" | "lost"
+    ) {
+        record["ended_at"] = json!(at);
+    }
+    if state != "skipped" {
+        record["deadline_at"] = json!(at);
+    }
+    if matches!(
+        state,
+        "submitted" | "running" | "completed" | "cancelled" | "timed_out"
+    ) {
+        record["session_id"] = json!("legacy-session");
+        record["session_origin"] = json!("reuse");
+        record["policy"] = json!({"preset": "read-only", "allowedTools": [], "disallowedTools": []});
+        record["input_event_id"] = json!(format!("{run_id}-input"));
+    }
+    record
+}
+
+/// The eight state names this change decodes from earlier builds.
+const LEGACY_STATES: [&str; 8] = [
+    "skipped", "submitted", "running", "completed", "cancelled", "timed_out", "lost", "launching",
+];
+
+/// The delivery file's inner text, as the store holds it.
+fn runs_text(home: &std::path::Path) -> String {
+    let envelope: Value =
+        serde_json::from_slice(&std::fs::read(home.join("scheduler/runs.json")).unwrap()).unwrap();
+    envelope["text"].as_str().unwrap().to_owned()
+}
+
+/// A delivery file written by an earlier build loads with the state names it
+/// wrote, shows them in `schedule.history`, and is not rewritten by reading
+/// or retention (A.7). The records are seeded into a running server: the
+/// retained launch recovery only reads the file at start, and this test is
+/// about the stored shapes, not about that recovery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_deliveries_load_show_in_history_and_keep_their_bytes() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let job_id = save_session_job(
+        &mut client,
+        "legacy-deliveries",
+        "00000000-0000-7000-8000-000000000001",
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+
+    edit_runs(home.path(), |runs| {
+        for state in LEGACY_STATES {
+            runs.push(legacy_delivery_record(
+                &format!("legacy-{state}"),
+                &job_id,
+                state,
+            ));
+        }
+    });
+    let seeded = runs_text(home.path());
+
+    let history: Value = client
+        .typed::<Value>("schedule.history", json!({"job_id": job_id, "limit": 50}))
+        .await
+        .unwrap();
+    let shown = history["runs"].as_array().unwrap();
+    for state in LEGACY_STATES {
+        let run_id = format!("legacy-{state}");
+        assert!(
+            shown
+                .iter()
+                .any(|run| run["run_id"] == run_id.as_str() && run["state"] == state),
+            "{state} is shown: {history}"
+        );
+    }
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    assert_eq!(seeded, runs_text(home.path()), "the records keep their bytes");
+}
+
+/// Retention keeps the newest 100 terminal deliveries per existing job; a
+/// non-terminal record from an earlier build is retained as written and is
+/// never selected by that rule (A.7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_non_terminal_deliveries_survive_retention_as_written() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let job_id = save_session_job(
+        &mut client,
+        "legacy-retention",
+        "00000000-0000-7000-8000-000000000002",
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    let dummy = save_session_job(
+        &mut client,
+        "legacy-retention-dummy",
+        "00000000-0000-7000-8000-000000000003",
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+
+    edit_runs(home.path(), |runs| {
+        for state in LEGACY_STATES {
+            runs.push(legacy_delivery_record(
+                &format!("legacy-{state}"),
+                &job_id,
+                state,
+            ));
+        }
+        for index in 0..100 {
+            let ended = format!("2026-03-01T00:{:02}:{:02}.000Z", index / 60, index % 60);
+            runs.push(json!({
+                "run_id": format!("delivered-{index}"),
+                "job_id": job_id,
+                "window": "manual",
+                "state": "delivered",
+                "session_id": "legacy-session",
+                "branch_id": "main",
+                "input_event_id": format!("delivered-{index}-input"),
+                "submission_id": format!("scheduler:delivered-{index}"),
+                "created_at": ended,
+                "ended_at": ended,
+                "detail": "",
+            }));
+        }
+    });
+
+    // Deleting the dummy job runs a retention pass (A.7).
+    client
+        .typed::<Value>("schedule.delete", json!({"job_id": dummy}))
+        .await
+        .unwrap();
+    wait_for("the retention pass", || {
+        !stored_runs(home.path()).iter().any(|run| {
+            matches!(
+                run["state"].as_str(),
+                Some("skipped" | "completed" | "cancelled" | "timed_out" | "lost")
+            )
+        })
+    })
+    .await;
+    let runs = stored_runs(home.path());
+    assert_eq!(
+        runs.iter()
+            .filter(|run| run["state"] == "delivered")
+            .count(),
+        100,
+        "the newest hundred terminal deliveries are kept"
+    );
+    for state in ["submitted", "running", "launching"] {
+        let run_id = format!("legacy-{state}");
+        let run = runs
+            .iter()
+            .find(|run| run["run_id"] == run_id.as_str())
+            .unwrap_or_else(|| panic!("{state} is never pruned: {runs:?}"));
+        assert_eq!(
+            run,
+            &legacy_delivery_record(&run_id, &job_id, state),
+            "{state} is retained as written"
+        );
+    }
+    assert_eq!(runs.len(), 103, "{runs:?}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// A job's explicit target is the whole truth: a legacy top-level policy and
 /// Agent do not come back once a save replaces the target (zerob13
 /// 4511587383). The host allows full access, so a stale full-access request
@@ -992,6 +1187,7 @@ async fn an_explicit_target_ignores_the_legacy_top_level_fields() {
             "policy": "full-access",
             "enabled": true,
             "enabled_at": "2026-01-01T00:00:00.000Z",
+            "max_run_minutes": 60,
             "revision": 1,
             "created_by": "user",
             "policy_cap": policy_cap.clone(),
