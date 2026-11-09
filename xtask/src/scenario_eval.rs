@@ -3591,6 +3591,18 @@ async fn native_probe(
     cancel: &CancellationToken,
 ) -> Result<Vec<(String, ToolSource)>> {
     let root = options.out.join("native-probe");
+    let home = options.out.join("homes").join("native-probe");
+    let socket = options.out.join("sockets").join("native-probe.sock");
+    // The probe starts from clean directories and a fresh endpoint: a
+    // reused --out would otherwise let an earlier probe's database or
+    // workspace answer for this one, and the declared set would depend on
+    // that history.
+    for path in [&root, &home] {
+        if path.exists() {
+            std::fs::remove_dir_all(path)?;
+        }
+    }
+    let _ = std::fs::remove_file(&socket);
     private_directory(&root)?;
     let workspace = root.join("workspace");
     private_directory(&workspace)?;
@@ -3599,9 +3611,7 @@ async fn native_probe(
     for directory in ["tmp", "xdg-config", "xdg-cache", "xdg-data"] {
         private_directory(&root.join("env").join(directory))?;
     }
-    let home = options.out.join("homes").join("native-probe");
     private_directory(&home)?;
-    let socket = options.out.join("sockets").join("native-probe.sock");
     private_directory(socket.parent().expect("a socket has a parent"))?;
     let socket = bindable_socket(&socket)?;
     let params = ChildParams {
@@ -12371,6 +12381,38 @@ mod tests {
             !names.contains(&PLUGIN_TOOL),
             "the served process registers no plugin tool: {names:?}"
         );
+    }
+
+    /// The native probe starts from clean directories: a file left in the
+    /// probe's root and home by an earlier evaluation is gone when the
+    /// probe runs, so a reused --out cannot answer for this evaluation's
+    /// native set.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_native_probe_clears_its_directories() {
+        let fixture = Fixture::start(
+            "native-probe-clean",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let stale_root = options.out.join("native-probe").join("stale.json");
+        let stale_home = options
+            .out
+            .join("homes")
+            .join("native-probe")
+            .join("stale.json");
+        for path in [&stale_root, &stale_home] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}").unwrap();
+        }
+        let native = native_probe(&options, &CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!native.is_empty(), "the probe declared its tool set");
+        assert!(!stale_root.exists(), "the probe starts from a clean root");
+        assert!(!stale_home.exists(), "the probe starts from a clean home");
     }
 
     /// A child's params for the checks that read only the tool sets: the
