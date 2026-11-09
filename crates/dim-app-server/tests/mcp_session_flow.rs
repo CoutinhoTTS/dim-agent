@@ -66,6 +66,8 @@ struct Remote {
     session: AtomicUsize,
     /// Rejects a request that carries another session id with HTTP 404.
     session_check: AtomicBool,
+    /// Answers every `initialize` with HTTP 503, a failed start.
+    refuse_start: AtomicBool,
     /// Expires the session once on `lookup/item`.
     expire_once: AtomicBool,
     /// Adds a tool when the client has connected a second time.
@@ -100,6 +102,7 @@ impl Remote {
             app_called: Notify::new(),
             session: AtomicUsize::new(0),
             session_check: AtomicBool::new(false),
+            refuse_start: AtomicBool::new(false),
             expire_once: AtomicBool::new(false),
             grown: AtomicBool::new(false),
             seen: Mutex::default(),
@@ -167,6 +170,9 @@ async fn rpc(
     let result = match method {
         "initialize" => {
             remote.initializes.fetch_add(1, Ordering::SeqCst);
+            if remote.refuse_start.load(Ordering::SeqCst) {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
             response_session = format!("s{}", remote.session.fetch_add(1, Ordering::SeqCst) + 1);
             json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{"listChanged":true}},"serverInfo":{"name":"session-test","version":"1"}})
         }
@@ -1685,6 +1691,49 @@ async fn project_visibility_disable_refresh_failure_and_permission_use_real_sour
         env.remote.initializes.load(Ordering::SeqCst),
         connections,
         "closing one Session must not interrupt another Session's connection"
+    );
+    env.close().await;
+}
+
+/// A refresh during a failed start's cooldown reaches the server no earlier
+/// than the cooldown does: the Session keeps the generation the failure was
+/// recorded on while it replaces the discovery.
+#[tokio::test]
+async fn a_refresh_during_a_failed_start_keeps_its_cooldown() {
+    let env = Env::new().await;
+    env.remote.refuse_start.store(true, Ordering::SeqCst);
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    let view = session.session_service::<McpSession>().unwrap();
+    failure(&session).await;
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        1,
+        "the first discovery"
+    );
+    let started = std::time::Instant::now();
+    for _ in 0..5 {
+        view.refresh().unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        1,
+        "five refreshes during the one-second cooldown reached the server again, \
+         in {:?}",
+        started.elapsed()
+    );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while env.remote.initializes.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the attempt after the cooldown reaches the server");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        env.remote.initializes.load(Ordering::SeqCst),
+        2,
+        "exactly one attempt follows the cooldown"
     );
     env.close().await;
 }

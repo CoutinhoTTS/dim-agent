@@ -1496,6 +1496,57 @@ mod tests {
         assert_eq!(generations, 1, "one generation retried every attempt");
         fixture.close().await;
     }
+    /// A configuration change starts a new generation, whose count begins at
+    /// one second: the count of the generation it replaced does not carry
+    /// over, so a rediscovery cannot reuse the old backoff across it.
+    #[tokio::test]
+    async fn a_configuration_change_starts_a_new_generation_at_one_second() {
+        let address = refused_address();
+        let url = format!("http://{address}/mcp");
+        let fixture = Fixture::with_entry(None, json!({"type":"http","url":url})).await;
+        tokio::time::pause();
+        let first = fixture.acquire().await;
+        assert!(first.tools(&CancellationToken::new()).await.is_err());
+        assert_eq!(cooldown(&first).await, 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(first.tools(&CancellationToken::new()).await.is_err());
+        assert_eq!(
+            cooldown(&first).await,
+            2,
+            "a second failure doubles the count"
+        );
+        let catalog = fixture.service.catalog(None, &fixture.stop).await.unwrap();
+        fixture
+            .service
+            .update(
+                SettingsScope::User,
+                catalog.user_revision,
+                "docs".into(),
+                McpChange::Put(
+                    serde_json::from_value(
+                        json!({"type":"http","url":url,"headers":{"X-Change":"two"}}),
+                    )
+                    .unwrap(),
+                ),
+                &fixture.stop,
+            )
+            .await
+            .unwrap();
+        let second = fixture.acquire().await;
+        tokio::time::resume();
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "a configuration change starts a new generation"
+        );
+        assert!(second.tools(&CancellationToken::new()).await.is_err());
+        assert_eq!(
+            cooldown(&second).await,
+            1,
+            "the new generation starts again at one second"
+        );
+        fixture.close().await;
+    }
     /// A successful connection clears the count; this passes before the fix
     /// and pins what keeping the generation must not lose.
     #[tokio::test]
