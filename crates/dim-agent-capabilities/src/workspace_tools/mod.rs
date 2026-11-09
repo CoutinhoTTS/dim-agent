@@ -345,6 +345,15 @@ impl DynPlugin for WorkspaceToolsPlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            // Fail closed where the handle-based path operations do not
+            // exist: a configured boundary would silently degrade to the
+            // unbounded path, so the Session part refuses to construct.
+            #[cfg(not(unix))]
+            if self.config.boundary.is_some() {
+                return Err(rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    "the file-tool root boundary needs handle-based path operations, which this platform does not provide".into(),
+                )));
+            }
             let platform = ctx.require_at(&self.platform)?;
             let config = ctx.require_at(&self.session_config)?;
             let identity = ctx.require_at(&self.identity)?;

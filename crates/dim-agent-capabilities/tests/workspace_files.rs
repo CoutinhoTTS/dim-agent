@@ -1893,3 +1893,4 @@ fn the_mention_index_drops_roots_whose_walk_is_past_its_ttl() {
     let _ = fs::remove_dir_all(&first);
     let _ = fs::remove_dir_all(&second);
 }
+
