@@ -80,7 +80,7 @@ impl AgentBuilder {
 
 ## 3. 盘点（#1300）
 
-catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`workflowRuns`、`sessionFiles`、`managedSearch`）；新名字不计入 84。每个现有名字恰好归类一次；§3.3 的“数据兄弟”列是目标名字，不是被盘点的 Rust-only 名字。
+catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`wakeups`、`sessionFiles`、`managedSearch`）；新名字不计入 84。`workflowRuns` 不在其中：它已经由 optional Workflow 包提供为数据面。每个现有名字恰好归类一次；§3.3 的“数据兄弟”列是目标名字，不是被盘点的 Rust-only 名字。
 
 ### 3.1 已经可以跨，但 catalog 列没体现
 
@@ -92,10 +92,12 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 
 | 名字 | 目标 | 备注 |
 | --- | --- | --- |
-| `scheduleJobs` | 新数据面 `scheduleJobs.call {request: ToolRequest, caller: Caller}` | 按 [Scheduler](plugins/Scheduler.md) 的 `JobRequest`/`JobReply`；实现是 `call(request, caller)`。`ToolRequest` 已有 `Deserialize`，`Caller`/`JobReply` 缺 serde，随迁移补 |
-| `workflowRuns` | 新数据面 `workflowRuns.call(RunRequest)` | 按 [Workflow](plugins/Workflow.md) 已接受的 `RunRequest`/`RunReply`；Workflow 未实现，接口预留 |
+| `scheduleJobs` | 新数据面 `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md) 的 flat `JobRequest`/`JobReply`；Rust 实现是 `call(request, caller)`，dispatcher 拼成 flat request。`Caller`/`JobReply` 补 serde，`Caller` 用 camelCase |
+| `wakeups` | 新数据面 `wakeups.create/list/cancel` | SchedulerSession 同时注入 `ScheduleJobs` 和 `Wakeups`；只做 `scheduleJobs` 不够。形状按 [Scheduler](plugins/Scheduler.md) §11.1 |
 | `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
 | `managedSearch` | 新数据面，只含 `search` | `managedProviders` 保持 internal(secret)，账号/token 不出去 |
+
+`workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致；#1292 不新增 provider，只核对形状。
 
 `settingsService` 和 `modelHost` **不进第一批**：它们保留类型化调用。`settings.read` 会新建取消 token、并返回 `SettingsResult` 信封；GoalBranch 需要自己的 stop token，改成数据面会丢取消。`auxiliaryModel.complete` 没有 tools、config 和 cached prefix；PromptSuggestion 克隆的是整轮 `ModelRequest`，换过去是行为变化，不只是形状。它们已有数据兄弟给其他消费者；有 leaf 消费者时再按 §4 的规则扩展。
 
@@ -172,14 +174,13 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 按 [Scheduler](plugins/Scheduler.md) 已接受的形状，不在这里重定义：
 
 ```text
-scheduleJobs.call {request: ToolRequest, caller: Caller}
-  ToolRequest = {action, job_id?, job?, enabled?, limit?}
-  Caller = {sessionId, branchId, cwd}
+scheduleJobs.call(JobRequest)
+  JobRequest = {action, job_id?, job?, enabled?, limit?, caller: {sessionId, branchId, cwd}}
   -> JobReply = {content, records}
   -> error {code, message}
 ```
 
-Scheduler 文档把 `request` 和 `caller` 合称 `JobRequest`；实现是 `call(request, caller)`，这里按实现写，不造一个同名 Rust 类型。
+这是 Scheduler 的 owner 形状：一个 flat `JobRequest`。Rust 实现是 `ScheduleJobs::call(request, caller)`，数据面的 dispatcher 负责把 `{request, caller}` 拼成这个 flat request；不要把 Rust 的两参数签名当成 wire 形状。`Caller` 补 serde 并加 `#[serde(rename_all = "camelCase")]`，与 owner 的 `sessionId`/`branchId` 一致。
 
 改动：
 
@@ -188,9 +189,9 @@ Scheduler 文档把 `request` 和 `caller` 合称 `JobRequest`；实现是 `call
 - `SchedulerSession` 改注入 `dyn HostDispatch`；调用传 `caller` 和取消。
 - 测试：Scheduler 的 Session 工具 flow；离线/取消。
 
-### 4.4 `workflowRuns`
+### 4.4 `workflowRuns`：已经是数据面
 
-按 [Workflow](plugins/Workflow.md) 已接受的形状：
+optional Workflow 包（`runtime/plugins/workflow`）已经提供 `workflowRuns`，`call: async`；`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致。本项不新增 provider，也不改 WorkflowSession 的注册；只核对形状：
 
 ```text
 workflowRuns.call(RunRequest)
@@ -198,8 +199,6 @@ workflowRuns.call(RunRequest)
   -> RunReply = {content, structured?}
   -> error {code, message}
 ```
-
-Workflow 尚未实现；本项只保留接口，不写半成品。WorkflowSession 的 `toolRegistry` 注册和工具形状不变。
 
 ### 4.5 `sessionFiles`
 
@@ -234,6 +233,19 @@ managedSearch.search {query, count}
 - Web 的搜索改调 `managedSearch`；Web 的 settings 仍走 `settings`。
 - 新名字使 catalog 多一行；它不在 84 个现有名字里。
 
+### 4.7 `wakeups`
+
+`SchedulerSession` 同时注入 `ScheduleJobs` 和 `Wakeups`；只有 `scheduleJobs` 数据面时它仍不能 leaf。按 Scheduler §11.1 的形状：
+
+```text
+wakeups.create {sessionId, branchId, at, prompt} -> Wakeup
+wakeups.list {sessionId, branchId} -> {wakeups: [...]}
+wakeups.cancel {sessionId, wakeupId} -> {cancelled: bool}
+  -> error {code, message}
+```
+
+改动：给 `Wakeups` 加数据面（或手写 dispatcher），在 `host_key("wakeups")` 提供；`SchedulerSession` 改注入 `dyn HostDispatch`。`WakeupRequest`/`Wakeup` 补 serde；字段按 Scheduler 附录。测试：wakeup 的 create/list/cancel flow，加 loopback。
+
 ## 5. 验证
 
 - `xtask check`：双向测试（dispatcher 未 shared 失败；shared 无 dispatcher 失败；shared+reason 失败）。
@@ -246,7 +258,7 @@ managedSearch.search {query, count}
 
 1. **Channel 单条消息上限**：`sessionFiles.put` 的 16 MiB 可能超过限制。先测；超了就分块，不降低上限。
 2. **secret**：`providerService`、`mcpAuth`、OAuth 服务、`managedProviders` 保持 internal；数据面只暴露操作，不暴露值。
-3. **Workflow 未实现**：`workflowRuns` 是接口预留，不阻塞其余项。
+3. **`workflowRuns` 已经是数据面**：optional Workflow 包已提供；#1292 只核对形状，不新增 provider。
 4. **`Faces` 的传播**：`Names`、`PartRegistry`、`SessionResolver` 都要拿到同一份原因表；独立 host / 测试用空表，检查只在装配和 leaf 加载处生效。
 5. **legacy 标记**：84 个名字里 16 个是“数据内容、无消费者”，先标 `legacy-no-consumer`；不是永久 internal。
 6. **shared 与 dispatcher 不一致**：`managementMethods`、`localId`、`loaderService`、`pluginMounter` 证明 shared 不等于数据面；#1289 必须把这三类逐个解决，检查双向失败。
@@ -255,5 +267,5 @@ managedSearch.search {query, count}
 
 1. **#1289**：`Faces`、`AgentBuilder::internal`、catalog `face`、双向 `xtask check`、leaf 拒绝、`managementMethods` 注册顺序、`localId`/`loaderService`/`pluginMounter` 的 dispatcher 或去 shared、模板/清单。此 PR 只加检查和标记，不改服务行为。
 2. **#1300**：按 §3 的分组在 catalog 里补齐 reason；`xtask graph` 的 diff 就是盘点结果。此 PR 不改服务。
-3. **#1292**：按 `scheduleJobs` → `sessionFiles` → `managedSearch` 的顺序，一项一个 PR；`workflowRuns` 随 Workflow 落地。`settingsService`、`modelHost` 不迁移。
+3. **#1292**：按 `scheduleJobs` → `wakeups` → `sessionFiles` → `managedSearch` 的顺序，一项一个 PR。`workflowRuns` 已是数据面，只核对；`settingsService`、`modelHost` 不迁移。
 4. 每项都带现有 flow 测试；不新增适配层，不写第二份逻辑。
