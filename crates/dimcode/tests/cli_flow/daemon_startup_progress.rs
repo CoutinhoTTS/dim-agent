@@ -1,6 +1,7 @@
 //! Startup waits follow a daemon that reports real store-upgrade progress:
-//! the spawn wait, the start-lock waiter, the one line on stderr and JSON
-//! stdout staying clean (#1213).
+//! the start-lock waiter, the wait for a daemon another client started, the
+//! spawn wait, the one line on stderr and JSON stdout staying clean (#1213,
+//! #1335).
 //!
 //! Every test here shortens a startup bound through `DIM_TEST_*`, which only a
 //! debug build reads, so the module is a debug-build check.
@@ -473,5 +474,140 @@ fn a_child_finding_the_store_owned_reports_the_owner() {
         "the client names the owner: {stderr}"
     );
     assert!(stderr.contains("Details:"), "{stderr}");
-    assert!(!stderr.contains("App Server exited (exit status"), "{stderr}");
+    assert!(
+        !stderr.contains("App Server exited (exit status"),
+        "{stderr}"
+    );
+}
+
+/// #1335: a client that starts while another daemon is mid-upgrade — the store
+/// lease held by a live process, a progress note from that process, no socket,
+/// and no client holding the start lock — waits for the upgrade and connects,
+/// instead of spawning a second daemon that fails admission.
+#[test]
+fn a_client_finding_another_daemons_upgrade_waits_for_it() {
+    use std::io::BufRead;
+
+    let home = Home::new();
+    let note = note_path(&home);
+    let bound = Duration::from_millis(1500);
+    // The upgrading daemon owns the store lease.
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.0.join("rust/dimcode.sqlite.lock"))
+        .unwrap();
+    lease.lock().unwrap();
+    // It rewrites its progress note every 50 ms from a pid that is alive and
+    // is not the client's own; no client holds `daemon.start.lock`.
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stop = Arc::clone(&stop);
+        let note = note.clone();
+        thread::spawn(move || {
+            let mut counter = 0;
+            while !stop.load(Ordering::SeqCst) {
+                counter += 1;
+                write_progress_note(&note, std::process::id(), counter);
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let mut client = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "1500")
+        .args(["models", "fixture"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr_text = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&stderr_text);
+    let pipe = std::io::BufReader::new(client.stderr.take().unwrap());
+    let reader = thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut line = String::new();
+        while pipe.read_line(&mut line).unwrap_or(0) > 0 {
+            sink.lock().unwrap().push_str(&line);
+            line.clear();
+        }
+    });
+    let started = Instant::now();
+    while !stderr_text.lock().unwrap().contains(UPGRADING) {
+        if let Some(status) = client.try_wait().unwrap() {
+            stop.store(true, Ordering::SeqCst);
+            let _ = wait(client);
+            reader.join().unwrap();
+            let stderr = stderr_text.lock().unwrap().clone();
+            panic!("the client stopped ({status}) instead of waiting for the upgrade: {stderr}");
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the client never reported the upgrade it found: {}",
+            stderr_text.lock().unwrap()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    // Keep the upgrade running a whole bound past the report: a client that
+    // only waits a fixed time has spawned, and failed, by now.
+    let reported = Instant::now();
+    while reported.elapsed() < bound + Duration::from_millis(500) {
+        if let Some(status) = client.try_wait().unwrap() {
+            stop.store(true, Ordering::SeqCst);
+            let _ = wait(client);
+            reader.join().unwrap();
+            let stderr = stderr_text.lock().unwrap().clone();
+            panic!("the client stopped ({status}) after one bound of progress: {stderr}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The upgrade finishes: the note goes, the lease is released, and the
+    // daemon begins to serve.
+    stop.store(true, Ordering::SeqCst);
+    writer.join().unwrap();
+    let _ = fs::remove_file(&note);
+    lease.unlock().unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.2 = true;
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(&catalog, json!({"catalog":{"version":1,"disabledModelIds":[],"models":[]}}));
+    });
+    let output = wait(client);
+    reader.join().unwrap();
+    daemon.join().unwrap();
+    let stderr = stderr_text.lock().unwrap().clone();
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr.matches(UPGRADING).count(), 1, "{stderr}");
+    assert!(!note.exists(), "the connected daemon removed the note");
+}
+
+/// #1335: a progress note whose pid is gone belongs to a daemon that died
+/// mid-upgrade; the client starts its own instead of waiting.
+#[test]
+fn a_progress_note_from_a_dead_pid_does_not_hold_up_the_start() {
+    let home = Home::new();
+    let note = note_path(&home);
+    let mut gone = Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    write_progress_note(&note, pid, 50);
+    let server = script(
+        &home,
+        "server",
+        &format!("exec '{}' app-server \"$@\"", env!("CARGO_BIN_EXE_dimcode")),
+    );
+    let output = home
+        .command()
+        .args(["--server", server.to_str().unwrap(), "models", "fixture"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains(UPGRADING), "{stderr}");
+    assert!(!note.exists(), "the started daemon removed the note");
 }
