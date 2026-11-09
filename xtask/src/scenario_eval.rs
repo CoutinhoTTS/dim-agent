@@ -608,6 +608,7 @@ const TEXTS: &[(&str, TextMember)] = &[
     ),
 ];
 
+#[cfg(unix)]
 pub async fn run() -> Result<()> {
     let options = Options::parse()?;
     let report = match (&options.rejudge, options.pool.is_empty()) {
@@ -618,6 +619,19 @@ pub async fn run() -> Result<()> {
     println!("{report}");
     println!("wrote {}", options.out.join("scenario.md").display());
     Ok(())
+}
+
+/// A scenario evaluation cannot isolate a run off unix: the run's own App
+/// Server endpoint, the sandbox backend and the file-tool boundary are
+/// unix-only, so the entry refuses at startup with the reason instead of
+/// failing per run.
+#[cfg(not(unix))]
+pub async fn run() -> Result<()> {
+    Err(
+        "scenario-eval runs only on unix: a run's App Server endpoint, the sandbox \
+         and the file-tool boundary are unix-only"
+            .into(),
+    )
 }
 
 /// Runs the evaluation and writes `runs.jsonl` and `scenario.md`; returns the
@@ -2227,6 +2241,7 @@ fn harness_outcome(error: String, preflight: Vec<PreflightCheck>) -> ChildOutcom
 
 /// The hidden `xtask scenario-eval-serve` entry: reads one run's params file
 /// and runs the child.
+#[cfg(unix)]
 pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
     let path = params_path.ok_or("scenario-eval-serve needs a params file path")?;
     let text = std::fs::read_to_string(&path)
@@ -2258,6 +2273,13 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
         serde_json::to_string(&child_outcome(&params, &provider).await)?
     );
     Ok(())
+}
+
+/// A non-unix host never starts a serve child: the entry refuses with the
+/// same reason [`run`] does.
+#[cfg(not(unix))]
+pub(crate) async fn serve_entry(_: Option<String>) -> Result<()> {
+    Err("scenario-eval-serve runs only on unix".into())
 }
 
 /// The child: serves the run's App Server, drives its preflight and its
@@ -3524,23 +3546,33 @@ async fn native_probe(
 /// The endpoint path the run's server binds: the out-relative socket when
 /// its path fits a Unix socket address, else a short directory under the
 /// system temporary directory with the out-relative name linked to it, so
-/// the run's layout keeps the socket under the output root either way.
+/// the run's layout keeps the socket under the output root either way. Only
+/// unix has the address length limit and the link; a non-unix run refuses
+/// before a run starts.
 fn bindable_socket(out_relative: &Path) -> Result<PathBuf> {
     if out_relative.as_os_str().len() <= 96 {
         return Ok(out_relative.to_owned());
     }
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let directory = std::env::temp_dir().join(format!(
-        "dim-eval-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    private_directory(&directory)?;
-    let socket = directory.join("rpc.sock");
-    let _ = std::fs::remove_file(out_relative);
-    std::os::unix::fs::symlink(&socket, out_relative)
-        .map_err(|error| format!("cannot link the socket {}: {error}", out_relative.display()))?;
-    Ok(socket)
+    #[cfg(unix)]
+    {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "dim-eval-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        private_directory(&directory)?;
+        let socket = directory.join("rpc.sock");
+        let _ = std::fs::remove_file(out_relative);
+        std::os::unix::fs::symlink(&socket, out_relative).map_err(|error| {
+            format!("cannot link the socket {}: {error}", out_relative.display())
+        })?;
+        Ok(socket)
+    }
+    #[cfg(not(unix))]
+    {
+        Err("scenario-eval needs a unix socket".into())
+    }
 }
 
 /// The platform's fixed read-only roots, as the sandbox and the file-tool
