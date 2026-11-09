@@ -80,7 +80,7 @@ impl AgentBuilder {
 
 ## 3. 盘点（#1300）
 
-catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 3 个新名字（`scheduleJobs`、`workflowRuns`、`managedSearch`）；新名字不计入 84。每个现有名字恰好出现一次。
+catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 3 个新名字（`scheduleJobs`、`workflowRuns`、`managedSearch`）；新名字不计入 84。每个现有名字恰好归类一次；§3.3 的“数据兄弟”列是目标名字，不是被盘点的 Rust-only 名字。
 
 ### 3.1 已经可以跨，但 catalog 列没体现
 
@@ -131,7 +131,9 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 
 ### 3.5 热路径与顺序：契约上 internal
 
-`agentLoop`、`loopState`、`modelProvider`、`prompt`、`contextPreparation`、`toolBinding`、`toolExecutor`、`branchOpening`、`configurationPublisher`、`configureControl`、`fileReads`、`branchLine`、`wait`、`submitChecks`、`commandRulesHost`、`promptHost`、`promptRegistry`、`initialPromptConfiguration`、`historyRenderer`、`contextModelHost`、`prepareModelHost`、`prepareContextHost`、`compactionStrategyHost`、`faultReporter`。
+`agentLoop`、`loopState`、`modelProvider`、`prompt`、`contextPreparation`、`toolBinding`、`toolExecutor`、`branchOpening`、`configurationPublisher`、`configureControl`、`fileReads`、`branchLine`、`submitChecks`、`commandRulesHost`、`promptHost`、`promptRegistry`、`initialPromptConfiguration`、`historyRenderer`、`contextModelHost`、`prepareModelHost`、`prepareContextHost`、`compactionStrategyHost`、`faultReporter`。
+
+`wait` 不在这里：它是操作面候选（`start`/`wait`/`result`）或宿主专用，和 #1299 的分类一致，不作为未标记数据服务。
 
 原因 `hot-path`：每回合/每条输入的状态机、严格本地顺序，或同步回调。跨了要重写顺序和失败语义，收益不成比例。
 
