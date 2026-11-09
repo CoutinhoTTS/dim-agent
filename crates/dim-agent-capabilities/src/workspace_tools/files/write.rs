@@ -5,8 +5,8 @@ use super::super::file_reads::{
 };
 use super::codec;
 use super::{
-    Cancelled, FileTools, NotRegular, blocking, cancelled, failed, field, hex, invalid_input,
-    not_regular, open_options, open_regular, resolve_path, revision, wrote,
+    Cancelled, FileTools, NotRegular, PathError, blocking, cancelled, failed, field, hex,
+    invalid_input, not_regular, open_options, open_regular, refused, resolve_path, revision, wrote,
 };
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolEffect, ToolResult};
@@ -53,11 +53,20 @@ pub(super) async fn run(
         return Ok(invalid_input("write requires a string content."));
     };
     let established = reads.established();
-    let (cwd, home, requested) = (tools.cwd.clone(), tools.home.clone(), display.clone());
-    let path = match blocking(move || resolve_path(&cwd, &home, &requested)).await? {
-        Ok(path) => path,
-        Err(message) => return Ok(invalid_input(message)),
-    };
+    let (cwd, home, requested, boundary) = (
+        tools.cwd.clone(),
+        tools.home.clone(),
+        display.clone(),
+        tools.boundary.clone(),
+    );
+    let path =
+        match blocking(move || resolve_path(&cwd, &home, boundary.as_ref(), true, &requested))
+            .await?
+        {
+            Ok(path) => path,
+            Err(PathError::Refused(path)) => return Ok(refused(&path)),
+            Err(PathError::Message(message)) => return Ok(invalid_input(message)),
+        };
     let _lock = tools.locks.lock(&path, &cancel).await?;
     let binding = reads.write_binding(&path).await?;
     let (display, content, target) = (display.clone(), content.clone(), path.clone());

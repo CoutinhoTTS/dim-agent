@@ -471,8 +471,8 @@ impl Permission {
             let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
                 format!("Failed to resolve workspace {}: {error}", cwd.display())
             })?;
-            let target = match home {
-                Some(home) => resolve_path(&cwd, &home, &path),
+            let target: Result<PathBuf, String> = match home {
+                Some(home) => resolve_path(&cwd, &home, None, false, &path).map_err(String::from),
                 None => canonical_prefix(PathBuf::from(path)),
             };
             target.map(|target| (workspace, target))

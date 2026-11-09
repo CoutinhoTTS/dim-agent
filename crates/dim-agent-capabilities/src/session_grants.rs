@@ -26,5 +26,5 @@ pub fn resolve_grant_path(cwd: &Path, path: &str) -> Result<PathBuf, String> {
     } else {
         PathBuf::new()
     };
-    crate::workspace_tools::files::resolve_path(cwd, &home, path)
+    crate::workspace_tools::files::resolve_path(cwd, &home, None, false, path).map_err(String::from)
 }

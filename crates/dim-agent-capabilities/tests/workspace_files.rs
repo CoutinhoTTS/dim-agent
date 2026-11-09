@@ -212,12 +212,14 @@ async fn coordinated_sessions_reject_stale_mutations() {
         workspace.root.clone(),
         workspace.root.join("outputs"),
         coordinator.clone(),
+        None,
     );
     let other = FileTools::with_coordinator(
         workspace.root.clone(),
         workspace.root.clone(),
         workspace.root.join("outputs"),
         coordinator,
+        None,
     );
     workspace.put("shared", b"before\r\n");
     let (a, b) = (branch(), branch());

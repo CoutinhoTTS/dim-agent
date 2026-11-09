@@ -54,7 +54,15 @@ const SEARCH_METHOD: &str = "session.files.search";
 pub struct WorkspaceToolsConfig {
     /// Absolute root of command output files, `<output_root>/<session_id>/`.
     pub output_root: PathBuf,
+    /// The root boundary of a session's file tools, when a host configures
+    /// one. The product passes `None`: the tools keep their unbounded
+    /// resolution, and ADR 014's facts keep deciding file access.
+    pub boundary: Option<files::FileToolBoundary>,
 }
+
+/// Re-exported for hosts that configure a boundary: the scenario evaluation
+/// harness.
+pub use files::FileToolBoundary;
 
 /// Installs WorkspaceTools: the process owner, which registers its Session and
 /// branch parts, and the parts themselves. The owner holds the file-write
@@ -260,8 +268,9 @@ impl ToolDriver for WorkspaceTools {
                     self.platform.home.clone(),
                     path.to_owned(),
                 );
-                let target =
-                    tokio::task::spawn_blocking(move || files::resolve_path(&cwd, &home, &path));
+                let target = tokio::task::spawn_blocking(move || {
+                    files::resolve_path(&cwd, &home, None, false, &path)
+                });
                 let path = tokio::select! {
                     result = target => result.map_err(|error| HostError::failed(error.to_string()))?
                         .map_err(HostError::failed)?,
@@ -343,14 +352,22 @@ impl DynPlugin for WorkspaceToolsPlugin {
             let methods = ctx.require_at(&self.methods)?;
             let cwd = PathBuf::from(&config.cwd);
             let output_dir = self.config.output_root.join(&identity.session_id);
+            // A configured boundary is the file tools' home too: `~`
+            // resolves against it, never against the platform home.
+            let home = self
+                .config
+                .boundary
+                .as_ref()
+                .map_or(platform.home.clone(), |boundary| boundary.home.clone());
             let tools = Arc::new(WorkspaceTools {
                 ctx: ctx.clone(),
                 facts: self.facts.clone(),
                 files: FileTools::with_coordinator(
                     cwd.clone(),
-                    platform.home.clone(),
+                    home,
                     output_dir.clone(),
                     self.coordinator.clone(),
+                    self.config.boundary.clone(),
                 ),
                 output_dir,
                 owner: ctx.get::<SessionFilesHost>(),

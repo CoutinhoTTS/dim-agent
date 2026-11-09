@@ -4,7 +4,7 @@
 //! traversal (`--hidden`, ignore files, the default exclusions), the same
 //! per-file and preview limits, and the same output.
 
-use super::{FileTools, blocking, cancelled, failed, field, js_len, lexical, succeeded};
+use super::{FileTools, blocking, cancelled, failed, field, inside, js_len, lexical, succeeded};
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolResult};
 use grep_matcher::Matcher;
@@ -220,9 +220,24 @@ impl Scope {
 }
 
 /// TS `resolveSearchScope`; directory searches must not be the filesystem
-/// root or the user home.
-fn resolve_scope(cwd: &Path, home: &Path, path: Option<&str>) -> Result<Scope, SearchError> {
-    let absolute = lexical(&cwd.join(path.unwrap_or("")));
+/// root or the user home. With `boundary` configured, `~` expands against
+/// the configured home (as the other file tools do), and a scope outside
+/// the roots is refused.
+fn resolve_scope(
+    cwd: &Path,
+    home: &Path,
+    boundary: Option<&super::FileToolBoundary>,
+    path: Option<&str>,
+) -> Result<Scope, SearchError> {
+    let expanded = match (boundary, path) {
+        (Some(_), Some("~")) => home.to_owned(),
+        (Some(_), Some(path)) => path
+            .strip_prefix("~/")
+            .or_else(|| path.strip_prefix("~\\"))
+            .map_or_else(|| PathBuf::from(path), |rest| home.join(rest)),
+        _ => PathBuf::from(path.unwrap_or("")),
+    };
+    let absolute = lexical(&cwd.join(expanded));
     let unreadable = || {
         input_error(format!(
             "Search path is missing or unreadable: {}",
@@ -232,6 +247,12 @@ fn resolve_scope(cwd: &Path, home: &Path, path: Option<&str>) -> Result<Scope, S
     let metadata = std::fs::metadata(&absolute).map_err(|_| unreadable())?;
     if metadata.is_file() {
         std::fs::File::open(&absolute).map_err(|_| unreadable())?;
+        if let Some(boundary) = boundary {
+            let canonical = std::fs::canonicalize(&absolute).map_err(|_| unreadable())?;
+            if !inside(boundary, &canonical, false) {
+                return Err(refused_scope(&canonical));
+            }
+        }
         return Ok(Scope::File(absolute));
     }
     if !metadata.is_dir() {
@@ -242,12 +263,28 @@ fn resolve_scope(cwd: &Path, home: &Path, path: Option<&str>) -> Result<Scope, S
     }
     std::fs::read_dir(&absolute).map_err(|_| unreadable())?;
     let canonical = std::fs::canonicalize(&absolute).map_err(|_| unreadable())?;
-    if canonical.parent().is_none() || std::fs::canonicalize(home).ok() == Some(canonical) {
+    if canonical.parent().is_none() || std::fs::canonicalize(home).ok() == Some(canonical.clone()) {
         return Err(input_error(
             "Open-ended searches cannot use the filesystem root or user home",
         ));
     }
+    if let Some(boundary) = boundary
+        && !inside(boundary, &canonical, false)
+    {
+        return Err(refused_scope(&canonical));
+    }
     Ok(Scope::Directory(absolute))
+}
+
+/// The refusal for a search scope outside the configured roots.
+fn refused_scope(path: &Path) -> SearchError {
+    SearchError::Search(
+        "outside_file_roots",
+        format!(
+            "Search path is outside the configured file roots: {}",
+            path.display()
+        ),
+    )
 }
 
 fn relative(root: &Path, path: &Path) -> String {
@@ -316,8 +353,13 @@ pub(super) async fn glob(
     input: &JsonObject,
     cancel: CancellationToken,
 ) -> Result<ToolResult, HostError> {
-    let (cwd, home, input) = (tools.cwd.clone(), tools.home.clone(), input.clone());
-    run(move || run_glob(&cwd, &home, &input, cancel)).await
+    let (cwd, home, boundary, input) = (
+        tools.cwd.clone(),
+        tools.home.clone(),
+        tools.boundary.clone(),
+        input.clone(),
+    );
+    run(move || run_glob(&cwd, &home, boundary.as_ref(), &input, cancel)).await
 }
 
 #[derive(Serialize)]
@@ -331,6 +373,7 @@ struct GlobFile {
 fn run_glob(
     cwd: &Path,
     home: &Path,
+    boundary: Option<&super::FileToolBoundary>,
     input: &JsonObject,
     cancel: CancellationToken,
 ) -> Result<ToolResult, SearchError> {
@@ -346,7 +389,7 @@ fn run_glob(
         }
     };
     let limit = preview_limit(field(input, "limit"))?;
-    let scope = resolve_scope(cwd, home, optional_path(input)?.as_deref())?;
+    let scope = resolve_scope(cwd, home, boundary, optional_path(input)?.as_deref())?;
     let started = Instant::now();
     let active = Active {
         cancel,
@@ -526,8 +569,13 @@ pub(super) async fn grep(
     input: &JsonObject,
     cancel: CancellationToken,
 ) -> Result<ToolResult, HostError> {
-    let (cwd, home, input) = (tools.cwd.clone(), tools.home.clone(), input.clone());
-    run(move || run_grep(&cwd, &home, &input, cancel)).await
+    let (cwd, home, boundary, input) = (
+        tools.cwd.clone(),
+        tools.home.clone(),
+        tools.boundary.clone(),
+        input.clone(),
+    );
+    run(move || run_grep(&cwd, &home, boundary.as_ref(), &input, cancel)).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -833,6 +881,7 @@ impl Results {
 fn run_grep(
     cwd: &Path,
     home: &Path,
+    boundary: Option<&super::FileToolBoundary>,
     input: &JsonObject,
     cancel: CancellationToken,
 ) -> Result<ToolResult, SearchError> {
@@ -856,7 +905,7 @@ fn run_grep(
     let matcher = builder
         .build(&request.pattern)
         .map_err(|error| input_error(format!("Invalid regex pattern: {error}")))?;
-    let scope = resolve_scope(cwd, home, request.path.as_deref())?;
+    let scope = resolve_scope(cwd, home, boundary, request.path.as_deref())?;
     let started = Instant::now();
     let active = Active {
         cancel,

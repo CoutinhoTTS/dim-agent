@@ -252,6 +252,7 @@ async fn serve_fixture(reply: Reply) -> Fixture {
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.join("rust").join("outputs"),
         },
         BranchToolConfig::default(),
@@ -418,6 +419,7 @@ async fn serve_compaction_fixture_with(
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.join("rust").join("outputs"),
         },
         BranchToolConfig::default(),

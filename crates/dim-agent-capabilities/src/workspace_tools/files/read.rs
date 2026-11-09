@@ -3,8 +3,8 @@
 use super::super::file_reads::{FileReads, TextEncoding, TextFileBinding};
 use super::codec::{self, CodecError};
 use super::{
-    Cancelled, FileTools, NotRegular, blocking, cancelled, failed, field, hex, invalid_input,
-    js_len, not_regular, object, open_regular, resolve_path, succeeded,
+    Cancelled, FileTools, NotRegular, PathError, blocking, cancelled, failed, field, hex,
+    invalid_input, js_len, not_regular, object, open_regular, refused, resolve_path, succeeded,
 };
 use crate::host::HostError;
 use crate::images::{self, ImageKind, ImageRefusal, ImageSize, ScaledImage, Sniffed};
@@ -128,11 +128,16 @@ pub(super) async fn run(
         Err(result) => return Ok(result),
     };
     let established = reads.established();
-    let (cwd, home) = (tools.cwd.clone(), tools.home.clone());
+    let (cwd, home, boundary) = (
+        tools.cwd.clone(),
+        tools.home.clone(),
+        tools.boundary.clone(),
+    );
     let outcome = blocking(move || {
-        let path = match resolve_path(&cwd, &home, &input.path) {
+        let path = match resolve_path(&cwd, &home, boundary.as_ref(), false, &input.path) {
             Ok(path) => path,
-            Err(message) => return Ok((invalid_input(message), None)),
+            Err(PathError::Refused(path)) => return Ok((refused(&path), None)),
+            Err(PathError::Message(message)) => return Ok((invalid_input(message), None)),
         };
         read_text(&input, path, &cancel)
     })

@@ -4,8 +4,8 @@ use super::super::file_reads::{Eol, FileReads, TextFileBinding};
 use super::codec;
 use super::write::write_target;
 use super::{
-    Cancelled, FileTools, NotRegular, blocking, cancelled, failed, field, hex, invalid_input,
-    js_len, not_regular, open_regular, resolve_path, revision, wrote,
+    Cancelled, FileTools, NotRegular, PathError, blocking, cancelled, failed, field, hex,
+    invalid_input, js_len, not_regular, open_regular, refused, resolve_path, revision, wrote,
 };
 use crate::host::HostError;
 use dim_agent_types::{JsonObject, ToolResult};
@@ -103,11 +103,20 @@ pub(super) async fn run(
             json!({ "code": "no_change" }),
         ));
     }
-    let (cwd, home, requested) = (tools.cwd.clone(), tools.home.clone(), input.path.clone());
-    let path = match blocking(move || resolve_path(&cwd, &home, &requested)).await? {
-        Ok(path) => path,
-        Err(message) => return Ok(invalid_input(message)),
-    };
+    let (cwd, home, requested, boundary) = (
+        tools.cwd.clone(),
+        tools.home.clone(),
+        input.path.clone(),
+        tools.boundary.clone(),
+    );
+    let path =
+        match blocking(move || resolve_path(&cwd, &home, boundary.as_ref(), true, &requested))
+            .await?
+        {
+            Ok(path) => path,
+            Err(PathError::Refused(path)) => return Ok(refused(&path)),
+            Err(PathError::Message(message)) => return Ok(invalid_input(message)),
+        };
     let _lock = tools.locks.lock(&path, &cancel).await?;
     let binding = reads.get(&path);
     let target = path.clone();
