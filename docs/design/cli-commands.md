@@ -199,11 +199,17 @@ Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
 
 `/queue` requires an attached Session and opens the shown line's unconsumed
 messages in both terminal modes. Applied-but-unconsumed messages are labelled
-`Incorporating`; unapplied messages are labelled `Held`. Up/Down selects a row,
+`Incorporating` while running and `Unread · waiting for your next message` while
+idle; unapplied messages are labelled `Held`. Up/Down selects a row,
 Enter steers it and `x` deletes it through the existing withdrawal operation.
 Only held messages can change; `notHeld` is a notice, not a failed run. Esc
 closes the panel without interrupting. Committed events refresh the panel,
 and changing attachment or shown line closes it.
+
+The panel advertises steer and delete only when the selected message is held.
+An applied-only strip offers `/queue` to view the messages, not held-only edit
+or steer shortcuts. While idle it explains that the next message will carry the
+unread input; it neither discards the input nor starts a run automatically.
 
 Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
@@ -233,6 +239,16 @@ Up/Down remain input history outside the panel.
 ```
 
 A queued message the strip does not show adds its count to the hint. The strip shows at most five messages and keeps the height it reached while the queue drains.
+
+After a stop, an applied-only queue remains visible without held-input actions:
+
+```text
+  stopped
+┌─ Queue (1) ──────────────────────────────────────────────┐
+│ › Unread · fix the failing test                          │
+│ /queue view · waiting for your next message              │
+└──────────────────────────────────────────────────────────┘
+```
 
 ## Usage report
 

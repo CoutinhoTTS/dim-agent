@@ -7,6 +7,7 @@ mod events;
 mod goal;
 pub mod grant;
 mod input;
+pub mod markup;
 mod member_approval;
 mod model;
 mod permission;

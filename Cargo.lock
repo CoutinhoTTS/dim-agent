@@ -1309,6 +1309,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "dim-event-hub"
+version = "0.1.0-alpha.18"
+dependencies = [
+ "chrono",
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "dim-agent-types",
+ "dim-app-server",
+ "dim-client",
+ "futures-util",
+ "rusqlite",
+ "rutis",
+ "rutis-bridge",
+ "rutis-loader",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "dim-goal"
 version = "0.1.0-alpha.18"
 dependencies = [
@@ -1498,6 +1525,7 @@ dependencies = [
  "dim-agent-types",
  "dim-app-server",
  "dim-cli",
+ "dim-event-hub",
  "dim-goal",
  "dim-modality",
  "dim-modality-aimux",
@@ -5933,6 +5961,7 @@ dependencies = [
  "dim-agent-types",
  "dim-app-server",
  "dim-client",
+ "dim-event-hub",
  "dim-goal",
  "dim-modality",
  "dim-session-title",

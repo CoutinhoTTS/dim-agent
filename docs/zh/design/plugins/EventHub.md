@@ -63,7 +63,7 @@ EventHub 是一个内置原生插件，位于新 crate `crates/dim-event-hub`。
 | `guide` | 至多 4096 字节：该来源写给模型的手册，说明它的事件是什么意思、该怎样应对，例如用哪个工具回复一条 IM 消息 |
 | `types` | 1 到 64 项，每项 `{type, description, mode}`：`type` 是 `<source>.<name>`，其中 `name` 匹配 `[a-z][a-z0-9_-]{0,31}`；`description` 至多 512 字节；`mode` 是该类型的默认投递模式 |
 
-**状态的所有者。** `install` 创建一份实例状态，行的构建函数捕获它，正如 `PluginManagerPlugin` 持有它的 `Arc<State>`(`crates/dim-app-server/src/lib.rs:941-951`)。状态持有目录、Session 锁(3.3)、事件锁(2.4)与投递预算(2.5)。它挺过行的每一次重新 apply——Agents、`pluginFiles`、`managementMethods` 或 `partRegistry` 重载之后，以及 `eventhub` 行被关闭再打开之后——并随进程结束。由此有两个行为，且只陈述一次：关闭再打开 EventHub 保留每一条声明，所以生产方不会再次声明；EventHub 关闭期间，生产方找不到服务，也无法发布。声明只随它的生产方行结束，靠声明时登记的那个 effect 撤回。同一行再次声明会原地替换指南与类型：保留该声明的 token，不再登记第二个 effect，所以生产方可以在每次通知时都声明一次。另一行的来源仍然是 `duplicate_source`，见 A.1。
+**状态的所有者。** `install` 创建一份实例状态，行的构建函数捕获它，正如 `PluginManagerPlugin` 持有它的 `Arc<State>`(`crates/dim-app-server/src/lib.rs:941-951`)。状态持有目录、订阅视图(A.5)、Session 锁(3.3)、事件锁(2.4)与投递预算(2.5)。它挺过行的每一次重新 apply——Agents、`pluginFiles`、`managementMethods` 或 `partRegistry` 重载之后，以及 `eventhub` 行被关闭再打开之后——并随进程结束。由此有两个行为，且只陈述一次：关闭再打开 EventHub 保留每一条声明，所以生产方不会再次声明；EventHub 关闭期间，生产方找不到服务，也无法发布。在行关闭之前准入的发布照常运行到结束(2.4)。声明只随它的生产方行结束，靠声明时登记的那个 effect 撤回。同一行再次声明会原地替换指南与类型：保留该声明的 token，不再登记第二个 effect，所以生产方可以在每次通知时都声明一次。另一行的来源仍然是 `duplicate_source`，见 A.1。
 
 Rust 部件或 Cordis 行声明来源时不要求 EventHub 在场。它先登记 `eventhub/ready` 的监听器，再读取服务；只要找到服务就声明，无论是在自己的 `apply` 里还是在收到这条通知时；`publish` 回答 `unknown_source` 时再声明一次。先监听意味着两步之间发出的通知不会被错过；而错过一条通知只会推迟声明，`unknown_source` 的回答会补上它，这正是 [插件合同 §5.3](../plugin-contract.md#53-总线事件) 允许的。`eventhub/ready` 只留一种情形：生产方在进程里 EventHub 的第一次 `apply` 之前就已装载。配合 `unknown_source`，这条通知是这类生产方完成声明的唯一路径。它在每次 `apply` 提供出服务、且该提供可被读取之后发出：一行只在提供方活跃时才能读到另一行的服务，而部件在 `apply` 返回时才变为活跃，所以这条通知来自进程部件在 `apply` 里创建的那个依赖的通知行，rutis 在服务可读的那一刻装载它，见 1、6。
 
@@ -123,7 +123,7 @@ GuideRecord {
 
 同一条事件的每次投递都使用同一个 `submissionId`，即 `eventhub:<source>:<eventId>`，而一条分支对每个 `submissionId` 只接受一次，见 [session access A.2](../contracts/session-access.md#a2-来源输入约定) 与 [sessions 服务 §6.2](../appserver/sessions-service.md#62-input)。因此被两次命中的分支只收到一次事件，用同一个 `id` 重新发布的生产方在每条分支上都是幂等的：第二次 `publish` 什么也不写，回复第一次输入的 `inputId` 与 `sequence`。输入被消费或被撤回之后，这个 id 仍然占用。
 
-每次发布从第一次查找到最后一次投递，持有以该提交 id 为键的进程内锁，即 `eventhub:<source>:<eventId>`(即 2.5 的实例状态)。这把锁把按分支的保证延伸到文件(3.2)：正文超过上限时先按 id 在每条目标分支上查找，已经持有该输入的分支直接回答 `repeated: true`，不写文件。发布结束时释放锁，映射项随最后一个持有者消失。
+每次发布从第一次查找到最后一次投递，持有以该提交 id 为键的进程内锁，即 `eventhub:<source>:<eventId>`(即 2.5 的实例状态)。这把锁把按分支的保证延伸到文件(3.2)：每次发布都先按 id 在每条目标分支上查找，已经持有该输入的分支直接回答 `repeated: true`，不写文件，也不写第二个输入。查找失败的分支继续走 `sessions.input`，由它保证该 id 只被接受一次；正文超过上限时，该分支不写文件，它的输入带预览并标 `truncated: true`。发布结束时释放锁，映射项随最后一个持有者消失。
 
 发布一旦持有它的事件锁，就在 EventHub 自己拥有的任务里运行到完成。丢弃回复的调用方或一次重载，都既不会停止它，也不会释放那把锁，所以用同一个 `id` 的重试会等它结束，然后找到该输入并回答 `repeated`。
 
@@ -133,7 +133,7 @@ GuideRecord {
 
 ### 2.5 EventHub 不保留什么
 
-没有队列、没有未投递事件、没有重试、没有定时器、没有心跳。`publish` 只在每个目标都有了结果之后才回复，所以需要顺序的生产方逐次等待每个调用；并发的发布之间没有顺序。没能完成的投递由生产方根据回执自行决定。发布持有一份属于整个安装的投递预算，所有发布合计至多同时运行 8 个投递：二十个并发发布合起来仍然至多同时进行 8 次 `sessions.input`，所以发布给许多冷 Session 时会分批恢复它们，而不是一次全部恢复，一次发布也挤不掉另一次；一次恢复需要数秒 (一个 10 万事件、十条打开分支的 Session 约 4 秒，为 #1113 测得)。`publish` 自己没有超时：不能等待的生产方不要 await 它，那样做的同时也就放弃了顺序。
+没有队列、没有未投递事件、没有重试、没有定时器、没有心跳。`publish` 只在每个目标都有了结果之后才回复，所以需要顺序的生产方逐次等待每个调用；并发的发布之间没有顺序。没能完成的投递由生产方根据回执自行决定。发布持有一份属于整个安装的投递预算，所有发布合计至多同时运行 8 个调用。这份预算同时约束 `sessions.lookup` 与 `sessions.input` 调用：二十个并发发布合起来仍然至多同时进行 8 个调用，发布给许多冷 Session 时会分批恢复它们，而不是一次全部恢复，一次发布也挤不掉另一次；一次恢复需要数秒 (一个 10 万事件、十条打开分支的 Session 约 4 秒，为 #1113 测得)。`publish` 自己没有超时：不能等待的生产方不要 await 它，那样做的同时也就放弃了顺序。
 
 实例状态(2.1)就是锁与预算所在：事件锁(2.4)、Session 锁(3.3)与投递预算。它们全是进程内存，所以重启后从空开始，每张映射在最后一个持有者释放时删除对应项。
 
@@ -186,7 +186,7 @@ sequenceDiagram
 
 文件原样保存正文，不含标题，标题留在标记里。put 按目标 Session 各做一次，所以订阅了同一事件的两个 Session 得到两个文件：Session 文件属于一个 Session，并随它删除。
 
-**重试不会写第二个文件。** 发布持有事件锁(2.4)，所以同一个 id 的两次发布不会交错。在存任何东西之前，它在每条目标分支上 `sessions.lookup` 该提交 id：已经持有该输入的分支直接回答 `delivered`，带上那个输入的 id 与 sequence 以及 `repeated: true`，不写文件，也不写第二个输入。只有没有该输入的分支才得到文件与输入。第一次发布的 put 可能失败而已投递了预览；此时重试对这些分支回答 `repeated: true` 且不含 `truncated`，因为带预览的是第一个输入，新文件从未被引用。put 成功而输入未写之间崩溃，只留下一个未被引用的文件，它随该 Session 删除。
+**重试不会为已持有该输入的分支写文件。** 发布持有事件锁(2.4)，所以同一个 id 的两次发布不会交错。在存任何东西之前，它在每条目标分支上 `sessions.lookup` 该提交 id：已经持有该输入的分支直接回答 `delivered`，带上那个输入的 id 与 sequence 以及 `repeated: true`，不写文件，也不写第二个输入。只有没有该输入的分支才得到文件与输入。等待仍在运行的发布之锁的重试，会复用那次发布存下的文件。如果重试发生在该发布结束之后，则每个 Session 里、它命中的是第一次发布错过的分支时，会多存一个文件：`sessionFiles.put` 每次调用都存一个新文件，每个输入引用自己的那份，随该 Session 删除。第一次发布的 put 可能失败而已投递了预览；此时重试对这些分支回答 `repeated: true` 且不含 `truncated`，因为带预览的是第一个输入，新文件从未被引用。put 成功而输入未写之间崩溃，只留下一个未被引用的文件，它随该 Session 删除。
 
 标记与条目不变。
 
@@ -297,11 +297,11 @@ EventHub 占有的名字：标记元素、键前缀 `eventhub:guide:`、id 前�
 
 ## 9. 向机制所有者提出的需求
 
-### 9.1 Agents 宣布每一次成功的删除
+### 9.1 Agents 宣布每一次移除了数据行的删除
 
 - **被什么挡住：** EventHub 必须移除被删除 Session 的订阅，而一个保留数据行的关闭不能移除它们。`session_closed` 同时回答这两种情况，见 `crates/dim-app-server/src/agents.rs:817-830` 与 [session access A.6](../contracts/session-access.md#a6-错误)；今天唯一的删除通知是 `agent/unloaded-session-deleted`，且只为未加载的 Session 发出，见 `crates/dim-app-server/src/agents.rs:97-109,1399-1415` 与 [插件契约 §5.3](../plugin-contract.md#53-总线事件)。
 - **考虑过的现有机制：** Session 广播的 `closed` 事件只说明一个 Session 关闭了，不说明它的数据行是否被移除，而 EventHub 不能因关闭而移除；用 `sessions.lookup` 轮询每个被订阅的 Session 时，对一个存在但从未收到输入的 Session 回答 `unknown`，区分不出已删除与可恢复，而且会引入 EventHub 设计明确排除的周期性读取者；`history` 对两种情况以同样的方式失败。
-- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次成功的删除，无论 Session 是否已加载。Collaboration 现有的通知保持原样。两条删除通知都保留，直到 Collaboration 迁移到 `agent/session-deleted`；那次迁移是 Collaboration 的改动。
+- **需要什么：** 一条宿主内部的进程通知 `agent/session-deleted {agentId, sessionId}`，在 SessionStore 移除数据行之后发出，覆盖每一次移除了该 Session 数据行的删除，无论 Session 是否已加载。它的 `agentId` 是记录下来的 Session 所有者，来自已加载的索引或 `session_owners`，两者都没有记录时为空。Collaboration 现有的通知保持原样。两条删除通知都保留，直到 Collaboration 迁移到 `agent/session-deleted`；那次迁移是 Collaboration 的改动。
 - **对顺序、批次、中断、重载的影响：** 对 Timeline 没有影响；这条通知是总线事件，不是事实。错过的通知由 3.4 的对账修复，在下一次 `apply` 或第一次失败的投递上。
 - **所有者：** Agents，`crates/dim-app-server/src/agents.rs`；它自己的文档陈述这条通知，见 [Sessions 服务](../appserver/sessions-service.md) 与 [删除与分叉](../appserver/session-deletion-and-fork.md)。
 
@@ -338,7 +338,7 @@ declare { source: "im",
 ```
 
 - 调用行必须可解析：Rust 部件是它的 `ctx`，桥接调用是它的调用行，见附录 F。另一行持有的来源是 `duplicate_source`。同一行再次声明自己的来源会原地替换它自己的声明：保留该声明的 token，不再登记第二个 effect，所以在每次 `eventhub/ready` 时声明不会给该行增加任何 effect，见 2.1。
-- `guide` 至多 4096 字节；1 到 64 个类型；2.1 中每个字段的上限之外都是 `invalid_declaration`，类型不以 `<source>.` 开头也一样。
+- `guide` 至多 4096 字节；1 到 64 个类型，每个只出现一次；2.1 中每个字段的上限之外都是 `invalid_declaration`，类型不以 `<source>.` 开头也一样。
 
 | 码 | 何时 |
 | --- | --- |
@@ -459,6 +459,7 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 | 正文超过 5120 字节且没有 `sessionFiles` | — | `truncated="true"`，只有预览，回执 `truncated: true` | EventHub |
 | Session 文件 put 失败 | — | 同没有 `sessionFiles`；重试回答 `repeated: true` 且不写文件(3.2) | EventHub |
 | 同一事件 id 的两次发布同时进行 | — | 事件锁 `eventhub:<source>:<eventId>` 串行化它们：一次写入，另一次回答 `repeated: true` | EventHub |
+| 只到达部分分支的发布之后的重试 | 第一次发布结束 < 重试 | 已持有该输入的每条分支回答 `repeated: true`；第一次发布错过的分支得到它的输入，正文超限时其 Session 多一个文件(3.2) | EventHub |
 | 生产方以新的指南再次声明某来源 | 声明 < 下一次投递 | 下一次投递在事件之前写出新指南并存入 digest；再往后的投递不写指南 | EventHub |
 | 已投递的输入在持有期间被撤回 | 输入 < `input/withdraw`，且没有 `input/applied` | `input/deleted`；EventHub 无从得知；回执早就说了 `delivered` | InputQueue |
 | 已投递的输入在被应用后被撤回 | `input/applied` < 撤回 | `notHeld`；输入照常被消费 | InputQueue |
@@ -468,7 +469,7 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 | `eventhub` 行被关闭再打开 | — | 安装的状态持有目录，所以每一条声明都保留，生产方不再声明；关闭期间生产方读不到服务、不发布；再次打开后无需新声明即可发布 | EventHub、PluginManager |
 | 生产方在 EventHub 第一次 `apply` 之前装载 | — | 它当时读不到服务；收到 `eventhub/ready` 后声明，它的事件随之到达 | 生产方 |
 | 同一行再次声明 | — | 原地替换指南与类型并保留 token，该行不因此增加 effect | EventHub |
-| EventHub 关闭 | — | 生产方读不到服务，不发布；已存储的订阅保留，它恢复后继续投递，无需新的声明 | 生产方、EventHub |
+| EventHub 关闭 | — | 生产方读不到服务，不发布；已存储的订阅保留，它恢复后继续投递，无需新的声明。在行关闭之前准入的发布照常运行到结束(2.4) | 生产方、EventHub |
 | EventHub 部件启动失败 | — | 生产方读不到服务；`eventhub.*` 调用报告该行的状态 | EventHub |
 | 生产方卸载而订阅仍在 | — | 目录失去它的声明；已存储的订阅保留，事件停止到达，直到有生产方再次声明 | EventHub |
 | 两个创建者争最后一个订阅名额 | — | 一个成功，另一个 `limit_reached`，在存储锁下决定 | EventHub |

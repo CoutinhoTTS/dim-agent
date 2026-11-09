@@ -48,6 +48,9 @@ pub struct Overrides {
     pub goal_objective: Option<Arc<str>>,
     /// Goal's continuation policy sentence in place of the shipped one.
     pub goal_continuation: Option<Arc<str>>,
+    /// EventHub's guide entry for the markers in place of the shipped one
+    /// (EventHub design A.6).
+    pub eventhub_entry: Option<Arc<str>>,
 }
 
 /// What one run adds to the product assembly: the overrides above, the model
@@ -117,6 +120,10 @@ pub async fn serve_home(
     observe: impl FnOnce(&mut AgentBuilder),
 ) -> Result<RunningServer> {
     let home = home.to_path_buf();
+    // The product CLI creates `<root>/eventhub` beside `scheduler/` for the
+    // authorized file transactions (`crates/dim-app-server/src/cli.rs`); a
+    // served profile creates it too.
+    std::fs::create_dir_all(home.join("eventhub"))?;
     let product = run.model_config.is_none();
     let mut config = ServerConfig {
         websocket_address: Some(([127, 0, 0, 1], 0).into()),
@@ -203,6 +210,14 @@ pub async fn serve_home(
     dim_agent_capabilities::prompt_suggestion::install(&mut builder);
     dim_app_server::collaboration::install(&mut builder);
     dim_agent_questions::install(&mut builder);
+    // The product installs EventHub (`crates/dimcode/src/main.rs`), so the
+    // served profile installs it too; its entry text comes from the factory
+    // configuration the product leaves at the shipped text (EventHub A.6).
+    let mut event_hub = dim_event_hub::EventHubTexts::default();
+    if let Some(entry) = &run.overrides.eventhub_entry {
+        event_hub.entry = entry.to_string();
+    }
+    dim_event_hub::install_with(&mut builder, event_hub);
     let mut texts = dim_goal::GoalTexts::default();
     if let Some(objective) = &run.overrides.goal_objective {
         texts.objective = objective.to_string();

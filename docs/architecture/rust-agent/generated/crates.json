@@ -208,6 +208,34 @@
     "to": "dim-agent-types"
   },
   {
+    "from": "dim-event-hub",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-client"
+  },
+  {
     "from": "dim-acp",
     "to": "dim-agent-types"
   },
@@ -429,6 +457,10 @@
   },
   {
     "from": "dimcode",
+    "to": "dim-event-hub"
+  },
+  {
+    "from": "dimcode",
     "to": "dim-goal"
   },
   {
@@ -494,6 +526,10 @@
   {
     "from": "xtask",
     "to": "dim-client"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-event-hub"
   },
   {
     "from": "xtask",

@@ -8707,6 +8707,7 @@ fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
             wire.no_context();
             let providers = wire.read("account.providers");
             wire.reply(&providers, json!([]));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
             for (sequence, text) in [(9, "delete this"), (10, "steer this")] {
                 let submit = wire.read("session.submit");
                 assert_eq!(submit["params"]["text"], text);
@@ -8723,10 +8724,14 @@ fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
             assert_eq!(steer["params"]["steer"], json!({"content":[{"type":"text","text":"steer this"}]}));
             wire.reply(&steer, json!({"status":"notHeld"}));
             wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"applied","sequence":12,"create_at":1,"type":"input","name":"applied","data":{"input_id":"steer this","mode":"queue"}}}));
+            let stop = wire.read("session.stop");
+            wire.reply(&stop, json!({"sequence":13}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            wire.no_context();
             let delete = wire.read("session.input.withdraw");
             assert_eq!(delete["params"]["inputId"], "steer this");
             wire.reply(&delete, json!({"status":"notHeld"}));
-            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"consumed","sequence":13,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"steer this"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"consumed","sequence":14,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"steer this"}}}));
             wire.hold();
         });
         let mut command = home.command();
@@ -8747,6 +8752,21 @@ fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
         terminal.write(b"\r");
         terminal.until("already left the queue");
         terminal.until("Incorporating");
+        terminal.until("\x1b[?2026l");
+        terminal.write(b"\x1b");
+        terminal.until("/queue view");
+        terminal.write(b"\x1b");
+        terminal.until("Unread");
+        terminal.until("waiting for your next message");
+        let panel_start = terminal.transcript.len();
+        terminal.write(b"/queue\r");
+        terminal.until("Unread · waiting for your next message");
+        terminal.until("\x1b[?2026l");
+        let panel = strip_ansi(&terminal.transcript[panel_start..]);
+        assert!(
+            !panel.contains("Enter steer") && !panel.contains("delete held"),
+            "{panel}"
+        );
         terminal.write(b"x");
         terminal.until("No queued messages.");
         let shown = strip_ansi(&terminal.transcript);
