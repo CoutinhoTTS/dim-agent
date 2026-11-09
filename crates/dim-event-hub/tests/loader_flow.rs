@@ -2,8 +2,9 @@
 //! service: the factory rebuild keeps the install's state, a delete racing a
 //! subscribe, a retry after a failed put, a retry while the first append is
 //! paused, a changed guide written before the next event, a guide written
-//! from the declaration current at the write, and the install's shared
-//! delivery budget (design §2.1, §2.4, §2.5, §3.2, §3.3).
+//! from the declaration current at the write, the install's shared delivery
+//! budget, and the contract's field bounds (design §2.1, §2.4, §2.5, §3.2,
+//! §3.3, A.1 to A.3, A.5).
 mod support;
 
 use dim_agent_types::InputMode;
@@ -412,6 +413,92 @@ async fn a_changed_guide_is_written_before_the_next_event() {
     assert!(
         calls[0].submission_id.starts_with("eventhub:im:"),
         "{calls:?}"
+    );
+}
+
+/// An empty attribute value is a match value like any other: a subscription
+/// that matches `{channel: ""}` selects the events whose channel is empty and
+/// not the others (design A.2, A.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscription_matches_an_empty_attribute_value() {
+    let fixture = LoaderFixture::mount().await;
+    fixture.producer.declare(im_declaration()).await.unwrap();
+    let reply = fixture
+        .call(
+            "eventhub.subscribe",
+            json!({
+                "types": ["im.*"],
+                "match": {"channel": ""},
+                "target": {"sessionId": "branch", "branchId": "main"},
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(reply["subscriptionId"].is_string(), "{reply}");
+
+    let mut filled = event("filled");
+    filled.attributes = [("channel".to_owned(), "general".to_owned())]
+        .into_iter()
+        .collect();
+    let receipt = fixture.producer.publish(filled).await.unwrap();
+    assert_eq!(
+        receipt["deliveries"].as_array().unwrap().len(),
+        0,
+        "{receipt}"
+    );
+
+    let mut empty = event("empty");
+    empty.attributes = [("channel".to_owned(), String::new())]
+        .into_iter()
+        .collect();
+    let receipt = fixture.producer.publish(empty).await.unwrap();
+    assert_eq!(
+        receipt["deliveries"][0]["status"],
+        json!("delivered"),
+        "{receipt}"
+    );
+}
+
+/// A declaration that names one type twice is refused: the catalog keeps one
+/// entry per type, so the second would silently replace the first
+/// (design A.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declaration_cannot_name_one_type_twice() {
+    let fixture = LoaderFixture::mount().await;
+    let mut duplicate = im_declaration();
+    duplicate.types.push(duplicate.types[0].clone());
+    let error = fixture.producer.declare(duplicate).await.unwrap_err();
+    assert_eq!(error.code, "invalid_declaration", "{}", error.message);
+    // The refused declaration installed nothing.
+    fixture.producer.declare(im_declaration()).await.unwrap();
+}
+
+/// A guide record's target is decoded like a subscription's: a record
+/// without a Session fails the load and leaves the file's bytes
+/// (design A.5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guide_record_without_a_target_fails_the_load() {
+    let fixture = LoaderFixture::mount().await;
+    let text = json!({
+        "version": 1,
+        "subscriptions": [],
+        "guides": [{
+            "target": {"sessionId": "", "branchId": "main"},
+            "source": "im",
+            "digest": "d",
+        }],
+    })
+    .to_string();
+    let bytes = serde_json::to_vec(&json!({"version": 1, "text": text})).unwrap();
+    std::fs::write(fixture.file(), &bytes).unwrap();
+    assert!(
+        fixture.host.loader().restart("eventhub").await.is_err(),
+        "a guide record without a Session fails the part"
+    );
+    assert_eq!(
+        std::fs::read(fixture.file()).unwrap(),
+        bytes,
+        "the bytes are left unchanged"
     );
 }
 

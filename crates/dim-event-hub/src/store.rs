@@ -199,6 +199,12 @@ fn decode(text: Option<&str>) -> Result<Document, String> {
         if record.source.is_empty() || record.digest.is_empty() {
             return Err("subscriptions.json has a guide record without a source".into());
         }
+        if record.target.session_id.is_empty() || record.target.branch_id.is_empty() {
+            return Err(format!(
+                "guide record of {} has a target without a Session",
+                record.source
+            ));
+        }
         if !recorded.insert((
             &record.target.session_id,
             &record.target.branch_id,

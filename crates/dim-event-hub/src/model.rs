@@ -3,7 +3,7 @@
 use crate::{error::EventHubError, text::one_line};
 use dim_agent_types::InputMode;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The longest body a marker carries; a longer one becomes a Session file
 /// (design §3.2).
@@ -196,6 +196,7 @@ pub fn validate_declaration(request: &DeclareRequest) -> Result<(), EventHubErro
             "a declaration has 1 to 64 types",
         ));
     }
+    let mut named = BTreeSet::new();
     for declared in &request.types {
         if !valid_type(&declared.r#type) {
             return Err(EventHubError::new(
@@ -220,6 +221,14 @@ pub fn validate_declaration(request: &DeclareRequest) -> Result<(), EventHubErro
                     "the description of {} is longer than 512 bytes",
                     declared.r#type
                 ),
+            ));
+        }
+        // The catalog keeps one entry per type, so a name twice would silently
+        // keep the last (design A.1).
+        if !named.insert(declared.r#type.as_str()) {
+            return Err(EventHubError::new(
+                "invalid_declaration",
+                format!("type {} is declared twice", declared.r#type),
             ));
         }
     }
@@ -323,10 +332,12 @@ pub fn validate_subscribe(request: &SubscribeRequest) -> Result<CheckedSubscribe
                     "match holds at most 16 entries",
                 ));
             }
-            for (name, value) in matches {
-                if !valid_attribute(name) || value.is_empty() {
+            for name in matches.keys() {
+                // The value may be empty: an attribute may be, and a match
+                // on it selects events whose value is empty (design A.2).
+                if !valid_attribute(name) {
                     return Err(EventHubError::invalid_params(format!(
-                        "match entry {name} is not a name and a value"
+                        "match entry {name} is not a name"
                     )));
                 }
             }

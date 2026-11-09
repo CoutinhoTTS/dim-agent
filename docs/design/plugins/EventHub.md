@@ -338,7 +338,7 @@ declare { source: "im",
 ```
 
 - The calling row must be resolvable: the `ctx` of a Rust part, the calling row of a bridge call (Appendix F). Another row's source is `duplicate_source`. The same row declaring its source again replaces its own declaration in place: it keeps the declaration's token and registers no second effect, so declaring on every `eventhub/ready` adds nothing to the row's effects (2.1).
-- `guide` is at most 4096 bytes; 1 to 64 types; the per-field bounds of 2.1 are `invalid_declaration` beyond them, as is a type outside `<source>.`.
+- `guide` is at most 4096 bytes; 1 to 64 types, each named once; the per-field bounds of 2.1 are `invalid_declaration` beyond them, as is a type outside `<source>.`.
 
 | Code | When |
 | --- | --- |

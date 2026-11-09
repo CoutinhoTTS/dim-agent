@@ -338,7 +338,7 @@ declare { source: "im",
 ```
 
 - 调用行必须可解析：Rust 部件是它的 `ctx`，桥接调用是它的调用行，见附录 F。另一行持有的来源是 `duplicate_source`。同一行再次声明自己的来源会原地替换它自己的声明：保留该声明的 token，不再登记第二个 effect，所以在每次 `eventhub/ready` 时声明不会给该行增加任何 effect，见 2.1。
-- `guide` 至多 4096 字节；1 到 64 个类型；2.1 中每个字段的上限之外都是 `invalid_declaration`，类型不以 `<source>.` 开头也一样。
+- `guide` 至多 4096 字节；1 到 64 个类型，每个只出现一次；2.1 中每个字段的上限之外都是 `invalid_declaration`，类型不以 `<source>.` 开头也一样。
 
 | 码 | 何时 |
 | --- | --- |
