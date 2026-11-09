@@ -767,6 +767,7 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/input_queue.rs",
       "unexpandedMacros": [
+        "format",
         "matches",
         "serde_json::json",
         "tokio::select",
@@ -12218,6 +12219,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError::InvalidInput",
+        "path AgentError::PublicationUnknown",
         "path Result",
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result"
@@ -12624,6 +12626,7 @@
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
+        "path AgentError::PublicationUnknown",
         "path AgentError::Reloading",
         "path AgentError::UnknownBranch",
         "use dim_agent_runtime::AgentError"
@@ -22127,6 +22130,7 @@
         "path AgentError::BranchEnded",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
+        "path AgentError::PublicationUnknown",
         "path AgentError::Reloading",
         "path AgentError::UnknownBranch",
         "use dim_agent_runtime::AgentError"

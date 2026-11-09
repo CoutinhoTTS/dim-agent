@@ -64,6 +64,8 @@ input/applied 和 input/deleted 是本 owner 的输出，不再次改变已经�
 
 撤回回复在批次提交后才完成。客户端 waiter 不恢复；重启后的队列状态和终态必须与已经提交的事实一致。
 
+撤回命令被接受后，若持久化失败或 owner 在结果发布前结束，返回 publication_unknown；不能返回表示未执行的 reloading，也不能把未知结果当成 notHeld。调用方恢复后先查询该输入的状态。命令被接受前的校验和写入拒绝保持原错误。
+
 恢复发布最终结果后，Dispatcher 可能仍会送达恢复期间提交的中间结果。InputSnapshot 按结果自身的提交位置单调更新，忽略已发布结果之前的记录；不能把队列数字退回前一恢复页。这个发布位置只属于本代内存，不替代 source_through。
 
 正常恢复只读一个 QueueState、当前树节点和真正未完成的源输入。它既不按历史 turn 重放，也不调用 session.input.pending 再猜 released/starting。缺兼容结果进入显式初始化，不能在普通 get 中隐藏全历史恢复。

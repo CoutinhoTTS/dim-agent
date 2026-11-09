@@ -1221,7 +1221,7 @@ async fn stored_directories_outlive_idle_instances() {
         let settled: i64 = connection
             .query_row(
                 "SELECT count(*) FROM timeline_events WHERE session_id=?1 AND branch_id='main' \
-             AND sequence>?2 AND (kind NOT IN ('input/message','input/applied') \
+             AND sequence>?2 AND (kind NOT IN ('input/message','input/applied','input-queue/node','input-queue/recovered') \
              OR (kind='input/message' AND json_extract(body,'$.record.event.data.user') IS NOT NULL))",
                 rusqlite::params![ids[0], before as i64],
                 |row| row.get(0),

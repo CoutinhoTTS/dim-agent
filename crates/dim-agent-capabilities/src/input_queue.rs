@@ -319,6 +319,11 @@ impl InputQueue {
         let mut events = appended?;
         let replacement = (events.len() > 1).then(|| events.remove(1));
         let sequence = events[0].sequence;
+        let unknown = || {
+            AgentError::PublicationUnknown(format!(
+                "withdrawal {sequence} was accepted, but its outcome was not published; check the input after recovery"
+            ))
+        };
         let mut publication = self.timeline.watch();
         loop {
             let answered = self.answered.notified();
@@ -330,16 +335,16 @@ impl InputQueue {
                     return Ok((*answer, replacement));
                 }
             }
-            if let Some(error) = self.timeline.failure() {
-                return Err(error);
+            if self.timeline.failure().is_some() {
+                return Err(unknown());
             }
             tokio::select! {
                 _ = answered => {}
                 result = publication.changed() => {
-                    result.map_err(|_| AgentError::Closed(self.timeline.branch_id()))?;
+                    result.map_err(|_| unknown())?;
                 }
                 _ = self.lifecycle.cancelled() => {
-                    return Err(AgentError::Reloading("InputQueue".into()));
+                    return Err(unknown());
                 }
             }
         }
