@@ -109,5 +109,6 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
 - [Timeline export](design/appserver/timeline-export.md) (ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
+- [Container image release](release/docker-image.md) (Draft): the proposed ghcr.io image for the Linux executable, its volumes, clients, build from original release archives and security boundary
 - [Tool origin read](design/tool-origin-read.md) — point lookup for tool arguments outside a transcript window.
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)
