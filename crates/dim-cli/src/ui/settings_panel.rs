@@ -233,16 +233,16 @@ impl SettingsPanel {
             row(Setting::Permission, "Permission", link(&values.permission)),
             row(Setting::Isolation, "Process isolation", link("")),
         ]);
-        let mut list = ListPanel::new(
-            "Settings",
-            "↑↓ move · Enter select · ←→/Space change · r reset · Esc close",
-            "",
-            "",
-            "",
-            false,
-        )
-        .without_filter();
+        let mut list = ListPanel::new("Settings", HINT, "", "", "", false).without_filter();
         list.set_items(Ok(items), Some(select.id()));
+        list.set_hint(
+            t(if select == Setting::SkillsPrompt {
+                SKILLS_HINT
+            } else {
+                HINT
+            })
+            .to_owned(),
+        );
         Self {
             list,
             prompts: values.prompts,
@@ -293,14 +293,6 @@ impl SettingsPanel {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         let setting = self.selected();
-        self.list.set_hint(
-            if setting == Setting::SkillsPrompt {
-                t(SKILLS_HINT)
-            } else {
-                t(HINT)
-            }
-            .to_owned(),
-        );
         if let Some(field) = setting.prompt_field() {
             let custom = PromptField::ALL
                 .iter()
@@ -320,7 +312,9 @@ impl SettingsPanel {
         {
             return Effect::Setting(setting);
         }
-        match self.list.handle_key(key) {
+        let event = self.list.handle_key(key);
+        self.set_hint();
+        match event {
             Event::Close => Effect::Close,
             Event::Pick(id) => match Setting::of(&id) {
                 Some(setting) => match setting.prompt_field() {
@@ -331,6 +325,17 @@ impl SettingsPanel {
             },
             Event::None | Event::Refresh => Effect::None,
         }
+    }
+
+    fn set_hint(&mut self) {
+        self.list.set_hint(
+            t(if self.selected() == Setting::SkillsPrompt {
+                SKILLS_HINT
+            } else {
+                HINT
+            })
+            .to_owned(),
+        );
     }
 
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {

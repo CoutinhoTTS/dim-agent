@@ -8236,6 +8236,29 @@ mod tests {
         ));
     }
 
+    /// The skills warning is visible while the row is selected, before Enter
+    /// opens the editor.
+    #[test]
+    fn settings_skills_row_shows_the_warning_before_enter() {
+        use crate::ui::render::panel::strip_escapes;
+
+        let mut drawn = Drawn::new((100, 40), None, true);
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        drawn.app.apply(Update::PromptSettings {
+            result: Ok(PromptSetting {
+                revision: "r1".into(),
+                document: serde_json::json!({}),
+            }),
+            field: None,
+        });
+        drawn.app.run_command("settings", "");
+        for _ in 0..10 {
+            drawn.app.handle_input(key(KeyCode::Down));
+        }
+        let live = strip_escapes(&drawn.app.frame((100, 40)).live.join("\n"));
+        assert!(live.contains("skill tool and list stay"), "{live}");
+    }
+
     /// A read that fails shows that the source is unavailable rather than a
     /// value the client invented.
     #[test]

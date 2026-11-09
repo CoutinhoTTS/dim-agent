@@ -457,6 +457,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Skills instructions" => "Skills 说明",
         "custom" => "自定义",
         "built-in" => "内置",
+        "skills replaces the marker and call shape; the skill tool and list stay · r reset" => {
+            "skills 会替换标记与调用形状；skill 工具和列表不受影响 · r 重置"
+        }
+        "Prompt saved; applies to new Sessions" => "提示词已保存；对新会话生效",
+        "A prompt save is still in progress" => "提示词保存尚未完成",
+        "Prompt settings are not available" => "提示词设置不可用",
         "↑↓ move · Enter select · ←→/Space change · r reset · Esc close" => {
             "↑↓ 移动 · Enter 选择 · ←→/空格 更改 · r 重置 · Esc 关闭"
         }
