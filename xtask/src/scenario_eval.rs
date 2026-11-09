@@ -2555,7 +2555,10 @@ const WELL_KNOWN_CREDENTIAL_NAMES: &[&str] = &[
 /// run's plugin defaults contribute. Its declared set, without the `plugin`
 /// tool, is the ceiling every Session of the run mounts, and the
 /// tools-product check reads it against `RUN_TOOLS`. Its one turn is answered
-/// without a tool call, so the probe never executes anything.
+/// without a tool call, so the probe never executes anything. It runs under
+/// the most restrictive preset, `read-only` — the lowest `PermissionPreset`
+/// by `PermissionPreset::rank` — and the permission layer denies file writes
+/// outright under it, which costs the tool-free turn nothing.
 async fn product_probe(
     client: &mut Client,
     params: &ChildParams,
@@ -2567,7 +2570,7 @@ async fn product_probe(
             json!({
                 "cwd": params.workspace,
                 "model": {"provider": "preflight", "modelId": "mock"},
-                "permissionPolicy": {"preset": "full-access"},
+                "permissionPolicy": {"preset": "read-only"},
             }),
         )
         .await
