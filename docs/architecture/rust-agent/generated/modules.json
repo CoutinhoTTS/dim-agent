@@ -47743,8 +47743,10 @@
       "from": "dim_session_title",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
+        "path QueryFilter",
         "path QueryFilter::And",
         "path QueryFilter::In",
+        "path QueryFilter::Or",
         "path QueryOperand::Field",
         "path QueryOutput::Rows",
         "path QueryPage",
@@ -47780,8 +47782,11 @@
       "to": "dim_agent_types::events",
       "references": [
         "path EventKind::InputApplied",
+        "path InputBlock",
+        "path InputBlock::Raw",
         "path UserInput",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::InputBlock",
         "use dim_agent_types::UserInput"
       ]
     },
