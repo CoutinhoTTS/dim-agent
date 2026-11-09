@@ -19,9 +19,13 @@ use std::{
     num::NonZeroU64,
     panic::AssertUnwindSafe,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, time::timeout};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Default)]
@@ -54,7 +58,10 @@ pub trait NestedGate: Send + Sync + 'static {
         call: ToolCall,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>>;
     fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn effects(&self) -> Vec<ToolEffect>;
 }
+
+type ChildEffects = Arc<Mutex<Vec<(u64, Vec<ToolEffect>)>>>;
 
 struct NestedGateImpl {
     executor: Arc<ToolExecutor>,
@@ -63,6 +70,8 @@ struct NestedGateImpl {
     cancel: CancellationToken,
     tasks: TaskTracker,
     state: Mutex<GateState>,
+    next: AtomicU64,
+    effects: ChildEffects,
 }
 
 #[derive(Default)]
@@ -86,8 +95,19 @@ impl NestedGate for NestedGateImpl {
                 let parent_call_id = self.parent_call_id.clone();
                 let context = self.context.clone();
                 let cancel = self.cancel.clone();
+                let effects = self.effects.clone();
+                let sequence = self.next.fetch_add(1, Ordering::SeqCst);
                 self.tasks.spawn(async move {
-                    let result = run_child(executor, parent_call_id, context, call, cancel).await;
+                    let result = run_child(
+                        executor,
+                        parent_call_id,
+                        context,
+                        call,
+                        cancel,
+                        sequence,
+                        effects,
+                    )
+                    .await;
                     let _ = sender.send(result);
                 });
             }
@@ -102,8 +122,17 @@ impl NestedGate for NestedGateImpl {
             self.state.lock().unwrap().closing = true;
             self.cancel.cancel();
             self.tasks.close();
-            self.tasks.wait().await;
+            let _ = timeout(Duration::from_secs(5), self.tasks.wait()).await;
         })
+    }
+
+    fn effects(&self) -> Vec<ToolEffect> {
+        let mut collected = std::mem::take(&mut *self.effects.lock().unwrap());
+        collected.sort_by_key(|(sequence, _)| *sequence);
+        collected
+            .into_iter()
+            .flat_map(|(_, effects)| effects)
+            .collect()
     }
 }
 
@@ -113,6 +142,8 @@ async fn run_child(
     context: ToolExecutionContext,
     call: ToolCall,
     cancel: CancellationToken,
+    sequence: u64,
+    effects: ChildEffects,
 ) -> Result<ToolResult, HostError> {
     let batch = executor
         .timeline
@@ -146,6 +177,9 @@ async fn run_child(
         Ok(Err(error)) => ToolResult::error(error.to_string()),
         Err(panic) => ToolResult::error(panic_message(panic)),
     };
+    if let Some(child_effects) = result.effects.clone() {
+        effects.lock().unwrap().push((sequence, child_effects));
+    }
     executor
         .timeline
         .append(
@@ -200,6 +234,8 @@ impl ToolExecutor {
             cancel,
             tasks: TaskTracker::new(),
             state: Mutex::new(GateState::default()),
+            next: AtomicU64::new(0),
+            effects: Arc::new(Mutex::new(Vec::new())),
         }))
     }
 }
@@ -857,11 +893,12 @@ async fn rebuild(owner: &ToolExecutor, timeline: &Timeline) -> dim_agent_runtime
     }
     // Children settle first, so the outer aggregation can read their
     // terminal results and copy the confirmed effects.
-    batches.sort_by_key(|batch| batch.parent_call_id.is_some());
+    batches.sort_by_key(|batch| batch.parent_call_id.is_none());
     for batch in batches {
         let mut children = 0usize;
         let mut effects = Vec::new();
         if batch.parent_call_id.is_none() {
+            let through = timeline.committed();
             for call_id in &batch.calls {
                 let (seen, child) = child_effects(timeline, call_id, through).await?;
                 children += seen;

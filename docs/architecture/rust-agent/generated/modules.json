@@ -1622,6 +1622,16 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::event_property::tests",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime::event_property",
+      "file": "crates/dim-agent-runtime/src/event_property.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_agent_runtime::lifecycle",
       "crate": "dim_agent_runtime",
       "parent": "dim_agent_runtime",
@@ -18471,6 +18481,13 @@
     },
     {
       "from": "dim_agent_runtime::event_property",
+      "to": "dim_agent_runtime::event_property::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::event_property",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
         "path QueryValue",
@@ -18494,6 +18511,18 @@
       "references": [
         "path AgentEvent",
         "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::event_property::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind::ToolResult",
+        "path ToolResultData",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ToolResultData"
       ]
     },
     {

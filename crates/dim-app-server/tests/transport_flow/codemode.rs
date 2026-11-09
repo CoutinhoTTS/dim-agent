@@ -11,10 +11,18 @@ impl ModelDriver for CodeModeModel {
         _: dim_agent_capabilities::host::ModelConnection,
         _: CancellationToken,
     ) -> HostFuture<'_, ModelStream> {
-        let answered = request
+        let results = request
             .messages
             .iter()
-            .any(|message| message.role == dim_agent_types::Role::ToolResult);
+            .filter(|message| message.role == dim_agent_types::Role::ToolResult)
+            .count();
+        let answered = results > 0;
+        if answered {
+            assert_eq!(
+                results, 1,
+                "the child tool result leaked into the model context"
+            );
+        }
         let chunks = if answered {
             vec![
                 Ok(ModelChunk::MessageStart {

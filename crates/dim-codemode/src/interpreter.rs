@@ -8,20 +8,22 @@ use rquickjs::{AsyncContext, AsyncRuntime, Function, Object, Promise, prelude::*
 use serde_json::json;
 use std::{
     collections::HashSet,
+    io::{self, Write},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
-use tokio::time::{Instant, timeout_at};
+use tokio::{
+    sync::Semaphore,
+    time::{Instant, timeout_at},
+};
 use tokio_util::sync::CancellationToken;
 
 const CODEMODE_TOOL: &str = "codemode";
 const EFFECTS_WARNING: &str =
     "Some child calls may have completed; check their effects before retrying.";
-
-type EffectLog = Arc<Mutex<Vec<(u64, Vec<ToolEffect>)>>>;
 
 const TOOLS_FACTORY: &str = r#"
 (function (__host) {
@@ -87,7 +89,7 @@ pub(crate) async fn run_program(
     );
     let definitions = Arc::new(definitions);
     let calls = Arc::new(AtomicU64::new(0));
-    let effects = Arc::new(Mutex::new(Vec::<(u64, Vec<ToolEffect>)>::new()));
+    let parallel = Arc::new(Semaphore::new(config.max_parallel_calls.max(1)));
     let child_cancel = cancel.child_token();
     let gate = match executor.open(outer_call_id, context.clone(), child_cancel.clone()) {
         Ok(gate) => gate,
@@ -109,7 +111,6 @@ pub(crate) async fn run_program(
         .map_err(|error| HostError::failed(format!("context: {error}")))?;
     let output_limit = config.max_output_bytes;
     let cancel_after = cancel.clone();
-    let effects_after = effects.clone();
     let gate_after = gate.clone();
     let child_cancel_after = child_cancel.clone();
     let run = context_handle.async_with(async move |ctx| {
@@ -141,10 +142,13 @@ pub(crate) async fn run_program(
 
         let call_scope = CallScope {
             gate: gate.clone(),
+            cancel: child_cancel.clone(),
             count: calls.clone(),
-            effects: effects.clone(),
+            parallel: parallel.clone(),
             allowed: allowed.clone(),
+            deadline,
             max_calls,
+            single_limit: config.max_single_result_bytes,
         };
         let call = Function::new(
             ctx.clone(),
@@ -184,36 +188,34 @@ pub(crate) async fn run_program(
     };
     child_cancel_after.cancel();
     gate_after.close().await;
+    let effects = gate_after.effects();
 
     match result {
-        Some(Ok(output)) => {
-            let result = if output.len() > output_limit {
-                failure(
-                    format!("Code Mode output exceeds the {output_limit} byte limit"),
-                    &effects_after,
-                )
-            } else {
-                ToolResult::text(output)
-            };
-            Ok(with_effects(result, &effects_after))
-        }
+        Some(Ok(output)) => Ok(if output.len() > output_limit {
+            failure(
+                format!("Code Mode output exceeds the {output_limit} byte limit"),
+                effects,
+            )
+        } else {
+            with_effects(ToolResult::text(output), effects)
+        }),
         Some(Err(message)) => {
             if cancel_after.is_cancelled() {
-                Ok(failure("Code Mode program cancelled", &effects_after))
+                Ok(failure("Code Mode program cancelled", effects))
             } else if instant_passed(deadline) {
-                Ok(failure("Code Mode program timed out", &effects_after))
+                Ok(failure("Code Mode program timed out", effects))
             } else {
                 Ok(failure(
                     format!("Code Mode program failed: {message}"),
-                    &effects_after,
+                    effects,
                 ))
             }
         }
         None => {
             if cancel_after.is_cancelled() {
-                Ok(failure("Code Mode program cancelled", &effects_after))
+                Ok(failure("Code Mode program cancelled", effects))
             } else {
-                Ok(failure("Code Mode program timed out", &effects_after))
+                Ok(failure("Code Mode program timed out", effects))
             }
         }
     }
@@ -222,10 +224,13 @@ pub(crate) async fn run_program(
 #[derive(Clone)]
 struct CallScope {
     gate: Arc<dyn NestedGate>,
+    cancel: CancellationToken,
     count: Arc<AtomicU64>,
-    effects: EffectLog,
+    parallel: Arc<Semaphore>,
     allowed: Arc<HashSet<String>>,
+    deadline: Instant,
     max_calls: u64,
+    single_limit: usize,
 }
 
 async fn call_nested_tool(
@@ -246,46 +251,83 @@ async fn call_nested_tool(
             "the tool is not in this request's Code Mode tool list",
         ));
     }
+    let permit = tokio::select! {
+        biased;
+        _ = scope.cancel.cancelled() => {
+            return Ok(error_json("cancelled", "the program stopped before the call started"));
+        }
+        _ = tokio::time::sleep_until(scope.deadline) => {
+            return Ok(error_json("timeout", "the call budget expired before the call started"));
+        }
+        permit = scope.parallel.acquire() => match permit {
+            Ok(permit) => permit,
+            Err(_) => {
+                return Ok(error_json("cancelled", "the program stopped before the call started"));
+            }
+        },
+    };
     let input: JsonObject = match serde_json::from_str(&arguments) {
         Ok(input) => input,
-        Err(error) => return Ok(error_json("invalid_arguments", &error.to_string())),
+        Err(error) => {
+            drop(permit);
+            return Ok(error_json("invalid_arguments", &error.to_string()));
+        }
     };
     let call = ToolCall {
         id: uuid::Uuid::new_v4().to_string(),
         name,
         input,
     };
-    match scope.gate.invoke(call).await {
+    let result = scope.gate.invoke(call).await;
+    drop(permit);
+    match result {
         Ok(result) => {
-            if let Some(child_effects) = result.effects.clone() {
-                scope.effects.lock().unwrap().push((index, child_effects));
-            }
-            match serde_json::to_string(&result) {
-                Ok(text) => Ok(text),
-                Err(error) => Ok(error_json("invalid_result", &error.to_string())),
+            let mut writer = LimitedWriter {
+                limit: scope.single_limit,
+                bytes: Vec::new(),
+            };
+            match serde_json::to_writer(&mut writer, &result) {
+                Ok(()) => match String::from_utf8(writer.bytes) {
+                    Ok(text) => Ok(text),
+                    Err(error) => Ok(error_json("invalid_result", &error.to_string())),
+                },
+                Err(error) => Ok(error_json(
+                    "result_too_large",
+                    &format!("the tool result exceeded the Code Mode per-call limit: {error}"),
+                )),
             }
         }
         Err(error) => Ok(error_json("tool_error", &error.to_string())),
     }
 }
 
-fn with_effects(
-    mut result: ToolResult,
-    effects: &Mutex<Vec<(u64, Vec<ToolEffect>)>>,
-) -> ToolResult {
-    let mut collected = std::mem::take(&mut *effects.lock().unwrap());
-    collected.sort_by_key(|(sequence, _)| *sequence);
-    let effects = collected
-        .into_iter()
-        .flat_map(|(_, effects)| effects)
-        .collect::<Vec<_>>();
+struct LimitedWriter {
+    limit: usize,
+    bytes: Vec<u8>,
+}
+
+impl Write for LimitedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
+            return Err(io::Error::other("per-child result limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn with_effects(mut result: ToolResult, effects: Vec<ToolEffect>) -> ToolResult {
     if !effects.is_empty() {
         result.effects = Some(effects);
     }
     result
 }
 
-fn failure(message: impl Into<String>, effects: &Mutex<Vec<(u64, Vec<ToolEffect>)>>) -> ToolResult {
+fn failure(message: impl Into<String>, effects: Vec<ToolEffect>) -> ToolResult {
     with_effects(
         ToolResult::error(format!("{}\n{EFFECTS_WARNING}", message.into())),
         effects,

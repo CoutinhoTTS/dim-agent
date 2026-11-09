@@ -136,9 +136,13 @@ top-level consumer ignores child batches, and the nested gate writes their
 batches may run in parallel and may themselves carry grandchildren. Interrupts
 cancel current work, including child calls, and suppress late host invocation.
 Cleanup closes admission, cancels, joins tracked work and aggregates failures.
-Reload settles open child batches first as errors, then settles an open outer
-batch with the confirmed effects of terminal child results; child results keep
-their effects. Reload-settled results make Loop fail the turn. Recovery selects
+The child gate bounds its join at five seconds; a handler that ignores its
+cancellation token past the grace is outside the contract and its child fact may
+settle after the outer result. Child events are execution facts:
+`context.render` and `context.state` are false for an event with
+`parent_call_id`, so child results never enter model context. Reload settles open
+child batches first as errors, then settles an open outer batch with the
+confirmed effects of terminal child results; child results keep their effects. Reload-settled results make Loop fail the turn. Recovery selects
 batch identities without a matching `call_event_id` result, reads their turn,
 request, call and parent identities, and does not read tool arguments. Interrupt
 state comes from the latest interrupt or turn boundary at the same fixed read

@@ -24,11 +24,15 @@ impl NestedToolHost for MockHost {
         _: ToolExecutionContext,
         _: CancellationToken,
     ) -> Result<Arc<dyn NestedGate>, HostError> {
-        Ok(Arc::new(MockGate))
+        Ok(Arc::new(MockGate {
+            effects: std::sync::Mutex::new(Vec::new()),
+        }))
     }
 }
 
-struct MockGate;
+struct MockGate {
+    effects: std::sync::Mutex<Vec<dim_agent_types::ToolEffect>>,
+}
 
 impl NestedGate for MockGate {
     fn invoke(
@@ -36,7 +40,7 @@ impl NestedGate for MockGate {
         call: ToolCall,
     ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>> {
         Box::pin(async move {
-            match call.name.as_str() {
+            let result = match call.name.as_str() {
                 "echo" => Ok(ToolResult::text(
                     serde_json::to_string(&call.input).expect("input serializes"),
                 )),
@@ -53,12 +57,20 @@ impl NestedGate for MockGate {
                     Ok(ToolResult::text("slow"))
                 }
                 other => Ok(ToolResult::error(format!("unknown tool {other}"))),
+            }?;
+            if let Some(effects) = result.effects.clone() {
+                self.effects.lock().unwrap().extend(effects);
             }
+            Ok(result)
         })
     }
 
     fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
+    }
+
+    fn effects(&self) -> Vec<dim_agent_types::ToolEffect> {
+        self.effects.lock().unwrap().clone()
     }
 }
 
@@ -171,6 +183,19 @@ async fn child_effects_reach_the_outer_result() {
 }
 
 #[tokio::test]
+async fn an_unawaited_child_effect_reaches_the_outer_result() {
+    let result =
+        run(r#"tools.call("write", {}); await tools.call("slow", {millis: 50}); return "ok";"#)
+            .await;
+    assert_eq!(
+        result.effects,
+        Some(vec![dim_agent_types::ToolEffect::FileWritten {
+            path: "/tmp/codemode".into()
+        }])
+    );
+}
+
+#[tokio::test]
 async fn a_never_settling_promise_is_a_timeout() {
     let config = CodeModeConfig {
         max_runtime_ms: 50,
@@ -236,6 +261,46 @@ async fn cancellation_wins_over_a_synchronous_loop() {
         Arc::new(CodeModeConfig::default()),
         "outer".into(),
         "while (true) {}".into(),
+        context(),
+        token,
+    )
+    .await
+    .expect("program settles");
+    assert!(text(&result).starts_with("Code Mode program cancelled"));
+}
+
+#[tokio::test]
+async fn a_child_result_over_the_host_limit_is_an_error() {
+    let result = run_with(
+        CodeModeConfig {
+            max_single_result_bytes: 5,
+            ..Default::default()
+        },
+        r#"try { await tools.call("echo", {x: 1}); } catch (error) { return error.code; }"#,
+    )
+    .await;
+    let value: serde_json::Value = serde_json::from_str(text(&result)).unwrap();
+    assert_eq!(value, "result_too_large");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiting_parallel_call_is_released_by_cancellation() {
+    let config = CodeModeConfig {
+        max_parallel_calls: 1,
+        ..Default::default()
+    };
+    let token = CancellationToken::new();
+    let cancel = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.cancel();
+    });
+    let result = run_program(
+        host(),
+        Arc::new(config),
+        "outer".into(),
+        r#"await Promise.all([tools.call("slow", {}), tools.call("slow", {})]); return "done";"#
+            .into(),
         context(),
         token,
     )

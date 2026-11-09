@@ -94,15 +94,18 @@ bounds; the model cannot raise or lower them.
 max_code_bytes          256 KiB
 max_runtime_ms          600 s
 max_calls               4096
+max_parallel_calls      16
 max_memory_bytes        1024 MiB
 max_programs            2
 max_output_bytes        16 MiB
+max_single_result_bytes 4 MiB
 ```
 
 `max_programs` bounds concurrent programs in one process. `CodeModeRuns` holds the program
 semaphore; aggregate QuickJS memory is bounded by `max_programs * max_memory_bytes`. A program
-waiting for a slot is cancelled by the outer call token. These bounds are host policy, not tool
-parameters and not prompt text.
+waiting for a slot is cancelled by the outer call token. `max_parallel_calls` bounds child tool
+tasks, and `max_single_result_bytes` bounds one child result before its full JSON string is
+materialized. These bounds are host policy, not tool parameters and not prompt text.
 
 The outer tool is declared with risk `session`. The outer call enters the normal ToolExecutor
 admission path under the Session's permission preset. Approving the outer call does **not** approve
@@ -140,9 +143,10 @@ global. `tools.call` rejects a non-object argument and every name outside the fi
 so `codemode` cannot recurse.
 
 The runtime enforces `max_code_bytes`, `max_runtime_ms` (a Rust `timeout_at` around the program and
-a QuickJS interrupt handler), `max_memory_bytes` (QuickJS memory limit), `max_calls` and
-`max_output_bytes`. A synchronous loop is interrupted by the QuickJS handler; cancellation also
-sets the interrupt and wins over the program await. These bounds are not written into the prompt.
+a QuickJS interrupt handler), `max_memory_bytes` (QuickJS memory limit), `max_calls`,
+`max_parallel_calls`, `max_single_result_bytes` and `max_output_bytes`. A synchronous loop is
+interrupted by the QuickJS handler; cancellation also sets the interrupt and wins over the program
+await. These bounds are not written into the prompt.
 
 ## 3. Child calls on the Timeline
 
@@ -222,14 +226,18 @@ open(parent_call_id)
 
 `close` runs for normal return, program failure, host timeout and cancellation. On reload,
 ToolExecutor's rebuild applies the reload rule in §3.6 instead. `close` stops new admission, cancels
-children that have not started or that the program no longer awaits, and waits for a terminal
-`step/tool-result` for every committed child before the outer result is written. A child waiting for
-Approval is cancelled through the existing Approval contract.
+children that have not started or that the program no longer awaits, and waits up to a five-second
+grace for a terminal `step/tool-result` for every committed child before the outer result is
+written. A handler that ignores the cancellation token past the grace is outside the contract; its
+terminal fact may settle after the outer result. A child waiting for Approval is cancelled through
+the existing Approval contract.
 
 Child effects are collected from terminal child `ToolResult`s in child sequence order, including
-effects from an error result, and appended to the outer `ToolResult.effects`. The branch does not
-shorten, truncate or drop an effect; `max_calls` bounds the number of child results, and each
-invoked tool remains responsible for its own result bounds. ToolExecutor records the returned outer
+effects from an error result, and appended to the outer `ToolResult.effects`. The gate records a
+child's effects when its task writes the terminal result, so an unawaited child that completes
+before `close` still contributes effects. `max_calls` bounds the number of child results;
+`max_single_result_bytes` bounds one child serialization; each invoked tool remains responsible for
+its own result bounds. ToolExecutor records the returned outer
 result unchanged under the Session boundary contract.
 
 ### 3.5 Cancellation and timeout

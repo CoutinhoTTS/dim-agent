@@ -1676,7 +1676,7 @@ fn write_batch(
                     &batch.key,
                     sequence,
                     kind,
-                    record.event.kind.context_flags(),
+                    record.event.context_flags(),
                     &row,
                 )?;
                 outputs.insert(
@@ -1696,7 +1696,7 @@ fn write_batch(
                     &batch.key,
                     sequence,
                     kind,
-                    record.event.kind.context_flags(),
+                    record.event.context_flags(),
                     &Row::Event {
                         record: Box::new(wire),
                     },
@@ -2325,7 +2325,7 @@ fn copy_fork_rows(
                 &key,
                 at + 1,
                 forked.event.kind.key(),
-                forked.event.kind.context_flags(),
+                forked.event.context_flags(),
                 &Row::Event {
                     record: Box::new(wire),
                 },

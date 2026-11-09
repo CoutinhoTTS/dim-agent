@@ -1255,6 +1255,17 @@ pub struct AgentEvent {
     pub kind: EventKind,
 }
 
+impl AgentEvent {
+    /// Child events are execution facts, never context input.
+    pub fn context_flags(&self) -> (bool, bool) {
+        if self.parent_call_id.is_some() {
+            (false, false)
+        } else {
+            self.kind.context_flags()
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelContentData {
