@@ -1378,6 +1378,22 @@
         "matches",
         "tokio::select",
         "unreachable",
+        "vec",
+        "write"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools::files",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/files.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "format",
+        "json",
+        "panic",
         "vec"
       ]
     },
@@ -16382,7 +16398,9 @@
         "path FileTools::handles",
         "path FileTools::with_coordinator",
         "path FileWriteCoordinator",
+        "path files::FileToolBoundary",
         "path files::resolve_path",
+        "use files::FileToolBoundary",
         "use files::FileTools",
         "use files::FileWriteCoordinator"
       ]
@@ -16850,6 +16868,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::files",
+      "to": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "references": [
+        "mod boundary_tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files",
       "to": "dim_agent_capabilities::workspace_tools::files::codec",
       "references": [
         "mod codec"
@@ -16896,6 +16921,7 @@
       "to": "dim_agent_capabilities::workspace_tools::files::write",
       "references": [
         "mod write",
+        "path write",
         "path write::definition",
         "path write::run"
       ]
@@ -16920,6 +16946,72 @@
         "use dim_agent_types::ToolDefinition",
         "use dim_agent_types::ToolEffect",
         "use dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_capabilities::workspace_tools::file_reads",
+      "references": [
+        "path FileReads",
+        "path FileReads::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_capabilities::workspace_tools::files",
+      "references": [
+        "path FileToolBoundary",
+        "path FileTools",
+        "path FileTools::new",
+        "path FileTools::with_boundary",
+        "use crate::workspace_tools::files::FileToolBoundary",
+        "use crate::workspace_tools::files::FileTools"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline::new",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_runtime::memory_timeline_store",
+      "references": [
+        "path MemoryTimelineStore::default",
+        "use dim_agent_runtime::MemoryTimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineKey",
+        "use dim_agent_runtime::TimelineKey"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::ToolContent::Text"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::files::boundary_tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolResult"
       ]
     },
     {
@@ -17000,6 +17092,8 @@
         "path Cancelled",
         "path Cancelled::check",
         "path FileTools",
+        "path PathError::Message",
+        "path PathError::Refused",
         "path blocking",
         "path cancelled",
         "path failed",
@@ -17008,6 +17102,7 @@
         "path js_len",
         "path not_regular",
         "path open_regular",
+        "path refused",
         "path resolve_path",
         "path revision",
         "path super::CommitHook",
@@ -17015,6 +17110,7 @@
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
+        "use super::PathError",
         "use super::blocking",
         "use super::cancelled",
         "use super::failed",
@@ -17024,6 +17120,7 @@
         "use super::js_len",
         "use super::not_regular",
         "use super::open_regular",
+        "use super::refused",
         "use super::resolve_path",
         "use super::revision",
         "use super::wrote"
@@ -17177,6 +17274,8 @@
         "path Cancelled",
         "path Cancelled::check",
         "path FileTools",
+        "path PathError::Message",
+        "path PathError::Refused",
         "path blocking",
         "path cancelled",
         "path failed",
@@ -17186,11 +17285,13 @@
         "path not_regular",
         "path object",
         "path open_regular",
+        "path refused",
         "path resolve_path",
         "path succeeded",
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
+        "use super::PathError",
         "use super::blocking",
         "use super::cancelled",
         "use super::failed",
@@ -17201,6 +17302,7 @@
         "use super::not_regular",
         "use super::object",
         "use super::open_regular",
+        "use super::refused",
         "use super::resolve_path",
         "use super::succeeded"
       ]
@@ -17267,14 +17369,17 @@
         "path cancelled",
         "path failed",
         "path field",
+        "path inside",
         "path js_len",
         "path lexical",
         "path succeeded",
+        "path super::FileToolBoundary",
         "use super::FileTools",
         "use super::blocking",
         "use super::cancelled",
         "use super::failed",
         "use super::field",
+        "use super::inside",
         "use super::js_len",
         "use super::lexical",
         "use super::succeeded"
@@ -17342,6 +17447,8 @@
         "path Cancelled",
         "path Cancelled::check",
         "path FileTools",
+        "path PathError::Message",
+        "path PathError::Refused",
         "path blocking",
         "path cancelled",
         "path failed",
@@ -17350,6 +17457,7 @@
         "path not_regular",
         "path open_options",
         "path open_regular",
+        "path refused",
         "path resolve_path",
         "path revision",
         "path super::CommitHook",
@@ -17357,6 +17465,7 @@
         "use super::Cancelled",
         "use super::FileTools",
         "use super::NotRegular",
+        "use super::PathError",
         "use super::blocking",
         "use super::cancelled",
         "use super::failed",
@@ -17366,6 +17475,7 @@
         "use super::not_regular",
         "use super::open_options",
         "use super::open_regular",
+        "use super::refused",
         "use super::resolve_path",
         "use super::revision",
         "use super::wrote"
