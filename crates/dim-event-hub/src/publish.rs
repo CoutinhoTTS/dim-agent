@@ -337,6 +337,16 @@ fn strongest(modes: &[InputMode]) -> Option<InputMode> {
     })
 }
 
+/// One branch's answer to a lookup (design §2.4).
+enum Lookup {
+    /// The branch holds this event's input: its id and sequence.
+    Held(String, u64),
+    /// The branch took no input for this id.
+    NotHeld,
+    /// The lookup failed, so whether the branch holds the input is unknown.
+    Failed,
+}
+
 /// The branches that already hold this event's input, by `sessions.lookup`
 /// (design §2.4, §3.2), and the branches whose lookup failed. Every publish
 /// asks, for every body, under a delivery permit of the install's budget;
@@ -351,31 +361,66 @@ async fn looked_up(
     HashMap<(String, String), (String, u64)>,
     HashSet<(String, String)>,
 ) {
+    // The lookups run the way the deliveries do: concurrently, at most
+    // `MAX_DELIVERIES_IN_FLIGHT` at a time, each under one permit of the
+    // install's budget, so one slow branch does not hold up the others
+    // (design §2.4, §2.5).
+    let jobs: Vec<(String, String)> = plans
+        .iter()
+        .map(|plan| (plan.session_id.clone(), plan.branch_id.clone()))
+        .collect();
+    let answers: Vec<((String, String), Lookup)> = stream::iter(jobs)
+        .map(|(session_id, branch_id)| {
+            let submission = submission.to_owned();
+            async move {
+                let key = (session_id.clone(), branch_id.clone());
+                let answer = lookup_branch(shared, session_id, branch_id, submission).await;
+                (key, answer)
+            }
+        })
+        .buffered(MAX_DELIVERIES_IN_FLIGHT)
+        .collect()
+        .await;
     let mut held = HashMap::new();
     let mut failed = HashSet::new();
-    for plan in plans {
-        let _permit = shared.state.delivery_permit().await;
-        let args = json!({
-            "sessionId": plan.session_id,
-            "branchId": plan.branch_id,
-            "submissionId": submission,
-        });
-        let key = (plan.session_id.clone(), plan.branch_id.clone());
-        match sessions(shared.sessions.as_ref(), "lookup", args).await {
-            Ok(Ok(value)) if value["status"] == json!("accepted") => {
-                if let (Some(input_id), Some(sequence)) =
-                    (value["inputId"].as_str(), value["sequence"].as_u64())
-                {
-                    held.insert(key, (input_id.to_owned(), sequence));
-                }
+    for (key, answer) in answers {
+        match answer {
+            Lookup::Held(input_id, sequence) => {
+                held.insert(key, (input_id, sequence));
             }
-            Ok(Ok(_)) => {}
-            _ => {
+            Lookup::NotHeld => {}
+            Lookup::Failed => {
                 failed.insert(key);
             }
         }
     }
     (held, failed)
+}
+
+/// One branch's `sessions.lookup`, under one permit of the install's budget
+/// (design §2.4, §2.5).
+async fn lookup_branch(
+    shared: &Shared,
+    session_id: String,
+    branch_id: String,
+    submission: String,
+) -> Lookup {
+    let _permit = shared.state.delivery_permit().await;
+    let args = json!({
+        "sessionId": session_id,
+        "branchId": branch_id,
+        "submissionId": submission,
+    });
+    match sessions(shared.sessions.as_ref(), "lookup", args).await {
+        Ok(Ok(value)) if value["status"] == json!("accepted") => {
+            match (value["inputId"].as_str(), value["sequence"].as_u64()) {
+                (Some(input_id), Some(sequence)) => Lookup::Held(input_id.to_owned(), sequence),
+                _ => Lookup::NotHeld,
+            }
+        }
+        Ok(Ok(_)) => Lookup::NotHeld,
+        _ => Lookup::Failed,
+    }
 }
 
 /// Stores an overflowed body once per target Session (design §3.2), and
