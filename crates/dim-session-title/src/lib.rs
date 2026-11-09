@@ -548,15 +548,20 @@ impl Owner {
     }
 }
 
+/// The opening of the objective element (Goal.md A.5). Goal writes the
+/// objective as an element of its own lines, and the decoder requires the line
+/// break; eligibility requires it too, so the two checks cannot disagree.
+const OBJECTIVE_OPENING: &str = "<objective>\n";
+
 /// The applied inputs that may title a Session (SessionTitle.md §0.1, A10): an
 /// operator `input/message` with `data.user`, or Goal's applied `goal:state`
 /// record, which states the objective.
 ///
-/// Goal's key alone identifies the record; `goal_objective` decodes it, so a
-/// change to Goal's wording does not change eligibility. The `<objective>`
-/// element stays a condition because Goal also writes a retired `goal:state`
-/// record with no objective when a goal is cleared, and such a record must not
-/// become the first eligible input and block a later title.
+/// Goal's key identifies the record, and eligibility requires the same opening
+/// `goal_objective` decodes, so a record cannot be selected and then fail to
+/// decode. The condition stays narrow on purpose: Goal also writes a retired
+/// `goal:state` record with no objective when a goal is cleared, and such a
+/// record must not become the first eligible input and block a later title.
 fn eligible_input() -> QueryFilter {
     QueryFilter::Or {
         conditions: vec![
@@ -577,7 +582,7 @@ fn eligible_input() -> QueryFilter {
                             value: QueryOperand::Element {
                                 path: "text".into(),
                             },
-                            text: "<objective>".into(),
+                            text: OBJECTIVE_OPENING.into(),
                         },
                     ],
                 }),
@@ -607,7 +612,7 @@ fn goal_objective(blocks: &Value) -> Option<String> {
             return None;
         }
         let body = &rest[end + 1..];
-        let start = body.find("<objective>\n")? + "<objective>\n".len();
+        let start = body.find(OBJECTIVE_OPENING)? + OBJECTIVE_OPENING.len();
         let end = start + body[start..].find("\n</objective>")?;
         let objective = unescape(&body[start..end]);
         (!objective.trim().is_empty()).then_some(objective)

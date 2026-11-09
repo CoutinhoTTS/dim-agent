@@ -5,20 +5,58 @@
 mod support;
 
 use axum::{Router, http::StatusCode, routing::post};
-use dim_agent_capabilities::{adapters::MockTools, defaults};
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_capabilities::{adapters::MockTools, defaults, timeline_tree::TreeCommands};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature};
+use dim_agent_types::{InputBlock, InputMessageData, InputMode};
 use dim_app_server::{RunningServer, ServerConfig, serve};
 use dim_client::{Client, Message};
+use rutis::host::CtxHost;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::*;
 use tokio::sync::mpsc;
 
 const PROVIDER: &str = "018ec73f-0000-7000-8000-00000000000a";
 
-fn builder() -> AgentBuilder {
+/// The Session's branch tree, captured at mount: the facade Goal writes its
+/// records with, so a test can write the record shape Goal owns without Goal
+/// having to produce it.
+#[derive(Clone, Default)]
+struct Probe(Arc<Mutex<Option<Arc<TreeCommands>>>>);
+struct RecordPlugin {
+    probe: Probe,
+    tree: rutis::host::Key<TreeCommands>,
+}
+impl RecordPlugin {
+    fn new(names: &dim_agent_runtime::Names<'_>, probe: Probe) -> rutis::Result<Self> {
+        Ok(Self {
+            probe,
+            tree: names.key()?,
+        })
+    }
+}
+impl rutis::host::DynPlugin for RecordPlugin {
+    fn name(&self) -> &str {
+        "test.goal-record"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.tree.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
+            *self.probe.0.lock().unwrap() = Some(tree);
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+fn builder(probe: &Probe) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_session_title::install(&mut builder);
     dim_goal::install(&mut builder);
@@ -26,6 +64,12 @@ fn builder() -> AgentBuilder {
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     dim_app_server::collaboration::install(&mut builder);
+    let slot = probe.clone();
+    builder.require_feature(
+        Feature::new("test.goal-record").session("test.goal-record", move |names| {
+            Ok(Box::new(RecordPlugin::new(names, slot.clone())?))
+        }),
+    );
     builder
 }
 
@@ -63,6 +107,7 @@ async fn failing() -> String {
 struct Flow {
     client: Client,
     id: String,
+    probe: Probe,
 }
 
 impl Flow {
@@ -74,8 +119,9 @@ impl Flow {
                 .to_string(),
         )
         .unwrap();
+        let probe = Probe::default();
         let server = serve(
-            builder(),
+            builder(&probe),
             ServerConfig {
                 unix_path: Some(PathBuf::from("/tmp").join(format!(
                     "dim-goal-title-{}/server.sock",
@@ -151,7 +197,63 @@ impl Flow {
         })
         .await
         .expect("the built-in SessionTitle part activates");
-        (Self { client, id }, server)
+        (Self { client, id, probe }, server)
+    }
+
+    /// Writes one raw `goal:state` record through the Session's branch tree,
+    /// with whatever text the test needs, not the shape Goal itself writes.
+    async fn record(&mut self, text: &str) {
+        let tree = self
+            .probe
+            .0
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the record fixture mounts in the Session");
+        tree.inputs(
+            "main".into(),
+            vec![InputMessageData {
+                submission_id: Some(format!("goal-record-{}", uuid::Uuid::new_v4())),
+                user: None,
+                blocks: vec![InputBlock::Raw {
+                    text: text.into(),
+                    key: Some("goal:state".into()),
+                    retire: false,
+                }],
+                mode: Some(InputMode::Append),
+                handover: None,
+            }],
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Waits until the branch history holds an `input/applied` event, so the
+    /// record's application precedes the next turn's eligibility query.
+    async fn applied(&mut self) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let history = self
+                    .client
+                    .rpc(
+                        "session.history",
+                        json!({"sessionId":self.id,"branchId":"main"}),
+                    )
+                    .await
+                    .unwrap();
+                if history["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event["type"] == "input" && event["name"] == "applied")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the record's application reaches the history");
     }
 
     async fn entry(&mut self) -> Value {
@@ -384,5 +486,36 @@ async fn goal_objective_round_trips_every_escaped_character() {
     assert_eq!(request["messages"][1]["content"], objective);
     release.send("Escaped objective title".into()).unwrap();
     flow.titled("Escaped objective title", "auto").await;
+    flow.idle().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_objective_without_the_decoder_opening_does_not_title() {
+    let (base, mut requests) = scripted().await;
+    let store = Store::new();
+    let (mut flow, _server) = Flow::start(&store, &base, true).await;
+
+    // Goal writes the objective as a line of its own (Goal.md A.5). A record
+    // whose objective lacks that line break is not the shape this reader
+    // decodes, and eligibility requires what the decoder reads: selected but
+    // unreadable, the record would count a failed attempt and keep every later
+    // turn from ever titling.
+    flow.record(
+        "<dim-goal kind=\"state\" status=\"active\" branch=\"main\">\n\
+         <objective>no line break</objective>\n</dim-goal>",
+    )
+    .await;
+    flow.applied().await;
+    assert!(
+        requests.try_recv().is_err(),
+        "a record this reader cannot decode requests no title"
+    );
+    assert_eq!(flow.entry().await["title"], Value::Null);
+
+    flow.submit("title from the turn").await;
+    let (request, release) = held(&mut requests).await;
+    assert_eq!(request["messages"][1]["content"], "title from the turn");
+    release.send("Turn title".into()).unwrap();
+    flow.titled("Turn title", "auto").await;
     flow.idle().await;
 }
