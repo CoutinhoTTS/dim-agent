@@ -220,6 +220,8 @@ sequenceDiagram
 
 **上限。** 一条 `delivering` 记录至多进行五次 `sessions.lookup` 尝试，每个定时器节拍一次。`reloading`、`ambiguous` 与传输失败计入这五次；`accepted` 在任一次尝试都把它结算为 `delivered`。第五次尝试即使得不到可用回答也会结算记录：此时 `unknown` 记为 `lost` 而不是 `failed`，其他任何非 `accepted` 的结果同样记为 `lost`。`lost` 是终态且可清理(A.7)，因此没有记录永久未结，跳过规则也不会超过这五次尝试。
 
+**排队的输入。** Scheduler 只约束自己的写入：每个任务每个窗口一条输入，且上一条投递未结时不再写。目标分支持有多少输入是该分支 InputQueue 的事，不是 Scheduler 的事。InputQueue 目前没有上限([input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs))，因此目标持续繁忙的 `queue` 任务每个窗口都会增加一条排队输入，直到分支消费它们。排队输入的上限会适用于向分支写入的每个生产方，因此它属于 InputQueue 的设计，而不是本设计。
+
 ### 3.2 完成与超时
 
 **完成。** 投递在目标分支发布输入时完成；记录变为 `delivered` 并携带回执的 `input_event_id`。此后 Scheduler 不再看它。输入变成什么由目标自己决定：其 InputQueue 与 Loop 决定它起一个回合、排在某个回合之后还是等待，该回合的工具由目标自己的 Permission 状态管辖。Scheduler 不订阅广播、不读历史、不持有租约。
@@ -614,6 +616,7 @@ Scheduler 不向任何 Session 投递运行结果，也不发送通知。一次�
 | 窗口投递进行中执行 `run_now` | — | 手动窗口记为 `missed: previous_delivery_unsettled`；不写第二次(A.6) | Scheduler |
 | 一个节拍里两个窗口到期 | — | 每个窗口一条投递；超过宽限或在上一条投递未结时到期的窗口为 `missed` | Scheduler |
 | 目标分支忙 | 先前事实 < 运行输入 | 输入排队；在运行中的回合结束后被消费(A5) | InputQueue、Loop |
+| `queue` 任务的目标分支持续繁忙 | — | 每个窗口一条排队输入；InputQueue 没有上限(§3.1) | InputQueue |
 | 目标分支等待审批 | — | 输入排在该回合之后；Scheduler 不参与 | Approval、InputQueue |
 | 用户中断或撤回已投递输入 | input < interrupt 或 withdraw | 输入被删除或随回合结束；投递保持 `delivered` | Loop、InputQueue |
 | 写入前目标 Session 被删除 | — | `failed: session_closed`，任务以该原因被禁用 | Agents、Scheduler |

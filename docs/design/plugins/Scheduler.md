@@ -242,6 +242,8 @@ The `delivering` record is persisted before any external effect, so a restart se
 
 **Bound.** A `delivering` record gets at most five `sessions.lookup` attempts, one per timer pass. `reloading`, `ambiguous` and a transport failure count toward the five; `accepted` settles it `delivered` at any attempt. The fifth attempt settles the record even when it answers nothing usable: `unknown` there is `lost` rather than `failed`, and any other non-`accepted` result is `lost` too. A `lost` record is terminal and prunable (A.7), so no record stays unsettled for ever and the skip rule cannot outlast those five attempts.
 
+**Queued inputs.** Scheduler bounds its own writes: one input per window per job, and none while that job's previous delivery is unsettled. How many inputs a target branch holds is that branch's InputQueue's concern, not Scheduler's. InputQueue has no bound today ([input_queue.rs](../../../crates/dim-agent-capabilities/src/input_queue.rs)), so a `queue` job whose target stays busy adds one queued input per window until the branch consumes them. A queue bound would apply to every producer that writes to a branch, so it belongs to an InputQueue design, not to this one.
+
 ### 3.2 Completion and timeout
 
 **Completion.** A delivery is complete when the target branch publishes the input; the record becomes `delivered` with the receipt's `input_event_id`. Scheduler then stops looking at it. What the input becomes is the target's own business: its InputQueue and Loop decide whether it starts a turn, queues behind one, or waits, and the target's own Permission state governs the tools of that turn. Scheduler subscribes to no broadcast, reads no history and holds no lease.
@@ -639,6 +641,7 @@ Run a retention pass after startup recovery, each settled delivery and `schedule
 | `run_now` while a window delivery is in flight | — | The manual window is `missed: previous_delivery_unsettled`; no second write (A.6) | Scheduler |
 | Two windows due in one tick | — | One delivery per window; a window past its grace or due while the previous delivery is unsettled is `missed` | Scheduler |
 | Target branch busy | prior facts < run input | The input is queued; it is consumed after the running turn (A5) | InputQueue, Loop |
+| A `queue` job's target branch stays busy | — | One queued input per window; InputQueue has no bound (§3.1) | InputQueue |
 | Target branch waiting on an approval | — | The input waits behind the turn; Scheduler is not involved | Approval, InputQueue |
 | User interrupts or withdraws the delivered input | input < interrupt or withdraw | The input is deleted or ends with the turn; the delivery stays `delivered` | Loop, InputQueue |
 | Target Session deleted before the write | — | `failed: session_closed`, and the job is disabled with that reason | Agents, Scheduler |
