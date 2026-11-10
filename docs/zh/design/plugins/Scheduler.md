@@ -231,7 +231,7 @@ sequenceDiagram
 **超时。** 只有 `launch` 目标有超时。`max_run_minutes` 是 Session 的停止时刻，在投递被接受时固化为 `created_at + max_run_minutes`；定时器在到点时停止该 Session：
 
 - `sessions.stop {sessionId, branchId:"main", reason:"scheduled run reached its stop time"}`。投递保持 `delivered`；停止是对启动工作的界，不是运行结果。
-- 停止失败时，定时器在记录仍命名该 Session 期间至多每分钟重试一次。投递本身不变。
+- 停止失败时，定时器在记录仍然存在期间至多每分钟重试一次。投递本身不变。
 - 在停止时刻被停止的 Session，在其最后一条命名记录离开存储时由保留期删除(A.7)，绝不在停止时刻之前删除。
 
 `session` 目标没有超时：投递属于用户的分支，Scheduler 永不撤回或停止它。
@@ -606,7 +606,7 @@ Scheduler 不向任何 Session 投递运行结果、不写报告输入，也不�
 | 该任务仍有 `delivering` 投递时窗口到期 | `missed: previous_delivery_unsettled` | 不写输入；该窗口不重试，记录可清理(A.7) |
 | 守护进程错过了窗口 | `missed` | 不启动、不写输入 |
 
-恢复绝不重写已结算记录，也绝不重发窗口。在持久化 `delivering` 与输入回复之间崩溃，由下次启动时的 `sessions.lookup` 结算；在 launch Session 已创建、其身份尚未记录时崩溃，会留下一条没有记录命名的 Session(附录 F 的已知限制)，而它的记录不命名任何 Session，因此没有查询能到它，它以 `detail: launch_reply_unknown` 结算为 `lost`。已带 Session 到达 `delivering` 的 launch 记录只恢复其停止定时器：定时器就是记录携带的 `deadline_at`。每条 `delivering` 记录每个定时器节拍查询一次，总共至多五次，跨重启累计。`accepted` 回答把它结算为 `delivered`；第五次不带事实的回答把它结算为 `lost`(§3.1)。恢复会在查询任何东西之前，把存储的 `attempts` 已达上限的记录结算为带 `detail: lookup_budget_exhausted` 的 `lost`。每个节拍在查询之前持久化递增后的 `attempts`，因此在两次尝试之间崩溃不会重新开始计数。“未结期间永不被清理”因此仍然成立，同时有了上限：目标持续失败的任务，既不会无界增长记录，也不会写两次。
+恢复绝不重写已结算记录，也绝不重发窗口。在持久化 `delivering` 与输入回复之间崩溃，由下次启动时的 `sessions.lookup` 结算；在 launch Session 已创建、其身份尚未记录时崩溃，会留下一条没有记录命名的 Session(附录 F 的已知限制)，而它的记录不命名任何 Session，因此没有查询能到它，它以 `detail: launch_reply_unknown` 结算为 `lost`。查询总是以该趟开始时其记录持有的身份为目标，因此 launch 回复在调用方自己的快照过期之后才到达的投递，会对 launch 出的 Session 对账，而不是凭过期的副本结算为 `lost`。携带其 Session 的 launch 记录以任何状态恢复其停止定时器，`delivered`、`lost` 或 `failed` 皆可：定时器就是记录携带的 `deadline_at`，它属于被 launch 的 Session，直到保留期移除该记录为止(A.7)。每条 `delivering` 记录每个定时器节拍查询一次，总共至多五次，跨重启累计。`accepted` 回答把它结算为 `delivered`；第五次不带事实的回答把它结算为 `lost`(§3.1)。恢复会在查询任何东西之前，把存储的 `attempts` 已达上限的记录结算为带 `detail: lookup_budget_exhausted` 的 `lost`。每个节拍在查询之前持久化递增后的 `attempts`，因此在两次尝试之间崩溃不会重新开始计数。“未结期间永不被清理”因此仍然成立，同时有了上限：目标持续失败的任务，既不会无界增长记录，也不会写两次。
 
 ### A.7 运行存储与保留期
 
@@ -668,7 +668,7 @@ Scheduler 不向任何 Session 投递运行结果、不写报告输入，也不�
 | 查询回答 `unknown` | 记录保持 `delivering`，该回答计入上限；之后的 `accepted` 结算为 `delivered`，绝不写第二条输入 |
 | 查询回答 `reloading`、`ambiguous` 或传输失败 | 记录保持 `delivering`，每分钟重试；每次回答都计入，第五次不带事实的回答结算为 `lost` |
 | 启动失败 | `failed: <code>`；该窗口不重试 |
-| 停止定时器调用失败 | 在记录仍命名该 Session 期间每分钟重试；投递不变 |
+| 停止定时器调用失败 | 在记录仍然存在期间每分钟重试；投递不变 |
 | 存储不可读或未知格式版本 | Scheduler 应用失败(不静默重置) |
 | 进程退出 | 定时器停止；`delivering` 记录在下次启动结算 |
 
@@ -729,7 +729,7 @@ Scheduler 不向任何 Session 投递运行结果、不写报告输入，也不�
 | 公开运行存储 | process-typescript §5.2 提供既有 pluginFiles 提供方与真实的公开存储验收。包必须在效果之前持久化 `delivering`；不使用私有托管插件槽位或直接文件系统访问。 |
 | Sessions | `sessions.input`、`launch`、`stop` 与 `delete` 是已交付的 S2 方法；§1.1 保持其信封。 |
 | 原生输入生命周期 | 已准入的输入跨卸载与索引重载继续运行；记录的结算等待它。 |
-| 启动停止定时器 | 由进程部分在其任务跟踪器中拥有；通过 `deadline_at` 跨越重启，本进程继承的 launch 记录会恢复它。较早构建留在 `launching`、`submitted` 或 `running` 的记录在这里没有停止定时器：它按原样保留(A.7)。 |
+| 启动停止定时器 | 由进程部分在其任务跟踪器中拥有；通过 `deadline_at` 跨越重启，本进程继承的 launch 记录以任何状态恢复它。较早构建留在 `launching`、`submitted` 或 `running` 的记录在这里没有停止定时器：它按原样保留(A.7)。 |
 | 记录 | A.1 定义任务与投递字段，A.7 定义内层 v1 存储；附录 D 演练重启、不确定回复、停止定时器与保留期。无需核心或协议需求。 |
 | 原生空闲生命周期 | [#126](https://github.com/arcships/dim/issues/126) 由已合入的 #331 交付。Scheduler 使用既有 S2 持有，不实现宿主卸载。 |
 

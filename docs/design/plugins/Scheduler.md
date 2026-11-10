@@ -253,7 +253,7 @@ The `delivering` record is persisted before any external effect, so a restart se
 **Timeout.** Only a `launch` target has one. `max_run_minutes` is the Session's stop time, fixed when the delivery is accepted as `created_at + max_run_minutes`; the timer stops the Session at it:
 
 - `sessions.stop {sessionId, branchId:"main", reason:"scheduled run reached its stop time"}`. The delivery stays `delivered`; a stop is a bound on the launched work, not a run outcome.
-- A stop that fails is retried by the timer at most once a minute while the record names the Session. Nothing about the delivery changes.
+- A stop that fails is retried by the timer at most once a minute while the record still exists. Nothing about the delivery changes.
 - A Session stopped at its stop time is deleted by retention when its last naming record leaves the store (A.7), never before its stop time.
 
 A `session` target has no timeout: the delivery belongs to the user's branch, and Scheduler never withdraws or stops it.
@@ -631,7 +631,7 @@ Scheduler delivers no run outcome to a Session, writes no report input, and send
 | A window is due while the job has a `delivering` delivery | `missed: previous_delivery_unsettled` | No input; the window is not retried, and the record is prunable (A.7) |
 | The daemon missed the window | `missed` | No launch and no input |
 
-Recovery never rewrites a settled record and never resends a window. A crash between persisting `delivering` and the input's reply is settled by `sessions.lookup` at the next start; a crash after a launched Session was created but before its identity was recorded leaves a Session named by no record (the known limit in Appendix F), and its record names no Session, so no lookup can reach it and it settles `lost` with `detail: launch_reply_unknown`. A launch record that reached `delivering` with its Session resumes only its stop timer: the timer is `deadline_at`, which the record carries. Each `delivering` record is looked up once per timer pass and at most five times in all, across restarts. An `accepted` answer settles it `delivered`; the fifth answer without a fact settles it `lost` (§3.1). Recovery settles a record whose stored `attempts` is already at the bound `lost` with `detail: lookup_budget_exhausted`, before it looks anything up. Each pass persists the incremented `attempts` before the lookup, so a crash between attempts does not start the count again. "Never pruned while unsettled" therefore stays true and becomes bounded: a job whose target keeps failing neither grows records without bound nor writes twice.
+Recovery never rewrites a settled record and never resends a window. A crash between persisting `delivering` and the input's reply is settled by `sessions.lookup` at the next start; a crash after a launched Session was created but before its identity was recorded leaves a Session named by no record (the known limit in Appendix F), and its record names no Session, so no lookup can reach it and it settles `lost` with `detail: launch_reply_unknown`. A lookup always targets the identity its record holds at the start of the pass, so a delivery whose launch reply arrived after the caller's own snapshot predated it is reconciled against the launched Session, not settled `lost` on a stale copy. A launch record that carries its Session resumes only its stop timer in any state, `delivered`, `lost` or `failed`: the timer is `deadline_at`, which the record carries, and it belongs to the launched Session until retention removes the record (A.7). Each `delivering` record is looked up once per timer pass and at most five times in all, across restarts. An `accepted` answer settles it `delivered`; the fifth answer without a fact settles it `lost` (§3.1). Recovery settles a record whose stored `attempts` is already at the bound `lost` with `detail: lookup_budget_exhausted`, before it looks anything up. Each pass persists the incremented `attempts` before the lookup, so a crash between attempts does not start the count again. "Never pruned while unsettled" therefore stays true and becomes bounded: a job whose target keeps failing neither grows records without bound nor writes twice.
 
 ### A.7 Run storage and retention
 
@@ -693,7 +693,7 @@ Run a retention pass after startup recovery, each settled delivery and `schedule
 | Lookup answers `unknown` | The record stays `delivering` and the answer counts toward the bound; a later `accepted` settles `delivered`, never a second input |
 | Lookup answers `reloading`, `ambiguous` or a transport failure | The record stays `delivering` and is retried once a minute; each answer counts, and the fifth answer without a fact settles it `lost` |
 | Launch failure | `failed: <code>`; the window is not retried |
-| Stop timer call fails | Retried once a minute while the record names the Session; the delivery is unchanged |
+| Stop timer call fails | Retried once a minute while the record still exists; the delivery is unchanged |
 | Storage unreadable or unknown format version | Scheduler fails to apply (no silent reset) |
 | Process exit | Timers stop; `delivering` records settle at the next start |
 
@@ -754,7 +754,7 @@ The first-release business choices and public bindings are specified. The remain
 | Public run store | Process-typescript §5.2 supplies the existing pluginFiles provider and actual public storage acceptance. The package must persist `delivering` before its effect; no private managed-plugin slot or direct filesystem access. |
 | Sessions | `sessions.input`, `launch`, `stop` and `delete` are the delivered S2 methods; §1.1 keeps their envelopes. |
 | Native input lifetime | An admitted input keeps running across unload and index reload; the record's settle waits for it. |
-| Launch stop timer | Owned by the process part, in its task tracker; it survives a restart through `deadline_at`, and a launch record this process inherits resumes it. A record an earlier build left in `launching`, `submitted` or `running` has no stop timer here: it is retained as written (A.7). |
+| Launch stop timer | Owned by the process part, in its task tracker; it survives a restart through `deadline_at`, and a launch record this process inherits resumes it in any state. A record an earlier build left in `launching`, `submitted` or `running` has no stop timer here: it is retained as written (A.7). |
 | Records | A.1 defines the job and delivery fields and A.7 the inner v1 storage; Appendix D exercises restart, uncertain replies, the stop timer and retention. No core or protocol requirement. |
 | Native idle lifetime | [#126](https://github.com/arcships/dim/issues/126) is delivered by merged #331. Scheduler uses existing S2 holds and does not implement host unloading. |
 
