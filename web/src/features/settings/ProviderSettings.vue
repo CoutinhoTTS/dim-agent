@@ -26,6 +26,7 @@ const busy = ref(false)
 const error = ref("")
 const detailError = ref("")
 const modelRefreshError = ref("")
+const savedProvider = ref("")
 const search = ref("")
 const pickerSearch = ref("")
 const custom = ref(false)
@@ -41,7 +42,8 @@ const isNew = computed(() => route.name === "settings-provider-new")
 const providerId = computed(() => typeof route.params.providerId === "string" ? route.params.providerId : "")
 const opened = computed(() => isNew.value || providerId.value !== "")
 function configured(provider: ManagementProvider): boolean {
-  return provider.account?.state.authenticated === true || provider.connection?.credentialConfigured === true || (provider.connection?.auth.type === "anonymous" && provider.enabled === true)
+  return provider.source === "custom" || provider.account?.state.authenticated === true
+    || provider.connection?.credentialConfigured === true || (!provider.account && provider.enabled === true)
 }
 const configuredProviders = computed(() => (view.value?.providers ?? []).filter(configured).filter((p) => `${p.displayName} ${p.providerId}`.toLowerCase().includes(search.value.toLowerCase())))
 const availableProviders = computed(() => (view.value?.providers ?? []).filter((p) => !configured(p)).filter((p) => `${p.displayName} ${p.providerId}`.toLowerCase().includes(pickerSearch.value.toLowerCase())))
@@ -94,8 +96,9 @@ function updated(provider: ManagementProvider): void {
 async function saved(provider: ManagementProvider): Promise<void> {
   connectionDirty.value = false
   updated(provider)
-  ++formKey.value
-  if (isNew.value) await router.replace({ name: "settings-provider-detail", params: { providerId: provider.providerId } })
+  savedProvider.value = provider.displayName
+  await router.replace({ name: "settings-providers" })
+  await models.load()
 }
 async function changeTab(next: string): Promise<void> {
   if (tab.value === next) return
@@ -150,6 +153,7 @@ watch([providerId, isNew], async () => {
   connectionDirty.value = false
   modelDirty.value = false
   modelRefreshError.value = ""
+  if (opened.value) savedProvider.value = ""
   ++formKey.value
   await syncDialog()
   await loadDetail()
@@ -162,6 +166,7 @@ onMounted(async () => { await syncDialog(); await load() })
   <article class="settings-page">
     <ConfirmDialog ref="confirm" />
     <header><h2 data-route-heading tabindex="-1">{{ t("providers") }}</h2><p>{{ t("providerDescription") }}</p></header>
+    <p v-if="savedProvider" class="settings-help" role="status">{{ t("providerSaved", { name: savedProvider }) }}</p>
     <p v-if="error" class="ui-banner settings-banner" data-tone="danger" role="alert">{{ error }} <button class="ui-button" data-variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load">{{ t("retry") }}</button></p>
     <p v-for="failure in view?.errors" :key="failure.providerId" class="ui-banner settings-banner" data-tone="warning">{{ failure.providerId }}: {{ failure.message }}</p>
     <div class="settings-list-toolbar">
@@ -171,12 +176,12 @@ onMounted(async () => { await syncDialog(); await load() })
     <p v-if="loading && !view" class="ui-banner" role="status">{{ t("loading") }}</p>
     <div class="settings-list">
       <button v-for="provider in configuredProviders" :key="provider.providerId" type="button" class="settings-row" @click="open(provider.providerId)">
-        <span class="settings-status" :data-connected="provider.enabled !== false" aria-hidden="true" /><span class="settings-row-main"><strong>{{ provider.displayName }} <span v-if="provider.account" class="ui-badge">OAuth</span></strong><small>{{ provider.connection?.driverKind ?? provider.providerId }}</small></span><span class="settings-meta">{{ provider.enabled === false ? t("disabled") : t("connected") }} · {{ provider.models?.length ?? 0 }} {{ t("models") }}</span><ChevronRight :size="16" aria-hidden="true" />
+        <span class="settings-status" :data-connected="provider.enabled !== false" aria-hidden="true" /><span class="settings-row-main"><strong>{{ provider.displayName }} <span v-if="provider.account" class="ui-badge">OAuth</span></strong><small v-if="provider.connection?.baseUrl">{{ provider.connection.baseUrl }}</small></span><span class="settings-meta">{{ t(provider.enabled === false ? "disabled" : provider.account ? "signedIn" : "enabled") }} · {{ t("providerModelCount", { count: provider.models?.length ?? 0 }) }}</span><ChevronRight :size="16" aria-hidden="true" />
       </button>
       <p v-if="view && !configuredProviders.length" class="settings-empty">{{ t(search ? 'noResults' : 'noProviders') }}</p>
     </div>
     <dialog ref="dialog" class="ui-dialog provider-dialog" data-size="lg" :aria-label="isNew ? t('add') : detail?.displayName" @cancel.prevent="close">
-      <header class="ui-dialog-header"><div><h2 class="ui-dialog-title">{{ isNew ? t("add") : detail?.displayName ?? providerId }}</h2><p v-if="detail && !isNew" class="ui-dialog-description">{{ detail.providerId }}</p></div><button class="ui-icon-button ui-dialog-close" data-size="sm" data-variant="close" type="button" :aria-label="t('close')" @click="close"><X aria-hidden="true" /></button></header>
+      <header class="ui-dialog-header"><div><h2 class="ui-dialog-title">{{ isNew ? t(custom ? "custom" : "add") : detail?.displayName ?? providerId }}</h2><p v-if="detail?.enabled === false && !isNew" class="ui-dialog-description">{{ t("disabled") }}</p></div><button class="ui-icon-button ui-dialog-close" data-size="sm" data-variant="close" type="button" :aria-label="t('close')" @click="close"><X aria-hidden="true" /></button></header>
       <p v-if="connection.phase === 'reconnecting'" class="ui-banner settings-banner" role="status">{{ t("page.reconnecting") }}</p>
       <p v-if="loading || busy" class="ui-banner settings-banner" role="status">{{ t(busy ? "working" : "loading") }}</p>
       <p v-if="error" class="ui-banner settings-banner" data-tone="danger" role="alert">{{ error }} <button class="ui-button" data-variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load">{{ t("retry") }}</button></p>
@@ -185,12 +190,14 @@ onMounted(async () => { await syncDialog(); await load() })
       <template v-if="isNew">
         <template v-if="custom && view">
           <div class="settings-list-toolbar"><button class="ui-button" data-size="sm" data-variant="ghost" type="button" @click="backToProviders"><ArrowLeft aria-hidden="true" />{{ t("back") }}</button></div>
-          <ProviderConnectionForm :key="`new-${formKey}`" v-model:dirty="connectionDirty" :drivers="view.drivers" @saved="saved" />
+          <ProviderConnectionForm :key="`new-${formKey}`" v-model:dirty="connectionDirty" :drivers="view.drivers" @saved="saved" @cancel="close" />
         </template>
         <template v-else-if="view">
-          <label class="ui-field-wrap" style="margin-bottom: 16px"><Search aria-hidden="true" /><input v-model="pickerSearch" class="ui-field" type="search" :placeholder="t('search')" /></label>
-          <div class="settings-list"><button v-for="provider in availableProviders" :key="provider.providerId" class="settings-row" @click="open(provider.providerId)"><span class="settings-row-main"><strong>{{ provider.displayName }}</strong><small>{{ provider.connection?.driverKind ?? 'OAuth' }}</small></span><ChevronRight :size="16" aria-hidden="true" /></button><p v-if="!availableProviders.length" class="settings-empty">{{ t("noResults") }}</p></div>
-          <footer class="ui-dialog-footer"><button class="ui-button" data-variant="primary" @click="custom = true">{{ t("custom") }}</button></footer>
+          <div class="settings-list-toolbar">
+            <label class="ui-field-wrap"><Search aria-hidden="true" /><input v-model="pickerSearch" class="ui-field" type="search" :placeholder="t('searchProvider')" /></label>
+            <button class="ui-button" data-variant="secondary" @click="custom = true">{{ t("addCustomProvider") }}</button>
+          </div>
+          <div class="settings-list"><button v-for="provider in availableProviders" :key="provider.providerId" class="settings-row" @click="open(provider.providerId)"><span class="settings-row-main"><strong>{{ provider.displayName }} <span v-if="provider.account" class="ui-badge">OAuth</span></strong></span><ChevronRight :size="16" aria-hidden="true" /></button><p v-if="!availableProviders.length" class="settings-empty">{{ t("noResults") }}</p></div>
         </template>
       </template>
       <template v-else-if="detail">
@@ -203,7 +210,7 @@ onMounted(async () => { await syncDialog(); await load() })
             <div v-if="detail.account.state.authenticated" class="settings-list-toolbar"><span>{{ detail.account.state.identity?.email ?? detail.account.state.preview ?? t("connected") }}</span><button class="ui-button" data-variant="secondary" :disabled="busy || dirty || connection.phase !== 'connected'" @click="remove(true)">{{ t("signOut") }}</button></div>
             <ProviderAuthFlow v-else :key="detail.providerId" :provider="detail" @finished="signedInFromAuth" />
           </section>
-          <ProviderConnectionForm v-if="detail.connection && view" :key="`${detail.providerId}-${formKey}`" v-model:dirty="connectionDirty" :provider="detail" :drivers="view.drivers" @saved="saved" @reload="reloadDetail" />
+          <ProviderConnectionForm v-if="detail.connection && view" :key="`${detail.providerId}-${formKey}`" v-model:dirty="connectionDirty" :provider="detail" :drivers="view.drivers" @saved="saved" @reload="reloadDetail" @cancel="close" />
         </template>
         <ProviderModels v-else :key="detail.providerId" v-model:dirty="modelDirty" :provider="detail" @updated="updated" />
         <footer v-if="detail.actions.includes('delete')" class="provider-footer"><button class="ui-button" data-variant="danger-ghost" :disabled="busy || dirty || connection.phase !== 'connected'" @click="remove()">{{ t("remove") }}</button></footer>

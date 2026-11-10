@@ -347,6 +347,14 @@ list and add-dialog searches are independent; the custom-provider form can retur
 to the picker, confirming before discarding a changed draft. Dialog close buttons
 remain square at the top right.
 
+The add dialog puts custom creation next to the Provider search. The connection
+form keeps connection fields and the enable toggle together. Test connection
+reports the number of models found. Only the probe result for the current draft
+seeds a new Provider; manually adding a model belongs to the Models tab. After
+the owner accepts a connection save, the dialog closes and the provider list
+shows the saved Provider and a confirmation. A rejected write keeps the draft
+and shows the owner's error in the form.
+
 Loading and failure states, including retry actions, remain inside the active
 dialog rather than behind it. Error banners wrap long server messages without
 widening the page. Account refresh retains the last successful usage and referral
@@ -403,6 +411,7 @@ refresh succeeds, the chat picker reads the updated catalog. A refresh error
 leaves the user signed in and shows the reason in Settings. The account card
 offers `Refresh model list` for the signed-in Dim account. Provider details
 offer the same action next to the tabs when the owner advertises `refresh`.
+This includes disabled Providers with a saved connection that supports listing.
 The refresh error's Retry button in Provider details fetches the models again.
 
 ```text
@@ -415,6 +424,15 @@ The refresh error's Retry button in Provider details fetches the models again.
 | [Connection] [Models]         [Refresh model list] |
 | Model list refresh failed                   [Retry] |
 +----------------------------------------------------+
+
++-- Custom provider -------------------------------+
+| Provider name                                     |
+| API URL                                           |
+| API protocol               Authentication         |
+| Credential                                        |
+| [ ] Enable provider                               |
+|          [Cancel] [Test connection] [Save provider]|
++---------------------------------------------------+
 ```
 
 Provider writes use the snapshot's expected version and the owner's field-operation

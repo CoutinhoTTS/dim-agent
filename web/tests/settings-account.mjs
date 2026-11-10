@@ -6,14 +6,17 @@ import { compileScript, parse } from "vue/compiler-sfc"
 import { createRenderer, nextTick, reactive, ref } from "vue"
 import { createPinia } from "pinia"
 
-const settingsComponent = (url) => /\/(AccountSettings|ProviderAuthFlow|ProviderSettings)\.vue$/.test(url)
+globalThis.Document = class {}
+globalThis.ShadowRoot = class {}
+
+const settingsComponent = (url) => /\/(AccountSettings|ProviderAuthFlow|ProviderConnectionForm|ProviderSettings)\.vue$/.test(url)
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "../../stores/connection" || (specifier === "./connection" && context.parentURL?.endsWith("/stores/models.ts"))) {
       return { url: "data:text/javascript,export const useConnectionStore=()=>globalThis.settingsConnection", shortCircuit: true }
     }
-    if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>globalThis.settingsRoute;export const useRouter=()=>({})", shortCircuit: true }
-    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:(key,args)=>args?.reason?key+' '+args.reason:key,locale:{value:'en'}})", shortCircuit: true }
+    if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>globalThis.settingsRoute;export const useRouter=()=>globalThis.settingsRouter??{}", shortCircuit: true }
+    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:(key,args)=>[key,args?.reason??args?.name].filter(Boolean).join(' '),locale:{value:'en'}})", shortCircuit: true }
     if (specifier.endsWith(".vue") && !settingsComponent(specifier)) return { url: "data:text/javascript,export default {setup(props,{expose}){expose({open:async()=>true});return ()=>null}}", shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
       if ((specifier.startsWith("./") || specifier.startsWith("../")) && !/\.(ts|vue)$/.test(specifier)) return next(`${specifier}.ts`, context)
@@ -39,7 +42,10 @@ const node = (type, text = "") => ({
 const renderer = createRenderer({
   createElement(type) {
     const element = node(type)
-    if (type === "dialog") element.showModal = () => { element.open = true }
+    if (type === "dialog") {
+      element.showModal = () => { element.open = true }
+      element.close = () => { element.open = false }
+    }
     return element
   },
   createText: (text) => node("text", text), createComment: (text) => node("comment", text),
@@ -193,10 +199,10 @@ test("Dim device sign-in fetches models and the signed-in account can retry a fa
   } finally { app.unmount(); delete globalThis.settingsConnection }
 })
 
-test("third-party Provider refresh retries the remote listing and updates the model count", async () => {
+test("disabled third-party Provider refresh retries the remote listing and updates the model count", async () => {
   const providerId = "relay"
   let refreshes = 0
-  const provider = { providerId, displayName: "Relay", source: "custom", credentialAuthority: "static", version: 1, enabled: true, actions: ["refresh"], preferences: {},
+  const provider = { providerId, displayName: "Relay", source: "custom", credentialAuthority: "static", version: 1, enabled: false, actions: ["refresh"], preferences: {},
     connection: { driverKind: "openai-compatible", auth: { type: "bearer" }, baseUrl: "https://example.test/v1", credentialConfigured: true, headerNames: [], proxyUrl: null, proxyAuthConfigured: false, timeoutMs: null },
   }
   globalThis.settingsRoute = { name: "settings-provider-detail", params: { providerId } }
@@ -231,4 +237,57 @@ test("third-party Provider refresh retries the remote listing and updates the mo
     assert.doesNotMatch(text(root), /Relay timeout/)
     assert.match(text(root), /models \(1\)/)
   } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsRoute }
+})
+
+test("a Provider save keeps the draft on failure and closes the dialog on success", async () => {
+  const route = reactive({ name: "settings-provider-new", params: {} })
+  globalThis.settingsRoute = route
+  globalThis.settingsRouter = { replace: async ({ name }) => { route.name = name } }
+  const drafts = []
+  const drivers = [{ driverKind: "openai-compatible", authTypes: ["bearer"], remoteModelList: true }]
+  globalThis.settingsConnection = { phase: "connected", supports: () => false, client: { call: async (method, params, read) => {
+    if (method === "provider.management") return read({ drivers, errors: [], providers: [] })
+    if (method === "provider.list") return read({ providers: [] })
+    if (method === "provider.probe") return read({ models: [] })
+    assert.equal(method, "provider.create")
+    drafts.push(params)
+    if (drafts.length === 1) throw new Error("Provider store unavailable")
+    return read({
+      providerId: params.providerId, displayName: params.displayName, source: "custom", credentialAuthority: "static",
+      version: 1, enabled: false, actions: ["models.create"], models: [], preferences: {},
+      connection: { ...params.connection, credentialConfigured: false, headerNames: [], proxyUrl: null, proxyAuthConfigured: false, timeoutMs: null },
+    })
+  } } }
+  const root = node("root")
+  const dirty = ref(false)
+  const app = renderer.createApp(ProviderSettings).use(createPinia()).provide(settingsDirtyKey, dirty)
+  app.mount(root)
+  try {
+    await flush()
+    const button = (label) => all(root).find((element) => element.type === "button" && text(element) === label)
+    const field = (label) => all(root).find((element) => element.type === "label" && text(element) === label).children.find((element) => element.type === "input")
+    await button("addCustomProvider").props.onClick()
+    await flush()
+    const dialog = all(root).find((element) => element.type === "dialog")
+    assert.equal(dialog.open, true)
+    field("providerName").props["onUpdate:modelValue"]("My relay")
+    field("baseUrl").props["onUpdate:modelValue"]("https://example.test/v1")
+    field("enableProvider").props["onUpdate:modelValue"](false)
+    await flush()
+    const form = all(root).find((element) => element.type === "form")
+    const submit = () => form.props.onSubmit({ preventDefault() {} })
+    assert.equal(dirty.value, true)
+    await submit()
+    await flush()
+    assert.equal(dialog.open, true)
+    assert.match(text(root), /Provider store unavailable/)
+    assert.equal(dirty.value, true)
+    await submit()
+    await flush()
+    assert.deepEqual(drafts[1], drafts[0])
+    assert.equal(route.name, "settings-providers")
+    assert.equal(dialog.open, false)
+    assert.equal(dirty.value, false)
+    assert.match(text(root), /providerSaved My relay/)
+  } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsRoute; delete globalThis.settingsRouter }
 })
