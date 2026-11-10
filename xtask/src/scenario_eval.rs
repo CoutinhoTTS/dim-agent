@@ -1260,6 +1260,10 @@ struct Options {
     /// non-zero, to exercise a failed run cancelling a still-working
     /// sibling: the arm's name and the marker's path.
     fail_child: Option<(String, PathBuf)>,
+    /// A test hook beside `fail_child`: the hook's descendant inherits the
+    /// child's standard output instead of detaching it, so only killing the
+    /// child's group lets the parent's read reach EOF.
+    fail_child_holds_stdout: bool,
     /// The default plugin configuration file both arms load; `None` serves
     /// the assembly without the product's plugins.
     defaults: Option<PathBuf>,
@@ -1424,6 +1428,7 @@ impl Options {
             offer_plugin: false,
             extra_tool: false,
             fail_child: None,
+            fail_child_holds_stdout: false,
             rejudge,
             select,
             pool,
@@ -2178,6 +2183,11 @@ struct ChildParams {
     /// so a failed run cancels a sibling still working.
     #[serde(default)]
     fail_child: Option<PathBuf>,
+    /// A test hook beside `fail_child`: the hook's descendant inherits this
+    /// child's standard output instead of detaching it, so only killing the
+    /// child's group lets the parent's read reach EOF.
+    #[serde(default)]
+    fail_child_holds_stdout: bool,
     /// The native probe's declared set: the assembly served without the
     /// plugin defaults. Each run's `tools-product` check reads its own
     /// declared set against it.
@@ -2307,18 +2317,23 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
         };
         // The descendant a failed child leaves behind when the harness does
         // not kill its group: `sleep` joins this child's process group (it
-        // starts no session of its own), its streams are detached so it
-        // cannot hold the parent's pipe open, and its pid goes beside the
-        // marker for the test to check.
-        let descendant = std::process::Command::new("sleep")
+        // starts no session of its own), and its pid goes beside the marker
+        // for the test to check. Its streams are detached, or — when the
+        // test asks for it — it inherits this child's standard output, so
+        // only killing the group lets the parent's read reach EOF.
+        let mut descendant = std::process::Command::new("sleep");
+        descendant
             .arg("300")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                format!("the failing-child test hook cannot start its descendant: {error}")
-            })?;
+            .stderr(Stdio::null());
+        if params.fail_child_holds_stdout {
+            descendant.stdout(Stdio::inherit());
+        } else {
+            descendant.stdout(Stdio::null());
+        }
+        let descendant = descendant.spawn().map_err(|error| {
+            format!("the failing-child test hook cannot start its descendant: {error}")
+        })?;
         std::fs::write(
             marker.with_extension("descendant"),
             descendant.id().to_string(),
@@ -3540,6 +3555,7 @@ async fn isolate_run(
             .as_ref()
             .filter(|(arm_name, _)| arm_name == arm)
             .map(|(_, marker)| marker.clone()),
+        fail_child_holds_stdout: options.fail_child_holds_stdout,
         native_tools: native.to_vec(),
         probe_only: false,
     };
@@ -3645,6 +3661,7 @@ async fn native_probe(
         offer_plugin: false,
         extra_tool: options.extra_tool,
         fail_child: None,
+        fail_child_holds_stdout: false,
         native_tools: Vec::new(),
         probe_only: true,
     };
@@ -3981,12 +3998,16 @@ async fn spawn_child_json(
     let status = tokio::select! {
         result = child.wait() => {
             let status = result?;
-            // A child that exited successfully left no process behind; one
-            // that failed may have started group members and died first, so
-            // its group stays armed and the failure path kills it.
+            // The group is killed before the output is read: a member the
+            // failed child left behind may hold the write end of its stdout,
+            // and the reader would wait for an EOF that never comes. A
+            // successful child left no member behind, so its group is
+            // disarmed instead.
             #[cfg(unix)]
             if status.success() {
                 group.disarm();
+            } else {
+                group.kill();
             }
             status
         }
@@ -4006,12 +4027,10 @@ async fn spawn_child_json(
     };
     let text = String::from_utf8_lossy(&output);
     if !status.success() {
-        // The child died without reaping what it started: its group may
-        // still hold the MCP servers and git, npm and pip children it
-        // started, so the group goes with the error. An empty group answers
-        // ESRCH and the kill ignores it.
-        #[cfg(unix)]
-        group.kill();
+        // The group was killed as soon as the exit status was known: a
+        // member left in it may hold this child's stdout, and the read
+        // above would never see EOF. An empty group answered ESRCH and the
+        // kill ignored it.
         // A test hook's child names the event that ended it on a line of
         // its own; the error carries that name, so a test waiting for the
         // event fails when it never arrived instead of reading only the
@@ -9410,6 +9429,7 @@ mod tests {
                 offer_plugin: false,
                 extra_tool: false,
                 fail_child: None,
+                fail_child_holds_stdout: false,
                 defaults: None,
                 node: None,
                 js_runtime: None,
@@ -12164,6 +12184,7 @@ mod tests {
             offer_plugin: false,
             extra_tool: false,
             fail_child: None,
+            fail_child_holds_stdout: false,
             defaults: None,
             node: None,
             js_runtime: None,
@@ -12461,6 +12482,7 @@ mod tests {
             offer_plugin: false,
             extra_tool: false,
             fail_child: None,
+            fail_child_holds_stdout: false,
             native_tools: native
                 .iter()
                 .map(|name| ((*name).to_owned(), ToolSource::Builtin))
@@ -12695,6 +12717,50 @@ mod tests {
         assert!(
             child_tree_gone(pid).await,
             "the failed child's descendant and its group are gone (pid {pid})"
+        );
+    }
+
+    /// A failed child's descendant that inherits the child's standard
+    /// output must not keep `evaluate` from the run's error: the group is
+    /// killed as soon as the non-zero status is known, before the parent
+    /// reads the child's output, so the read reaches EOF. The bound makes
+    /// an ordering regression a failed assertion instead of a hang.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_child_holding_stdout_returns_its_error() {
+        let fixture = Fixture::start(
+            "failed-stdout-holder",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let directory = fixture.directory.join("out");
+        let mut options = fixture.options(directory);
+        // The marker is already there: the failing child needs no held
+        // sibling, and its descendant inherits its standard output.
+        let marker = fixture.directory.join("fail.marker");
+        std::fs::write(&marker, "go").unwrap();
+        options.fail_child = Some(("current".into(), marker.clone()));
+        options.fail_child_holds_stdout = true;
+        let settled = tokio::time::timeout(Duration::from_secs(10), fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns within the bound");
+        let error = settled
+            .expect_err("the failing run fails the evaluation")
+            .to_string();
+        assert!(
+            error.contains("the held sibling's model call was seen"),
+            "the failing child saw its marker: {error}"
+        );
+        let pid: u32 = std::fs::read_to_string(marker.with_extension("descendant"))
+            .expect("the failing child recorded its descendant")
+            .trim()
+            .parse()
+            .expect("the descendant's pid");
+        assert!(
+            child_tree_gone(pid).await,
+            "the failed child's stdout holder and its group are gone (pid {pid})"
         );
     }
 
