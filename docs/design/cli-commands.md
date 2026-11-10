@@ -462,8 +462,8 @@ Authorization URL rows have no side borders, including wrapped continuation
 rows, so native terminal selection does not copy dialog borders into the URL.
 The other rows keep their borders; Enter on the URL still opens the full link.
 
-The terminal UI after Dim account sign-in and the line client after Dim device
-sign-in await `provider.refresh` for that account's Provider. The terminal UI opens
+After Dim account sign-in, the terminal UI and line client await
+`provider.refresh` for that account's Provider. The terminal UI opens
 `/models` once the refresh succeeds. On a refresh error it shows the signed-in
 account and the reason in the account panel, with focus on `Refresh model list`.
 Enter on that row refreshes the same Provider and shows the outcome in the
