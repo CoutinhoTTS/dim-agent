@@ -1738,18 +1738,21 @@ impl AgentIndex {
             .ok_or_else(|| AgentError::Closed(source.into()))?;
         // The record is the Session's current configuration: an in-place
         // update (`session.language.update`) rewrites it, while the live
-        // Session keeps the value its apply ran with at creation.
-        let mut config = store
-            .timeline_store()
-            .session_config(source)
+        // Session keeps the value its apply ran with at creation. One read
+        // feeds the live fork and the record the copy writes, so a concurrent
+        // update cannot make them disagree.
+        let stored = store
+            .session_config_text(source)
             .await?
             .ok_or_else(|| AgentError::Closed(source.to_owned()))?;
+        let mut config = serde_json::from_str::<SessionConfig>(&stored)
+            .map_err(|error| AgentError::Storage(format!("the source configuration: {error}")))?;
         // A fork of an older protocol keeps the live Session's codemode
         // exclusion; the stored record is written without it, as on create.
         config.exclude_codemode_below(version);
         let source = source.to_owned();
         let (id, prepare) = self.prepared(config.cwd.clone(), move |fork| {
-            Box::pin(async move { store.fork_session(&source, &fork, at).await })
+            Box::pin(async move { store.fork_session(&source, &fork, at, &stored).await })
         });
         let creation = usage
             .host
