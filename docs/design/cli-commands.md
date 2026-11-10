@@ -1527,40 +1527,49 @@ The daemon is detached and its stderr is the append-only `daemon.log`, so a
 per-launch note is the only channel that does not parse history or depend on a
 pipe the client may close. Before spawning, the CLI removes
 `<native home>/dimcode.sqlite.startup`, where the native home is the daemon's
-own home, `<home>/rust`. When the spawned daemon exits before the client
-connects, the CLI reads that note (at most 16 KiB, and only a regular
-file; on Unix it must also be owned by the current user and offer no group or
-other permissions). On Unix that mode is the note's protection, since the
-daemon writes it 0600; on Windows the client checks only the regular file, its
-size and the header, and the private home's inherited ACL is the boundary. It
-requires the `dimcode-startup-failure v1 pid=<child pid>` header, removes
-control characters other than newline and tab from the body, and returns it as
-the command's error followed by `Details: <native home>/daemon.log`. The
-storage gate writes the note on a diagnosed incompatibility and names the
-store, its marker, the daemon's supported format, whether the store is newer,
-mismatched, unrecognized or too old, and the recovery paths ([native storage format §
-startup incompatibility](appserver/native-storage-format.md#启动不兼容诊断)).
-Without a matching note the embedded server reports the existing
+own home, `<home>/rust`; it leaves it in place when it is a progress note from
+another live process, and waits for that process instead of spawning. When the
+spawned daemon exits before the client connects, the CLI reads that note (at
+most 16 KiB, and only a regular file; on Unix it must also be owned by the
+current user and offer no group or other permissions). On Unix that mode is the
+note's protection, since the daemon writes it 0600; on Windows the client checks
+only the regular file, its size and the header, and the private home's inherited
+ACL is the boundary. It requires the
+`dimcode-startup-failure v1 pid=<child pid>` header, removes control characters
+other than newline and tab from the body, and returns it as the command's error
+followed by `Details: <native home>/daemon.log`. The storage gate writes the
+note on a diagnosed incompatibility and names the store, its marker, the
+daemon's supported format, whether the store is newer, mismatched, unrecognized
+or too old, and the recovery paths; it writes the same kind when another process
+owns the store, naming that process and, when the process reports an upgrade,
+its pid and the formats ([native storage format § startup
+incompatibility](appserver/native-storage-format.md#启动不兼容诊断)). Without a
+matching note the embedded server reports the existing
 `App Server exited (<status>); see ...`, and a `--server` binary reports that
 the flag must name a standalone `dim-app-server` binary. The failed launch
 removes the note after reading; a successful connection removes any note. The
 CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
 the store, and exits 1.
 
-While a store format upgrade runs, the daemon writes the same note as a
-progress kind, `dimcode-startup-progress v1 pid=<pid>` with
+While a store format upgrade runs, the daemon writes the same note as a progress
+kind, `dimcode-startup-progress v1 pid=<pid>` with
 `store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
-after each upgrade step; a fresh store or one at the current format writes
-none. Both startup waits read it: the spawn wait counts only its child's pid,
-the start-lock wait any pid, and each new counter moves the wait's bound
-forward by the bound itself (10 s for the spawn, one verified shutdown plus
-one startup plus a margin for the lock). A store format upgrade is the long
-phase that reports progress and moves the bound; every other phase of
-startup is bounded by the client's fixed value. The first such
-note prints, once on stderr in every mode, `Upgrading the local store from
-format v<from> to v<to>; this can take a while on a large store.`; stdout and
-JSON output stay unchanged. A client that only knows the failure kind ignores
-the progress kind and falls back to the generic messages above.
+after each upgrade step; a fresh store or one at the current format writes none.
+All three startup waits read it: the wait before spawning and the start-lock
+wait count any pid, the spawn wait only its child's pid, and each new counter
+moves the wait's bound forward by the bound itself (10 s for the wait before
+spawning and the spawn wait, one verified shutdown plus one startup plus a
+margin for the lock). A store format upgrade is the long phase that reports
+progress and moves the bound; every other phase of startup is bounded by the
+client's fixed value. Before it spawns, a client waits while the note names a
+live pid other than its own: the store is owned, and it has no socket until the
+upgrade finishes. Progress moves that bound, the client retries the socket, and
+it connects once the daemon serves; a note whose pid is gone, or that names the
+client itself, is stale, and the client starts its own daemon. The first such
+note a client reads prints, once on stderr in every mode,
+`Upgrading the local store from format v<from> to v<to>; this can take a while on a large store.`;
+stdout and JSON output stay unchanged. A client that only knows the failure kind
+ignores the progress kind and falls back to the generic messages above.
 Development documentation continues to use `./dev` and its isolated home; the
 terminal note itself names a compatible build or `--home PATH`.
 

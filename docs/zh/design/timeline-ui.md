@@ -213,6 +213,25 @@ applied 的输入可以跨过一次 stop 继续待消费，正是下一个 turn 
 
 fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 
+### 分支未读回答
+
+输入框底栏提示有未读回答的分支数。用 `/lines` 查看标记为「未读取」的分支，面板打开时选中第一条未读分支。按 Enter 打开对应正文并清除这条分支的提示。新回答到达时，输入焦点留在原处。
+
+```text
++--------------------------------------------+
+| >                                          |
++------------------------ 未读取 (1) · /lines+
+
+/lines
+  main
+  * parser race       未读取 · 等待中
+  Enter 打开所选分支
+```
+
+Session worker 通过实时 `session.event` 中非空白的 assistant 正文判断新回答。已显示的分支和已打开的侧面板视为已读。提示按分支计数，历史加载和重复事件不会重新点亮提示。回答及用户已读位置只保存在当前 attachment 内。新 attachment 从空标记开始，旧回答仍可作为历史查看。
+
+两种 TUI 模式都复用输入框底栏。空间不足时优先显示提醒，按可用宽度依次缩成 `/lines (N)`、`/lines`、`*`。全屏模式仍优先保留左侧状态。
+
 ## 7. 客户端数据
 
 | # | 需求 | 归属 | 说明 |
@@ -221,6 +240,7 @@ fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 | R2 | 用户消息行的切点（`ViewRow.cut`）、模型是否已消费（`ViewRow.pending`）与标记行的线（`ViewRow.line`） | CLI projection | 来自客户端已有的序号与输入状态 |
 | R3 | `session.branch_create` 与 `session.fork` 调用 | CLI session host | 已有方法；从过期 attachment 发出的请求在本地拒绝 |
 | R4 | 后续、可选：显示 fork 的来源（源上的 `↗ forked`，fork 里的 `forked from S`） | App Server，需格式决定 | `session/forked` 不带数据，fork 设计也不加来源列 |
+| R5 | CLI 快照里的未读分支 ID | CLI session worker | 从现有实时回答及客户端已读位置派生。位置属于当前 attachment。 |
 
 ## 8. 不做的事
 

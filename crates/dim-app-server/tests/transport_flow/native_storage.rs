@@ -1007,6 +1007,7 @@ async fn interactive_is_stored_with_the_session_and_absence_means_interactive() 
         [
             "collaborationRole",
             "cwd",
+            "excludedTools",
             "model",
             "permissionPolicy",
             "systemPrompt",

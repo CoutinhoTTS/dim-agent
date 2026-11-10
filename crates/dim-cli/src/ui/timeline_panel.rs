@@ -247,6 +247,7 @@ mod tests {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,

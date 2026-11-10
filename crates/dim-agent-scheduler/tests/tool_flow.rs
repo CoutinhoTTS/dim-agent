@@ -167,6 +167,7 @@ async fn the_schedule_tool_saves_jobs_for_interactive_sessions_only() {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-tool-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     select_model(&mut client).await;

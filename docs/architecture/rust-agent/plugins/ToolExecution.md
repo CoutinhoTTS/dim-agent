@@ -130,15 +130,23 @@ declarations on it travel on that fact
 ([session boundary A.6](../../../design/contracts/session-boundary.md#a6-tool-effects));
 a call it settles without a tool result carries none. Calls in a batch settle
 before the correlated batch result.
-Only one batch runs at once. Interrupts cancel current work and suppress late
-host invocation. Cleanup closes admission, cancels, joins tracked work and
-aggregates failures. Reload settles unmatched committed batches as errors rather
-than rerunning effects; reload-settled results make Loop fail the turn.
-Recovery selects batch identities without a matching `call_event_id` result,
-and reads their turn, request and call identities. It does not read tool
-arguments. Interrupt state comes from the latest interrupt or turn boundary
-at the same fixed read boundary.
-Cancellation is not rollback of a tool's completed side effect.
+One top-level batch runs at once. A child batch carries `parent_call_id`; the
+top-level consumer ignores child batches, and the nested gate writes their
+`step/tool-call`/`step/tool-result` and joins them before the outer result. Child
+batches may run in parallel and may themselves carry grandchildren. Interrupts
+cancel current work, including child calls, and suppress late host invocation.
+Cleanup closes admission, cancels, joins tracked work and aggregates failures.
+The child gate bounds its join at five seconds; a handler that ignores its
+cancellation token past the grace is outside the contract and its child fact may
+settle after the outer result. Child events are execution facts:
+`context.render` and `context.state` are false for an event with
+`parent_call_id`, so child results never enter model context. Reload settles open
+child batches first as errors, then settles an open outer batch with the
+confirmed effects of terminal child results; child results keep their effects. Reload-settled results make Loop fail the turn. Recovery selects
+batch identities without a matching `call_event_id` result, reads their turn,
+request, call and parent identities, and does not read tool arguments. Interrupt
+state comes from the latest interrupt or turn boundary at the same fixed read
+boundary. Cancellation is not rollback of a tool's completed side effect.
 
 A request prepared with no tools never runs a call: the executor's snapshot
 refusal ([tool_binding.rs](../../../../crates/dim-agent-capabilities/src/tool_binding.rs))
@@ -155,7 +163,9 @@ delivered, are protocol
 `progress admission failed` and `capability reloading`, and `Tool cancelled
 before execution` say the work did not run; `Tool execution cancelled:
 capability reloading` says the call may have run, possibly to the end, and that
-its result was replaced because the capability reloaded. The model checks the
+its result was replaced because the capability reloaded. An open outer batch
+with child results says `Tool did not finish before Capability reload; an effect
+may have happened` and carries the confirmed child effects. The model checks the
 effect before it retries, and reports the work neither as done nor as never run.
 
 ### Tests

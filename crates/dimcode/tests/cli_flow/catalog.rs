@@ -427,7 +427,7 @@ fn a_cold_ui_leaf_submits_its_first_message_with_a_large_native_catalog() {
     let hello = rpc(
         &mut wire,
         "hello",
-        json!({"protocolVersion":3,"clientKind":"cli"}),
+        json!({"protocolVersion":4,"clientKind":"cli"}),
     );
     assert!(
         hello["result"]["features"]

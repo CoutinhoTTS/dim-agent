@@ -1218,6 +1218,11 @@ struct Branch {
     timeline: Arc<Timeline>,
     approval: Arc<Approval>,
     registry: Arc<ToolRegistry>,
+    /// The plugin's own context, which a rebuilt page reports progress under.
+    ctx: Ctx,
+    /// The Session whose rebuilt pages a test can slow (feature `testing`).
+    #[cfg(feature = "testing")]
+    session_id: String,
     branch_id: String,
     view: Mutex<View>,
     jobs: mpsc::UnboundedSender<Job>,
@@ -1234,6 +1239,8 @@ impl Branch {
         let mut after = None;
         let mut view = View::default();
         loop {
+            #[cfg(feature = "testing")]
+            slow_rebuild_page(&self.session_id).await;
             let reply = self
                 .timeline
                 .query(TimelineQuery {
@@ -1467,6 +1474,10 @@ impl Branch {
                     _ => {}
                 }
             }
+            // A completed page is real progress: report it, so a rebuild that
+            // outlasts the opening's inactivity interval still opens while a
+            // page that never returns still times out.
+            dim_agent_runtime::opening_advanced(&self.ctx);
             after = reply.next;
             if after.is_none() {
                 break;
@@ -2033,6 +2044,36 @@ const FOLLOWED_EVENTS: [&str; 12] = [
     "approval/cancelled",
 ];
 
+/// Slows the rebuilt pages of one Session by this delay, so a flow test can
+/// make a rebuild outlast a short `startup_timeout`. Feature `testing` only.
+#[cfg(feature = "testing")]
+static REBUILD_PAGE_DELAY: Mutex<Option<(String, Duration)>> = Mutex::new(None);
+
+/// Sets the Session whose rebuilt pages wait before each query, and by how
+/// much; `None` clears it. Feature `testing` only.
+#[cfg(feature = "testing")]
+pub fn set_rebuild_page_delay(delay: Option<(String, Duration)>) {
+    *REBUILD_PAGE_DELAY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = delay;
+}
+
+/// A page that never returns for the chosen Session: the delay runs before
+/// the query, so no page completes and no progress is reported within the
+/// interval.
+#[cfg(feature = "testing")]
+async fn slow_rebuild_page(session_id: &str) {
+    let delay = REBUILD_PAGE_DELAY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .filter(|(id, _)| id == session_id)
+        .map(|(_, delay)| *delay);
+    if let Some(delay) = delay {
+        tokio::time::sleep(delay).await;
+    }
+}
+
 pub struct HooksBranchPlugin {
     runtime: Key<HooksRuntime>,
     timeline: Key<Timeline>,
@@ -2090,6 +2131,9 @@ impl DynPlugin for HooksBranchPlugin {
                 timeline,
                 approval,
                 registry,
+                ctx: ctx.clone(),
+                #[cfg(feature = "testing")]
+                session_id: identity.session_id.clone(),
                 branch_id: identity.branch_id.clone(),
                 view: Mutex::new(View::default()),
                 jobs: sender,
@@ -2163,6 +2207,7 @@ mod tests {
             sequence,
             create_at: 0,
             tags: None,
+            parent_call_id: None,
             kind,
         }
     }

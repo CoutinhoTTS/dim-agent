@@ -101,6 +101,7 @@ fn record(sequence: u64, kind: EventKind) -> StoredEvent {
             sequence,
             create_at: 1000 + sequence,
             tags: Some(vec!["stored".into()]),
+            parent_call_id: None,
             kind,
         }),
         trace: None,
@@ -404,6 +405,8 @@ const V36_ADDITIONS: &[&str] = &[
     "CREATE TRIGGER timeline_text_delete AFTER DELETE ON timeline_text BEGIN DELETE FROM timeline_text_fts WHERE rowid=old.id; END",
     "CREATE TABLE timeline_text_tails (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, request_id TEXT NOT NULL, tail TEXT NOT NULL, PRIMARY KEY(session_id, branch_id, request_id))",
 ];
+const SESSION_OWNERS_V37: &str = "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)))";
+const SESSION_OWNERS_V38: &str = "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3, 4)))";
 fn schema_of(version: u32) -> Vec<String> {
     let mut statements: Vec<String> = V13_SCHEMA
         .iter()
@@ -439,6 +442,13 @@ fn schema_of(version: u32) -> Vec<String> {
                 sql
             } else {
                 sql.replace(AGENT_SESSIONS_V27, AGENT_SESSIONS_V30)
+            }
+        })
+        .map(|sql| {
+            if version < 38 {
+                sql
+            } else {
+                sql.replace(SESSION_OWNERS_V37, SESSION_OWNERS_V38)
             }
         })
         .collect();
@@ -757,6 +767,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
             result: Some(EventDraft {
                 id: None,
                 tags: first.event.tags.clone(),
+                parent_call_id: None,
                 kind: prepare,
             }),
         }],
@@ -785,6 +796,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
             result: Some(EventDraft {
                 id: None,
                 tags: fifth.event.tags.clone(),
+                parent_call_id: None,
                 kind: fifth.event.kind.clone(),
             }),
         }],
@@ -2033,6 +2045,7 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
         Some(EventDraft {
             id: None,
             tags: traced.event.tags.clone(),
+            parent_call_id: None,
             kind: prepare(request),
         })
     };
@@ -4120,14 +4133,80 @@ fn read_startup_note(database: &std::path::Path) -> String {
     body.to_owned()
 }
 
+/// #1335: a store another process owns leaves a startup note that says so,
+/// and names the owner and the formats when the owner's progress note does.
+#[test]
+fn an_owned_store_leaves_a_note_that_names_the_owner() {
+    let database = Database::new();
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(format!("{}.lock", database.0.display()))
+        .unwrap();
+    lease.lock().unwrap();
+    let Err(AgentError::Storage(message)) = SqliteStorage::open(database.0.clone()) else {
+        panic!("an owned store must be refused");
+    };
+    assert!(
+        message.contains("another process owns the SQLite database"),
+        "{message}"
+    );
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Another dimcode-server is using the store."),
+        "{note}"
+    );
+    assert!(
+        note.contains("Wait for it to finish, then run the command again."),
+        "{note}"
+    );
+    // A running upgrade reports itself beside the store; the refusal then
+    // names the process and the formats to wait for.
+    std::fs::write(
+        startup_note(&database.0),
+        format!(
+            "dimcode-startup-progress v1 pid={}\nstore-upgrade from=34 to=36 progress=7\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            startup_note(&database.0),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    let Err(AgentError::Storage(message)) = SqliteStorage::open(database.0.clone()) else {
+        panic!("an owned store must be refused");
+    };
+    assert!(
+        message.contains("another process owns the SQLite database"),
+        "{message}"
+    );
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains(&format!(
+            "Another dimcode-server (pid {}) is upgrading it from format v34 to v36.",
+            std::process::id()
+        )),
+        "{note}"
+    );
+    lease.unlock().unwrap();
+}
+
 #[test]
 fn a_newer_store_leaves_an_actionable_startup_note() {
     let database = Database::new();
     Connection::open(&database.0)
         .unwrap()
         .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 37));
-             INSERT INTO agent_store_format VALUES (37);",
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 39));
+             INSERT INTO agent_store_format VALUES (39);",
         )
         .unwrap();
     let original = std::fs::read(&database.0).unwrap();
@@ -4137,10 +4216,10 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     assert!(message.contains("unsupported SQLite schema"), "{message}");
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v37"), "{note}");
-    assert!(note.contains("Daemon format: v36"), "{note}");
+    assert!(note.contains("Store format: v39"), "{note}");
+    assert!(note.contains("Daemon format: v38"), "{note}");
     assert!(note.contains("Existing data was preserved"), "{note}");
-    assert!(note.contains("Run a build supporting v37"), "{note}");
+    assert!(note.contains("Run a build supporting v39"), "{note}");
     assert!(note.contains("--home PATH"), "{note}");
 }
 
@@ -4158,7 +4237,7 @@ fn a_mismatched_store_note_does_not_claim_a_downgrade() {
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
-    assert!(note.contains("Store format: v29 (schema is v36)"), "{note}");
+    assert!(note.contains("Store format: v29 (schema is v38)"), "{note}");
     assert!(note.contains("marker and schema disagree"), "{note}");
     assert!(
         note.contains("Use the build that wrote this store"),
@@ -4202,7 +4281,7 @@ fn an_empty_marker_table_is_reported_as_missing_or_ambiguous() {
     assert_eq!(std::fs::read(&database.0).unwrap(), original);
     let note = read_startup_note(&database.0);
     assert!(
-        note.contains("Store format: v36 (format marker is missing or ambiguous)"),
+        note.contains("Store format: v38 (format marker is missing or ambiguous)"),
         "{note}"
     );
     assert!(!note.contains("Run a build supporting"), "{note}");
@@ -4301,14 +4380,14 @@ fn a_failed_open_replaces_the_previous_startup_note() {
         .unwrap();
     std::fs::write(
         startup_note(&database.0),
-        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v37\n",
+        "dimcode-startup-failure v1 pid=1\nCannot open native store /previous.\n  Store format: v39\n",
     )
     .unwrap();
     assert!(SqliteStorage::open(database.0.clone()).is_err());
     let note = read_startup_note(&database.0);
     assert!(note.contains("Store format: v34"), "{note}");
     assert!(!note.contains("/previous"), "{note}");
-    assert!(!note.contains("v37"), "{note}");
+    assert!(!note.contains("v39"), "{note}");
 }
 
 #[test]
@@ -8054,6 +8133,7 @@ fn query_record(sequence: u64, batch_end: u64, id: &str, kind: EventKind) -> Sto
             sequence,
             create_at: 1000 + sequence,
             tags: None,
+            parent_call_id: None,
             kind,
         }),
         trace: None,
