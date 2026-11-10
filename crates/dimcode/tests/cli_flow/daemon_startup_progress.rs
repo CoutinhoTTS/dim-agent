@@ -611,3 +611,94 @@ fn a_progress_note_from_a_dead_pid_does_not_hold_up_the_start() {
     assert!(!stderr.contains(UPGRADING), "{stderr}");
     assert!(!note.exists(), "the started daemon removed the note");
 }
+
+/// The hello of a daemon of another build that an idle replacement stops.
+fn old_hello() -> Value {
+    json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.summaries","daemon.shutdown.completed","daemon.shutdown.ifIdle"]})
+}
+
+/// #1335: a client that already spawned its own daemon and then finds another
+/// build's daemon on the endpoint reaps that child once the daemon is
+/// stopped, and starts a successor instead of reporting the child's exit.
+#[test]
+fn a_child_that_lost_the_store_is_reaped_and_a_successor_starts() {
+    let home = Home::new();
+    let note = note_path(&home);
+    // The store is leased until the fixture daemon is stopped, so the client's
+    // own child fails admission and exits while the client meets it: the
+    // stale child whose exit the loop must not report.
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.0.join("rust/dimcode.sqlite.lock"))
+        .unwrap();
+    lease.lock().unwrap();
+    // A note from a dead pid is no daemon to wait for; the client removes it
+    // when it starts its own, and a child that fails admission writes its
+    // failure note there with its own pid. A note that no longer names the
+    // dead pid is therefore the spawn.
+    let mut gone = Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    write_progress_note(&note, pid, 50);
+    let watched = note.clone();
+    let stale = format!("pid={pid}");
+    let mut client = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "15000")
+        .args(["models", "fixture"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // `Home::daemon` binds synchronously and the client retries the endpoint
+    // every 50 ms after its spawn, so this thread has that window to bind;
+    // the daemon below answers that attempt, when the child is already there.
+    let started = Instant::now();
+    while fs::read_to_string(&note).is_ok_and(|text| text.contains(&stale)) {
+        assert!(
+            client.try_wait().unwrap().is_none(),
+            "the client stopped before it spawned"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the client never started its own daemon"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        client.try_wait().unwrap().is_none(),
+        "the client stopped before the endpoint answered"
+    );
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello, old_hello());
+        let shutdown = wire.read("daemon.shutdown");
+        assert_eq!(shutdown["params"], json!({"ifIdle": true}));
+        // The spawned child has failed admission once its note is beside the
+        // store; the store goes free only then, for the client's successor.
+        let started = Instant::now();
+        while !watched.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the spawned child did not fail admission: {:?}",
+                std::fs::read_to_string(watched.parent().unwrap().join("daemon.log"))
+                    .unwrap_or_default()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        lease.unlock().unwrap();
+        wire.reply(&shutdown, json!({}));
+    });
+    let output = wait(client);
+    daemon.join().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the client starts its successor instead of reporting the reaped child: {stderr}"
+    );
+    assert!(!stderr.contains("Another dimcode-server"), "{stderr}");
+    assert!(!note.exists(), "the successor removed the note");
+}

@@ -846,9 +846,17 @@ pub async fn connect_inner(
         match Client::open(&connection, true).await {
             Ok(client) => match adopt(client, start, &server, &startup_note).await? {
                 Some(link) => return Ok(Some(link)),
-                // The daemon was another build's and is stopped now; this
-                // client starts its own.
-                None => waiting = None,
+                // The daemon behind the endpoint was another build's; it is
+                // stopped now. A child this client already spawned may have
+                // lost the store or the endpoint to it, so it is reaped, and
+                // the loop starts this client's own.
+                None => {
+                    if let Some(mut child) = child.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    waiting = None;
+                }
             },
             Err(error)
                 if missing(&error) || cfg!(unix) && error.kind() == io::ErrorKind::WouldBlock => {}
