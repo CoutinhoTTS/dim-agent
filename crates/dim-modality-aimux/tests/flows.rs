@@ -407,6 +407,23 @@ async fn wait_state(client: &mut Client, task_id: &str, wanted: &[&str]) -> Valu
     }
 }
 
+/// The record once the adapter's submit stored its remote handle: the
+/// record's own proof that the job was accepted (Modality A.6 Start).
+async fn wait_handle(client: &mut Client, task_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        let task = status(client, task_id).await;
+        if task["remote_handle"].is_string() {
+            return task;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "task never recorded its remote handle: {task}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn read_result(client: &mut Client, task_id: &str, name: &str) -> Vec<u8> {
     let reply = client
         .rpc(
@@ -686,6 +703,13 @@ async fn cancel_is_local_for_an_image_and_unsupported_for_a_video() {
     )
     .await;
     wait_state(&mut client, &image, &["running"]).await;
+    // A blocking task has no handle; its stub request is held open for 30 s,
+    // so its arrival shows the local cancel has running work to abort.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while stub.starts("/v1/images/generations") == 0 {
+        assert!(Instant::now() < deadline, "the image job never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let reply = client
         .rpc("modality.task.cancel", json!({"task_id": image}))
         .await;
@@ -706,6 +730,12 @@ async fn cancel_is_local_for_an_image_and_unsupported_for_a_video() {
     )
     .await;
     wait_state(&mut client, &video, &["running"]).await;
+    // A.6 Start writes `running` before the adapter submits, and the drive
+    // re-checks the cancel after opening the submit phase (engine.rs): a
+    // cancel here would settle `cancelled` with no handle and nothing to ask
+    // the executor. The handle is the record's proof the job was accepted;
+    // with it, the cancel keeps the executor's answer (A.6 Cancel).
+    wait_handle(&mut client, &video).await;
     let reply = client
         .rpc("modality.task.cancel", json!({"task_id": video}))
         .await;

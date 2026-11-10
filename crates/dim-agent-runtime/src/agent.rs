@@ -189,6 +189,9 @@ impl Agent {
                 .map(Session::start)
             }
             .await;
+            if let Err(error) = &result {
+                tracing::error!(session_id = %id, %error, "Session failed to build");
+            }
             let unpublished = {
                 let mut entries = owner.0.entries.lock().unwrap();
                 match &result {
