@@ -74,7 +74,7 @@ git diff --check
 
 ## Publish the container image
 
-- A published, non-draft Release is required; the workflow verifies that state before downloading assets. `gh workflow run image-publish.yml --ref main -f release_tag=vVERSION` builds both platform rootfs trees and the amd64 image on hosted Ubuntu, runs local acceptance, and pushes nothing. The workflow uses the `image-release` environment and `GITHUB_TOKEN`; the GHCR package must be public and linked to `arcships/dim`.
+- A published, non-draft Release is required; the workflow verifies that state before downloading assets. `gh workflow run image-publish.yml --ref main -f release_tag=vVERSION` builds both platform rootfs trees and the amd64 image on hosted Ubuntu, runs local acceptance, and pushes nothing. Create the `image-release` environment with protection rules and, after the first push, make the GHCR package public and link it to `arcships/dim`. The first dry run needs an alpha Release cut after the image workflow lands.
 - Actual publication requires an explicit image-publication request and the same command with `-f publish=true`. The workflow checks out the release tag's Dockerfile and staging script, verifies the original Linux and Web archives against `SHA256SUMS`, their manifests and expected names, refuses an existing version tag, and pushes the two-platform index with provenance and an SBOM.
 - Acceptance pulls that exact index digest on native amd64 and arm64 runners, checks `dimcode --version`, the version/revision/source labels, UID 1000, both CLI symlinks and the Web assets. Only then does it copy the accepted index to `alpha` and assert the digest is unchanged. A wrong image needs a new alpha; do not rebuild a version tag.
 

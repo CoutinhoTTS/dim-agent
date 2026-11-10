@@ -55,6 +55,22 @@ for (const archive of [nativeArchive, webArchive]) {
 }
 
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'dimcode-image-'));
+const entryTypes = {
+  l: 'symbolic link', h: 'hard link', c: 'character device', b: 'block device', p: 'fifo', s: 'socket',
+};
+/** Rejects links and special files before extraction. */
+const checkTypes = (archive) => {
+  const result = spawnSync('tar', ['-tvzf', archive], {
+    encoding: 'utf8', env: {...process.env, LC_ALL: 'C'},
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `Cannot list ${path.basename(archive)}: ${result.stderr}`);
+  for (const line of result.stdout.split('\n').filter(Boolean)) {
+    const type = line[0];
+    assert(type === '-' || type === 'd',
+      `Release archive contains a ${entryTypes[type] ?? `type ${JSON.stringify(type)}`} entry: ${line}`);
+  }
+};
 /** Rejects archive members outside the expected root before anything is extracted. */
 const checkMembers = (archive, rootName) => {
   const result = spawnSync('tar', ['-tzf', archive], {encoding: 'utf8'});
@@ -69,6 +85,7 @@ const checkMembers = (archive, rootName) => {
   }
 };
 const extract = (archive, rootName) => {
+  checkTypes(archive);
   checkMembers(archive, rootName);
   const directory = mkdtempSync(path.join(scratch, 'extract-'));
   const result = spawnSync('tar', ['-xzf', archive, '-C', directory], {encoding: 'utf8'});

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {copyFileSync, lstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {copyFileSync, existsSync, lstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
@@ -13,6 +13,7 @@ const commit = 'a'.repeat(40);
 const protocolVersion = Number(readFileSync(path.join(root, 'crates/dim-app-server/src/protocol.rs'), 'utf8')
   .match(/pub const PROTOCOL_VERSION: u32 = (\d+);/)[1]);
 const skipped = process.platform === 'win32' ? 'stage-image assembly targets Linux archives' : false;
+const gnuTar = spawnSync('tar', ['--version'], {encoding: 'utf8'}).stdout.includes('GNU tar');
 
 const digest = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
@@ -51,10 +52,11 @@ function writeManifest(root, fields) {
     `${JSON.stringify({schemaVersion: 1, version, sourceCommit: commit, ...fields, files: filesUnder(root)}, null, 2)}\n`);
 }
 
-function archive(temporary, root) {
+function archive(temporary, root, extra = []) {
   const name = path.basename(root);
   const file = path.join(temporary, `${name}-${version}.tar.gz`);
-  const result = spawnSync('tar', ['-czf', file, '-C', path.dirname(root), name], {encoding: 'utf8'});
+  const args = ['-czf', file, '-C', path.dirname(root), name, ...extra.map((entry) => `${name}/${entry}`)];
+  const result = spawnSync('tar', args, {encoding: 'utf8'});
   assert.ifError(result.error);
   assert.equal(result.status, 0, result.stderr);
   return file;
@@ -83,6 +85,12 @@ function release(t, options = {}) {
   if (options.addNative) writeFileSync(path.join(native, 'extra.txt'), 'extra\n');
   if (options.linkNative) symlinkSync('LICENSE', path.join(native, 'plugins/EXAMPLE-LINK'));
   if (options.hardNative) linkSync(path.join(native, 'LICENSE'), path.join(native, 'plugins/HARD-LINK'));
+  if (options.symlinkChildNative) {
+    const outside = path.join(temporary, 'outside');
+    mkdirSync(outside);
+    writeFileSync(path.join(outside, 'escape'), 'original\n');
+    symlinkSync(outside, path.join(native, 'plugins/LINK'));
+  }
 
   const web = payload(temporary, 'dimcode-web', {
     'web/index.html': '<!doctype html>\n',
@@ -99,7 +107,8 @@ function release(t, options = {}) {
     sourceCommit: options.sourceCommit ?? commit, platform: 'web',
     protocolVersion: options.webProtocol ?? protocolVersion, toolchain: {node: '24.21.0'}});
 
-  const archives = [archive(temporary, native), archive(temporary, web)];
+  const archives = [archive(temporary, native,
+    options.symlinkChildNative ? ['plugins/LINK/escape'] : []), archive(temporary, web)];
   let checksums = sums(temporary, archives);
   if (options.badSum) {
     writeFileSync(checksums, `${'0'.repeat(64)}  ${path.basename(archives[0])}\n${digest(archives[1])}  ${path.basename(archives[1])}\n`);
@@ -153,6 +162,17 @@ test('rejects a symbolic link in the release payload', {skip: skipped}, (t) => {
   assert.match(result.stderr, /symbolic link/);
 });
 
+test('rejects a symlink before extracting its child', {skip: skipped || !gnuTar ? 'needs GNU tar' : false}, (t) => {
+  const fixture = release(t, {symlinkChildNative: true});
+  const outside = path.join(fixture.temporary, 'outside', 'escape');
+  writeFileSync(outside, 'sentinel\n');
+  const result = run(fixture);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /symbolic link/);
+  assert.equal(existsSync(path.join(fixture.temporary, 'image')), false);
+  assert.equal(readFileSync(outside, 'utf8'), 'sentinel\n');
+});
+
 test('rejects a different Web protocol', {skip: skipped}, (t) => {
   const result = run(release(t, {webProtocol: protocolVersion + 1}));
   assert.notEqual(result.status, 0);
@@ -190,4 +210,21 @@ test('rejects a hard link in the release payload', {skip: skipped}, (t) => {
   const result = run(release(t, {hardNative: true}));
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /hard link/);
+});
+
+test('rejects a member outside the archive root', {skip: skipped || !gnuTar ? 'needs GNU tar' : false}, (t) => {
+  const fixture = release(t);
+  const source = path.join(fixture.temporary, 'source');
+  mkdirSync(source);
+  writeFileSync(path.join(source, 'escape'), 'evil\n');
+  const archive = spawnSync('tar', ['--transform=s|^escape$|dimcode-linux-x64/../escape|',
+    '-czf', fixture.native, '-C', source, 'escape'], {encoding: 'utf8'});
+  assert.equal(archive.status, 0, archive.stderr);
+  const sums = path.join(fixture.temporary, 'SHA256SUMS');
+  writeFileSync(sums, `${digest(fixture.native)}  ${path.basename(fixture.native)}\n`
+    + `${digest(fixture.web)}  ${path.basename(fixture.web)}\n`);
+  const result = run({...fixture, sums});
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /escapes its root/);
+  assert.equal(existsSync(path.join(fixture.temporary, 'image')), false);
 });

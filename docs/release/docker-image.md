@@ -61,7 +61,8 @@ another UID, run with `--user "$(id -u):$(id -g)"` and a writable home.
 1. Require a published, non-draft alpha Release.
 2. Check out the release tag; download the Linux and Web archives and `SHA256SUMS`.
 3. Verify archive names, `SHA256SUMS`, the internal manifests, version, source commit, platform and
-   Web protocol; reject symlinks, hard links and members outside the archive root.
+   Web protocol; before extraction, reject symlinks, hard links, special files and members outside
+   the archive root.
 4. Build and push the two-platform index with provenance and an SBOM; record its index digest.
 5. Pull that exact digest on native amd64 and arm64 runners; check `dimcode --version`, the
    version/revision/source labels, UID 1000, both CLI symlinks and the Web assets.
@@ -70,6 +71,11 @@ another UID, run with `--user "$(id -u):$(id -g)"` and a writable home.
 `publish=false` builds the amd64 image locally and runs its checks without pushing. A version tag is
 written once; an existing tag fails the run. The `build` and `alpha` jobs hold `packages: write`;
 `accept` holds `packages: read`.
+
+One-time setup: create the `image-release` environment with protection rules, then after the first
+push make the GHCR package public and verify it is linked to `arcships/dim`. The first dry run
+requires an alpha Release cut after this change; earlier tags contain neither the staging script nor
+the Dockerfile.
 
 ### 1.5 Security
 

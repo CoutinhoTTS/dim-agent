@@ -13,7 +13,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: image-${{ inputs.release_tag }}
+  group: image-alpha
   cancel-in-progress: false
 env:
   IMAGE: ghcr.io/arcships/dim
@@ -58,7 +58,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p staging
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > staging/github-release.json
+          if ! gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > staging/github-release.json; then
+            echo "Release $RELEASE_TAG is not visible; it must be published and non-draft." >&2
+            exit 1
+          fi
           if ! jq -e --arg tag "$RELEASE_TAG" \
             '.draft == false and .prerelease == true and .published_at != null and .tag_name == $tag' \
             staging/github-release.json > /dev/null; then
@@ -173,6 +176,7 @@ jobs:
           VERSION="${RELEASE_TAG#v}"
           [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
           docker pull --platform "linux/$ARCH" "$IMAGE@$DIGEST"
+          # The digest is an index; resolve the platform image ID before reading its labels.
           container=$(docker create --platform "linux/$ARCH" "$IMAGE@$DIGEST")
           image_id=$(docker inspect --format '{{.Image}}' "$container")
           docker rm "$container" >/dev/null
