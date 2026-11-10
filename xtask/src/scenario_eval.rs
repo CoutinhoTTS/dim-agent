@@ -415,9 +415,11 @@ const RUN_TOOLS: &[&str] = &[
     "member_approval_allow",
     "member_approval_reject",
     "recall",
+    "schedule",
     "settings",
     "skill",
     "wait",
+    "wakeup",
     "web_fetch",
     "web_search",
 ];
