@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn a_multiplexer_forwards_the_form_the_terminal_understands() {
+    fn a_multiplexer_gets_what_it_forwards_and_otherwise_a_bell() {
         let question = Event::Question;
         assert_eq!(
             sequence(
