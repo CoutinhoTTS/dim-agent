@@ -460,6 +460,420 @@ impl TimelineStore for CountContextReads {
 }
 
 #[tokio::test]
+async fn persisted_usage_reads_and_restores_without_projecting_history() {
+    for threshold in [None, Some(900.)] {
+        let store = Arc::new(CountContextReads::default());
+        let mut builder = builder_with_context(
+            Arc::new(EchoModel),
+            HistoryRenderer::default(),
+            Context {
+                threshold,
+                ..Context::default()
+            },
+        );
+        builder.timeline_store(store.clone());
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        let session_id = session.id().to_owned();
+        session
+            .service::<dim_agent_capabilities::prompt::Prompt>("main")
+            .unwrap()
+            .configure_loaded(
+                Some(ModelSelection {
+                    provider_id: "test".into(),
+                    model_id: "test".into(),
+                    capability_snapshot: None,
+                    config: None,
+                    metadata: None,
+                }),
+                vec![],
+            )
+            .await
+            .unwrap();
+        for text in ["first".repeat(256), "second".into()] {
+            session
+                .submit(text, InputMode::Queue, "main")
+                .await
+                .unwrap();
+            session.idle("main").await.unwrap();
+        }
+        let preparation = session
+            .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+            .unwrap();
+        let first = preparation.usage(CancellationToken::new()).await.unwrap();
+        if threshold.is_some() {
+            assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| matches!(&event.kind,
+            EventKind::ContextCompaction(data) if matches!(data.outcome, ContextCompactionResult::Completed { .. }))));
+        }
+        let history = HistoryRenderer::default()
+            .context_in(&session, "main", first.through)
+            .await
+            .unwrap();
+        let rendered = project_context_history(&history).unwrap();
+        let messages = dim_agent_capabilities::history::context_messages(&history, &rendered);
+        let old_body_ids: std::collections::HashSet<_> = history
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::InputMessage(_)
+                        | EventKind::ModelCall(_)
+                        | EventKind::ModelContent(_)
+                        | EventKind::Text(_)
+                        | EventKind::Thinking(_)
+                )
+            })
+            .map(|event| serde_json::Value::String(event.id.clone()))
+            .collect();
+        assert_eq!(
+            first.estimated_input_tokens,
+            serde_json::to_vec(&messages).unwrap().len() as f64
+        );
+        store.context_pages.lock().unwrap().clear();
+        for _ in 0..3 {
+            let next = preparation.usage(CancellationToken::new()).await.unwrap();
+            assert_eq!(next.estimated_input_tokens, first.estimated_input_tokens);
+        }
+        assert!(
+            store.context_pages.lock().unwrap().is_empty(),
+            "usage queries projected settled history"
+        );
+        agent.close().await.unwrap();
+        store.context_pages.lock().unwrap().clear();
+        store.property_queries.lock().unwrap().clear();
+        let mut resumed_builder = builder_with_context(
+            Arc::new(EchoModel),
+            HistoryRenderer::default(),
+            Context {
+                threshold,
+                window: 8192.,
+                ..Context::default()
+            },
+        );
+        resumed_builder.timeline_store(store.clone());
+        let agent = MinimalHost::start(&resumed_builder).await.unwrap();
+        let restored = agent.restore_session(session_id.clone()).await.unwrap();
+        let usage = restored
+            .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(usage.estimated_input_tokens, first.estimated_input_tokens);
+        assert_eq!(usage.context_window, 8192.);
+        assert!(
+            store.context_pages.lock().unwrap().is_empty(),
+            "restoring saved usage projected settled history"
+        );
+        assert!(store.property_queries.lock().unwrap().iter().all(|query| {
+        !matches!(&query.filter, Some(QueryFilter::In { value: QueryOperand::Field { path }, values })
+            if path == "id" && values.iter().any(|id| old_body_ids.contains(id)))
+    }), "restoring saved usage reread a settled source object");
+        agent.close().await.unwrap();
+
+        let timeline = Timeline::restore(
+            Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: session_id.clone(),
+                branch_id: "main".into(),
+            },
+            vec![],
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        let input = timeline
+            .append(
+                EventKind::InputMessage(InputMessageData::text(
+                    "new after saved result",
+                    Some(InputMode::Append),
+                ))
+                .into(),
+            )
+            .unwrap();
+        timeline
+            .append(
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: input.id.clone(),
+                })
+                .into(),
+            )
+            .unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
+        store.context_pages.lock().unwrap().clear();
+        store.property_queries.lock().unwrap().clear();
+        let agent = MinimalHost::start(&resumed_builder).await.unwrap();
+        let restored = agent.restore_session(session_id).await.unwrap();
+        let usage = restored
+            .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            usage.estimated_input_tokens,
+            first.estimated_input_tokens
+                + Context::default()
+                    .message(&Message::text(Role::User, "new after saved result"))
+                    .serialized_bytes as f64
+        );
+        assert!(
+            store.context_pages.lock().unwrap().is_empty(),
+            "processing a new source replayed settled history"
+        );
+        assert!(store.property_queries.lock().unwrap().iter().all(|query| {
+        !matches!(&query.filter, Some(QueryFilter::In { value: QueryOperand::Field { path }, values })
+            if path == "id" && values.iter().any(|id| old_body_ids.contains(id)))
+    }), "processing a new source reread a settled source object");
+        agent.close().await.unwrap();
+    }
+}
+
+struct CompleteRequestOnly;
+impl ContextModel for CompleteRequestOnly {
+    fn context_window(&self) -> f64 {
+        4096.
+    }
+    fn output_tokens(&self) -> f64 {
+        64.
+    }
+    fn threshold_tokens(&self) -> f64 {
+        10_000.
+    }
+    fn count_tokens(&self, request: &ModelRequest) -> f64 {
+        Context::default().count_tokens(request)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_during_usage_result_publication_is_not_a_statistics_fault() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (publication, mut pending) =
+            tokio::sync::mpsc::unbounded_channel::<DeferredPublication>();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let publisher = {
+            let (entered, release) = (entered.clone(), release.clone());
+            tokio::spawn(async move {
+                while let Some((events, publish, result)) = pending.recv().await {
+                    if events.iter().any(|stored| {
+                        matches!(&stored.event.kind,
+                        EventKind::Extension(data) if data.key() == "context-usage/recovered")
+                    }) {
+                        entered.notify_one();
+                        release.notified().await;
+                    }
+                    publish(result);
+                }
+            })
+        };
+        let store = Arc::new(CountContextReads {
+            publication: Some(publication),
+            ..Default::default()
+        });
+        let mut builder = builder(Arc::new(EchoModel));
+        builder.timeline_store(store);
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        entered.notified().await;
+        let closed = tokio::spawn(agent.close());
+        while !session.is_closing() {
+            tokio::task::yield_now().await;
+        }
+        release.notify_one();
+        closed.await.unwrap().unwrap();
+        publisher.abort();
+    })
+    .await
+    .unwrap();
+}
+impl ResolveContextModel for CompleteRequestOnly {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Arc<dyn ContextModel>> {
+        Box::pin(async { Ok(Arc::new(Self) as Arc<dyn ContextModel>) })
+    }
+}
+
+fn builder_with_usage_resolver(resolver: Arc<dyn ResolveContextModel>) -> AgentBuilder {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(resolver))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(
+            Context::default(),
+        )))))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::install(&mut builder);
+    builder
+}
+
+#[derive(Default)]
+struct AvailableCounter(std::sync::atomic::AtomicBool);
+impl ResolveContextModel for AvailableCounter {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Arc<dyn ContextModel>> {
+        Box::pin(async {
+            if self.0.load(Ordering::SeqCst) {
+                Ok(Arc::new(Context::default()) as Arc<dyn ContextModel>)
+            } else {
+                Err(HostError::failed("counter model unavailable"))
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn unavailable_usage_counter_does_not_fault_resume_and_can_recover() {
+    let store = Arc::new(CountContextReads::default());
+    let resolver = Arc::new(AvailableCounter::default());
+    resolver.0.store(true, Ordering::SeqCst);
+    let mut builder = builder_with_usage_resolver(resolver.clone());
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let id = session.id().to_owned();
+    session
+        .service::<dim_agent_capabilities::prompt::Prompt>("main")
+        .unwrap()
+        .configure_loaded(
+            Some(ModelSelection {
+                provider_id: "test".into(),
+                model_id: "test".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            }),
+            vec![],
+        )
+        .await
+        .unwrap();
+    session
+        .submit("saved input".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let expected = session
+        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    agent.close().await.unwrap();
+
+    resolver.0.store(false, Ordering::SeqCst);
+    store.context_pages.lock().unwrap().clear();
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session(id.clone()).await.unwrap();
+    let unavailable = session
+        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await;
+    assert!(
+        matches!(unavailable, Err(dim_agent_capabilities::context_preparation::ContextOpError::Model(error))
+        if error.to_string() == "counter model unavailable")
+    );
+    assert!(
+        store.context_pages.lock().unwrap().is_empty(),
+        "unavailable counter projected historical messages"
+    );
+    agent.close().await.unwrap();
+
+    resolver.0.store(true, Ordering::SeqCst);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent.restore_session(id).await.unwrap();
+    let restored = session
+        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.estimated_input_tokens,
+        expected.estimated_input_tokens
+    );
+    store.context_pages.lock().unwrap().clear();
+    session
+        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        store.context_pages.lock().unwrap().is_empty(),
+        "recovered counter repeatedly initialized history"
+    );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_usage_counter_does_not_fall_back_to_history_projection() {
+    let store = Arc::new(CountContextReads::default());
+    let mut builder = builder_with_usage_resolver(Arc::new(CompleteRequestOnly));
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .service::<dim_agent_capabilities::prompt::Prompt>("main")
+        .unwrap()
+        .configure_loaded(
+            Some(ModelSelection {
+                provider_id: "test".into(),
+                model_id: "test".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            }),
+            vec![],
+        )
+        .await
+        .unwrap();
+    store.context_pages.lock().unwrap().clear();
+    let result = session
+        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await;
+    assert!(
+        matches!(result, Err(dim_agent_capabilities::context_preparation::ContextOpError::Model(error))
+        if error.to_string().contains("does not support persistent usage"))
+    );
+    assert!(
+        store.context_pages.lock().unwrap().is_empty(),
+        "unsupported usage reconstructed history"
+    );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn unconfigured_usage_does_not_project_legacy_messages() {
     let store = Arc::new(CountContextReads::default());
     store
@@ -497,6 +911,65 @@ async fn unconfigured_usage_does_not_project_legacy_messages() {
             )
             .unwrap();
     }
+    timeline
+        .append(
+            EventKind::TurnStart(TurnStartData {
+                turn_id: "legacy".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    timeline
+        .append(
+            EventKind::ModelStart(ModelStartData {
+                turn_id: "legacy".into(),
+                request_id: "legacy".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let call = timeline
+        .append(
+            EventKind::ModelCall(ModelCallData {
+                turn_id: "legacy".into(),
+                request_id: "legacy".into(),
+                request: Arc::new(ModelRequest::new(
+                    "fixture",
+                    "model",
+                    (0..256)
+                        .map(|_| Message::text(Role::User, "x".repeat(4096)))
+                        .collect(),
+                )),
+                configuration: None,
+                prompt: None,
+                failure_chain: None,
+            })
+            .into(),
+        )
+        .unwrap();
+    timeline
+        .append(
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                turn_id: "legacy".into(),
+                request_id: "legacy".into(),
+                outcome: ModelOutputOutcome::Completed {
+                    finish_reason: FinishReason::EndTurn,
+                },
+            })
+            .into(),
+        )
+        .unwrap();
+    timeline
+        .append(
+            EventKind::TurnEnd(TurnEndData {
+                turn_id: "legacy".into(),
+                outcome: TurnOutcome::Completed {
+                    reason: "fixture completed".into(),
+                },
+            })
+            .into(),
+        )
+        .unwrap();
     dim_agent_runtime::core::close_timeline(&timeline)
         .await
         .unwrap();
@@ -524,6 +997,10 @@ async fn unconfigured_usage_does_not_project_legacy_messages() {
         store.context_pages.lock().unwrap().is_empty(),
         "an unavailable usage read must not reconstruct legacy context"
     );
+    assert!(store.property_queries.lock().unwrap().iter().all(|query| {
+        !matches!(&query.filter, Some(QueryFilter::In { value: QueryOperand::Field { path }, values })
+            if path == "id" && values.contains(&serde_json::Value::String(call.id.clone())))
+    }), "an unconfigured read loaded a call without a provider measurement");
     agent.close().await.unwrap();
 }
 

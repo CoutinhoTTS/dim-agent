@@ -468,6 +468,40 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::context_usage",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/context_usage.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "tokio::select",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::context_usage::numeric",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::context_usage",
+      "file": "crates/dim-agent-capabilities/src/context_usage/numeric.rs",
+      "unexpandedMacros": [
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::context_usage::sources",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::context_usage",
+      "file": "crates/dim-agent-capabilities/src/context_usage/sources.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::defaults",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -603,6 +637,16 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::history::settled_output",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::history",
+      "file": "crates/dim-agent-capabilities/src/history/settled_output.rs",
+      "unexpandedMacros": [
         "unreachable",
         "vec"
       ]
@@ -8522,6 +8566,14 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::context_usage",
+      "references": [
+        "mod context_usage",
+        "path context_usage::ContextUsage"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::defaults",
       "references": [
         "mod defaults"
@@ -9995,16 +10047,21 @@
       "references": [
         "path ContextPolicy",
         "path ContextPolicy::bind",
-        "path EstimateEvent",
         "path PolicyContext::from_stream",
-        "path configured_request",
+        "path crate::context_policy::PreparedRequest",
         "path crate::context_policy::check_cancel",
         "path estimate_events",
         "use crate::context_policy::ContextPolicy",
-        "use crate::context_policy::EstimateEvent",
         "use crate::context_policy::PolicyContext",
-        "use crate::context_policy::configured_request",
         "use crate::context_policy::estimate_events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_preparation",
+      "to": "dim_agent_capabilities::context_usage",
+      "references": [
+        "path crate::context_usage::ContextUsage",
+        "path crate::context_usage::UsageEvidence"
       ]
     },
     {
@@ -10012,11 +10069,7 @@
       "to": "dim_agent_capabilities::history",
       "references": [
         "path HistoryRenderer",
-        "path chain_by_id",
-        "path crate::history::FoldRead::timeline",
-        "path crate::history::project_batch",
-        "use crate::history::HistoryRenderer",
-        "use crate::history::chain_by_id"
+        "use crate::history::HistoryRenderer"
       ]
     },
     {
@@ -10032,8 +10085,7 @@
         "path HostError::classified",
         "path HostError::failed",
         "path HostErrorKind::InvalidRequest",
-        "path PrepareContextHost",
-        "path crate::host::ContextModel"
+        "path PrepareContextHost"
       ]
     },
     {
@@ -10133,7 +10185,6 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQueryScope::Branch",
-        "path TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
@@ -10148,12 +10199,10 @@
         "path QueryOperand::Field",
         "path QueryOperand::Outer",
         "path QueryOperand::Value",
-        "path QueryOutput::Events",
         "path QueryOutput::Exists",
         "path QueryOutput::Rows",
         "path QueryPage",
         "path QueryPick::Last",
-        "path QuerySelect::Events",
         "path QuerySelect::Exists",
         "path QuerySelect::Fields",
         "path QuerySpec",
@@ -10170,6 +10219,13 @@
         "use dim_agent_runtime::QuerySpec",
         "use dim_agent_runtime::QueryValue",
         "use dim_agent_runtime::TimelineQuery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_preparation",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition"
       ]
     },
     {
@@ -10196,19 +10252,7 @@
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Cancelled",
         "path ModelOutputOutcome::Failed",
-        "path dim_agent_types::AgentEvent",
-        "path dim_agent_types::EventKind::InputConsumed",
-        "path dim_agent_types::EventKind::ModelCall",
-        "path dim_agent_types::EventKind::ModelUsage",
-        "path dim_agent_types::ModelUsageData",
         "path events"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::context_preparation",
-      "to": "dim_agent_types::input",
-      "references": [
-        "path input"
       ]
     },
     {
@@ -10216,9 +10260,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path BaselineSource",
-        "path BaselineSource::ProviderBaseline",
         "path ModelRequest",
-        "path ModelRequest::new",
         "path SystemPrompt",
         "path SystemPrompt::Text",
         "path model"
@@ -10246,6 +10288,420 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolDefinition",
+        "path kind"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_capabilities::context_preparation",
+      "references": [
+        "path ContextOpError",
+        "path ContextOpError::Model",
+        "path ContextOpError::NotConfigured",
+        "path ContextOpError::Read",
+        "path UsageRead",
+        "use crate::context_preparation::ContextOpError",
+        "use crate::context_preparation::ContextUsage"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_capabilities::context_usage::numeric",
+      "references": [
+        "mod numeric",
+        "path Numeric",
+        "path Numeric::new",
+        "path Reference",
+        "path Summary",
+        "path Summary::default",
+        "path numeric",
+        "use numeric::Entry",
+        "use numeric::Numeric",
+        "use numeric::Reference",
+        "use numeric::Summary"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_capabilities::context_usage::sources",
+      "references": [
+        "mod sources",
+        "path sources::RequestBase"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path HistoryRenderer",
+        "use crate::history::HistoryRenderer"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path ContextModel",
+        "path ContextModelHost",
+        "path Contribution",
+        "path HostError",
+        "path HostError::failed",
+        "use crate::host::ContextContribution",
+        "use crate::host::ContextModel",
+        "use crate::host::ContextModelHost",
+        "use crate::host::HostError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path BranchLifecycle",
+        "path dim_agent_runtime::BranchPhase::Closing",
+        "use dim_agent_runtime::BranchLifecycle"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_runtime::core::dispatcher",
+      "references": [
+        "path Dispatcher",
+        "use dim_agent_runtime::Dispatcher"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::InvalidInput",
+        "path AgentError::aggregate",
+        "path AgentError::fault",
+        "path Result",
+        "use dim_agent_runtime::AgentError",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryFilter::In",
+        "path QueryOperand::Field",
+        "path QueryPage",
+        "path QuerySelect::Fields",
+        "path QuerySpec",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryFilter",
+        "use dim_agent_runtime::QueryOperand",
+        "use dim_agent_runtime::QueryOutput",
+        "use dim_agent_runtime::QueryPage",
+        "use dim_agent_runtime::QueryPick",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QuerySpec",
+        "use dim_agent_runtime::QueryValue",
+        "use dim_agent_runtime::TimelineQuery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path EventKind::Extension",
+        "path ExtensionEvent::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_types::input",
+      "references": [
+        "path input"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path BaselineSource::FullEstimate",
+        "path BaselineSource::ProviderBaseline",
+        "path ModelRequest"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path kind"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::numeric",
+      "to": "dim_agent_capabilities::context_usage",
+      "references": [
+        "path Calibration",
+        "path Compression",
+        "path Configuration",
+        "path Key",
+        "path add",
+        "path fault",
+        "use super::Calibration",
+        "use super::Compression",
+        "use super::Configuration",
+        "use super::Key",
+        "use super::add",
+        "use super::fault"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::numeric",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path crate::history::chain_by_id"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::numeric",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path Contribution",
+        "use super::Contribution"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::numeric",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::numeric",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::numeric",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryOutput::Rows",
+        "path QuerySelect::Fields",
+        "path QueryValue::Value",
+        "use dim_agent_runtime::QueryOutput",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QueryValue"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::numeric",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path EventDraft",
+        "path EventDraft::new",
+        "path EventKind::Extension",
+        "path ExtensionEvent::new",
+        "use dim_agent_types::EventDraft",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ExtensionEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_capabilities::context_model",
+      "references": [
+        "path crate::context_model::adopted_config"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_capabilities::context_usage",
+      "references": [
+        "path Calibration",
+        "path Compression",
+        "path Configuration",
+        "path Configuration::Ready",
+        "path Configuration::Unavailable",
+        "path Configuration::Unsupported",
+        "path ContextUsage",
+        "path CounterConfiguration",
+        "path Key",
+        "path Limits",
+        "path Machine",
+        "path RESULT",
+        "path Recovered",
+        "path SCHEMA",
+        "path SOURCES",
+        "path State",
+        "path add",
+        "path fault",
+        "path fingerprint",
+        "path request",
+        "path total"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_capabilities::context_usage::numeric",
+      "references": [
+        "path Entry",
+        "path Numeric::new",
+        "path Reference",
+        "path Summary",
+        "path Summary::default",
+        "path numeric"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path chain_by_id",
+        "path projected_message_refs",
+        "path render_input",
+        "path tool_result_message",
+        "use crate::history::chain_by_id",
+        "use crate::history::projected_message_refs",
+        "use crate::history::render_input",
+        "use crate::history::tool_result_message"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_capabilities::history::settled_output",
+      "references": [
+        "path settled_request_output",
+        "use crate::history::settled_request_output"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path Contribution::default",
+        "path ModelSettings",
+        "use crate::host::ModelSettings"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain",
+        "use dim_agent_runtime::TimelineQueryDirection"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryFilter::And",
+        "path QueryOutput::Rows",
+        "path QueryPick::Last",
+        "path QuerySelect::Fields",
+        "path QueryValue",
+        "path QueryValue::Elements",
+        "path QueryValue::Missing",
+        "path QueryValue::Value",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryOrder",
+        "use dim_agent_runtime::QueryOrderKey"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path Message",
+        "path ToolContent",
+        "path content"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path EventKind::ContextCompaction",
+        "path InputMessageData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_types::input",
+      "references": [
+        "path input"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelRequest",
+        "path ModelRequest::new",
+        "path model"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_types::prompt",
+      "references": [
+        "path ContextBaselineEntry",
+        "path ModelConfiguration",
+        "path prompt"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_types::tool",
+      "references": [
         "path kind"
       ]
     },
@@ -10302,6 +10758,13 @@
       "references": [
         "path ContextPreparationPlugin::new",
         "use crate::context_preparation::ContextPreparationPlugin"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::context_usage",
+      "references": [
+        "path crate::context_usage::ContextUsagePlugin::new"
       ]
     },
     {
@@ -11067,6 +11530,14 @@
     },
     {
       "from": "dim_agent_capabilities::history",
+      "to": "dim_agent_capabilities::history::settled_output",
+      "references": [
+        "mod settled_output",
+        "use settled_output::settled_request_output"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history",
       "to": "dim_agent_capabilities::prompt_state",
       "references": [
         "path PromptSnapshot::from_checkpoint",
@@ -11235,6 +11706,89 @@
         "path ToolEffect",
         "path ToolEffect::CommandRun",
         "path ToolEffect::FileWritten",
+        "path kind"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path boundary",
+        "path chain_by_id",
+        "path fold_output_parts",
+        "path segments",
+        "path settled_output_message"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::fault",
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope::Chain"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryFilter",
+        "path QueryFilter::And",
+        "path QueryFilter::In",
+        "path QueryOperand::Field",
+        "path QueryOutput::Events",
+        "path QueryOutput::Rows",
+        "path QueryPage",
+        "path QueryPick::Last",
+        "path QuerySelect::Events",
+        "path QuerySelect::Fields",
+        "path QuerySpec",
+        "path QueryValue::Value",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryPick"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path Message",
+        "path content"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path events"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::history::settled_output",
+      "to": "dim_agent_types::tool",
+      "references": [
         "path kind"
       ]
     },

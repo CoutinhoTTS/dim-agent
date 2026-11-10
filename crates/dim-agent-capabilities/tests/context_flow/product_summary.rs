@@ -236,7 +236,13 @@ fn product_contributions_preserve_the_complete_request_counting_contract() {
         }
     );
     assert_eq!(model.count_tokens(&request), 2.);
-    assert!(Context::default().contribution_counter().is_none());
+    assert_eq!(
+        Context::default()
+            .contribution_counter()
+            .unwrap()
+            .algorithm(),
+        "test/message-array/v1"
+    );
 
     let tool = serde_json::from_value::<ToolDefinition>(serde_json::json!({
         "name": "read",

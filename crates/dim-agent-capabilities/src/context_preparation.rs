@@ -1,8 +1,6 @@
 use crate::{
-    context_policy::{
-        ContextPolicy, EstimateEvent, PolicyContext, configured_request, estimate_events,
-    },
-    history::{HistoryRenderer, chain_by_id},
+    context_policy::{ContextPolicy, PolicyContext, estimate_events},
+    history::HistoryRenderer,
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_state::{PromptSnapshot, scope_is_visible},
@@ -363,6 +361,16 @@ pub struct ContextPreparation {
     errors: Mutex<Vec<AgentError>>,
     host: Arc<PrepareContextHost>,
     policy: Option<ContextPolicy>,
+    usage: Arc<crate::context_usage::ContextUsage>,
+    references: Mutex<
+        std::collections::HashMap<
+            String,
+            (
+                std::sync::Weak<ModelRequest>,
+                crate::context_usage::UsageEvidence,
+            ),
+        >,
+    >,
     history: Arc<HistoryRenderer>,
     timeline: Arc<Timeline>,
     identity: Arc<TimelineIdentity>,
@@ -634,6 +642,9 @@ impl ContextPreparation {
         source: ContextPrepareData,
         result: std::result::Result<Arc<ModelRequest>, HostError>,
     ) -> dim_agent_runtime::Result<()> {
+        if result.is_err() {
+            self.references.lock().unwrap().remove(&source.request_id);
+        }
         let kind = match result {
             Ok(request) => EventKind::ModelCall(ModelCallData {
                 turn_id: source.turn_id,
@@ -744,194 +755,33 @@ impl ContextPreparation {
             None => Ok(()),
         }
     }
+
+    pub(crate) async fn confirm_usage(
+        &self,
+        request_id: &str,
+        request: &Arc<ModelRequest>,
+        cancel: CancellationToken,
+    ) -> Result<(), HostError> {
+        let reference = self.references.lock().unwrap().remove(request_id);
+        if let Some((expected, evidence)) = reference
+            && expected
+                .upgrade()
+                .is_some_and(|expected| Arc::ptr_eq(&expected, request))
+        {
+            self.usage.confirm(evidence, cancel).await?
+        }
+        Ok(())
+    }
+
+    pub(crate) fn discard_usage(&self, request_id: &str) {
+        self.references.lock().unwrap().remove(request_id);
+    }
     /// The current head's budget; writes nothing.
     pub async fn usage(
         &self,
         cancel: CancellationToken,
     ) -> std::result::Result<ContextUsage, ContextOpError> {
-        let policy = self.policy.as_ref().ok_or_else(|| {
-            ContextOpError::Model(HostError::failed("Context compaction is not available"))
-        })?;
-        let through = self.timeline.sequence();
-        let events = estimate_events(&self.timeline, through)
-            .await
-            .map_err(ContextOpError::Read)?;
-        if let Some(request) = canary_request(&events) {
-            let model = policy
-                .resolver
-                .resolve(request.clone(), cancel.clone())
-                .await
-                .map_err(ContextOpError::Model)?;
-            if let Some(input) = self
-                .incremental_usage(&events, through, &request, model.as_ref())
-                .await?
-            {
-                return Ok(ContextUsage {
-                    through,
-                    context_window: model.context_window(),
-                    output_tokens: model.output_tokens(),
-                    threshold_tokens: model.threshold_tokens(),
-                    estimated_input_tokens: input,
-                    baseline_source: BaselineSource::ProviderBaseline,
-                });
-            }
-        }
-        let configured = self
-            .timeline
-            .query(TimelineQuery {
-                scope: TimelineQueryScope::Chain,
-                from: None,
-                through: Some(through),
-                include_publishing: false,
-                query: QuerySpec {
-                    rows: None,
-                    filter: Some(QueryFilter::In {
-                        value: QueryOperand::Field {
-                            path: "kind".into(),
-                        },
-                        values: vec!["context/configured".into()],
-                    }),
-                    select: QuerySelect::Exists,
-                    group_by: vec![],
-                    pick: None,
-                    order_by: vec![],
-                },
-                page: None,
-            })
-            .await
-            .map_err(ContextOpError::Read)?;
-        let QueryOutput::Exists { exists } = configured.result else {
-            unreachable!("configuration existence")
-        };
-        if !exists {
-            return Err(ContextOpError::NotConfigured);
-        }
-        let streamed = self
-            .history
-            .rendered_stream(&self.timeline, through, 256)
-            .await
-            .map_err(ContextOpError::Read)?;
-        let request = configured_request(&PolicyContext::from_stream(&streamed), &streamed.history)
-            .ok_or(ContextOpError::NotConfigured)?;
-        let model = policy
-            .resolver
-            .resolve(request.clone(), cancel)
-            .await
-            .map_err(ContextOpError::Model)?;
-        let estimate = policy
-            .estimate(&request, model.as_ref(), &[])
-            .map_err(ContextOpError::Model)?;
-        Ok(ContextUsage {
-            through,
-            context_window: model.context_window(),
-            output_tokens: model.output_tokens(),
-            threshold_tokens: model.threshold_tokens(),
-            estimated_input_tokens: estimate.input,
-            baseline_source: estimate.source,
-        })
-    }
-    /// The last provider measurement plus the messages written after it, when
-    /// the request's system and tools are unchanged since that call.
-    async fn incremental_usage(
-        &self,
-        events: &[EstimateEvent],
-        through: u64,
-        request: &Arc<ModelRequest>,
-        model: &dyn crate::host::ContextModel,
-    ) -> std::result::Result<Option<f64>, ContextOpError> {
-        let Some(usage) = last_usage(events) else {
-            return Ok(None);
-        };
-        let Some(call) = last_call(events, &usage.request_id) else {
-            return Ok(None);
-        };
-        let segments = self
-            .timeline
-            .segments(through)
-            .map_err(ContextOpError::Read)?;
-        let rank = |branch: &str| segments.iter().position(|(name, _)| name == branch);
-        let Some(call_rank) = rank(&call.0.branch_id) else {
-            return Ok(None);
-        };
-        let at = (Some(call_rank), call.0.sequence);
-        if events.iter().any(|(position, event)| {
-            (rank(&position.branch_id), position.sequence) > at
-                && matches!(
-                    &event.kind,
-                    dim_agent_types::EventKind::ContextConfigured(_)
-                        | dim_agent_types::EventKind::ContextCompaction(
-                            dim_agent_types::ContextCompactionData {
-                                outcome: dim_agent_types::ContextCompactionResult::Completed { .. },
-                                ..
-                            }
-                        )
-                )
-        }) {
-            return Ok(None);
-        }
-        let mut tail: Vec<(String, Vec<Arc<dim_agent_types::AgentEvent>>)> = Vec::new();
-        let mut read =
-            crate::history::FoldRead::timeline(&self.timeline, Some(call.1.id.clone()), through);
-        loop {
-            let Some(page) = read.next(256).await.map_err(ContextOpError::Read)? else {
-                break;
-            };
-            let read = page.events.len() as u64;
-            for (event, position) in page.events.into_iter().zip(page.positions) {
-                let same = tail
-                    .last()
-                    .is_some_and(|(branch, _)| *branch == position.branch_id);
-                match tail.last_mut() {
-                    Some((_, events)) if same => events.push(event),
-                    _ => tail.push((position.branch_id, vec![event])),
-                }
-            }
-            if read < 256 {
-                break;
-            }
-        }
-        let mut history = Vec::new();
-        let mut state = None;
-        for (branch, events) in &tail {
-            let mut supplied: Vec<Arc<dim_agent_types::AgentEvent>> = Vec::new();
-            for event in events {
-                if let dim_agent_types::EventKind::InputConsumed(data) = &event.kind
-                    && !events.iter().any(|seen| {
-                        seen.id == data.input_id
-                            && matches!(seen.kind, dim_agent_types::EventKind::InputMessage(_))
-                    })
-                    && !supplied.iter().any(|seen| seen.id == data.input_id)
-                {
-                    let reply = self
-                        .timeline
-                        .query(chain_by_id(&data.input_id, through, QuerySelect::Events))
-                        .await
-                        .map_err(ContextOpError::Read)?;
-                    let QueryOutput::Events { events } = reply.result else {
-                        unreachable!("event selection returns events")
-                    };
-                    if let Some(row) = events.into_iter().next() {
-                        supplied.push(row.event);
-                    }
-                }
-            }
-            supplied.sort_by_key(|event| event.sequence);
-            let mut all = supplied;
-            all.extend(events.iter().cloned());
-            let projected = crate::history::project_batch(&all, state.as_ref(), branch)
-                .map_err(|error| ContextOpError::Model(HostError::failed(error)))?;
-            history.extend(projected.history);
-            state = Some(projected.state);
-        }
-        let messages = history
-            .into_iter()
-            .map(|entry| entry.message.clone())
-            .collect();
-        let count = model.count_tokens(&ModelRequest {
-            messages,
-            ..ModelRequest::new(&request.provider_id, &request.model_id, Vec::new())
-        });
-        Ok(Some(usage.usage.prompt_tokens + count))
+        self.usage.read(None, cancel).await
     }
 
     async fn prepare(
@@ -973,6 +823,7 @@ impl ContextPreparation {
                 "Context preparation must preserve the timeline history prefix; additional messages may be appended.",
             ));
         }
+        let exact_prefix = request.messages.len() == context.messages_len(&history);
         let cancelled = || {
             let state = self.state.lock().unwrap();
             if generation.is_cancelled() || state.closed {
@@ -989,7 +840,7 @@ impl ContextPreparation {
                 })
                 .unwrap_or_else(|| "Operation cancelled".to_owned())
         };
-        match &self.policy {
+        let prepared = match &self.policy {
             Some(policy) => {
                 let events = estimate_events(&self.timeline, self.timeline.sequence())
                     .await
@@ -999,12 +850,99 @@ impl ContextPreparation {
                     .collect();
                 policy
                     .prepare(
-                        request, &source, context, history, events, cancel, &cancelled,
+                        request,
+                        &source,
+                        context,
+                        history,
+                        events,
+                        cancel.clone(),
+                        &cancelled,
                     )
                     .await
             }
-            None => Ok(request),
+            None => Ok(crate::context_policy::PreparedRequest {
+                request,
+                through: source.through,
+                compaction: None,
+            }),
+        }?;
+        if exact_prefix {
+            let mut unchanged = true;
+            if prepared.through > source.through {
+                let changed = self
+                    .timeline
+                    .query(TimelineQuery {
+                        scope: TimelineQueryScope::Branch,
+                        from: Some(TimelinePosition {
+                            branch_id: self.identity.branch_id.clone(),
+                            sequence: source.through + 1,
+                        }),
+                        through: Some(prepared.through),
+                        include_publishing: false,
+                        query: QuerySpec {
+                            rows: None,
+                            filter: Some(QueryFilter::And {
+                                conditions: vec![
+                                    QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "kind".into(),
+                                        },
+                                        values: [
+                                            "input/consumed",
+                                            "step/model-output-end",
+                                            "step/tool-result",
+                                            "context/configured",
+                                            "context/compaction",
+                                        ]
+                                        .into_iter()
+                                        .map(Into::into)
+                                        .collect(),
+                                    },
+                                    QueryFilter::Not {
+                                        condition: Box::new(QueryFilter::In {
+                                            value: QueryOperand::Field { path: "id".into() },
+                                            values: prepared
+                                                .compaction
+                                                .iter()
+                                                .map(|id| id.clone().into())
+                                                .collect(),
+                                        }),
+                                    },
+                                ],
+                            }),
+                            select: QuerySelect::Exists,
+                            group_by: vec![],
+                            pick: None,
+                            order_by: vec![],
+                        },
+                        page: None,
+                    })
+                    .await
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                let QueryOutput::Exists { exists } = changed.result else {
+                    unreachable!("request prefix changes")
+                };
+                unchanged = !exists;
+            }
+            if unchanged
+                && let Some(evidence) = self
+                    .usage
+                    .reference(
+                        &source.request_id,
+                        prepared.through,
+                        &prepared.request,
+                        prepared.compaction.as_deref(),
+                        cancel,
+                    )
+                    .await?
+            {
+                self.references.lock().unwrap().insert(
+                    source.request_id,
+                    (Arc::downgrade(&prepared.request), evidence),
+                );
+            }
         }
+        Ok(prepared.request)
     }
 }
 
@@ -1025,6 +963,7 @@ const DIGEST_ENTRY: &str = r#"<dim-digest>: the runtime's account of what tools 
 pub struct ContextPreparationPlugin {
     publisher: Key<ConfigurationPublisher>,
     context: Key<ContextPreparation>,
+    usage: Key<crate::context_usage::ContextUsage>,
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
     host: Key<PrepareContextHost>,
@@ -1040,6 +979,7 @@ impl ContextPreparationPlugin {
         Ok(Self {
             publisher: names.key()?,
             context: names.key()?,
+            usage: names.key()?,
             timeline: names.key()?,
             dispatcher: names.key()?,
             host: names.key()?,
@@ -1058,6 +998,7 @@ impl DynPlugin for ContextPreparationPlugin {
     }
     fn injects(&self) -> Vec<TypeKey> {
         vec![
+            self.usage.erase(),
             self.timeline.erase(),
             self.dispatcher.erase(),
             self.host.erase(),
@@ -1100,6 +1041,8 @@ impl DynPlugin for ContextPreparationPlugin {
             ctx.provide_at(self.publisher.clone(), publisher)?;
             let service = Arc::new(ContextPreparation {
                 state: Mutex::new(PreparationState::default()),
+                usage: ctx.require_at(&self.usage)?,
+                references: Mutex::new(std::collections::HashMap::new()),
                 tasks: TaskTracker::new(),
                 errors: Mutex::new(Vec::new()),
                 host,
@@ -1120,6 +1063,7 @@ impl DynPlugin for ContextPreparationPlugin {
                 }
                 owner.tasks.close();
                 owner.tasks.wait().await;
+                owner.references.lock().unwrap().clear();
                 AgentError::aggregate(owner.errors.lock().unwrap().clone()).map_err(Into::into)
             })?;
             let owner = service.clone();
@@ -1246,27 +1190,4 @@ impl DynPlugin for ContextPreparationPlugin {
             Ok(Effect::Done)
         })
     }
-}
-
-fn last_usage(facts: &[EstimateEvent]) -> Option<&dim_agent_types::ModelUsageData> {
-    facts.iter().rev().find_map(|(_, event)| match &event.kind {
-        dim_agent_types::EventKind::ModelUsage(data) => Some(data),
-        _ => None,
-    })
-}
-
-fn last_call<'a>(facts: &'a [EstimateEvent], request_id: &str) -> Option<&'a EstimateEvent> {
-    facts.iter().find(|(_, event)| {
-        matches!(&event.kind, dim_agent_types::EventKind::ModelCall(data) if data.request_id == request_id)
-    })
-}
-
-fn canary_request(facts: &[EstimateEvent]) -> Option<Arc<ModelRequest>> {
-    let usage = last_usage(facts)?;
-    facts.iter().rev().find_map(|(_, event)| match &event.kind {
-        dim_agent_types::EventKind::ModelCall(data) if data.request_id == usage.request_id => {
-            Some(data.request.clone())
-        }
-        _ => None,
-    })
 }

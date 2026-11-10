@@ -596,6 +596,10 @@ async fn a_manual_compaction_with_no_turn_writes_only_its_facts() {
     let after: Vec<_> = events
         .iter()
         .filter(|event| event.sequence >= command)
+        .filter(|event| {
+            !matches!(&event.kind, EventKind::Extension(data)
+            if data.domain() == "context-usage" && matches!(data.name(), "node" | "recovered"))
+        })
         .collect();
     assert_eq!(after.len(), 3, "{after:#?}");
     let EventKind::ContextCompactionStart(start) = &after[1].kind else {

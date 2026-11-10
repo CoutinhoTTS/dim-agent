@@ -992,6 +992,10 @@ pub trait CompactionStrategy: Send + Sync + 'static {
 /// when both are `Some`.
 pub struct CompactionStrategyHost(pub Option<Arc<dyn CompactionStrategy>>);
 pub trait ResolveContextModel: Send + Sync + 'static {
+    /// A model exposing a contribution counter must resolve its algorithm and
+    /// limits from provider/model, capabilities, config and metadata alone.
+    /// Statistics recovery passes empty messages and absent system/tools;
+    /// their saved contributions are not read again to resolve the counter.
     fn resolve(
         &self,
         request: Arc<ModelRequest>,

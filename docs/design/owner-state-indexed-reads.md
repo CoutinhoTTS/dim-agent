@@ -50,7 +50,7 @@ owner 自写且也属于自己源范围的事实，统一作为后续输入按�
 
 ## 4. 冷恢复
 
-先固定本次恢复的源截止 S。恢复期间实时输入仍由既有 Dispatcher consume 交接，不另建订阅协议。
+先固定本次恢复的源截止 S。同步处理事实的 owner 沿用 Dispatcher consume 交接。[ContextUsage](plugins/ContextUsage.md#10-源输入写入及恢复) 的异步任务则把既有 Dispatcher 订阅仅作位置通知，统一从已保存前缀读取；不把回调到达当作处理完成，不持有第二份事实队列。两种方式都使用同一 source_through，先处理固定恢复范围，再处理更晚的源。
 
 1. 在当前可见读头内，用结果类型和位置索引读最后一条本地结果。
 2. 检查 schema，读取 state 和 source_through。正常恢复要求 source_through 不超过 S。

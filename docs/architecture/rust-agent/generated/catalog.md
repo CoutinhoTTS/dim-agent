@@ -108,6 +108,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `configurationPublisher` | branch | ContextPreparation | Rust-only | — |
 | `configureControl` | branch | Prompt | Rust-only | — |
 | `contextPreparation` | branch | ContextPreparation | Rust-only | — |
+| `contextUsage` | branch | ContextUsage | Rust-only | — |
 | `dispatcher` | branch | BranchScope | yes | `changed` async, `committed` async, `consume` async, `listen` async, `notify` async, `sequence` async |
 | `fileReads` | branch | FileReads | Rust-only | — |
 | `inputQueue` | branch | InputQueue | Rust-only | — |
@@ -133,6 +134,7 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | BranchLine | branch | `dispatcher`, `timeline` |
 | CollaborationTimeline | branch | `dispatcher`, `timeline` |
 | ContextPreparation | branch | `dispatcher`, `timeline` |
+| ContextUsage | branch | `dispatcher`, `timeline` |
 | EnvironmentClientsBranch | branch | `timeline` |
 | FileReads | branch | `timeline` |
 | GoalBranch | branch | `dispatcher`, `timeline` |

@@ -22,6 +22,7 @@ cannot fit the request fails terminally without requesting another recovery.
 | `B:TimelineIdentity` | Identify configuration publication scope; Session and branch ids of the `context.prepare` span. |
 | `B:Dispatcher` | Hand off recovery to live preparation/steer/interrupt transitions and report faults. |
 | `B:Timeline` | Read fixed context, publish handoff and configuration facts. |
+| `B:ContextUsage` | Read persisted statistics and capture the exact request boundary for final confirmation. |
 | `B:BranchLifecycle` | Refuse a guide adoption on a closing branch. |
 
 ## Events and lifetime
@@ -31,7 +32,7 @@ compaction start/result and turn start/end. Produces `model/call` on success or
 `step/model-output-end` on failure, with `context/compaction-start` and one `context/compaction` around
 each strategy call. A `context/prepare` may carry `failure_chain
 {from_request_id, attempts, waited_ms}`; preparation copies it into `model/call`
-unchanged, as it copies `configuration` and `prompt`. `usage` reads the head's budget without writing. Its publisher receives the adopted Snapshot and configuration explicitly from
+unchanged, as it copies `configuration` and `prompt`. `usage` reads ContextUsage at a fixed published head without projecting history. Its publisher receives the adopted Snapshot and configuration explicitly from
 Prompt, then commits prompt changes, adopted inputs and `context/configured`
 atomically; it composes the System at every adoption that
 publishes a configuration. A change that renders the System composes the new
@@ -87,7 +88,7 @@ nothing and no digest can be written
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:GuideEntries`、`S:HistoryRenderer`、`S:PrepareContextHost` |
+| 注入 | `B:BranchLifecycle`、`B:ContextUsage`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:GuideEntries`、`S:HistoryRenderer`、`S:PrepareContextHost` |
 | 提供 | `B:ConfigurationPublisher`、`B:ContextPreparation` |
 | 被注入于 | `ModelProvider`、`Prompt` |
 <!-- /generated -->

@@ -274,6 +274,7 @@ pub(crate) struct View {
     checkpoint: Option<CompactionCheckpoint>,
     /// `request` projected under `checkpoint`.
     pub prepared: Arc<ModelRequest>,
+    adopted: Option<(u64, String)>,
 }
 
 /// The committed result of a step and, when it completed, the request
@@ -281,6 +282,12 @@ pub(crate) struct View {
 pub(crate) struct Compacted {
     pub fact: Arc<AgentEvent>,
     pub request: Option<Result<Arc<ModelRequest>, HostError>>,
+}
+
+pub(crate) struct PreparedRequest {
+    pub request: Arc<ModelRequest>,
+    pub through: u64,
+    pub compaction: Option<String>,
 }
 
 /// A completed strategy result composed on the view: its cut, the running
@@ -487,11 +494,14 @@ impl ContextPolicy {
                     context.position_entry(&history, &position)
                 }
             };
-            reused = Some((checkpoint, kept));
+            reused = Some((checkpoint, kept, event.sequence, event.id.clone()));
             break;
         }
+        let adopted = reused
+            .as_ref()
+            .map(|(_, _, sequence, id)| (*sequence, id.clone()));
         let (history, checkpoint, prepared) = match reused {
-            Some((checkpoint, kept)) => {
+            Some((checkpoint, kept, _, _)) => {
                 let history = history[kept..].to_vec();
                 let prepared = project(
                     &request,
@@ -519,6 +529,7 @@ impl ContextPolicy {
             events,
             checkpoint,
             prepared,
+            adopted,
         })
     }
 
@@ -978,7 +989,7 @@ impl ContextPolicy {
         events: Vec<Arc<AgentEvent>>,
         cancel: CancellationToken,
         cancelled: &(dyn Fn() -> String + Sync),
-    ) -> Result<Arc<ModelRequest>, HostError> {
+    ) -> Result<PreparedRequest, HostError> {
         let boundary = history.last().map(|entry| entry.id.clone());
         let mut reusable = Vec::new();
         let through = self.timeline.committed();
@@ -1059,6 +1070,11 @@ impl ContextPolicy {
         let view = self
             .view(request, context, history, source.through, events, reusable)
             .await?;
+        let prepared_through = view
+            .adopted
+            .as_ref()
+            .map_or(source.through, |(sequence, _)| *sequence);
+        let prepared_compaction = view.adopted.as_ref().map(|(_, id)| id.clone());
         let model = self
             .resolver
             .resolve(view.prepared.clone(), cancel.clone())
@@ -1092,10 +1108,18 @@ impl ContextPolicy {
         });
         let recovery = provider_budget.is_some();
         if !recovery && estimate.input < model.threshold_tokens() {
-            return Ok(view.prepared);
+            return Ok(PreparedRequest {
+                request: view.prepared,
+                through: prepared_through,
+                compaction: prepared_compaction,
+            });
         }
         if !recovery && !self.regrown(&view, model.as_ref()).await? {
-            return Ok(view.prepared);
+            return Ok(PreparedRequest {
+                request: view.prepared,
+                through: prepared_through,
+                compaction: prepared_compaction,
+            });
         }
         let step = CompactionStep {
             turn_id: Some(source.turn_id.clone()),
@@ -1130,7 +1154,11 @@ impl ContextPolicy {
                 if recovery && input > input_budget(model.as_ref()) {
                     return Err(recovery_overflow(&data.outcome, model.as_ref(), &view));
                 }
-                Ok(request)
+                Ok(PreparedRequest {
+                    request,
+                    through: compacted.fact.sequence,
+                    compaction: Some(compacted.fact.id.clone()),
+                })
             }
             (ContextCompactionResult::Cancelled { reason }, _) => {
                 Err(HostError::Cancelled(reason.clone()))
@@ -1141,7 +1169,11 @@ impl ContextPolicy {
             (ContextCompactionResult::Skipped { reason, .. }, _) if recovery => Err(
                 HostError::failed(format!("Context recovery could not compact: {reason}")),
             ),
-            _ => Ok(view.prepared),
+            _ => Ok(PreparedRequest {
+                request: view.prepared,
+                through: prepared_through,
+                compaction: prepared_compaction,
+            }),
         }
     }
 

@@ -244,6 +244,7 @@ struct Compiler<'a> {
     physical_candidates: Option<String>,
     physical_ids: Option<Vec<String>>,
     physical_kinds: Option<&'a [Value]>,
+    candidate_index: &'static str,
     array_rows: bool,
     element_values: bool,
     resolved_relations: Vec<(&'a QueryFilter, String)>,
@@ -407,6 +408,20 @@ impl<'a> Compiler<'a> {
             physical_candidates: None,
             physical_ids: None,
             physical_kinds: query.filter.as_ref().and_then(kind_values),
+            candidate_index: [
+                ("data.request_id", "timeline_events_requests"),
+                ("data.input_id", "timeline_events_inputs"),
+            ]
+            .into_iter()
+            .find_map(|(field, index)| {
+                query
+                    .filter
+                    .as_ref()
+                    .and_then(|filter| equality_values(filter, field))
+                    .filter(|values| !values.is_empty() && values.iter().all(Value::is_string))
+                    .map(|_| index)
+            })
+            .unwrap_or("timeline_events_by_kind"),
             array_rows,
             element_values,
             resolved_relations: Vec::new(),
@@ -1083,13 +1098,14 @@ impl<'a> Compiler<'a> {
                     .collect::<std::collections::BTreeSet<_>>()
             });
             if let Some(kinds) = kinds.filter(|kinds| (2..=32).contains(&kinds.len())) {
+                let index = self.candidate_index;
                 let candidates = kinds
                     .into_iter()
                     .map(|kind| {
                         let kind = self.bind(kind.to_owned());
                         format!(
                             "SELECT sequence FROM (SELECT candidate.sequence
-                      FROM timeline_events candidate INDEXED BY timeline_events_by_kind
+                      FROM timeline_events candidate INDEXED BY {index}
                       WHERE candidate.session_id={session} AND candidate.branch_id=s.branch
                       AND candidate.kind={kind} AND candidate.sequence BETWEEN {lower} AND s.hi
                       AND candidate.last_sequence>=s.lo AND ({predicate})
@@ -2129,6 +2145,7 @@ fn selected_properties(
         physical_candidates: None,
         physical_ids: None,
         physical_kinds: None,
+        candidate_index: "timeline_events_by_kind",
         array_rows: false,
         element_values: false,
         resolved_relations: Vec::new(),

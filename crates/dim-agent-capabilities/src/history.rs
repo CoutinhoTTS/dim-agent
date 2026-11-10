@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, num::NonZeroU64, sync::Arc};
 
+mod settled_output;
+pub(crate) use settled_output::settled_request_output;
+
 pub(crate) fn chain_by_id(id: &str, through: u64, select: QuerySelect) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Chain,
@@ -781,19 +784,22 @@ impl HistoryRenderer {
 /// state it changes: `Some((key, None))` ends a key.
 pub(crate) struct ProjectionEntry {
     id: String,
-    pub(crate) message: Message,
+    pub(crate) message: Arc<Message>,
     state: Option<(String, Option<ContextBaselineEntry>)>,
 }
 
 /// Raw blocks in order, then the operator's words; each is one message.
-pub(crate) fn render_input(consumed_id: &str, input: &InputMessageData) -> Vec<ProjectionEntry> {
-    let mut entries: Vec<_> = input
+pub(crate) fn render_input<'a>(
+    consumed_id: &'a str,
+    input: &'a InputMessageData,
+) -> impl Iterator<Item = ProjectionEntry> + 'a {
+    input
         .blocks
         .iter()
         .enumerate()
-        .map(|(index, block)| {
+        .map(move |(index, block)| {
             let InputBlock::Raw { text, key, retire } = block;
-            let message = Message::text(Role::User, text);
+            let message = Arc::new(Message::text(Role::User, text));
             ProjectionEntry {
                 id: format!("{consumed_id}:block:{index}"),
                 state: key.as_ref().map(|key| {
@@ -802,22 +808,18 @@ pub(crate) fn render_input(consumed_id: &str, input: &InputMessageData) -> Vec<P
                         (!retire).then(|| ContextBaselineEntry {
                             key: key.clone(),
                             source_event: consumed_id.to_owned(),
-                            message: Arc::new(message.clone()),
+                            message: message.clone(),
                         }),
                     )
                 }),
                 message,
             }
         })
-        .collect();
-    if let Some(user) = &input.user {
-        entries.push(ProjectionEntry {
+        .chain(input.user.as_ref().map(move |user| ProjectionEntry {
             id: consumed_id.to_owned(),
-            message: user_message(user),
+            message: Arc::new(user_message(user)),
             state: None,
-        });
-    }
-    entries
+        }))
 }
 
 /// Keeps about `keep` bytes of `text`, half from the start and half from
@@ -1033,7 +1035,9 @@ fn replay(
                         output,
                         matches!(data.outcome, ModelOutputOutcome::Completed { .. }),
                     )
-                    .map(|message| entry(event.id.clone(), message, false, baseline.clone())),
+                    .map(|message| {
+                        entry(event.id.clone(), Arc::new(message), false, baseline.clone())
+                    }),
                 );
                 output_open = false;
             }
@@ -1041,7 +1045,7 @@ fn replay(
                 if data.call_event_id.is_none() && output_open {
                     history.extend(
                         settled_output_message(std::mem::take(&mut output), false).map(|message| {
-                            entry(event.id.clone(), message, false, baseline.clone())
+                            entry(event.id.clone(), Arc::new(message), false, baseline.clone())
                         }),
                     );
                     output_open = false;
@@ -1050,11 +1054,11 @@ fn replay(
                     let id = format!("{}:{index}", event.id);
                     history.push(entry(
                         id,
-                        tool_result_message(
+                        Arc::new(tool_result_message(
                             &item.call_id,
                             &item.result.content,
                             item.result.is_error,
-                        ),
+                        )),
                         false,
                         baseline.clone(),
                     ));
@@ -1063,7 +1067,7 @@ fn replay(
                             |(context_index, message)| {
                                 entry(
                                     format!("{}:{index}:{context_index}", event.id),
-                                    message.clone(),
+                                    Arc::new(message.clone()),
                                     true,
                                     baseline.clone(),
                                 )
@@ -1648,13 +1652,13 @@ pub(crate) fn tool_result_message(
 
 fn entry(
     id: String,
-    message: Message,
+    message: Arc<Message>,
     tool_context: bool,
     baseline: Arc<[ContextBaselineEntry]>,
 ) -> HistoryEntry {
     HistoryEntry {
         id,
-        message: Arc::new(message),
+        message,
         tool_context,
         baseline,
         event_id: String::new(),
