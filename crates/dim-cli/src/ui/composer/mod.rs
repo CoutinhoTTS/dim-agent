@@ -497,6 +497,12 @@ impl Composer {
         self.mention_open() && self.mentions.as_mut().is_some_and(|m| m.changed())
     }
 
+    /// Whether the `@` index is still being walked. It is false before the
+    /// first draft starts a walk and after the walk has finished one.
+    pub fn mention_searching(&self) -> bool {
+        self.mentions.as_ref().is_some_and(|m| m.searching())
+    }
+
     fn mention_candidates(&mut self, query: &str) -> Vec<mentions::Candidate> {
         self.picker.follow(query);
         self.mentions
@@ -575,7 +581,7 @@ impl Composer {
     pub fn mention_panel(&mut self, width: usize, p: &Palette) -> Option<Vec<String>> {
         let trigger = self.mention()?;
         let candidates = self.mention_candidates(&trigger.query);
-        let searching = self.mentions.as_ref().is_some_and(|m| m.searching());
+        let searching = self.mention_searching();
         Some(mentions::render(
             &self.picker,
             &candidates,
@@ -1896,8 +1902,7 @@ mod tests {
                 .into_iter()
                 .map(|candidate| candidate.text)
                 .collect();
-            let searching = c.mentions.as_ref().is_some_and(|m| m.searching());
-            if !searching || started.elapsed() > std::time::Duration::from_secs(10) {
+            if !c.mention_searching() || started.elapsed() > std::time::Duration::from_secs(10) {
                 return found;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
