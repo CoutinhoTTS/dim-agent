@@ -59,9 +59,12 @@ jobs:
           set -euo pipefail
           mkdir -p staging
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > staging/github-release.json
-          jq -e --arg tag "$RELEASE_TAG" \
+          if ! jq -e --arg tag "$RELEASE_TAG" \
             '.draft == false and .prerelease == true and .published_at != null and .tag_name == $tag' \
-            staging/github-release.json > /dev/null
+            staging/github-release.json > /dev/null; then
+            echo "Release $RELEASE_TAG is not a published, non-draft prerelease." >&2
+            exit 1
+          fi
       - name: Download the release archives
         env:
           GH_TOKEN: ${{ github.token }}
@@ -131,8 +134,8 @@ jobs:
           docker buildx build --platform linux/amd64,linux/arm64 --push \
             --build-arg VERSION="$VERSION" --build-arg SOURCE_SHA="$SOURCE_SHA" \
             --provenance=mode=max --sbom=true \
-            --tag "$IMAGE:$VERSION" -f docker/Dockerfile staging/image \
-            --metadata-file "$RUNNER_TEMP/image-metadata.json"
+            --metadata-file "$RUNNER_TEMP/image-metadata.json" \
+            --tag "$IMAGE:$VERSION" -f docker/Dockerfile staging/image
           digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/image-metadata.json")
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
