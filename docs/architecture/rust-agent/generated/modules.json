@@ -3675,6 +3675,16 @@
       ]
     },
     {
+      "id": "dim_cli::client::starting_note_tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::client",
+      "file": "crates/dim-cli/src/client.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "format"
+      ]
+    },
+    {
       "id": "dim_cli::client::web_assets_tests",
       "crate": "dim_cli",
       "parent": "dim_cli::client",
@@ -32267,6 +32277,13 @@
     },
     {
       "from": "dim_cli::client",
+      "to": "dim_cli::client::starting_note_tests",
+      "references": [
+        "mod starting_note_tests"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
       "to": "dim_cli::client::web_assets_tests",
       "references": [
         "mod web_assets_tests"
@@ -32313,6 +32330,13 @@
       "to": "dim_cli::client",
       "references": [
         "use super::same_file"
+      ]
+    },
+    {
+      "from": "dim_cli::client::starting_note_tests",
+      "to": "dim_cli::client",
+      "references": [
+        "use super::another_daemon_starting"
       ]
     },
     {

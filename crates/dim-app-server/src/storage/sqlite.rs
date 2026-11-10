@@ -443,11 +443,33 @@ fn storage(error: impl std::fmt::Display) -> AgentError {
     AgentError::Storage(error.to_string())
 }
 
+/// The store upgrade a running daemon reports beside the store, when the note
+/// there is that kind: the process to wait for and the formats it moves
+/// between.
+struct UpgradeNote {
+    pid: u32,
+    from: u32,
+    to: u32,
+}
+
 enum StartupFailure {
-    Newer { marker: i64 },
-    Mismatched { schema: u32, marker: Option<i64> },
-    Unrecognized { marker: Option<i64> },
-    TooOld { marker: i64 },
+    Newer {
+        marker: i64,
+    },
+    Mismatched {
+        schema: u32,
+        marker: Option<i64>,
+    },
+    Unrecognized {
+        marker: Option<i64>,
+    },
+    TooOld {
+        marker: i64,
+    },
+    /// Another process holds the store's admission lease.
+    Owned {
+        upgrade: Option<UpgradeNote>,
+    },
 }
 impl StartupFailure {
     /// The note a CLI-started daemon leaves for its client; the first line
@@ -479,6 +501,15 @@ impl StartupFailure {
             Self::TooOld { marker } => format!(
                 "Cannot open native store {path}.\n  Store format: v{marker} (no longer read by this daemon)\n  Daemon format: v{FORMAT}\n  This daemon cannot read the store. Existing data was preserved.\n  Use a build that reads v{marker}, or use --home PATH for a separate environment."
             ),
+            Self::Owned {
+                upgrade: Some(upgrade),
+            } => format!(
+                "Cannot open native store {path}.\n  Another dimcode-server (pid {}) is upgrading it from format v{} to v{}.\n  The store stays with that process until the upgrade finishes; wait for it, then run the command again.",
+                upgrade.pid, upgrade.from, upgrade.to
+            ),
+            Self::Owned { upgrade: None } => format!(
+                "Cannot open native store {path}.\n  Another dimcode-server is using the store.\n  Wait for it to finish, then run the command again."
+            ),
         };
         format!(
             "dimcode-startup-failure v1 pid={}\n{body}",
@@ -498,7 +529,8 @@ fn single_marker(markers: &[i64]) -> Option<i64> {
 }
 
 /// The note's body is written beside it and renamed over it, so a reader sees
-/// one complete note. Best effort: the caller's error does not depend on it.
+/// one complete note, or none while Windows replaces it. Best effort: the
+/// caller's error does not depend on it.
 fn write_note(target: &Path, note: &str) {
     let temp = target.with_file_name(format!(
         "{}.{}.tmp",
@@ -518,6 +550,11 @@ fn write_note(target: &Path, note: &str) {
     let written = options.open(&temp).and_then(|mut file| {
         file.write_all(note.as_bytes())?;
         drop(file);
+        // Unix replaces the target in the rename itself, so a reader never
+        // sees the note missing. Windows removes it first, as this writer
+        // always has, so the replace does not depend on how another process
+        // opened the note.
+        #[cfg(windows)]
         let _ = std::fs::remove_file(target);
         std::fs::rename(&temp, target)
     });
@@ -542,6 +579,56 @@ fn write_startup_progress(path: &std::path::Path, from: u32, to: u32, counter: u
             std::process::id()
         ),
     );
+}
+
+/// The text of a note written as this program writes it: a regular file of a
+/// bounded size, owned by the current user and private on Unix, like the CLI
+/// reads it (`crates/dim-cli/src/client.rs`).
+fn read_note(path: &std::path::Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
+            return None;
+        }
+    }
+    String::from_utf8(std::fs::read(path).ok()?).ok()
+}
+
+/// The upgrade a running daemon reports beside `path`, when the note there is
+/// a progress note: the process that owns the store and the formats it moves
+/// between. That note is the only channel that names a live owner (#1335); a
+/// body that does not parse is no note.
+fn upgrade_note(path: &std::path::Path) -> Option<UpgradeNote> {
+    let text = read_note(&startup_note_path(path))?;
+    let (header, body) = text.split_once('\n')?;
+    let pid = header
+        .strip_prefix("dimcode-startup-progress v1 pid=")?
+        .parse()
+        .ok()?;
+    let mut fields = body.lines().next()?.split_whitespace();
+    if fields.next()? != "store-upgrade" {
+        return None;
+    }
+    let (mut from, mut to) = (None, None);
+    for field in fields {
+        let (name, value) = field.split_once('=')?;
+        match name {
+            "from" => from = Some(value.parse().ok()?),
+            "to" => to = Some(value.parse().ok()?),
+            // `progress` and any field a later kind adds do not matter here.
+            _ => {}
+        }
+    }
+    Some(UpgradeNote {
+        pid,
+        from: from?,
+        to: to?,
+    })
 }
 
 /// How often the SQLite progress handler reports a running store upgrade: it
@@ -756,10 +843,23 @@ impl SqliteStorage {
             .open(lock_path)
             .map_err(storage)?;
         admission.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => storage(format!(
-                "another process owns the SQLite database: {}",
-                path.display()
-            )),
+            std::fs::TryLockError::WouldBlock => {
+                // The store belongs to a process that is serving it or is
+                // starting it; either way this launch cannot have it. Its
+                // progress note names the owner while an upgrade runs, and
+                // the note is the client's only report of what to wait for
+                // (#1335).
+                write_startup_failure(
+                    &path,
+                    StartupFailure::Owned {
+                        upgrade: upgrade_note(&path),
+                    },
+                );
+                storage(format!(
+                    "another process owns the SQLite database: {}",
+                    path.display()
+                ))
+            }
             std::fs::TryLockError::Error(error) => storage(error),
         })?;
         let admission = DatabaseLease(admission);
