@@ -444,6 +444,31 @@ renderer adds terminal styling. The write path keeps that promise for every row,
 text included: of the sequences a row carries, only SGR and an OSC 8 link to an `http`,
 `https` or `mailto` target reach the terminal. Clicked links use only those schemes.
 
+### Terminal channels
+
+Three channels can say a run is working: the program status record (`OSC 7501`), the
+progress bar (`OSC 9;4`) and the window title's turning quarter-circle. The startup probe
+that already asks for the keyboard and clipboard protocols also asks whether the terminal
+keeps the record (`OSC 7501;?`, ahead of the DA1 sentinel), and that one answer decides
+which of the three speak:
+
+```text
+terminal answered OSC 7501;?          record only
+  window title     DIM | topic        no mark, no frame
+  progress bar     (none)             the terminal draws from the record
+  notifications    OSC 9 / 99 / 777   a one-off event, not a record
+
+terminal answered DA1 alone           today's behaviour
+  window title     ◐ DIM | topic      120 ms per frame
+  progress bar     OSC 9;4 where drawn
+  notifications    OSC 9 / 99 / 777
+```
+
+DA1 decides, not a timeout: tmux and GNU screen drop the query and still answer the
+sentinel, so they keep today's behaviour with no wait. `DIM_TERMINAL_STATUS=off` omits the
+query along with the reports. `DIM_TERMINAL_TITLE=always` and `DIM_TERMINAL_PROGRESS=on`
+are escape hatches for a terminal that answers but draws nothing.
+
 ## 5. Context mapping
 
 None. No client plugin writes to any Timeline or produces model context; user input reaches the model only through `session.submit`, as today.

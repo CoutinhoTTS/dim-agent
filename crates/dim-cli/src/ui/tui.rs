@@ -251,9 +251,12 @@ fn run_terminal(
     let background = terminal
         .background_report()
         .and_then(detect::parse_background_report);
+    // A terminal that answered the program status query keeps the record of
+    // the run, so the title and the bar leave the job to it.
+    let program_status = terminal.program_status();
     let env = detect::env_from_process();
-    let mut progress = ProgressBar::from_env(&env);
-    let mut title = WindowTitle::new(crate::ui::title::apple_terminal(), Instant::now());
+    let mut progress = ProgressBar::from_env(&env, program_status);
+    let mut title = WindowTitle::from_env(program_status, Instant::now());
     let (default_id, detected) = Theme::detect(&env, true, background.as_deref());
     let saved = crate::ui::theme_panel::saved_theme_id(&surroundings.home);
     let theme = match &saved {
