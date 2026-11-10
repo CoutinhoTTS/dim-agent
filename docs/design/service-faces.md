@@ -80,7 +80,7 @@ impl AgentBuilder {
 
 ## 3. 盘点（#1300）
 
-catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`wakeups`、`sessionFiles`、`managedSearch`）；新名字不计入 84。`workflowRuns` 不在其中：它已经由 optional Workflow 包提供为数据面。每个现有名字恰好归类一次；§3.3 的“数据兄弟”列是目标名字，不是被盘点的 Rust-only 名字。
+catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`wakeups`、`sessionFiles`、`managedSearch`）；新名字不计入 84。`workflowRuns` 不在其中：109 是 Rust product-profile 目录；optional Workflow 包有自己的 provides 目录，`workflowRuns` 在那里，已经由该包提供为数据面。每个现有名字恰好归类一次；§3.3 的“数据兄弟”列是目标名字，不是被盘点的 Rust-only 名字。
 
 ### 3.1 已经可以跨，但 catalog 列没体现
 
@@ -93,11 +93,11 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | 名字 | 目标 | 备注 |
 | --- | --- | --- |
 | `scheduleJobs` | 新数据面 `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md) 的 flat `JobRequest`/`JobReply`；Rust 实现是 `call(request, caller)`，dispatcher 拼成 flat request。`Caller`/`JobReply` 补 serde，`Caller` 用 camelCase |
-| `wakeups` | 新数据面 `wakeups.create/list/cancel` | SchedulerSession 同时注入 `ScheduleJobs` 和 `Wakeups`；只做 `scheduleJobs` 不够。形状按 [Scheduler](plugins/Scheduler.md) §11.1 |
+| `wakeups` | 新数据面 `wakeups.create/list/cancel` | SchedulerSession 同时注入 `ScheduleJobs` 和 `Wakeups`；只做 `scheduleJobs` 不够。形状按 [Scheduler](plugins/Scheduler.md) §10.2 |
 | `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
 | `managedSearch` | 新数据面，只含 `search` | `managedProviders` 保持 internal(secret)，账号/token 不出去 |
 
-`workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致；#1292 不新增 provider，只核对形状。
+`workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致。它不在 109 个 Rust product-profile 名字里，而在该包自己的 provides 目录里；#1292 不新增 provider，只核对形状。
 
 `settingsService` 和 `modelHost` **不进第一批**：它们保留类型化调用。`settings.read` 会新建取消 token、并返回 `SettingsResult` 信封；GoalBranch 需要自己的 stop token，改成数据面会丢取消。`auxiliaryModel.complete` 没有 tools、config 和 cached prefix；PromptSuggestion 克隆的是整轮 `ModelRequest`，换过去是行为变化，不只是形状。它们已有数据兄弟给其他消费者；有 leaf 消费者时再按 §4 的规则扩展。
 
@@ -238,13 +238,15 @@ managedSearch.search {query, count}
 `SchedulerSession` 同时注入 `ScheduleJobs` 和 `Wakeups`；只有 `scheduleJobs` 数据面时它仍不能 leaf。按 Scheduler §11.1 的形状：
 
 ```text
-wakeups.create {sessionId, branchId, at, prompt} -> Wakeup
-wakeups.list {sessionId, branchId} -> {wakeups: [...]}
-wakeups.cancel {sessionId, wakeupId} -> {cancelled: bool}
-  -> error {code, message}
+wakeups.create {sessionId, branchId, at, prompt} -> {wakeupId}
+wakeups.list {sessionId, branchId?} -> {wakeups: [{wakeupId, at, prompt, state}]}
+wakeups.cancel {sessionId, wakeupId} -> {} | {state}
+  -> error {code: invalid_params | wakeup_not_found | ..., message}
 ```
 
-改动：给 `Wakeups` 加数据面（或手写 dispatcher），在 `host_key("wakeups")` 提供；`SchedulerSession` 改注入 `dyn HostDispatch`。`WakeupRequest`/`Wakeup` 补 serde；字段按 Scheduler 附录。测试：wakeup 的 create/list/cancel flow，加 loopback。
+按 Scheduler §10.2 的方法表，不按 §11.1 的通知表。`branchId` 默认 `main`；`at` 是 RFC 3339；`cancel` 结算 `scheduled` 记录时返回 `{}`，记录已经终态时返回 `{state}`。
+
+改动：给 `Wakeups` 加数据面（或手写 dispatcher），在 `host_key("wakeups")` 提供；`SchedulerSession` 改注入 `dyn HostDispatch`。`WakeupRequest` 补 serde（camelCase）；`Wakeup` 是持久化记录，已经 snake_case，**不要**给它加 `rename_all`，data face 的 record 用单独的 wire 类型或显式映射。测试：wakeup 的 create/list/cancel flow，加 loopback。
 
 ## 5. 验证
 
