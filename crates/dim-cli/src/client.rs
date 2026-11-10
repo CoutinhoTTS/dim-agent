@@ -264,12 +264,12 @@ fn read_progress_note(path: &Path) -> Option<ProgressNote> {
     let (mut from, mut to, mut counter) = (None, None, None);
     for field in fields {
         let (name, value) = field.split_once('=')?;
-        let value: u64 = value.parse().ok()?;
         match name {
-            "from" => from = Some(u32::try_from(value).ok()?),
-            "to" => to = Some(u32::try_from(value).ok()?),
-            "progress" => counter = Some(value),
-            // A later kind may add fields; an older client ignores them.
+            "from" => from = Some(u32::try_from(value.parse::<u64>().ok()?).ok()?),
+            "to" => to = Some(u32::try_from(value.parse::<u64>().ok()?).ok()?),
+            "progress" => counter = Some(value.parse().ok()?),
+            // A later kind may add fields; an older client ignores them,
+            // whatever their values, as the daemon's own reader does.
             _ => {}
         }
     }

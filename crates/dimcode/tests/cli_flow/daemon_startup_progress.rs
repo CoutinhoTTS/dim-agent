@@ -510,7 +510,23 @@ fn a_client_finding_another_daemons_upgrade_waits_for_it() {
             let mut counter = 0;
             while !stop.load(Ordering::SeqCst) {
                 counter += 1;
-                write_progress_note(&note, std::process::id(), counter);
+                // A later version may add fields to the progress line; this
+                // one adds a value that is not a number, which a reader must
+                // ignore as the daemon's own reader does.
+                let temp = note.with_file_name(format!(
+                    "{}.{counter}.tmp",
+                    note.file_name().unwrap().to_string_lossy()
+                ));
+                fs::write(
+                    &temp,
+                    format!(
+                        "dimcode-startup-progress v1 pid={}\nstore-upgrade from=33 to=34 progress={counter} stage=rewrite\n",
+                        std::process::id()
+                    ),
+                )
+                .unwrap();
+                fs::set_permissions(&temp, fs::Permissions::from_mode(0o600)).unwrap();
+                fs::rename(&temp, &note).unwrap();
                 thread::sleep(Duration::from_millis(50));
             }
         })
