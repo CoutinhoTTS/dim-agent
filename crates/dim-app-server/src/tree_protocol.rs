@@ -75,10 +75,15 @@ pub struct BranchesResult {
 }
 
 #[derive(Debug)]
-pub struct ProductEvent(Arc<AgentEvent>);
+pub struct ProductEvent {
+    event: Arc<AgentEvent>,
+}
 impl ProductEvent {
-    /// `version` is the connection's protocol version (2 or 3).
+    /// `version` is the connection's protocol version (2, 3 or 4).
     pub fn new(event: Arc<AgentEvent>, version: u32) -> Option<Self> {
+        if event.parent_call_id.is_some() && version < 4 {
+            return None;
+        }
         let visible = match &event.kind {
             EventKind::ToolUseStart(_) => version >= 3,
             EventKind::ToolResult(data) => version >= 3 || data.call_event_id.is_some(),
@@ -134,14 +139,14 @@ impl ProductEvent {
             // dynamic protocol after host visibility filtering (ADR 001).
             | EventKind::Extension(_) => false,
         };
-        visible.then_some(Self(event))
+        visible.then_some(Self { event })
     }
 }
 impl Serialize for ProductEvent {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if let EventKind::ContextConfigured(configured) = &self.0.kind {
+        if let EventKind::ContextConfigured(configured) = &self.event.kind {
             let mut view = serde_json::json!({
-                "id": self.0.id, "sequence": self.0.sequence, "create_at": self.0.create_at,
+                "id": self.event.id, "sequence": self.event.sequence, "create_at": self.event.create_at,
                 "type": "context", "name": "configured",
                 "data": {"timeline": configured.timeline, "revision": configured.revision,
                     "previous": configured.previous, "prompt": configured.prompt,
@@ -161,7 +166,7 @@ impl Serialize for ProductEvent {
             }
             view.serialize(serializer)
         } else {
-            self.0.serialize(serializer)
+            self.event.serialize(serializer)
         }
     }
 }
@@ -360,9 +365,31 @@ mod tests {
     use super::*;
     use dim_agent_types::*;
 
-    /// A fork's opening is where an owner that folds the branch's own history
-    /// stops reading the copied facts (Goal A11): v3 delivers it, v2 keeps
-    /// its list.
+    /// A child batch reaches only v4; older clients keep their old projection.
+    #[test]
+    fn a_child_batch_parent_is_v4_only() {
+        let event = Arc::new(AgentEvent {
+            id: "child".into(),
+            sequence: 2,
+            create_at: 1,
+            tags: None,
+            parent_call_id: Some("c1".into()),
+            kind: EventKind::ToolCall(ToolCallData {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                calls: vec![ToolCall {
+                    id: "c2".into(),
+                    name: "echo".into(),
+                    input: Default::default(),
+                }],
+            }),
+        });
+        assert!(ProductEvent::new(event.clone(), 2).is_none());
+        assert!(ProductEvent::new(event.clone(), 3).is_none());
+        let v4 = serde_json::to_value(ProductEvent::new(event, 4).unwrap()).unwrap();
+        assert_eq!(v4["parent_call_id"], "c1");
+    }
+
     #[test]
     fn a_fork_opening_is_a_v3_fact() {
         let opening = Arc::new(AgentEvent {
@@ -370,6 +397,7 @@ mod tests {
             sequence: 9,
             create_at: 1,
             tags: None,
+            parent_call_id: None,
             kind: EventKind::SessionForked(SessionForkedData {}),
         });
         assert!(ProductEvent::new(opening.clone(), 3).is_some());
@@ -377,29 +405,32 @@ mod tests {
     }
 
     fn configured(config: Option<ModelConfig>, metadata: Option<RequestMetadata>) -> ProductEvent {
-        ProductEvent(Arc::new(AgentEvent {
-            id: "event".into(),
-            sequence: 1,
-            create_at: 0,
-            tags: None,
-            kind: EventKind::ContextConfigured(ContextConfiguredData {
-                timeline: "main".into(),
-                revision: "revision".into(),
-                previous: None,
-                prompt: None,
-                settings: Box::new(ModelConfiguration {
-                    provider_id: "provider".into(),
-                    model_id: "model".into(),
-                    capability_snapshot: None,
-                    tools: None,
-                    tool_sources: Vec::new(),
-                    config,
-                    metadata,
+        ProductEvent {
+            event: Arc::new(AgentEvent {
+                id: "event".into(),
+                sequence: 1,
+                create_at: 0,
+                tags: None,
+                parent_call_id: None,
+                kind: EventKind::ContextConfigured(ContextConfiguredData {
+                    timeline: "main".into(),
+                    revision: "revision".into(),
+                    previous: None,
+                    prompt: None,
+                    settings: Box::new(ModelConfiguration {
+                        provider_id: "provider".into(),
+                        model_id: "model".into(),
+                        capability_snapshot: None,
+                        tools: None,
+                        tool_sources: Vec::new(),
+                        config,
+                        metadata,
+                    }),
+                    system: None,
+                    system_source: None,
                 }),
-                system: None,
-                system_source: None,
             }),
-        }))
+        }
     }
 
     fn effort() -> ModelConfig {

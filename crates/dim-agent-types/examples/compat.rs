@@ -221,6 +221,7 @@ fn native_events() -> Vec<AgentEvent> {
             sequence: i as u64 + 1,
             create_at: 1_790_000_001_234,
             tags: None,
+            parent_call_id: None,
             kind,
         })
         .collect()
@@ -255,6 +256,7 @@ fn extension_events() -> Vec<AgentEvent> {
             sequence: i as u64 + 1,
             create_at: 1_790_000_001_234,
             tags: None,
+            parent_call_id: None,
             kind,
         })
         .collect()
