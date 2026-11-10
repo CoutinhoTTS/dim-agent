@@ -176,6 +176,7 @@ async fn the_schedule_tool_saves_jobs_for_interactive_sessions_only() {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-tool-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     select_model(&mut client).await;
@@ -339,6 +340,7 @@ async fn the_schedule_tool_is_refused_in_a_member_session() {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-member-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     select_model(&mut client).await;
@@ -427,6 +429,7 @@ async fn the_factory_description_replaces_the_declaration() {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-description-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     select_model(&mut client).await;
@@ -490,6 +493,7 @@ async fn the_seventeenth_tool_job_of_a_session_is_refused() {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-tool-limit-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     select_model(&mut client).await;
@@ -591,6 +595,7 @@ async fn a_tool_update_keeps_the_stored_launch_target() {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-tool-target-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     select_model(&mut client).await;

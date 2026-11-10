@@ -788,6 +788,9 @@ async fn a_v34_submission_index_upgrade_preserves_duplicate_identities_and_reope
     connection
         .execute_batch(
             "BEGIN; DROP INDEX timeline_events_requests; DROP INDEX timeline_events_inputs; DROP INDEX timeline_events_users; DROP TRIGGER timeline_text_delete; DROP TABLE timeline_text; DROP TABLE timeline_text_fts; DROP TABLE timeline_text_tails; DROP INDEX timeline_input_submissions;
+        DROP TABLE session_owners;
+        CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)));
+        CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id);
         DROP TABLE agent_store_format;
         CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 34));
         INSERT INTO agent_store_format VALUES (34); COMMIT;",
@@ -1073,7 +1076,7 @@ async fn text_candidates_survive_output_merging_reopen_fork_and_session_deletion
             .unwrap(),
         0
     );
-    connection.execute_batch("DROP INDEX timeline_events_requests; DROP INDEX timeline_events_inputs; DROP INDEX timeline_events_users; DROP TRIGGER timeline_text_delete; DROP TABLE timeline_text; DROP TABLE timeline_text_fts; DROP TABLE timeline_text_tails; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 35)); INSERT INTO agent_store_format VALUES(35);").unwrap();
+    connection.execute_batch("DROP INDEX timeline_events_requests; DROP INDEX timeline_events_inputs; DROP INDEX timeline_events_users; DROP TRIGGER timeline_text_delete; DROP TABLE timeline_text; DROP TABLE timeline_text_fts; DROP TABLE timeline_text_tails; DROP TABLE session_owners; CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3))); CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id); DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 35)); INSERT INTO agent_store_format VALUES(35);").unwrap();
     drop(connection);
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     assert_eq!(

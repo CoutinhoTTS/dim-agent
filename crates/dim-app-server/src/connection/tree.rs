@@ -66,7 +66,7 @@ impl Connection {
             SubmitCheckReply::Proceed { blocks } => append_blocks(&mut data.user, blocks),
         }
         let event = session.input(data, branch).await.map_err(RpcError::from)?;
-        if self.protocol_version() == 3 {
+        if self.protocol_version() >= 3 {
             let mut published = publication.watch();
             tokio::select! {
                 biased;

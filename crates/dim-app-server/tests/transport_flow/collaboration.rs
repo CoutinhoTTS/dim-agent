@@ -527,7 +527,7 @@ async fn launch_held_team(
     dim_app_server::collaboration::install(&mut builder);
     let server = serve(builder, config).await.unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -578,7 +578,7 @@ impl rutis::host::DynPlugin for CaptureMemberConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn product_collaboration_adopts_profile_and_default_capabilities() {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let home = std::env::temp_dir().join(format!("dim-team-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let configs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -593,7 +593,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
                 move |names| Ok(Box::new(CaptureMemberConfig::new(names, observed.clone())?)),
             ));
         }).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let capabilities = dim_agent_types::CatalogCapabilities::with_limits(32000, 128);
         let models = ["alpha", "beta"].map(|id| json!({"modelId":id,"displayName":id,"status":"active",
             "capabilities":capabilities}));
@@ -624,7 +624,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
         for method in ["collaboration.model_policy", "collaboration.set_model_policy"] {
             assert!(client.features.as_array().unwrap().contains(&json!(method)));
         }
-        let mut remote = Client::new_version(&server, true, 3).await;
+        let mut remote = Client::new_version(&server, true, 4).await;
         assert_eq!(remote.rpc("collaboration.model_policy", json!({})).await["error"]["data"]["appError"], "local_transport_required");
         let read = client.rpc("collaboration.model_policy", json!({})).await;
         assert_eq!(read["result"]["policy"], json!({"mode":"agent"}));
@@ -646,7 +646,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             reply["result"]["revision"].as_str().unwrap().to_owned()
         };
         let fixed = set(&mut client, &initial, json!({"mode":"fixed","model":model("alpha")})).await;
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         let stale = other.rpc("collaboration.set_model_policy", json!({"expectedRevision":initial,"policy":{"mode":"inherit"}})).await;
         assert_eq!(stale["error"]["data"]["appError"], "collaboration_model_policy_conflict", "{stale}");
         let reread = other.rpc("collaboration.model_policy", json!({})).await;
@@ -852,7 +852,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
         .await
         .unwrap();
         let agent = server.agent().unwrap();
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let lead = leader(&mut client, allowed()).await;
         let session = agent.get_session(&lead).unwrap();
         let agent_id = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
@@ -1308,7 +1308,7 @@ fn result_of(events: &[Arc<AgentEvent>], member: &str) -> Vec<CollaborationOutco
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_delegates_and_team_members_communicate() {
     let (server, agent) = launch_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     assert!(
         !client
             .features
@@ -1824,7 +1824,7 @@ async fn leader_delegates_and_team_members_communicate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn temporary_agents_stay_private_during_concurrent_create_and_close() {
     let (server, agent) = launch_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     let foreign = leader(&mut client, allowed()).await;
@@ -1889,7 +1889,7 @@ async fn temporary_agents_stay_private_during_concurrent_create_and_close() {
 async fn a_member_is_an_internal_child_of_its_leader() {
     let store = Store::new();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     say(
@@ -1957,7 +1957,7 @@ async fn a_member_is_an_internal_child_of_its_leader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn members_cancel_close_and_leave_the_team() {
     let (server, agent) = launch_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     let default_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
@@ -2329,7 +2329,7 @@ async fn members_cancel_close_and_leave_the_team() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_stop_and_close_settle_requests() {
     let (server, agent) = launch_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"preset": "workspace-write", "allowedTools": ["echo", "wait"]}),
@@ -2580,7 +2580,7 @@ async fn member_work(mut config: ServerConfig) {
         .get_or_insert_default()
         .push("hold".into());
     let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -2958,7 +2958,7 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
     .await
     .unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     process_typescript::select_model(&mut client).await;
     let created = client
         .rpc(
@@ -3148,7 +3148,7 @@ async fn a_client_cancel_stops_a_running_member_and_writes_nothing_when_idle() {
         .get_or_insert_default()
         .push("hold".into());
     let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -3308,7 +3308,7 @@ async fn a_client_cancel_from_another_branch_leaves_the_owning_branch_turn_runni
         |_| {},
     )
     .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client
         .rpc(
             "session.create",
@@ -3794,7 +3794,7 @@ async fn a_client_cancel_after_the_member_input_is_applied_stops_the_turn_it_sta
     let cancelling = {
         let lead = lead.clone();
         let member = member.clone();
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         tokio::spawn(async move {
             other
                 .rpc(
@@ -3884,7 +3884,7 @@ async fn a_client_cancel_refuses_a_new_request_to_the_member_until_it_returns() 
     let cancelling = {
         let lead = lead.clone();
         let member = member.clone();
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         tokio::spawn(async move {
             other
                 .rpc(
@@ -4007,7 +4007,7 @@ async fn a_client_cancel_stops_the_turn_it_named_not_the_one_that_replaced_it() 
     let cancelling = {
         let lead = lead.clone();
         let member = member.clone();
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         tokio::spawn(async move {
             other
                 .rpc(
@@ -4126,7 +4126,7 @@ async fn a_detached_cancel_wait_stops_the_turn_it_named_not_the_one_that_replace
     let cancelling = {
         let lead = lead.clone();
         let member = member.clone();
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         tokio::spawn(async move {
             other
                 .rpc(
@@ -4705,7 +4705,7 @@ async fn a_leader_branch_close_after_a_client_cancel_keeps_one_carry_out() {
         let cancelling = {
             let lead = lead.clone();
             let member = member.clone();
-            let mut other = Client::new_version(&server, false, 3).await;
+            let mut other = Client::new_version(&server, false, 4).await;
             tokio::spawn(async move {
                 other
                     .rpc(
@@ -4994,7 +4994,7 @@ async fn a_client_cancel_refuses_another_teams_member_an_unknown_id_and_a_member
         .get_or_insert_default()
         .push("hold".into());
     let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -5184,7 +5184,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
     dim_app_server::collaboration::install(&mut builder);
     let server = serve(builder, config).await.unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent"]}),
@@ -5403,7 +5403,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_page_carries_the_effects_its_tool_results_declared() {
     let (server, agent) = launch_with_agent(Arc::new(EffectTools), ServerConfig::default()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "touch"]}),
@@ -5498,7 +5498,7 @@ async fn a_member_page_carries_the_effects_its_tool_results_declared() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn collaboration_facts_publish_to_tree_protocols_only() {
     let (server, agent) = launch_team().await;
-    let mut tree = Client::new_version(&server, false, 3).await;
+    let mut tree = Client::new_version(&server, false, 4).await;
     let default_agent = tree.rpc("agent.list", json!({})).await["result"][0]["agentId"]
         .as_str()
         .unwrap()
@@ -5575,7 +5575,7 @@ async fn stored_member_read_acquires_it_and_it_can_unload_and_work_again() {
         },
     )
     .await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let lead = leader(&mut client, allowed()).await;
     assert_ok(
         &client
@@ -5990,7 +5990,7 @@ async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled()
         }
     })
     .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     hold.leader.set(lead.clone()).unwrap();
@@ -6087,7 +6087,7 @@ async fn a_cancel_before_the_result_reports_cancelled_however_late_it_is_deliver
         })
     }));
     let (server, agent) = launch_gated(gate.clone(), ServerConfig::default()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     let lead_session = agent.get_session(&lead).unwrap();
@@ -6158,7 +6158,7 @@ async fn an_operation_of_a_turn_interrupted_before_a_reload_is_refused() {
         },
     )
     .await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     assert_ok(
@@ -6269,7 +6269,7 @@ async fn a_request_covered_before_its_member_input_is_refused() {
         }
     })
     .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     hold.leader.set(lead.clone()).unwrap();
@@ -6362,7 +6362,7 @@ async fn held(session: &Session) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn open_requests_hold_their_leader_until_the_last_result() {
     let (server, agent, gate, directory) = launch_holding_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -6447,7 +6447,7 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
     let (server, agent, gate, directory) =
         launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
             .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -6618,7 +6618,7 @@ async fn deleting_the_last_two_members_together_ends_their_agent() {
         ..Default::default()
     };
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     assert_ok(
@@ -6652,7 +6652,7 @@ async fn deleting_the_last_two_members_together_ends_their_agent() {
     returned(&mut client, &lead, &lead_session, 2).await;
     let second = next_member(&lead_session, 1).await;
 
-    let mut other = Client::new_version(&server, true, 3).await;
+    let mut other = Client::new_version(&server, true, 4).await;
     let (deleted, _) = tokio::join!(
         client.rpc("session.delete", json!({"sessionId": first})),
         other.rpc("session.delete", json!({"sessionId": second})),
@@ -6706,7 +6706,7 @@ async fn deleting_the_last_two_members_together_ends_their_agent() {
 async fn a_leader_whose_member_is_in_use_is_not_deleted_when_inactive_is_required() {
     let store = super::deletion::Store::new();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
@@ -6724,7 +6724,7 @@ async fn a_leader_whose_member_is_in_use_is_not_deleted_when_inactive_is_require
     let member = next_member(&lead_session, 0).await;
     // An attached client keeps the member in use; the leader itself is idle
     // once its request completed.
-    let mut watcher = Client::new_version(&server, true, 3).await;
+    let mut watcher = Client::new_version(&server, true, 4).await;
     assert_ok(
         &watcher
             .rpc("session.attach", json!({"sessionId":member}))
@@ -6822,7 +6822,7 @@ async fn startup_removes_an_incomplete_and_an_orphaned_delegation() {
         ..Default::default()
     };
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let listed = client.rpc("agent.list", json!({})).await;
     assert_eq!(
         listed["result"].as_array().unwrap().len(),
@@ -6880,7 +6880,7 @@ async fn listed(client: &mut Client, lead: &str, lead_session: &Session, id: &st
 async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
     let (server, agent, _gate, directory) =
         launch_holding_team_unloading(Duration::from_millis(200), |_| {}).await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let (lead, lead_session, temporary, first, second) =
         unloaded_temporary_members(&mut client, &agent).await;
 
@@ -6958,7 +6958,7 @@ async fn deleting_unloaded_members_ends_their_relations_and_the_temporary_agent(
     let (server, agent, _gate, directory) =
         launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
             .await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let (lead, lead_session, temporary, first, second) =
         unloaded_temporary_members(&mut client, &agent).await;
 
@@ -7015,7 +7015,7 @@ async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent
             sessions.install(builder);
         })
         .await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let (lead, lead_session, temporary, first, second) =
         unloaded_temporary_members(&mut client, &agent).await;
 
@@ -7058,7 +7058,7 @@ async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_settlement_of_a_request_releases_its_leader() {
     let (server, agent, _gate, directory) = launch_holding_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -7174,7 +7174,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
         }
     })
     .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     hold.leader.set(lead.clone()).unwrap();
@@ -7479,7 +7479,7 @@ async fn configured_agent_descriptions_replace_the_builtin_text() {
         let (server, agent) =
             launch_with_collaboration(Arc::new(MockTools), ServerConfig::default(), collaboration)
                 .await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let lead = leader(&mut client, allowed()).await;
         let lead_session = agent.get_session(&lead).unwrap();
         say(&mut client, &lead, "hello".into(), "queue").await;
@@ -7542,7 +7542,7 @@ async fn parts_required_without_install_keep_the_builtin_descriptions() {
     .await
     .unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = tokio::time::timeout(Duration::from_secs(20), leader(&mut client, allowed()))
         .await
         .expect("the Session is created within the wait");
@@ -7570,7 +7570,7 @@ async fn a_restart_restores_a_delegation_and_keeps_it_private() {
         ..Default::default()
     };
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     say(
@@ -7613,7 +7613,7 @@ async fn a_restart_restores_a_delegation_and_keeps_it_private() {
     server.join().await.unwrap();
 
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     assert_eq!(
         client.rpc("agent.list", json!({})).await["result"]
             .as_array()
@@ -7670,7 +7670,7 @@ async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_
     tokio::time::timeout(Duration::from_secs(30), async {
         let runs = Arc::new(AtomicUsize::new(0));
         let (server, agent) = approval_team(runs.clone()).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","danger","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
         assert_ok(&created);
         let lead = created["result"]["sessionId"].as_str().unwrap();
@@ -7806,7 +7806,7 @@ async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_
 async fn new_members_sample_requesting_branch_policy_and_reused_members_keep_theirs() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (server, agent) = launch_team().await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let lead = leader(&mut client, allowed()).await;
         let lead_session = agent.get_session(&lead).unwrap();
         let policy = json!({"preset":"workspace-write","allowedTools":["agent","echo","wait"],"disallowedTools":["forbidden"]});
@@ -7843,7 +7843,7 @@ async fn member_approval_cancellation_and_policy_tightening_never_execute_a_late
     tokio::time::timeout(Duration::from_secs(30), async {
         let runs = Arc::new(AtomicUsize::new(0));
         let (server, agent) = approval_team(runs.clone()).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
         assert_ok(&created);
         let lead = created["result"]["sessionId"].as_str().unwrap();
@@ -7928,7 +7928,7 @@ async fn a_stopped_turn_keeps_a_delivered_members_later_approval_reachable() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let runs = Arc::new(AtomicUsize::new(0));
         let (server, agent) = approval_team(runs.clone()).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","wait","danger","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent","wait"]}})).await;
         assert_ok(&created);
         let lead = created["result"]["sessionId"].as_str().unwrap();
@@ -7978,7 +7978,7 @@ async fn missing_permission_state_refuses_a_committed_member_request_without_cre
         });
         let gate = DispatchGate::new(hold);
         let (server, agent) = launch_gated(gate.clone(), ServerConfig::default()).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let lead = leader(&mut client, allowed()).await;
         gate.leader.set(lead.clone()).unwrap();
         let session = agent.get_session(&lead).unwrap();
@@ -8052,7 +8052,7 @@ async fn member_routes_are_authorized_only_after_the_owning_branch_consumes_the_
             ..Default::default()
         }).await.unwrap();
         let agent = server.agent().unwrap();
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
         assert_ok(&created);
         let lead = created["result"]["sessionId"].as_str().unwrap();

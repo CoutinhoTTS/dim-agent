@@ -72,6 +72,7 @@ async fn connect(server: &RunningServer) -> Client {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-retention-test",
+        protocol_version: 4,
     };
     Client::connect(&config).await.unwrap()
 }

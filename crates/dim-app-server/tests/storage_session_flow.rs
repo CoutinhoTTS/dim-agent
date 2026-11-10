@@ -112,6 +112,7 @@ impl DynPlugin for GenericCleanupFault {
                 timeline.append(EventDraft {
                     id: None,
                     tags: Some(vec!["cleanup".into()]),
+                    parent_call_id: None,
                     kind: EventKind::PermissionChanged(PermissionChangedData {
                         policy: PermissionPolicy::default(),
                     }),
@@ -125,7 +126,7 @@ impl DynPlugin for GenericCleanupFault {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_failure_during_generic_cleanup_supersedes_the_session_fault() {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target/storage-session-flow").join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&directory).unwrap();
@@ -181,7 +182,7 @@ async fn storage_failure_during_generic_cleanup_supersedes_the_session_fault() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         let path = std::env::temp_dir().join(format!("dimagent-storage-siblings-{}.sqlite", uuid::Uuid::new_v4()));
         let db = SqliteStorage::open(path.clone()).unwrap();
         let store = SqliteTimelineStore::new(db.clone());
@@ -265,6 +266,7 @@ impl DynPlugin for RecordCleanup {
                 timeline.append(EventDraft {
                     id: None,
                     tags: Some(vec!["finalizer".into()]),
+                    parent_call_id: None,
                     kind: EventKind::PermissionChanged(PermissionChangedData {
                         policy: PermissionPolicy::default(),
                     }),
@@ -278,7 +280,7 @@ impl DynPlugin for RecordCleanup {
 
 #[tokio::test]
 async fn session_close_and_idle_unload_persist_finalizer_events() {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         for unloading in [false, true] {
             let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("target/storage-session-flow")

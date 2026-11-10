@@ -529,8 +529,9 @@ impl QueryOperand {
 
 fn validate_field(path: &str, array: bool) -> Result<()> {
     match path {
-        "kind" | "id" | "create_at" | "tags" | "position" | "position.branch_id"
-        | "position.sequence" | "context.render" | "context.state" | "data" => Ok(()),
+        "kind" | "id" | "create_at" | "tags" | "parent_call_id" | "position"
+        | "position.branch_id" | "position.sequence" | "context.render" | "context.state"
+        | "data" => Ok(()),
         _ => match path.strip_prefix("data.") {
             Some(path) => validate_path(path, array, false),
             None => invalid("a property must name an event field or position"),

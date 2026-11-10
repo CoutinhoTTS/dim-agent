@@ -129,6 +129,7 @@ async fn a_manual_run_launches_a_session_and_settles_completed() {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-run-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     select_model(&mut client).await;
