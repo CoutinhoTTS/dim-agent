@@ -19,7 +19,7 @@
 
 ### 2.1 标记
 
-**数据面 = 名字在 catalog 里 shared，并且在 `host_key(name)` 上有一个 `HostDispatch`。** 两个条件缺一不可。`#[rutis::service]`、`register_shared`、`register_shared_instance` 都是标记写法，但 shared 本身不是数据面：`localId`、`loaderService`、`pluginMounter` 今天是 shared 却没有 dispatcher，leaf 不能调用它们。
+**数据面 = 名字在 catalog 里 shared，并且在 `host_key(name)` 上有一个 `HostDispatch`。** 两个条件缺一不可。`#[rutis::service]`、`register_shared`、`register_shared_instance` 都是标记写法，但 shared 本身不是数据面：`loaderService`、`pluginMounter` 今天是 shared 却没有 dispatcher，leaf 不能调用它们。
 
 `internal` 需要一条原因，放在 `AgentBuilder` 的旁表里，不改 rutis 的 `ServiceCatalog`：
 
@@ -44,19 +44,19 @@ impl AgentBuilder {
 - `xtask graph` 把 `Crosses languages` 列换成 `face`：
   - shared 且有 dispatcher：`data`；
   - 非 shared 且有 reason：`internal(<reason>)`；
-  - shared 但没有 dispatcher：`shared-no-dispatcher`，生成失败；
+  - shared 但没有 dispatcher：`shared-no-dispatcher`；除 `loaderService`、`pluginMounter` 两个 rutis-loader 外部名字外，生成失败；
   - 非 shared 且没有 reason：生成失败，报名字。
 - `xtask check` 双向检查：
   - 一个在 `host_key(name)` 上有 dispatcher、但没有 shared 的名字失败（`managementMethods` 是这一类）；
-  - 一个 shared、但没有 dispatcher 的名字失败（`localId`、`loaderService`、`pluginMounter` 是这一类）；
+  - 一个 shared、但没有 dispatcher 的名字失败；`loaderService`、`pluginMounter` 是仅有的两个例外，catalog 显示 `shared-no-dispatcher`；
   - 一个名字同时 shared 和有 reason 是矛盾，失败。
 - `managementMethods` 不是只加一行：`session_typescript.rs:80` 已经 `register_shared`，但 `xtask/src/catalog.rs:81` 在 `serve` 注册 typed 名字之前调用 `share_names`，后者会被覆盖。改动是让 shared 注册发生在 typed 注册之后，或让 `register_names` 保留已有的 shared；这是 #1289 的代码项。
-- `localId`、`loaderService`、`pluginMounter` 三个 shared-without-dispatcher 在 #1289 里逐个解决：需要 leaf 的补一个 `get`/`status` dispatcher，不需要的停止 shared 并写 reason。检查在解决前会失败，这是有意的。
+- `localId` 由 root 的 `get` dispatcher 变成 `data`。`loaderService`、`pluginMounter` 保持 `shared-no-dispatcher`：它们是 rutis-loader 的外部名字，leaf 不能调用，去掉或补 dispatcher 需要上游改动。检查只对这两个名字放行。
 - `xtask/src/catalog.rs` 的 `crosses` 字段改名 `face`，枚举 `Data | Internal(&'static str) | SharedNoDispatcher`。
 
 ### 2.3 leaf 的运行时拒绝
 
-- `PartRegistry` 挂载 leaf 部件前，`Names` 解析每个 `inject` 名字：`face != data` → 失败，错误码 `internal_service`，消息写明名字和原因。
+- `PartRegistry` 挂载 leaf 部件前，`Names` 解析每个 `inject` 名字：`face != data` → 失败，`ErrorKind::PluginFailed`，消息以 `internal_service:` 开头并写明名字和原因。
 - 一个 leaf 行声明 `provides` 的名字时，同样要求 data；否则它的服务在宿主侧不可解析，直接拒绝，不等到第一次调用。
 - `Names` 需要读到 `Faces`：新增 `Names::copy_with_faces(catalog, build, faces)`；`Names::copy` 保持原签名并传空表。不要给 `copy` 加可选参数（Rust 没有），也不要改所有调用点。
 
@@ -76,17 +76,19 @@ impl AgentBuilder {
 
 ### 2.5 存量迁移
 
-存量不一次改完。每个非 shared 名字按 §3 的分类标 reason（`object`/`hot-path`/`secret`/…）；#1300 的清单就是映射，出现 leaf 消费者时再改数据面。这样 `xtask check` 从第一天就能拦住“新写的服务忘了形状”，而不用等 84 个名字全部迁完。
+存量不一次改完。每个非 shared 名字按 §3 的分类标 reason（`object`/`hot-path`/`secret`/…）；#1300 的清单就是映射，出现 leaf 消费者时再改数据面。这样 `xtask check` 从第一天就能拦住“新写的服务忘了形状”，而不用等所有名字全部迁完。
 
 ## 3. 盘点（#1300）
 
-catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`wakeups`、`sessionFiles`、`managedSearch`）；新名字不计入 84。`workflowRuns` 不在其中：109 是 Rust product-profile 目录；optional Workflow 包有自己的 provides 目录，`workflowRuns` 在那里，已经由该包提供为数据面。每个现有名字在分类表里恰好一行；§3.2/§3.3 的说明句和“数据兄弟”列是引用，不算第二行。
+catalog 现在 118 个名字：25 data、91 internal、2 shared-no-dispatcher。§3 表覆盖这 91 个 internal 名字；§3.2 的 `scheduleJobs`、`wakeups` 目前还是 internal(owner-api)，#1292 转成数据面；`sessionFiles`、`managedSearch` 是 #1292 的新名字，不在当前 catalog。`workflowRuns` 不在其中：它是 optional Workflow 包自己的 provides 目录，已经是数据面。每个名字在分类表里恰好一行；说明句和“数据兄弟”列是引用，不算第二行。
 
 ### 3.1 已经可以跨，但 catalog 列没体现
 
 | 名字 | 处理 |
 | --- | --- |
 | `managementMethods` | 在 `host_key` 上有 dispatcher；修 shared 注册顺序后 catalog 变 `data`。它是 #1289 的代码项，不是迁移。 |
+| `localId` | 由 root 提供的 `get` dispatcher；catalog 是 `data`。 |
+| `loaderService`、`pluginMounter` | rutis-loader 的 shared 名字，没有 host dispatcher；catalog 是 `shared-no-dispatcher`，leaf 不能调用。 |
 
 ### 3.2 第一批数据面（#1292）
 
@@ -97,7 +99,7 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
 | `managedSearch` | 新数据面，只含 `search` | `managedProviders`（§3.6）保持 internal(secret)，账号/token 不出去 |
 
-`workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致。它不在 109 个 Rust product-profile 名字里，而在该包自己的 provides 目录里；#1292 不新增 provider，只核对形状。
+`workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致。它不在 Rust product-profile 的 118 个名字里，而在该包自己的 provides 目录里；#1292 不新增 provider，只核对形状。
 
 两个 owner API **不进第一批**：它们保留类型化调用。`settings.read` 会新建取消 token、并返回 `SettingsResult` 信封；GoalBranch 需要自己的 stop token，改成数据面会丢取消。`auxiliaryModel.complete` 没有 tools、config 和 cached prefix；PromptSuggestion 克隆的是整轮 `ModelRequest`，换过去是行为变化，不只是形状。它们已有数据兄弟给其他消费者；有 leaf 消费者时再按 §4 的规则扩展。
 
@@ -113,6 +115,9 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `auxiliaryModelHost` | `auxiliaryModel` | 模型调用走 `complete` |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
 | `sessionFilesHost` | `sessionFiles` | Rust 绑定；wire 名按 owner 契约 |
+| `basePromptSettingsHost` | — | 宿主 prompt settings 端口；`owner-api` |
+| `skillsInstructionsSettingsHost` | — | 宿主 skills settings 端口；`owner-api` |
+| `summaryPromptSettingsHost` | — | 宿主 summary settings 端口；`owner-api` |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
 | `toolSourcesView` | `toolRegistry` | 工具贡献走注册表 |
@@ -132,6 +137,7 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `approval`、`permission` | 决策状态 | `decide` 数据面 |
 | `inputQueue` | 队列状态 | `submit`/`withdraw` 数据面 |
 | `wait` | `WaitResult`、`CancellationToken` | `start`/`wait`/`result` 操作面 |
+| `promptSourcesBranch` | 分支 prompt 装配 | 留宿主；`hot-path` |
 
 这些面即使有数据接口，实例核心仍默认留在宿主；它们列在这里是为了说明“对象形状”不是永久 internal，而是需要操作化；原因 `object`。
 
@@ -196,6 +202,8 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
+| `eventSubscriptions` | process | eventhub | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `sessionLanguage` | session | PromptSources | legacy-no-consumer | 有 leaf 消费者时加数据面 |
 | `executionSettingsHost` | process | ExecutionSettings | legacy-no-consumer | 有 leaf 消费者时加数据面 |
 | `toolchainSourceHost` | process | ToolchainSource | legacy-no-consumer | 有 leaf 消费者时加数据面 |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | legacy-no-consumer | 有 leaf 消费者时加数据面 |
@@ -291,7 +299,7 @@ managedSearch.search {query, count}
 - 取消是协议动作（调用方丢弃调用或发 bridge cancel），不是请求字段。
 - `managedProviders` 保持 internal(secret)：账号、登录、token、租约仍在类型化面。
 - Web 的搜索改调 `managedSearch`；Web 的 settings 仍走 `settings`。
-- 新名字使 catalog 多一行；它不在 84 个现有名字里。
+- 新名字使 catalog 多一行；它不在当前 91 个 internal 名字里。
 
 ### 4.7 `wakeups`
 
@@ -310,7 +318,7 @@ wakeups.cancel {sessionId, wakeupId} -> {} | {state}
 
 ## 5. 验证
 
-- `xtask check`：双向测试（dispatcher 未 shared 失败；shared 无 dispatcher 失败；shared+reason 失败）。
+- `xtask check`：双向测试（dispatcher 未 shared 失败；shared 无 dispatcher 失败，两个外部名字除外；shared+reason 失败；reason 不在闭集失败）。
 - `xtask graph`：catalog 的 `face` 列与真实装配一致；`catalog.md` 的 diff 作为评审材料。
 - 每个服务：现有 flow 测试 + 一个 loopback session 的跨边界用例；不新增 mock-only 测试。
 - 数量：不改 `cargo test` 的总量要求；按受影响 crate 跑，最终 `cargo test --workspace --locked`。
@@ -322,12 +330,12 @@ wakeups.cancel {sessionId, wakeupId} -> {} | {state}
 2. **secret**：`providerService`、`mcpAuth`、OAuth 服务、`managedProviders` 保持 internal；数据面只暴露操作，不暴露值。
 3. **`workflowRuns` 已经是数据面**：optional Workflow 包已提供；#1292 只核对形状，不新增 provider。
 4. **`Faces` 的传播**：`Names`、`PartRegistry`、`SessionResolver` 都要拿到同一份原因表；独立 host / 测试用空表，检查只在装配和 leaf 加载处生效。
-5. **legacy 标记**：84 个名字里 16 个是“数据内容、无消费者”，先标 `legacy-no-consumer`；不是永久 internal。
-6. **shared 与 dispatcher 不一致**：`managementMethods`、`localId`、`loaderService`、`pluginMounter` 证明 shared 不等于数据面；#1289 必须把这三类逐个解决，检查双向失败。
+5. **legacy 标记**：当前 91 个 internal 名字里 18 个是“数据内容、无消费者”，标 `legacy-no-consumer`；不是永久 internal。
+6. **shared 与 dispatcher 不一致**：`managementMethods`、`localId` 已在 #1289 变成 `data`；`loaderService`、`pluginMounter` 是仅有的两个 `shared-no-dispatcher` 例外，检查不放行其他 shared-without-dispatcher。
 
 ## 7. 交付顺序
 
-1. **#1289**：`Faces`、`AgentBuilder::internal`、catalog `face`、双向 `xtask check`、leaf 拒绝、`managementMethods` 注册顺序、`localId`/`loaderService`/`pluginMounter` 的 dispatcher 或去 shared、模板/清单。此 PR 只加检查和标记，不改服务行为。
+1. **#1289**：`Faces`、`AgentBuilder::internal`、catalog `face`、双向 `xtask check`、leaf 拒绝、`managementMethods` 注册顺序、`localId` dispatcher；`loaderService`/`pluginMounter` 作为两个外部 `shared-no-dispatcher` 例外。
 2. **#1300**：按 §3 的分组在 catalog 里补齐 reason；`xtask graph` 的 diff 就是盘点结果。此 PR 不改服务。
 3. **#1292**：按 `scheduleJobs` → `wakeups` → `sessionFiles` → `managedSearch` 的顺序，一项一个 PR。`workflowRuns` 已是数据面，只核对；`settingsService`、`modelHost` 不迁移。
 4. 每项都带现有 flow 测试；不新增适配层，不写第二份逻辑。
