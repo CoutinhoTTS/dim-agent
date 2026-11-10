@@ -1902,7 +1902,6 @@
       "unexpandedMacros": [
         "format",
         "json",
-        "matches",
         "panic",
         "tokio::select",
         "vec"
@@ -19659,8 +19658,7 @@
       "from": "dim_agent_scheduler",
       "to": "dim_agent_scheduler::engine",
       "references": [
-        "mod engine",
-        "path engine::REPORT_GUIDANCE"
+        "mod engine"
       ]
     },
     {
@@ -19776,16 +19774,12 @@
       "references": [
         "path Job",
         "path Mode::Reuse",
-        "path Origin::Tool",
-        "path Origin::User",
-        "path Target",
         "path Target::Launch",
         "path Target::Session",
         "path canonical_instant",
         "path crate::document::DisabledReason",
         "use crate::document::Job",
         "use crate::document::Mode",
-        "use crate::document::Origin",
         "use crate::document::Schedule",
         "use crate::document::Target",
         "use crate::document::canonical_instant"
@@ -19809,23 +19803,14 @@
       "references": [
         "path Delivery",
         "path DeliveryState",
-        "path DeliveryState::Cancelled",
-        "path DeliveryState::Completed",
         "path DeliveryState::Delivered",
         "path DeliveryState::Delivering",
         "path DeliveryState::Failed",
-        "path DeliveryState::Launching",
         "path DeliveryState::Lost",
         "path DeliveryState::Missed",
-        "path DeliveryState::Running",
-        "path DeliveryState::Skipped",
-        "path DeliveryState::Submitted",
-        "path DeliveryState::TimedOut",
-        "path ReportTo",
         "path SchedulerError",
         "path SchedulerError::invalid_data",
         "path SchedulerError::new",
-        "path SessionOrigin",
         "path SessionOrigin::Launch",
         "path runs",
         "path runs::read",
@@ -19835,7 +19820,6 @@
         "use crate::runs",
         "use crate::runs::Delivery",
         "use crate::runs::DeliveryState",
-        "use crate::runs::ReportTo",
         "use crate::runs::SchedulerError",
         "use crate::runs::SessionOrigin",
         "use crate::runs::stamp"
@@ -19845,18 +19829,8 @@
       "from": "dim_agent_scheduler::engine",
       "to": "dim_agent_types::events",
       "references": [
-        "path AgentEvent",
-        "path EventKind::InputApplied",
-        "path EventKind::InputConsumed",
-        "path EventKind::InputDeleted",
-        "path EventKind::StopInterrupt",
-        "path EventKind::TurnEnd",
-        "path TurnOutcome::Cancelled",
-        "path TurnOutcome::Completed",
-        "path TurnOutcome::Failed",
-        "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::EventKind",
-        "use dim_agent_types::TurnOutcome"
+        "path InputMode::Queue",
+        "use dim_agent_types::InputMode"
       ]
     },
     {
@@ -19957,7 +19931,6 @@
         "path Origin::User",
         "path Schedule",
         "path Target",
-        "path Target::Launch",
         "path Target::Session",
         "path canonical_instant",
         "path crate::document::ScheduleDocument",
@@ -19998,7 +19971,6 @@
         "path stamp",
         "use crate::runs",
         "use crate::runs::Delivery",
-        "use crate::runs::DeliveryState",
         "use crate::runs::SchedulerError",
         "use crate::runs::SessionOrigin",
         "use crate::runs::stamp"
@@ -20040,22 +20012,6 @@
       "references": [
         "path InputMode",
         "use dim_agent_types::InputMode"
-      ]
-    },
-    {
-      "from": "dim_agent_scheduler::methods",
-      "to": "dim_agent_types::permission",
-      "references": [
-        "path PermissionPolicy",
-        "use dim_agent_types::PermissionPolicy"
-      ]
-    },
-    {
-      "from": "dim_agent_scheduler::methods",
-      "to": "dim_app_server::agents::sessions",
-      "references": [
-        "path SessionPermissions",
-        "use dim_app_server::SessionPermissions"
       ]
     },
     {

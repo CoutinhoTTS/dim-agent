@@ -1,7 +1,6 @@
-//! Restart recovery through a real App Server. Runs that were active when the
-//! previous process stopped are settled from the stored Session state: a
-//! launch that was never recorded is `lost`, and an accepted input resumes
-//! tracking to its outcome. Nothing is launched or submitted again.
+//! Restart recovery through a real App Server: a record written before this
+//! change in a non-terminal state is left as written, and a launch record's
+//! stop timer resumes from `deadline_at` without launching or writing again.
 use dim_agent_capabilities::{defaults, history::HistoryRenderer, host::*};
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
 use dim_agent_scheduler::install;
@@ -114,68 +113,62 @@ async fn select_model(client: &mut Client) {
         .unwrap();
 }
 
-/// Polls a run until it leaves the active states, and returns its record.
-async fn settled(client: &mut Client, job_id: &str, run_id: &str) -> Value {
-    tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            let history: Value = client
-                .typed("schedule.history", json!({"job_id": job_id}))
-                .await
-                .unwrap();
-            let run = history["runs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|run| run["run_id"] == run_id)
-                .cloned()
-                .unwrap_or(Value::Null);
-            if !run.is_null()
-                && !matches!(
-                    run["state"].as_str(),
-                    Some("launching" | "submitted" | "running")
-                )
-            {
-                return run;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("the run settles")
-}
-
-/// Rewrites the run store as a crash would leave it: the edit receives the
-/// inner run list and the file keeps its `{version, text}` envelope.
+/// Rewrites the run store as an earlier build would have left it: the edit
+/// receives the inner run list and the file keeps its `{version, text}`
+/// envelope. A missing store starts empty.
 fn edit_runs(home: &Path, change: impl FnOnce(&mut Vec<Value>)) {
     let path = home.join("scheduler/runs.json");
-    let envelope: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let mut inner: Value = serde_json::from_str(envelope["text"].as_str().unwrap()).unwrap();
+    let mut inner: Value = match std::fs::read(&path) {
+        Ok(bytes) => {
+            let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+            serde_json::from_str(envelope["text"].as_str().unwrap()).unwrap()
+        }
+        Err(_) => json!({"version": 1, "runs": []}),
+    };
     change(inner["runs"].as_array_mut().unwrap());
     let envelope = json!({"version": 1, "text": inner.to_string()});
     std::fs::write(&path, envelope.to_string()).unwrap();
 }
 
-fn find<'a>(runs: &'a mut [Value], run_id: &str) -> &'a mut Value {
-    runs.iter_mut()
-        .find(|run| run["run_id"] == run_id)
-        .expect("the run is in the store")
+/// The stored run list, as the file holds it.
+fn stored_runs(home: &Path) -> Vec<Value> {
+    let envelope: Value =
+        serde_json::from_slice(&std::fs::read(home.join("scheduler/runs.json")).unwrap()).unwrap();
+    let inner: Value = serde_json::from_str(envelope["text"].as_str().unwrap()).unwrap();
+    inner["runs"].as_array().unwrap().clone()
 }
 
-/// Puts a run back in `launching` with the given Session fields kept or cleared.
-fn relaunch(run: &mut Value, keep_session: bool) {
-    run["state"] = json!("launching");
-    run["detail"] = json!("");
-    run.as_object_mut().unwrap().remove("ended_at");
-    run.as_object_mut().unwrap().remove("input_event_id");
-    if !keep_session {
-        for field in ["session_id", "session_origin", "policy"] {
-            run.as_object_mut().unwrap().remove(field);
-        }
+/// One record in the shape an earlier build wrote (A.7): a launch that was
+/// accepted and never settled, with the fields that shape carried.
+fn active_legacy_record(run_id: &str, job_id: &str, state: &str) -> Value {
+    let at = "2026-01-01T00:00:00.000Z";
+    let mut record = json!({
+        "run_id": run_id,
+        "job_id": job_id,
+        "window": at,
+        "state": state,
+        "deadline_at": "2030-01-01T00:00:00.000Z",
+        "submission_id": format!("scheduler:{run_id}"),
+        "created_at": at,
+        "ended_at": at,
+        "detail": "",
+    });
+    record.as_object_mut().unwrap().remove("ended_at");
+    if state != "launching" {
+        record["session_id"] = json!("legacy-session");
+        record["session_origin"] = json!("launch");
+        record["policy"] =
+            json!({"preset": "read-only", "allowedTools": [], "disallowedTools": []});
+        record["input_event_id"] = json!(format!("{run_id}-input"));
     }
+    record
 }
 
+/// A restart leaves an earlier build's `launching`, `submitted` and `running`
+/// records exactly as written: nothing settles them and nothing writes again
+/// (A.7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn restart_settles_active_runs_without_launching_again() {
+async fn a_restart_leaves_earlier_build_active_records_as_written() {
     let home = tempfile::tempdir().unwrap();
     std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::create_dir_all(home.path().join("scheduler")).unwrap();
@@ -195,65 +188,122 @@ async fn restart_settles_active_runs_without_launching_again() {
         .await
         .unwrap();
     let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
-
-    let mut run_ids = Vec::new();
-    for _ in 0..2 {
-        let accepted: Value = client
-            .typed("schedule.run_now", json!({"job_id": job_id}))
-            .await
-            .unwrap();
-        let run_id = accepted["run_id"].as_str().unwrap().to_owned();
-        let run = settled(&mut client, &job_id, &run_id).await;
-        assert_eq!(run["state"], "completed", "{run}");
-        run_ids.push(run_id);
-    }
-    let accepted_input = {
-        let history: Value = client
-            .typed("schedule.history", json!({"job_id": job_id}))
-            .await
-            .unwrap();
-        let run = history["runs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|run| run["run_id"] == run_ids[1].as_str())
-            .unwrap()
-            .clone();
-        run["input_event_id"].as_str().unwrap().to_owned()
-    };
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
-    let requests_before = model.count();
 
+    let seeded: Vec<Value> = ["launching", "submitted", "running"]
+        .iter()
+        .map(|state| active_legacy_record(&format!("legacy-{state}"), &job_id, state))
+        .collect();
+    edit_runs(home.path(), |runs| runs.extend(seeded.clone()));
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let history: Value = client
+        .typed::<Value>("schedule.history", json!({"job_id": job_id, "limit": 50}))
+        .await
+        .unwrap();
+    let shown = history["runs"].as_array().unwrap();
+    for state in ["launching", "submitted", "running"] {
+        let run_id = format!("legacy-{state}");
+        assert!(
+            shown
+                .iter()
+                .any(|run| run["run_id"] == run_id.as_str() && run["state"] == state),
+            "{state} is shown as written: {history}"
+        );
+    }
+    assert_eq!(
+        model.count(),
+        0,
+        "recovery launches nothing and submits no turn"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    assert_eq!(
+        stored_runs(home.path()),
+        seeded,
+        "the records keep their bytes"
+    );
+}
+
+/// A launch delivery whose input was never confirmed is settled by lookup at
+/// the next start, and its stop timer is not started for a Session no record
+/// names (A.6, Appendix F).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_settles_an_unconfirmed_launch_by_lookup() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir_all(home.path().join("scheduler")).unwrap();
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    select_model(&mut client).await;
+
+    let saved: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"name": "nightly", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Summarize the day.",
+                "target": {"kind": "launch", "cwd": home.path()}}}),
+        )
+        .await
+        .unwrap();
+    let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    // A launch whose reply never arrived: no Session, so no lookup can reach
+    // it and its stop timer has nothing to stop.
+    let at = "2026-01-01T00:00:00.000Z";
     edit_runs(home.path(), |runs| {
-        relaunch(find(runs, &run_ids[0]), false);
-        relaunch(find(runs, &run_ids[1]), true);
+        runs.push(json!({
+            "run_id": "unconfirmed",
+            "job_id": job_id,
+            "window": at,
+            "state": "delivering",
+            "deadline_at": "2030-01-01T00:00:00.000Z",
+            "submission_id": "scheduler:unconfirmed",
+            "created_at": at,
+            "detail": "",
+            "attempts": 0,
+            "job_revision": 1,
+        }));
     });
 
     let model = Arc::new(Script::default());
     let server = start(home.path(), model.clone()).await;
     let mut client = connect(&server).await;
-
-    let unconfirmed = settled(&mut client, &job_id, &run_ids[0]).await;
-    assert_eq!(unconfirmed["state"], "lost", "{unconfirmed}");
-    assert_eq!(
-        unconfirmed["detail"], "no_session_after_restart",
-        "{unconfirmed}"
-    );
-
-    let resumed = settled(&mut client, &job_id, &run_ids[1]).await;
-    assert_eq!(resumed["state"], "completed", "{resumed}");
-    assert_eq!(
-        resumed["input_event_id"],
-        json!(accepted_input),
-        "recovery adopts the accepted input and does not submit again: {resumed}"
-    );
-    assert_eq!(
-        model.count(),
-        0,
-        "recovery does not launch or submit a Session turn; requests before the restart: {requests_before}"
-    );
+    let settled: Value = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let history: Value = client
+                .typed("schedule.history", json!({"job_id": job_id, "limit": 50}))
+                .await
+                .unwrap();
+            let run = history["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["run_id"] == json!("unconfirmed"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            if !run.is_null() && run["state"] != json!("delivering") {
+                return run;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the unconfirmed launch settles");
+    assert_eq!(settled["state"], "lost", "{settled}");
+    assert_eq!(settled["detail"], "launch_reply_unknown", "{settled}");
+    assert_eq!(model.count(), 0, "nothing is launched again");
 
     drop(client);
     server.shutdown();
