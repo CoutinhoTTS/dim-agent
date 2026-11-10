@@ -1438,8 +1438,24 @@ impl Projection {
             line: None,
             compaction: None,
             failure: None,
+            reportable: false,
         }));
         self.rows.len() - 1
+    }
+
+    pub fn mark_reportable_error(&mut self, previous_rows: usize) -> bool {
+        if previous_rows >= self.rows.len() {
+            return false;
+        }
+        let Some(row) = self
+            .rows
+            .last_mut()
+            .filter(|row| row.kind == RowKind::Error)
+        else {
+            return false;
+        };
+        Arc::make_mut(row).reportable = true;
+        true
     }
 
     fn push_error(&mut self, text: String, failure: Option<FailureDetail>) {
