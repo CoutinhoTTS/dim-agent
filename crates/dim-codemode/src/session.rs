@@ -19,6 +19,7 @@ tools.describe(name) -> full declaration | undefined
 tools.call(name, args) -> {content, structuredContent?, isError?}
   args is a JSON object.
   The whole tool result: content is a string or content blocks, structuredContent is the tool's structured data; neither replaces the other.
+  Return content unless you need the structured fields.
   A failed tool throws ToolCallError with code, message and optional data.
   Only the request's tools are callable; codemode is excluded.
 

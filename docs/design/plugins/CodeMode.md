@@ -114,7 +114,8 @@ child calls: each child uses the invoked tool's own risk.
 
 The model-visible description states only the contract the model must act on: the raw JavaScript
 function body, top-level `await`/`return`, the `tools.list`/`tools.describe`/`tools.call` shapes,
-`args` as an object, the whole child `ToolResult` (`content` and `structuredContent` together),
+`args` as an object, the whole child `ToolResult` (`content` and `structuredContent` together,
+with the guidance to return `content` unless a program needs the structured fields),
 `ToolCallError`, the exclusion of `codemode`, the absent host APIs, the JSON return value, and that
 child results do not enter model context. Host bounds, engine name, memory, program count and
 error-code tables are not prompt text.

@@ -32,7 +32,7 @@ const TOOLS_FACTORY: &str = r#"
     if (Array.isArray(content)) {
       return content
         .map((block) => (block && block.type === "text" ? block.text : ""))
-        .join("");
+        .join("\n");
     }
     return "";
   };
