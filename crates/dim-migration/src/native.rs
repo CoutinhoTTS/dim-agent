@@ -516,8 +516,12 @@ impl Native {
         )
         .map_err(failure)?;
         tx.execute(
-            "INSERT INTO session_owners VALUES (?1,?2,3)",
-            params![session, agent],
+            "INSERT INTO session_owners VALUES (?1,?2,?3)",
+            params![
+                session,
+                agent,
+                i64::from(dim_app_server::protocol::PROTOCOL_VERSION)
+            ],
         )
         .map_err(failure)?;
         let branch = BranchRecord {
@@ -618,6 +622,7 @@ pub(crate) fn history(data: &SessionData) -> Result<Vec<StoredEvent>> {
                 sequence,
                 create_at: now,
                 tags: Some(vec!["migration:legacy-import".into()]),
+                parent_call_id: None,
                 kind,
             }),
             trace: None,

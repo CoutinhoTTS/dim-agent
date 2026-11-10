@@ -1091,7 +1091,7 @@ fn value_text(value: QueryValue) -> Result<SqlValue> {
 }
 
 struct Temporary<'a> {
-    connection: &'a Connection,
+    connection: &'a mut Connection,
     names: Vec<String>,
 }
 
@@ -1227,9 +1227,7 @@ fn related_filters<'a>(filter: &'a QueryFilter, result: &mut Vec<&'a QueryFilter
     }
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 fn sources<'a>(
-    connection: &Connection,
     scope: &TimelineReadScope,
     query: &'a QuerySpec,
     compiler: &mut Compiler<'a>,
@@ -1332,6 +1330,7 @@ fn sources<'a>(
         let statement = super::text::candidates(scope, field, partition_by, terms, &table);
         let supported = statement.is_some();
         if let Some((sql, parameters)) = statement {
+            let connection = &*temporary.connection;
             connection
                 .execute_batch(&format!(
                     "CREATE INDEX {table}_physical ON {table}(ord,physical)"
@@ -1535,6 +1534,7 @@ fn sources<'a>(
         let table = temporary.table(&format!(
             "ord INTEGER,seq INTEGER,{columns},PRIMARY KEY(ord,seq)"
         ))?;
+        let connection = &*temporary.connection;
         let candidates = if roles.is_empty() {
             "1".into()
         } else {
@@ -1602,6 +1602,7 @@ fn sources<'a>(
         let table = temporary.table(&format!(
             "ord INTEGER,branch TEXT,seq INTEGER{columns},PRIMARY KEY(ord,seq)"
         ))?;
+        let connection = &*temporary.connection;
         let placeholders = std::iter::repeat_n("?", fields.len() + prefixes.len() + 3)
             .collect::<Vec<_>>()
             .join(",");
@@ -1876,7 +1877,7 @@ fn selected_properties(
 
 #[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 pub(super) fn execute(
-    connection: &Connection,
+    connection: &mut Connection,
     scope: &TimelineReadScope,
     query: &QuerySpec,
     page: Option<&QueryPage>,
@@ -2014,7 +2015,6 @@ pub(super) fn execute(
         names: Vec::new(),
     };
     let source = sources(
-        connection,
         scope,
         query,
         &mut compiler,
@@ -2024,6 +2024,7 @@ pub(super) fn execute(
         #[cfg(feature = "testing")]
         statistics,
     )?;
+    let connection = &*temporary.connection;
     let filter = query.filter.as_ref().map_or("1".into(), |filter| {
         compiler.filter(filter, "a", None, None)
     });

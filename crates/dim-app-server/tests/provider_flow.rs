@@ -7860,6 +7860,9 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
                  CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0));
                  INSERT INTO agent_sessions(session_id, config, created_at_ms) SELECT session_id, config, created_at_ms FROM sessions_rows;
                  DROP TABLE sessions_rows;
+                 DROP TABLE session_owners;
+                 CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)));
+                 CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id);
                  DROP TABLE session_output_owners;
                  DROP TABLE session_grants;
                  DROP TABLE session_worktrees;

@@ -797,7 +797,7 @@ fn disposable_database(
         database,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    source.backup(rusqlite::MAIN_DB, &copy, None)?;
+    source.backup(rusqlite::MAIN_DB, &copy, rusqlite::backup::NO_PROGRESS)?;
     Ok((directory, copy))
 }
 

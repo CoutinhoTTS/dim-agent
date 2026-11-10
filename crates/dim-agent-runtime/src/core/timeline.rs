@@ -24,6 +24,27 @@ use std::{
 use tokio::sync::watch;
 use uuid::Uuid;
 
+tokio::task_local! {
+    /// The child tool call whose task is producing events. `Timeline::append`
+    /// stamps an event without an explicit parent from this scope.
+    static PARENT_CALL_ID: String;
+}
+
+/// Runs `future` with `parent_call_id` as the implicit parent of events it
+/// appends. A child batch or result that names its own parent keeps it.
+pub async fn with_parent_call_id<F>(parent_call_id: String, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    PARENT_CALL_ID.scope(parent_call_id, future).await
+}
+
+/// The child call whose task is running, for a background task that must
+/// carry the same parent after it leaves the current task.
+pub fn current_parent_call_id() -> Option<String> {
+    PARENT_CALL_ID.try_with(Clone::clone).ok()
+}
+
 /// One draft offered to the branch's `before` middleware. Each wrapper records
 /// the step it applied, so steps follow the order the transforms took effect.
 /// The steps stay local: the event is dispatched only by its own branch's
@@ -219,9 +240,16 @@ impl Timeline {
     #[service(skip)]
     pub fn append_batch_registered(
         &self,
-        originals: Vec<EventDraft>,
+        mut originals: Vec<EventDraft>,
         register: impl FnOnce(&[Arc<AgentEvent>]) -> Result<()>,
     ) -> Result<Vec<Arc<AgentEvent>>> {
+        if let Ok(parent) = PARENT_CALL_ID.try_with(Clone::clone) {
+            for draft in &mut originals {
+                if draft.parent_call_id.is_none() {
+                    draft.parent_call_id = Some(parent.clone());
+                }
+            }
+        }
         let _append = AppendGuard::enter()?;
         let _commit = self.0.commit.lock().unwrap();
         self.commit(originals, register)
@@ -434,6 +462,7 @@ impl Timeline {
                 sequence: first_sequence + events.len() as u64,
                 create_at: unix_millis(),
                 tags: draft.tags,
+                parent_call_id: draft.parent_call_id,
                 kind: draft.kind,
             });
             let trace = (!steps.is_empty()).then(|| TimelineTrace {

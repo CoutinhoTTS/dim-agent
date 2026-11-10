@@ -28,6 +28,33 @@ use tokio::{
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 
+/// Everything this test binary logs, so a test can assert one line.
+fn logs() -> Arc<std::sync::Mutex<Vec<u8>>> {
+    static LOGS: std::sync::OnceLock<Arc<std::sync::Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = logs.clone();
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || Capture(sink.clone()))
+            .init();
+        logs
+    })
+    .clone()
+}
+
+struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[path = "transport_flow/approval.rs"]
 mod approval;
 #[path = "transport_flow/call_channel.rs"]
@@ -203,6 +230,9 @@ mod workflow;
 
 #[path = "transport_flow/questions.rs"]
 mod questions;
+
+#[path = "transport_flow/codemode.rs"]
+mod codemode;
 
 #[path = "transport_flow/timeline_export.rs"]
 mod timeline_export;
@@ -511,6 +541,7 @@ async fn unloaded(session: dim_agent_runtime::Session) {
 /// failed main branch build rolls the whole creation back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_create_rejects_trace_and_rolls_back_a_failed_main_branch() {
+    let captured = logs();
     for ws in [false, true] {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         defaults::install(&mut builder);
@@ -545,7 +576,33 @@ async fn session_create_rejects_trace_and_rolls_back_a_failed_main_branch() {
             assert!(agent.sessions().is_empty());
         }
         let failed = client.rpc("session.create", create(json!([]))).await;
-        assert_eq!(failed["error"]["data"]["appError"], "session_build_failed");
+        // The reply is unchanged: a build failure stays opaque on the wire.
+        assert_eq!(
+            failed["error"]["data"],
+            json!({"appError": "session_build_failed"}),
+            "{failed}"
+        );
+        assert_eq!(failed["error"]["message"], "Session initialization failed");
+        // The runtime logs the underlying error with the Session it built.
+        let written = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        let line = written
+            .lines()
+            .find(|line| {
+                line.contains("Session failed to build") && line.contains("UnreadyCapability")
+            })
+            .unwrap_or_else(|| panic!("no build failure line in {written}"));
+        let id = line
+            .split("session_id=")
+            .nth(1)
+            .and_then(|rest| rest.split(char::is_whitespace).next())
+            .unwrap_or_else(|| panic!("no Session id in {line}"))
+            .trim_matches('"');
+        assert_eq!(id.len(), 36, "{line}");
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "{line}"
+        );
+        assert!(line.contains("initialization timed out"), "{line}");
         assert!(agent.sessions().is_empty());
         server.shutdown();
         server.join().await.unwrap();
@@ -1321,13 +1378,13 @@ async fn handshake_errors_and_a_busy_close_are_real_transport_boundaries() {
         tokio_tungstenite::connect_async(format!("ws://{}/ws", server.websocket_address.unwrap()))
             .await
             .unwrap();
-    mismatch.send(Message::Text(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":4,"clientKind":"other"}}).to_string().into())).await.unwrap();
+    mismatch.send(Message::Text(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":5,"clientKind":"other"}}).to_string().into())).await.unwrap();
     let error = mismatch.next().await.unwrap().unwrap().into_text().unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&error).unwrap()["error"]["data"]["appError"],
         "protocol_version"
     );
-    let mut client = Client::new(&server, false).await;
+    let mut client = Client::new_version(&server, false, 1).await;
     let invalid = client
         .rpc(
             "session.submit",

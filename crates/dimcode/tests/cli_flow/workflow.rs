@@ -1898,7 +1898,7 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
             stream.get_mut(),
             "{}",
             json!({"jsonrpc":"2.0","id":1,"method":"hello",
-                   "params":{"protocolVersion":3,"clientKind":"cli"}})
+                   "params":{"protocolVersion":4,"clientKind":"cli"}})
         )
         .ok()?;
         let mut line = String::new();

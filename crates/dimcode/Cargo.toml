@@ -45,4 +45,4 @@ rutis.workspace = true
 rutis-bridge.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-rusqlite = "0.40.2"
+rusqlite = "0.41.1"

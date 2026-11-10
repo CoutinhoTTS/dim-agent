@@ -38,7 +38,7 @@ boxed; `cargo run -p dim-agent-types --example layout` reports actual type sizes
 Internal types are re-exported at the crate root. `EventKind` is a closed union of
 27 typed payload variants, with `key()` returning names such as `input/message`
 and `step/model-start`. `EventDraft::new(kind)` sets omitted tags. The Timeline
-producer assigns `AgentEvent { id, sequence, create_at, tags, kind }`; the crate
+producer assigns `AgentEvent { id, sequence, create_at, tags, parent_call_id?, kind }`; the crate
 does not allocate event identities or read the clock. Serde preserves the
 original flat `type/name/data` object.
 
