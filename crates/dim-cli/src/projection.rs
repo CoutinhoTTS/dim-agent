@@ -3151,6 +3151,86 @@ mod tests {
         assert_eq!(row.text, "turn failed: context preparation failed");
     }
 
+    /// Every end the command owner writes arrives as `exec/ended` with a
+    /// status: a timeout, a kill and a non-zero exit are `failed`, and a stop
+    /// is `cancelled`. The row and the terminal read that status, so each of
+    /// the three failures marks the task failed and a stop does not.
+    #[test]
+    fn a_timed_out_killed_or_non_zero_exit_task_finishes_failed() {
+        let started = |task: &str| {
+            serde_json::json!({
+                "id": format!("started-{task}"),
+                "sequence": 1,
+                "create_at": 1000,
+                "type": "exec",
+                "name": "started",
+                "data": {
+                    "turn_id": "turn", "request_id": "request",
+                    "call_id": task, "task_id": task,
+                    "description": "cargo build",
+                    "output_path": "/server/private/output",
+                },
+            })
+        };
+        for (task, status, result, failed) in [
+            (
+                "timed-out",
+                "failed",
+                serde_json::json!({"content": "Command timed out.", "isError": true}),
+                true,
+            ),
+            (
+                "killed",
+                "failed",
+                serde_json::json!({
+                    "content": "Command terminated with SIGKILL.",
+                    "isError": true,
+                    "structuredContent": {"signal": "SIGKILL"},
+                }),
+                true,
+            ),
+            (
+                "exit-seven",
+                "failed",
+                serde_json::json!({
+                    "content": "Command failed with exit code 7.",
+                    "isError": true,
+                    "structuredContent": {"exitCode": 7},
+                }),
+                true,
+            ),
+            (
+                "stopped",
+                "cancelled",
+                serde_json::json!({"content": "Command cancelled by user."}),
+                false,
+            ),
+        ] {
+            let mut projection = Projection::default();
+            apply(
+                &mut projection,
+                &[
+                    started(task),
+                    serde_json::json!({
+                        "id": format!("ended-{task}"),
+                        "sequence": 2,
+                        "create_at": 2000,
+                        "type": "exec",
+                        "name": "ended",
+                        "data": {"task_id": task, "status": status, "result": result},
+                    }),
+                ],
+            );
+            let snapshot = projection.snapshot();
+            let finish = snapshot.tasks[0]
+                .finished
+                .as_ref()
+                .expect("a finished task");
+            assert_eq!(finish.failed, failed, "{task}: {finish:?}");
+            assert_eq!(finish.at, 2000, "{task}: the end's own time");
+        }
+    }
+
     #[test]
     fn a_retry_progress_reaches_the_snapshot_and_clears() {
         let mut projection = Projection::default();

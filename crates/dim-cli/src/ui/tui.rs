@@ -8601,6 +8601,84 @@ mod tests {
         );
     }
 
+    /// Switching away from a Session and back starts a new baseline: its
+    /// already-ended tasks are that Session's history again, so a return
+    /// raises nothing, while a task that ends after the return still does.
+    #[test]
+    fn returning_to_a_session_reports_none_of_its_ended_tasks_again() {
+        use crate::model::session::SwitchKind;
+        use crate::ui::notify::Event;
+        let theme = test_theme();
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let snapshot = |session: &str, tasks| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: session.into(),
+                tasks,
+                ..ViewSnapshot::default()
+            }))
+        };
+        let ended = finished(background_task("t1", "cargo build"), false);
+
+        app.apply(snapshot("s1", vec![background_task("t1", "cargo build")]));
+        app.apply(snapshot("s1", vec![ended.clone()]));
+        assert_eq!(
+            app.notifications,
+            vec![Event::BackgroundFinished {
+                label: "cargo build".into(),
+                failed: false,
+            }]
+        );
+
+        app.notifications.clear();
+        app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: SwitchKind::Resumed,
+        });
+        app.apply(snapshot(
+            "s2",
+            vec![finished(background_task("u1", "cargo test"), false)],
+        ));
+        assert!(
+            app.notifications.is_empty(),
+            "another Session's history is not news: {:?}",
+            app.notifications
+        );
+
+        app.apply(Update::Switched {
+            session_id: "s1".into(),
+            kind: SwitchKind::Resumed,
+        });
+        app.apply(snapshot("s1", vec![ended]));
+        assert!(
+            app.notifications.is_empty(),
+            "coming back re-baselines instead of replaying: {:?}",
+            app.notifications
+        );
+
+        app.apply(snapshot(
+            "s1",
+            vec![
+                finished(background_task("t1", "cargo build"), false),
+                finished(background_task("t2", "cargo run"), true),
+            ],
+        ));
+        assert_eq!(
+            app.notifications,
+            vec![Event::BackgroundFinished {
+                label: "cargo run".into(),
+                failed: true,
+            }],
+            "a task that ends after the return still reports"
+        );
+    }
+
     #[test]
     fn the_background_count_survives_a_running_turn() {
         use crate::ui::render::panel::strip_escapes;
