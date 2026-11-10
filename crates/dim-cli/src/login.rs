@@ -349,6 +349,14 @@ async fn poll(client: &mut Client, provider: &Described, attempt_id: &str) -> Re
             State::Pending => {}
             State::Completed => {
                 println!("Signed in.");
+                if provider.namespace == ACCOUNT_NAMESPACE
+                    && let Err(error) = refresh_models(client, &provider.provider_id).await
+                {
+                    eprintln!(
+                        "Model list refresh failed: {error}. Retry with dimcode models {} --refresh.",
+                        safe(&provider.provider_id)
+                    );
+                }
                 return Ok(0);
             }
             State::Failed { error } => return Err(format!("Login failed: {}", safe(&error)).into()),
@@ -360,6 +368,17 @@ async fn poll(client: &mut Client, provider: &Described, attempt_id: &str) -> Re
             _ = tokio::time::sleep(Duration::from_secs(1)) => {},
         }
     }
+}
+
+pub(crate) async fn refresh_models(
+    client: &mut Client,
+    provider_id: &str,
+) -> std::result::Result<(), String> {
+    client
+        .rpc("provider.refresh", json!({"providerId": provider_id}))
+        .await
+        .map(|_| ())
+        .map_err(|error| crate::sanitize::safe_line(&error.to_string()))
 }
 
 async fn cancel(client: &mut Client, provider: &Described, attempt_id: &str) -> Result<()> {

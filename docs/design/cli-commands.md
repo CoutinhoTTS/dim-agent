@@ -462,6 +462,26 @@ Authorization URL rows have no side borders, including wrapped continuation
 rows, so native terminal selection does not copy dialog borders into the URL.
 The other rows keep their borders; Enter on the URL still opens the full link.
 
+The terminal UI after Dim account sign-in and the line client after Dim device
+sign-in await `provider.refresh` for that account's Provider. The terminal UI opens
+`/models` once the refresh succeeds. On a refresh error it shows the signed-in
+account and the reason in the account panel, with focus on `Refresh model list`.
+Enter on that row refreshes the same Provider and shows the outcome in the
+panel. `Open models` reads the stored catalog. The line client reports a
+refresh error on stderr and gives the `dimcode models PROVIDER --refresh`
+retry command. The sign-in still succeeds.
+
+```text
++-- DimAgent OAuth -----------------------------------+
+|   Signed-in account                                |
+|   Open models                                      |
+| > Refresh model list                               |
+|   View plan                                        |
+|   Sign out                                         |
+|   Error: Model list refresh failed: Relay timeout  |
++---------------------- Up/Down move, Enter activate -+
+```
+
 `dimcode login [PROVIDER]` starts the same flow in the line client and prints
 the URL or the code the daemon returns; without a PROVIDER it lists the
 described accounts. `dimcode logout PROVIDER` signs one out, and

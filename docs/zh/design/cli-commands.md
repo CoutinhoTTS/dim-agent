@@ -318,6 +318,24 @@ fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
 ╰─ Select to copy · Enter opens link ──────────╯
 ```
 
+终端界面登录 Dim 账号成功后，以及行客户端通过设备码登录 Dim 账号成功后，都会等待该账号提供方的
+`provider.refresh` 请求完成。
+刷新成功后，终端界面打开 `/models`。刷新失败时，账号面板显示已登录的账号和失败原因，
+焦点停在「刷新模型列表」。在该行按 Enter 可刷新同一提供方的模型，并在面板查看结果。
+「打开模型列表」读取已保存的目录。行客户端将刷新失败写入标准错误，并提示用
+`dimcode models PROVIDER --refresh` 重试。登录仍然成功。
+
+```text
++-- DimAgent OAuth -------------------------+
+|   已登录账号                             |
+|   打开模型列表                           |
+| > 刷新模型列表                           |
+|   查看套餐                               |
+|   退出登录                               |
+|   错误：刷新模型列表失败：连接超时       |
++---------------- Up/Down 移动, Enter 执行 -+
+```
+
 `dimcode login [PROVIDER]` 在行客户端启动同样的流程，并打印守护进程返回的 URL 或验证码；
 不给 PROVIDER 时列出被描述的账号。`dimcode logout PROVIDER` 让其中一个账号退出；
 `dimcode account PROVIDER` 打印它的非机密状态。`--help` 列出这些形式，且从不连接守护进程。
