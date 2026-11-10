@@ -26,6 +26,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::ui::notify::Terminal;
 use crate::ui::status::Status;
 use crate::ui::terminal::modes::Mode;
 use crate::ui::theme::detect::Env;
@@ -52,7 +53,9 @@ fn bar(status: &Status) -> Option<&'static [u8]> {
 }
 
 /// Whether the terminal `env` describes draws the bar, `program_status` being
-/// whether it keeps the record of the run.
+/// whether it keeps the record of the run. A multiplexer or herdr between the
+/// pane and the user hides the bar, which is why `notify::Terminal` decides
+/// that part here too.
 fn draws(env: &Env, program_status: bool) -> bool {
     let var = |key: &str| env.get(key).map_or("", String::as_str);
     match var(ENV_KEY).trim().to_ascii_lowercase().as_str() {
@@ -60,10 +63,7 @@ fn draws(env: &Env, program_status: bool) -> bool {
         "on" => return true,
         _ => {}
     }
-    if program_status {
-        return false;
-    }
-    if !var("TMUX").is_empty() || !var("STY").is_empty() || var("HERDR_ENV") == "1" {
+    if program_status || Terminal::of(|key| env.get(key).cloned()).intercepts_osc() {
         return false;
     }
     let program = var("TERM_PROGRAM");

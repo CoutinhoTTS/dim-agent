@@ -21,28 +21,30 @@ pub enum KeyboardProtocol {
     Legacy,
 }
 
-/// Queries sent at startup: kitty flags, the background colour (OSC 11), the
-/// program status (OSC 7501, see `ui::status`), the kitty clipboard mode
-/// (DECRQM 5522), then the DA1 sentinel. Replies arrive in order, so DA1
-/// proves the others are either here or never coming.
-pub const PROBE_QUERY: &[u8] = b"\x1b[?u\x1b]11;?\x07\x1b]7501;?\x1b\\\x1b[?5522$p\x1b[c";
-/// The probe without the program status query, sent when no report will be
-/// written: a run with `DIM_TERMINAL_STATUS=off` asks for nothing it will not
-/// use.
-pub const PROBE_QUERY_WITHOUT_STATUS: &[u8] = b"\x1b[?u\x1b]11;?\x07\x1b[?5522$p\x1b[c";
+const KITTY_QUERY: &[u8] = b"\x1b[?u";
+const BACKGROUND_QUERY: &[u8] = b"\x1b]11;?\x07";
+const PROGRAM_STATUS_QUERY: &[u8] = b"\x1b]7501;?\x1b\\";
+const CLIPBOARD_QUERY: &[u8] = b"\x1b[?5522$p";
 /// The DA1 sentinel alone, used as the teardown fence.
 pub const FENCE_QUERY: &[u8] = b"\x1b[c";
 
-/// The startup probe for this process.
-pub fn probe_query() -> &'static [u8] {
+/// Queries sent at startup, in the order their replies arrive: kitty flags,
+/// the background colour (OSC 11), the program status (OSC 7501, see
+/// `ui::status`), the kitty clipboard mode (DECRQM 5522), then the DA1
+/// sentinel, so DA1 proves the others are either here or never coming. The
+/// program status query is left out where no report is written: a run with
+/// `DIM_TERMINAL_STATUS=off` asks for nothing it will not use.
+pub fn probe_query() -> Vec<u8> {
+    let mut query = [KITTY_QUERY, BACKGROUND_QUERY].concat();
     if crate::ui::status::reports() {
-        PROBE_QUERY
-    } else {
-        PROBE_QUERY_WITHOUT_STATUS
+        query.extend_from_slice(PROGRAM_STATUS_QUERY);
     }
+    query.extend_from_slice(CLIPBOARD_QUERY);
+    query.extend_from_slice(FENCE_QUERY);
+    query
 }
 
-/// Result of scanning the bytes read after [`PROBE_QUERY`].
+/// Result of scanning the bytes read after [`probe_query`].
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProbeScan {
     /// A `CSI ? <flags> u` report was seen.

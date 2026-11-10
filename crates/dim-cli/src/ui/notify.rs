@@ -6,10 +6,16 @@
 //! Anything else gets a plain `BEL`, which every terminal turns into some
 //! signal.
 //!
-//! Inside tmux or GNU screen the chosen form is wrapped for passthrough
-//! (`OSC 52` and the rest of what dim writes there): a multiplexer keeps a
-//! notification it does not know to itself, and forwarding it upward is what
-//! lets a finished run say what finished. A notification asserts nothing
+//! What a multiplexer gets differs, because neither carries the form upward
+//! by itself and each drops a different part of it. tmux 3.3 and later leave
+//! `allow-passthrough` off, so a wrapped sequence may be discarded whole: the
+//! form is wrapped as tmux's passthrough asks (`OSC 52` and the rest of what
+//! dim writes there) and a bare `BEL` follows it, so a tmux that forwards the
+//! form draws a rich notification and one that does not still rings. GNU
+//! screen does not double `ESC` (`ESC P` is its own passthrough, which a
+//! notification does not need), and it passes an `OSC` closed by `BEL` as it
+//! is: the bell-terminated forms go through unwrapped, and kitty's `OSC 99`,
+//! closed by `ST`, becomes the bell alone. A notification asserts nothing
 //! after it is delivered, so the record's reason for staying inside a
 //! multiplexer (`ui::status`, `ui::progress`) does not apply.
 //!
@@ -45,10 +51,6 @@ pub enum Multiplexer {
 }
 
 impl Multiplexer {
-    pub fn from_env() -> Self {
-        Self::of(|name| std::env::var(name).ok())
-    }
-
     /// The multiplexer these variables describe: tmux by `TMUX` or a `tmux`
     /// `TERM`, GNU screen by `STY` or a `screen` `TERM`.
     fn of(var: impl Fn(&str) -> Option<String>) -> Self {
@@ -84,18 +86,37 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn from_env() -> Self {
-        let var = |name| std::env::var(name).unwrap_or_default();
+        Self::of(|name| std::env::var(name).ok())
+    }
+
+    /// The terminal these variables describe.
+    pub fn of(var: impl Fn(&str) -> Option<String>) -> Self {
+        let value = |name: &str| var(name).unwrap_or_default();
         Self {
-            term_program: var("TERM_PROGRAM"),
-            term: var("TERM"),
-            kitty: !var("KITTY_WINDOW_ID").is_empty(),
-            multiplexer: Multiplexer::from_env(),
-            herdr: var("HERDR_ENV") == "1",
+            term_program: value("TERM_PROGRAM"),
+            term: value("TERM"),
+            kitty: !value("KITTY_WINDOW_ID").is_empty(),
+            multiplexer: Multiplexer::of(&var),
+            herdr: value("HERDR_ENV") == "1",
         }
+    }
+
+    /// Whether an `OSC` written here stops before the terminal the user looks
+    /// at: a multiplexer keeps a sequence it does not know, and herdr reads a
+    /// pane's `OSC`s for its own terminals. The record and the bar are drawn
+    /// only where nothing stands between them and the user (`ui::progress`);
+    /// a notification, which asserts nothing, is wrapped or reduced to the
+    /// bell instead (`sequence`).
+    pub fn intercepts_osc(&self) -> bool {
+        self.multiplexer != Multiplexer::None || self.herdr
     }
 }
 
-/// The bytes that make `terminal` show `event`; never empty.
+/// The bytes that make `terminal` show `event`; never empty. Inside tmux the
+/// wrapped form is followed by a bare `BEL` and inside GNU screen a
+/// bell-terminated form is passed as it is, so the output under a multiplexer
+/// may hold both a wrapped sequence and a bell while every other case is one
+/// form or the bell alone.
 pub fn sequence(terminal: &Terminal, event: &Event) -> Vec<u8> {
     if terminal.herdr {
         return b"\x07".to_vec();
@@ -128,31 +149,47 @@ pub fn sequence(terminal: &Terminal, event: &Event) -> Vec<u8> {
         None
     };
     match form {
-        Some(text) => passthrough(terminal.multiplexer, text.into_bytes()),
+        Some(text) => multiplexed(terminal.multiplexer, text.into_bytes()),
         None => b"\x07".to_vec(),
     }
 }
 
-/// `sequence` wrapped for `multiplexer`: past the multiplexer's own header,
-/// every `ESC` of the sequence is doubled so the multiplexer reads the inner
-/// sequence as one string instead of acting on it. `BEL` needs no escaping
-/// for either multiplexer, so a notification body never ends the string
-/// early.
-fn passthrough(multiplexer: Multiplexer, sequence: Vec<u8>) -> Vec<u8> {
-    let header: &[u8] = match multiplexer {
-        Multiplexer::None => return sequence,
-        Multiplexer::Tmux => b"\x1bPtmux;",
-        Multiplexer::Screen => b"\x1bP",
-    };
+/// `sequence` as `multiplexer` needs it.
+///
+/// tmux may drop a passthrough whole (3.3 and later default
+/// `allow-passthrough` to off), so the wrapped form is followed by a bare
+/// `BEL`: a tmux that forwards it draws the notification, one that does not
+/// still rings. GNU screen passes a single `ESC` and a `BEL`-terminated `OSC`
+/// through unchanged, so a bell-terminated form is sent as it is, and
+/// `OSC 99`, closed by `ST`, is not: `ESC P` would start a passthrough screen
+/// does not terminate the way tmux does, so only the bell is sent.
+fn multiplexed(multiplexer: Multiplexer, sequence: Vec<u8>) -> Vec<u8> {
+    match multiplexer {
+        Multiplexer::None => sequence,
+        Multiplexer::Tmux => {
+            let mut wrapped = passthrough(&sequence);
+            wrapped.push(0x07);
+            wrapped
+        }
+        Multiplexer::Screen if sequence.last() == Some(&0x07) => sequence,
+        Multiplexer::Screen => b"\x07".to_vec(),
+    }
+}
+
+/// `sequence` in tmux's passthrough form: past `ESC P tmux;`, every `ESC` of
+/// the sequence is doubled so tmux reads the inner sequence as one string
+/// instead of acting on it. `BEL` needs no escaping, so a notification body
+/// never ends the string early.
+fn passthrough(sequence: &[u8]) -> Vec<u8> {
     let mut escaped = Vec::with_capacity(sequence.len() * 2);
-    for byte in sequence {
+    for &byte in sequence {
         if byte == 0x1b {
             escaped.push(0x1b);
         }
         escaped.push(byte);
     }
-    let mut wrapped = Vec::with_capacity(header.len() + escaped.len() + 2);
-    wrapped.extend_from_slice(header);
+    let mut wrapped = Vec::with_capacity(b"\x1bPtmux;".len() + escaped.len() + 2);
+    wrapped.extend_from_slice(b"\x1bPtmux;");
     wrapped.extend_from_slice(&escaped);
     wrapped.extend_from_slice(b"\x1b\\");
     wrapped
@@ -213,14 +250,14 @@ mod tests {
                 &in_mux(Multiplexer::Tmux, "iTerm.app", "tmux-256color"),
                 &question
             ),
-            b"\x1bPtmux;\x1b\x1b]9;DIM: Question waiting for your answer\x07\x1b\\"
+            b"\x1bPtmux;\x1b\x1b]9;DIM: Question waiting for your answer\x07\x1b\\\x07"
         );
         assert_eq!(
             sequence(
                 &in_mux(Multiplexer::Tmux, "ghostty", "tmux-256color"),
                 &question
             ),
-            "\x1bPtmux;\x1b\x1b]777;notify;DIM;Question waiting for your answer\x07\x1b\\"
+            "\x1bPtmux;\x1b\x1b]777;notify;DIM;Question waiting for your answer\x07\x1b\\\x07"
                 .as_bytes()
         );
         assert_eq!(
@@ -228,12 +265,23 @@ mod tests {
                 &in_mux(Multiplexer::Screen, "iTerm.app", "screen-256color"),
                 &question
             ),
-            b"\x1bP\x1b\x1b]9;DIM: Question waiting for your answer\x07\x1b\\"
+            b"\x1b]9;DIM: Question waiting for your answer\x07"
+        );
+        assert_eq!(
+            sequence(
+                &in_mux(Multiplexer::Screen, "ghostty", "screen-256color"),
+                &question
+            ),
+            "\x1b]777;notify;DIM;Question waiting for your answer\x07".as_bytes()
         );
         assert_eq!(
             sequence(&in_mux(Multiplexer::Tmux, "", "xterm-kitty"), &question),
-            "\x1bPtmux;\x1b\x1b]99;;DIM: Question waiting for your answer\x1b\x1b\\\x1b\\"
+            "\x1bPtmux;\x1b\x1b]99;;DIM: Question waiting for your answer\x1b\x1b\\\x1b\\\x07"
                 .as_bytes()
+        );
+        assert_eq!(
+            sequence(&in_mux(Multiplexer::Screen, "", "xterm-kitty"), &question),
+            b"\x07"
         );
         assert_eq!(
             sequence(
@@ -242,6 +290,40 @@ mod tests {
             ),
             b"\x07"
         );
+    }
+
+    #[test]
+    fn a_passthrough_that_tmux_drops_still_rings() {
+        let question = Event::Question;
+        for (term_program, term) in [
+            ("iTerm.app", "tmux-256color"),
+            ("ghostty", "tmux-256color"),
+            ("", "xterm-kitty"),
+        ] {
+            let bytes = sequence(&in_mux(Multiplexer::Tmux, term_program, term), &question);
+            assert!(
+                bytes.starts_with(b"\x1bPtmux;"),
+                "{term_program:?} {term:?}"
+            );
+            assert!(bytes.ends_with(b"\x07"), "{term_program:?} {term:?}");
+        }
+    }
+
+    #[test]
+    fn screen_gets_no_doubled_escape_and_no_unterminated_osc() {
+        let question = Event::Question;
+        for (term_program, term) in [
+            ("iTerm.app", "screen-256color"),
+            ("ghostty", "screen-256color"),
+            ("WezTerm", "screen-256color"),
+        ] {
+            let bytes = sequence(&in_mux(Multiplexer::Screen, term_program, term), &question);
+            assert!(
+                !bytes.windows(2).any(|pair| pair == b"\x1b\x1b"),
+                "{term_program:?} {term:?}"
+            );
+            assert!(bytes.ends_with(b"\x07"), "{term_program:?} {term:?}");
+        }
     }
 
     #[test]

@@ -467,13 +467,28 @@ terminal answered DA1 alone           today's behaviour
 DA1 decides, not a timeout: tmux and GNU screen drop the query and still answer the
 sentinel, so they keep today's behaviour with no wait. `DIM_TERMINAL_STATUS=off` omits the
 query along with the reports. `DIM_TERMINAL_TITLE=always` and `DIM_TERMINAL_PROGRESS=on`
-are escape hatches for a terminal that answers but draws nothing. Notifications are exempt
-from the multiplexer rule the record and the bar follow: inside tmux or GNU screen the
-chosen form is wrapped for passthrough (`ESC P tmux;` or `ESC P`), because a delivered
-notification asserts nothing afterwards. herdr keeps the bell whatever its `TERM_PROGRAM`
-names: it reads a pane's `OSC`s for itself and notifies from its own list of terminals, so
-a form the pane's variables carry is not known to reach the user, while a `BEL` is not an
-`OSC` it takes.
+are escape hatches for a terminal that answers but draws nothing.
+
+Notifications are exempt from the multiplexer rule the record and the bar follow, because
+a delivered notification asserts nothing afterwards, but each multiplexer keeps a
+different part of one:
+
+```text
+no multiplexer, herdr   one form, or BEL where none is known
+tmux                    ESC P tmux; <form, ESC doubled> ESC \   + BEL
+screen, BEL-terminated  <form, as it is>
+screen, ST-terminated   BEL
+```
+
+tmux 3.3 and later default `allow-passthrough` to off, so a wrapped sequence may be
+dropped whole; the bare `BEL` after it is what still rings there, while a tmux that
+forwards the wrapper draws the notification. GNU screen doubles nothing: `ESC P` opens a
+passthrough it ends differently from tmux, so a `BEL`-terminated `OSC` goes through
+unwrapped and kitty's `ST`-terminated `OSC 99` becomes the bell alone, which makes a
+`BEL` that no `OSC` introduced. herdr keeps the bell whatever its `TERM_PROGRAM` names: it
+reads a pane's `OSC`s for itself and notifies from its own list of terminals, so a form
+the pane's variables carry is not known to reach the user, while a `BEL` is not an `OSC`
+it takes.
 
 ## 5. Context mapping
 

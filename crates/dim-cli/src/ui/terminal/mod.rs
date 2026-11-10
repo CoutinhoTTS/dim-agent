@@ -345,7 +345,7 @@ impl Terminal {
     }
 
     fn negotiate_keyboard(&mut self) -> io::Result<()> {
-        sys::write_all(sys::STDOUT, keyboard::probe_query())?;
+        sys::write_all(sys::STDOUT, &keyboard::probe_query())?;
         let deadline = Instant::now() + PROBE_TIMEOUT;
         let mut seen = Vec::new();
         let mut buf = [0u8; 256];
