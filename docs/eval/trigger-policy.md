@@ -763,6 +763,10 @@ ledger 记两种记录，因为判定的两个部分归属不同的单位：**L1
 
 **直推 main 的 commit 不产生 MR 记录**（没有 MR 可记），只出现在 run 记录的 `unjudged` 里。少了这一条，ledger 会漏掉这次运行实际答复过的代码。
 
+**PR 落地不等于双 parent merge commit。** daily 在窗口内按 first-parent、从旧到新枚举：多 parent 的 merge，以及标题以 `Merge pull request #N from ...` 开头或以 ` (#N)` 结尾的单 parent commit，都进入 L1、产生 MR 记录；diff 均取该 commit 相对第一 parent 的变化。两个入口（L1 枚举与直推枚举）使用同一标题识别函数，不能让一个 commit 同时进入 `covers` 和 `unjudged`，也不能两边都漏掉。
+
+标题只是本仓库离线使用的约定，不是向 GitHub 验证过的来源凭证。没有上述标记的 rebase/custom-message 落地仍保守地按直推处理：不伪造 L1 verdict，强制进入 L2，而不是静默跳过。历史 run 的 `unjudged` 保留当时没有 L1 记录的事实；修正识别后补判、补跑会写入 MR 记录与新的 run，不重写旧 run。
+
 每个事实只记一次，记在归属它的地方：「这个 merge 没被判定」属于 MR 记录的 `l1_trigger`，「这段代码没有任何判定」属于 run 记录的 `unjudged`。
 
 **`fail_open` 是唯一可以被替换的 MR 记录。** 它说的是「这一次 judge 没给出结论」，不是判定。窗口因它保留、下一次运行重判；judge 得出的判定（`agent`、`path_rule` 或 `oversize`）直接替换这条记录，不算分歧，不进 `disputed`。若保留 `fail_open`、把真实判定只记成分歧，这个 merge 在 ledger 里就永远是「未判定」，归因时查不到 L1 的真实判断。
