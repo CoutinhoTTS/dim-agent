@@ -397,6 +397,26 @@ Settings owner. Do not expose a generic configuration-file or JSON editor.
 | Other OAuth providers | Follow the returned account namespace and declared login methods; reuse the existing Codex/Grok account owners rather than treating their credentials as static API keys |
 | Chat integration | After a successful account, Provider or model mutation, reload authoritative discovery and reconcile the picker; preserve existing Session model-selection semantics |
 
+Both Dim sign-in surfaces fetch the signed-in Provider's model list with
+`provider.refresh` after browser or device authorization completes. Once the
+refresh succeeds, the chat picker reads the updated catalog. A refresh error
+leaves the user signed in and shows the reason in Settings. The account card
+offers `Refresh model list` for the signed-in Dim account. Provider details
+offer the same action next to the tabs when the owner advertises `refresh`.
+The refresh error's Retry button in Provider details fetches the models again.
+
+```text
++-- Account ---------------------------------------+
+| Dim account        [Refresh model list] [Sign out] |
+| Model list refresh failed                          |
++----------------------------------------------------+
+
++-- Provider --------------------------------------+
+| [Connection] [Models]         [Refresh model list] |
+| Model list refresh failed                   [Retry] |
++----------------------------------------------------+
+```
+
 Provider writes use the snapshot's expected version and the owner's field-operation
 contract ([Provider management](appserver/provider-management.md)); a conflict
 preserves the form and offers reload. Partial list failures retain healthy entries.

@@ -18,12 +18,14 @@ const { t } = useI18n({ messages: settingsMessages })
 const route = useRoute()
 const router = useRouter()
 const connection = useConnectionStore()
+const models = useModelsStore()
 const view = ref<ManagementView>()
 const detail = ref<ManagementProvider>()
 const loading = ref(true)
 const busy = ref(false)
 const error = ref("")
 const detailError = ref("")
+const modelRefreshError = ref("")
 const search = ref("")
 const pickerSearch = ref("")
 const custom = ref(false)
@@ -60,8 +62,12 @@ async function loadDetail(): Promise<void> {
   try {
     const result = await connection.client.call("provider.management", { providerId: id }, readManagement)
     if (providerId.value === id) {
-      detail.value = result.providers.find((p) => p.providerId === id)
-      if (!detail.value) detailError.value = result.errors.find((failure) => failure.providerId === id)?.message ?? t("unavailable")
+      const provider = result.providers.find((p) => p.providerId === id)
+      if (provider) updated(provider)
+      else {
+        detail.value = undefined
+        detailError.value = result.errors.find((failure) => failure.providerId === id)?.message ?? t("unavailable")
+      }
     }
   } catch (cause) { if (providerId.value === id) detailError.value = messageFrom(cause) }
 }
@@ -107,25 +113,33 @@ async function reloadDetail(): Promise<void> {
 }
 async function refresh(): Promise<void> {
   const current = detail.value
-  if (!current || busy.value || dirty.value) return
+  if (!current?.actions.includes("refresh") || busy.value || dirty.value || connection.phase !== "connected") return
   busy.value = true
-  detailError.value = ""
+  modelRefreshError.value = ""
   try {
-    await connection.client.call("provider.refresh", { providerId: current.providerId }, readAck)
-    await Promise.all([loadDetail(), useModelsStore().load()])
-  } catch (cause) { detailError.value = messageFrom(cause) }
+    await models.refresh(current.providerId)
+    if (providerId.value === current.providerId) await loadDetail()
+  } catch (cause) {
+    if (providerId.value === current.providerId) modelRefreshError.value = messageFrom(cause)
+  }
   finally { busy.value = false }
+}
+async function signedInFromAuth(refreshError?: string): Promise<void> {
+  const id = providerId.value
+  await loadDetail()
+  if (providerId.value === id) modelRefreshError.value = refreshError ?? ""
 }
 async function remove(logout = false): Promise<void> {
   const current = detail.value
   if (!current || busy.value || !await confirm.value?.open(t(logout ? "signOutConfirm" : "deleteConfirm"), { confirmLabel: t(logout ? "signOut" : "remove") })) return
   busy.value = true
   detailError.value = ""
+  modelRefreshError.value = ""
   try {
     await connection.client.call(logout ? `${current.account!.namespace}.logout` : "provider.delete", logout ? (current.account!.namespace === "account" ? { providerId: current.providerId } : {}) : { providerId: current.providerId, expectedVersion: current.version }, readAck)
     if (logout) await loadDetail()
     else close()
-    await Promise.all([load(), useModelsStore().load()])
+    await Promise.all([load(), models.load()])
   } catch (cause) { detailError.value = messageFrom(cause) }
   finally { busy.value = false }
 }
@@ -135,6 +149,7 @@ watch([providerId, isNew], async () => {
   tab.value = "connection"
   connectionDirty.value = false
   modelDirty.value = false
+  modelRefreshError.value = ""
   ++formKey.value
   await syncDialog()
   await loadDetail()
@@ -166,6 +181,7 @@ onMounted(async () => { await syncDialog(); await load() })
       <p v-if="loading || busy" class="ui-banner settings-banner" role="status">{{ t(busy ? "working" : "loading") }}</p>
       <p v-if="error" class="ui-banner settings-banner" data-tone="danger" role="alert">{{ error }} <button class="ui-button" data-variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load">{{ t("retry") }}</button></p>
       <p v-if="detailError" class="ui-banner settings-banner" data-tone="danger" role="alert">{{ detailError }} <button class="ui-button" data-variant="ghost" :disabled="connection.phase !== 'connected'" @click="loadDetail">{{ t("retry") }}</button></p>
+      <p v-if="modelRefreshError" class="ui-banner settings-banner" data-tone="danger" role="alert">{{ t("modelRefreshFailed", { reason: modelRefreshError }) }} <button v-if="detail?.actions.includes('refresh')" class="ui-button" data-variant="ghost" :disabled="busy || dirty || connection.phase !== 'connected'" @click="refresh">{{ t("retry") }}</button></p>
       <template v-if="isNew">
         <template v-if="custom && view">
           <div class="settings-list-toolbar"><button class="ui-button" data-size="sm" data-variant="ghost" type="button" @click="backToProviders"><ArrowLeft aria-hidden="true" />{{ t("back") }}</button></div>
@@ -178,16 +194,19 @@ onMounted(async () => { await syncDialog(); await load() })
         </template>
       </template>
       <template v-else-if="detail">
-        <nav class="provider-tabs" :aria-label="t('providers')"><button class="ui-button" data-variant="ghost" :aria-pressed="tab === 'connection'" @click="changeTab('connection')">{{ t("connection") }}</button><button class="ui-button" data-variant="ghost" :aria-pressed="tab === 'models'" @click="changeTab('models')">{{ t("models") }} ({{ detail.models?.length ?? 0 }})</button></nav>
+        <div class="provider-tabs">
+          <nav class="settings-inline-actions" :aria-label="t('providers')"><button class="ui-button" data-variant="ghost" :aria-pressed="tab === 'connection'" @click="changeTab('connection')">{{ t("connection") }}</button><button class="ui-button" data-variant="ghost" :aria-pressed="tab === 'models'" @click="changeTab('models')">{{ t("models") }} ({{ detail.models?.length ?? 0 }})</button></nav>
+          <button v-if="detail.actions.includes('refresh')" class="ui-button" data-variant="secondary" :disabled="busy || dirty || connection.phase !== 'connected'" @click="refresh"><RefreshCw :size="14" aria-hidden="true" />{{ t("refreshModelList") }}</button>
+        </div>
         <template v-if="tab === 'connection'">
           <section v-if="detail.account" class="settings-card">
             <div v-if="detail.account.state.authenticated" class="settings-list-toolbar"><span>{{ detail.account.state.identity?.email ?? detail.account.state.preview ?? t("connected") }}</span><button class="ui-button" data-variant="secondary" :disabled="busy || dirty || connection.phase !== 'connected'" @click="remove(true)">{{ t("signOut") }}</button></div>
-            <ProviderAuthFlow v-else :key="detail.providerId" :provider="detail" @finished="loadDetail" />
+            <ProviderAuthFlow v-else :key="detail.providerId" :provider="detail" @finished="signedInFromAuth" />
           </section>
           <ProviderConnectionForm v-if="detail.connection && view" :key="`${detail.providerId}-${formKey}`" v-model:dirty="connectionDirty" :provider="detail" :drivers="view.drivers" @saved="saved" @reload="reloadDetail" />
         </template>
         <ProviderModels v-else :key="detail.providerId" v-model:dirty="modelDirty" :provider="detail" @updated="updated" />
-        <footer class="provider-footer"><button v-if="detail.actions.includes('delete')" class="ui-button" data-variant="danger-ghost" :disabled="busy || dirty || connection.phase !== 'connected'" @click="remove()">{{ t("remove") }}</button><button v-if="detail.actions.includes('refresh')" class="ui-button" data-variant="secondary" :disabled="busy || dirty || connection.phase !== 'connected'" @click="refresh"><RefreshCw :size="14" aria-hidden="true" />{{ t("refresh") }}</button></footer>
+        <footer v-if="detail.actions.includes('delete')" class="provider-footer"><button class="ui-button" data-variant="danger-ghost" :disabled="busy || dirty || connection.phase !== 'connected'" @click="remove()">{{ t("remove") }}</button></footer>
       </template>
       <p v-else-if="!error && !detailError && !loading" class="settings-help" role="status">{{ t("loading") }}</p>
     </dialog>
@@ -195,6 +214,6 @@ onMounted(async () => { await syncDialog(); await load() })
 </template>
 
 <style scoped>
-.provider-tabs { display: flex; gap: var(--space-2); margin-bottom: var(--space-5); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
+.provider-tabs { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-bottom: var(--space-5); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
 .provider-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-6); padding-top: var(--space-4); border-top: 1px solid var(--border); }
 </style>

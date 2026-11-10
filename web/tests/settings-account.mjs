@@ -3,16 +3,18 @@ import { readFileSync } from "node:fs"
 import { registerHooks, stripTypeScriptTypes } from "node:module"
 import test from "node:test"
 import { compileScript, parse } from "vue/compiler-sfc"
-import { createRenderer, nextTick, reactive } from "vue"
+import { createRenderer, nextTick, reactive, ref } from "vue"
+import { createPinia } from "pinia"
 
+const settingsComponent = (url) => /\/(AccountSettings|ProviderAuthFlow|ProviderSettings)\.vue$/.test(url)
 registerHooks({
   resolve(specifier, context, next) {
-    if (context.parentURL?.endsWith("AccountSettings.vue")) {
-      if (specifier === "../../stores/connection") return { url: "data:text/javascript,export const useConnectionStore=()=>globalThis.settingsConnection", shortCircuit: true }
-      if (specifier === "../../stores/models") return { url: "data:text/javascript,export const useModelsStore=()=>({load:async()=>{}})", shortCircuit: true }
+    if (specifier === "../../stores/connection" || (specifier === "./connection" && context.parentURL?.endsWith("/stores/models.ts"))) {
+      return { url: "data:text/javascript,export const useConnectionStore=()=>globalThis.settingsConnection", shortCircuit: true }
     }
-    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:key=>key,locale:{value:'en'}})", shortCircuit: true }
-    if (specifier.endsWith(".vue") && !specifier.endsWith("AccountSettings.vue")) return { url: "data:text/javascript,export default {setup(props,{expose}){expose({open:async()=>true});return ()=>null}}", shortCircuit: true }
+    if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>globalThis.settingsRoute;export const useRouter=()=>({})", shortCircuit: true }
+    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:(key,args)=>args?.reason?key+' '+args.reason:key,locale:{value:'en'}})", shortCircuit: true }
+    if (specifier.endsWith(".vue") && !settingsComponent(specifier)) return { url: "data:text/javascript,export default {setup(props,{expose}){expose({open:async()=>true});return ()=>null}}", shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
       if ((specifier.startsWith("./") || specifier.startsWith("../")) && !/\.(ts|vue)$/.test(specifier)) return next(`${specifier}.ts`, context)
       throw error
@@ -20,16 +22,27 @@ registerHooks({
   },
   load(url, context, next) {
     if (url.endsWith(".ts")) return { format: "module", source: stripTypeScriptTypes(readFileSync(new URL(url), "utf8"), { mode: "transform" }), shortCircuit: true }
-    if (!url.endsWith("AccountSettings.vue")) return next(url, context)
+    if (!settingsComponent(url)) return next(url, context)
     const { descriptor } = parse(readFileSync(new URL(url), "utf8"))
     return { format: "module", source: stripTypeScriptTypes(compileScript(descriptor, { id: "settings-account-test", inlineTemplate: true }).content, { mode: "transform" }), shortCircuit: true }
   },
 })
 
 const { default: AccountSettings } = await import("../src/features/settings/AccountSettings.vue")
-const node = (type, text = "") => ({ type, text, children: [], props: {}, parent: undefined })
+const { default: ProviderSettings } = await import("../src/features/settings/ProviderSettings.vue")
+const { useModelsStore } = await import("../src/stores/models.ts")
+const { settingsDirtyKey } = await import("../src/features/settings/context.ts")
+const node = (type, text = "") => ({
+  type, text, children: [], props: {}, parent: undefined, value: "", options: [], selectedIndex: -1,
+  addEventListener() {}, getRootNode() { return {} },
+})
 const renderer = createRenderer({
-  createElement: node, createText: (text) => node("text", text), createComment: (text) => node("comment", text),
+  createElement(type) {
+    const element = node(type)
+    if (type === "dialog") element.showModal = () => { element.open = true }
+    return element
+  },
+  createText: (text) => node("text", text), createComment: (text) => node("comment", text),
   patchProp: (element, key, _, value) => { element.props[key] = value },
   setText: (element, text) => { element.text = text },
   setElementText: (element, text) => { element.text = text; element.children = [] },
@@ -64,7 +77,7 @@ test("an uncertain reset reuses its key after a usage refresh, even when no cred
     return read({})
   } } }
   const root = node("root")
-  const app = renderer.createApp(AccountSettings)
+  const app = renderer.createApp(AccountSettings).use(createPinia())
   app.mount(root)
   try {
     await flush()
@@ -101,7 +114,7 @@ test("account refresh retains usage on failure and reconnect never exposes the p
     return read({ enabled: false, eligible: false, invitedCount: 0, paidCount: 0, inviterRebateBp: 0, inviteeRebateBp: 0 })
   } } })
   const root = node("root")
-  const app = renderer.createApp(AccountSettings)
+  const app = renderer.createApp(AccountSettings).use(createPinia())
   app.mount(root)
   try {
     await flush()
@@ -128,4 +141,94 @@ test("account refresh retains usage on failure and reconnect never exposes the p
     assert.match(text(root), /Second account plan/)
     assert.doesNotMatch(text(root), /First account plan/)
   } finally { app.unmount(); delete globalThis.settingsConnection }
+})
+
+test("Dim device sign-in fetches models and the signed-in account can retry a failed fetch", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const providerId = "dimcode-api-oauth"
+  let signedIn = false
+  let refreshed = false
+  let refreshes = 0
+  globalThis.settingsConnection = { phase: "connected", supports: () => true, client: { call: async (method, params, read) => {
+    if (method === "provider.management") return read({ drivers: [], errors: [], providers: [{
+      providerId, displayName: "Dim", source: "managed", credentialAuthority: "account", version: null, enabled: true,
+      actions: signedIn ? ["refresh"] : ["login"], connection: null, models: null, preferences: {},
+      account: { namespace: "account", loginMethods: ["device"], state: { account: signedIn ? { issuer: "https://example.test", subject: "42" } : null } },
+    }] })
+    if (method === "account.providers") return read([{ providerId, displayName: "Dim", defaultDirectory: "https://dimagent.cn" }])
+    if (method === "account.login.begin") return read({ attemptId: "device", expiresAt: Date.now() + 60_000, verificationUri: "https://example.test/device", userCode: "CODE" })
+    if (method === "account.login.status") { signedIn = true; return read({ status: "completed" }) }
+    if (method === "account.usage") return read({ windows: [], features: [] })
+    if (method === "account.referral") return read({ enabled: false, eligible: false, invitedCount: 0, paidCount: 0, inviterRebateBp: 0, inviteeRebateBp: 0 })
+    if (method === "provider.list") return read({ providers: [] })
+    if (method === "provider.catalog") return read({ catalog: refreshed ? { models: [{ id: "relay-model", name: "Relay model" }], disabledModelIds: [] } : null })
+    assert.equal(method, "provider.refresh")
+    assert.deepEqual(params, { providerId })
+    assert.equal(signedIn, true)
+    if (++refreshes === 1) throw new Error("Relay timeout")
+    refreshed = true
+    return read({})
+  } } }
+  const root = node("root")
+  const pinia = createPinia()
+  const app = renderer.createApp(AccountSettings).use(pinia)
+  app.mount(root)
+  try {
+    await flush()
+    const form = all(root).find((element) => element.type === "form")
+    await form.props.onSubmit({ preventDefault() {} })
+    t.mock.timers.tick(100)
+    await flush()
+    assert.equal(refreshes, 1)
+    assert.match(text(root), /signOut/)
+    assert.match(text(root), /modelRefreshFailed Relay timeout/)
+    assert.equal(all(root).some((element) => element.type === "form"), false)
+    const refresh = all(root).find((element) => element.type === "button" && text(element) === "refreshModelList")
+    await refresh.props.onClick()
+    await flush()
+    assert.equal(refreshes, 2)
+    assert.match(text(root), /modelListRefreshed/)
+    assert.doesNotMatch(text(root), /Relay timeout/)
+    assert.equal(useModelsStore(pinia).providers[0].models[0].id, "relay-model")
+  } finally { app.unmount(); delete globalThis.settingsConnection }
+})
+
+test("third-party Provider refresh retries the remote listing and updates the model count", async () => {
+  const providerId = "relay"
+  let refreshes = 0
+  const provider = { providerId, displayName: "Relay", source: "custom", credentialAuthority: "static", version: 1, enabled: true, actions: ["refresh"], preferences: {},
+    connection: { driverKind: "openai-compatible", auth: { type: "bearer" }, baseUrl: "https://example.test/v1", credentialConfigured: true, headerNames: [], proxyUrl: null, proxyAuthConfigured: false, timeoutMs: null },
+  }
+  globalThis.settingsRoute = { name: "settings-provider-detail", params: { providerId } }
+  globalThis.settingsConnection = { phase: "connected", supports: () => false, client: { call: async (method, params, read) => {
+    if (method === "provider.management") return read({ drivers: [], errors: [], providers: [{
+      ...provider, models: refreshes < 2 ? [] : [{
+        model: { modelId: "relay-model", displayName: "Relay model", status: "active", capabilities: {
+          modalities: ["text"], toolCalling: true, streaming: true, structuredOutput: true, vision: false, audio: false, reasoning: false,
+        } },
+        source: "default", enabled: true, endpoint: null, unavailableReason: null, actions: [],
+      }],
+    }] })
+    if (method === "provider.list") return read({ providers: [{ ...provider, credentialConfigured: true }] })
+    if (method === "provider.catalog") return read({ catalog: { models: [], disabledModelIds: [] } })
+    assert.equal(method, "provider.refresh")
+    assert.deepEqual(params, { providerId })
+    if (++refreshes === 1) throw new Error("Relay timeout")
+    return read({})
+  } } }
+  const root = node("root")
+  const app = renderer.createApp(ProviderSettings).use(createPinia()).provide(settingsDirtyKey, ref(false))
+  app.mount(root)
+  try {
+    await flush()
+    const button = (label) => all(root).find((element) => element.type === "button" && text(element) === label)
+    await button("refreshModelList").props.onClick()
+    await flush()
+    assert.match(text(root), /modelRefreshFailed Relay timeout/)
+    await button("retry").props.onClick()
+    await flush()
+    assert.equal(refreshes, 2)
+    assert.doesNotMatch(text(root), /Relay timeout/)
+    assert.match(text(root), /models \(1\)/)
+  } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsRoute }
 })
