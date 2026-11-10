@@ -312,6 +312,31 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "configure tool approvals" => "配置工具审批",
         "choose ask or full access" => "选择询问或完全访问",
         "open settings" => "打开设置",
+        "report the most recent error" => "上报最近一次错误",
+        "Run /report to report this error." => "输入 /report 上报此错误。",
+        "No reportable error in this interface." => "当前界面没有可上报的错误。",
+        "Usage: /report" => "用法：/report",
+        "Report this error" => "上报此错误",
+        "Report preview" => "报告预览",
+        "Model · Generate locally" => "模型 · 本地生成",
+        "Local generation makes zero model requests." => "本地生成不会调用模型。",
+        "Session model" => "会话模型",
+        "Redact [x]" => "脱敏 [x]",
+        "Redact [ ]" => "脱敏 [ ]",
+        "Options" => "选项",
+        "Generate report" => "生成报告",
+        "Evidence · Timeline failure captured" => "证据 · 已捕获时间线错误",
+        "Evidence · Observed error only" => "证据 · 只有观察到的错误",
+        "Save ZIP" => "保存 ZIP",
+        "Saved ZIP" => "ZIP 已保存至",
+        "Could not save ZIP" => "无法保存 ZIP",
+        "Preparing report…" => "正在准备报告…",
+        "Updating report plan…" => "正在更新报告计划…",
+        "Generating report…" => "正在生成报告…",
+        "Cancelling generation…" => "正在取消生成…",
+        "Tab focus · Enter select · ↑↓ scroll · Esc close" => {
+            "Tab 切换 · Enter 选择 · ↑↓ 滚动 · Esc 关闭"
+        }
         "exit" => "退出应用",
 
         "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {

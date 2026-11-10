@@ -1276,6 +1276,7 @@ version = "0.1.0-alpha.18"
 dependencies = [
  "anstyle",
  "base64 0.22.1",
+ "chrono",
  "crossterm",
  "dim-acp",
  "dim-agent-capabilities",

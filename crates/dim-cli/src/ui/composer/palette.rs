@@ -464,6 +464,7 @@ mod tests {
             "theme",
             "language",
             "keys",
+            "report",
             "exit",
         ];
         for context in [

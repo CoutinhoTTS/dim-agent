@@ -4425,6 +4425,15 @@
       ]
     },
     {
+      "id": "dim_cli::report",
+      "crate": "dim_cli",
+      "parent": "dim_cli",
+      "file": "crates/dim-cli/src/report.rs",
+      "unexpandedMacros": [
+        "json"
+      ]
+    },
+    {
       "id": "dim_cli::sanitize",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -4505,6 +4514,17 @@
         "json",
         "matches",
         "unreachable"
+      ]
+    },
+    {
+      "id": "dim_cli::session_host::report",
+      "crate": "dim_cli",
+      "parent": "dim_cli::session_host",
+      "file": "crates/dim-cli/src/session_host/report.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
       ]
     },
     {
@@ -5693,6 +5713,17 @@
       "parent": "dim_cli::ui::render",
       "file": "crates/dim-cli/src/ui/render/testterm.rs",
       "unexpandedMacros": [
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_cli::ui::report_panel",
+      "crate": "dim_cli",
+      "parent": "dim_cli::ui",
+      "file": "crates/dim-cli/src/ui/report_panel.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
         "vec"
       ]
     },
@@ -32152,6 +32183,13 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::report",
+      "references": [
+        "mod report"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::sanitize",
       "references": [
         "mod sanitize",
@@ -35004,6 +35042,15 @@
     },
     {
       "from": "dim_cli::model::session",
+      "to": "dim_cli::report",
+      "references": [
+        "path crate::report::Captured",
+        "path crate::report::Reply",
+        "path crate::report::Request"
+      ]
+    },
+    {
+      "from": "dim_cli::model::session",
       "to": "dim_cli::update",
       "references": [
         "path crate::update::Install",
@@ -36022,6 +36069,35 @@
       ]
     },
     {
+      "from": "dim_cli::report",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path BranchCreateFailedData::Failed",
+        "path ModelOutputOutcome::Failed",
+        "use dim_agent_types::BranchCreateFailedData",
+        "use dim_agent_types::ModelOutputOutcome"
+      ]
+    },
+    {
+      "from": "dim_cli::report",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_cli::report",
+      "to": "dim_client::wire",
+      "references": [
+        "path Event",
+        "path EventContent::BranchCreateFailed",
+        "path EventContent::ModelEnd",
+        "use crate::wire::Event",
+        "use crate::wire::EventContent"
+      ]
+    },
+    {
       "from": "dim_cli::session",
       "to": "dim_agent_types::content",
       "references": [
@@ -36568,6 +36644,7 @@
         "path Command::Configure",
         "path Command::Earlier",
         "path Command::EndLine",
+        "path Command::ErrorReport",
         "path Command::Export",
         "path Command::FindRepository",
         "path Command::FocusLine",
@@ -36843,6 +36920,18 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::report",
+      "references": [
+        "path crate::report::Captured::event",
+        "path crate::report::Captured::observed",
+        "path crate::report::Operation::BranchCreate",
+        "path crate::report::Operation::SessionFork",
+        "path crate::report::Operation::SessionRead",
+        "path crate::report::Reply::Generated"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::sanitize",
       "references": [
         "path crate::sanitize::safe"
@@ -36874,6 +36963,14 @@
         "path member::Notice::Progress",
         "path member::Notice::State",
         "use member::Members"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
+      "to": "dim_cli::session_host::report",
+      "references": [
+        "mod report",
+        "path report"
       ]
     },
     {
@@ -36939,6 +37036,7 @@
         "path Message::Response",
         "path client::RpcError",
         "path client::app_error",
+        "path dim_client::app_error",
         "use crate::client::Client",
         "use crate::client::Message"
       ]
@@ -37120,6 +37218,62 @@
       ]
     },
     {
+      "from": "dim_cli::session_host::report",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Error",
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path Update::ReportReply",
+        "path Update::Reportable",
+        "use crate::model::session::Update"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report",
+      "to": "dim_cli::report",
+      "references": [
+        "path Action::Cancel",
+        "path Action::Generate",
+        "path Action::Plan",
+        "path Action::Prepare",
+        "path Captured",
+        "path Draft",
+        "path Prepared",
+        "path Reply",
+        "path Reply::Failed",
+        "path Reply::Plan",
+        "path Reply::Prepared",
+        "path Request",
+        "use crate::report::Action",
+        "use crate::report::Captured",
+        "use crate::report::Draft",
+        "use crate::report::Prepared",
+        "use crate::report::Reply",
+        "use crate::report::Request"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path Worker",
+        "use super::Worker"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report",
+      "to": "dim_client",
+      "references": [
+        "path dim_client::RpcError"
+      ]
+    },
+    {
       "from": "dim_cli::session_host::tasks",
       "to": "dim_agent_types::activity",
       "references": [
@@ -37182,6 +37336,14 @@
     },
     {
       "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::report",
+      "references": [
+        "path crate::report::Captured::observed",
+        "path crate::report::Operation::SessionRead"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
       "to": "dim_cli::session_host",
       "references": [
         "path LineProjection",
@@ -37195,6 +37357,13 @@
       "to": "dim_cli::session_host::inventory",
       "references": [
         "path inventory::METHODS"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tasks",
+      "to": "dim_cli::session_host::report",
+      "references": [
+        "path report"
       ]
     },
     {
@@ -37520,6 +37689,13 @@
       "to": "dim_cli::ui::render",
       "references": [
         "mod render"
+      ]
+    },
+    {
+      "from": "dim_cli::ui",
+      "to": "dim_cli::ui::report_panel",
+      "references": [
+        "mod report_panel"
       ]
     },
     {
@@ -41578,6 +41754,137 @@
       ]
     },
     {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Result"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::browser",
+      "references": [
+        "path crate::browser::open"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::clipboard::copy",
+      "references": [
+        "path crate::clipboard::copy_local"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::report",
+      "references": [
+        "path Action",
+        "path Action::Cancel",
+        "path Action::Generate",
+        "path Action::Plan",
+        "path Captured",
+        "path Draft",
+        "path Plan",
+        "path Preview",
+        "path Reply",
+        "path Reply::Failed",
+        "path Reply::Generated",
+        "path Reply::Plan",
+        "path Reply::Prepared",
+        "use crate::report::Action",
+        "use crate::report::Captured",
+        "use crate::report::Draft",
+        "use crate::report::Plan",
+        "use crate::report::Preview",
+        "use crate::report::Reply"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path crate::sanitize::safe",
+        "path crate::sanitize::safe_line"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t",
+        "use crate::ui::i18n::t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::ui::line_input",
+      "references": [
+        "path LineInput",
+        "path LineInput::new",
+        "use crate::ui::line_input::LineInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path bordered",
+        "path follow_window",
+        "path wrap",
+        "use crate::ui::render::panel::bordered",
+        "use crate::ui::render::panel::follow_window",
+        "use crate::ui::render::panel::wrap"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::ui::terminal::input",
+      "references": [
+        "path KeyCode::BackTab",
+        "path KeyCode::Down",
+        "path KeyCode::Enter",
+        "path KeyCode::Esc",
+        "path KeyCode::PageDown",
+        "path KeyCode::PageUp",
+        "path KeyCode::Tab",
+        "path KeyCode::Up",
+        "path KeyEvent",
+        "use crate::ui::terminal::KeyCode",
+        "use crate::ui::terminal::KeyEvent"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path truncate_cells",
+        "use crate::ui::text::truncate_cells"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path fg",
+        "use crate::ui::theme::ansi::fg"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::report_panel",
+      "to": "dim_cli::ui::theme::palette",
+      "references": [
+        "path Palette",
+        "use crate::ui::theme::Palette"
+      ]
+    },
+    {
       "from": "dim_cli::ui::rows",
       "to": "dim_cli::ui::commands",
       "references": [
@@ -43336,6 +43643,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::report",
+      "references": [
+        "path crate::report::HINT"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::sanitize",
       "references": [
         "path crate::sanitize::safe",
@@ -43764,6 +44078,7 @@
         "path Command::Configure",
         "path Command::Earlier",
         "path Command::EndLine",
+        "path Command::ErrorReport",
         "path Command::Export",
         "path Command::FindRepository",
         "path Command::FocusLine",
@@ -43883,6 +44198,8 @@
         "path Update::Ready",
         "path Update::Renamed",
         "path Update::Report",
+        "path Update::ReportReply",
+        "path Update::Reportable",
         "path Update::RepositoryWorkspaces",
         "path Update::Runtimes",
         "path Update::Sessions",
@@ -43980,6 +44297,19 @@
       "references": [
         "path crate::projection::failure_phrase",
         "path crate::projection::retry_seconds"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::report",
+      "references": [
+        "path crate::report::Action::Cancel",
+        "path crate::report::Action::Prepare",
+        "path crate::report::Captured",
+        "path crate::report::Draft",
+        "path crate::report::HINT",
+        "path crate::report::Reply::Prepared",
+        "path crate::report::Request"
       ]
     },
     {
@@ -44373,6 +44703,18 @@
         "use crate::ui::render::Frame",
         "use crate::ui::render::Overlay",
         "use crate::ui::render::Screen"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_cli::ui::report_panel",
+      "references": [
+        "path report_panel::Input::Close",
+        "path report_panel::Input::None",
+        "path report_panel::Input::Send",
+        "path report_panel::Panel",
+        "path report_panel::Panel::new",
+        "use crate::ui::report_panel"
       ]
     },
     {
