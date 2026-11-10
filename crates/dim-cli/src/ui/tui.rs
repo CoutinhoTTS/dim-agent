@@ -1364,7 +1364,11 @@ impl App {
         let mouse = crate::ui::config::read(&home, MOUSE_KEY).is_none_or(|v| v != "off");
         let notify = crate::ui::config::read(&home, crate::ui::notify::NOTIFY_KEY)
             .is_none_or(|v| v != false);
-        let composer = Composer::new(past);
+        // The `@` index, pasted paths and dropped files all resolve against
+        // the local `--cwd` (cli-attachment-input), which an attach does not
+        // change; the border's workspace label is the Session's and does.
+        let mut composer = Composer::new(past);
+        composer.set_root(PathBuf::from(&cwd_key));
         let mut app = Self {
             host,
             composer,
@@ -5816,15 +5820,18 @@ impl App {
         }
     }
 
-    /// Points the composer's label, its `@` mention root and its Git source
-    /// at the workspace the daemon reported for the Session being shown, or
-    /// back at the launch workspace for `None` (Home, or a daemon older than
-    /// the attach record). The branch is read once here, without waiting for
-    /// the next poll.
+    /// Points the composer's label and its Git source at the workspace the
+    /// daemon reported for the Session being shown, or back at the launch
+    /// workspace for `None` (Home, or a daemon older than the attach record).
+    /// The branch is read once here, without waiting for the next poll.
+    ///
+    /// The `@` mention root does not move: interactive local file paths keep
+    /// the CLI's selected `--cwd` as their base, whichever Session is
+    /// attached (cli-attachment-input), and the reported workspace may be a
+    /// directory this client cannot see.
     fn show_workspace(&mut self, cwd: Option<&str>) {
         let cwd = cwd.unwrap_or(&self.cwd_key);
         self.workspace = crate::ui::tilde(cwd);
-        self.composer.set_root(PathBuf::from(cwd));
         self.git_head = git_head(cwd);
         self.branch = self.git_head.as_deref().and_then(git_branch);
     }
@@ -8216,10 +8223,12 @@ mod tests {
     /// The reported flow: launched in workspace A, the client attaches a
     /// Session that lives in workspace B (an explicit `--cwd`, a `/resume`
     /// into another worktree). The border must name B, its branch included,
-    /// its `@` mention picker must offer B's files, and going Home must put
-    /// A back for both.
+    /// and going Home must put A back. `@` file completion is not the
+    /// Session's: interactive local paths keep the selected `--cwd` as their
+    /// base, so it offers A's files throughout, and that is asserted here so
+    /// the border cannot quietly take the mention root with it.
     #[test]
-    fn a_session_attached_elsewhere_moves_the_border_and_home_moves_it_back() {
+    fn a_session_attached_elsewhere_moves_the_border_but_not_the_mention_base() {
         use crate::ui::render::panel::{strip_escapes, visible_width};
 
         let root = tempfile::tempdir().unwrap();
@@ -8288,33 +8297,33 @@ mod tests {
             row
         };
         // The `@` file names the picker panel offers for `@note`, read from
-        // the frame that draws them.
+        // one frame once the walk reports that it has finished.
         let candidates = |app: &mut App| -> Vec<String> {
             let names = ["launch-note.txt", "session-note.txt"];
             typed(app, "@note");
             let started = Instant::now();
-            loop {
-                let rows: Vec<String> = app
-                    .frame((80, 30))
-                    .live
-                    .iter()
-                    .map(|row| strip_escapes(row))
-                    .collect();
-                let found: Vec<String> = names
-                    .iter()
-                    .filter(|name| rows.iter().any(|row| row.contains(*name)))
-                    .map(|name| (*name).to_owned())
-                    .collect();
-                if !found.is_empty() || started.elapsed() > Duration::from_secs(10) {
-                    app.composer.clear();
-                    return found;
+            let rows = loop {
+                let frame = app.frame((80, 30));
+                let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+                if !app.composer.mention_searching() {
+                    break rows;
                 }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the `@` walk did not finish"
+                );
                 std::thread::sleep(Duration::from_millis(5));
-            }
+            };
+            app.composer.clear();
+            names
+                .iter()
+                .filter(|name| rows.iter().any(|row| row.contains(*name)))
+                .map(|name| (*name).to_owned())
+                .collect()
         };
 
         // Launched in A: Home names A and its branch, and `@` offers A's
-        // files, the directory the next Session will work in.
+        // files, the base pasted and dropped paths also use.
         let row = border(&mut app, 160);
         assert!(
             row.contains(&format!("{launch_workspace} (launch-line)")),
@@ -8349,8 +8358,12 @@ mod tests {
         );
         assert_eq!(
             candidates(&mut app),
-            ["session-note.txt"],
-            "the mention picker offers the Session's workspace's files"
+            ["launch-note.txt"],
+            "the mention picker keeps the local `--cwd` while the border names the Session's workspace"
+        );
+        assert!(
+            !app.composer.mention_searching(),
+            "the picker's candidates were read from a finished walk"
         );
 
         // `/new` goes Home: the Session is gone and the launch workspace is
@@ -8368,7 +8381,7 @@ mod tests {
         assert_eq!(
             candidates(&mut app),
             ["launch-note.txt"],
-            "Home moves the mention picker back to the launch workspace"
+            "Home keeps the mention picker on the launch workspace"
         );
     }
 
