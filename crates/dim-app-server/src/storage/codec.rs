@@ -272,8 +272,8 @@ pub(super) struct Previous {
 }
 #[derive(Clone)]
 pub(super) enum Values {
-    /// Still in memory: written earlier in the round or held by the writer
-    /// memo.
+    /// Known values of the previous prefix, written in this round, held by
+    /// the writer memo, or proved from the current request's addresses.
     Written(Arc<ModelRequest>),
     /// Rebuilt from its stored list.
     Stored(Arc<Rebuilt>),
@@ -305,9 +305,46 @@ pub(super) fn prefix(previous: &Previous, request: &ModelRequest) -> usize {
         .values
         .messages()
         .iter()
+        .take(previous.refs.length)
         .zip(&request.messages)
         .take_while(|(kept, message)| Arc::ptr_eq(kept, message) || kept == message)
         .count()
+}
+/// Whether `request` proves the complete stored prefix and fixed values
+/// by their content addresses. A different address still requires value
+/// comparison because serialization order need not define value equality.
+pub(super) fn matches_list(request: &ModelRequest, refs: &ListReferences) -> Result<bool> {
+    if request.messages.len() < refs.length {
+        return Ok(false);
+    }
+    let mut parent = None::<String>;
+    for message in &request.messages[..refs.length] {
+        let body = serde_json::to_string(&Node {
+            parent: parent.as_deref(),
+            message: &**message,
+        })
+        .map_err(error)?;
+        parent = Some(hash("node", &body));
+    }
+    if parent != refs.list {
+        return Ok(false);
+    }
+    let tools = request
+        .tools
+        .as_ref()
+        .map(|tools| serde_json::to_string(tools).map(|body| hash("tools", &body)))
+        .transpose()
+        .map_err(error)?;
+    if tools != refs.tools {
+        return Ok(false);
+    }
+    let system = request
+        .system
+        .as_ref()
+        .map(|system| serde_json::to_string(system).map(|body| hash("system", &body)))
+        .transpose()
+        .map_err(error)?;
+    Ok(system == refs.system)
 }
 /// `value`'s address: the previous request's when equal, without
 /// serializing; otherwise a content row of `kind`.

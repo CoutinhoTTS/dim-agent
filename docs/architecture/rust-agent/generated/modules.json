@@ -31888,6 +31888,7 @@
         "path codec::drafts",
         "path codec::encode",
         "path codec::encode_list",
+        "path codec::matches_list",
         "path codec::prefix",
         "path codec::request",
         "use super::codec",

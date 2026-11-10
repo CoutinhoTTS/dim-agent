@@ -864,3 +864,9 @@ page's status. The bounded-read, checkpoint and acceptance conventions of timeli
    [restore-scoped shared history read](restore-shared-read.md).
 2. **One-way upgrade without a backup.** S5a and S5b decided this during development, and v17 follows them. Does that
    still hold for the release that ships v17, or should the upgrade keep a copy of the v16 database?
+
+## 20. Writer cold-prefix proof
+
+The stored format and value-equality rule below remain unchanged. When the previous request's Weak has expired, the writer first reads only its list references. It serializes and hashes the current request's first `previous.length` messages with the existing node encoding. If their final address equals the stored list address, and the current tools/system addresses also match, the current values prove the complete previous prefix; no previous message node is loaded. Only the newly appended messages produce content rows.
+
+A shorter request, a different address or different fixed content takes the existing bounded rebuild and pointer/value comparison path. A hash mismatch is not proof of unequal values: JSON object order can change serialized bytes while preserving value equality. The fallback therefore remains necessary for deterministic storage, rewrites, compaction and legacy rows. No strong previous-request cache, retained node list, new schema or native format is introduced. This proof reduces old-body I/O by hashing current content that is already owned by the actual request; CPU and serialized bytes must be measured separately.

@@ -702,6 +702,7 @@ impl SqliteTimelineStore {
                         session,
                         branch,
                         sequence.saturating_sub(1),
+                        request,
                         &round,
                         &mut reader,
                     )?;
@@ -811,13 +812,15 @@ impl SqliteTimelineStore {
     /// storage design): the last request through `through` on `branch`,
     /// else through the cut on each ancestor in turn. Earlier records of
     /// the round come first, then the memo, then the store, whose request
-    /// is rebuilt from its list in holds of node loads. A v16 row has no
-    /// list to share, so it gives no previous request.
+    /// values are proved from `request`'s addresses or rebuilt from its
+    /// list in bounded holds. A v16 row has no list to share, so it gives
+    /// no previous request.
     fn previous(
         &self,
         session: &str,
         branch: &str,
         through: u64,
+        request: &Arc<ModelRequest>,
         round: &Round,
         reader: &mut Reader,
     ) -> Result<Option<Previous>> {
@@ -887,6 +890,13 @@ impl SqliteTimelineStore {
                 let Some(refs) = record.list()?.cloned() else {
                     return Ok(None);
                 };
+                if codec::matches_list(request, &refs)? {
+                    return Ok(Some(Previous {
+                        sequence,
+                        values: Values::Written(request.clone()),
+                        refs,
+                    }));
+                }
                 return self
                     .hold(reader, |connection, reader| {
                         reader.previous(connection, session, sequence, &refs)

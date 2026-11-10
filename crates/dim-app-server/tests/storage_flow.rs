@@ -2700,16 +2700,6 @@ async fn paged_reads_decode_requested_events_and_check_request_content() {
     db.close().await.unwrap();
 }
 
-/// §18 item 3b: one long request, append-only or with its last four
-/// messages rewritten each turn. A cold read of it loads each of its nodes
-/// once, in holds of at most 256 node loads. After a restart the first
-/// request written on the branch rebuilds its previous request in the same
-/// holds, before its write transaction, which loads no node. The running
-/// Session's next request takes its previous request from the writer memo
-/// and loads only the nodes it steps back over: none when it extends that
-/// request, four when it rewrites the last four messages. A request after
-/// another in the same round takes that one and loads no node. Every write
-/// encodes nodes for its new messages only.
 /// One page of `branch`'s events through the timeline store.
 async fn page(
     store: &Arc<dyn TimelineStore>,
@@ -2781,7 +2771,14 @@ async fn a_long_request_is_read_and_extended_in_bounded_holds() {
             .unwrap();
         assert_eq!(
             store.take_node_loads(),
-            holds(2, fresh),
+            if rewrite {
+                holds(2, fresh)
+            } else {
+                NodeLoads {
+                    encoded: fresh,
+                    ..Default::default()
+                }
+            },
             "rewrite: {rewrite}"
         );
         let stepped = if rewrite { 4 } else { 0 };
@@ -2810,7 +2807,14 @@ async fn a_long_request_is_read_and_extended_in_bounded_holds() {
             .unwrap();
         assert_eq!(
             store.take_node_loads(),
-            holds(4, 2 * fresh),
+            if rewrite {
+                holds(4, 2 * fresh)
+            } else {
+                NodeLoads {
+                    encoded: 2 * fresh,
+                    ..Default::default()
+                }
+            },
             "rewrite: {rewrite}"
         );
         let read = store.read(&main, 1..=6).await.unwrap();
@@ -2820,6 +2824,76 @@ async fn a_long_request_is_read_and_extended_in_bounded_holds() {
         store.close().await.unwrap();
         db.close().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn cold_request_writes_keep_equal_values_with_different_json_order() {
+    let message = |input: &str| Message {
+        role: Role::Assistant,
+        content: MessageContent::Parts(vec![MessagePart::ToolUse {
+            provider_metadata: None,
+            id: "call".into(),
+            name: "echo".into(),
+            input: serde_json::from_str(input).unwrap(),
+            start_time: None,
+        }]),
+    };
+    let first = message(r#"{"a":"one","b":"two"}"#);
+    let reordered = message(r#"{"b":"two","a":"one"}"#);
+    assert_eq!(first, reordered);
+    assert_ne!(
+        serde_json::to_string(&first).unwrap(),
+        serde_json::to_string(&reordered).unwrap()
+    );
+    let records = [first, reordered]
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let mut messages = vec![message];
+            if index > 0 {
+                messages.push(Message::text(Role::User, "next input"));
+            }
+            model_call(index as u64 + 1, messages)
+        })
+        .collect::<Vec<_>>();
+    let mut written = Vec::new();
+    for memo in [true, false] {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = if memo {
+            SqliteTimelineStore::new(db.clone())
+        } else {
+            SqliteTimelineStore::without_writer_memo(db.clone())
+        };
+        store
+            .create_session("ordered", &SessionConfig::default())
+            .await
+            .unwrap();
+        for record in &records {
+            append(&store, key("ordered", "main"), vec![record.clone()])
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.take_node_loads().loads,
+            usize::from(!memo),
+            "unequal addresses still need the old value comparison"
+        );
+        let actual = store.read(&key("ordered", "main"), 1..=2).await.unwrap();
+        assert_eq!(
+            actual.iter().map(|row| &row.event).collect::<Vec<_>>(),
+            records.iter().map(|row| &row.event).collect::<Vec<_>>()
+        );
+        let connection = Connection::open(&database.0).unwrap();
+        written.push(session_rows(&connection, "ordered"));
+        drop(connection);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+    assert_eq!(
+        written[0], written[1],
+        "writer liveness cannot change the persisted encoding"
+    );
 }
 
 /// The round's combined commit fails on Session `bad`, so the writer
