@@ -21,6 +21,12 @@ pub enum Event {
     /// A permission request for the named tool.
     Permission(String),
     Question,
+    /// A background task that ran apart from the turn ended: its label, and
+    /// whether it ended in failure.
+    BackgroundFinished {
+        label: String,
+        failed: bool,
+    },
 }
 
 /// The terminal as notifications see it.
@@ -50,6 +56,14 @@ pub fn sequence(terminal: &Terminal, event: &Event) -> Vec<u8> {
         Event::Complete => t("Task complete").to_owned(),
         Event::Permission(tool) => tf("Permission needed: {tool}", &[("tool", tool)]),
         Event::Question => t("Question waiting for your answer").to_owned(),
+        Event::BackgroundFinished { label, failed } => tf(
+            if *failed {
+                "Background task failed: {label}"
+            } else {
+                "Background task finished: {label}"
+            },
+            &[("label", label)],
+        ),
     };
     let clean = |text: &str| -> String {
         text.chars()
@@ -116,6 +130,26 @@ mod tests {
             "\x1b]777;notify;DIM;Permission needed: bash\x07".as_bytes()
         );
         assert_eq!(sequence(&on("Apple_Terminal", "xterm"), &done), b"\x07");
+        assert_eq!(
+            sequence(
+                &on("iTerm.app", "xterm-256color"),
+                &Event::BackgroundFinished {
+                    label: "cargo build; rm -rf /".into(),
+                    failed: false,
+                }
+            ),
+            b"\x1b]9;DIM: Background task finished: cargo build, rm -rf /\x07"
+        );
+        assert_eq!(
+            sequence(
+                &on("ghostty", "xterm-ghostty"),
+                &Event::BackgroundFinished {
+                    label: "cargo test".into(),
+                    failed: true,
+                }
+            ),
+            "\x1b]777;notify;DIM;Background task failed: cargo test\x07".as_bytes()
+        );
         let tmux = Terminal {
             multiplexer: true,
             ..on("iTerm.app", "tmux-256color")

@@ -534,6 +534,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "drawing diagram… {count} lines" => "a desenhar diagrama… {count} linhas",
         // notify.rs
         "Task complete" => "Tarefa concluída",
+        "Background task finished: {label}" => "Tarefa em segundo plano concluída: {label}",
+        "Background task failed: {label}" => "Tarefa em segundo plano falhou: {label}",
         "Permission needed: {tool}" => "Permissão necessária: {tool}",
         "Question waiting for your answer" => "Pergunta à espera de resposta",
         "Notify when agent needs you" => "Notificar quando o agente precisar de si",

@@ -1075,6 +1075,10 @@ struct App {
     /// The permission or question request last notified: a prompt that
     /// stays open notifies once.
     notified_request: Option<String>,
+    /// Background tasks already reported as ended, by task id. `None` until
+    /// the Session's first snapshot, whose ended tasks are history: a
+    /// reconnect that finds tasks already finished reports none of them.
+    notified_tasks: Option<HashSet<String>>,
     /// The session's runs as the terminal's program status follows them.
     runs: Runs,
     /// The draft set aside while Ctrl+O/Ctrl+P has the palette open; it
@@ -1425,6 +1429,7 @@ impl App {
             notifications: Vec::new(),
             revealed: std::collections::HashMap::new(),
             notified_request: None,
+            notified_tasks: None,
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
@@ -2020,6 +2025,7 @@ impl App {
                 }
                 self.sync_prompt();
                 self.queue_notification(was_running && !switched);
+                self.queue_background_notifications();
             }
             Update::QuestionReply {
                 session_id,
@@ -3845,6 +3851,41 @@ impl App {
         let event = raised.or(finished.then_some(Event::Complete));
         if let (true, Some(event)) = (self.notify, event) {
             self.notifications.push(event);
+        }
+    }
+
+    /// Reports each background task that ended since the last snapshot, once
+    /// per task: a redraw or a reconnect that shows an ended task again does
+    /// not report it again. The Session's first snapshot is the baseline, so
+    /// tasks that had already ended when the interface attached are history,
+    /// not news.
+    fn queue_background_notifications(&mut self) {
+        use crate::ui::notify::Event;
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let ended: Vec<(String, String, bool)> = snapshot
+            .tasks
+            .iter()
+            .filter_map(|task| {
+                let finish = task.finished.as_ref()?;
+                Some((task.id.clone(), task.label.clone(), finish.failed))
+            })
+            .collect();
+        let Some(seen) = &mut self.notified_tasks else {
+            self.notified_tasks = Some(ended.iter().map(|(id, _, _)| id.clone()).collect());
+            return;
+        };
+        for (id, label, failed) in ended {
+            if !seen.insert(id) {
+                continue;
+            }
+            if self.notify {
+                self.notifications.push(Event::BackgroundFinished {
+                    label: crate::sanitize::safe(&label),
+                    failed,
+                });
+            }
         }
     }
 
@@ -5704,6 +5745,9 @@ impl App {
         self.prompt = None;
         self.snapshot = None;
         self.runs = Runs::default();
+        // Another Session's ended tasks are its history: its first snapshot
+        // is this interface's baseline, as this Session's was.
+        self.notified_tasks = None;
         self.window_floor = 0;
         self.history_floor = 0;
         self.load_more = false;
@@ -8078,6 +8122,92 @@ mod tests {
             started_at: 0,
             finished: None,
         }
+    }
+
+    fn finished(
+        mut task: crate::model::view::TaskView,
+        failed: bool,
+    ) -> crate::model::view::TaskView {
+        task.finished = Some(crate::model::view::TaskFinish {
+            at: 1,
+            status: if failed { "Failed" } else { "Completed" },
+            failed,
+            text: String::new(),
+            exit_code: None,
+        });
+        task
+    }
+
+    #[test]
+    fn each_background_task_is_reported_ended_once() {
+        use crate::ui::notify::Event;
+        let theme = test_theme();
+        let home = tempfile::tempdir().unwrap();
+        let build = |notify: bool| {
+            let mut app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            app.notify = notify;
+            app
+        };
+        let snapshot = |tasks: Vec<crate::model::view::TaskView>| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                tasks,
+                ..ViewSnapshot::default()
+            }))
+        };
+        let mut app = build(true);
+        app.apply(snapshot(vec![background_task("t1", "cargo build")]));
+        assert!(app.notifications.is_empty());
+
+        let ended = vec![finished(background_task("t1", "cargo build"), true)];
+        app.apply(snapshot(ended.clone()));
+        assert_eq!(
+            app.notifications,
+            vec![Event::BackgroundFinished {
+                label: "cargo build".into(),
+                failed: true,
+            }]
+        );
+
+        app.notifications.clear();
+        app.apply(snapshot(ended));
+        assert!(app.notifications.is_empty(), "{:?}", app.notifications);
+
+        let mut quiet = build(false);
+        quiet.apply(snapshot(vec![background_task("t2", "cargo test")]));
+        quiet.apply(snapshot(vec![finished(
+            background_task("t2", "cargo test"),
+            false,
+        )]));
+        assert!(quiet.notifications.is_empty(), "the switch is respected");
+
+        let mut attached = build(true);
+        attached.apply(snapshot(vec![finished(
+            background_task("t9", "already done"),
+            false,
+        )]));
+        assert!(
+            attached.notifications.is_empty(),
+            "the first snapshot is the baseline: {:?}",
+            attached.notifications
+        );
+        attached.apply(snapshot(vec![
+            finished(background_task("t9", "already done"), false),
+            finished(background_task("t10", "later"), false),
+        ]));
+        assert_eq!(
+            attached.notifications,
+            vec![Event::BackgroundFinished {
+                label: "later".into(),
+                failed: false,
+            }]
+        );
     }
 
     #[test]
