@@ -209,6 +209,7 @@ mod tests {
                 ("WT_SESSION", "0f8a"),
             ],
             &[("STY", "1.pts-0.host"), ("TERM", "xterm-ghostty")],
+            &[("TERM", "screen-256color")],
             &[("HERDR_ENV", "1"), ("TERM_PROGRAM", "ghostty")],
             &[ghostty[0], ghostty[1], (ENV_KEY, "OFF")],
         ] {
