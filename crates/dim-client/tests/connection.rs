@@ -137,7 +137,10 @@ async fn loopback_capture_rejects_other_paths_without_consuming_the_callback() {
 
 #[test]
 fn conversation_windows_keep_atomic_pages_and_their_raw_cursors() {
-    use dim_client::{window::Window, wire::HistoryWindow};
+    use dim_client::{
+        window::Window,
+        wire::{DisplayPage, EventContent, HistoryWindow},
+    };
     let event = |at| json!({"id":format!("event-{at}"),"sequence":at,"create_at":at,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"message"}]}}});
     let mut window = Window::default();
     let empty: HistoryWindow = serde_json::from_value(
@@ -171,4 +174,18 @@ fn conversation_windows_keep_atomic_pages_and_their_raw_cursors() {
     assert!(earlier.push(page).unwrap());
     assert_eq!(earlier.take().len(), 300);
     assert!(earlier.before.is_none());
+    let page: DisplayPage = serde_json::from_value(json!({
+        "items":[event(1),{"id":"compaction-2","sequence":2,"create_at":2,
+            "type":"display","name":"compaction","data":{"strategy":"summary"}}],
+        "through":2,"nextAfter":2,"nextBefore":1,"done":true
+    }))
+    .unwrap();
+    let mut display = Window::default();
+    assert!(display.push(page.into()).unwrap());
+    let items = display.take();
+    assert_eq!(items.len(), 2);
+    assert!(
+        matches!(&items[1].content, EventContent::CompactionSummary(summary) if summary.strategy=="summary")
+    );
+    assert_eq!(items[1].id, "compaction-2");
 }

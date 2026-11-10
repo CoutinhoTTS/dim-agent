@@ -714,6 +714,7 @@ mod tests {
         ] {
             let mut completed = row(RowKind::Compaction, "");
             completed.compaction = Some(CompactionView {
+                detail: None,
                 state: CompactionState::Completed,
                 text: text.into(),
                 insufficient: Vec::new(),
@@ -756,6 +757,7 @@ mod tests {
                 };
                 let mut completed = row(RowKind::Compaction, "");
                 completed.compaction = Some(CompactionView {
+                    detail: None,
                     state: CompactionState::Completed,
                     text: content,
                     insufficient: Vec::new(),

@@ -24835,6 +24835,8 @@
         "path Call::Fork",
         "path Call::Hello",
         "path Call::History",
+        "path Call::HistoryDetail",
+        "path Call::HistoryDisplay",
         "path Call::Idle",
         "path Call::InputLookup",
         "path Call::Keys",
@@ -25050,6 +25052,7 @@
         "path RpcError::app",
         "path RpcError::closed",
         "path RpcError::from",
+        "path RpcError::invalid",
         "path RpcError::wire",
         "path params"
       ]
@@ -25199,6 +25202,8 @@
         "path wire::ApprovalRequest",
         "path wire::ApprovalResolved",
         "path wire::BranchState::new",
+        "path wire::CompactionItem::new",
+        "path wire::DisplayNotice",
         "path wire::EventNotice",
         "path wire::ForwardedNotice",
         "path wire::ModelProgressNotice::new",
@@ -25290,6 +25295,7 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
+        "path QueryFilter",
         "path QueryFilter::And",
         "path QueryFilter::In",
         "path QueryOperand::Field",
@@ -25301,6 +25307,7 @@
         "path QuerySelect::Events",
         "path QuerySelect::Fields",
         "path QuerySpec",
+        "path QueryValue::Missing",
         "path QueryValue::Value",
         "path TimelineQuery",
         "path dim_agent_runtime::TimelineQueryReply",
@@ -25344,6 +25351,14 @@
     },
     {
       "from": "dim_app_server::connection::tree",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path dim_agent_types::CompactionDetailChunk",
+        "path dim_agent_types::CompactionSummary"
+      ]
+    },
+    {
+      "from": "dim_app_server::connection::tree",
       "to": "dim_app_server::connection",
       "references": [
         "path Connection",
@@ -25368,6 +25383,7 @@
         "path BranchRequest",
         "path Branches",
         "path History",
+        "path HistoryDetail",
         "path InputLookup",
         "path InputLookupResult::Accepted",
         "path InputLookupResult::Unknown",
@@ -25377,6 +25393,8 @@
         "path Reply::BranchGet",
         "path Reply::Branches",
         "path Reply::History",
+        "path Reply::HistoryDetail",
+        "path Reply::HistoryDisplay",
         "path Reply::InputLookup",
         "path Reply::Keys",
         "path Reply::Submit",
@@ -25398,6 +25416,7 @@
       "references": [
         "path wire::BranchDirectoryView::from",
         "path wire::BranchesResult",
+        "path wire::CompactionItem",
         "path wire::CreateResult",
         "path wire::HistoryResult",
         "path wire::KeyEntry",
@@ -28356,6 +28375,7 @@
       "to": "dim_agent_types::model",
       "references": [
         "path crate::provider::ModelPreferences",
+        "path dim_agent_types::CompactionDetailChunk",
         "path dim_agent_types::ModelCapabilitySnapshot",
         "path dim_agent_types::ModelPreferences"
       ]
@@ -28426,6 +28446,7 @@
         "path crate::tree_protocol::BranchDirectoryView",
         "path crate::tree_protocol::BranchesResult",
         "path crate::tree_protocol::CreateResult",
+        "path crate::tree_protocol::DisplayResult",
         "path crate::tree_protocol::HistoryResult",
         "path crate::tree_protocol::KeysResult"
       ]
@@ -32164,16 +32185,25 @@
         "path ApprovalCallData",
         "path ApprovalDecision",
         "path BranchSource",
+        "path EventKind::ContextCompaction",
         "path EventKind::ContextConfigured",
         "path ModelFailureKind",
         "path dim_agent_types::BranchEndData",
         "path dim_agent_types::BranchSource",
+        "path dim_agent_types::ContextCompactionResult::Completed",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::ApprovalCallData",
         "use dim_agent_types::ApprovalDecision",
         "use dim_agent_types::BranchSource",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::ModelFailureKind"
+      ]
+    },
+    {
+      "from": "dim_app_server::tree_protocol",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path dim_agent_types::CompactionSummary"
       ]
     },
     {
@@ -36500,6 +36530,7 @@
         "path InsufficientSpacePartName::Summary",
         "path InsufficientSpacePartName::SystemPrompt",
         "path InsufficientSpacePartName::Tools",
+        "path dim_agent_types::InsufficientSpace",
         "use dim_agent_types::InsufficientSpacePartName"
       ]
     },
@@ -36538,6 +36569,7 @@
       "to": "dim_cli::model::view",
       "references": [
         "path ApprovalView",
+        "path CompactionDetail",
         "path CompactionPart",
         "path CompactionPart::AppendedMessages",
         "path CompactionPart::Digest",
@@ -36597,6 +36629,7 @@
         "path WorkflowView",
         "path crate::model::view::INTERRUPT_REASON",
         "use crate::model::view::ApprovalView",
+        "use crate::model::view::CompactionDetail",
         "use crate::model::view::CompactionPart",
         "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState",
@@ -36676,6 +36709,7 @@
         "path EventContent::CollaborationResult",
         "path EventContent::Compaction",
         "path EventContent::CompactionStart",
+        "path EventContent::CompactionSummary",
         "path EventContent::Configuration",
         "path EventContent::ExecEnded",
         "path EventContent::ExecStarted",
@@ -46364,6 +46398,7 @@
       "from": "dim_client::wire",
       "to": "dim_agent_types::model",
       "references": [
+        "path CompactionSummary",
         "path ModelCapabilitySnapshot",
         "path dim_agent_types::ModelCapabilitySnapshot",
         "path dim_agent_types::ModelPreferences"
@@ -50024,6 +50059,10 @@
     {
       "module": "dim_app_server::connection::subscription",
       "path": "Notification::Closed"
+    },
+    {
+      "module": "dim_app_server::connection::subscription",
+      "path": "Notification::Display"
     },
     {
       "module": "dim_app_server::connection::subscription",

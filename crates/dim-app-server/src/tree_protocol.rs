@@ -1,4 +1,4 @@
-//! Version 2 product views of the Session broadcast; positions are branch sequences.
+//! Product events and display items; positions are branch sequences.
 use dim_agent_capabilities::session_broadcast::SessionNotice;
 use dim_agent_runtime::{
     BranchDirectoryEntry, BranchDirectoryState, BranchStatus, ModelProgress, TimelineInfo,
@@ -214,6 +214,89 @@ pub struct HistoryResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_start: Option<u64>,
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayResult {
+    pub items: Vec<Box<serde_json::value::RawValue>>,
+    pub through: u64,
+    pub next_after: u64,
+    pub done: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_start: Option<u64>,
+}
+
+impl From<HistoryResult> for DisplayResult {
+    fn from(page: HistoryResult) -> Self {
+        Self {
+            items: page.events,
+            through: page.through,
+            next_after: page.next_after,
+            done: page.done,
+            next_before: page.next_before,
+            turn_start: page.turn_start,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct CompactionItem {
+    pub id: String,
+    pub sequence: u64,
+    pub create_at: u64,
+    pub data: dim_agent_types::CompactionSummary,
+}
+
+impl CompactionItem {
+    pub fn new(event: &AgentEvent) -> Option<Self> {
+        let EventKind::ContextCompaction(data) = &event.kind else {
+            return None;
+        };
+        let dim_agent_types::ContextCompactionResult::Completed {
+            strategy,
+            diagnostics,
+            ..
+        } = &data.outcome
+        else {
+            return None;
+        };
+        Some(Self {
+            id: event.id.clone(),
+            sequence: event.sequence,
+            create_at: event.create_at,
+            data: dim_agent_types::CompactionSummary {
+                start: data.start,
+                strategy: strategy.clone(),
+                insufficient_space: diagnostics.insufficient_space.clone(),
+            },
+        })
+    }
+}
+
+impl Serialize for CompactionItem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut item = serializer.serialize_struct("CompactionItem", 6)?;
+        item.serialize_field("id", &self.id)?;
+        item.serialize_field("sequence", &self.sequence)?;
+        item.serialize_field("create_at", &self.create_at)?;
+        item.serialize_field("type", "display")?;
+        item.serialize_field("name", "compaction")?;
+        item.serialize_field("data", &self.data)?;
+        item.end()
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayNotice {
+    pub session_id: String,
+    pub branch_id: String,
+    pub item: CompactionItem,
+}
+
 /// `session.keys`: the live keyed blocks of one branch segment at `through`,
 /// ascending by the carrying input's sequence and by block order inside one
 /// input (keyed-blocks §2.2).

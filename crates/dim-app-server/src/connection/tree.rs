@@ -114,6 +114,7 @@ impl Connection {
         &self,
         rpc: &RpcService,
         params: History,
+        display: bool,
     ) -> Result<Reply, RpcError> {
         if params.latest_turn && params.after.is_some() {
             return Err(RpcError::invalid(
@@ -213,16 +214,7 @@ impl Connection {
             } else {
                 HistoryRead::Open(&session)
             };
-            let reply = window_at(
-                &read,
-                branch,
-                before,
-                limit,
-                through,
-                turn,
-                self.protocol_version(),
-            )
-            .await;
+            let reply = window_at(&read, branch, before, limit, through, turn, display).await;
             // The owner is chosen before the read: a line that ends in between
             // answers `BranchEnded`, and the tree serves the same request at its
             // fixed head.
@@ -240,13 +232,19 @@ impl Connection {
                         limit,
                         through,
                         turn,
-                        self.protocol_version(),
+                        display,
                     )
                     .await
                 }
                 other => other,
             };
-            return reply.map(Reply::History);
+            return reply.map(|page| {
+                if display {
+                    Reply::HistoryDisplay(page.into())
+                } else {
+                    Reply::History(page)
+                }
+            });
         }
         let tree = session
             .session_service::<TreeCommands>()
@@ -256,15 +254,7 @@ impl Connection {
         } else {
             HistoryRead::Open(&session)
         };
-        let reply = forward_page(
-            &read,
-            branch,
-            after,
-            limit,
-            through,
-            self.protocol_version(),
-        )
-        .await;
+        let reply = forward_page(&read, branch, after, limit, through, display).await;
         let reply = match reply {
             Err(error)
                 if error
@@ -278,13 +268,127 @@ impl Connection {
                     after,
                     limit,
                     through,
-                    self.protocol_version(),
+                    display,
                 )
                 .await
             }
             other => other,
         };
-        reply.map(Reply::History)
+        reply.map(|page| {
+            if display {
+                Reply::HistoryDisplay(page.into())
+            } else {
+                Reply::History(page)
+            }
+        })
+    }
+
+    pub(super) async fn history_detail(
+        &self,
+        rpc: &RpcService,
+        params: HistoryDetail,
+    ) -> Result<Reply, RpcError> {
+        if params.event_id.is_empty() || params.sequence == 0 {
+            return Err(RpcError::invalid(
+                "A detail requires an event identity and positive sequence",
+            ));
+        }
+        let session = self.session(rpc, &params.session_id)?;
+        let branch = params.branch_id.as_deref().expect("validated branchId");
+        if params.sequence > session.sequence(branch).map_err(history_error)? {
+            return Err(RpcError::invalid("Future detail position"));
+        }
+        let query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: Some(dim_agent_types::TimelinePosition {
+                branch_id: branch.into(),
+                sequence: params.sequence,
+            }),
+            through: Some(params.sequence),
+            include_publishing: false,
+            query: QuerySpec {
+                rows: None,
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        completed_compaction(),
+                        QueryFilter::In {
+                            value: QueryOperand::Field { path: "id".into() },
+                            values: vec![params.event_id.clone().into()],
+                        },
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["data".into()],
+                },
+                group_by: vec![],
+                pick: None,
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: std::num::NonZeroU64::MIN,
+                after: None,
+            }),
+        };
+        let reply = match session.query(branch, query.clone()).await {
+            Err(AgentError::BranchEnded(_)) => {
+                session
+                    .session_service::<TreeCommands>()
+                    .map_err(history_error)?
+                    .query(branch.to_owned(), query)
+                    .await
+            }
+            other => other,
+        }
+        .map_err(history_error)?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("detail selects data")
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return Err(RpcError::app(
+                -32000,
+                "detail_not_found",
+                "The completed compaction is not visible at this position",
+            ));
+        };
+        let [QueryValue::Value { value }]: [_; 1] =
+            row.values.try_into().expect("compaction detail data")
+        else {
+            unreachable!("compaction data is present")
+        };
+        let offset = params.offset.unwrap_or(0);
+        let start = usize::try_from(offset)
+            .map_err(|_| RpcError::invalid("Detail offset is out of range"))?;
+        let mut chunk = DetailBytes {
+            offset: start,
+            total: 0,
+            bytes: Vec::new(),
+        };
+        serde_json::to_writer(&mut chunk, &value)
+            .map_err(|error| RpcError::wire(-32603, error.to_string()))?;
+        if start >= chunk.total {
+            return Err(RpcError::invalid(
+                "Detail offset must be inside the JSON at a UTF-8 boundary",
+            ));
+        }
+        if let Err(error) = std::str::from_utf8(&chunk.bytes) {
+            if error.error_len().is_some() {
+                return Err(RpcError::invalid(
+                    "Detail offset must be at a UTF-8 boundary",
+                ));
+            }
+            chunk.bytes.truncate(error.valid_up_to());
+        }
+        let end = start + chunk.bytes.len();
+        Ok(Reply::HistoryDetail(
+            dim_agent_types::CompactionDetailChunk {
+                event_id: params.event_id,
+                sequence: params.sequence,
+                offset,
+                total_bytes: chunk.total as u64,
+                text: String::from_utf8(chunk.bytes).expect("the chunk has valid UTF-8"),
+                next_offset: (end < chunk.total).then_some(end as u64),
+            },
+        ))
     }
 
     /// The branch's live keyed blocks at `through` (keyed-blocks §2.2): the
@@ -736,6 +840,29 @@ enum HistoryRead<'a> {
     Ended(&'a TreeCommands),
 }
 
+struct DetailBytes {
+    offset: usize,
+    total: usize,
+    bytes: Vec<u8>,
+}
+
+impl std::io::Write for DetailBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let start = self.offset.saturating_sub(self.total).min(bytes.len());
+        let keep = (1024 * 1024 - self.bytes.len()).min(bytes.len() - start);
+        self.bytes.extend_from_slice(&bytes[start..start + keep]);
+        self.total = self
+            .total
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("Detail size is out of range"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl HistoryRead<'_> {
     async fn query(
         &self,
@@ -952,7 +1079,7 @@ async fn window_at(
     limit: usize,
     through: u64,
     turn: crate::storage::TurnWindow,
-    version: u32,
+    display: bool,
 ) -> Result<wire::HistoryResult, RpcError> {
     let events = window_page(
         read,
@@ -961,7 +1088,7 @@ async fn window_at(
         limit,
         through,
         turn.window_start,
-        version,
+        display,
     )
     .await?;
     history_window(read, branch, events, through, turn).await
@@ -979,7 +1106,7 @@ async fn window_page(
     limit: usize,
     through: u64,
     window_start: u64,
-    version: u32,
+    display: bool,
 ) -> Result<Vec<HistoryItem>, RpcError> {
     if through > 0 {
         read.batch_end(branch, through)
@@ -998,7 +1125,7 @@ async fn window_page(
         .max(1)
         .max(window_start);
     let low = batch_start(read, branch, low, window_start).await?;
-    window_items(read, branch, low, end, version).await
+    window_items(read, branch, low, end, display).await
 }
 
 /// The greatest atomic-batch end at or below `top`, searching no lower than
@@ -1045,9 +1172,21 @@ async fn window_items(
     branch: &str,
     low: u64,
     end: u64,
-    version: u32,
+    display: bool,
 ) -> Result<Vec<HistoryItem>, RpcError> {
     let limit = end.saturating_sub(low).saturating_add(1).max(1);
+    let filter = if display {
+        QueryFilter::And {
+            conditions: vec![
+                wire::ProductEvent::query_filter(),
+                QueryFilter::Not {
+                    condition: Box::new(completed_compaction()),
+                },
+            ],
+        }
+    } else {
+        wire::ProductEvent::query_filter()
+    };
     let reply = read
         .query(
             branch,
@@ -1061,7 +1200,7 @@ async fn window_items(
                 include_publishing: false,
                 query: QuerySpec {
                     rows: None,
-                    filter: Some(wire::ProductEvent::query_filter()),
+                    filter: Some(filter),
                     select: QuerySelect::Events,
                     group_by: vec![],
                     pick: None,
@@ -1078,9 +1217,84 @@ async fn window_items(
     let QueryOutput::Events { events } = reply.result else {
         unreachable!("event selection returns events")
     };
-    let mut visible = history_items(events.into_iter().map(|row| row.event).collect(), version)?
-        .into_iter()
-        .peekable();
+    let mut visible = history_items(events.into_iter().map(|row| row.event).collect())?;
+    if display {
+        let reply = read
+            .query(
+                branch,
+                TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: Some(dim_agent_types::TimelinePosition {
+                        branch_id: branch.into(),
+                        sequence: low,
+                    }),
+                    through: Some(end),
+                    include_publishing: false,
+                    query: QuerySpec {
+                        rows: None,
+                        filter: Some(completed_compaction()),
+                        select: QuerySelect::Fields {
+                            fields: [
+                                "id",
+                                "position.sequence",
+                                "create_at",
+                                "data.start",
+                                "data.strategy",
+                                "data.diagnostics.insufficientSpace",
+                            ]
+                            .map(String::from)
+                            .to_vec(),
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: std::num::NonZeroU64::new(limit).unwrap(),
+                        after: None,
+                    }),
+                },
+            )
+            .await
+            .map_err(history_error)?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("display selects summary fields")
+        };
+        for row in rows {
+            let [id, sequence, create_at, start, strategy, insufficient_space]: [_; 6] =
+                row.values.try_into().expect("compaction summary fields");
+            let value = |value| match value {
+                QueryValue::Value { value } => value,
+                _ => unreachable!("required compaction summary field"),
+            };
+            let optional = |value| match value {
+                QueryValue::Missing => None,
+                QueryValue::Value { value } => Some(value),
+                _ => unreachable!("scalar compaction summary field"),
+            };
+            let item = wire::CompactionItem {
+                id: serde_json::from_value(value(id)).expect("event id"),
+                sequence: serde_json::from_value(value(sequence)).expect("event sequence"),
+                create_at: serde_json::from_value(value(create_at)).expect("event creation time"),
+                data: dim_agent_types::CompactionSummary {
+                    start: optional(start)
+                        .map(|value| serde_json::from_value(value).expect("compaction start")),
+                    strategy: serde_json::from_value(value(strategy)).expect("compaction strategy"),
+                    insufficient_space: optional(insufficient_space)
+                        .map(|value| serde_json::from_value(value).expect("insufficient space")),
+                },
+            };
+            let encoded = serde_json::value::to_raw_value(&item)
+                .map_err(|error| RpcError::wire(-32603, error.to_string()))?;
+            visible.push(HistoryItem {
+                sequence: item.sequence,
+                bytes: encoded.get().len(),
+                event: Some(encoded),
+            });
+        }
+        visible.sort_unstable_by_key(|item| item.sequence);
+    }
+    let mut visible = visible.into_iter().peekable();
     Ok((low..=end)
         .map(|sequence| {
             if visible.peek().is_some_and(|item| item.sequence == sequence) {
@@ -1096,6 +1310,18 @@ async fn window_items(
         .collect())
 }
 
+fn completed_compaction() -> QueryFilter {
+    QueryFilter::And {
+        conditions: [("kind", "context/compaction"), ("data.status", "completed")]
+            .into_iter()
+            .map(|(path, value)| QueryFilter::In {
+                value: QueryOperand::Field { path: path.into() },
+                values: vec![value.into()],
+            })
+            .collect(),
+    }
+}
+
 /// One event of a history page with its encoded form, built once, and size.
 struct HistoryItem {
     sequence: u64,
@@ -1107,12 +1333,11 @@ struct HistoryItem {
 /// and carried in that same form.
 fn history_items(
     events: Vec<Arc<dim_agent_types::AgentEvent>>,
-    version: u32,
 ) -> Result<Vec<HistoryItem>, RpcError> {
     let mut items = Vec::with_capacity(events.len());
     for event in events {
         let sequence = event.sequence;
-        let encoded = match wire::ProductEvent::new(event, version) {
+        let encoded = match wire::ProductEvent::new(event, 3) {
             Some(product) => Some(
                 serde_json::value::to_raw_value(&product)
                     .map_err(|error| RpcError::wire(-32603, error.to_string()))?,
@@ -1245,7 +1470,7 @@ async fn forward_page(
     after: u64,
     limit: usize,
     through: u64,
-    version: u32,
+    display: bool,
 ) -> Result<wire::HistoryResult, RpcError> {
     if after > 0 {
         read.batch_end(branch, after).await.map_err(history_error)?;
@@ -1262,7 +1487,7 @@ async fn forward_page(
         }
     }
     let items = if end > after {
-        window_items(read, branch, after + 1, end, version).await?
+        window_items(read, branch, after + 1, end, display).await?
     } else {
         Vec::new()
     };

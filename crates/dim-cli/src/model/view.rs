@@ -119,6 +119,7 @@ pub struct RetryView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionView {
     pub state: CompactionState,
+    pub detail: Option<CompactionDetail>,
     /// A completed compaction's summary text — the strategy's part of what
     /// replaced the cut history — or the reason or error of one that did not
     /// complete.
@@ -126,6 +127,12 @@ pub struct CompactionView {
     /// The parts that keep a completed compaction above its bound, as the
     /// record names them; empty when the record carries no such mark.
     pub insufficient: Vec<CompactionPartSize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionDetail {
+    pub event_id: String,
+    pub sequence: u64,
 }
 
 /// One part the record names in a compaction's insufficient-space mark.

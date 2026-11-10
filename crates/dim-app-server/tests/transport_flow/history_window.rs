@@ -1,5 +1,198 @@
 use super::*;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn display_windows_and_live_compaction_keep_the_body_for_chunked_detail() {
+    use dim_agent_types::{ContextCompactionData, InputMode};
+    let directory = new_directory("display");
+    let model = Arc::new(StreamingModel::default());
+    let (server, probe) = serve_streaming(&directory, model.clone()).await;
+    let mut reader = Client::new_version(&server, false, 3).await;
+    assert!(
+        reader
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.history.display"))
+    );
+    assert!(
+        reader
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.history.detail"))
+    );
+    let created = reader.rpc("session.create", create(json!([]))).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap();
+    let mut v2 = Client::new_version(&server, false, 2).await;
+    let unavailable = v2
+        .rpc(
+            "session.history.display",
+            json!({"sessionId":id,"branchId":"main","after":0}),
+        )
+        .await;
+    assert_eq!(unavailable["error"]["code"], -32601);
+    drop(v2);
+    turn(&mut reader, &model, id, "seed", Plan::Chunks(1)).await;
+    let timeline = probe.timeline.lock().unwrap().clone().unwrap();
+    let input = timeline
+        .append(
+            EventKind::InputMessage(dim_agent_types::InputMessageData::text(
+                "retained",
+                Some(InputMode::Append),
+            ))
+            .into(),
+        )
+        .unwrap();
+    assert_ok(
+        &reader
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    assert_ok(
+        &reader
+            .rpc("session.attach", json!({"sessionId":id,"display":true}))
+            .await,
+    );
+    let mut legacy = Client::new_version(&server, false, 3).await;
+    assert_ok(&legacy.rpc("session.attach", json!({"sessionId":id})).await);
+    let data: ContextCompactionData = serde_json::from_value(json!({
+        "through":timeline.sequence(),"status":"completed","retain_from":input.id,
+        "replacement":[{"role":"user","content":"中".repeat(800_000)}],
+        "strategy":"summary","diagnostics":{
+            "reason":"auto","trigger":"threshold","estimatedInputTokens":700_000,
+            "entriesReplaced":1,"modelCallCount":1,"durationMs":1,"strategy":{"kind":"summary"}
+        },"context_baseline":[]
+    }))
+    .unwrap();
+    let expected = serde_json::to_value(&data).unwrap();
+    let event = timeline
+        .append(EventKind::ContextCompaction(data).into())
+        .unwrap();
+    assert_ok(
+        &reader
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    let notice = reader.notice("session.display").await;
+    let summary = &notice["params"]["item"];
+    assert_eq!(summary["id"], event.id);
+    assert_eq!(summary["type"], "display");
+    assert_eq!(summary["data"], json!({"strategy":"summary"}));
+    assert!(serde_json::to_vec(&notice).unwrap().len() < 1024);
+    let original = loop {
+        let notice = legacy.notice("session.event").await;
+        if notice["params"]["event"]["id"] == event.id {
+            break notice;
+        }
+    };
+    assert!(
+        original["params"]["event"]["data"] == expected,
+        "legacy live content must be complete"
+    );
+    let params = json!({"sessionId":id,"branchId":"main","through":event.sequence,"latestTurn":true,"limit":1});
+    let display = reader.rpc("session.history.display", params.clone()).await;
+    assert_ok(&display);
+    assert_eq!(display["result"]["items"], json!([summary]));
+    let summary_bytes = serde_json::to_vec(&display).unwrap().len();
+    assert!(summary_bytes < 1024);
+    let full = legacy.rpc("session.history", params).await;
+    assert_ok(&full);
+    assert!(
+        full["result"]["events"][0]["data"] == expected,
+        "legacy window content must be complete"
+    );
+    for field in ["through", "nextAfter", "nextBefore", "done", "turnStart"] {
+        assert_eq!(display["result"][field], full["result"][field], "{field}");
+    }
+    drop(legacy);
+    let mut offset = 0;
+    let mut text = String::new();
+    let mut total = None;
+    let mut chunks = 0;
+    let detail_started = std::time::Instant::now();
+    let mut detail_bytes = 0;
+    loop {
+        let reply = reader.rpc("session.history.detail",json!({"sessionId":id,"branchId":"main","eventId":event.id,"sequence":event.sequence,"offset":offset})).await;
+        assert_ok(&reply);
+        detail_bytes += serde_json::to_vec(&reply).unwrap().len();
+        let part = &reply["result"];
+        assert_eq!(part["eventId"], event.id);
+        assert_eq!(part["sequence"], event.sequence);
+        assert_eq!(part["offset"], offset);
+        let size = part["totalBytes"].as_u64().unwrap();
+        assert!(total.is_none_or(|previous| previous == size));
+        total = Some(size);
+        let chunk = part["text"].as_str().unwrap();
+        assert!(chunk.len() <= 1024 * 1024 && !chunk.is_empty());
+        text.push_str(chunk);
+        chunks += 1;
+        let Some(next) = part.get("nextOffset").and_then(Value::as_u64) else {
+            break;
+        };
+        assert_eq!(next, text.len() as u64);
+        offset = next;
+    }
+    assert_eq!(chunks, 3);
+    assert_eq!(text.len() as u64, total.unwrap());
+    eprintln!(
+        "compaction display: summary={summary_bytes}B, detail={detail_bytes}B/{chunks}requests/{}ms, JSON={}B",
+        detail_started.elapsed().as_millis(),
+        text.len()
+    );
+    assert!(
+        serde_json::from_str::<Value>(&text).unwrap() == expected,
+        "detail must preserve the complete compaction data"
+    );
+    for (event_id, sequence, offset, error) in [
+        (
+            event.id.as_str(),
+            event.sequence,
+            (text.find('中').unwrap() + 1) as u64,
+            "invalid_params",
+        ),
+        (
+            event.id.as_str(),
+            event.sequence,
+            text.len() as u64,
+            "invalid_params",
+        ),
+        ("absent", event.sequence, 0, "detail_not_found"),
+        (input.id.as_str(), input.sequence, 0, "detail_not_found"),
+    ] {
+        let reply=reader.rpc("session.history.detail",json!({"sessionId":id,"branchId":"main","eventId":event_id,"sequence":sequence,"offset":offset})).await;
+        if error == "invalid_params" {
+            assert_eq!(reply["error"]["code"], -32602, "{reply}");
+        } else {
+            assert_eq!(error_name(&reply), error, "{reply}");
+        }
+    }
+    assert_ok(&reader.rpc("session.attach", json!({"sessionId":id})).await);
+    let next = timeline
+        .append(
+            EventKind::ContextCompaction(serde_json::from_value(expected.clone()).unwrap()).into(),
+        )
+        .unwrap();
+    assert_ok(
+        &reader
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    let reverted = loop {
+        let notice = reader.notice("session.event").await;
+        if notice["params"]["event"]["id"] == next.id {
+            break notice;
+        }
+    };
+    assert!(
+        reverted["params"]["event"]["data"] == expected,
+        "replacement attachment must restore full events"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[cfg(feature = "testing")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hidden_model_requests_are_not_rebuilt_for_windows_or_forward_pages() {

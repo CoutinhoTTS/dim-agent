@@ -13,16 +13,34 @@ Scope: App Server 的显示读取和客户端对该结果的消费。
 
 ## 2. 目标接口
 
-下面的方法名和数据是提案，不是现有 API。具体协议能力与错误编码由该接口实现前确认。
+以下是目标公开合同。现有完整事件接口不改变。
 
 | 方法 | 请求 | 结果 |
 | --- | --- | --- |
 | session.history.display | session/branch 身份；latestTurn 或 before；through；limit | 显示 items、固定 through、原始窗口 nextBefore、done 和可选 turnStart。 |
-| session.history.detail | session/branch、eventId、可选详情续读位置 | 该身份的详情及必要的续读信息；不推进聊天窗口游标。 |
+| session.history.detail | session/branch、事件 ID、原位置、可选字节续读位置 | 该身份的详情及必要的续读信息；不推进聊天窗口游标。 |
 
 display 中一个 item 要么是协议定义的完整可见产品事件，要么是明确标记的摘要。首阶段为完成 compaction 定义摘要：事件身份、位置、状态、策略及展开所需身份，不包含 replacement、context_baseline 或诊断大正文。不把摘要事件再送进模型上下文或执行状态恢复。
 
-detail 按事件身份读取，不扫描整个 turn。内容超出详情响应的传输上限时，需要在详情合同中定义完整可重组的有界分块；不能静默截断、返回 transport 无法发送的帧或要求重读全部历史。分块形状和续读身份在协议细化前须确定。
+detail 按事件身份与原位置读取，不扫描整个 turn，按 §2.1 分块完整重组；不能静默截断、返回 transport 无法发送的帧或要求重读全部历史。
+
+### 2.1 协议绑定
+
+hello 的 features 同时公布 `session.history.display`、`session.history.detail`。二者要求协议 v3。display 沿用 history 的窗口参数、固定 through、批次、原始位置游标和字节限制；回复将 `events` 改为 `items`，其它字段相同。item 为完整 ProductEvent 或下述完成压缩摘要，不能当作 AgentEvent 持久化或交给业务恢复：
+
+```json
+{"id":"event-id","sequence":42,"create_at":1700000000000,
+ "type":"display","name":"compaction",
+ "data":{"start":38,"strategy":"summary"}}
+```
+
+摘要类型表示 completed；data.start 缺失表示旧事实没有开始位置，data.insufficientSpace 仅在原诊断有该标记时出现。start、strategy 和 insufficientSpace 足以维持原折叠行及空间不足提示。replacement、context_baseline、digest_entries 和完整 diagnostics 只有详情读取才返回。其它 compaction 结果继续返回完整产品事件。
+
+客户端仅在服务端公布显示能力时，于 `session.attach` 传 `display:true`。该模式属于本次 attachment，重复 attach 可以更换，detach 后释放。模式开启后，完成压缩通过 `session.display {sessionId,branchId,item}` 发送同一摘要；其它实时产品事件仍为原 session.event。未开启时保留完整实时事件合同。模式在注册订阅前确定，不能等首次历史读取后再切换，避免期间的大正文漏入直播路径。
+
+detail 请求为 `{sessionId,branchId,eventId,sequence,offset?}`。sequence 是摘要的原位置，用来直接定位；eventId 必须同时匹配。只允许读取该分支已发布、已完成 compaction 的 data，不能借此读取隐藏事实或其它分支。没有该对象返回 `detail_not_found`；空身份、未来位置、越界或非 UTF-8 边界的 offset 返回 invalid_params。
+
+detail 回复为 `{eventId,sequence,offset,totalBytes,text,nextOffset?}`。text 是原 ContextCompactionData 的完整 JSON 编码的一个连续 UTF-8 片段，最多 1 MiB；offset/nextOffset 按该 JSON 的 UTF-8 字节计。首段 offset=0，各段连续且身份、位置与 totalBytes 相同；没有 nextOffset 表示结束。客户端完整拼接后只解码一次，不把片段分别当 JSON。此限制约束响应大小，不声称 Store 读取一个大事件的 I/O 或服务器内存只有 1 MiB；当前内容布局的实际读取、序列化和重复分块成本必须单列测量。详情不建立服务器缓存或持久游标，取消只释放本次读取。
 
 导出和需要完整历史事实的调用继续使用对应完整读取，不从显示摘要还原事实。
 
@@ -46,7 +64,7 @@ Timeline 保证分支逻辑序号连续。窗口按已验证的批次范围保�
 
 同一详情不需要在客户端窗口外永久缓存；显示中的详情由其视图持有，关闭后释放。返回的内容有实际大小，展开大 replacement 仍有相应解析与显示成本。
 
-首屏优化不能只覆盖历史 RPC 而漏掉实时 Session 广播和重连。后续协议细化须明确新显示能力下，实时大 compaction 是否同样以摘要/详情身份发送；与旧完整事件流分开协商，不能向已接受完整事件合同的订阅者发半个事件。
+历史、实时 Session 广播与重连都使用 §2.1 的显示合同；不能向已接受完整事件合同的订阅者发半个事件。
 
 ## 5. 兼容与费用边界
 
@@ -75,6 +93,8 @@ App Server 拥有显示选择、摘要类型与详情协议；客户端拥有窗
 覆盖原子批次、全隐藏页、未知事件、合并输出、无 turn/start 的迁移、空窗口、较早加载、实时大事件、断线重连和详情失败。新显示投影应与旧完整产品事件投影的可见效果一致，展开前仅少了尚未请求的详情。
 
 使用 2.4 MB replacement 与很多隐藏请求：首屏 replacement 传输为零，隐藏请求消息节点加载为零；分别报告首屏、展开与累计分页的 CPU/内存/字节。旧窗口/新显示能力分别测试，不能仅修改 done 就宣称客户端少读。
+
+大 JSON 的 SQLite 解析与实际 I/O 按[读取执行成本](../timeline-read-followups.md#属性投影与累计执行成本)另计；摘要回复小不代表底层只读取了摘要字节。分块编码只保留本块字节，不额外构造整个详情的 JSON 字符串；当前 query 返回的单个详情对象仍在本次请求内存中，后续分块会重新查询和编码它。
 
 不增加显示结果数据库、公共 Reader 或统一 UI 状态聚合服务。摘要是实际用户交互对象，详情端点因避免首屏正文读取而存在；没有该需求的事件不新增一层摘要包装。
 
