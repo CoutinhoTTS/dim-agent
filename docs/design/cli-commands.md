@@ -215,10 +215,13 @@ Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
 text draft replaces their attachments. Esc interrupt instead withdraws all held
 messages before stopping, restoring their operator content to the draft, oldest
-first, so they cannot start a new run automatically. Appended runtime text blocks
-(after the first block, starting with `<dim-`) are not restored; references such
-as `$skill: name` stay so resubmission loads fresh context. Adjacent operator text
-blocks are separated by newlines. Images and stored paste/file links are kept.
+first, so they cannot start a new run automatically. A text block after the first
+that opens one of the runtime's own markers is context a capability appended
+rather than the operator's words, by the same rule the title and the catalog
+preview read (Hooks A.6.2, Skills §9), so it is not restored; a later operator
+block that only looks like one is. References such as `$skill: name` stay so
+resubmission loads fresh context. Adjacent operator text blocks are separated by
+newlines. Images and stored paste/file links are kept.
 Steering always uses the owner's full held input.
 
 ### Queue strip

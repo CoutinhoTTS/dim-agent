@@ -38158,6 +38158,13 @@
     },
     {
       "from": "dim_cli::ui::composer",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path dim_agent_types::markup::runtime_context"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
       "to": "dim_cli::attachments",
       "references": [
         "path MAX_IMAGES",
