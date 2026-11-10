@@ -19473,7 +19473,9 @@
       "from": "dim_agent_scheduler",
       "to": "dim_agent_runtime::names",
       "references": [
-        "path dim_agent_runtime::names::register"
+        "path Names",
+        "path dim_agent_runtime::names::register",
+        "use dim_agent_runtime::Names"
       ]
     },
     {
@@ -19498,6 +19500,7 @@
       "references": [
         "mod methods",
         "path ScheduleJobs",
+        "path SchedulerPlugin",
         "path SchedulerPlugin::new",
         "path SchedulerPlugin::new_with_testing",
         "use methods::ScheduleJobs",
