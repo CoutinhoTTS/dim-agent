@@ -2686,17 +2686,32 @@ fn carried_parts(configuration: &Configuration) -> Option<(Option<String>, Optio
 }
 
 /// The assembly overrides as JSON, and back.
+///
+/// Every field is destructured first so a member added to [`Overrides`] but
+/// missing from this round trip fails the build, as `child_overrides`' struct
+/// literal already does.
 fn overrides_value(overrides: &Overrides) -> Value {
+    let Overrides {
+        summary_prompt,
+        plugin_configs,
+        branch_description,
+        roster_closing,
+        goal_objective,
+        goal_continuation,
+        eventhub_entry,
+        eventhub_tool,
+        scheduler_description,
+    } = overrides;
     json!({
-        "summaryPrompt": overrides.summary_prompt.as_ref().map(ToString::to_string),
-        "eventhubEntry": overrides.eventhub_entry.as_ref().map(ToString::to_string),
-        "eventhubTool": overrides.eventhub_tool.as_ref().map(ToString::to_string),
-        "pluginConfigs": overrides.plugin_configs,
-        "branchDescription": overrides.branch_description.as_ref().map(ToString::to_string),
-        "rosterClosing": overrides.roster_closing.as_ref().map(ToString::to_string),
-        "goalObjective": overrides.goal_objective.as_ref().map(ToString::to_string),
-        "goalContinuation": overrides.goal_continuation.as_ref().map(ToString::to_string),
-        "schedulerDescription": overrides.scheduler_description.as_ref().map(ToString::to_string),
+        "summaryPrompt": summary_prompt.as_ref().map(ToString::to_string),
+        "eventhubEntry": eventhub_entry.as_ref().map(ToString::to_string),
+        "eventhubTool": eventhub_tool.as_ref().map(ToString::to_string),
+        "pluginConfigs": plugin_configs,
+        "branchDescription": branch_description.as_ref().map(ToString::to_string),
+        "rosterClosing": roster_closing.as_ref().map(ToString::to_string),
+        "goalObjective": goal_objective.as_ref().map(ToString::to_string),
+        "goalContinuation": goal_continuation.as_ref().map(ToString::to_string),
+        "schedulerDescription": scheduler_description.as_ref().map(ToString::to_string),
     })
 }
 
