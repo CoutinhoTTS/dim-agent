@@ -612,6 +612,58 @@ fn a_progress_note_from_a_dead_pid_does_not_hold_up_the_start() {
     assert!(!note.exists(), "the started daemon removed the note");
 }
 
+/// Runs a command that starts the daemon over a note that names no daemon to
+/// wait for: the client starts its own at once, connects, and prints no
+/// upgrade line.
+fn a_note_naming_no_daemon_does_not_hold_up_the_start(write: impl FnOnce(&std::path::Path)) {
+    let home = Home::new();
+    let note = note_path(&home);
+    write(&note);
+    let server = script(
+        &home,
+        "server",
+        &format!("exec '{}' app-server \"$@\"", env!("CARGO_BIN_EXE_dimcode")),
+    );
+    let output = home
+        .command()
+        .args(["--server", server.to_str().unwrap(), "models", "fixture"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains(UPGRADING), "{stderr}");
+    assert!(!note.exists(), "the started daemon removed the note");
+}
+
+/// #1335: a note whose header names the failure kind is not a progress note,
+/// whatever its body: the client starts its own daemon instead of waiting on
+/// it.
+#[test]
+fn a_failure_note_does_not_hold_up_the_start() {
+    let pid = std::process::id();
+    a_note_naming_no_daemon_does_not_hold_up_the_start(|note| {
+        fs::write(
+            note,
+            format!(
+                "dimcode-startup-failure v1 pid={pid}\nstore-upgrade from=33 to=34 progress=1\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(note, fs::Permissions::from_mode(0o600)).unwrap();
+    });
+}
+
+/// #1335: a progress note another user can read is not the daemon's private
+/// note: the client starts its own daemon instead of waiting on it.
+#[test]
+fn a_progress_note_that_is_not_private_does_not_hold_up_the_start() {
+    let pid = std::process::id();
+    a_note_naming_no_daemon_does_not_hold_up_the_start(|note| {
+        write_progress_note(note, pid, 50);
+        fs::set_permissions(note, fs::Permissions::from_mode(0o644)).unwrap();
+    });
+}
+
 /// The hello of a daemon of another build that an idle replacement stops.
 fn old_hello() -> Value {
     json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.summaries","daemon.shutdown.completed","daemon.shutdown.ifIdle"]})

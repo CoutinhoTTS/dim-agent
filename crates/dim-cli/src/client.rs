@@ -942,8 +942,8 @@ mod starting_note_tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     /// A progress note names the daemon to wait for, unless it names this
-    /// client; a failed note, a missing note and a note another user can
-    /// read name nothing.
+    /// client; a missing note names nothing. The failed-note and permission
+    /// cases live in the startup flow tests, where the client runs.
     #[test]
     fn a_progress_note_names_another_process() {
         let dir = tempfile::tempdir().unwrap();
@@ -959,15 +959,6 @@ mod starting_note_tests {
         write(4242);
         assert_eq!(another_daemon_starting(&path), Some(4242));
         write(std::process::id());
-        assert_eq!(another_daemon_starting(&path), None);
-        fs::write(
-            &path,
-            "dimcode-startup-failure v1 pid=7\nnot a progress note",
-        )
-        .unwrap();
-        assert_eq!(another_daemon_starting(&path), None);
-        write(4242);
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(another_daemon_starting(&path), None);
         assert_eq!(another_daemon_starting(&dir.path().join("missing")), None);
     }
