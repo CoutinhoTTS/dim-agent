@@ -36959,15 +36959,25 @@
       "from": "dim_cli::session_host::tests",
       "to": "dim_cli::args",
       "references": [
+        "path Options::parse",
         "path crate::args::Options::parse"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_cli::client",
+      "references": [
+        "path client"
       ]
     },
     {
       "from": "dim_cli::session_host::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path Command::FocusLine",
         "path RuntimeAction::Configure",
-        "path RuntimeAction::Install"
+        "path RuntimeAction::Install",
+        "path Update::Snapshot"
       ]
     },
     {
@@ -36982,8 +36992,26 @@
       "to": "dim_cli::session_host",
       "references": [
         "path LineProjection::new",
+        "path Worker::new",
         "path suggestion_setting",
         "path transcript_mut"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_cli::update",
+      "references": [
+        "path update"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_client",
+      "references": [
+        "path Client::open",
+        "path Message::Notice",
+        "path dim_client::ConnectionConfig",
+        "path dim_client::Server"
       ]
     },
     {
