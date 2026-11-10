@@ -963,11 +963,15 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
  user message
                           one normal separator row
  ◆ Thinking… · text
-                          released layout space, if any
+ ◐ 1 · cargo build 1m12s  the tasks running apart from the turn
  ╭─ · thinking… ─────────────────────────────╮
  │ › Ask anything...                        │   composer stays anchored
  ╰──────────────────────────────────────────╯
 ```
+
+The task row sits above the composer here as it does above the dock in fullscreen,
+so the released space of a closing menu still returns below it and the composer
+keeps its place.
 
 While a terminal resize is pending, scrollback pauses frame painting until the existing resize debounce settles; model and input processing continue. The settled resize rebuilds native scrollback from the recorded blocks at the new width and overwrites visible rows in place, without clearing the screen first. No full row above the final live region is cleared: shorter rewritten rows erase their stale suffix in place, and unused rows below the final live region are erased. This keeps the normal one-row message separators and removes old composer and thinking rows without a blank-screen flash, including in tmux without synchronized output.
 

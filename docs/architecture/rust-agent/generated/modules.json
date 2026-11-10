@@ -44538,6 +44538,7 @@
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
+        "path crate::model::view::TaskView",
         "use crate::model::view::CompactionState",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
@@ -45461,6 +45462,7 @@
         "path SessionPort",
         "path SuggestionSetting",
         "path SwitchKind::Forked",
+        "path SwitchKind::Resumed",
         "path Update",
         "path Update::EffortChoices",
         "path Update::Failed",
@@ -45511,11 +45513,15 @@
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path SideLine",
+        "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default",
         "path crate::model::view::QueuedInput",
         "path crate::model::view::RowTone::Danger",
+        "path crate::model::view::TaskFinish",
+        "path crate::model::view::TaskKind::Command",
+        "path crate::model::view::TaskView",
         "path crate::model::view::TurnEnd::Completed"
       ]
     },
@@ -45761,13 +45767,16 @@
         "path Prompt::Sessions",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
+        "path TASK_FADE",
         "path WebOpened",
         "path banner",
         "path chunk",
         "path live_panel_rows",
         "path overlay_panel_rows",
         "path queue_strip",
+        "path shown_tasks",
         "path side_reply",
+        "path task_line",
         "path web_panel",
         "path write_notifications"
       ]
@@ -50685,6 +50694,10 @@
     {
       "module": "dim_cli::ui::transcript::stream::tests",
       "path": "Screen::new"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "Event::BackgroundFinished"
     },
     {
       "module": "dim_cli::ui::tui",

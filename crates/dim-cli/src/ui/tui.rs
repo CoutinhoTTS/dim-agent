@@ -1029,6 +1029,12 @@ struct App {
     message_blocks: Vec<usize>,
     /// The second their running time was last drawn for.
     card_second: u64,
+    /// The second the task line was last laid out for: its elapsed times
+    /// follow this, and it repaints the row so an ended task leaves on time.
+    task_second: u64,
+    /// Whether the task line was drawn in the frame the pulse last asked for:
+    /// the frame that erases it is the one where it stopped being drawn.
+    task_row: bool,
     session_id: String,
     /// The invocation's first message, submitted once the first frame is
     /// drawn.
@@ -1420,6 +1426,8 @@ impl App {
             card_blocks: Vec::new(),
             message_blocks: Vec::new(),
             card_second: 0,
+            task_second: 0,
+            task_row: false,
             session_id: String::new(),
             initial: None,
             unsent: None,
@@ -1907,6 +1915,19 @@ impl App {
             self.card_second = second;
             self.refresh_cards();
             changed = true;
+        }
+        // The task row names a running task's elapsed time and drops an ended
+        // one after TASK_FADE, so it needs a frame on every new second while
+        // it is drawn, and one more once it is not: the pulse of a running
+        // turn is not enough, and a task that ends while the turn is idle
+        // would otherwise stay on screen.
+        if second != self.task_second {
+            let shown = self.task_line_shown();
+            if shown || self.task_row {
+                self.task_second = second;
+                self.task_row = shown;
+                changed = true;
+            }
         }
         if self.composer.mention_tick() {
             changed = true;
@@ -6730,14 +6751,20 @@ fn task_line(
         let elapsed = task_elapsed(at - started);
         let label = crate::sanitize::safe(&task.label);
         let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
-        let entry = format!(" · {label} {elapsed}");
+        let mark = match &task.finished {
+            Some(finish) if finish.failed => "\u{2717} ",
+            Some(_) => "\u{2713} ",
+            None => "",
+        };
+        let entry = format!(" · {mark}{label} {elapsed}");
         let fits = display_width(&entry) <= room;
         if !fits {
             if shown == 0 {
                 // The first entry still names what runs, shortened to fit.
                 let tail = format!(" {elapsed}");
-                let label = truncate_cells(&label, room.saturating_sub(3 + tail.len()).max(1));
-                row.push_str(&format!(" · {label}{tail}"));
+                let lead = 3 + display_width(mark) + tail.len();
+                let label = truncate_cells(&label, room.saturating_sub(lead).max(1));
+                row.push_str(&format!(" · {mark}{label}{tail}"));
             } else {
                 row.push_str(&truncate_cells(" · …", room.max(1)));
             }
@@ -8427,9 +8454,16 @@ mod tests {
         let both = [ended.clone(), second.clone()];
         let shown = shown_tasks(&both, now);
         let plain = strip_escapes(&task_line(shown.clone(), now, 60, p).expect("a line"));
-        assert!(plain.starts_with("◐ 1 ·"), "{plain}");
-        assert!(plain.contains("cargo build 1m12s"), "{plain}");
+        assert!(plain.starts_with("◐ 1 · ✓ cargo build 1m12s"), "{plain}");
         assert!(plain.contains("cargo test 34s"), "{plain}");
+
+        let mut failed = ended.clone();
+        if let Some(finish) = &mut failed.finished {
+            finish.failed = true;
+        }
+        let plain =
+            strip_escapes(&task_line(shown_tasks(&[failed], now), now, 60, p).expect("a line"));
+        assert!(plain.starts_with("◐ 0 · ✗ cargo build 1m12s"), "{plain}");
 
         // Five seconds after the end the ended task leaves; nothing else runs.
         let later = now + TASK_FADE;
@@ -8527,6 +8561,52 @@ mod tests {
                 .any(|command| matches!(command, Command::TaskHistory { .. })),
             "the panel reads the Session's task history"
         );
+    }
+
+    /// The row's end is the pulse's doing: an ended task keeps its place while
+    /// it fades, and the tick that finds it gone asks for the frame that
+    /// erases the row, so the composer never keeps a row nothing draws into.
+    #[test]
+    fn the_pulse_asks_for_the_frame_that_erases_an_ended_task_row() {
+        let theme = test_theme();
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let snapshot = |tasks| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                tasks,
+                ..ViewSnapshot::default()
+            }))
+        };
+        let fading = ended_at(background_task("t1", "cargo build"), (now - 1) * 1000);
+        app.apply(snapshot(vec![fading]));
+        assert!(app.task_line_shown(), "an ended task stays while it fades");
+        assert!(app.tick(), "the pulse repaints the fading row");
+        assert!(app.task_row, "the frame it asked for drew the row");
+
+        // The end is older than the fade: nothing draws the row, and the
+        // pulse still asks for the frame that erases what it last drew. The
+        // pulse runs once a second, so the recorded second is moved back the
+        // way the clock would.
+        let gone = ended_at(
+            background_task("t2", "cargo test"),
+            (now - TASK_FADE) * 1000,
+        );
+        app.apply(snapshot(vec![gone]));
+        assert!(!app.task_line_shown(), "an ended task leaves");
+        app.task_second -= 1;
+        assert!(app.tick(), "the pulse asks for the erasing frame");
+        assert!(!app.task_row, "and then stops asking");
     }
 
     #[test]
