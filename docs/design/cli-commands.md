@@ -431,7 +431,9 @@ account. A signed-out account says `Sign in`, and opening it starts its only
 flow; a signed-in one shows its state and offers `Sign out`. A row whose
 namespace is `account` opens the Dim account's `/login` panel instead, with its
 identity, plan and usage. A Provider without a descriptor keeps the connection
-form, and opening it starts nothing.
+form, and opening it starts nothing. With a saved connection and no pending
+edits, `Edit models` opens the Provider's model area, including when disabled.
+Ctrl+R in that area fetches the catalog when the Provider offers `refresh`.
 
 ```text
 /connect
