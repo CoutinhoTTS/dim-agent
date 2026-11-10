@@ -3116,6 +3116,18 @@
       ]
     },
     {
+      "id": "dim_app_server::session_language",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server",
+      "file": "crates/dim-app-server/src/session_language.rs",
+      "unexpandedMacros": [
+        "json",
+        "tokio::select",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::session_typescript",
       "crate": "dim_app_server",
       "parent": "dim_app_server",
@@ -8632,7 +8644,9 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::prompt_sources",
       "references": [
-        "mod prompt_sources"
+        "mod prompt_sources",
+        "path prompt_sources::PromptSourcesBranch",
+        "path prompt_sources::SessionLanguage"
       ]
     },
     {
@@ -13462,8 +13476,10 @@
       "to": "dim_agent_runtime::config",
       "references": [
         "path BranchLifecycle",
+        "path ReplyLanguage",
         "path SessionConfig",
         "use dim_agent_runtime::BranchLifecycle",
+        "use dim_agent_runtime::ReplyLanguage",
         "use dim_agent_runtime::SessionConfig"
       ]
     },
@@ -21413,6 +21429,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::session_language",
+      "references": [
+        "mod session_language"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::session_typescript",
       "references": [
         "mod session_typescript",
@@ -21834,6 +21857,13 @@
         "path crate::protocol::SessionInfo",
         "use crate::protocol::AgentInfo",
         "use crate::protocol::SessionOrigin"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_app_server::session_language",
+      "references": [
+        "path crate::session_language::SessionLanguagePlugin::new"
       ]
     },
     {
@@ -27574,6 +27604,13 @@
     },
     {
       "from": "dim_app_server::protocol",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path dim_agent_runtime::ReplyLanguage"
+      ]
+    },
+    {
+      "from": "dim_app_server::protocol",
       "to": "dim_agent_types",
       "references": [
         "path JS_MAX_SAFE_INTEGER",
@@ -29085,6 +29122,75 @@
     },
     {
       "from": "dim_app_server::session_grants",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore",
+        "use crate::storage::SessionStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path MethodCall",
+        "path RpcError",
+        "path RpcError::app",
+        "path RpcError::closed",
+        "path RpcError::from",
+        "path SessionMethods",
+        "path params",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::SessionMethods",
+        "use dim_agent_capabilities::methods::params"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
+      "to": "dim_agent_capabilities::prompt_sources",
+      "references": [
+        "path PromptSourcesBranch",
+        "path prompt_sources::language_update",
+        "use dim_agent_capabilities::prompt_sources",
+        "use dim_agent_capabilities::prompt_sources::PromptSourcesBranch"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path ReplyLanguage",
+        "use dim_agent_runtime::ReplyLanguage"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::Closed",
+        "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
       "to": "dim_app_server::storage::timeline",
       "references": [
         "path SessionStore",
@@ -30644,8 +30750,10 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_runtime::config",
       "references": [
+        "path ReplyLanguage",
         "path SessionConfig",
         "path SessionConfig::default",
+        "use dim_agent_runtime::ReplyLanguage",
         "use dim_agent_runtime::SessionConfig"
       ]
     },
@@ -49089,6 +49197,18 @@
     {
       "module": "dim_app_server::runtime_manager::tests",
       "path": "SimpleFileOptions::default"
+    },
+    {
+      "module": "dim_app_server::session_language",
+      "path": "Change::Clear"
+    },
+    {
+      "module": "dim_app_server::session_language",
+      "path": "Change::Code"
+    },
+    {
+      "module": "dim_app_server::session_language",
+      "path": "ClearAction::Clear"
     },
     {
       "module": "dim_app_server::session_typescript",
