@@ -11,9 +11,13 @@
 //! notification it does not know to itself, and forwarding it upward is what
 //! lets a finished run say what finished. A notification asserts nothing
 //! after it is delivered, so the record's reason for staying inside a
-//! multiplexer (`ui::status`, `ui::progress`) does not apply. herdr forwards
-//! `OSC` itself and its `HERDR_ENV` is not a multiplexer for this purpose, so
-//! it keeps taking the form its terminal names.
+//! multiplexer (`ui::status`, `ui::progress`) does not apply.
+//!
+//! herdr is not a multiplexer of that kind and gets the bell. It reads the
+//! `OSC`s in a pane for itself and notifies from its own list of terminals,
+//! so a form the pane's variables name is not known to reach the user there,
+//! while a `BEL` is not an `OSC` it would take. `HERDR_ENV` therefore sends
+//! the bell whatever `TERM_PROGRAM` says.
 //!
 //! On by default; `/settings` switches it (`tuiNotifyOnComplete`).
 
@@ -46,9 +50,7 @@ impl Multiplexer {
     }
 
     /// The multiplexer these variables describe: tmux by `TMUX` or a `tmux`
-    /// `TERM`, GNU screen by `STY` or a `screen` `TERM`. herdr is not one: it
-    /// forwards the `OSC` to the terminal it runs in, so there the terminal's
-    /// own form reaches the user unchanged, and `HERDR_ENV` names no wrapping.
+    /// `TERM`, GNU screen by `STY` or a `screen` `TERM`.
     fn of(var: impl Fn(&str) -> Option<String>) -> Self {
         let var = |name: &str| var(name).unwrap_or_default();
         if !var("TMUX").is_empty() {
@@ -75,6 +77,9 @@ pub struct Terminal {
     pub term: String,
     pub kitty: bool,
     pub multiplexer: Multiplexer,
+    /// herdr reads a pane's `OSC`s for itself, so nothing shows a form the
+    /// pane's variables name; a `BEL` is what it does not take.
+    pub herdr: bool,
 }
 
 impl Terminal {
@@ -85,12 +90,16 @@ impl Terminal {
             term: var("TERM"),
             kitty: !var("KITTY_WINDOW_ID").is_empty(),
             multiplexer: Multiplexer::from_env(),
+            herdr: var("HERDR_ENV") == "1",
         }
     }
 }
 
 /// The bytes that make `terminal` show `event`; never empty.
 pub fn sequence(terminal: &Terminal, event: &Event) -> Vec<u8> {
+    if terminal.herdr {
+        return b"\x07".to_vec();
+    }
     let body = match event {
         Event::Complete => t("Task complete").to_owned(),
         Event::Permission(tool) => tf("Permission needed: {tool}", &[("tool", tool)]),
@@ -236,13 +245,51 @@ mod tests {
     }
 
     #[test]
-    fn herdr_is_not_a_multiplexer_for_notifications() {
-        let done = Event::Complete;
+    fn herdr_gets_the_bell_whatever_terminal_it_sits_on() {
+        let question = Event::Question;
         assert_eq!(
-            sequence(&on("ghostty", "xterm-ghostty"), &done),
-            "\x1b]777;notify;DIM;Task complete\x07".as_bytes()
+            sequence(
+                &Terminal {
+                    herdr: true,
+                    ..on("ghostty", "xterm-ghostty")
+                },
+                &question
+            ),
+            b"\x07"
         );
-        assert_eq!(sequence(&on("", "xterm-256color"), &done), b"\x07");
+        assert_eq!(
+            sequence(
+                &Terminal {
+                    herdr: true,
+                    ..on("iTerm.app", "xterm-256color")
+                },
+                &question
+            ),
+            b"\x07"
+        );
+        for (term_program, term) in [("", "xterm-kitty"), ("", "xterm-256color")] {
+            assert_eq!(
+                sequence(
+                    &Terminal {
+                        herdr: true,
+                        ..on(term_program, term)
+                    },
+                    &Event::Complete
+                ),
+                b"\x07",
+                "{term:?}"
+            );
+        }
+        assert_eq!(
+            sequence(
+                &Terminal {
+                    herdr: true,
+                    ..in_mux(Multiplexer::Tmux, "iTerm.app", "tmux-256color")
+                },
+                &Event::Complete
+            ),
+            b"\x07"
+        );
     }
 
     #[test]

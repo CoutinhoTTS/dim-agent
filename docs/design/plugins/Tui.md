@@ -470,7 +470,10 @@ query along with the reports. `DIM_TERMINAL_TITLE=always` and `DIM_TERMINAL_PROG
 are escape hatches for a terminal that answers but draws nothing. Notifications are exempt
 from the multiplexer rule the record and the bar follow: inside tmux or GNU screen the
 chosen form is wrapped for passthrough (`ESC P tmux;` or `ESC P`), because a delivered
-notification asserts nothing afterwards.
+notification asserts nothing afterwards. herdr keeps the bell whatever its `TERM_PROGRAM`
+names: it reads a pane's `OSC`s for itself and notifies from its own list of terminals, so
+a form the pane's variables carry is not known to reach the user, while a `BEL` is not an
+`OSC` it takes.
 
 ## 5. Context mapping
 
