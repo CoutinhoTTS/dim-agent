@@ -1938,6 +1938,13 @@ fit flow. The length sentence's template rule — exactly one `{target}` placeho
 otherwise — is pinned by `a_length_sentence_needs_one_target_placeholder` in
 `summary_strategy.rs`.
 
+**The product's user override.** The App Server may supply the operator's summary prompt from
+its `prompts` setting ([prompt overrides](../appserver/prompt-overrides.md)). The port is
+`SummaryPromptSettingsHost`, optional and read while the Session's strategy part applies: the
+factory `system_prompt` outranks it, a read failure keeps `SYSTEM`, and the value applies to
+Sessions loaded after the change. The length sentence and the target rule stay factory-only, so
+a user override changes the prompt and not the size rule.
+
 ### 13.6 Rule check (for the #170 changes)
 
 | Rule | Answer |

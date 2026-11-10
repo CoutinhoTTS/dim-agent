@@ -156,6 +156,12 @@ protocol, and the loaded body is the skill author's own text.
 | `S:ToolRegistry` | Register the `skill` tool, until this part unloads. |
 | `S:SubmitChecks` | Register the check `skills` with the Session's submit checks, until this part unloads: `$skill: <name>` references in operator input load those Skills with the same input ([Skills §9](../../../design/plugins/Skills.md#9-references-load-with-the-operators-input)). |
 
+`SkillsInstructionsSettingsHost`, the operator's override of the instructions, is
+provided by the App Server's execution-root assembly. The part declares it only
+where its name is registered, reads it while applying, and keeps the built-in
+text when it is absent or fails; the factory `SkillsConfig` outranks it
+([prompt overrides](../../../design/appserver/prompt-overrides.md)).
+
 ### Content instances
 
 `SkillContentInstances` is an instanced Session extension template. Each enabled,

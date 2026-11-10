@@ -4133,6 +4133,72 @@ fn read_startup_note(database: &std::path::Path) -> String {
     body.to_owned()
 }
 
+/// #1335: a store another process owns leaves a startup note that says so,
+/// and names the owner and the formats when the owner's progress note does.
+#[test]
+fn an_owned_store_leaves_a_note_that_names_the_owner() {
+    let database = Database::new();
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(format!("{}.lock", database.0.display()))
+        .unwrap();
+    lease.lock().unwrap();
+    let Err(AgentError::Storage(message)) = SqliteStorage::open(database.0.clone()) else {
+        panic!("an owned store must be refused");
+    };
+    assert!(
+        message.contains("another process owns the SQLite database"),
+        "{message}"
+    );
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Another dimcode-server is using the store."),
+        "{note}"
+    );
+    assert!(
+        note.contains("Wait for it to finish, then run the command again."),
+        "{note}"
+    );
+    // A running upgrade reports itself beside the store; the refusal then
+    // names the process and the formats to wait for.
+    std::fs::write(
+        startup_note(&database.0),
+        format!(
+            "dimcode-startup-progress v1 pid={}\nstore-upgrade from=34 to=36 progress=7\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            startup_note(&database.0),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    let Err(AgentError::Storage(message)) = SqliteStorage::open(database.0.clone()) else {
+        panic!("an owned store must be refused");
+    };
+    assert!(
+        message.contains("another process owns the SQLite database"),
+        "{message}"
+    );
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains(&format!(
+            "Another dimcode-server (pid {}) is upgrading it from format v34 to v36.",
+            std::process::id()
+        )),
+        "{note}"
+    );
+    lease.unlock().unwrap();
+}
+
 #[test]
 fn a_newer_store_leaves_an_actionable_startup_note() {
     let database = Database::new();

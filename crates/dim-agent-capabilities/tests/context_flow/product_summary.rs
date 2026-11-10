@@ -9,7 +9,7 @@ use dim_agent_capabilities::{
     history::{context_messages, project_context_history},
     summary_strategy::{
         LengthSentence, ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin,
-        SummaryReasoning, TargetRule,
+        SummaryPromptSettings, SummaryPromptSettingsHost, SummaryReasoning, TargetRule,
     },
 };
 use dim_agent_runtime::testing::chain_events;
@@ -248,6 +248,7 @@ async fn product_session_with(
         None,
         Arc::new(Local),
         None,
+        None,
     )
     .await
 }
@@ -263,8 +264,17 @@ async fn product_session_on(
     stored_config: Option<ModelConfig>,
     connection: Arc<dyn ResolveModelConnection>,
     reasoning: Option<serde_json::Value>,
+    settings: Option<Arc<dyn SummaryPromptSettings>>,
 ) -> (MinimalHost, dim_agent_runtime::Session) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    if let Some(settings) = settings {
+        dim_agent_runtime::names::register::<SummaryPromptSettingsHost>(
+            builder.catalog_mut(),
+            None,
+        );
+        let host: Arc<dyn SummaryPromptSettings> = settings;
+        builder.process_value(Arc::new(SummaryPromptSettingsHost(host)));
+    }
     builder
         .session_value(Arc::new(ToolHost(tools)))
         .session_value(Arc::new(HistoryRenderer::default()))
@@ -441,6 +451,54 @@ async fn every_summary_request_uses_the_configured_prompt_and_fits_the_window() 
         assert!(
             tokens <= (WINDOW - output) as f64,
             "summary request of {tokens} tokens exceeds the input budget"
+        );
+    }
+    agent.close().await.unwrap();
+}
+
+/// A host summary-prompt override fixed at construction.
+struct FixedSummary(&'static str);
+impl SummaryPromptSettings for FixedSummary {
+    fn system_prompt(&self, _: CancellationToken) -> HostFuture<'_, Option<Arc<str>>> {
+        Box::pin(async move { Ok(Some(self.0.into())) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_override_supplies_the_summary_prompt() {
+    let prompt = "CUSTOM-SUMMARY: summarize the transcript.";
+    let recorder = Arc::new(Recorder {
+        prefix: prompt.into(),
+        ..Default::default()
+    });
+    let (agent, session) = product_session_on(
+        WINDOW,
+        Arc::new(MockTools),
+        recorder.clone(),
+        OUTPUT,
+        ProductSummaryStrategyConfig::default(),
+        SessionConfig::default(),
+        None,
+        Arc::new(Local),
+        None,
+        Some(Arc::new(FixedSummary(prompt))),
+    )
+    .await;
+    session
+        .submit(cjk(1_500), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    compact_now(&session).await;
+    let requests = recorder.requests.lock().unwrap().clone();
+    assert!(!requests.is_empty(), "the compaction summarized");
+    for request in &requests {
+        let Some(SystemPrompt::Text(system)) = request.system.as_deref() else {
+            panic!("a summarizer request has no system prompt")
+        };
+        assert_eq!(
+            system, prompt,
+            "a summarizer request does not carry the host's text"
         );
     }
     agent.close().await.unwrap();
@@ -1095,6 +1153,7 @@ async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
             None,
             Arc::new(Compatible),
             Some(declared),
+            None,
         )
         .await;
         for text in [cjk(3_000), cjk(1_800)] {
@@ -1162,6 +1221,7 @@ async fn startup_summaries_keep_selection_and_strategy_reasoning_without_narrowi
                 "supported": true,
                 "off": {"kind": "thinking_type", "value": "disabled"}
             })),
+            None,
         )
         .await;
         let adopted = session
@@ -1326,6 +1386,7 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
         None,
         Arc::new(Local),
         None,
+        None,
     )
     .await;
     // The first turn declares an effect; the second is the one a manual step
@@ -1419,6 +1480,7 @@ async fn an_output_limit_at_or_above_the_window_still_leaves_an_input_budget() {
             None,
             Arc::new(Local),
             None,
+            None,
         )
         .await;
         session
@@ -1486,6 +1548,7 @@ async fn a_stored_allowance_from_before_the_rule_is_repaired_at_the_request() {
         SessionConfig::default(),
         Some(stored.clone()),
         Arc::new(Local),
+        None,
         None,
     )
     .await;

@@ -355,6 +355,13 @@ pub struct PromptSourcesConfig {
     pub file_encoding_guidance: Option<Arc<str>>,
 }
 
+/// The host's user override of `dim/base`. `None` keeps this plugin's factory
+/// configuration or the built-in text.
+pub trait BasePromptSettings: Send + Sync + 'static {
+    fn base(&self, cancel: CancellationToken) -> HostFuture<'_, Option<Arc<str>>>;
+}
+
+pub struct BasePromptSettingsHost(pub Arc<dyn BasePromptSettings>);
 /// The Session's reply language, when the operator selected one: the live
 /// value the `dim/language` source reads and the App Server's
 /// `session.language.*` methods change. It starts from `SessionConfig.language`
@@ -494,6 +501,7 @@ pub struct PromptSourcesPlugin {
     config: Key<SessionConfig>,
     registry: Key<PromptRegistry>,
     language: Key<SessionLanguage>,
+    settings: Option<Key<BasePromptSettingsHost>>,
     pub today: Today,
     policy: PromptSourcesConfig,
 }
@@ -513,6 +521,10 @@ impl PromptSourcesPlugin {
             config: names.key()?,
             registry: names.key()?,
             language: names.key()?,
+            settings: names
+                .registered::<BasePromptSettingsHost>()
+                .then(|| names.key::<BasePromptSettingsHost>())
+                .transpose()?,
             today,
             policy,
         })
@@ -538,12 +550,32 @@ impl DynPlugin for PromptSourcesPlugin {
             // reload, and every rebuilt daemon or fork creates a new
             // instance, each reading its record.
             let language = Arc::new(SessionLanguage::new(config.language));
+            let mut policy = self.policy.clone();
+            if policy.base.is_none() {
+                let settings = match &self.settings {
+                    Some(key) => ctx.get_at(key),
+                    None => None,
+                };
+                if let Some(settings) = settings {
+                    match settings
+                        .0
+                        .base(ctx.cancellation_token().child_token())
+                        .await
+                    {
+                        Ok(Some(base)) => policy.base = Some(base),
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "base prompt setting was not read")
+                        }
+                    }
+                }
+            }
             let sources: Arc<dyn LoadPrompt> = Arc::new(Sources {
                 platform,
                 config,
                 today: self.today.clone(),
                 stopped: ctx.cancellation_token(),
-                policy: self.policy.clone(),
+                policy,
                 language: language.clone(),
             });
             for name in SOURCES {
