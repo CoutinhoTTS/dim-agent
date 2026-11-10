@@ -100,6 +100,8 @@ pub enum SessionOrigin {
     Reuse,
 }
 
+/// The branch an earlier build reported a run's outcome to (A.1): decoded and
+/// preserved, never written by a delivery of this design.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportTo {
@@ -156,14 +158,28 @@ fn omitted_when_false(value: &bool) -> bool {
 }
 
 impl Delivery {
-    /// Whether the record carries the shape written before this change. Only
-    /// `failed`, `lost` and `missed` are reachable in both vocabularies, so
-    /// only they need the test.
-    fn legacy_shape(&self) -> bool {
+    /// Whether the record is a launch window whose Session has a stop time
+    /// and therefore a stop timer (§3.2): a state this design writes, with
+    /// the identity the launch recorded.
+    pub fn has_stop_timer(&self) -> bool {
         self.deadline_at.is_some()
-            || self.session_origin.is_some()
-            || self.policy.is_some()
-            || self.report_to.is_some()
+            && self.session_id.is_some()
+            && matches!(
+                self.state,
+                DeliveryState::Delivering | DeliveryState::Delivered
+            )
+    }
+
+    /// Whether this design wrote the record. `branch_id`, the job revision
+    /// and the states `delivering` and `delivered` are its own, and no record
+    /// written before it carries one (A.7).
+    fn written_here(&self) -> bool {
+        self.branch_id.is_some()
+            || self.job_revision.is_some()
+            || matches!(
+                self.state,
+                DeliveryState::Delivering | DeliveryState::Delivered
+            )
     }
 
     /// The record invariants of A.1 and A.7. A violation makes the whole file
@@ -195,41 +211,44 @@ impl Delivery {
         if self.submission_id != format!("scheduler:{}", self.run_id) {
             return Err(format!("delivery {} has a foreign submission", self.run_id));
         }
-        let consistent = match self.state {
-            DeliveryState::Delivering => {
-                !self.legacy_shape()
-                    && self.session_id.is_some()
-                    && self.branch_id.is_some()
-                    && self.input_event_id.is_none()
-                    && self.ended_at.is_none()
-            }
-            DeliveryState::Delivered => {
-                !self.legacy_shape()
-                    && self.session_id.is_some()
-                    && self.branch_id.is_some()
-                    && self.input_event_id.is_some()
-                    && self.ended_at.is_some()
-            }
-            DeliveryState::Failed | DeliveryState::Lost if !self.legacy_shape() => {
-                self.session_id.is_some() == self.branch_id.is_some()
-                    && self.input_event_id.is_none()
-                    && self.ended_at.is_some()
-                    && self.deadline_at.is_none()
-                    && !self.detail.is_empty()
-            }
-            DeliveryState::Missed if !self.legacy_shape() => {
-                self.session_id.is_none()
-                    && self.branch_id.is_none()
-                    && self.input_event_id.is_none()
-                    && self.ended_at.is_some()
-                    && !self.detail.is_empty()
-            }
-            _ => self.validate_legacy(),
+        let consistent = if self.written_here() {
+            self.validate_own()
+        } else {
+            self.validate_legacy()
         };
         if consistent {
             Ok(())
         } else {
             Err(format!("delivery {} is inconsistent", self.run_id))
+        }
+    }
+
+    /// The invariants of a record this design writes: §2.2's five states, and
+    /// the target identity and launch authority each state carries (A.1). A
+    /// launch is `delivering` before its Session exists, so the identity and
+    /// the authority it observed arrive together and only then.
+    fn validate_own(&self) -> bool {
+        let named = self.session_id.is_some() == self.branch_id.is_some();
+        let authority = self.session_origin.is_some() == self.policy.is_some();
+        let has_input = self.input_event_id.is_some();
+        let ended = self.ended_at.is_some();
+        match self.state {
+            DeliveryState::Delivering => named && authority && !has_input && !ended,
+            DeliveryState::Delivered => named && authority && has_input && ended,
+            DeliveryState::Failed | DeliveryState::Lost => {
+                named && authority && !has_input && ended && !self.detail.is_empty()
+            }
+            DeliveryState::Missed => {
+                self.session_id.is_none()
+                    && self.branch_id.is_none()
+                    && self.session_origin.is_none()
+                    && self.policy.is_none()
+                    && self.deadline_at.is_none()
+                    && !has_input
+                    && ended
+                    && !self.detail.is_empty()
+            }
+            _ => false,
         }
     }
 
