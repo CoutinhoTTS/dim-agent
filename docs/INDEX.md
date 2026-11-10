@@ -42,7 +42,8 @@ This index is navigation. Delivery status lives in issues, not here.
 - [ADR 022 — Timeline 属性查询与正文重建](adr/022-event-property-queries.md)（中文）：目标 API 与模块结构、属性查询、业务状态恢复和正文释放
 - [ADR 023 — 上下文用量由独立分支部件维护](adr/023-context-usage.md)（中文）：ContextUsage 的职责、增量统计、服务商校准及后续设计边界
 - [Resume：按业务对象设计计算与读取](design/resume-read-design.md)（中文，草案）：usage、输入队列、Prompt、显示详情、SQL 执行和恢复校验的分项设计与成本验收
-- [状态结果与未处理输入](design/owner-state-indexed-reads.md)（中文，草案）：沿用 append/query，保存完整状态与已完成源位置，恢复按索引读取其后的新输入
+- [当前状态字段索引](design/appserver/timeline-state-read-indexes.md)（中文，草案）：现有API缺口、完整索引键、源位置前驱和SQL扫描验收
+- [状态保存与恢复读取](design/owner-state-indexed-reads.md)（中文，草案）：按业务对象决定持久化；当前队列点查、Prompt有效引用、Usage数字和真实流程读写数量
 - [Timeline 数组元素查询](design/timeline-array-rows.md)（中文，草案）：元素行、原下标、固定范围与按身份取值
 - [Timeline 未完成成员索引](design/appserver/timeline-member-index.md)（中文，草案）：版本集合、同事务维护、分页和新增读写成本
 - [Timeline 身份与恢复操作查询](design/appserver/timeline-identity-reads.md)（中文，草案）：ID 定位、模型/压缩未完成集合及索引验收
@@ -51,7 +52,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Timeline read consumers and page execution](design/timeline-read-followups.md): bounded Web windows, title/activity field reads and cumulative SQL page costs
 - [输入、轮次及活动输出的当前状态读取](design/input-state-read.md)：输入队列、轮次身份和输出字符水位
 - [Goal 属性查询与状态恢复](design/plugins/Goal-property-queries.md)（中文）：统一状态记录下的查询对象、状态来源、剩余遍历和删除重算提案
-- [Goal 状态结果读取](design/plugins/Goal-state-read.md)（中文，草案）：保留模型可见状态，直接读取已完成结果，删除补偿作为真实未完成工作结算
+- [Goal 状态结果读取](design/plugins/Goal-state-read.md)（中文，草案）：完整目标业务状态；运行只在内存，重载暂停，不恢复旧执行
 - [Rust agent design documents](architecture/README.md#design-documents)
 - [Owner-independent Timeline instances](design/collaboration-timeline.md) (#335)
 - [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (#427)（[中文](zh/design/timeline-branches.md)）

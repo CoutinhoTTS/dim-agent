@@ -9,7 +9,7 @@ Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 
 调用方继续查询“开始事实不存在对应终态”。Store 为明确支持的等值反关联形状维护未完成成员，查询时定位成员集合，而不是从全部开始事实逐个排除。
 
-不增加插件数据库接口、用户索引配置、运行时索引注册服务或 pending 专用查询方法。基础成员结构的格式决定见[原生格式 v37](native-storage-format.md#v37未完成集合索引的格式决定)。本文只处理未结束业务对象；owner 按序处理输入的恢复使用[已完成位置](../owner-state-indexed-reads.md)，不另建源确认成员树。
+不增加插件数据库接口、用户索引配置、运行时索引注册服务或 pending 专用查询方法。基础成员结构的格式决定见[原生格式 v37](native-storage-format.md#v37未完成集合索引的格式决定)。本文只处理未结束业务对象；owner各自的保存与恢复见[保存边界](../owner-state-indexed-reads.md)，不另建源确认成员树。
 
 ## 2. 索引描述
 
@@ -19,14 +19,14 @@ Store 的静态描述表记录：开始类型、终态类型、两端关联属�
 
 | 开始 | 关联到终态 | 额外条件 |
 | --- | --- | --- |
-| input/message.id | consumed/deleted.input_id | 只维护 handover 缺失的普通输入集合；不登记 handover 成员。 |
+| input/message.id | consumed/deleted.input_id | v40维护handover缺失/存在两种互斥分组；公共pending只用缺失组，Queue恢复分别用两组。 |
 | step/tool-call.id | step/tool-result.call_event_id | 工具名称是公开数组属性，作为成员分组键；不在 Store 写 ask_user 特例。 |
 | exec/started.task_id | exec/ended.task_id | 无。 |
 | collaboration/request.id | result.request_event_id 或 delivered.op_event_id | delivered 只有 error 关闭该成员。 |
 
 索引描述必须与查询条件逐项等价；少一个终态、不同的关联字段或不同范围，不能套用近似结果。上述终态关联键是标量。复杂任意表达式仍沿用通用执行器，正常 owner inventory 只使用已验证支持的形状。
 
-模型与压缩恢复的新增描述见[身份与恢复操作查询 §3](timeline-identity-reads.md#3-恢复操作的成员集合)，随独立格式提案确认；不改变本节既有四种描述。
+模型与压缩恢复的五种新增描述见[身份与恢复操作查询 §3](timeline-identity-reads.md#3-恢复操作的成员集合)，采用已确认的 v40；不改变四种原关联键；input增加的存在组见[状态字段索引](timeline-state-read-indexes.md)。
 
 初始只加速单个分支段、从序号 1 开始、无 publishing tail 的公共 pending 查询。带 from 的裁剪会改变终态可见性，不能直接使用完整分支的成员根；多段 chain 也不能简单并集。两类范围保留原查询能力，不作为正常 pending 的隐藏替代路径。
 
@@ -58,7 +58,7 @@ Store 的静态描述表记录：开始类型、终态类型、两端关联属�
 
 同批次的开始和终态可以留下历史需要的中间版本，但不单独提交。发布失败不保留索引更新；提交成功后崩溃，索引和事实同时存在。重复终态是幂等移除。不能只按原子批次末尾存一个版本，因为 query 的 through 可以指向已提交批次的内部位置。
 
-成员仍可能在物理输出行合并、Session 复制和删除时受影响。索引用逻辑身份和位置；复制时按目标事实建立对应根；删除 Session 时同事务删除其根和关系。共享节点的回收必须证明没有旧根或 fork 读者引用，首版不在普通读取中做回收。
+物理输出行合并、Session 复制和删除沿逻辑身份维护索引；复制时按目标事实建立对应根；删除 Session 时同事务删除其根和关系。本轮不单独回收仍属于 Session 的旧版本节点；不在普通读取中做回收。
 
 ## 5. 读取
 
@@ -66,7 +66,7 @@ Store 的静态描述表记录：开始类型、终态类型、两端关联属�
 
 ```sql
 SELECT root_id
-FROM member_roots
+FROM timeline_member_roots
 WHERE session_id = ? AND branch_id = ? AND index_id = ? AND group_key = ?
   AND sequence <= ?
 ORDER BY sequence DESC
@@ -77,7 +77,7 @@ LIMIT 1;
 
 工具名称筛选定位对应分组根；同一 tool-call 含重复名称时，同一分组仅保留一个事件成员。每批问题的所有匹配 calls 仍保持原下标。
 
-输入和工具索引不另存一份无分组集合。输入查询必须带 handover 缺失条件，工具查询必须带名称条件，才采用对应成员根。其余表达式保留通用执行，不是正常 inventory 的备用路径。每条分支的序号 0 空根只证明索引已初始化，不代表另一个待维护集合。
+输入和工具索引不另存一份无分组集合。输入查询必须带handover缺失或存在条件，工具查询必须带名称条件，才采用对应成员根。其余表达式保留通用执行，不是正常 inventory 的备用路径。每条分支的序号 0 空根只证明索引已初始化，不代表另一个待维护集合。
 
 续页绑定索引描述版本、分组、原 through 和末尾成员位置；不绑定 SQLite 游标或进程内句柄。并发提交只生成新根，不改变旧页范围。
 
@@ -99,4 +99,4 @@ LIMIT 1;
 
 MemoryTimelineStore 维护相同的关系和集合版本语义。持久格式和复制后的引用验证归 Store，业务所有者继续决定何时产生开始与终态。
 
-删减：不持久化查询结果正文、不增加业务状态机、不缓存完整历史。保留版本树只为固定 through 的成员读取；如果更简单的数据结构能通过同样的历史增长和旧截止位置验收，可以替换，但不能删掉版本语义。
+删减：不持久化查询结果正文、不增加业务状态机、不缓存完整历史。本轮固定使用现有版本 AVL，不重新选结构；它服务旧 through 和分页，与 Goal/队列本代的标准集合分开。正常 pending 不受已结束历史线性影响，是保留该机制的验收依据。

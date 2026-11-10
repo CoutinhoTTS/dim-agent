@@ -2,7 +2,7 @@
 
 Scope: 原生 Store 的查询执行。关联问题：[#1320](https://github.com/arcships/dim/issues/1320)。
 
-查询语义沿用[属性查询](../timeline-property-query.md)，模块责任沿用 [Resume §6](../resume-read-design.md#6-最终-api-与模块关系)。本设计不增加公开读取方法。新增持久结构需先确认[原生格式提案](native-storage-format.md#提案v40-补齐逻辑事件身份与恢复成员)。
+查询语义沿用[属性查询](../timeline-property-query.md)，模块责任沿用 [Resume §2](../resume-read-design.md#2-最终-api-与模块关系)。本设计不增加公开读取方法，采用已确认的 [v40 格式](native-storage-format.md#提案v40-补齐逻辑事件身份与恢复成员)。
 
 ## 1. 调用接口
 
@@ -84,7 +84,7 @@ WHERE e.kind IN (:all_required_kinds)
 | storage/query.rs | 提取必要身份；合并两种 locator；类型并集；保留关系范围和逻辑过滤。 |
 | storage/members.rs | 新静态描述、组合键及严格形状识别；复用原成员树。 |
 | storage/timeline.rs、复制与删除路径 | 在原事务更新输出 locator 与新成员。 |
-| storage/sqlite.rs、校验和升级 | 新格式准入、回填、完整性检查和失败回滚。 |
+| storage/sqlite.rs、校验和升级 | 按 v40 准入、回填、完整性检查和失败回滚，不改 v39 解释。 |
 | 业务 owner | 原查询条件和字段；不增加 Store 依赖或索引参数。 |
 
 用可丢弃数据库固定命中对象、当前成员及单条大小，将历史从 100 增至 5,000，并补充 6,000/60,000 的验收。分别测 ID 命中、未命中、混合普通/输出 ID、固定旧 through、分叉切点、正反向所有页面，以及真实恢复查询。累计选择、属性投影、关系和内部补查的全部 SQL VM、扫描、排序、自动索引、正文加载字节及 SQLite 内存。

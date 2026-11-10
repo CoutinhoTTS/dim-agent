@@ -1,117 +1,89 @@
-# InputQueue：保存和读取恢复状态
+# InputQueue：按当前输入和控制事实恢复
 
 Status: Draft.
 Scope: branch InputQueue；客户端 pending 合同不变。
 Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
-依据：[InputQueue](../architecture/rust-agent/plugins/InputQueue.md)、[状态结果](owner-state-indexed-reads.md)、[插件合同](plugin-contract.md)、[设计规则](../architecture/rust-agent/principles.md)、[ADR 002](../adr/002-plugin-scope.md)、[rutis](rutis-usage.md)。
+依据：[InputQueue](../architecture/rust-agent/plugins/InputQueue.md)、[状态保存边界](owner-state-indexed-reads.md)、[插件合同](plugin-contract.md)、[设计规则](../architecture/rust-agent/principles.md)、[ADR 002](../adr/002-plugin-scope.md)、[rutis](rutis-usage.md)。
 
 ## 1. 决定
 
-InputQueue 保存自己的完整队列控制状态，不再通过历史 input/turn 字段重放恢复。UI pending 继续由既有方法返回；它排除 handover，不作为本恢复的数据源。
+不再写 input-queue/recovered、input-queue/node，不保存整个 entries。原事实已经包含队列恢复需要的数据；问题在于原恢复没有直接选出当前对象。采用[成员及控制索引](appserver/timeline-state-read-indexes.md)，不新增队列 API 或私有数据库。
 
-新增 owner 结果类型 `input-queue/recovered`，采用既有扩展事实路径，不新增 query/getState/saveState 接口。源输入的已完成位置遵循[状态结果协议](owner-state-indexed-reads.md)。事件是提议的合同，不表示类型已实现。
+公开 pending 排除 handover，不能拿它的返回值恢复队列；本 owner 自己用同一 query 机制读取普通输入和 handover 两个集合。它不从 UI 获取控制状态。
 
-## 2. 恢复对象
+## 2. 逐对象决策
 
-结果的 schema、source_through 由上述协议定义；state 的唯一类型为 QueueState：
-
-| 字段 | 类型与含义 |
-| --- | --- |
-| turn | 当前 turn ID 或 null。 |
-| starting | boolean；已经释放驱动输入但未观察到 start/interrupt。 |
-| entries_root | 当前队列不可变有序树的根事件 ID；空队列为 null。 |
-| queued | 当前普通输入数量，不计 handover；供已发布结果直接更新 InputSnapshot。 |
-
-Entry 只有一个定义：input_id、源 sequence 和 kind 对象。sequence 决定 Queue 输入的释放顺序，不保存另一份 branch_id。kind 对象的 kind 字段为 input 时，含有效 mode 和 released；为 handover 时含目标 turn_id，不含 released。恢复不需要 user/blocks 正文。
-
-QueueState 的业务字段直接使用这个恢复类型；节点中的 Entry/EntryKind 在内存和持久化边界共用定义。持久化的子节点是事件 ID，装载后的子节点是同一数据的内存引用；只在持久化边界解析。
-
-初始化计算出的欠写 Apply/Delete 与第一份结果同批提交，不另存一份长期 owed 列表。结果不含进程 waiter、任务句柄或客户端连接。
-
-不从 applied 写入序号重新推导 starting。释放发生在源输入或 turn/end 的处理步骤，随后 interrupt 可以清除 starting，即使对应 applied 更晚才提交。
-
-## 3. 输入与状态转移
-
-| 源输入 | 状态和输出 |
-| --- | --- |
-| input/message | 按既有默认 mode 与 handover 规则加入、释放或删除。 |
-| input/consumed | 移除对应条目。 |
-| input/withdraw | 仅撤回仍被本 owner 持有、未释放的条目；必要时产生 Delete。 |
-| turn/start | 更新 turn，清除 starting。 |
-| turn/end | 按原状态机结束 turn、删除对应 handover、释放下一项。 |
-| stop/interrupt | 清除 starting；不凭空启动 held queue。 |
-
-input/applied 和 input/deleted 是本 owner 的输出，不再次改变已经完成的同一次转移。已提交输出不能在恢复时重新写；其它生产者不得用这些输出修改队列的私有状态。旧格式初始化仍按原兼容规则解释它们。
-
-## 4. 写入和恢复
-
-```text
-源事件 -> InputQueue 按序 handler
-          -> 从当前状态计算下一状态及 Apply/Delete
-          -> append 原子批次：[Apply/Delete，新队列节点，input-queue/recovered]
-          -> handler 返回，不等待数据库
-批次持久化 -> Dispatcher 送达 recovered
-             -> 发布 queued 数；撤回回复等待批次发布后返回
-
-恢复 -> 最后一个恢复状态，按身份装载当前根可达的节点
-     -> 按类型和位置索引读取 source_through 之后的源输入
-     -> 仅处理这些输入，提交输出和新状态
-```
-
-处理一批源事件时，转移仍逐项按序执行；可以合并最后恢复状态，不合并掉必要终态。source_through 只推进到本批已经按序完成的最后源位置。普通新结果与它产生的 Apply/Delete 一起提交，因此不留下“状态说已完成、终态尚未写”的中间持久状态。
-
-本代处理了新的源输入，但批次尚未提交时，状态不得被当作持久结果返回。提交失败中止该代处理并走 fault；不能继续以已修改内存接受更多工作。沿用 Timeline 的同步登记和异步持久化，不新增 worker。冷恢复和撤回方法等待既有发布通知，不在 handler 内等待 SQLite。
-
-撤回回复在批次提交后才完成。客户端 waiter 不恢复；重启后的队列状态和终态必须与已经提交的事实一致。
-
-撤回命令被接受后，若持久化失败或 owner 在结果发布前结束，返回 publication_unknown；不能返回表示未执行的 reloading，也不能把未知结果当成 notHeld。调用方恢复后先查询该输入的状态。命令被接受前的校验和写入拒绝保持原错误。
-
-恢复发布最终结果后，Dispatcher 可能仍会送达恢复期间提交的中间结果。InputSnapshot 按结果自身的提交位置单调更新，忽略已发布结果之前的记录；不能把队列数字退回前一恢复页。这个发布位置只属于本代内存，不替代 source_through。
-
-正常恢复只读一个 QueueState、当前树节点和真正未完成的源输入。它既不按历史 turn 重放，也不调用 session.input.pending 再猜 released/starting。缺兼容结果进入显式初始化，不能在普通 get 中隐藏全历史恢复。
-
-## 5. 队列节点与读写成本
-
-不能每次变化都复制当前完整队列。队列节点是本 owner 的私有 `input-queue/node` 事实，数据为 entry、left、right、height、queued、handovers、first_held。left/right 为子节点事件 ID 或 null；queued 为该子树的普通输入数量；handovers 为 handover 数量；first_held 为尚未释放的 Queue 输入中最小的源序号，没有则为 null。节点不可改写，按 input_id 建 AVL 树，消费、撤回和释放直接定位条目。最早 Queue 输入沿 first_held 定位；结束 turn 时跳过 handovers=0 的子树，只处理当前 handover 条目。Store 只存事实，不执行队列算法。
-
-新增、移除或改变 released 时，只复制受影响的树路径及旋转所需节点；同一批内不保存最终根不可达的临时节点。只改 turn/starting 而不改条目时复用原根。节点与引用它的 recovered 在同一原子批次，结果放在最后；不新增节点存储服务或插件数据库依赖。
-
-恢复用 query 按节点 ID 批量取必要字段，每批最多 128 个身份。节点查询的可见截止是结果自身的位置，因为节点可能晚于 source_through 写入；它与新源的读取范围分开。只装载当前根可达的 K 个节点，不枚举旧版本节点。节点缺失、循环或数据不兼容是恢复错误，不退回历史重放。
-
-运行时只持有当前树；旧版本由 Timeline 保留。结果中的 queued 在生产时来自同一根，发布时不为更新队列数字重新加载节点。内存状态、节点与恢复记录不保存历史正文或另一份完整 entries 数组。
-
-当前 K 项，恢复读取和内存随 K 增长；一次单项变化写一条平衡树路径和一个固定大小结果，不再序列化 K 项。批量删除 M 个 handover 按实际受影响项计费。分别测 K=0/10/1,000 的节点数、结果字节、WAL 与进程写入；不能把根变小就称写入免费。历史 N 增长不改变当前根可达的节点数。
-
-旧程序可能在最后结果之后写出没有 recovered 的 applied/deleted。恢复对本批计算出的必要输出按 input_id 点查现有终态，仅提交尚不存在的输出，不能重复应用。查询使用原输入关联索引和固定源截止，不扫描全部终态；实时 handler 不增加该读取。此兼容行为在旧格式与恢复交错流程中验证。
-
-## 6. 修改位置与依赖
-
-| 位置 | 修改 |
-| --- | --- |
-| input_queue.rs 的 QueueState | 保留既有状态机，增加单一恢复状态类型和边界编码。 |
-| InputQueue::on_event / write | 沿用按序 handler，提交原子输出/结果批次；recovered 发布后更新可见状态，不逐项独立提交。 |
-| InputQueue::rebuild | 读取兼容结果和索引中的未处理输入，删除八类型历史扫描。 |
-| input_queue/pending.rs | 方法及返回字段不变，由 Store 成员索引加速原查询。 |
-
-继续依赖 Timeline、Dispatcher 和 StateCell；无新增后台任务或生命周期依赖，不依赖 Store。事件类型及源条件向机制 owner 提出的要求见下表。
-
-| owner / 问题 | 现有合同与不足 | 需要的能力 | 位置和生命周期 |
+| 对象 | 实际改变条件 | 重载处理；原事实 | 新增持久化 |
 | --- | --- | --- | --- |
-| Store / #1320 | 已有类型/位置索引；恢复不得枚举旧前缀 | 将 from/through 和源类型直接用于索引范围，合并本次新输入 | 固定源截止；取消释放本页，不新增恢复成员索引。 |
-| Timeline / #1320 | 已有原子批次，无需另建事务端口 | 保持必要输出与结果同批，失败不发布 | 不改序号、before、发布或关闭规则。 |
+| entries | input/message 加入；consumed 移除；withdraw 仅删除尚未 released 的对象；turn/end 删除该 turn 的 handover，并释放最早 held queue | 保留尚无 consumed/deleted 的 input/message，按原位置排序；处理仍待决定的 withdraw 和失效 handover | 无。id、原位置、mode、handover.turn_id 留在原事实 |
+| turn | turn/start 设置 ID；turn/end 清空 | start/end 各Last，较新的 start 表示打开 turn；较新的 end 表示无 turn。旧 turn 的实际结算归 Loop，Queue 不假造结束 | 无 |
+| starting | 无 turn 时释放非 append 输入置 true；收到 turn/start 或 interrupt 清 false | 无 turn 时，当前 released 非 append 输入的 applied 位置晚于最新 start/end 和 interrupt 才为 true。它阻止第二个 queue 输入越过尚未开始的驱动 | 无 |
+| released | Queue 决定释放时变 true，并写 input/applied；不会被 withdraw 改回 false | 当前 input_id 有 applied 即 true；原 mode 从 applied 取得，决定已发生，不重复写 applied | 无 |
+
+handover 从不 applied、不计 queued；仅在所指 turn 打开时保留。其 turn 已结束或不匹配时写原 input/deleted。不能给它套 Goal 的 paused，也不能因重载删除普通待消费输入。Append 可保持 released 等待后续请求，不自动驱动新 turn。
+
+先固定 S，并注册 Dispatcher 交接。恢复期间不把较晚来源混入 S；恢复决定 append 后须提交发布才作为本代完成。S 之后已排队的来源仍按原顺序交付；同一个 input_id 的 applied/deleted 决定通过恢复时已取得的身份去重。新的恢复输出在尾部派发，不作为重复源转移。
+
+## 3. 具体读取
+
+1. 普通输入：kind=input/message，handover 缺失，不存在 consumed/deleted.input_id=id。Fields(id,position,data.mode)。成员索引直接读当前集合，页128。
+2. handover：同一反关联，改为 handover 存在。Fields(id,position,data.handover.turn_id)。需要 v40 补齐 presence=true 分组；现有实现没有维护它。
+3. 每个当前普通 input_id，分别按 kind+data.input_id 点查最后 applied 与 withdraw。handover 只查 withdraw。当前无 applied 且已有 withdraw 的条目写 deleted；已有 applied 的 withdraw 返回 notHeld，不重新 apply。
+4. start/end 各取最后一条 turn_id、position，构造 turn。存在 released 驱动且 turn 为空时才查最后 interrupt。只比较标量位置，不遍历旧 turns。
+5. 原 mode 缺失时才对该 input_id 查询 user 的 Present/非 null，按已有 effective_mode 规则恢复。不得为判断存在性返回整个 user。SQLite 对内联 JSON 的解析成本仍计入这一个选中对象，不宣称 Fields 自动免解析。
+6. 建立当前 entries 后执行原调度：已释放不重放；有效 turn 或 starting 时持有 queue；可释放时写原 applied；无效 handover/有效撤回写原 deleted。
+
+判定 withdraw 使用决定时的状态：applied 在 withdraw 之前已经提交则不可撤回；没有 applied 则 held。按序 owner 不会先写较晚释放再处理较早撤回；发现违背此生产合同的数据报错，不能用最新值掩盖。
+
+当前输入字段不包含 user 正文、blocks、历史终态、任务句柄或回复 waiter。answers/answered/lifecycle 仍为本代内存；已接受撤回后结果发布未知沿用 publication_unknown，不能返回假 notHeld 或自动重发。
+
+## 4. 变化检测和发布
+
+普通实时处理直接用原 QueueState 更新内存。删除/消费只查目标 id；turn/end 只处理对应 handover 与下一 held 输入。保留原标准有序集合，不为本轮重写调度算法；当前 K 项的查找最坏 O(K)，K不包含已结束历史。queued 使用入队/消费/删除的计数变化维护，不先复制整个 entries 比较。
+
+有 Apply/Delete 输出时沿用原 append_batch 和发布合同；纯 turn/starting 内存变化在该已提交源的处理完成后发布 InputSnapshot，不新增等待恢复事件的门槛。重复 turn 边界、空队列、无效 withdraw 都不写恢复结果。关闭只清理本代 waiter，不刷新快照。
+
+~~~text
+input/message -> 内存 entries -> 必要 input/applied
+input/consumed -> 内存移除 -> queued 通知
+turn/end -> 清 turn -> 有 handover/held 时写必要 deleted/applied；否则零写入
+reload -> 当前成员 + 每项决定事实 + 最新控制 -> 当前内存 -> 原调度
+~~~
+
+## 5. 成本与修改
+
+空队列正常冷读4次 query（两个当前成员组、两个 turn 边界），无正文、无写入。一个普通 held 输入增加 applied/withdraw 两次点查，解码一个 Entry；若 mode 缺失再加一次存在性。存在 released 驱动且无打开 turn 时再加一次 interrupt。当前集合分多页时每组按128个身份分页，只有有 next 才续页；这些都是当前任务，不是已完成历史。
+
+普通完整聊天一轮 Queue 仍写原 applied 1条；message、consumed、start/end 归原生产者。本设计额外事件为0。自动续行、配置改变、异常终止、空队列重载的恢复事件同样为0；异常后的实际删除/释放逐项按业务决定计数，不在“0快照”中抹去。
+
+| 必要落点 | 修改 |
+| --- | --- |
+| input_queue.rs | 恢复标准当前集合；去掉逐源 checkpoint、恢复事件订阅和以结果位置发布的逻辑；保留撤回发布错误语义 |
+| input_queue/recovery.rs | 当前成员、applied/withdraw、turn/interrupt 定位；不再八类型历史重放 |
+| input_queue/entries.rs、recovery/nodes.rs | 私有持久节点不进入目标实现；原标准集合承担当前调度 |
+| input_queue/pending.rs | 公共语义不变；不拿它替本 owner 恢复，也不增加参数 |
+| Store | 维护已声明 handover 分组，输入属性关联命中既有 input_id 索引；细节归索引设计 |
+
+旧 input-queue/v1/v2 结果只作为旧派生记录保留，不加载、不回填；原输入和决定事实仍是兼容来源。索引升级一次建立当前成员，普通打开不得退回历史重放。缺索引/损坏返回存储错误。
+
+## 6. Requirements raised to mechanism owners
+
+| owner / 问题 | 现有能力与不足 | 确定要求及位置/取消 |
+| --- | --- | --- |
+| Store / #1320 | input/v1 只登记 handover 缺失组；普通 pending 不能返回交接对象 | v40 增加同一关系的存在组；维持固定 S、旧版本分页、取消及事务。见索引设计 |
+| Timeline / #1320 | 现有 query、原子 append、Dispatcher 交接足够 | 不增加 checkpoint 参数或查询服务；恢复输出走原尾部发布 |
 
 ## 7. 验收、Rule check 与删减
 
-复用队列公开流程比较撤回回复、后续 applied/deleted 和启动 turn。覆盖 queue/steer/append、handover 无目标、先释放后 interrupt 再写 applied、消费、并发输入、提交前后崩溃、初始化旧 owed 和重复恢复。固定 K、U 增加十倍已处理历史，不能读取旧源正文。
+复用 queue/steer/append、handover、starting/interrupt、消费、撤回、装配恢复与 publication_unknown 流程。覆盖 applied 前后崩溃、withdraw 提交后尚无 deleted、turn/end 尚未清 handover、已消费驱动不误设 starting、同一 cutoff 续页。正常输入消费在其 turn/start 之后；违反此关系不是另造恢复状态的理由。
 
 | 规则 | 本设计 |
 | --- | --- |
-| principles §1；ADR 002 D1 | 原 branch owner 保存队列状态。 |
-| ADR 002 D2–D5 | 无接线层或新服务；无新用户配置；事件与字段是语言中立合同。 |
-| §4 规则 1、2 | 不代替 Loop 消费输入，交接后不撤回。 |
-| §4 规则 3、4 | 无 before I/O；Store 不执行队列状态机。 |
-| §4 规则 5、6 | 输出/结果原子；不新增上下文入口。 |
-| §4 规则 7、8 | 只用现有声明服务；索引需求由机制 owner 闭环。 |
-| §4 规则 9 | 结果用于恢复未来决策，不为 UI 单独追加日志。 |
+| principles §1；ADR002 D1 | 原 branch Capability 决定队列，Loop 决定执行 |
+| ADR002 D2–D5 | 无接线层、用户配置、新服务；事实和查询语言中立 |
+| §4 1–4 | 原交接/异步责任；无 before I/O，Store 不调度 |
+| §4 5、6 | 保留必要 Apply/Delete 与发布规则；无上下文旁路 |
+| §4 7、8 | 复用原服务；机制要求见§6 |
+| §4 9 | 只保留真实释放/删除事实，不保存可直接取得的重复控制状态 |
 
-删除历史字段恢复循环与临时 owed 的全历史累积；保留当前 entries 是业务队列本身。首版不增加通用持久 map、三种 reader 或独立完成事件。
+删减审查：移除完整队列快照、节点事件、queued 的持久副本、逐源 source_through；不增加替代快照。保留成员索引是为直接取得当前未完成输入，不以保存恢复代码方便为理由。

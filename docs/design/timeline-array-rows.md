@@ -1,90 +1,54 @@
-# Timeline：数组元素查询
+# Timeline：按已知下标读取数组元素
 
 Status: Draft.
-Scope: Timeline 查询合同的元素行扩展。
+Scope: 现有属性查询的下标点读和原生执行。
 Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
-基础合同：[属性查询](timeline-property-query.md)、[插件查询入口](plugin-contract.md#54-the-event-query)。
+合同：[属性查询](timeline-property-query.md)。消费者：[Prompt 恢复](prompt-state-read.md)。
 
 ## 1. 决定
 
-沿用 query，不新增读取服务。默认输入仍是一条事件；调用方可以指定一个数组字段，使数组中的每个元素成为一行。本文定义元素行合同；大数组的内容定位另由存储格式设计规定。
+不增加 QuerySpec.rows、QueryRows、元素行、数组聚合或新的读取方法。Prompt 已保存事件 ID 和原始下标，直接使用现有 Fields 的数字下标路径。原 QuerySpec 的 Rust 构造、JSON、返回类型和事件游标保持不变。
 
-这与现有 Fields 的 `[]` 投影不同：原投影保留数组形状；元素行可以独立筛选、分组、排序和分页。
+需要修改的是原生执行：先定位事件，再定位选中数组元素，最后解码所选内容。返回一项不能以解析整个数组为代价。
 
-## 2. 请求与字段
+## 2. 请求形状
 
-在原 query 对象增加可选 rows：
+按事件 ID 分组，每组最多 128 个引用；同一事件的多个下标在一个 Fields 请求中读取。例如：
 
-```json
-{
-  "rows": {"kind": "elements", "field": "data.changes"},
-  "filter": null,
-  "select": {"kind": "fields", "fields": [
-    "position", "element.index", "element.value"
-  ]},
-  "group_by": [],
-  "pick": null,
-  "order_by": []
-}
-```
+~~~text
+A 的下标 2、7：
+  scope  = 原业务可见范围，through = 固定恢复截止
+  filter = kind = prompt/changed AND id = A
+  select = Fields [id, position,
+                   data.changes[2].entry, data.changes[7].entry]
+  pick   = null
+  group_by / order_by = []
+  page   = limit 1，无续页
 
-| 字段 | 合同 |
+B 的下标 7：
+  相同范围，filter 中 id = B
+  select = Fields [id, position, data.changes[7].entry]
+~~~
+
+调用方按请求中的字段顺序取得 QueryValue，直接在持久化边界解码 PromptEntry。不同事件不共享下标集合，不请求 A/7 以外未引用元素。每个恢复批次有 K 个引用、分布于 G 个事件时，G <= K <= 128，执行 G 次逻辑 query，不把它写成一次 SQL。
+
+## 3. 原执行合同
+
+沿用字段下标语义：事件不可见或不存在则没有行；可见数组的下标越界返回 Missing；数组内 null 保持 null。Prompt 持有的有效 Set 引用缺失、不是 Set 或 entry 损坏时，恢复报错，不能静默丢掉提示。
+
+Memory 使用现有数字下标投影。SQLite 对外置 changes 先读事件的数组引用，再以 (session_id, array_id, element_index) 定位元素内容；不展开其它下标。原始内联旧编码在格式升级时转换，正常新格式读取不临时迁移。具体编码归[原生格式](appserver/native-storage-format.md#提案状态读取索引与数组元素)。
+
+完整事件读取仍还原全部 changes；Any、Count、Exists 和原事件分组保持原合同。本工作不把它们推广成独立数组元素的计算语言。
+
+## 4. 修改和验收
+
+| 对象 | 修改 |
 | --- | --- |
-| rows 省略 | 原事件行，结果和游标语义不变。 |
-| rows.kind | 首版只增加 elements；不增加任意数据源或 SQL。 |
-| rows.field | 一个公开事件数组字段；不能包含 `[]` 或再展开第二层数组。 |
-| element.index | 原数组的零基下标；筛选不重编号。 |
-| element.value | 该元素的原始 JSON 值，可读取其子路径。 |
-| 原有事件属性 | 仍指包含该元素的事件。每个元素共享同一事件位置。 |
+| Prompt 恢复 | 将已存引用按事件分组，提交已存在的 Fields 下标路径。 |
+| storage/query、codec | 下标投影直接加载所选元素；同一次 query 内复用同一事件 wire。 |
+| 数组 locator 与升级 | 保留直接寻址、内容验证、复制/删除和导出；不附带通用展开器。 |
+| runtime 查询类型、普通调用方、SDK | 不增加字段或类型，不批量补 rows=None。 |
 
-先执行不依赖元素的必要事件条件，再展开其数组。OR 的每个分支都要求事件身份时，先取这些身份的并集，再判断各自的下标；不展开其它事件。某个 OR 分支没有事件限制时，不能借用另一个分支的身份把它排除。缺失、null、空数组产生零行；实际展开的非数组值返回输入类型错误，不能当作空集合。数组内的 null 仍是一行。请求完整 Events 与 elements 不能组合，不能把元素伪装成事件。
+验收复用 Prompt 恢复 flow：固定两个有效引用，将原 changes 从 128 扩至 2,048 项。返回与旧投影相同，未选元素内容节点加载为零；被选元素损坏失败，未选元素损坏不被本次读取加载。完整导出仍发现损坏。覆盖祖先截止、同事件多下标、缺失、越界和同名键。
 
-Fields、Count、Exists 和标量分组可用于元素行。Characters 保留字符串字符单位。组内 First/Last 按分支段、事件序号、元素下标选择；order_by 只排列最终结果。事件行与元素行的游标不能混用。
-
-## 3. 条件和关联
-
-根 Field 可以读取事件属性及 element.index/value。Element 操作数仍只用于原 Any 条件，不增加另一种读取同一根元素的写法。
-
-Exists 的内层仍是同一固定范围中的事件，不隐式展开另一个数组。Outer 指外层结果行，因此可以引用外层事件位置和 element.index/value。内层 Any 的 Element 只指它正在判断的数组元素，不指外层元素。需要引用外层元素时必须使用 Outer。
-
-元素行的下标不改变原事件位置，不能用筛选后相邻行代替原数组下标。首版不增加 Any 内的下标操作数、嵌套 Exists、嵌套 Any、任意函数、CASE 或用户 SQL。
-
-TextCandidate 仍只接受事件属性及事件属性分区，不接受 element 字段。它提供 Recall 的事件文本候选，不在元素展开后建立另一套全文分区；元素中的字符串筛选使用原 Compare、Prefix 或 Contains。
-
-Prompt 正常恢复按已保存的事件 ID/下标读取有效 Set，不要求 query 猜测 Set.entry.source 与 Revoke.source 的对应关系。历史初始化才解释两种操作。当前条目的维护与有效性见 [Prompt 设计](prompt-state-read.md)。
-
-## 4. 固定范围和分页
-
-先固定分支链和 through，再在该范围展开、筛选、关联、分组，最后分页。排序的末尾唯一键包含元素下标。续页保留原 through，不能以页游标缩小关联范围。
-
-同一事件的元素可以跨页；调用方不能把元素页当成原子事件批次。取消释放本次查询的数组、临时索引和正文引用。
-
-## 5. 执行目标
-
-以下 SQL 只说明元素行语义，events 是既有逻辑事件范围：
-
-```sql
-SELECT e.position, c.key AS element_index, c.value AS element_value
-FROM events e, json_each(e.changes) c;
-```
-
-存储先用事件类型、范围、身份或元素索引缩小输入，再读取必要数组。按事件 ID 和下标点选时，直接取得元素，不先展开整数组。大数组元素定位与内容编码由[下一格式提案](appserver/native-storage-format.md#提案状态读取索引与数组元素)定义，不为返回几十个有效条目展开所有历史 changes。元素索引保存身份与内容引用，不复制另一份权威正文。
-
-Memory 与 SQLite 返回相同元素身份、缺失值和顺序。合并物理行先恢复逻辑事件位置。引用内容只在所选属性要求时加载。数组行能力只解决表达问题，不自动提供有效条目索引或业务生命周期解释。
-
-## 6. 验收
-
-- 同事件内 Set/Revoke 的先后次序正确；同键重复操作、null 元素、缺失和非数组分别验证。
-- 选择、关联、分组和续页在元素跨页、祖先截止、publishing tail 下结果一致。
-- 旧事件行请求及其游标不变；新查询在旧服务端明确报不支持，不改成全历史读取。
-- 历史操作增长十倍、当前有效条目不变时，分别检查元素选择计划和返回量；不得只检查最后输出条数。
-
-## 7. Rust 与跨语言绑定
-
-`QuerySpec` 增加可选 `rows: QueryRows`；新增 `QueryRows::Elements { field }`。字段路径校验允许元素行中的 element.index/value；Any 的 Element 合同不变。Outer 的 element.index/value 总是外层输出元素，不新增操作数。
-
-rows=None 时省略序列化字段，沿用旧 query binding；不能让一个默认 rows:null 使已有事件游标无故失效。新元素游标明确绑定 rows 描述及下标。
-
-QueryRow 的返回形状不增加另一套结果类型；调用方显式选择位置和下标。排序/续页内部补齐元素身份，即使调用方没有选择它们。查询类型修改时同步 Rust、Memory、SQLite、服务声明和生成绑定，不新增语言专用接口。
-
-删减：只有单层元素行和元素身份；不增加关系 DSL、查询会话、Reader、计算字段或业务路径别名。
+删减：移除通用 QueryRows 及其筛选/关联/分组/排序/游标分支；保留现有字段接口和真实需要的元素定位。无需为没有生产消费者的数组分析组合新增测试。

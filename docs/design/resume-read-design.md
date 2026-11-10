@@ -1,234 +1,162 @@
-# Resume：按业务对象设计计算与读取
+# Resume：状态、查询与显示的最终设计
 
 Status: Draft.
-Scope: CLI resume 的跨模块流程；不定义各所有者的内部状态。
-相关问题：[#1320](https://github.com/arcships/dim/issues/1320)、[#1147](https://github.com/arcships/dim/issues/1147)。
+Scope: #1320 的跨模块读取、业务恢复和客户端打开流程。
+Issue: [#1320](https://github.com/arcships/dim/issues/1320)、[#1147](https://github.com/arcships/dim/issues/1147)。
 
-目标：状态在变化时计算并保存；恢复只读当前结果和结果之后的新工作；显示只读当前窗口。结构化查询负责定位这些对象，不负责重新计算所有业务状态。
+本文件规定本轮修改边界及模块关系，具体字段和算法由各 owner 文档唯一规定。目标是消除正常状态读取和客户端首屏对已处理历史的重算。InputQueue直接查询当前输入；Prompt保存有效引用与采用版本；ContextUsage保存已算出的数字。Goal恢复目标定义，未结束执行在内存中暂停，不恢复运行进度。不改模型请求构造、压缩质量或迁移内容。
 
-本文组织已确认方向的具体设计，不表示提案接口已经存在。保留 append/query 入口；原子批次用于结果与必需输出；已完成位置用于恢复，成员索引用于业务 pending。持久化格式与新事件按相应 owner 的提案实施，不扩大既有 issue 的已约定范围。
+## 1. 决策表
 
-正常状态读取的约束见[状态结果与未处理输入](owner-state-indexed-reads.md)：禁止扫描历史后筛选或 Fold。结果提交前崩溃留下真实未处理输入，恢复只处理该集合。原始历史重建只用于初始化、显式修复与等价对照。
-
-## 1. 先确定结果，再确定读取
-
-| 业务 | 要取得的对象 | 计算与 I/O 设计 |
+| 对象 | 采用的设计 | 明确排除 |
 | --- | --- | --- |
-| 上下文占用 | 当前贡献总量、算法、基准和模型预算 | [ContextUsage](plugins/ContextUsage.md)：变化时计算，数字节点和结果同批保存，查询不重建请求。 |
-| 输入队列恢复 | 当前条目树、turn、starting 和真实欠写结果 | [InputQueue 恢复](input-queue-recovery.md)：读取保存的控制状态，不从 UI pending 推导。 |
-| Prompt 恢复 | 当前条目引用、活动 scope、配置身份与版本 | [Prompt 状态读取](prompt-state-read.md)：保存有效引用，按事件 ID/元素下标取内容，删除五处历史重放。 |
-| 首屏与折叠详情 | 有界显示窗口，以及用户展开的详情 | [Session 显示读取](appserver/session-display-read.md)：先选择显示对象，正文按需读；显示对象与完整事件明确分型。 |
-| pending / turn | 各所有者当前未完成集合、轮次及输出水位 | 保留[输入状态读取](input-state-read.md)的结果语义；[Store 成员索引](appserver/timeline-member-index.md)直接分页集合。 |
-| Goal | 当前 Goal 状态、执行控制和源位置 | [Goal 状态读取](plugins/Goal-state-read.md)：保留原模型可见状态，读取 owner 完成结果，删除补偿先作为工作结算。 |
-| SQLite 属性执行 | 调用方指定的字段或计算结果 | [读取执行补充设计](timeline-read-followups.md#属性投影与累计执行成本)：批量投影，统计关联和内部补查成本。 |
-| 首开完整性校验 | 存储合同要求验证的记录及关系 | [恢复读取成本](appserver/restore-read-cost.md)：保留必要扫描，单独测量并减少重复处理。 |
+| ContextUsage | 独立branch owner；真实内容/配置/基准变化保存数字；无效果尾部只合并小位置缓存；既有预算/校验复用已算数值。 | 独立boundary、私有数字树、producer confirm/discard、请求基准事实/正文缓存。 |
+| InputQueue | 当前普通/交接输入成员 + 每项applied/withdraw + 最新turn/interrupt；原必要决定事实。 | 完整队列恢复结果、节点事件、持久queued/starting副本、历史八类型重放。 |
+| Goal | 只保存完整业务状态；运行期只改内存，重载将 active 映射为内存 paused，显式 set/resume 才执行。 | goal/recovered、运行状态/集合持久化、每输入边界、旧轮次/计数/评估恢复、get 扫历史。 |
+| Prompt | 仅有效引用与revision/system_revision；真实采用/退役同批保存；scope边界按键点读，配置独立取得。 | turns/tasks/configuration_event/source_through持久副本、无条目生命周期快照、QueryRows。 |
+| Store pending | 保留按位置排序的版本成员树；同一 through 读取当前成员。 | 仅存当前集合、扫描所有 origin 排除旧 terminal、插件访问 SQL。 |
+| ID 与字段定位 | v40输出locator、五种恢复描述、handover存在组及实际使用的turn/scope/源位置键。 | 必须补kind才能点查、任意JSON索引注册、owner状态数据库。 |
+| 显示 | 有界窗口、完成压缩摘要、一次类型化 detail。 | 每块重读完整详情、文本拼接协议、服务端详情缓存。 |
+| 校验 | 保留现有完整性检查与校验复用，分阶段计量。 | 延迟/抽样校验、正文缓存、借扫描成本重写业务。 |
+| 请求存储前缀 | 沿用已发布请求存储合同。 | 本轮新增的冷前缀重哈希优化及请求链重构。 |
 
-三类工作不能互相替代：SQL 判断存在性、关联和最新值；业务所有者解释状态变化；正文读取服务显示或本次模型请求。分页只是分批返回，不改变应计算哪些对象。
+各设计为确定方案，不列实现者自行挑选的替代结构。表中 O(K)、旧格式兼容和删除修复是各自明确成本，不是正常历史遍历的备用路径。
 
-## 2. 目标流程
+## 2. 最终 API 与模块关系
 
-以下是目标流程，不是当前装配图。各部件的服务、订阅和恢复由其设计定义。
+以下为目标调用关系，当前装配仍以生成图为准：
 
-```text
-attach
-  -> 取得或恢复 Session：校验与各 owner 恢复分别计时
-  -> 固定显示窗口位置
-  -> 读取显示窗口并投影，尽早显示
-  -> 安装相同截止位置的 owner inventories，交接后续事实
-
-usage 读取
-  -> ContextUsage 的指定位置结果
-  -> 不阻塞 CLI 的历史回复、发布和用户命令处理
-
-展开详情 -> 按身份读取详情
-加载更早 -> 在原窗口范围继续分页
-```
-
-窗口投影可以先显示；依赖 owner inventory 的操作在该 inventory 可用前不得使用历史窗口推断出的替代状态。查询失败保留错误与重试能力，不作为空集合或无运行任务。
-
-## 3. 控制状态读取的业务边界
-
-pending 方法分别返回各自未结束对象。候选和 terminal 关联使用同一截止位置；续页只推进外层结果，不能排除游标之前的 terminal。正文只在实际展示或结算该对象需要时选择。
-
-当前轮次与未完成输出的绝对水位来自 owner 方法。输出字符计数的含义是 Unicode 字符，不是 usage 的序列化字节统计，不能互相代用。
-
-Goal 已有完整状态记录，但删除提交后、补偿提交前，该记录可能不代表正确状态。正常读取必须确认记录有效性；候选 fold 只用于迁移、构建和等价对照，不作为隐蔽回退。只读当前状态不意味着丢掉配对、旧格式和删除补偿语义，也不预先要求任意历史状态版本接口。
-
-普通未打开分支不读聊天正文。不得为简化 UI 调度新增一个读取所有分支完整状态与历史的聚合服务。独立 inventory 的网络等待若经测量成为瓶颈，可在固定截止位置并发不同方法；同一方法的续页依赖仍按序。
-
-## 4. 成本如何验收
-
-| 路径 | 必须减少或界定的工作 | 不能据此宣称解决的问题 |
-| --- | --- | --- |
-| usage 正常读取 | 读取持久统计，不读已结算消息正文；在线查询不重建历史 | 异步请求本身不降低服务端 CPU；持久化方案必须另外证明一致性。 |
-| 输入、Prompt 恢复 | owner 接收的字段和处理对象有明确后续用途 | 返回当前对象不保证 SQL 没扫全部 origin 或 change。 |
-| 显示窗口 | 隐藏请求正文加载为零；折叠详情在展开前不传输 | 事件条数不能代表字节上限；单个原子批次可能很大。 |
-| 完整性校验 | 明确记录数、解码及关系检查成本 | 它的必要全量扫描不能作为其它模块重放历史的理由。 |
-
-记录产品装配下的校验、owner 恢复、插件 opening、历史选择/解码/编码、客户端投影/首帧、inventory 和 usage。不同取样范围的耗时不直接相加。
-
-分别扩大已结束历史、当前未完成对象和单条内容大小。记录 wall time、CPU、Rust 与 SQLite 内存、读取正文和返回字节、SQL 总指令及额外写入；同时检查首个页面和全部页面累计。已有有效统计的恢复与首次初始化必须分开报告。
-
-## 5. 设计约束与删减
-
-不新增公共 Reader、完整历史缓存或替各模块计算业务状态的统一恢复层。ContextUsage 的独立部件由 [ADR 023](../adr/023-context-usage.md) 决定；其它业务继续由原 owner 处理。
-
-各草案明确区分可复用的现有机制与尚缺的能力。没有证明等价的直接查询，不取代现有恢复算法；没有一致提交保证的异步快照，不宣称正常冷恢复无需补算。设计不得通过改变 UI 数值含义、跳过校验或删去恢复义务获得性能收益。
-
-## 6. 最终 API 与模块关系
-
-以下为目标调用关系，不是生成的当前装配图：
-
-```text
+~~~text
 CLI / ACP / Web
-  -> 原 session.* 方法 -> 对应业务模块
-                          -> 活 owner：读取其已提交状态
-                          -> 需要事实：Timeline.query -> Store.query
-                          -> 结束分支：TreeCommands.query -> Store.query
+  |-> session.goal.get               -> Goal 当前内存状态
+  |-> context.usage                  -> Usage 已完成的统计结果
+  |-> 原 *.pending / turn.get         -> 业务方法组织既有 query
+  |-> history.display                -> App Server 显示选择
+  +-> history.detail                 -> 按身份读取一个展开对象
 
-业务 owner 的输出 / 恢复结果
-  -> 既有 append / 原子批次
-     -> Store 同事务维护索引
-        -> 提交后原样发布与派发
-```
+需要事实的业务 owner / App Server
+  -> 活分支：Session/Branch 门面或本部件的 timeline
+     结束分支：TreeCommands.query
+  -> Timeline 建立固定范围与祖先截止
+  -> Store.query 按索引执行，返回选定字段
 
-活 owner 的 getter 先确认本次固定位置已处理，再返回已提交状态；不是每次调用都查询事实。需要读取事实时，已打开分支使用 Timeline.query；结束分支使用 TreeCommands.query。后者只支持 branch 范围，没有 publishing tail。尚未打开但未结束的分支按原 Session 获取流程打开，不能因为没有 owner 就套用结束分支读取。两个 query 入口都建立读取范围后调用 Store；业务模块没有直连 Store 的路径。Store 执行 SQL、成员索引和数组内容定位。目标图只表示调用关系，不表示新增装配或服务。
+业务变化 -> 原 append_batch
+         -> 原事实、必要输出/恢复结果
+         -> Store 同事务维护索引
+         -> 提交发布 -> Dispatcher -> 各 owner
+~~~
 
-| 层 | 负责 | 不承担的工作 |
-| --- | --- | --- |
-| 业务 owner | 定义源类型、选择字段、解释变化、保存结果；等待自己的处理进度 | 不生成 SQL，不维护数据库索引。 |
-| Timeline / TreeCommands | 建立分支、祖先切点、固定 through 和可见尾部，交给 Store 执行 | 不计算 Goal、队列、Prompt 或 usage。 |
-| Store | 编译 query；按索引选身份，再取必要属性；维护事实与索引的一致提交 | 不判断提示是否有效，不执行 Goal Fold，不渲染上下文。 |
-| CLI / ACP | 展示窗口，按需取详情，消费 owner 的状态回复 | 不从窗口事件推导完整 pending 或当前 Goal。 |
-
-| 入口 | 决定 |
+| 层 | 负责 |
 | --- | --- |
-| session.goal.get / session.context.usage | 保留；不在方法内重建历史。 |
-| session.input/question/exec/collaboration.pending | 保留参数、返回和 through；只替换 Store 执行方式。 |
-| Timeline.query / TreeCommands.query | 保留；只增加[元素行](timeline-array-rows.md)这一项表达能力。 |
-| append 与原子批次 | 沿用事实写入；不增加 getState、saveState、SQL 或事务服务。 |
-| feature 内部 contextUsage.read | 业务统计接口，ContextPreparation 消费；不是新的通用读取层。 |
+| 业务 owner | 定义当前状态、源事实、字段、转移、保存及恢复；拥有自己的任务。 |
+| Timeline / TreeCommands | 固定分支、祖先、through、发布尾部、权限及取消范围。TreeCommands 仍只支持 branch。 |
+| Store | 用既有 query 执行索引定位、字段投影和通用关联；维护存储格式。 |
+| 客户端 | 窗口、展开视图、请求调度；采用 owner inventories，不从显示历史重建控制状态。 |
 
-四个 owner 的新恢复类型分别为 goal/recovered、input-queue/recovered、prompt-state/recovered、context-usage/recovered。它们各自定义 state，公共已完成位置语义只在[状态结果合同](owner-state-indexed-reads.md)定义。结果不是另一份模型上下文。
+保留 TimelineQuery、QuerySpec、Fields、QueryRow、QueryValue、原 pending/get 方法。**不新增 query 字段、QueryRows 或状态 CRUD。** Prompt 使用原有数字下标路径；只改其 Store 执行和数组定位。唯一新增业务读取服务是 ADR 023 决定的内部 contextUsage.read；显示协议由 App Server 自己定义。
 
-这些是新增事实合同，不是无成本的缓存。恢复结果增加写入与历史保留；源查询必须把已完成位置作为索引下界，不能保存结果后仍扫描全部源输入。
+插件不取得 Store 句柄、表名或索引名，不自行写数据库。未打开但仍活动的分支按现有 Session 获取流程打开，不能套用结束分支快读。
 
-本次首先改造现有 Rust owner，复用已有 Rust 原子批次。跨语言 timeline 当前没有暴露同等的任意多事实批次，不能宣称 TypeScript 已支持本结果协议。今后扩展该绑定时应暴露既有原子批次能力，另列公开合同变更；不能用多次 append 冒充原子提交，也不为此增建状态数据库 API。
+## 3. 正常恢复和实时处理
 
-## 7. 一致性与初始化流程
+不再统一要求owner每处理源事件就保存完整结果。内存位置前进和持久化触发分别由业务设计决定，字段/事件数唯一见[保存边界](owner-state-indexed-reads.md)。
 
-```text
-原事实提交
-  -> owner 按原位置处理真实工作
-  -> [必要输出、恢复状态、已完成源位置] 一次提交
-  -> 发布结果
+~~~text
+Goal  -> 最新完整业务状态 -> 未结束在内存paused；运行计数不恢复
+Queue -> 当前输入成员 -> 每项决定事实 -> 最新控制 -> 原内存调度
+Prompt-> 最新有效引用 -> 指定scope边界 -> 有效Set下标；配置独立读
+Usage -> 最新数字/小位置缓存 -> 仅真正尚未处理来源 -> 数字提交后发布
+~~~
 
-resume
-  -> 读最后结果并检查 schema
-  -> 索引读取已完成位置之后的新源，空则不读旧输入
-  -> 处理完后交接实时消费
-```
+普通已就绪getter直接用owner当前内存；固定本次目标，等待真实工作交接，不等待并不存在的“每回调恢复事件”。usage不以新总量冒充旧through。查询取消不撤销已接受业务工作。Goal重载暂停不传播到其它owner；Loop/Tool/Task等仍结算自己的资源。
 
-源输入截止与结果读头不同：结果可以晚于被处理输入提交。恢复先取结果，再以其 source_through 为下界、恢复截止为上界查询新源。不通过确认反关联找源输入。普通 pending 保留其开始与终态使用同一 through 的原语义。
+### 3.1 必要对象和成本
 
-未配置统计、没有 Goal、空队列是各自明确结果，不触发通用恢复。缺结果、schema 升级或首次启用 owner 是初始化：一次构建状态与基线，普通 resume 不反复做。缺节点/索引是错误，不是“没有状态”；初始化和错误不能悄悄降级成全历史查询。
-
-## 8. 实施顺序与文件
-
-| 顺序 | 修改对象 | 完成条件 |
+| 对象 | 正常单分支冷读 | 新增写入 |
 | --- | --- | --- |
-| 1 | storage/query.rs | 修 FTS 驱动方向、删除关系方向、批量字段投影，原语义对照通过。 |
-| 2 | runtime 查询类型、Memory、SQLite、声明绑定 | 元素行按成对身份取值，旧事件查询不变。 |
-| 3 | storage/timeline.rs、sqlite.rs、codec 与格式升级 | 沿用成员根和类型/位置索引，补齐数组元素直接寻址；事实/索引原子且支持旧 through。 |
-| 4 | InputQueue | 完整控制状态与终态同批保存，恢复不再八类型重放。 |
-| 5 | Prompt / ConfigurationPublisher | 引用恢复及单一 owner 状态；五个旧 read 入口替换。 |
-| 6 | Goal | 完成结果与未处理工作恢复，get 删除候选 fold；删除路径单列实际受影响工作。 |
-| 7 | ContextUsage / context_model / 请求事实 owner | 数字状态、算法合同、基准引用和统计查询，删除 usage 的 rendered_stream。 |
-| 8 | CLI / ACP、显示窗口 | 首屏不等 usage，采用原方法安装 inventories；展开详情才取大正文。 |
+| [Usage](plugins/ContextUsage.md) | 数字/位置缓存各1+六类源Last，共8定位query；无旧消息解码 | 每个实际内容源一份numeric（同时是累计边界），配置/基准变化合并；仅无效果尾部交接保存小covered |
+| [队列](input-queue-recovery.md) | 空队列4query；有队列只增加当前对象的applied/withdraw及必要默认mode、interrupt定位 | 恢复事件0；仅原applied/deleted |
+| [Goal](plugins/Goal-state-read.md) | 新格式普通加载1条；兼容/删除修复单列；活get零SQL | 仅真实goal/state；运行进度和重载均0 |
+| [Prompt](prompt-state-read.md) | 引用1+配置1+G个有效正文事件+已知scope键定位 | 真实采用/退役每批1份引用；普通无提示变化的turn0 |
+| [pending](appserver/timeline-member-index.md) | 固定through根、当前成员与本页字段 | 原事实事务维护成员路径；不复制整个当前队列 |
 
-存储新增结构和数组编码必须采用[下一格式提案](appserver/native-storage-format.md#提案状态读取索引与数组元素)，不能无声改已提交的 v37。数组/索引就绪前不把 owner 的目标恢复写成已完成性能改造。
+表中为逻辑query，不是statement计数。SQL表达式、索引键、当前未匹配条件和额外扫描范围见[状态字段索引](appserver/timeline-state-read-indexes.md)。源码拥有的原有能力与目标新增执行必须分开验证；LIMIT1不是性能证据。
 
-## 9. 读写量验收
+## 4. 初始化、删除和错误
 
-N 为已经处理的历史，K 为当前结果成员，U 为真实未完成工作；这些数量分别变化：
+| 情况 | 确定处理 |
+| --- | --- |
+| 旧数据/缺少派生结果 | Queue直接用原事实和升级后的成员索引，不写初始快照；Prompt已知v1可取原引用，缺引用时明确一次初始化；Usage旧v1–v3明确初始化数字。Goal仅兼容目标定义，不回填运行快照。 |
+| 配置不存在或计数不支持 | Usage 直接返回原业务错误，不先渲染正文。 |
+| 未知 schema、缺引用、损坏 | 返回错误，不隐藏为“无状态”，不使用更旧结果或全历史回退。 |
+| fork | 各owner遵守原opening/祖先截止；只用切点内可见引用和数字，缺数字时明确首次初始化，不冒用父分支未来状态。 |
+| Goal 删除 | input_id 定位受影响业务状态，类型/位置索引定位前一个完整目标；只修复实际受影响的 Goal 业务变更，结束旧执行并完成必要补偿，不重建控制源。 |
+| 首次完整性校验 | 按存储合同完整检查，单列 O(N) 读取；不改变校验要求。 |
 
-| 路径 | 目标读取 | 新增写入 |
+Goal 删除及删除后补偿未提交的崩溃，属于目标定义的真实业务修复，成本按受影响 Goal 变更计；不恢复旧次数、轮次、任务或评估，不为普通输入保存边界。旧格式兼容与该修复不承诺只读一条；新格式普通加载不借此重扫历史。
+
+## 5. 首屏、详情和 Recall
+
+### 5.1 客户端打开
+
+~~~text
+attach -> 固定窗口 -> 显示首批内容并接受输入
+                  -> 相同头的 owner inventories
+                  -> 异步 usage
+
+展开 -> 一个 detail RPC -> 原视图
+较早 -> 原范围下一页
+~~~
+
+客户端沿用 100 行、四页和 300 身份的首开预算。缺 turn/start 不改 done 的含义，不把整条分支读完。历史页、usage 和用户输入不能被同一个串行 await 相互阻塞。
+
+[显示设计](appserver/session-display-read.md)规定 summary、实时协商、类型化 detail 和超限错误。首屏 replacement 传输为零；内联大事件的 SQLite 解析仍计费。详情一次读取/编码，不按字节 offset 反复重读。超出既有回复帧预算明确报错并保留导出路径。
+
+### 5.2 Recall 与已有 FTS5
+
+复用已有 FTS5 TextCandidate，不增加渲染结果索引。索引只提供源属性的无漏报候选；既有 3–200 ASCII 安全词规则、跨 delta 尾部及未索引词保留语义不变。
+
+Recall 先取候选位置和关联键，按候选重建自己需要的 thing 正文并验证；达到结果页及续页证据即停止。没有命中的保守候选仍会被验证，这是真实候选工作，不是 owner 状态恢复。非可索引词、渲染新增文字和未索引类型不作“零扫描搜索”承诺。
+
+Store 对有选择性的文本候选从候选驱动关联，不能先扫全部 origin 再逐条检查 FTS；没有 TextCandidate 的查询不构建全文候选集合。关系判断保留原固定范围，分页只推进外层。具体执行只在[读取执行设计](timeline-read-followups.md)定义，不改 Recall 业务匹配。
+
+Hooks 等其它现有恢复查询只接受通用 SQL 执行优化，不在本轮另建持久状态 owner。其实际候选和计算量单列；本设计不把执行器修复等同于所有插件都已消除历史折叠，也不以它为由扩写所有插件状态机。
+
+## 6. 必要修改和撤出范围
+
+| 单元 | 必要落点 | 不保留的现有分支扩张 |
 | --- | --- | --- |
-| Goal get | 活 owner 不查库；结束分支读取 opening、最后结果及新源是否存在，不展开驱动树 | get 不写；业务变化写结果及原必需输出。 |
-| pending 一页 | 一个版本根、树路径和本页对象 | 原事实提交维护成员路径。 |
-| InputQueue 恢复 | 一个结果、当前根可达的 K 个控制节点，加 U 项工作 | 单项变化只写受影响树路径和一个结果；不复制完整队列。 |
-| Prompt 恢复 | 当前引用元数据、K 个元素、U 项工作 | 当前引用状态与必要采用事实，不复制历史 body。 |
-| usage | 当前总量、限制和适用基准，不展开消息叶 | 新增/替换的数字路径、结果；无逐 delta usage 日志。 |
+| Usage | 数字owner；现有usage委托、计数/投影复用；原ContextPolicy.prepare/validate复用同一请求已算数值。 | 数字树、boundary与snapshot双写、request-base事实、ModelProvider/AgentLoop confirm/discard、事件计数载荷。 |
+| InputQueue | 原当前集合与发布；当前成员/决定/控制查询。 | recovered、entries节点/序列化、八类型源历史重放；公共pending合同改动。 |
+| Goal | 内存执行状态、完整业务事件、异常/关闭 paused、重载映射、owner get、文本/评估生命周期对齐。 | 完整运行快照、逐事件 checkpoint、节点装载、源后缀执行重放、每输入边界、重载后自动续行/评估。 |
+| Prompt | 精简引用、指定scope读取、原采用/退役批次合并、ConfigurationPublisher显式状态；按变化键生成输入。 | 逐生命周期结果、整集复制比较、通用QueryRows及调用方rows=None。 |
+| Store | query匹配、数组locator、v40输出ID/恢复成员、handover组及三个实际字段键、升级/复制/校验。 | 业务状态机SQL、任意字段索引注册、正文缓存、owner状态API。 |
+| 显示客户端 | 历史/实时协议、原 RPC 边界、worker、projection 和视图；ACP/Web 原窗口。 | offset 分块协议、完整 JSON 文本拼接、服务端 detail 缓存。 |
+| 验证及配套 | 真实受影响 flow、格式升级、生成声明与装配图。 | 泛化数组组合测试、仅机械补字段的调用方修改、手写生成图。 |
 
-历史 N 扩大十倍、K/U 不变，SQL 不得出现十倍 origin 扫描。只读一个结果不代表写入免费：同时量 result 字节、数字/成员节点、WAL、FTS 与序列化成本。新设计未实测前不引用旧标量快照微测来承诺整个产品耗时。
+Goal 的 Session 身份隔离、RPC 边界的既有正确性修复保留为独立单元，不据此扩大性能改造。图片复制优化、请求冷前缀重哈希、迁移 replacement 裁剪、MCP 重试和启动超时策略不属于本轮；设计不要求它们作为交付前置。
 
-默认身份页为 128，当前内容按需分批读取。行数不限制单对象字节；Goal 的 JSON 结果还可能包含实际未完成执行状态，必须记录 SQLite 解析的结果体积，不能把选择一个字段说成只读了这个字段的字节。
+上述是按行为划分的明确范围，不以已有 diff 文件数量反推必要性。各 owner 文档给出字段与代码对象；实现不能为保留旧分支结构而恢复已排除的机制。当前实现及生成图不因文档更新而宣称已达到目标。
 
-验证范围包括源事实与结果之间崩溃、批次提交后回调丢失、并发读取/续页、schema 初始化、分叉切点和 self-output 顺序。最后用与 #1320 相同口径拆分 attach、owner 恢复、首屏、inventories 和 usage，不把不同样本相加报总收益。
+## 7. 存储格式与兼容
 
-## 10. 查询清单与 API 缺口
+v39 保留已确定的 changes 元素定位编码，不附加数组查询语言。v40 采用已确认的[输出逻辑身份和恢复成员方案](appserver/native-storage-format.md#提案v40-补齐逻辑事件身份与恢复成员)：输出locator和五种恢复描述保留；本次补齐handover存在组与turn/scope/source_through三个定位键，同事务升级、失败回滚。
 
-所有查询由业务 owner 组织，入口和执行责任见 §6。下表的次数是逻辑 query 调用数，不是 SQLite statement 数；一次 query 内的补查也须计入验收。
+不向 v39 静默写入 v40 结构；旧程序拒读新格式。owner 的 ExtensionEvent/schema 与 native 格式分开：Queue不再写恢复事件；Prompt新引用为prompt-state/v2，Usage数字为context-usage/v4，小位置缓存为context-usage-covered/v1；Goal业务事件为goal-state/v1，不沿用旧 goal/v1 或提议 goal/v2 的运行快照。旧布局按各 owner 的兼容合同处理，Goal 不初始化运行快照；Store 不执行业务初始化。普通调用继续使用现有 query；旧 QuerySpec 的 Rust 字面量与线上请求不增加可选字段。
 
-### 10.1 调用方实际提交什么
+## 8. 验收
 
-保留 TimelineQuery、QuerySpec、QueryRow 和 QueryValue。下面是绑定参数，不是新增方法；完整 JSON 见[查询绑定示例](owner-state-indexed-reads.md#8-查询绑定示例)。
+设计预算和实测成绩严格分开。正常路径固定 K/U，历史 N=6,000/60,000，U=0/3，pending=0/10；Prompt 固定有效引用扩大原数组 128/2,048；队列按真实空队列、一个待输入、交接/撤回流程计量；Goal 固定业务变更数，扩大普通聊天轮数并核对零运行快照写入；显示用 2.4 MB replacement 及超过回复预算的对象。
 
-| 用途 | scope / 范围 | filter / select / pick | 分页 |
-| --- | --- | --- | --- |
-| 最后恢复结果 | branch；本地 opening 之后至固定结果读头 H | kind 为 owner 的结果类型；Fields(schema, source_through, state)；Last | limit=1。先选最新结果，再检查 schema。 |
-| 未处理源 | branch；source_through+1 至固定源截止 S | kind 为 owner 声明的源类型；Fields(id, kind, position, 必要控制字段)；无 pick | 位置升序，limit=128；原 through 与 next 游标续页。 |
-| 已知对象 | 原业务可见的 branch 或 chain；截止 S | id 为已知 ID；Fields(本次必要属性)；无 pick | 单 ID 为 limit=1；多个 ID 每批至多 128 个。 |
-| 仅检查缺口 | 与未处理源相同 | 同一源条件；Exists；无 pick/order_by | page=null；只判断结果是否仍有效，不计算新状态。 |
-| 已知数组元素 | 原事件所在可见范围；截止 S | rows=Elements(data.changes)；成对匹配事件 ID 与 element.index；Fields(element.value.entry) | 最多 128 项；不展开未引用元素。 |
+| 检查 | 必须满足 |
+| --- | --- |
+| 正常状态恢复 | Queue当前对象、Prompt有效引用/指定scope、Usage数字/未完成工作；不遍历已结束聊天。Goal只恢复业务状态并内存暂停。 |
+| 已知 ID 命中/未命中 | 普通身份索引加输出 locator，不扫输出类型；验证旧截止、fork、混合 ID。 |
+| pending 全部分页 | 只读固定版本当前成员；已结束历史十倍增长不能造成十倍 origin 检查。 |
+| SQL | 累计 statement、VM_STEP、FULLSCAN_STEP、SORT、AUTOINDEX、节点/字节及 EXPLAIN；不只看返回数。 |
+| 写入 | 按保存边界文档的真实流程登记；空队列/无提示变化0恢复事件；Usage禁止boundary与结果双写；小位置缓存单列；原事实、成员、FTS、WAL全部计入。 |
+| 一致性 | 提交前后崩溃、回调丢失、self-output、并发分页、取消/closing、复制/删除和旧库初始化。 |
+| 用户流程 | CLI/ACP/Web 首开、侧线/成员、加载较早、重连、异步 usage、详情失败/超限；旧能力服务器保持有界。 |
+| 产品结果 | 同机、同缓存条件、release 产品装配及隔离 home，拆分 attach/owner/首帧/inventory/usage；采用 #1320 的首帧 <=2s 目标验证，不以旧微测宣称通过。 |
 
-S 是本次业务读取承诺覆盖的源位置；H 是读取恢复结果时固定的可见读头，允许晚于 S。结果的 source_through 与结果自身的 sequence 不能互换。活 owner 等待的目标在入口固定，后续新事件不延长本次读取；已处理到更晚位置的统计若需要回答 S，使用其设计保存的数字前缀，不能把更晚值标成 S。
-
-最后结果、未处理源、已知对象和 Exists 已能用现有 query 表达。数组元素需要扩展 QuerySpec.rows；增加的是结果行的表达能力，不增加另一套读取入口。每个 owner 的字段表仍归其设计，下表只给出跨模块核对点。
-
-### 10.2 各业务怎样使用
-
-| 场景 | 读取对象与字段 | 读取频次 | Store 必须怎样定位 |
-| --- | --- | --- | --- |
-| Goal get | 已发布结果中的 objective/state/judge；原 GoalRead 回复 | 已就绪 owner 为 0 次 query；新格式结束分支为 opening、最后结果、新源 Exists 各 1 次；旧格式另计 | 结果按类型/位置倒序定位；缺口只查 source_through 之后，不运行候选 Fold，也不展开驱动树。 |
-| InputQueue 恢复 | schema、source_through、控制状态；当前节点的 Entry/摘要；新源的控制字段 | 每次恢复一次结果查询、当前树节点批查及新源分页；空根不查节点 | 结果按类型/位置；节点按 ID；新源以 source_through 为位置下界。字段由其设计 §2、§3、§5 定义，无聊天正文。 |
-| Prompt 恢复 | 结果中的有效引用、活动 scope、版本和配置 ID；每个引用的 Set.entry | 每次恢复一次结果查询、至多一次配置查询；有效引用每 128 项一批；另查新源 | 先按事件 ID 定位，再按原元素下标读取；不重算历史 Set/Revoke。 |
-| Goal 恢复 | GoalRecoveryState、当前 driving_root 可达节点及新源所需字段 | 每次恢复各 1 次 opening/结果查询；驱动节点每批最多 128 个 ID；再查新源，空后缀不读正文；删除补偿另计 | 结果/新源按类型及位置；当前节点按 ID；删除按 input_id/before 边界重算受影响后缀，不能藏进 get。 |
-| usage | 总贡献、限制、算法及兼容基准；恢复才取新源 | 当前已提交结果直接读内存；固定旧源位置按数字树路径读取；冷恢复一次结果查询及新源分页 | 当前总量不展开数字叶；固定旧位置只读前缀路径；均不读旧消息或调用 rendered_stream；新 usage 按 request ID 取基准。 |
-| input/question/exec/collaboration pending | 当前成员身份及本页真正需要的显示字段 | 每页一次成员查询；属性补查计入同页成本 | 在支持的范围与条件内定位 through 对应的成员根，再取本页；不能扫描全部开始事实。 |
-| CLI / ACP 首屏 | 显示窗口及各自 inventory | 每次打开一个初始窗口；更早窗口由原预算或用户操作触发 | 先选显示对象；隐藏正文不读，折叠正文延后读；usage 不阻塞首屏。 |
-
-新源按最多 128 个身份分页；只在存在下一页时续查。Prompt 的有效引用页与未处理工作页是两种对象，不能混用。前者数量是当前有效提示条数，后者数量是尚未保存处理结果的源事实条数。
-
-### 10.3 API 能表达，不等于执行已满足
-
-通用读取 API 的改动只有 query 的元素行表达；其它差距在事实生产、业务恢复和 Store 执行。完成接口迁移但仍扫描历史，不满足本设计。具体请求形状见[结果与未处理查询](owner-state-indexed-reads.md#5-query-请求形状)和[Prompt 元素请求](prompt-state-read.md#41-元素请求形状)；SQL 定位方式由[存储格式](appserver/native-storage-format.md#查询定位)定义。
-
-| 缺口 | 修改归属 | 是否新增公共查询方法 |
-| --- | --- | --- |
-| 事件属性不能成为独立数组元素行 | 查询合同及各语言绑定：增加可选 rows=elements、原下标和元素值 | 否，扩展现有 query 请求。 |
-| 已知事件 ID/下标仍可能解析整个大数组 | Store：元素定位和内容编码，另作格式升级 | 否，不把内容哈希或表名暴露给插件。 |
-| pending 的反关联仍可能扫描全部 origin | Store：识别严格等价的查询形状，维护版本成员索引 | 否，保留原 pending 和 query。 |
-| query 能查字段，但没有保存好的业务结果 | 各 owner：结果事实、按序转移和原子输出 | 否，不能靠新增读取 API 省掉尚未完成的业务计算。 |
-
-成员索引的适用范围由[成员索引设计 §2](appserver/timeline-member-index.md#2-索引描述)限定。裁剪 from、多段 chain 或 publishing tail 不能被称为同等的索引读取；正常 inventory 须使用已支持形状。其它通用查询保留原语义，并单独报告其实际成本。
-
-以已保存到 9,980、恢复截止 10,000 为例：只查这 20 个位置内相关的新源。若其中 3 条属于该 owner，处理 3 条；没有相关源则结束，不加载前 9,980 条。若当前队列仍有 10 项，则另外读取当前 10 个控制节点；这 10 项是现存队列，不是从历史重新筛选的候选。没有合法结果的首次初始化单列成本，不能包装成普通恢复。
-
-### 10.4 修改落点与拒收条件
-
-| 修改对象 | 要改的行为 | 不能接受的替代 |
-| --- | --- | --- |
-| runtime 的 timeline_query/properties.rs、MemoryTimelineStore | 数组行、原下标、固定范围和游标；两种 Store 返回相同属性结果 | 为少量字段构造残缺 AgentEvent；新增 readState/saveState。 |
-| Timeline::query、TreeCommands::query | 沿用范围校验与可见性；把位置下界交给 Store | 在 facade 取全历史后过滤；将 TreeCommands 扩成任意 chain 读取。 |
-| App Server storage/query.rs | 类型/位置与身份索引定位；批量属性投影；严格等价的 pending 查询使用成员根 | LIMIT 后再用 Rust 丢弃旧源；每页从历史开头重新扫描。 |
-| storage/codec、数组 locator 与格式升级 | 先定位 ID/下标，再解码选中元素；按存储 owner 的格式决定升级 | 解析整个大数组只返回一项，再宣称点查成本。 |
-| InputQueue、Prompt、Goal 的恢复与 getter | 变化时同批保存必要输出和恢复结果；恢复只处理 source_through 之后的源 | getter 重放历史；把 UI pending 当作完整控制状态。 |
-| ContextUsage、ContextPreparation、最终请求生产者 | 维护统计、数字前缀与实际请求基准；usage 查询不渲染历史 | 只把旧遍历放进后台；按每个 delta 写一份统计。 |
-| CLI / ACP 的打开流程 | 窗口与 inventories 使用原公开入口；usage 异步消费；大详情按需读 | 收齐所有历史再首屏；从截断窗口推导完整控制状态。 |
-
-验收使用可丢弃数据库，分别固定当前成员 K、未处理源 U 和正文大小，只增加已完成历史 N。同一请求累计记录所有 SQL statement、VM_STEP、FULLSCAN_STEP、SORT、AUTOINDEX、内容解码字节和返回字节；检查 EXPLAIN QUERY PLAN。身份查询与源后缀查询的索引定位允许随索引高度增长，不能随旧前缀逐项增长。pending 还要统计成员节点和本页正文；业务恢复还要统计 K 个当前状态节点与 U 项真实计算。
-
-通用 ID 查询及模型/压缩恢复的执行落点见 [Timeline 身份与恢复操作查询](appserver/timeline-identity-reads.md)。普通事件身份索引不能代替合并输出内部 ID 的定位；不能要求 owner 额外填写 kind 才获得点查。新格式确认前，该文的 locator 和新增成员描述均为目标设计，不是已有能力。
-
-至少覆盖 N=6,000/60,000、U=0/3、pending=0/10，以及多页续读。另用单个大数组验证 ID/下标定位。写入另计结果、复制路径节点、索引维护与 WAL；不能只报告查询变快。初始化、Goal 删除的受影响区间、首次完整性校验按各自合同单列，不混入“正常恢复不读已处理历史”的结果。
+[完整性成本设计](appserver/restore-read-cost.md)保留必须扫描的范围。首开 25 MB 校验不是可凭推测扣除的六秒；完整性、owner 计算和外部等待分别报告。请求构造和迁移的大模型上下文另计，不将本轮查询优化宣称为这些工作的消除。

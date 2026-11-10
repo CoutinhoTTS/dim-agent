@@ -427,7 +427,7 @@ ProjectionCheckpoint = {
 
 ### 读取校验
 
-读取时先解析 `Row` 和运行时事件，再按 `(session_id, hash)` 查请求引用的内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核。`ListReferences` 从 `list` 向首个节点遍历：每个节点须是 `kind=node`、hash 匹配、正文可解析为 `{parent,message}`，遍历恰好经过 `length` 个节点，最后一个的 `parent` 为 `null`，其余都有父节点。同一次读取保留上一个由列表重建的事件请求及其各消息的节点地址，遍历遇到与它同位置的同一节点即停止，其余前缀取自该请求；共用节点已在重建该请求时复核。遍历每加载至多 256 个节点释放一次连接，下一次持有从中断处继续。随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；缺失或损坏的节点以 "missing request content"、"request content hash mismatch" 或 "request list length mismatch" 明确失败，不得通过默认值把损坏请求还原为空请求或部分请求。不使用请求正文的读取（历史分页、摘要、上下文投影、协作）不还原这两类记录中的请求，也不加载或校验其内容行，只校验记录种类与引用形状相符（[请求增量存储 §7.5](request-delta-storage.md#75-不使用请求正文的读取)）；因此损坏的节点不会让这些读取失败；导出与每个使用请求的读取仍会失败。恢复校验同样不加载请求正文：它按记录引用的 hash 校验内容行存在，并对每个 `node` 行只读出 `parent` 字段、校验父节点存在（只读 hash 与 parent，不读正文），引用或父节点缺失时以 "missing request content" 拒绝恢复；内容行存在但正文损坏时恢复通过，由加载它的读取失败。导出在写第一行前保留完整校验：重建并复核每个请求正文的 hash，正文损坏时以 "request content hash mismatch" 拒绝且不写出任何行（[恢复校验复用](restore-validation.md)）。
+读取时先解析 `Row` 和运行时事件，再按 `(session_id, hash)` 查请求引用的内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核。`ListReferences` 从 `list` 向首个节点遍历：每个节点须是 `kind=node`、hash 匹配、正文可解析为 `{parent,message}`，遍历恰好经过 `length` 个节点，最后一个的 `parent` 为 `null`，其余都有父节点。同一次读取保留上一个由列表重建的事件请求及其各消息的节点地址，遍历遇到与它同位置的同一节点即停止，其余前缀取自该请求；共用节点已在重建该请求时复核。遍历每加载至多 256 个节点释放一次连接，下一次持有从中断处继续。随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；缺失或损坏的节点以 "missing request content"、"request content hash mismatch" 或 "request list length mismatch" 明确失败，不得通过默认值把损坏请求还原为空请求或部分请求。不使用请求正文的读取（历史分页、摘要、上下文投影、协作）不还原这两类记录中的请求，也不加载或校验其内容行，只校验记录种类与引用形状相符（[请求增量存储 §7.5](request-delta-storage.md#75-reads-that-do-not-use-request-bodies)）；因此损坏的节点不会让这些读取失败；导出与每个使用请求的读取仍会失败。恢复校验同样不加载请求正文：它按记录引用的 hash 校验内容行存在，并对每个 `node` 行只读出 `parent` 字段、校验父节点存在（只读 hash 与 parent，不读正文），引用或父节点缺失时以 "missing request content" 拒绝恢复；内容行存在但正文损坏时恢复通过，由加载它的读取失败。导出在写第一行前保留完整校验：重建并复核每个请求正文的 hash，正文损坏时以 "request content hash mismatch" 拒绝且不写出任何行（[恢复校验复用](restore-validation.md)）。
 
 ## 格式版本
 
@@ -1130,7 +1130,7 @@ to retain the event ID value without its column affinity. Plan acceptance requir
 
 ## 提案：v40 补齐逻辑事件身份与恢复成员
 
-本节是待确认的下一格式方案；当前已实现格式仍为 v39。它支持[身份与恢复操作查询](timeline-identity-reads.md)，不改变公开 query、事件或请求内容编码。不能把新表或新成员描述直接写入 v39 数据库。
+本轮目标格式确定为 v40；该方案已获确认，当前分支实现格式仍为 v39。它支持[身份与恢复操作查询](timeline-identity-reads.md)，不改变公开 query、事件或请求内容编码。不能把新表或新成员描述写入 v39 数据库；本文保留“提案”标题的既有链接锚点，不表示还需选择格式。
 
 ### 输出身份定位
 
@@ -1173,7 +1173,7 @@ v39 到 v40 在原准入事务内建表、回填并检查，再更新 marker；�
 
 ## 提案：状态读取索引与数组元素
 
-Status: Draft. 本节定义下一格式 v39 的数组编码；不能把它加入已提交的 v38。基础 member 结构沿用本文件开头的 v37 决定，不重新建立第二套成员树。
+本节固定 v39 的数组编码，并由 v40 原样沿用；不能把它加入已提交的 v38。基础 member 结构沿用本文件开头的 v37 决定，不重新建立第二套成员树。查询使用既有 Fields 数字下标，不新增元素行语言。
 
 ### 范围
 
@@ -1189,15 +1189,30 @@ Status: Draft. 本节定义下一格式 v39 的数组编码；不能把它加入
 | member_terminals | session、branch、index_id、关闭键的定位，保留最早终态位置。 |
 | timeline_array_elements | 主键 session_id、array_id、element_index；值为 content_ref。下标 0 另存正整数 array_length，其余行该列为 NULL；不另建根表。事件及 trace 各自在自己的 wire 中保存数组身份和长度。 |
 
-最后结果复用既有 `timeline_events_by_kind(session_id, branch_id, kind, sequence, event_id)`；不新建 result_positions 表或表达式索引。schema 与 source_through 在选中一条结果后读取，不参与跳过记录。
+按提交位置读取最后结果复用既有 `timeline_events_by_kind(session_id, branch_id, kind, sequence, event_id)`，不新建 result_positions 表。schema 在选中结果后由 owner 检查；Usage 按源位置查询累计前驱使用下文v40标量索引。
 
-index_id 是规范化的、由 Store 明确支持的查询描述身份；不是插件名或可执行回调。group_key 编码已声明的标量分组，未分组也有固定编码。节点编码、完整 SQL schema 与外键在实现该格式时固定，不能在普通 query 中创建临时持久结构。
+index_id 是规范化的、由 Store 明确支持的查询描述身份；不是插件名或可执行回调。group_key 编码已声明的标量分组，未分组也有固定编码。member 表和节点编码沿用 v37，不在本节重新选择。唯一数组表固定为：
 
-普通成员描述覆盖 input、tool-call、exec 和 collaboration 的反关联，见成员索引合同。owner 按序处理输入，恢复直接查询 source_through 之后的源位置，不新增恢复源成员树、确认数组或关联表。启用与版本初始化由 owner 保存第一份状态，Store 不执行其业务算法。
+```sql
+CREATE TABLE timeline_array_elements (
+  session_id TEXT NOT NULL,
+  array_id TEXT NOT NULL,
+  element_index INTEGER NOT NULL CHECK(element_index >= 0),
+  content_ref TEXT NOT NULL,
+  array_length INTEGER,
+  PRIMARY KEY(session_id, array_id, element_index),
+  CHECK((element_index = 0 AND array_length IS NOT NULL AND array_length > 0)
+     OR (element_index > 0 AND array_length IS NULL))
+);
+```
+
+内容引用和数组身份在存储读取/校验边界验证，不新增另一套外键或根表；普通 query 不创建持久结构。
+
+普通成员描述覆盖 input、tool-call、exec 和 collaboration 的反关联，见成员索引合同。owner 的保存与恢复方式由各自设计决定，不统一保存source_through。Usage读取已保存数字之后的未完成源，Queue直接读当前输入，Prompt读有效引用和指定scope边界；不新增源确认成员树。Store不执行业务初始化。
 
 ### 查询定位
 
-以下是 Store 内部定位步骤，不是插件可调用的 SQL 接口。数组表使用本节的逻辑名称，最终拼写与 codec 随新格式 schema 固定。
+以下是 Store 内部定位步骤，不是插件可调用的 SQL 接口。数组表使用上节已固定的名称和主键。
 
 最后结果首先定位身份与版本，再投影所选字段：
 
@@ -1210,7 +1225,7 @@ ORDER BY sequence DESC
 LIMIT 1;
 ```
 
-该查询利用既有按类型索引倒序定位；再按所选位置投影 schema、source_through 与 state。缺少或不支持的 schema 都交给 owner 报错，不在 SQL 中排除后冒用更旧结果。当前结果读取不提供任意历史源位置版本；请求准备需要的旧数字根按事实中明确保存的身份点查。
+该查询利用既有按类型索引倒序定位；再按所选位置投影 schema、source_through 与 state。缺少或不支持的 schema 都交给 owner 报错，不在 SQL 中排除后冒用更旧结果。当前公开读取不提供任意历史版本；Usage的压缩累计前驱按v40的epoch/源位置范围定位，不能将结果提交位置视为源位置。
 
 新源的单类型定位使用相同索引和显式位置范围：
 
@@ -1256,11 +1271,11 @@ array_id 是原数组 JSON 序列化的内容哈希，使用 array 内容域。�
 
 数组身份代替来源 sequence 作为 locator 键，是为了同时覆盖 before trace 的不同草稿；这些草稿共用事件身份，却可能有不同的 changes。相同内容可共享同一个数组版本。分支位置和 property 由原事件 wire 解析，不再增加 trace 路径列或另一套草稿索引。插件仍只保存事件 ID 和原下标，不接触这些内部身份。
 
-完整事件读取按原顺序还原数组；字段读取还原所需公开属性；elements 行按原下标只取选中节点。新编码下的 Any、Fields、Count、关联和完整 Events 必须与旧逻辑事件一致。不能让 inline JSON 路径把引用标记看作公共值或缺失字段。
+完整事件读取按原顺序还原数组；Fields 的数字下标路径只取选中节点。新编码下的 Any、Fields、Count、关联和完整 Events 保持原事件行语义，不新增数组元素行。不能让 inline JSON 路径把引用标记看作公共值或缺失字段。
 
 节点的序列化、哈希、共享与损坏错误沿用内容存储的验证边界。首开对 Session 的 locator 元数据检查一次数量、下标连续性和内容引用存在性；每个 wire 引用按主键核对下标 0 的长度，不因同一数组被多次引用而反复扫描它。所选正文在读取时解码和验哈希；导出完整重建。查询游标只含公开位置与元素身份，不含内容哈希。FTS 在写入时消费移出数组前的公开数据；升级保留已有倒排项，复制时使用原数组内容，不索引引用标记。
 
-元素条件先以事件身份和原下标筛选，再读取确实需要判断或返回的正文。只带事件条件的 Count 合计数组长度；Exists 取得一个匹配位置即可。无正文条件的位置分页先按当前下标在 locator 主键中取本页及一项续页证据，不能每页从数组末端或开头重新扫描。涉及值筛选、分组或排序时，按实际候选计费，不把这类计算伪装成单点读取。
+已知下标的 Fields 先以事件 ID 定位数组引用，再按 locator 主键逐个取本次字段所需元素。相同事件 wire 在本 query 内复用，不展开未选元素。Count/Exists 仍统计或判断事件，不被重新解释为数组长度；不增加元素分页、分组或排序执行器。
 
 ### 事务与升级
 
@@ -1279,3 +1294,33 @@ Session 复制保留逻辑位置、身份关系和原数组顺序，在目标范
 ### 进入实现前的验收清单
 
 一次性 v38→新格式数据库验证升级、回滚、重复打开、只读导出、Session 复制/删除及各提交阶段崩溃。query 的祖先、批次内部 through、合并输出、数组与 publishing tail 做语义对照。固定 10 个成员或 1 个数组元素，扩大历史及原数组体积，记录真实扫描、节点加载、VM、SQLite/Rust 内存和 WAL。不能只通过表结构检查就宣布性能满足。
+
+
+## v40 状态字段定位补充
+
+本节是尚未实现的v40目标格式细化，与输出locator/五种恢复描述共同升级；不适用于已提交v39。查询匹配、真实范围和缺口见[状态索引设计](timeline-state-read-indexes.md)，业务判断归各owner。
+
+```sql
+CREATE INDEX timeline_events_turns ON timeline_events(
+  session_id,branch_id,kind,
+  json_extract(body,'$.record.event.data.turn_id'),sequence
+) WHERE json_extract(body,'$.record.event.data.turn_id') IS NOT NULL;
+CREATE INDEX timeline_events_scopes ON timeline_events(
+  session_id,branch_id,kind,
+  json_extract(body,'$.record.event.data.scope.kind'),
+  json_extract(body,'$.record.event.data.scope.timeline'),
+  json_extract(body,'$.record.event.data.scope.id'),
+  json_extract(body,'$.record.event.data.status'),sequence
+) WHERE kind='context/scope';
+CREATE INDEX timeline_events_source_positions ON timeline_events(
+  session_id,branch_id,kind,
+  json_extract(body,'$.record.event.data.epoch'),
+  json_extract(body,'$.record.event.data.source_through'),sequence
+) WHERE kind='context-usage/recovered';
+```
+
+三个索引只服务实际等值/范围查询，不索引Prompt body或token语义。最后numeric读取仍使用kind/提交位置索引，不在SQL中跳过未知schema。源位置前驱显式固定epoch和逻辑可见范围，额外visible_head筛选成本单独报告。
+
+原input成员的presence分组在v40同时登记handover缺失和存在两种互斥值；缺失组编码与旧根保持不变，存在组使用同一presence编码的true值。每个输入只进入一组，不复制为第三个全集；consumed/deleted按原input_id移除其所属组。Store matcher分别识别Not(Present(data.handover))与Present(data.handover)。
+
+v39→v40事务内建立表达式索引并从handover输入与其终态回填存在组，保留已有普通组与旧cutoff根。所有新结构成功、格式校验通过后才写v40 marker；失败回滚。正常写入/导入/复制在原事实事务中维护，删除沿Session原事务。不得为这些字段增加plugin SQL接口或替代业务原事实。

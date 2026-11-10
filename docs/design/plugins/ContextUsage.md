@@ -1,247 +1,149 @@
-# ContextUsage
+# ContextUsage：保存计算结果，不保存每次回调
 
 Status: Draft.
-Scope: branch；Session 方法仅提供跨分支身份路由。
-决策：[ADR 023](../../adr/023-context-usage.md)。相关问题：[#1320](https://github.com/arcships/dim/issues/1320)。
-规则：[设计规则](../../architecture/rust-agent/principles.md)、[ADR 002](../../adr/002-plugin-scope.md)、[插件契约](../plugin-contract.md)、[rutis 用法](../rutis-usage.md)。
+Scope: branch ContextUsage 的贡献、累计值、压缩、provider 基准、持久化与恢复。
+Decision: [ADR 023](../../adr/023-context-usage.md)。Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
+合同：[ContextCompaction](ContextCompaction.md#51-productcontextmodel)、[保存边界](../owner-state-indexed-reads.md)、[插件合同](../plugin-contract.md)、[设计规则](../../architecture/rust-agent/principles.md)、[ADR002](../../adr/002-plugin-scope.md)、[rutis](../rutis-usage.md)。
 
-本文细化业务计算和读取。持久化采用[状态结果与未处理输入](../owner-state-indexed-reads.md)：数字节点和结果通过既有事实批次保存，新输入在已保存前缀之后按类型/位置索引定位。不新增状态 CRUD，不改变事实发布规则。
+## 1. 决定与边界
 
-## 1. 范围
+ContextUsage 是现有上下文功能内的独立 branch Capability，维护有效上下文的数字。生产者继续写原事实，不调用 Usage 更新、确认、删除或清理统计。Timeline/Store 不做 token 计算。
 
-ContextUsage 是现有上下文功能的独立分支部件，拥有当前有效上下文的统计、位置和 provider 校准。请求构造与压缩决策仍归 ContextPreparation；事实的提交、发布和结构检查归 Timeline。
+保留现有 session.context.usage 及错误合同，由 ContextPreparation.usage 委托本 owner。read 固定源截止和当前 tools 身份，等待该目标完成后返回；已就绪读不查历史、不计数、不保存。无配置直接 NotConfigured，不先渲染正文；可组合计数不支持返回 Model/Unsupported，不退回完整历史重建。
 
-不保存完整历史、消息列表或请求正文；不执行模型调用，不决定哪些输入被采用，不修改压缩内容。统计遵循[上下文拼装需求](../context-assembly-requirements.md)。
+保存已经计算出的数字是必要优化：输入/输出已入上下文后，未来显示不应再次读取它们。处理过无关事件、delta、model-start 不构成保存理由。数字结果与单独 boundary 合为一份；不保存逐源数字树或请求正文。
 
-## 2. 统计对象
+## 2. 对象、改变条件与重载决定
 
-| 对象 | 保存的数值或身份 | 更新时机 |
-| --- | --- | --- |
-| 固定内容 | system、tools 的贡献与配置身份 | 配置采用时替换对应部分。 |
-| 有效消息 | 消息贡献及定位替换范围所需的身份和累计边界 | 输入消费、模型输出结算、工具结果进入上下文时推进。 |
-| 压缩结果 | 生效切点、replacement 与基线贡献 | 完成压缩时替换受影响前缀；非完成结果不替换。 |
-| provider 基准 | request 身份、对应前缀、模型配置、实际输入量与本地对应贡献 | 匹配的 model/usage 到来时校准；同请求新记录替换旧记录。 |
-| 当前水位 | 统计对应的发布位置、计数算法标识 | 与已处理内容变化一致推进。 |
-
-统计不是每条事件一份记录。需要多少消息边界、未完成输入身份或替换前缀累计值，由压缩和分叉查询实际所需范围决定；不能声称只保存一个总数就足以支持任意历史切点。
-
-### 产品计数
-
-产品估算分成序列化 UTF-8 字节贡献和图片数，沿用现有计数形状：纯文本 Message、普通 part、ToolResult Blocks 分支各自的序列化范围不变；图片沿用固定估算。固定部分只计一次，消息增量不重复计空 system/tools。
-
-实现从同一计数函数取得内容贡献；不能用裸文本字符数或 SQL Characters 替代。可替换的 ContextModel 未承诺可加，产品优化不能静默用于其它计数实现。计数合同需明确可组合统计能力或明确返回不支持；不隐藏回退成每次读取全历史。
-
-### provider 校准
-
-先验证同一 provider/model、相关配置与能力、固定内容、请求专有增补和有效前缀。只有证明当前上下文仍包含该实测前缀，才将对应前缀的本地贡献替换为实际 prompt_tokens；其后的内容继续使用本地贡献。
-
-输出 completion_tokens、total_tokens 和缓存计费分项不代替下一次请求的消息贡献。迟到 usage 属于原 request，不得覆盖更近且已变化的基准。同一 request 的重复记录不累加。
-
-prompt_tokens 必须大于零且不小于 cache_read_tokens 与 cache_write_tokens 之和，才可作为基准。零值或缺少缓存覆盖的记录不替换已有有效基准。
-
-校准值为实测 prompt_tokens 加上“当前本地估算减去对应请求本地估算”。两次本地估算都使用同一算法及各自完整 Contribution，固定内容因此不会再次加入。当前内容没有变化时增量为零；不能通过构造 system/tools 为 null 的空请求计算增量，否则会把空固定字段的序列化开销再计一次。
-
-## 3. 事件处理
-
-复用上下文投影的转移规则，不在本部件复制另一套正文解释：
-
-| 输入事实 | 统计处理 |
-| --- | --- |
-| input/message | 保存随后消费所需的身份与统计贡献；不加入当前有效上下文。大块正文消费后释放。 |
-| input/consumed | 按原投影的 blocks/user 消息形状计入；跨统计起点的输入按身份补齐必要统计。 |
-| 模型输出结算 | 按 request ID 读取这次实际保留的输出，复用投影的合并、完整内容覆盖和中断规则，只计新消息。原始 delta 不触发统计状态写入。 |
-| 工具结果 | 计结果及 context_messages 的贡献，不读取 structuredContent 作为模型文本。 |
-| context/configured | 更新固定部分和模型预算身份，并判断 provider 基准适用性。 |
-| 完成 compaction | 原子替换统计范围；固定保留内容只计一次。 |
-| model/usage | 校准对应 request；未匹配则保留其请求实测语义，不错误校准当前前缀。 |
-
-新增内容可以被顺序解释和计数；已经结算的未变正文不能因查询再算。仅用于显示且尚未进入有效上下文的 delta 不逐条新增持久统计事实。
-
-首版选择消费时计数：input/message 不新增统计写入；收到 input/consumed 后按 ID 点查一次必要正文，按实际消息形状计数并释放。撤回但未消费的输入不计数。这个选择增加每个新消费输入的一次正文读取，不允许把它扩大成扫描输入历史。
-
-无持久统计的旧数据可按事实初始化一次，必须标识为初始化并报告正文读取量。统计未就绪、版本不兼容、重建失败和缺少配置是不同状态，不都当作零或无限等待。
-
-## 4. 读取与生命周期
-
-目标分支服务 contextUsage 在本 feature 内提供 read，接收请求准备固定的源位置或读取当前结果。客户端继续使用 session.context.usage，回复保留现有 through、contextWindow、outputTokens、thresholdTokens、estimatedInputTokens、baselineSource。正常读取无写入副作用，不触发完整上下文渲染；新服务不是通用数据库读写接口。
-
-读取当前值先等待本代初始化完成，再固定一次发布位置；之后只等待处理到这个位置，不随新事件继续抬高目标。请求准备已经给定位置时不重选位置；它早于本次初始化边界便不能生成数字基准引用。
-
-不接受任意历史位置却只保留当前累计值。首阶段只要求当前发布位置读取与请求准备的固定内容位置；所需请求基准在受理准备时固定。若需要其它历史位置，必须证明已有边界记录足够或明确不支持，不能偷偷重放全部历史。
-
-按 Dispatcher 的恢复与实时交接规则处理。与 ContextPreparation 的状态消费不互相等待对方处理同一事实，避免出现派发顺序死锁。缺口读取和数值保存由本部件登记任务，等待 activated 后开始，closing 取消；不在 handler 中等待 I/O。
-
-ContextPreparation 对最终请求的专有增补或 host 变换单独核验，不能把“基准覆盖的上下文”视作“最终请求完全相同”。CLI 的异步读取和会话切换归 [Tui §3.7](Tui.md#37-context-usage-reads)。
-
-## 5. Requirements raised to mechanism owners
-
-| owner / 关联问题 | 现有合同限制、考虑过的机制 | 需要的通用能力 | 提交、位置、关闭与恢复影响 |
+| 实际对象 | 业务事件与具体条件 | 重载时保留/取得 | 持久化决策 |
 | --- | --- | --- | --- |
-| Runtime / #1320 | Dispatcher 在事实提交后推进；现有快照可缺失；before 不可等待 I/O | 沿用原子批次提交数字节点和恢复结果，保存已按序完成的位置，不增加通用保存端口 | 提交前崩溃按旧位置恢复，提交后使用新结果；发布与关闭规则不变。 |
-| 上下文投影与计数 owner / #1320 | 当前以完整 ModelRequest 计数，完整输出和压缩可能替换前面的贡献；复制 fold 会产生两套语义 | 同一投影转移可产生数字贡献与替换范围；计数定义可组合能力及算法身份 | 同一分支截止与祖先切点相同；完成压缩不遗漏；取消不发布半份统计。 |
-| 存储 owner / #1320 | 已有类型/位置和事件身份索引，统计读取不得扫描已处理历史 | 按固定位置范围读取新源；按 ID 批量读取数字节点 | 保持 Memory/SQLite 语义一致，不新增恢复确认索引。 |
-| ToolBinding / #1320 | [工具采用 §7](../../architecture/rust-agent/tool-contributions.md) 允许没有工具部分的配置在请求时直接使用当前工具；纯贡献工具的变化不一定产生配置事实 | 提案：已有模型配置时，完整工具集合也通过既有 Prompt 采用队列记录；未变不写。没有模型配置时仍使用 PrepareModelHost，不由统计部件私自写工具配置 | BranchOpening 在初次采用后完成；后续配置包含实际工具身份，恢复可从配置取得固定贡献。增加的是工具集合变化时的配置写入，不是每个事件或每次请求写入。此提案需先对齐工具 owner 的既有合同。 |
+| 内容贡献 | input/consumed 经 render_input 实际产生消息；output-end 结算保留的助手消息；tool-result 产生结果/附带消息；完成 compaction 产生 replacement/基线 | 保留已经计算出的贡献；只计算未处理来源及真正新增内容 | 消息贡献合并进该次数字结果，不另存同源 boundary，不复制正文 |
+| 普通历史累计值 | 新源实际产生消息时累加 serialized_bytes、images、message_count；更新最后 HistoryEntry ID/来源位置 | 直接恢复数字；压缩不重写既有累计值 | 随数字结果保存；即使估算 token 四舍五入后相同，贡献/条目身份改变仍保存 |
+| 压缩边界 | 仅 context/compaction.status=completed 且有效 retain_from | 保留切点、扣除的累计贡献、新 replacement/基线贡献；先前摘要被替换 | 同一数字结果；failed/skipped 无压缩状态保存 |
+| 输出结算标记 | model-start 打开 request；output-end 关闭；旧 tool-result 无 call_event_id 时仅结算仍打开输出 | 从该 request 的 model-start/output-end/旧 flush 边界点查；不续跑旧模型请求 | 内存，不保存 started/settled 集合；原终态足够表达 |
+| provider 基准 | 有有效 prompt_tokens，且请求、覆盖前缀、算法、固定内容、压缩均匹配；同请求更新测量 | 已建立基准恢复；尚未建立的实时关联作废；不读旧 request.messages 补证 | 基准与当前数字同一结果；相同数值、相同身份不写新数字结果 |
+| 处理位置 | 六类相关源处理完且对应数字已保存；空消息/重复无效 usage 只提高内存位置 | 从数字结果及其匹配的小位置缓存取得 | 不逐源保存；无效果尾部在业务结束/固定读取交接处合并位置缓存，见§5 |
 
-这些依赖完成前，不声称已经实现无历史扫描恢复，也不承诺每请求只多写一次。正常路径不遍历历史的目标不以削弱当前用量语义达成。
+算法标识沿用 `dim/window-facts/v1`。贡献是两个整数 `{serialized_bytes,images}`，计数为字节/4+图片×1600；消息序列化边界严格复用现有 ContextCounter。Text 消息计完整 Message；parts 分项，Image 只计图片；ToolResult Blocks 只计实际 content blocks，不计 structuredContent 或额外包装。未 consumed 的输入不计入。
 
-## 6. 计算与 I/O 验收
+数字结果的完整字段：
 
-| 场景 | 必须证明 |
+- `schema=context-usage/v4`、`epoch`、`source_through`、`initialized_from`。
+- `configuration`：配置事件ID、算法、固定内容身份与贡献、模型窗口/输出/阈值；不可用时保存明确状态，不伪造零。
+- `ordinary`：累计贡献、消息数、最后 HistoryEntry ID和来源位置。
+- `compression`：完成事件ID、retain_from位置、removed贡献/消息数、replacement/基线贡献/消息数，或null。
+- `baseline`：request_id、覆盖位置、配置/压缩身份、覆盖位置本地估算、prompt_tokens，或null。
+
+不保存 root、节点、逐消息正文、所有请求、Weak引用、started/settled数组。当前用量是固定贡献+ordinary−removed+本次replacement/基线。每次压缩替换上一份 replacement，而不是累加历次摘要。
+
+## 3. 每种来源读什么、算什么
+
+| 来源 | 字段和查询 | 计算/写入条件 |
+| --- | --- | --- |
+| input/consumed | input_id；按 ID 点读 input/message 的 blocks、user | 复用 render_input；每个新 Message 计数一次。没有 Message 时不写数字结果 |
+| step/model-output-end | request_id、status；该 request 的最后完整 content 及之后仍保留的 delta | 复用 settled_request_output；不读被完整内容覆盖的 delta；保留内容计数一次，空输出不写数字结果 |
+| step/tool-result | request_id、call_event_id、calls、contents、isError、contextMessages | 复用现有 tool_result_message；附带消息同源合并。旧 flush 先按 request 索引取得打开/结算边界，避免重复输出 |
+| context/configured | 实际采用的 settings、system、tools | 算法相同保留 ordinary，只计算改变的固定部分/限制并撤销不适用基准；相同固定身份与限制零计数/零数字结果 |
+| context/compaction | status；completed 时读 retain_from、replacement、context_baseline | 切点点查已保存累计值；只算新的 replacement/基线；失败/跳过不算正文 |
+| model/usage | request_id、usage；只取 prompt_tokens 及缓存输入量 | 有匹配基准且测量变化才替换；相同数值不重复累加，不重算消息 |
+
+六类是恢复源。model-start 不是持久进度源；打开输出的标记由请求控制事实按需取得。context/prepare、model/call、context/budget 用于有限实时关联，不读取它们的历史消息数组，不因为这些回调保存统计。
+
+固定 tools 已在配置中时直接采用它。否则使用原 ToolRegistry 当前声明及 source key/version。集合身份不变直接复用 fixed 数字，不重新序列化工具。读取注册表当前声明的复制成本仍按工具数量计，不冒充零成本；不调用 bind/bind_current。动态集合变化只保存新的固定贡献/身份并撤销基准，重载以当前集合重新取得，不恢复旧运行注册表。
+
+## 4. 复用已经计算出的数值
+
+| 已有数值 | 用法 |
 | --- | --- |
-| 在线读取，历史增长 | 不加载旧消息或请求正文；查询本身不启动统计重建。 |
-| 有有效持久统计后恢复 | 读取量与实际恢复状态有关；正文不重复加载；SQL 不能因结果为一条仍扫全部历史。 |
-| 新有效内容 | 只计新增或被替换部分；记录处理字节、数字更新和实际持久写入次数。 |
-| 无配置、无有效基准 | 小字段条件判定后返回不可用，不先渲染正文；有可用基准时保留合法成功路径。 |
-| 压缩、fork、配置变化、重复/迟到 usage | 与同一前缀完整投影的计数一致；错误基准不复活。 |
-| host 增补、空增量、多字节/转义、图片、工具附带消息、中断 | 最终预算规则一致，空固定部分不重复计数，不把字符数当序列化字节。 |
-| 保存失败与任意提交阶段崩溃 | 按后续机制设计证明事实/统计的位置关系；不以小规模正常运行测试代替。 |
+| Usage 当前 ordinary/fixed/compression 数字 | 直接用于显示、预算和压缩扣除，旧消息计数调用为0 |
+| ContextPolicy 本次已算的完整请求估算 | ContextPreparation 将数值与本次不可变 Arc<ModelRequest>、算法/限制一起保留到最终校验；同一对象复用该数值，不能再 count_tokens 一次 |
+| Usage 数字与本次准备请求严格同一有效前缀 | 原预算/最终校验入口可读同一 numeric estimate；只核对配置、切点、最后条目/消息数与本次准备的来源证明，不全文比较。请求经过实际增补/替换，失效后只计实际新请求一次 |
+| model/usage.prompt_tokens | 直接作为匹配请求的输入实测，不从 completion_tokens/total_tokens 推导 |
+| context/budget.full_estimate | 只有覆盖边界、固定内容和算法匹配才复用为该调用本地总量；它不是单条消息贡献 |
+| context/budget.provider_baseline 或 compaction diagnostics | 不反推单条贡献；前者是混合估算，后者不等于 replacement 的贡献 |
 
-## 7. Rule check 与删减
+现有历史事实没有逐消息贡献，完整请求的一个总数也不能拆出任意压缩切点。新增输入/结算输出的单源贡献仍各计算一次。这项计算不因“共享了同一个函数”就算成复用了数值。请求构造、host 实际改变内容后的最终计数、压缩新摘要计数是各自真实工作，分别记账。
+
+复用只改已有预算和校验的数值传递，不增加 ModelProvider/AgentLoop 的 Usage confirm/discard，不增加请求事件载荷、请求基准事实或 producer→Usage 更新调用。`UsageEvidence` 中持久 root、任意历史 prefix/growth 接口不保留。临时数值证明不跨重载、不使请求正文常驻。
+
+## 5. 保存与位置缓存
+
+同一原子源批次按原位置处理，用转移结果的标量标记记录变化：新增消息数/贡献、实际配置身份/限制改变、成功压缩、有效基准替换。不要 clone整份状态或重算集合比较。`context-usage/recovered` 的每份结果内部包含该源之后的累计值，不同时写 boundary；本批有几个需要保留切点的内容源，就保存几份，最后一份也是当前结果。提交后才发布。
+
+不同源批次不为少写而等候未来事件。同批多个普通消息源仍须保留压缩切点可寻址的累计值：本批每个实际产生消息的源保存一份 numeric 结果，最后一份同时承担当前结果，不额外再写一份全批快照。仅固定配置/基准变化可合并入末份结果；跨源累积边界不能被合并掉。一个源中的多条 Message 合并为一个边界，因为 retain_from 按源事件切割。
+
+空消息、失败/跳过压缩、无效/重复 provider 数字没有新 numeric。它们如果发生在最后保存的数字之后，需要确认“已经处理且无效果”，否则每次重载都会重新检查同一段来源。确定保存一种小型派生缓存：
+
+`context-usage/covered`：`schema=context-usage-covered/v1`、`result_id`、`source_through`。result_id指向它延伸的最新数字结果。不含state、贡献数组、正文或请求身份。
+
+仅在以下条件全部满足时写一份：本 owner 已处理固定范围；存在晚于当前 numeric/covered 的相关源；本范围没有需要保存的数字变化；到达 turn/end、closing 的已完成范围，或正在兑现固定 read 目标。无相关源、已被结果覆盖、只有 model-start/delta/interrupt 时不写。多个无效果源在同一交接处只写一份；普通实时回调不写。后续有 numeric 时覆盖这段处理位置，不再另外写 covered。
+
+该缓存是避免重复检查无效果尾部的性能数据，不是业务事实，也不是所有 owner 的通用快照。未变化的普通 getter为0写入；等待新来源的 getter可能等到 owner 完成必要保存，不能把这种情况伪称为已经就绪读取。读一次失败/空来源之后，再次重载不重做这项工作。
+
+## 6. 恢复、切点和查询范围
+
+正常恢复先读最新 numeric 和最新 covered，各1次。只有 covered.result_id 匹配当前 numeric 且范围合法才采用其位置；更早数字的缓存不延伸新结果。再对六类源各取Last位置，确定是否有未处理源；没有则结束，共8次逻辑query，解码一份数字和至多7份小身份。只需要新工作时才读 `(saved_source_through,S]` 的六类源，身份每页128，正文逐对象消费释放。不读旧正文，不保存完整源队列。
+
+压缩切点：按 retain_from 的逻辑ID取得来源位置；在同一 epoch 的 numeric 结果中按 `data.source_through < 切点` 倒序取最近累计值，再按其数字扣除。采用已有 Field 排序语法；必须由[源位置索引](../appserver/timeline-state-read-indexes.md)执行，不用事件提交位置代替源位置，不用 LIMIT1 掩盖历史筛选。单分支2次逻辑query（ID位置+数字边界）；祖先切点按固定chain各段定位，最多R次范围探测，R是分支链长度。边界之前无普通消息时累计值为0，不能因此遍历旧来源。
+
+本 epoch 初始化保留前缀的累计值为0，切点不允许回到已经替换/未初始化范围。数字结果 source_through 可能小于自身提交位置，查询同时核对事件在固定可见范围；数值索引不是绕过祖先 cutoff 的权限。
+
+输出结算状态按 request 的已有 request_id 索引取得最后 start/end/旧 flush边界。正常重载没有打开输出时不读取任何旧输出内容；资源 owner 补出的终态属于新的真实内容源。已有 numeric 之前的输出不重计。
+
+known旧context-usage/v1–v3使用一次明确初始化，未知schema/算法不兼容/引用损坏报错，不过滤未知结果后拿旧版本。初始化只读取最后有效压缩后的保留上下文，逐来源计算数字边界，不构建常驻消息数组，不声称零遍历；完成后正常重载必须使用v4数字。无配置先返回业务错误。fork优先复用祖先可见数字和边界；不可见/无兼容数字时只在新分支首次初始化，不能把父分支未来统计当作切点内结果。
+
+## 7. provider 基准与异常
+
+实时关联最多保留一个准备槽和一个最近调用槽：prepare 的 request_id、through、配置/提示身份、消息数及请求Weak；call 与其是同一不可变对象且身份未变，才形成候选。弱引用不保留正文；不持久化地址，不用失效地址比较，不建请求表。覆盖期间配置/压缩/动态工具改变，候选作废。图片或请求专有增补不能证明可校准时使用本地估算，不读取历史 request.messages 补证。
+
+统计覆盖该源位置后，候选只保留配置/压缩身份、覆盖位置本地总量及request_id。有效model/usage要求prompt_tokens有限且>0，且不少于cache_read+cache_write之和。当前估算为实测输入+覆盖后本地增量，缓存量不再重复相加。相同request后续usage替换旧测量；旧候选不覆盖更晚基准。相同身份与数值不写新numeric。已建立基准存numeric；未建立候选在重载作废，旧活任务不重启。
+
+异常取消释放当前读取和临时请求关联，已完成数字正常提交；未提交部分由下次恢复处理。可处理的模型/工具异常由其owner结算原终态，不为Usage写paused。提交失败不推进持久处理位置或发布成功数字；读取取消不撤销已接受的业务事件。
+
+## 8. 实际流程的数量
+
+以下“计数”指ContextCounter处理消息或固定内容，不包括请求必须的构造、网络和原流式持久化。B_in/B_out为本轮实际采用的输入/保留输出大小，F为变化的固定内容大小。
+
+| 流程 | 数字/位置新增事件 | 正文读取与计算 |
+| --- | --- | --- |
+| 普通一轮，无工具/压缩，最终usage与output-end同批 | 输入numeric1、输出+基准numeric1，共2；covered0 | 输入/输出各一次贡献，处理B_in+B_out；无旧历史计数；prepare/最终校验复用同一次已确定数值 |
+| usage与output-end分批且都改变结果 | numeric3 | 仍只有输入/输出两次消息贡献；usage只改标量，不再计一次输出 |
+| Goal自动执行一轮并继续 | 同上；Goal运行快照0 | 只计算原续行输入与本轮输出 |
+| 固定配置改变 | numeric1；Prompt引用0 | 仅变化固定部分F；消息贡献0次重算 |
+| 同值配置/提示、重复已覆盖统计读取 | 0 | 0贡献计算；提示刷新原逐目标比较另计 |
+| 无内容失败，相关源尚未覆盖后turn结束 | numeric0、covered1 | 空结算判定及小控制查询；旧正文0；再重载不检查这段失败来源 |
+| 中断并保留部分输出 | 该输出numeric1；不另为interrupt保存 | 只读取本请求保留的完整内容+后续片段，按保留字节计一次 |
+| 压缩完成 | 新替换贡献numeric1；原compaction事实保留 | 2次切点定位+replacement/基线贡献；旧前缀0次求和/计数 |
+| 正常已结算重载 | 0 | 8个定位query；1份numeric；0消息正文和计数 |
+
+一轮原事实明确为input/message、applied、consumed、turn/start/end、model-start/output-end、model/usage、context/budget、context/prepare、model/call各1，加D个原输出事实，共11+D。Usage增加2或3，不是再加2份boundary和逐model-start快照。带工具的一轮按真实tool-call/tool-result及附带消息另列，不用假设积压量作为优化依据。
+
+## 9. 必要修改与机制要求
+
+| 位置 | 必要修改 |
+| --- | --- |
+| context_usage.rs、context_usage/sources.rs | v4小数字状态、按实际转移保存、covered合并、输出控制按需取得、原read屏障 |
+| context_usage/numeric.rs | 私有数字树不保留；累计边界使用已保存numeric事实 |
+| context_model.rs、host.rs | 唯一可组合计数定义；可选默认接口保持旧计数实现兼容 |
+| history.rs/settled_output.rs | 复用已有投影/结算；不复制转换规则或缓存历史 |
+| context_preparation.rs、context_policy.rs | usage委托；本次请求已有数值在原prepare/validate间复用；不拥有第二套累计统计 |
+| defaults.rs、lib.rs | 原上下文功能安装与内部服务名 |
+| ModelProvider、AgentLoop等 | 不要求Usage确认/清理调用，不增加事件字段或统计状态 |
+
+| owner / 问题 | 现有能力与确定要求 | 序号/取消/重载 |
+| --- | --- | --- |
+| Store / #1320 | ID、kind/位置、request_id足够读取新源；按源数值位置取前驱尚无索引，补通用标量范围索引与匹配 | 原fixed scope与事务；v40索引方案归机制文档；不在Store计token |
+| Timeline / #1320 | 现有append/query足够 | 不改before/提交/发布；数字保存失败不发布；无新状态CRUD |
+
+## 10. Rule check与删减
 
 | 规则 | 本设计 |
 | --- | --- |
-| principles §1；ADR 002 D1 | ContextUsage 是 branch Capability，拥有统计状态；Session 方法不持有分支累计值。 |
-| ADR 002 D2、D3 | 不设接线插件或全局缓存；依赖现有 Timeline、Dispatcher、branchLifecycle 和公开计数合同；请求消费方向不引入环。 |
-| ADR 002 D4、D5 | 不新增用户配置；服务与状态先用数据合同描述，Rust 绑定另定。 |
-| §4 规则 1、2 | 不替输入、模型或工具 owner 决定交接与结果，只消费其事实。 |
-| §4 规则 3、4 | 不在 before 等待或写入快照；统计语义不进入 Timeline/SQL 核心。 |
-| §4 规则 5、6、9 | 数字节点与结果同批，不改变上下文入口；只在有效变化/确认需要时合并写结果，不为每个 delta 追加 usage，派生结果不替代必要事实。 |
-| §4 规则 7、8 | 通过声明服务和事实协调；尚缺机制见 §5，由各 owner 决定。 |
+| principles§1；ADR002 D1 | 统计、任务与恢复归独立branch Capability |
+| ADR002 D2–D5 | 无接线层、新用户配置；贡献/服务合同语言中立 |
+| §4 1–4 | 不启动其它owner任务，不代交接；handler只通知自己的任务；无before I/O |
+| §4 5、6 | 原上下文事实不变，统计不进入模型上下文；保存成功后发布 |
+| §4 7、8 | 声明原依赖；机制需求见§9 |
+| §4 9 | 数字服务预算/显示/压缩；位置缓存只避免重复处理已确认无效果的尾部 |
 
-独立状态所有者由 ADR 023 要求；保留的部分累计边界用于压缩、分叉或请求前缀校准。实现若引入完整消息缓存、每事件统计日志或常驻第二条派发队列，应删除并重新核对上述用途。
-
-## 8. 具体状态与计数接口
-
-新增结果类型 context-usage/recovered，使用既有扩展事实路径。其 state 是单一 UsageRecoveryState：
-
-| 字段 | 内容 |
-| --- | --- |
-| branches | 根到当前分支的身份顺序，用于比较消息源位置；恢复时与实际链核对。 |
-| initialized | 此数字前缀完成初始化的源位置；更早的请求位置没有由本次初始化获得读取能力。 |
-| root | 不可变数字树根引用，包括根身份、位置范围、高度及摘要，见 §9.1。当前查询使用该摘要，不另外保存一份总量。 |
-
-根摘要保存普通贡献之和、最后配置、压缩、provider 基准和本地估算。配置包含算法身份、固定贡献及预算；其配置身份已经包含固定内容指纹，不另存一份同义指纹。provider 基准包含 request ID、请求源位置、引用位置、本地对应估算与 prompt_tokens。产品首版算法为 dim/window-facts/v1。普通消息累计值不是当前有效消息总量；当前值按 §9.1 扣除已替换前缀。
-
-保存的 request_identity 覆盖模型控制字段、固定内容和算法；基准使用的完整配置身份还包含实际预算。预算改变后不继续使用旧本地基准，即使贡献单位和算法名称未变。
-
-配置摘要保存原配置事实身份，不在每条结果复制 ModelRequest 或 metadata。冷恢复按该 ID 选 provider/model、能力、config 和 metadata，构造无消息、无 system/tools 的计数控制请求。支持可组合统计的模型解析实现必须能据这些控制字段恢复同一算法和预算；实际固定内容贡献已经保存，无须再读其正文。
-
-Contribution 只定义一次：serialized_bytes 和 images，都是非负整数。计数操作、算法身份、精确序列化范围和 Rust 绑定归 [ContextCompaction §5.1 的计数合同](ContextCompaction.md#51-productcontextmodel)。本部件保存该合同的 ContextContribution，不定义另一种计数类型或复制其序列化规则。
-
-产品 ContextModel 显式声明支持该算法；其它实现继续保留完整请求计数，但若未提供等价的可组合统计，usage 返回不支持此统计，不能静默重建历史。最终完整请求计数的原合同不删除。
-
-读取计数能力只调用当前 ContextModel 的 contribution_counter；None 是明确的不支持，不向 Timeline 补查正文来试算。新增消息只调用一次 message；固定内容变化只调用 fixed；变化后的累计贡献只调用 estimate。读取使用保存的本地估算，不再调用计数器。算法身份不同则不得复用旧数字根或 provider 校准；走显式初始化，而非在 getter 内偷偷重算。
-
-冷恢复解析计数控制字段后，同算法的预算变化只更新限制和数值，不读旧消息。计数实现暂时不可用时，统计返回不可用，不能因此让整个 Session 恢复失败；后续一代恢复计数能力时显式初始化一次。未知 schema、坏节点和存储失败仍是错误，不归为计数器不可用。
-
-## 9. 数字节点、压缩和请求基准
-
-消息贡献按实际投影顺序保存，叶节点含消息源位置和 Contribution；同一源形成的多条消息可合并贡献。内部节点含子节点身份、位置边界和累计贡献。节点是本 owner 的不可变事实 context-usage/node；不含正文、完整 Message 或 Store 内容哈希。
-
-首版每叶目标 64 项、内部扇出目标 32。追加复制最后一条路径；压缩追加数字边界，不改写旧数字。数字节点和 recovered 同批提交。按节点 ID 使用既有 query，读取总量不展开叶；请求/压缩需要的前缀按树边界定位，不把所有历史贡献重新求和。新节点事实和 FTS/编码产生的额外写入全部计入成本。
-
-一次完整输出结算为一个或多个新消息贡献；不为原始 delta 建立另一套常驻输出缓存或统计日志。结算按 request ID 定位最后完整内容和其后必要片段，不能读取早已被完整内容覆盖的旧片段。没有完整内容时，读取该次输出确实需要的片段，成本随这次新输出体积增长。若压缩切开一条消息，使消息形状改变，该受影响内容作为新消息重新计数；不能据此重读其它未变消息。
-
-输出边界分三次取最后位置：同 request 的 model-start/model-output-end、同 request 且没有 call_event_id 的旧格式 tool-result，以及 branch/start。只比较这三个候选在分支链中的位置，不能把它们合成一个跨类型、跨关联键的 OR 后扫描历史。再按 request ID 取边界之后最后一条 model-content，读取其后的片段。类型与 request ID 同时受限时，SQL 使用已有 request 关联索引；不存在的类型也不能退回扫描该类型的全部旧请求。
-
-准备请求时固定源截止、数字根、固定内容身份及算法，形成待确认的 request 基准引用。最终请求生产者确认后，通过私有 context-usage/request-base 事实提交引用；不扩充 ModelCall 的持久字段，也不从完整历史请求反推引用。确认条件见 §9.2。
-
-基准引用必须对应实际发送的最终请求。host 或写入前变换改变了消息/固定内容时，最终请求生产者须重新确认引用或明确标为不可校准，不能把旧引用原样留给 usage 消费者补救。
-
-provider usage 按 request ID 点查基准。只有前缀、配置和算法仍兼容，才保存 baseline；当前估算等于 provider 实测前缀加其后本地增量，固定内容不能重复计数。压缩替换该前缀或请求含未覆盖的 host 内容时，不采用该基准；仍可返回当前本地统计。
-
-### 9.1 数字前缀与压缩
-
-当前总量和请求准备使用的位置不同。例如准备固定在 100，统计已处理到 110，其中 105 完成了压缩。不能拿 110 的当前根总量当作位置 100 的统计，也不能为取得 100 而查询全部旧 recovered。
-
-数字树保存以下条目，按分支链位置排序：
-
-| 条目 | 保存内容 |
-| --- | --- |
-| 已结算普通消息 | 源位置和本次新增 Contribution。 |
-| 配置采用 | 源位置、配置身份、算法、固定贡献与预算；不保存 system/tools 正文。 |
-| 完成压缩 | 源位置、retain_from 的位置、该切点之前普通消息的累计贡献，以及 replacement/context_baseline 的贡献。 |
-| provider 校准 | 请求覆盖位置、引用位置、配置/压缩身份、请求本地估算和实测输入量。 |
-
-每个子树摘要保存普通消息贡献之和、最后配置边界、最后压缩边界和最后 provider 基准。实际内容、配置或压缩变化的条目还保存该位置的本地估算；它是对累计 Contribution 的常数计算，不重新读取正文。usage 校准只追加基准边界，保留原本地估算。没有变更的可选边界在节点中省略，不重复编码 null。
-
-读取位置 S 的前缀时，完整位于 S 之前的子树直接使用摘要，只沿跨越 S 的路径读取节点。使用保存的本地估算，无须为旧位置重新解析模型配置或计数正文。当前有效消息贡献为：该前缀的普通消息累计值，减去最后压缩边界记录的已替换累计值，再加该压缩的 replacement/context_baseline 贡献。没有压缩时直接使用普通消息累计值。
-
-retained_entry 的位置规则和“切点不能早于已生效切点”的检查与上下文投影共用。压缩不会把此前移除的普通消息复活。新的 replacement 包含旧 pin 时，它是这次 replacement 的内容，只计这次 replacement；旧 replacement 不累加。
-
-普通消息的旧数字保留在树中，是为请求固定位置、后续压缩切点和分叉读取提供前缀值；查询不逐条读取这些数字。无变化的处理确认只推进 recovered.source_through，不创建数字条目。节点按叶打包，不能退化成每条原始事件一个统计事实。
-
-旧数据初始化以其固定截止建立数字前缀，只导入当时有效的普通消息和压缩边界。初始化之前的任意历史位置不因此获得统计读取能力；恢复中的旧请求若没有可见的兼容数字引用，标为不可校准，不为了校准额外重建旧请求。当前统计初始化仍只执行一次。
-
-### 9.2 最终请求的确认
-
-ContextPreparation 仅在以下条件全部成立时登记待确认引用：请求消息恰好是固定源位置的投影，没有额外消息；system/tools 与该位置统计一致，或已按下文证明并计算实际固定贡献；模型、配置及算法兼容。已有的历史前缀检查仍用于拒绝非法请求，不能用相同字节数代替内容相同。
-
-准备期间完成压缩时，请求构造者同时给出实际采用的完成事实身份和源截止，引用该压缩之后的数字前缀；不能继续沿用 context/prepare 最初的 through。这项证明来自实际请求构造流程，不由 usage 根据“最后一条压缩”猜测。没有额外内容、没有后续变换的正常压缩请求也须能取得基准引用。
-
-登记内容是 request ID、数字引用和最终准备结果的 Weak<ModelRequest>，不保留请求正文。该记录仅存活于这个在途请求，确认、失败或取消后释放，不持久化运行时指针。
-
-请求准备的预算判断与最终校验使用同一个数字估算。采用前须确认请求的消息前缀、固定内容、模型控制字段、计数算法及预算均匹配；准备期间采用较新的压缩时，原源截止至压缩之间不能夹入其它有效内容变更。引用同时保存本次在途请求的估算和限制，最终对象未变且当前计数算法、限制仍相同时复用。任一条件不成立，就对实际待发送请求做完整本地计数；不读取历史 ModelCall.request，不通过历史请求正文比较来重新寻找 provider 基准。手动压缩对已经构造的实际请求做本地计数。
-
-前缀校验直接比较 host 返回的消息与 Loop 已构造的 source.request.messages：相同 Arc 直接通过，替换对象再比较内容。来源是同一固定截止的规范请求，不能为再次验证它而重建历史。策略需要消息来源、切点和保留范围时自行读取投影；没有压缩策略的准备路径不读取第二份历史。
-
-模型控制身份包含 provider、model、能力、config、startup 和 metadata.extensions；session、agent、run、trace、turn 这些追踪身份不参与计数兼容性。固定内容身份另包含实际 system/tools。配置没有工具部分时，既有 ToolBinding 合同允许请求使用当前工具；这种请求只在消息前缀和模型控制一致时取得引用：点查原配置的控制字段，计算本次实际固定贡献，替换已保存的固定贡献。不读取旧工具正文或消息，不修改工具采用合同。引用保存这次固定内容的身份及实际本地估算；以后相同固定内容的请求才可使用其 provider 基准。普通 usage 读取仍针对已采用配置，不把这类请求专有的基准用于不同的固定内容。
-
-结果与请求引用使用 v3 schema，包含请求专有身份和 §9.3 的最后条目边界；数字摘要与引用使用相同字段定义。读取明确兼容 v1、v2：缺少请求专有身份表示原已采用配置，缺少最后条目边界表示尚未保存该信息；新结果写 v3。未知版本报错，不回退扫描历史。没有改变 Timeline 的原生文件版本、ModelCall 或 model/usage 格式。
-
-最终请求生产者在所有 before 和图片适配之后、调用 provider 之前确认实际 Arc<ModelRequest>。只有它与待确认对象仍是同一个未修改对象，才提交 request-base；内容变换或引用消失都使本次请求不可校准。Arc 的写时复制会使旧 Weak 无法证明新对象，不能只比较配置或消息数量后继续采用旧引用。无法证明的请求仍按最终请求做原预算校验。
-
-request-base 保存 request ID、请求源截止、数字根身份、算法、配置/压缩身份和该请求的本地贡献。提交完成后再调用 provider；保存失败沿现有故障路径终止，不发送一个无法确认其基准已提交的请求。usage 仍是原模型事实，request-base 不替代它。
-
-重复 usage 替换同请求的实测值；迟到的旧请求不覆盖更新请求的基准。先比较请求覆盖的源位置，同位置再比较 request-base 的位置。配置或压缩身份不匹配时，不采用该基准。旧程序、恢复请求或变换后的请求没有 request-base 时，只失去 provider 校准，当前本地统计仍可读。
-
-### 9.3 请求准备的投影读取
-
-ContextPolicy 接收 Loop 已构造的规范请求、固定源截止及统计引用，不要求调用者先读出 HistoryEntry 列表。未达到压缩条件时，写预算事实并返回这份请求；达到条件后才读取切点、消息来源、保留范围所需的投影。最终校验沿用 §9.2 的同一引用。
-
-既有 context/budget.boundary 仍表示最后一个 HistoryEntry 的 id，不改成最后事件 id。为取得该字段，数字摘要保存 last_entry：
-
-| 值 | 含义 |
-| --- | --- |
-| 缺少 last_entry | 旧数字结果尚未保存此信息；不能据此声称历史为空。 |
-| `{at, id: null}` | 该源位置的有效历史没有 HistoryEntry。 |
-| `{at, id: "..."}` | 最后一条有效 HistoryEntry 的源位置与真实 id，包括工具上下文等投影后缀。 |
-
-last_entry 由共享投影转移产生：输入取最后实际消息的 id；输出结算只在产生消息时更新；工具结果取最后结果或附带上下文的 id。完成压缩后，最后条目位于保留切点之前便改为空，否则保留。初始化从已经读取的规范投影取得，不再查询旧正文。配置和 usage 不产生历史消息，不覆盖这个字段。
-
-它与贡献保存在同一条目和数字摘要中，随数字节点、recovered 原子提交；没有第二个状态 owner 或缓存。reference 返回同一数字前缀的估算、last_entry 和请求证明。旧摘要缺少 last_entry 时，新的实际消息会自然建立此边界；不能为了补充一个 id 在 usage getter 中重放历史。
-
-压缩的增长条件也使用数字范围：按类型和位置索引取得最近相关 compaction-start 的 through，再读取该位置之后、请求源位置以内的增长累计值。每条新消息计贡献时，同时从该贡献计算“单条消息的估算减空请求估算”，保存其和，维持原有逐条增长的计量方式；不再次序列化正文，也不假设任意计数器的 estimate 是线性的。每个完整子树使用已有摘要，只读取两个范围边界上的数字节点，不逐条读旧贡献或消息。旧数字没有增长字段时表示未知，不当成零。实际触发压缩时，才读取所需消息正文并执行切点、pin、digest 和 replacement 计算。保留策略、合法切点和预算恢复语义仍归 ContextCompaction。
-
-## 10. 源输入、写入及恢复
-
-需要处理确认的源输入是 input/consumed、工具结果、配置采用、模型输出结算、compaction 和 model/usage。非完成压缩和无效基准按既有语义处理后确认。准备/调用事实不进入统计处理队列，request-base 通过既有 request 索引按身份读取；也不把原始流式 delta 当作持久统计任务。
-
-```text
-有效内容变化 -> 计算新增或替换贡献
-             -> append [新数字节点，context-usage/recovered]
-
-model/usage -> 按 request ID 取得基准引用
-            -> append [数字基准边界，recovered]
-
-usage 读取 -> 当前 recovered 的总量、限制和校准字段
-```
-
-恢复读取最后结果及 source_through 之后的新源；这些输入需要的新正文允许按身份读取，已保存前缀的内容不再计数。崩溃留下多少真实未完成工作 U，就处理多少，不扫描之前已完成的源输入。一条尚未结算的大输出仍可能需要处理很多新内容字节，不能以 U=1 宣称计算无成本。源截止与结果读头遵循状态结果协议。
-
-本部件的 Dispatcher 订阅只记录待处理的最大位置并唤醒自持任务，不持有完整事实。订阅先于恢复截止的捕获；任务在 activated 后固定截止、恢复，再从同一 source_through 继续按序读取新源。恢复期间收到的位置不丢弃，已覆盖的位置不重做。通知位置不等于已处理位置，也不发布为结果；状态转移、节点写入和处理确认只由这一个任务完成。closing 取消任务，不新增派发队列或另一套运行时订阅机制。
-
-fork 固定祖先切点，只有根和节点在该来源范围内可读时才共享，节点不可改写。源位置早于切点但物理提交晚于切点的结果，不能直接当作已复制的节点；分叉初始化必须单列导入或初始化成本。没有兼容根的数据初始化一次，普通 resume 不重复读取旧正文。
-
-## 11. 修改位置与写入预算
-
-| 位置 | 修改 |
-| --- | --- |
-| context_model.rs / host 计数合同 | 提供 Contribution 及算法身份；WindowFacts 复用同一计数实现。 |
-| 新 context_usage.rs | branch owner、数字状态、源处理确认和结果读取。 |
-| history.rs 的投影逻辑 | 同一转移提供消息身份和受影响范围；不增加另一套历史渲染器。 |
-| context_preparation.rs::usage | 读取 contextUsage，删除 rendered_stream 与尾部收集。 |
-| ContextPreparation / 最终请求生产者 | 固定实际采用的数字前缀；最终请求确认后、发送前提交私有 request-base。 |
-| CLI 的 context 请求 | 异步读取原 session 方法，不阻塞历史回复处理。 |
-
-查询一般读一个结果及必要基准；当前总量不访问数字叶。一个新增消息更新一条数字路径和一个结果；多个消息同批共享路径。校准保存数字基准边界与结果，供固定位置查询使用，不读取正文；原始 delta 不增加统计事实。批内被后一次路径复制替代的临时节点立即释放，只持久化最终根可达的新节点。实际 WAL、序列化、FTS、数字节点数与结果保留体积必须测量，不用“只多写一条”估算全部成本。
+删去数字树、独立boundary、每个model-start保存、started/settled持久数组、每次只推进内存位置也保存完整状态、request-base事实、生产者confirm/discard。保留的贡献累计数字、切点、基准和小处理位置缓存各有明确读路径。复用现有上下文flow验证计数等价、同批/分批、重复/迟到usage、空输出、压缩、fork、提交崩溃和关闭；记录实际SQL候选、解码字节、计数调用和WAL，不以LIMIT1或输出行数代替证明。
