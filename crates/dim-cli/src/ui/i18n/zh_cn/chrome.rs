@@ -317,7 +317,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No reportable error in this interface." => "当前界面没有可上报的错误。",
         "Usage: /report" => "用法：/report",
         "Report this error" => "上报此错误",
-        "Report preview" => "报告预览",
+        "Report ready" => "报告已生成",
+        "ZIP contents: report.md, diagnostics.json" => "ZIP 内容：report.md、diagnostics.json",
         "Model · Generate locally" => "模型 · 本地生成",
         "Local generation makes zero model requests." => "本地生成不会调用模型。",
         "Session model" => "会话模型",
@@ -334,9 +335,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Updating report plan…" => "正在更新报告计划…",
         "Generating report…" => "正在生成报告…",
         "Cancelling generation…" => "正在取消生成…",
-        "Tab focus · Enter select · ↑↓ scroll · Esc close" => {
-            "Tab 切换 · Enter 选择 · ↑↓ 滚动 · Esc 关闭"
-        }
+        "↑↓/Tab move · Enter select · Esc close" => "↑↓/Tab 切换 · Enter 选择 · Esc 关闭",
         "exit" => "退出应用",
 
         "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {

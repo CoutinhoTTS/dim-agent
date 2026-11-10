@@ -110,7 +110,7 @@ pub struct Draft {
 pub enum Reply {
     Prepared(Option<String>, Prepared),
     Plan(Plan),
-    Generated(Preview),
+    Generated(GeneratedReport),
     Failed(String),
 }
 
@@ -144,10 +144,8 @@ pub struct Evidence {
 }
 
 #[derive(Deserialize)]
-pub struct Preview {
+pub struct GeneratedReport {
     pub title: String,
-    pub body: String,
-    pub files: std::collections::BTreeMap<String, String>,
     pub archive: Archive,
     pub sharing: Sharing,
 }

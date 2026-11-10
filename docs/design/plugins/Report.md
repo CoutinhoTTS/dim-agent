@@ -39,16 +39,18 @@ Both TUI modes display the hint below a reportable error, including a failed con
 | [Generate report]                                 [Cancel]   |
 +--------------------------------------------------------------+
 
-+-- Report preview --------------------------------------------+
-| <Title and issue body>                                       |
-| ZIP contents    [report.md]  [diagnostics.json]              |
-| [Save ZIP]      [GitHub]     [Discord]             [Close]   |
++-- Report ready ----------------------------------------------+
+| <Report title>                                               |
+| ZIP contents: report.md, diagnostics.json                    |
+| > Save ZIP                                                   |
+|   Close                                                      |
 +--------------------------------------------------------------+
+  After saving: <ZIP path> · GitHub · Discord
 ```
 
 The model picker starts from the Session's adopted model identity and offers other selectable models from the client's admitted catalog and **Generate locally**. A missing model or connection leaves those choices available. Redaction starts checked. Options accepts a short instruction about what to omit or keep. There are no required fields. With a model selected, the dialog exposes the exact model material and limits before Generate can send it. Local mode displays zero model requests. Cancellation or model failure returns to the same evidence with local generation available.
 
-The overlay follows the TUI's focus and list conventions. Tab moves between controls, Enter activates the focused control, and Esc closes a picker first, cancels generation while busy, or closes the report. Focus starts on Model. At narrow widths, labels and controls stack and previews scroll within the overlay with the focused action visible. Place `/report` immediately before `/exit` in both curated menus, following the existing exact-name, Enter and Tab behavior. The CLI command owner owns that order change (§7). [TUI design](Tui.md), [command menu contract](../cli-commands.md#command-menu).
+The overlay follows the TUI's focus and list conventions. Up and Down move between controls, and Tab and Shift+Tab cycle focus. Enter activates the focused control. Esc closes a picker first, cancels generation while busy, or closes the report. Focus starts on Model. The TUI shortens the error and report title to fit the overlay and keeps the focused action visible. The result lists the archive contents and shows the saved path so users can inspect the files with their own tools. Place `/report` immediately before `/exit` in both curated menus, following the existing exact-name, Enter and Tab behavior. The CLI command owner owns that order change (§7). [TUI design](Tui.md), [command menu contract](../cli-commands.md#command-menu).
 
 ## 3. Evidence and redaction
 
@@ -94,7 +96,7 @@ The Agent's operation uses the one-shot auxiliary model boundary, with the singl
 
 ## 6. Preview and sharing
 
-Build `report.md` and versioned `diagnostics.json` from the same approved content shown in the preview. Diagnostics v1 contains `{version: 1, evidence, unavailable}`. The ZIP contains exactly those two files. Return the two UTF-8 file contents and the base64-encoded ZIP in the direct reply so clients can save after the connection closes. Cap the ZIP at 64 KiB before encoding. The client displays the body and both file contents before exposing share actions. It treats diagnostics and report text as data when rendering them.
+Build `report.md` and versioned `diagnostics.json` from the same approved content used for the report. Diagnostics v1 contains `{version: 1, evidence, unavailable}`. The ZIP contains exactly those two files. Return the two UTF-8 file contents and the base64-encoded ZIP in the direct reply so clients can save after the connection closes. Cap the ZIP at 64 KiB before encoding. The TUI exposes share actions after the ZIP has been saved and the user can open it. It leaves the saved path in the transcript when the dialog closes. Clients with inline previews display the body and both file contents before exposing share actions and treat them as data when rendering them.
 
 | Action | Client behavior |
 | --- | --- |
@@ -134,7 +136,7 @@ The Session part declares `sessionMethods`, Session lifecycle, public Session/br
 - Exercise a failed authorized history read and failed Session admission separately. Confirm the process route does not read Session data, the local Web route requires authentication, and guessed, foreign or stale report IDs do not expose drafts.
 - Seed forbidden fields and free-text secrets into source errors and evidence. Assert their absence from the model material and both ZIP members under either redaction setting. Compare the returned preview files byte-for-byte with the archive entries.
 - Use a counting provider to verify zero local requests, one model request after Generate, and no retry after a failed or duplicate call. Verify cancellation, expiry, close and reconnect settle work, discard late output and allow local generation from the same evidence while the draft remains open. A late cancellation for a settled plan leaves its successor running.
-- Save a report ZIP on a client connected to another host and exercise the GitHub draft and Discord flows without `gh`. Verify explicit sharing follows preview and that a failed share leaves the saved bytes available.
+- Save a report ZIP on a client connected to another host and exercise the GitHub draft and Discord flows without `gh`. Verify explicit sharing follows review or local save and that a failed share leaves the saved bytes available.
 
 ## 10. Ablation
 

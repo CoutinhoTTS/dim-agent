@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-use crate::report::{Action, Captured, Draft, Plan, Preview, Reply};
+use crate::report::{Action, Captured, Draft, GeneratedReport, Plan, Reply};
 use crate::ui::i18n::t;
 use crate::ui::line_input::LineInput;
 use crate::ui::render::panel::{bordered, follow_window, wrap};
@@ -25,7 +25,7 @@ pub struct Panel {
     pub draft: Option<Draft>,
     message: String,
     model: Option<dim_agent_types::ModelId>,
-    preview: Option<Preview>,
+    generated: Option<GeneratedReport>,
     plan: Option<Plan>,
     busy: Option<Busy>,
     note: String,
@@ -34,9 +34,6 @@ pub struct Panel {
     options: LineInput,
     instructions: String,
     focus: usize,
-    file: usize,
-    offset: usize,
-    page: Cell<usize>,
     caret: Cell<Option<(usize, usize)>>,
     saved: Option<PathBuf>,
 }
@@ -54,7 +51,7 @@ impl Panel {
             draft: None,
             message: crate::sanitize::safe_line(&error.message),
             model: None,
-            preview: None,
+            generated: None,
             plan: None,
             busy: Some(Busy::Prepare),
             note: String::new(),
@@ -63,9 +60,6 @@ impl Panel {
             options: LineInput::new(""),
             instructions: String::new(),
             focus: 0,
-            file: 0,
-            offset: 0,
-            page: Cell::new(1),
             caret: Cell::new(None),
             saved: None,
         }
@@ -90,11 +84,10 @@ impl Panel {
                 }
                 self.plan = Some(plan);
             }
-            Reply::Generated(preview) => {
+            Reply::Generated(report) => {
                 self.draft = None;
-                self.preview = Some(preview);
+                self.generated = Some(report);
                 self.focus = 0;
-                self.offset = 0;
             }
             Reply::Failed(error) => self.note = crate::sanitize::safe_line(&error),
         }
@@ -160,11 +153,9 @@ impl Panel {
         match key.code {
             KeyCode::Tab => self.focus = (self.focus + 1) % count,
             KeyCode::BackTab => self.focus = (self.focus + count - 1) % count,
-            KeyCode::Up => self.offset = self.offset.saturating_sub(1),
-            KeyCode::Down => self.offset = self.offset.saturating_add(1),
-            KeyCode::PageUp => self.offset = self.offset.saturating_sub(self.page.get()),
-            KeyCode::PageDown => self.offset = self.offset.saturating_add(self.page.get()),
-            KeyCode::Enter if self.preview.is_some() => return self.preview_key(workspace),
+            KeyCode::Up => self.focus = self.focus.saturating_sub(1),
+            KeyCode::Down => self.focus = (self.focus + 1).min(count - 1),
+            KeyCode::Enter if self.generated.is_some() => return self.generated_key(workspace),
             KeyCode::Enter if self.focus == 4 || self.draft.is_none() && self.busy.is_none() => {
                 return Input::Close;
             }
@@ -194,36 +185,33 @@ impl Panel {
         Input::None
     }
 
-    fn preview_key(&mut self, workspace: &Path) -> Input {
-        let preview = self.preview.as_ref().expect("open preview");
+    pub fn saved_path(&self) -> Option<&Path> {
+        self.saved.as_deref()
+    }
+
+    fn generated_key(&mut self, workspace: &Path) -> Input {
+        let report = self.generated.as_ref().expect("generated report");
         match self.focus {
-            0..=2 => {
-                self.file = self.focus;
-                self.offset = 0;
-            }
-            3 => {
-                self.note = match self
-                    .saved
-                    .clone()
-                    .map(Ok)
-                    .unwrap_or_else(|| save_zip(workspace, preview))
-                {
-                    Ok(path) => {
-                        self.saved = Some(path.clone());
-                        format!("{} {}", t("Saved ZIP"), path.display())
+            0 => {
+                if self.saved.is_none() {
+                    match save_zip(workspace, report) {
+                        Ok(path) => {
+                            self.saved = Some(path);
+                            self.note.clear();
+                        }
+                        Err(error) => self.note = format!("{} {error}", t("Could not save ZIP")),
                     }
-                    Err(error) => format!("{} {error}", t("Could not save ZIP")),
-                };
+                }
             }
-            4 | 5 => {
-                let (url, host, path) = if self.focus == 4 {
+            1 | 2 if self.saved.is_some() => {
+                let (url, host, path) = if self.focus == 1 {
                     (
-                        &preview.sharing.github_issue_url,
+                        &report.sharing.github_issue_url,
                         "github.com",
                         "/arcships/dim/issues/new",
                     )
                 } else {
-                    (&preview.sharing.discord_url, "discord.gg", "/ds35K3TadP")
+                    (&report.sharing.discord_url, "discord.gg", "/ds35K3TadP")
                 };
                 let valid = url::Url::parse(url).ok().filter(|url| {
                     url.scheme() == "https"
@@ -234,8 +222,8 @@ impl Panel {
                         && url.port().is_none()
                 });
                 self.note = if valid.is_some_and(|url| crate::browser::open(url.as_str())) {
-                    if self.focus == 5 {
-                        crate::clipboard::copy_local(&preview.sharing.description);
+                    if self.focus == 2 {
+                        crate::clipboard::copy_local(&report.sharing.description);
                         t("Opened Discord")
                     } else {
                         t("Opened GitHub issue draft")
@@ -251,16 +239,12 @@ impl Panel {
     }
 
     fn controls(&self) -> Vec<&str> {
-        if self.preview.is_some() {
-            vec![
-                t("Preview"),
-                "report.md",
-                "diagnostics.json",
-                t("Save ZIP"),
-                "GitHub",
-                "Discord",
-                t("Close"),
-            ]
+        if self.generated.is_some() {
+            if self.saved.is_some() {
+                vec![t("Save ZIP"), "GitHub", "Discord", t("Close")]
+            } else {
+                vec![t("Save ZIP"), t("Close")]
+            }
         } else {
             vec![
                 t("Model · Generate locally"),
@@ -288,8 +272,8 @@ impl Panel {
         let inner = width - 4;
         let height = budget - 2;
         let mut rows = Vec::new();
-        let title = if self.preview.is_some() {
-            t("Report preview")
+        let title = if self.generated.is_some() {
+            t("Report ready")
         } else {
             t("Report this error")
         };
@@ -311,16 +295,17 @@ impl Panel {
             let visible = controls.len().min((height / 2).max(1));
             let first = follow_window(0, self.focus, visible, controls.len());
             let body_rows = height.saturating_sub(visible);
-            self.page.set(body_rows.max(1));
-            let body = self.body();
-            let lines: Vec<_> = crate::sanitize::safe(&body)
-                .split('\n')
-                .flat_map(|line| wrap(line, inner))
-                .collect();
-            let from = self
-                .offset
-                .min(lines.len().saturating_sub(body_rows.max(1)));
-            rows.extend(lines.into_iter().skip(from).take(body_rows));
+            if let Some(path) = &self.saved {
+                let path = crate::sanitize::safe_line(&path.display().to_string());
+                rows.extend(wrap(&format!("{} {path}", t("Saved ZIP")), inner));
+            }
+            rows.extend(
+                crate::sanitize::safe(&self.summary())
+                    .lines()
+                    .take(body_rows.saturating_sub(rows.len()))
+                    .map(|line| truncate_cells(line, inner)),
+            );
+            rows.truncate(body_rows);
             for (index, label) in controls.into_iter().enumerate().skip(first).take(visible) {
                 let selected = self.focus == index;
                 let line = truncate_cells(
@@ -333,22 +318,18 @@ impl Panel {
         let hint = if self.editing {
             t("Enter apply · Esc back")
         } else {
-            t("Tab focus · Enter select · ↑↓ scroll · Esc close")
+            t("↑↓/Tab move · Enter select · Esc close")
         };
         bordered(&rows, width, None, &p.border, Some(title), Some(hint))
     }
 
-    fn body(&self) -> String {
-        let mut body = if let Some(preview) = &self.preview {
-            match self.file {
-                1 => preview.files.get("report.md").cloned().unwrap_or_default(),
-                2 => preview
-                    .files
-                    .get("diagnostics.json")
-                    .cloned()
-                    .unwrap_or_default(),
-                _ => format!("{}\n\n{}", preview.title, preview.body),
-            }
+    fn summary(&self) -> String {
+        let mut body = if let Some(report) = &self.generated {
+            format!(
+                "{}\n{}",
+                crate::sanitize::safe_line(&report.title),
+                t("ZIP contents: report.md, diagnostics.json")
+            )
         } else {
             let mut body = self.message.clone();
             if let Some(model) = &self.model {
@@ -393,8 +374,8 @@ impl Panel {
     }
 }
 
-fn save_zip(workspace: &Path, preview: &Preview) -> crate::Result<PathBuf> {
-    let bytes = STANDARD.decode(&preview.archive.base64)?;
+fn save_zip(workspace: &Path, report: &GeneratedReport) -> crate::Result<PathBuf> {
+    let bytes = STANDARD.decode(&report.archive.base64)?;
     if bytes.len() > 64 * 1024 || !bytes.starts_with(b"PK\x03\x04") {
         return Err("Invalid report ZIP".into());
     }

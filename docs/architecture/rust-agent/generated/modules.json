@@ -41791,8 +41791,8 @@
         "path Action::Plan",
         "path Captured",
         "path Draft",
+        "path GeneratedReport",
         "path Plan",
-        "path Preview",
         "path Reply",
         "path Reply::Failed",
         "path Reply::Generated",
@@ -41801,8 +41801,8 @@
         "use crate::report::Action",
         "use crate::report::Captured",
         "use crate::report::Draft",
+        "use crate::report::GeneratedReport",
         "use crate::report::Plan",
-        "use crate::report::Preview",
         "use crate::report::Reply"
       ]
     },
@@ -41851,8 +41851,6 @@
         "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Esc",
-        "path KeyCode::PageDown",
-        "path KeyCode::PageUp",
         "path KeyCode::Tab",
         "path KeyCode::Up",
         "path KeyEvent",

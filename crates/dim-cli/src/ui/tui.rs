@@ -2756,6 +2756,13 @@ impl App {
                 report_panel::Input::None => None,
                 report_panel::Input::Send(action) => Some(action),
                 report_panel::Input::Close => {
+                    if let Some(path) = report.saved_path() {
+                        self.notices.push(format!(
+                            "{} {}",
+                            t("Saved ZIP"),
+                            crate::sanitize::safe_line(&path.display().to_string())
+                        ));
+                    }
                     let draft = report.draft.take();
                     self.prompt = None;
                     draft.map(|draft| crate::report::Action::Cancel {
