@@ -218,6 +218,20 @@ pub fn print_web_panel(opened: &WebOpened) {
     }
 }
 
+/// Writes each notification the run queued since the last frame (`ui::notify`)
+/// through `write`, in the order they came, and empties the queue. `write` is
+/// the terminal's write; an error ends the interface as that one does.
+fn write_notifications(
+    notifications: &mut Vec<crate::ui::notify::Event>,
+    terminal: &crate::ui::notify::Terminal,
+    mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    for event in std::mem::take(notifications) {
+        write(&crate::ui::notify::sequence(terminal, &event))?;
+    }
+    Ok(())
+}
+
 fn run_terminal(
     host: Box<dyn SessionPort>,
     surroundings: Env,
@@ -329,15 +343,14 @@ fn run_terminal(
                 return code;
             }
         }
-        for event in std::mem::take(&mut app.notifications) {
-            if terminal
-                .write(&crate::ui::notify::sequence(&notify_terminal, &event))
-                .is_err()
-            {
-                let code = terminal.lost();
-                app.host.shutdown();
-                return code;
-            }
+        if write_notifications(&mut app.notifications, &notify_terminal, |bytes| {
+            terminal.write(bytes)
+        })
+        .is_err()
+        {
+            let code = terminal.lost();
+            app.host.shutdown();
+            return code;
         }
         let program_status = app.program_status();
         if let Some(report) = status.report(program_status.clone())

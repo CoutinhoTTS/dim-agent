@@ -13,11 +13,13 @@
 //! dim writes there) and a bare `BEL` follows it, so a tmux that forwards the
 //! form draws a rich notification and one that does not still rings. GNU
 //! screen does not double `ESC` (`ESC P` is its own passthrough, which a
-//! notification does not need), and it passes an `OSC` closed by `BEL` as it
-//! is: the bell-terminated forms go through unwrapped, and kitty's `OSC 99`,
-//! closed by `ST`, becomes the bell alone. A notification asserts nothing
-//! after it is delivered, so the record's reason for staying inside a
-//! multiplexer (`ui::status`, `ui::progress`) does not apply.
+//! notification does not need), and some builds forward an `OSC` closed by
+//! `BEL` while others drop every `OSC` a pane writes: the bell-terminated
+//! forms go through unwrapped with a bare `BEL` after them, which rings on
+//! both. kitty's `OSC 99`, closed by `ST`, has no shape screen carries whole,
+//! so it becomes the bell alone. A notification asserts nothing after it is
+//! delivered, so the record's reason for staying inside a multiplexer
+//! (`ui::status`, `ui::progress`) does not apply.
 //!
 //! herdr is not a multiplexer of that kind and gets the bell. It reads the
 //! `OSC`s in a pane for itself and notifies from its own list of terminals,
@@ -113,10 +115,10 @@ impl Terminal {
 }
 
 /// The bytes that make `terminal` show `event`; never empty. Inside tmux the
-/// wrapped form is followed by a bare `BEL` and inside GNU screen a
-/// bell-terminated form is passed as it is, so the output under a multiplexer
-/// may hold both a wrapped sequence and a bell while every other case is one
-/// form or the bell alone.
+/// wrapped form is followed by a bare `BEL`, and inside GNU screen a
+/// bell-terminated form is passed as it is with a bare `BEL` after it, so the
+/// output under a multiplexer may hold both a sequence and a bell while every
+/// other case is one form or the bell alone.
 pub fn sequence(terminal: &Terminal, event: &Event) -> Vec<u8> {
     if terminal.herdr {
         return b"\x07".to_vec();
@@ -159,8 +161,9 @@ pub fn sequence(terminal: &Terminal, event: &Event) -> Vec<u8> {
 /// tmux may drop a passthrough whole (3.3 and later default
 /// `allow-passthrough` to off), so the wrapped form is followed by a bare
 /// `BEL`: a tmux that forwards it draws the notification, one that does not
-/// still rings. GNU screen passes a single `ESC` and a `BEL`-terminated `OSC`
-/// through unchanged, so a bell-terminated form is sent as it is, and
+/// still rings. GNU screen is the same rule for the same reason: some builds
+/// forward a `BEL`-terminated `OSC` a pane writes and some drop every `OSC`,
+/// so a bell-terminated form is sent as it is and a bare `BEL` follows it.
 /// `OSC 99`, closed by `ST`, is not: `ESC P` would start a passthrough screen
 /// does not terminate the way tmux does, so only the bell is sent.
 fn multiplexed(multiplexer: Multiplexer, sequence: Vec<u8>) -> Vec<u8> {
@@ -171,7 +174,11 @@ fn multiplexed(multiplexer: Multiplexer, sequence: Vec<u8>) -> Vec<u8> {
             wrapped.push(0x07);
             wrapped
         }
-        Multiplexer::Screen if sequence.last() == Some(&0x07) => sequence,
+        Multiplexer::Screen if sequence.last() == Some(&0x07) => {
+            let mut passed = sequence;
+            passed.push(0x07);
+            passed
+        }
         Multiplexer::Screen => b"\x07".to_vec(),
     }
 }
@@ -265,14 +272,14 @@ mod tests {
                 &in_mux(Multiplexer::Screen, "iTerm.app", "screen-256color"),
                 &question
             ),
-            b"\x1b]9;DIM: Question waiting for your answer\x07"
+            b"\x1b]9;DIM: Question waiting for your answer\x07\x07"
         );
         assert_eq!(
             sequence(
                 &in_mux(Multiplexer::Screen, "ghostty", "screen-256color"),
                 &question
             ),
-            "\x1b]777;notify;DIM;Question waiting for your answer\x07".as_bytes()
+            "\x1b]777;notify;DIM;Question waiting for your answer\x07\x07".as_bytes()
         );
         assert_eq!(
             sequence(&in_mux(Multiplexer::Tmux, "", "xterm-kitty"), &question),
