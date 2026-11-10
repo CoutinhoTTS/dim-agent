@@ -74,9 +74,9 @@ git diff --check
 
 ## Publish the container image
 
-- A published, non-draft Release is required. `gh workflow run image-publish.yml --ref main -f release_tag=vVERSION` builds both platform rootfs trees and the amd64 image on hosted Ubuntu, runs local acceptance, and pushes nothing. The workflow uses the `image-release` environment and `GITHUB_TOKEN`; the GHCR package must be public and linked to `arcships/dim`.
-- Actual publication requires an explicit image-publication request and the same command with `-f publish=true`. The workflow checks out the release tag's Dockerfile and staging script, verifies the original Linux and Web archives against `SHA256SUMS` and their manifests, refuses an existing version tag, and pushes the two-platform index with provenance and an SBOM.
-- Acceptance pulls `ghcr.io/arcships/dim:vVERSION` on native amd64 and arm64 runners, checks `dimcode --version`, the image user and the Web assets, and only then moves `alpha` to that index digest. A wrong image needs a new alpha; do not rebuild a version tag.
+- A published, non-draft Release is required; the workflow verifies that state before downloading assets. `gh workflow run image-publish.yml --ref main -f release_tag=vVERSION` builds both platform rootfs trees and the amd64 image on hosted Ubuntu, runs local acceptance, and pushes nothing. The workflow uses the `image-release` environment and `GITHUB_TOKEN`; the GHCR package must be public and linked to `arcships/dim`.
+- Actual publication requires an explicit image-publication request and the same command with `-f publish=true`. The workflow checks out the release tag's Dockerfile and staging script, verifies the original Linux and Web archives against `SHA256SUMS`, their manifests and expected names, refuses an existing version tag, and pushes the two-platform index with provenance and an SBOM.
+- Acceptance pulls that exact index digest on native amd64 and arm64 runners, checks `dimcode --version`, the version/revision/source labels, UID 1000, both CLI symlinks and the Web assets. Only then does it copy the accepted index to `alpha` and assert the digest is unchanged. A wrong image needs a new alpha; do not rebuild a version tag.
 
 ## Recovery
 

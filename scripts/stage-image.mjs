@@ -32,6 +32,8 @@ const sourceCommit = options['--source-commit'];
 const output = path.resolve(options['--output']);
 const rootfs = path.join(output, `rootfs-${arch}`);
 assert(!existsSync(rootfs), `Destination already exists: ${rootfs}`);
+assert.equal(path.basename(nativeArchive), `dimcode-${platform}-${version}.tar.gz`, 'Native archive name mismatch');
+assert.equal(path.basename(webArchive), `dimcode-web-${version}.tar.gz`, 'Web archive name mismatch');
 
 const repo = path.resolve(import.meta.dirname, '..');
 const protocol = readFileSync(path.join(repo, 'crates/dim-app-server/src/protocol.rs'), 'utf8')
@@ -53,7 +55,21 @@ for (const archive of [nativeArchive, webArchive]) {
 }
 
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'dimcode-image-'));
+/** Rejects archive members outside the expected root before anything is extracted. */
+const checkMembers = (archive, rootName) => {
+  const result = spawnSync('tar', ['-tzf', archive], {encoding: 'utf8'});
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `Cannot list ${path.basename(archive)}: ${result.stderr}`);
+  for (const member of result.stdout.split('\n').filter(Boolean)) {
+    const name = member.replace(/\/+$/, '');
+    assert(name === rootName || name.startsWith(`${rootName}/`),
+      `Unexpected archive member in ${path.basename(archive)}: ${member}`);
+    assert(!path.isAbsolute(name) && !name.split('/').includes('..'),
+      `Archive member escapes its root: ${member}`);
+  }
+};
 const extract = (archive, rootName) => {
+  checkMembers(archive, rootName);
   const directory = mkdtempSync(path.join(scratch, 'extract-'));
   const result = spawnSync('tar', ['-xzf', archive, '-C', directory], {encoding: 'utf8'});
   assert.ifError(result.error);
@@ -77,6 +93,7 @@ const inventory = (root) => {
       if (stat.isDirectory()) visit(absolute);
       else {
         assert(stat.isFile(), `Release archive contains a special file: ${relative}`);
+        assert.equal(stat.nlink, 1, `Release archive contains a hard link: ${relative}`);
         files[relative] = digest(absolute);
       }
     }

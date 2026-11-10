@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {copyFileSync, lstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
@@ -76,23 +76,28 @@ function release(t, options = {}) {
     NOTICE: 'Dim\n',
     'licenses/aimux/LICENSE': 'MIT\n',
   });
-  writeManifest(native, {platform: options.nativePlatform ?? 'linux-x64', account: true,
-    toolchain: {rust: '1.98.1'}});
+  writeManifest(native, {version: options.manifestVersion ?? version,
+    sourceCommit: options.sourceCommit ?? commit, platform: options.nativePlatform ?? 'linux-x64',
+    account: true, toolchain: {rust: '1.98.1'}});
   if (options.changeNative) writeFileSync(path.join(native, 'default-plugins.json'), '{"plugins":{}}\nchanged\n');
   if (options.addNative) writeFileSync(path.join(native, 'extra.txt'), 'extra\n');
   if (options.linkNative) symlinkSync('LICENSE', path.join(native, 'plugins/EXAMPLE-LINK'));
+  if (options.hardNative) linkSync(path.join(native, 'LICENSE'), path.join(native, 'plugins/HARD-LINK'));
 
   const web = payload(temporary, 'dimcode-web', {
     'web/index.html': '<!doctype html>\n',
     'web/dimcode-web.json': `${JSON.stringify({
-      version, protocolVersion: options.webProtocol ?? protocolVersion, sourceCommit: commit,
+      version: options.manifestVersion ?? version,
+      protocolVersion: options.webProtocol ?? protocolVersion,
+      sourceCommit: options.sourceCommit ?? commit,
     })}\n`,
     'web/THIRD-PARTY-NOTICES.txt': 'notices\n',
     LICENSE: 'MIT\n',
     NOTICE: 'Dim\n',
   });
-  writeManifest(web, {platform: 'web', protocolVersion: options.webProtocol ?? protocolVersion,
-    toolchain: {node: '24.21.0'}});
+  writeManifest(web, {version: options.manifestVersion ?? version,
+    sourceCommit: options.sourceCommit ?? commit, platform: 'web',
+    protocolVersion: options.webProtocol ?? protocolVersion, toolchain: {node: '24.21.0'}});
 
   const archives = [archive(temporary, native), archive(temporary, web)];
   let checksums = sums(temporary, archives);
@@ -158,4 +163,31 @@ test('rejects a platform mismatch', {skip: skipped}, (t) => {
   const result = run(release(t, {nativePlatform: 'linux-arm64'}));
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Native platform mismatch/);
+});
+
+test('rejects a release version mismatch', {skip: skipped}, (t) => {
+  const result = run(release(t, {manifestVersion: '9.9.9'}));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Native version mismatch/);
+});
+
+test('rejects a release source mismatch', {skip: skipped}, (t) => {
+  const result = run(release(t, {sourceCommit: 'b'.repeat(40)}));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Native source mismatch/);
+});
+
+test('rejects an archive with the wrong name', {skip: skipped}, (t) => {
+  const fixture = release(t);
+  const wrong = path.join(fixture.temporary, 'wrong.tar.gz');
+  copyFileSync(fixture.native, wrong);
+  const result = run({...fixture, native: wrong});
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Native archive name mismatch/);
+});
+
+test('rejects a hard link in the release payload', {skip: skipped}, (t) => {
+  const result = run(release(t, {hardNative: true}));
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /hard link/);
 });
