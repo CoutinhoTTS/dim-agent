@@ -869,7 +869,9 @@ impl SqliteStorage {
                         super::text::backfill(&connection)?;
                     }
                     if *from == 37 {
-                        tx.execute_batch(V38_SESSION_OWNERS).map_err(storage)?;
+                        connection
+                            .execute_batch(V38_SESSION_OWNERS)
+                            .map_err(storage)?;
                     }
                     if *from == 24 {
                         connection
