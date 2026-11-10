@@ -632,16 +632,21 @@ impl SubmitChecks {
 }
 
 /// Appends the checks' contexts after the operator's own content (Hooks
-/// A.6.2); an input with no user content takes none.
+/// A.6.2); an input with no user content takes none. Content that is present
+/// but empty is no user content either: there is no operator text to append
+/// after, and a context placed there would be the input's first block, which
+/// every reader takes for the operator's words.
 pub fn append_blocks(user: &mut Option<UserInput>, blocks: Vec<String>) {
-    let Some(user) = user else {
-        if !blocks.is_empty() {
-            tracing::warn!("submit check contexts dropped: the input has no user content");
+    match user {
+        Some(user) if !user.content.is_empty() => user
+            .content
+            .extend(blocks.into_iter().map(|text| ContentBlock::Text { text })),
+        _ => {
+            if !blocks.is_empty() {
+                tracing::warn!("submit check contexts dropped: the input has no user content");
+            }
         }
-        return;
-    };
-    user.content
-        .extend(blocks.into_iter().map(|text| ContentBlock::Text { text }));
+    }
 }
 
 #[derive(serde::Deserialize)]

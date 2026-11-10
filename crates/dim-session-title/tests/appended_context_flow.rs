@@ -17,14 +17,19 @@ use tokio::sync::mpsc;
 const PROVIDER: &str = "018ec73f-0000-7000-8000-00000000000b";
 const HOOK: &str = "<dim-hooks kind=\"prompt-submit\">The parser's entry points are in src/parser.rs; read it before answering, and keep the answer short.</dim-hooks>";
 const SKILL: &str = "<dim-skill name=\"check\">\nSkill: check\nDescription: D\nFile: /tmp/check/SKILL.md\n\nInstructions:\nBODY\n</dim-skill>";
+/// What the real `UserPromptSubmit` hook used by the empty-content flow
+/// answers as its additional context.
+const HOOK_CONTEXT: &str = "Read src/parser.rs before answering.";
 
-fn builder() -> AgentBuilder {
+fn builder(home: &std::path::Path) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_session_title::install(&mut builder);
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     dim_app_server::collaboration::install(&mut builder);
+    dim_app_server::hooks_settings::install(&mut builder, Some(home.to_owned()));
+    dim_agent_capabilities::hooks::install(&mut builder);
     builder
 }
 
@@ -36,7 +41,46 @@ async fn start() -> (
     Client,
     mpsc::UnboundedReceiver<Request>,
 ) {
+    start_with(false).await
+}
+
+/// The `UserPromptSubmit` command the user's hooks run, if the Session gets
+/// one: a script answering with `HOOK_CONTEXT` as its additional context. A
+/// script keeps the command's own shell quoting out of the fixture.
+fn hook(home: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let script = home.join("prompt-context.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s' '{{\"hookSpecificOutput\":{{\"additionalContext\":\"{HOOK_CONTEXT}\"}}}}'\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script.to_string_lossy().into_owned()
+}
+
+/// [`start`] with the user's hooks document running the `UserPromptSubmit`
+/// script `use_hook` writes, so the served Session runs a real hook.
+async fn start_with(
+    use_hook: bool,
+) -> (
+    Box<Store>,
+    RunningServer,
+    Client,
+    mpsc::UnboundedReceiver<Request>,
+) {
     let store = Box::new(Store::new());
+    if use_hook {
+        let command = hook(&store.0);
+        std::fs::write(
+            store.0.join("hooks.json"),
+            json!({"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":command}]}]}})
+                .to_string(),
+        )
+        .unwrap();
+    }
     let (sent, requests) = mpsc::unbounded_channel::<Request>();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -51,7 +95,7 @@ async fn start() -> (
         .unwrap();
     });
     let server = serve(
-        builder(),
+        builder(&store.0),
         ServerConfig {
             unix_path: Some(PathBuf::from("/tmp").join(format!(
                 "dim-title-appended-{}/server.sock",
@@ -144,6 +188,21 @@ async fn submit(client: &mut Client, id: &str, content: Vec<&str>) {
         .unwrap();
 }
 
+/// Submits user content as given, which may be empty: an empty content list is
+/// the input shape whose first block has no operator text before it (#1386).
+async fn submit_content(
+    client: &mut Client,
+    id: &str,
+    content: Vec<Value>,
+) -> Result<Value, dim_client::Error> {
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId":id,"branchId":"main","user":{"content":content}}),
+        )
+        .await
+}
+
 /// The text the title request carried and its release, once the request that
 /// follows `submitted` reaches the provider.
 async fn title_request(
@@ -220,6 +279,52 @@ async fn an_input_without_appended_context_titles_unchanged() {
     assert_eq!(text, "Just the operator's own words");
     release.send("Own words".into()).unwrap();
     titled(&mut client, &id, "Own words").await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// #1386: an input with no operator content has nothing to append a context
+/// after, so the hook's context is dropped rather than placed at index 0,
+/// where every reader takes it for the operator's words. Such an input carries
+/// no user content at all, so the entry refuses it exactly as it does with no
+/// hook installed: nothing is written, nothing is titled, no preview is
+/// decided.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_input_with_no_operator_content_takes_no_context_and_writes_nothing() {
+    let (store, server, mut client, mut requests) = start_with(true).await;
+    let id = session(&mut client, &store.0).await;
+    let refused = submit_content(&mut client, &id, vec![])
+        .await
+        .expect_err("an input with no operator content is refused");
+    assert_eq!(
+        dim_client::app_error(&refused),
+        Some("session_invalid_input"),
+        "{refused}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .is_err(),
+        "a context the operator did not write titles nothing"
+    );
+    let preview = summary(&mut client, &id).await["preview"].clone();
+    assert!(preview.is_null(), "no preview: {preview}");
+    let history = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":"main","after":0,"limit":64}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !history["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["name"] == "message" && event["data"].get("user").is_some()),
+        "the refused input wrote nothing: {history}"
+    );
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
