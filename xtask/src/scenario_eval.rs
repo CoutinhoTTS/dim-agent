@@ -7066,6 +7066,77 @@ mod tests {
         assert!(overrides.branch_description.is_none());
     }
 
+    /// The `scheduler/description` candidate survives the serve child's JSON
+    /// overrides and arrives in the run's model request as the `schedule`
+    /// tool's declaration (§5.1): the candidate arm's every request names the
+    /// tool with the candidate text, the current arm's with the shipped one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_schedule_description_candidate_reaches_the_run_through_the_child() {
+        const CANDIDATE: &str = "CANDIDATE SCHEDULE TOOL DESCRIPTION";
+        /// The shipped description's opening (`session.rs` `DESCRIPTION`).
+        const SHIPPED: &str = "Manage scheduled jobs across this host";
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| Some(content("ok")))
+        }
+        let fixture = Fixture::start(
+            "scheduler-description",
+            answers,
+            json!({
+                "message": "Say ok.",
+                "budget": {"turns": 2, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let candidate = overrides(&pairs(&[("scheduler/description", CANDIDATE)])).unwrap();
+        for (arm, overrides) in [("current", Overrides::default()), ("candidate", candidate)] {
+            let record = run_arm(&fixture, &options, arm, &overrides, 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert!(!record.failed, "{arm}");
+        }
+        // The `schedule` tool's description in each request of an arm, one
+        // entry per request that declares the tool.
+        let descriptions = |arm: &str| -> Vec<Option<String>> {
+            fixture
+                .arm(arm)
+                .iter()
+                .filter_map(|request| serde_json::from_str::<Value>(request).ok())
+                .filter_map(|request| {
+                    request["tools"].as_array().and_then(|tools| {
+                        tools
+                            .iter()
+                            .find(|tool| tool["function"]["name"] == "schedule")
+                            .map(|tool| tool["function"]["description"].as_str().map(str::to_owned))
+                    })
+                })
+                .collect()
+        };
+        let current = descriptions("current");
+        let offered = descriptions("candidate");
+        assert!(
+            !current.is_empty(),
+            "the current arm's request declares the schedule tool"
+        );
+        assert!(
+            !offered.is_empty(),
+            "the candidate arm's request declares the schedule tool"
+        );
+        assert!(
+            current.iter().all(|description| description
+                .as_deref()
+                .is_some_and(|text| text.contains(SHIPPED))),
+            "the current arm carries the shipped description: {current:?}"
+        );
+        assert!(
+            offered
+                .iter()
+                .all(|description| description.as_deref() == Some(CANDIDATE)),
+            "the candidate arm's schedule tool description is the candidate text: {offered:?}"
+        );
+    }
+
     /// Every file under a scenario's `workspace/`, by path under it.
     fn workspace_files(directory: &Path) -> BTreeMap<PathBuf, String> {
         fn walk(root: &Path, directory: &Path) -> BTreeMap<PathBuf, String> {
