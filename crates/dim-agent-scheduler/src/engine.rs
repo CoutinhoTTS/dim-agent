@@ -48,6 +48,24 @@ pub(crate) fn uncertain(code: &str) -> bool {
     is_reloading(code) || matches!(code, "publication_unknown" | "ambiguous")
 }
 
+/// Whether the flow tests' seam drops this write's reply, which leaves an
+/// accepted write's outcome open the way a lost transport reply does (A.5,
+/// A.6). Feature `testing` only.
+fn drops_input_reply(shared: &Shared) -> bool {
+    #[cfg(feature = "testing")]
+    {
+        shared
+            .holds
+            .as_ref()
+            .is_some_and(|holds| holds.take_lost_input_reply())
+    }
+    #[cfg(not(feature = "testing"))]
+    {
+        let _ = shared;
+        false
+    }
+}
+
 /// The codes that say the target can never accept the input: its Session or
 /// branch is gone. A `session` delivery settles `failed` on these and the job
 /// is disabled with the reason (A.3); any other failure says nothing about
@@ -782,9 +800,7 @@ pub async fn settle_delivering(shared: &Arc<Shared>) {
         .iter()
         .filter(|run| run.state == DeliveryState::Delivering)
     {
-        if let Err(error) = lookup_once(shared, run).await {
-            tracing::warn!(%error, "scheduler lookup failed");
-        }
+        lookup_now(shared, &run.run_id).await;
     }
 }
 
@@ -793,19 +809,23 @@ pub async fn settle_delivering(shared: &Arc<Shared>) {
 enum LookupStep {
     /// The stored count was already at the bound; the record settled `lost`.
     Exhausted(Box<Delivery>),
-    /// This pass persisted attempt `n` before its lookup.
-    Attempt(u32),
+    /// This pass persisted the next attempt on the record it returns, whose
+    /// identity is the one the lookup uses.
+    Attempt(Box<Delivery>),
     /// The record settled or moved meanwhile; nothing to look up.
     Settled,
 }
 
 /// One lookup attempt for one `delivering` record (A.6): persist the
 /// incremented `attempts` before the lookup, settle `delivered` on
-/// `accepted`, and settle `lost` on the fifth answer without a fact.
-async fn lookup_once(shared: &Arc<Shared>, run: &Delivery) -> Result<(), SchedulerError> {
-    let run_id = run.run_id.clone();
+/// `accepted`, and settle `lost` on the fifth answer without a fact. The
+/// lookup's target is the identity the record holds under this update's lock,
+/// not the caller's snapshot: a launch persists its Session after the reply
+/// and before the input, so the caller's own copy may predate it.
+async fn lookup_once(shared: &Arc<Shared>, run_id: &str) -> Result<(), SchedulerError> {
+    let found = run_id.to_owned();
     let step = runs::update(&shared.files, move |history| {
-        let Some(run) = history.iter_mut().find(|run| run.run_id == run_id) else {
+        let Some(run) = history.iter_mut().find(|run| run.run_id == found) else {
             return Ok((false, LookupStep::Settled));
         };
         if run.state != DeliveryState::Delivering {
@@ -820,9 +840,8 @@ async fn lookup_once(shared: &Arc<Shared>, run: &Delivery) -> Result<(), Schedul
             return Ok((true, LookupStep::Exhausted(Box::new(run.clone()))));
         }
         run.attempts = Some(attempts + 1);
-        let attempt = run.attempts.unwrap_or(attempts + 1);
         run.validate().map_err(SchedulerError::invalid_data)?;
-        Ok((true, LookupStep::Attempt(attempt)))
+        Ok((true, LookupStep::Attempt(Box::new(run.clone()))))
     })
     .await?;
     match step {
@@ -832,7 +851,8 @@ async fn lookup_once(shared: &Arc<Shared>, run: &Delivery) -> Result<(), Schedul
             shared.spawn(prune(shared.clone()));
             Ok(())
         }
-        LookupStep::Attempt(attempt) => {
+        LookupStep::Attempt(run) => {
+            let attempt = run.attempts.unwrap_or(0);
             let (Some(session_id), Some(branch_id)) =
                 (run.session_id.clone(), run.branch_id.clone())
             else {
@@ -857,7 +877,7 @@ async fn lookup_once(shared: &Arc<Shared>, run: &Delivery) -> Result<(), Schedul
                 }
                 Ok(Ok(_)) => "unknown".to_owned(),
                 Ok(Err(code)) if target_gone(&code) => {
-                    return settle_target_gone(shared, run, &code).await;
+                    return settle_target_gone(shared, &run, &code).await;
                 }
                 Ok(Err(code)) => code,
                 Err(_) => "transport".to_owned(),
@@ -1032,24 +1052,35 @@ async fn write_input(
         "content": [{"type": "text", "text": job.prompt}],
     });
     match sessions(shared.sessions.as_ref(), "input", input).await {
-        Ok(Ok(receipt)) => {
+        Ok(Ok(receipt)) if !drops_input_reply(shared) => {
             let input_id = receipt["inputId"]
                 .as_str()
                 .ok_or_else(|| SchedulerError::invalid_data("input reply has no inputId"))?;
             settle_delivered(shared, &run.run_id, input_id).await
         }
+        // A lost reply leaves the write's outcome open even though the input
+        // was accepted, which is exactly what the lookup settles (A.5, A.6).
+        Ok(Ok(_)) => {
+            lookup_now(shared, &run.run_id).await;
+            Ok(())
+        }
         Ok(Err(code)) if uncertain(&code) => {
-            if let Err(error) = lookup_once(shared, run).await {
-                tracing::warn!(%error, "scheduler lookup failed");
-            }
+            lookup_now(shared, &run.run_id).await;
             Ok(())
         }
         Ok(Err(code)) => failed(shared, run, &code).await,
         Err(_) => {
-            if let Err(error) = lookup_once(shared, run).await {
-                tracing::warn!(%error, "scheduler lookup failed");
-            }
+            lookup_now(shared, &run.run_id).await;
             Ok(())
         }
+    }
+}
+
+/// One settling pass for a record whose write answered with no fact, so a
+/// healthy service settles it now. A failed pass leaves the record to the
+/// next generation's or the timer's pass (A.6).
+async fn lookup_now(shared: &Arc<Shared>, run_id: &str) {
+    if let Err(error) = lookup_once(shared, run_id).await {
+        tracing::warn!(%error, "scheduler lookup failed");
     }
 }

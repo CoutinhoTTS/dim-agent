@@ -303,6 +303,67 @@ async fn a_delivered_launch_is_not_tracked_and_an_unload_leaves_it_as_written() 
     server.join().await.unwrap();
 }
 
+/// A launch whose input reply is lost still settles from the identity the
+/// launch persisted: the lookup reaches the launched Session, its `accepted`
+/// answer settles the record `delivered`, the input is not sent again, and
+/// nothing launches a second time (A.5, A.6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_launch_with_a_lost_input_reply_settles_from_its_persisted_session() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = connect(&server).await;
+    let saved: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"name": "lost-reply", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Summarize the day.",
+                "target": {"kind": "launch", "cwd": home.path(), "max_run_minutes": 5}}}),
+        )
+        .await
+        .unwrap();
+    let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
+    // The write reaches the target and is accepted; only its reply is lost.
+    holds(home.path()).lose_next_input_reply();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job_id}))
+        .await
+        .unwrap();
+    let run_id = accepted["run_id"].as_str().unwrap().to_owned();
+    let run = settled(&mut client, &job_id, &run_id).await;
+
+    assert_eq!(run["state"], "delivered", "{run}");
+    assert_eq!(run["attempts"], 1, "one lookup settled it: {run}");
+    let session_id = run["session_id"].as_str().unwrap().to_owned();
+    let submission = run["submission_id"].clone();
+    let mut inputs = Vec::new();
+    let mut after = 0;
+    let mut through = None;
+    loop {
+        let mut params = json!({"sessionId": session_id, "branchId": "main", "after": after});
+        if let Some(through) = through {
+            params["through"] = json!(through);
+        }
+        let page: dim_client::wire::History =
+            client.typed("session.history", params).await.unwrap();
+        through = Some(page.through);
+        let next = page.next(after, through).unwrap();
+        inputs.extend(
+            page.events
+                .into_iter()
+                .filter(|event| event["data"]["submission_id"] == submission),
+        );
+        match next {
+            Some(next) => after = next,
+            None => break,
+        }
+    }
+    assert_eq!(inputs.len(), 1, "the input is not sent again: {inputs:?}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_at_job_saved_after_its_instant_records_missed_and_disables() {
     let home = home();
