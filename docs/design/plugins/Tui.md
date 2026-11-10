@@ -467,7 +467,10 @@ terminal answered DA1 alone           today's behaviour
 DA1 decides, not a timeout: tmux and GNU screen drop the query and still answer the
 sentinel, so they keep today's behaviour with no wait. `DIM_TERMINAL_STATUS=off` omits the
 query along with the reports. `DIM_TERMINAL_TITLE=always` and `DIM_TERMINAL_PROGRESS=on`
-are escape hatches for a terminal that answers but draws nothing.
+are escape hatches for a terminal that answers but draws nothing. Notifications are exempt
+from the multiplexer rule the record and the bar follow: inside tmux or GNU screen the
+chosen form is wrapped for passthrough (`ESC P tmux;` or `ESC P`), because a delivered
+notification asserts nothing afterwards.
 
 ## 5. Context mapping
 
