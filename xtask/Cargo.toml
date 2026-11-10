@@ -7,7 +7,7 @@ publish = false
 [features]
 eval-tests = []
 [dependencies]
-rusqlite = { version = "0.40.2", features = ["backup"] }
+rusqlite = { version = "0.41.1", features = ["backup"] }
 dim-agent-runtime = { workspace = true, features = ["testing"] }
 dim-agent-capabilities.workspace = true
 dim-agent-aimux.workspace = true

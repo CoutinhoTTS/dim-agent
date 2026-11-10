@@ -2549,6 +2549,7 @@
       "parent": "dim_app_server::mcp::auth",
       "file": "crates/dim-app-server/src/mcp/auth/oauth.rs",
       "unexpandedMacros": [
+        "assert",
         "format",
         "matches",
         "vec"
@@ -25425,6 +25426,7 @@
         "path oauth::loopback",
         "path oauth::now",
         "path oauth::revoke",
+        "path oauth::stored_endpoint",
         "path oauth::token"
       ]
     },
