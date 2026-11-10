@@ -576,7 +576,18 @@ fn build_job(
             }
             Some(cap)
         }
-        _ => previous.and_then(|before| before.policy_cap.clone()),
+        // A save that moves a job from a `launch` target to a `session`
+        // target drops the launch route's save-time cap. Every other save
+        // keeps the stored cap, including one that sends a legacy job's
+        // mapped `session` target explicitly (§2.3, A.1).
+        _ => match (&target, previous) {
+            (Some(Target::Session { .. }), Some(before))
+                if matches!(before.effective_target(), Some(Target::Launch { .. })) =>
+            {
+                None
+            }
+            _ => previous.and_then(|before| before.policy_cap.clone()),
+        },
     };
     let enabled = input
         .enabled

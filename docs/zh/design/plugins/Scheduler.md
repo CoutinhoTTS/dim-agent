@@ -160,7 +160,7 @@ classDiagram
 
 ### 2.3 本次变更之前保存的任务与投递
 
-存储形状是增量变化：本次变更之前保存的任务没有 `target`，其旧字段会被读出、映射为目标，并由写入保留。`Job` 把 `mode`、`session_id`、`cwd`、`model`、`agent_id`、`policy`、`policy_cap` 与 `max_run_minutes` 保留为旧字段(A.1)；它们永不被报告；保存唯一写入的旧字段是 `policy_cap`，且只在 `launch` 目标上，作为保留的 launch 路由的保存期上限(附录 F)。
+存储形状是增量变化：本次变更之前保存的任务没有 `target`，其旧字段会被读出、映射为目标，并由写入保留。`Job` 把 `mode`、`session_id`、`cwd`、`model`、`agent_id`、`policy`、`policy_cap` 与 `max_run_minutes` 保留为旧字段(A.1)；它们永不被报告；保存唯一写入的旧字段是 `policy_cap`，且只在 `launch` 目标上，作为保留的 launch 路由的保存期上限(附录 F)；把任务从 `launch` 目标改为 `session` 目标的保存会丢弃该上限。
 
 映射是固定的，取决于保存来源，而不是目标的方便：
 
@@ -356,7 +356,7 @@ Scheduler 进程行在其 `apply` 中注册一个来源([Settings §3.1](../apps
 | `userFile` | `schedule.json`；原生 profile 使用 Settings 既有的 `user/schedule` 行 |
 | `projectFile` | 缺省：仅用户作用域，无项目作用域、无合并 |
 | 文档根 | 含 `jobs`(数组，默认 `[]`)的对象；任务字段与约束见 A.1/A.4 |
-| 旧字段 | 存储的任务还可以携带 `mode`、`session_id`、`cwd`、`model`、`agent_id`、`policy`、`policy_cap` 与 `max_run_minutes`；它们按 §2.3 读取并映射，并由写入保留。`max_concurrent_runs`(整数，最小 1，默认 4)保持可读，并仅因存储文档兼容而被任务写入保留；它不影响投递。无需用户可配置的并发字段或 `userOnly` 声明。 |
+| 旧字段 | 存储的任务还可以携带 `mode`、`session_id`、`cwd`、`model`、`agent_id`、`policy`、`policy_cap` 与 `max_run_minutes`；它们按 §2.3 读取并映射，并由写入保留(`policy_cap` 由保存按 §2.3 管理)。`max_concurrent_runs`(整数，最小 1，默认 4)保持可读，并仅因存储文档兼容而被任务写入保留；它不影响投递。无需用户可配置的并发字段或 `userOnly` 声明。 |
 
 Settings 在边界处应用这些默认值并校验外部文档一次。非法文档是错误，不是空任务列表。来源只保存任务；A.7 的内层 v1 投递历史留在 `pluginFiles`。读取或修改该文档绝不结构性地重载包。
 
@@ -497,7 +497,7 @@ Scheduler 的记录是进程状态，没有 Timeline 事实，因此要展示它
 
 投递状态：`delivering`、`delivered`、`failed`、`lost`、`missed`。终态投递带 `ended_at`；`delivering` 记录不带。`delivered` 同时需要 `input_event_id` 与目标身份；`launch` 投递还带 `deadline_at`。`missed` 记录不带目标也不带输入。`session_id` 与 `branch_id` 同时存在或同时缺省。`submission_id` 为 `scheduler:<run_id>`。`delivering` 记录可携带 `attempts`，即已为它进行的 `sessions.lookup` 尝试次数；第一次尝试之前它缺省，读作零。本次变更之前写入的记录可在 launch 来源上携带 `released: true`(A.7)：记录保留其记录的 `session_origin: launch`，不再携带对该 Session 的删除权威。`released` 只在该记录的 `session_origin` 为 `launch` 时有效；来源为其他值或缺省的记录携带它即为非法数据。本次变更写入的投递还会记录 `job_revision`，即它到期时所依据的任务修订号(A.7)。
 
-本次变更之前保存的任务还可能携带 `mode`、`session_id`、`cwd`、`model`、`agent_id`、`policy`、`policy_cap` 与 `max_run_minutes`。它们按 §2.3 读取并映射，由每次写入保留，永不被报告。保存唯一写入的旧字段是 `policy_cap`，且只在 `launch` 目标上，作为保留的 launch 路由的保存期上限(附录 F)。存储的 `enabled_at` 保持其含义：成功的 Settings CAS 在创建即启用或从禁用转为启用时把它设为该次保存的 UTC 时刻；禁用会移除它。已经启用的保存保留它，包括计划编辑。直接本地配置遵循同一不变量；没有 schema 默认值，也不在加载时以当前时间替换。
+本次变更之前保存的任务还可能携带 `mode`、`session_id`、`cwd`、`model`、`agent_id`、`policy`、`policy_cap` 与 `max_run_minutes`。它们按 §2.3 读取并映射，由每次写入保留(`policy_cap` 除外)，永不被报告。保存唯一写入的旧字段是 `policy_cap`，且只在 `launch` 目标上，作为保留的 launch 路由的保存期上限(附录 F)；把 `launch` 任务改为 `session` 目标的保存会丢弃它，其他保存保留存储的上限，包括显式发送旧任务映射后的 `session` 目标的那次保存。存储的 `enabled_at` 保持其含义：成功的 Settings CAS 在创建即启用或从禁用转为启用时把它设为该次保存的 UTC 时刻；禁用会移除它。已经启用的保存保留它，包括计划编辑。直接本地配置遵循同一不变量；没有 schema 默认值，也不在加载时以当前时间替换。
 
 投递历史为每个现存任务保留最近 100 条终态投递，另加 `delivering` 记录以及命名 launch 自有 Session 的最后一条记录(A.7)。Settings 来源 `schedule` 保存一份含 §7.1 旧字段说明的任务文档。Settings 在写入时与读取持久数据时应用 Scheduler 的文档默认值与校验；Scheduler 直接使用交付的任务。任务写入是 Scheduler 对那份文档的类型化写入，按其修订做 CAS，因此工具与管理保存绝不会静默互相覆盖；这不对其他客户端/文件写入做认证(§7)。`Job.revision` 是所选任务的修订，由 Scheduler 在每次任务变更时推进。它与 CAS 使用的 Settings 不透明文档修订不同。投递记录使用既有 `pluginFiles` 事务(A.7)。
 

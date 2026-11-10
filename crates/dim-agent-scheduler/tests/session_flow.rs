@@ -2328,3 +2328,105 @@ async fn a_later_save_of_a_retargeted_job_releases_nothing_again() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// A save that moves a job from a `launch` target to a `session` target
+/// drops the launch route's save-time cap (A.1, §2.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retarget_to_a_session_drops_the_launch_policy_cap() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"name": "launch-target",
+                "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Work.",
+                "target": {"kind": "launch", "cwd": home.path()}}}),
+        )
+        .await
+        .unwrap();
+    let stored = stored_document(home.path())["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["name"] == "launch-target")
+        .unwrap()
+        .clone();
+    assert!(
+        stored.get("policy_cap").is_some(),
+        "the launch target keeps its save-time cap: {stored}"
+    );
+    let id = stored["id"].as_str().unwrap().to_owned();
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": id.clone(),
+                "target": {"kind": "session", "session_id": session, "branch_id": "main"}}}),
+        )
+        .await
+        .unwrap();
+    let stored = stored_document(home.path())["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(stored["target"]["kind"], "session", "{stored}");
+    assert!(
+        stored.get("policy_cap").is_none(),
+        "a session target stores no policy cap: {stored}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A legacy `reuse` job saved with its mapped `session` target explicitly
+/// has not replaced the binding, and keeps its stored cap (A.7, §2.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_legacy_job_saved_with_its_mapped_target_keeps_its_policy_cap() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let launched = create_session(&mut client, home.path(), true).await;
+    save_session_job(
+        &mut client,
+        "seed",
+        &launched,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    seed_legacy_reuse_job(home.path(), &launched);
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": "reuse",
+                "target": {"kind": "session", "session_id": launched, "branch_id": "main"}}}),
+        )
+        .await
+        .unwrap();
+    let stored = stored_document(home.path())["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == "reuse")
+        .unwrap()
+        .clone();
+    assert!(
+        stored.get("policy_cap").is_some(),
+        "an equivalent target keeps the legacy cap: {stored}"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
