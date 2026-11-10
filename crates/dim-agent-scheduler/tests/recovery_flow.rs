@@ -446,6 +446,226 @@ async fn a_restart_settles_an_earlier_build_delivering_session_record() {
     server.join().await.unwrap();
 }
 
+/// A launch this design wrote keeps its stop timer across a restart whatever
+/// state its delivery settled in: a record that settled `lost` or `failed`
+/// after its launch still names the Session its stop time ends (A.7). The
+/// timer runs from `deadline_at`, so the launched Session is stopped at that
+/// time and its record keeps the state it settled in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_resumes_the_stop_timer_of_a_terminal_launch() {
+    for state in ["lost", "failed"] {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::create_dir_all(home.path().join("scheduler")).unwrap();
+
+        let model = Arc::new(Script::default());
+        let server = start(home.path(), model.clone()).await;
+        let mut client = connect(&server).await;
+        select_model(&mut client).await;
+
+        let saved: Value = client
+            .typed(
+                "schedule.save",
+                json!({"job": {"name": "slow", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                    "prompt": "Summarize the day.",
+                    "target": {"kind": "launch", "cwd": home.path(), "max_run_minutes": 5}}}),
+            )
+            .await
+            .unwrap();
+        let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
+        let accepted: Value = client
+            .typed("schedule.run_now", json!({"job_id": job_id}))
+            .await
+            .unwrap();
+        let run_id = accepted["run_id"].as_str().unwrap().to_owned();
+        let delivered = await_state(&mut client, &job_id, &run_id, "delivered").await;
+        let session_id = delivered["session_id"].as_str().unwrap().to_owned();
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+
+        // The delivery settled `lost`/`failed` after the launch persisted its
+        // Session, and the stop time is now, as time would make it.
+        let soon = (chrono::Utc::now() + chrono::Duration::seconds(2))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        edit_runs(home.path(), |runs| {
+            let run = runs
+                .iter_mut()
+                .find(|run| run["run_id"] == run_id.as_str())
+                .unwrap();
+            run["state"] = json!(state);
+            run["detail"] = json!(if state == "lost" {
+                "unknown"
+            } else {
+                "input_refused"
+            });
+            run["deadline_at"] = json!(soon);
+            run.as_object_mut().unwrap().remove("input_event_id");
+        });
+
+        let server = start(home.path(), Arc::new(Script::default())).await;
+        let mut client = connect(&server).await;
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let history = branch_events(&mut client, &session_id).await;
+                if stopped_at_its_stop_time(&history) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the stop timer of a {state} launch runs"));
+        let after = stored_runs(home.path())
+            .into_iter()
+            .find(|run| run["run_id"] == run_id.as_str())
+            .unwrap();
+        assert_eq!(
+            after["state"],
+            json!(state),
+            "the stop is not a run outcome: {after}"
+        );
+
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+/// A restart's stop timer ends with its record: a launch record removed from
+/// the store before its stop time is not stopped, because the timer runs only
+/// "for as long as the record exists" (A.7). The same check precedes every
+/// retry, so a stop that keeps failing cannot outlive its record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarts_stop_timer_ends_when_its_record_is_gone() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir_all(home.path().join("scheduler")).unwrap();
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    select_model(&mut client).await;
+
+    let saved: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"name": "removed", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Summarize the day.",
+                "target": {"kind": "launch", "cwd": home.path(), "max_run_minutes": 5}}}),
+        )
+        .await
+        .unwrap();
+    let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job_id}))
+        .await
+        .unwrap();
+    let run_id = accepted["run_id"].as_str().unwrap().to_owned();
+    let delivered = await_state(&mut client, &job_id, &run_id, "delivered").await;
+    let session_id = delivered["session_id"].as_str().unwrap().to_owned();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let soon = (chrono::Utc::now() + chrono::Duration::seconds(4))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    edit_runs(home.path(), |runs| {
+        let run = runs
+            .iter_mut()
+            .find(|run| run["run_id"] == run_id.as_str())
+            .unwrap();
+        run["deadline_at"] = json!(soon);
+    });
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = connect(&server).await;
+    // The record leaves the store before its stop time, as a store a later
+    // generation pruned at its own stop time would leave it.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            edit_runs(home.path(), |runs| {
+                runs.retain(|run| run["run_id"] != run_id.as_str());
+            });
+            if !stored_runs(home.path())
+                .iter()
+                .any(|run| run["run_id"] == run_id.as_str())
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the record leaves the store");
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let history = branch_events(&mut client, &session_id).await;
+    assert!(
+        !stopped_at_its_stop_time(&history),
+        "a record the store no longer holds is not stopped: {history:?}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Whether the stop timer's own interrupt is on the branch: the reason
+/// `stop_at` sends, distinct from the one a closing branch writes.
+fn stopped_at_its_stop_time(history: &[Value]) -> bool {
+    history.iter().any(|event| {
+        event["type"] == "stop"
+            && event["name"] == "interrupt"
+            && event["data"]["reason"] == "scheduled run reached its stop time"
+    })
+}
+
+/// Every event of a Session's `main` branch, in order.
+async fn branch_events(client: &mut Client, session_id: &str) -> Vec<Value> {
+    let mut events = Vec::new();
+    let mut after = 0;
+    let mut through = None;
+    loop {
+        let mut params = json!({"sessionId": session_id, "branchId": "main", "after": after});
+        if let Some(through) = through {
+            params["through"] = json!(through);
+        }
+        let page: dim_client::wire::History =
+            client.typed("session.history", params).await.unwrap();
+        through = Some(page.through);
+        let next = page.next(after, through).unwrap();
+        events.extend(page.events);
+        match next {
+            Some(next) => after = next,
+            None => return events,
+        }
+    }
+}
+
+/// The job's run with `run_id`, once it reaches `state`.
+async fn await_state(client: &mut Client, job_id: &str, run_id: &str, state: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let history: Value = client
+                .typed("schedule.history", json!({"job_id": job_id, "limit": 50}))
+                .await
+                .unwrap();
+            if let Some(run) = history["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["run_id"] == run_id)
+                && run["state"] == json!(state)
+            {
+                return run.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the delivery reaches its state")
+}
+
 /// A launch delivery whose input was never confirmed is settled by lookup at
 /// the next start, and its stop timer is not started for a Session no record
 /// names (A.6, Appendix F).

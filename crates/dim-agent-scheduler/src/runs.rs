@@ -159,15 +159,19 @@ fn omitted_when_false(value: &bool) -> bool {
 
 impl Delivery {
     /// Whether the record is a launch window whose Session has a stop time
-    /// and therefore a stop timer (§3.2): a state this design writes, with
-    /// the identity the launch recorded.
+    /// and therefore a stop timer (§3.2, A.7): a record this design wrote,
+    /// with the Session and the stop time the launch recorded, whatever its
+    /// state. The timer belongs to the launched Session until retention
+    /// removes the record, so a delivery that settled `lost` or `failed`
+    /// after its launch keeps it.
+    ///
+    /// An earlier build's launch records cannot satisfy this: `launching`,
+    /// `submitted` and `running` carry no `branch_id` and no `attempts`, the
+    /// only states they share with this design's vocabulary are `launching`
+    /// and `running`, and `written_here` excludes both, so they stay as
+    /// written (A.7). Its `skipped` window carries no Session.
     pub fn has_stop_timer(&self) -> bool {
-        self.deadline_at.is_some()
-            && self.session_id.is_some()
-            && matches!(
-                self.state,
-                DeliveryState::Delivering | DeliveryState::Delivered
-            )
+        self.written_here() && self.deadline_at.is_some() && self.session_id.is_some()
     }
 
     /// Whether this design wrote the record (A.7). The two writers' state

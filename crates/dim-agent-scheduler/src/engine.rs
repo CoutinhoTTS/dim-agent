@@ -632,7 +632,10 @@ async fn prune_once(shared: &Arc<Shared>) -> Result<bool, SchedulerError> {
 /// (§3.2). A record written before this change in `launching`, `submitted` or
 /// `running` is left as written: nothing settles it and its Session is not
 /// stopped, because a stop timer belongs to the record a window of this
-/// design wrote (A.7). Nothing is launched or submitted again.
+/// design wrote (A.7). A launch this design wrote keeps its stop timer in any
+/// state: a delivery that settled `lost` or `failed` after the launch still
+/// owns the Session its stop time ends. Nothing is launched or submitted
+/// again.
 pub fn recover(shared: &Arc<Shared>, launches: Vec<Delivery>) {
     for run in launches {
         let Some(deadline) = run.deadline_at.as_deref().and_then(canonical_instant) else {
@@ -643,15 +646,16 @@ pub fn recover(shared: &Arc<Shared>, launches: Vec<Delivery>) {
         };
         let owner = shared.clone();
         shared.spawn(async move {
-            stop_at(owner, session_id, deadline).await;
+            stop_at(owner, run.run_id, session_id, deadline).await;
         });
     }
 }
 
 /// Stops a launched Session at its stop time, and keeps retrying once a
-/// minute while the call fails (§3.2). The delivery's state is not touched: a
-/// stop is a bound on the launched work, not a run outcome.
-async fn stop_at(shared: Arc<Shared>, session_id: String, deadline: DateTime<Utc>) {
+/// minute while the call fails and the record still exists (§3.2, A.7). The
+/// delivery's state is not touched: a stop is a bound on the launched work,
+/// not a run outcome.
+async fn stop_at(shared: Arc<Shared>, run_id: String, session_id: String, deadline: DateTime<Utc>) {
     let wait = deadline.signed_duration_since(Utc::now()).to_std();
     if let Ok(wait) = wait
         && !shared.pause(wait).await
@@ -659,6 +663,9 @@ async fn stop_at(shared: Arc<Shared>, session_id: String, deadline: DateTime<Utc
         return;
     }
     loop {
+        if !record_exists(&shared, &run_id).await {
+            return;
+        }
         match sessions(
             shared.sessions.as_ref(),
             "stop",
@@ -676,6 +683,16 @@ async fn stop_at(shared: Arc<Shared>, session_id: String, deadline: DateTime<Utc
             }
         }
     }
+}
+
+/// Whether the delivery's record is still in the store, which bounds the stop
+/// timer: A.7 words it as running "for as long as the record exists". A store
+/// that cannot be read is no evidence of removal, so the timer keeps going.
+async fn record_exists(shared: &Shared, run_id: &str) -> bool {
+    runs::read(&shared.files)
+        .await
+        .map(|history| history.iter().any(|run| run.run_id == run_id))
+        .unwrap_or(true)
 }
 
 /// `Ok(None)` when the Session never accepted the submission. A service error
@@ -1017,8 +1034,9 @@ async fn launch_target(
         .ok_or_else(|| SchedulerError::invalid_data("a launch delivery has no stop time"))?;
     let owner = shared.clone();
     let stopped = session_id.clone();
+    let run_id = run.run_id.clone();
     shared.spawn(async move {
-        stop_at(owner, stopped, deadline).await;
+        stop_at(owner, run_id, stopped, deadline).await;
     });
     write_input(shared, job, run, &session_id).await
 }
