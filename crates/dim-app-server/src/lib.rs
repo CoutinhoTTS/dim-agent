@@ -110,6 +110,14 @@ pub struct ServerConfig {
     /// a plugin's data directory. The product sets it through a product
     /// home; a host without one names it here.
     pub plugin_files: Option<PathBuf>,
+    /// Whether the `plugin` management tool is offered to the Sessions this
+    /// process serves. `true` by default. `false` leaves the `PluginTools`
+    /// Session part unregistered, so no Session, a collaboration member
+    /// included, can name the tool; the process's plugins still load and the
+    /// `plugin.*` management methods stay registered. The scenario
+    /// evaluation serves with `false`, so the registered tools, not a
+    /// Session's mount list, are the ceiling a run's Sessions can declare.
+    pub plugin_tools: bool,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -136,6 +144,7 @@ impl Default for ServerConfig {
             plugin_defaults: None,
             plugin_configs: BTreeMap::new(),
             plugin_files: None,
+            plugin_tools: true,
         }
     }
 }
@@ -938,6 +947,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .transpose()?;
     if let Some(state) = &plugins {
         let state = state.clone();
+        let plugin_tools = config.plugin_tools;
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
@@ -945,6 +955,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 Ok(Box::new(plugin_manager::PluginManagerPlugin::new(
                     names,
                     state.clone(),
+                    plugin_tools,
                 )?))
             },
         )?);

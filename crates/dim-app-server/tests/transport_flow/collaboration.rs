@@ -1049,6 +1049,97 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
     .unwrap();
 }
 
+/// `ServerConfig::plugin_tools` off leaves the `PluginTools` part
+/// unregistered, so no Session the process serves declares `plugin`, a
+/// collaboration member whose profile names it included; the default still
+/// offers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_tools_off_removes_the_plugin_tool_from_every_session() {
+    fn declares(tools: &[dim_agent_types::ToolDefinition], name: &str) -> bool {
+        tools.iter().any(|tool| tool.name == name)
+    }
+    tokio::time::timeout(Duration::from_secs(20), async {
+        for (plugin_tools, declared) in [(true, true), (false, false)] {
+            let home =
+                std::env::temp_dir().join(format!("dim-plugin-tools-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&home).unwrap();
+            let mut config = ServerConfig {
+                // A target home is a plugin home (lib.rs), so the process
+                // runs PluginManager; without a product home it keeps the
+                // mock model the other Collaboration tests use.
+                target_home: Some(home.clone()),
+                plugin_tools,
+                ..Default::default()
+            };
+            // The default profile, which a `default` Agent's members adopt,
+            // names `plugin`: the member's own tools list is the profile's.
+            config.session_defaults.tools =
+                Some(["plugin", "echo", "wait", "agent"].map(String::from).to_vec());
+            let (server, agent) = launch_with(Arc::new(MockTools), config, |_| {}).await;
+            let mut client = Client::new_version(&server, false, 3).await;
+            let created = client
+                .rpc(
+                    "session.create",
+                    json!({"cwd": std::env::temp_dir(),
+                        "tools": ["echo", "wait", "agent", "plugin"],
+                        "permissionPolicy": {"allowedTools": ["echo", "wait", "agent"]}}),
+                )
+                .await;
+            assert_ok(&created);
+            let lead = created["result"]["sessionId"].as_str().unwrap().to_owned();
+            let lead_session = agent.get_session(&lead).unwrap();
+            let model_tools = async |session: &Session| {
+                poll("model call", async || {
+                    events(session).await.iter().find_map(|event| match &event.kind {
+                        EventKind::ModelCall(data) => Some(data.request.tools.clone()),
+                        _ => None,
+                    })
+                })
+                .await
+                .unwrap_or_default()
+            };
+            say(&mut client, &lead, "plain".into(), "queue").await;
+            idle(&mut client, &lead).await;
+            let lead_tools = model_tools(&lead_session).await;
+            assert_eq!(
+                declares(&lead_tools, "plugin"),
+                declared,
+                "leader declares plugin={declared} with plugin_tools={plugin_tools}: {lead_tools:?}"
+            );
+            let default_agent = client.rpc("agent.list", json!({})).await["result"][0]
+                ["agentId"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            say(
+                &mut client,
+                &lead,
+                tool(json!({"action": "request", "agentId": default_agent, "prompt": "hello"})),
+                "queue",
+            )
+            .await;
+            returned(&mut client, &lead, &lead_session, 1).await;
+            let member = next_member(&lead_session, 0).await;
+            let member_session = poll("member session", async || agent.get_session(&member)).await;
+            let member_tools = model_tools(&member_session).await;
+            assert!(
+                declares(&member_tools, "echo"),
+                "member keeps the tools it can declare: {member_tools:?}"
+            );
+            assert_eq!(
+                declares(&member_tools, "plugin"),
+                declared,
+                "member declares plugin={declared} with plugin_tools={plugin_tools}: {member_tools:?}"
+            );
+            drop(client);
+            server.shutdown();
+            server.join().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
 /// A leader Session of the default Agent; members inherit its policy.
 async fn leader(client: &mut Client, policy: Value) -> String {
     let created = client

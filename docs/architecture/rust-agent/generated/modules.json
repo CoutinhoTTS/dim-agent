@@ -2549,6 +2549,7 @@
       "parent": "dim_app_server::mcp::auth",
       "file": "crates/dim-app-server/src/mcp/auth/oauth.rs",
       "unexpandedMacros": [
+        "assert",
         "format",
         "matches",
         "vec"
@@ -2685,6 +2686,7 @@
         "assert_eq",
         "format",
         "json",
+        "panic",
         "tokio::select",
         "unreachable",
         "vec"
@@ -25435,6 +25437,7 @@
         "path oauth::loopback",
         "path oauth::now",
         "path oauth::revoke",
+        "path oauth::stored_endpoint",
         "path oauth::token"
       ]
     },
@@ -26159,6 +26162,7 @@
         "path McpConnection",
         "path McpPlugin::new",
         "path McpService",
+        "path McpSource::User",
         "use crate::mcp::McpChange",
         "use crate::mcp::McpPlugin",
         "use crate::mcp::McpService"
@@ -26181,14 +26185,16 @@
         "path McpOwner",
         "path McpOwner::new",
         "path McpPublication::register",
-        "path McpPublication::standalone_template"
+        "path McpPublication::standalone_template",
+        "path connection"
       ]
     },
     {
       "from": "dim_app_server::mcp::publication::tests",
       "to": "dim_app_server::mcp::server",
       "references": [
-        "path McpServerError::Cleanup"
+        "path McpServerError::Cleanup",
+        "path McpServerError::StartCooldown"
       ]
     },
     {
@@ -36977,15 +36983,25 @@
       "from": "dim_cli::session_host::tests",
       "to": "dim_cli::args",
       "references": [
+        "path Options::parse",
         "path crate::args::Options::parse"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_cli::client",
+      "references": [
+        "path client"
       ]
     },
     {
       "from": "dim_cli::session_host::tests",
       "to": "dim_cli::model::session",
       "references": [
+        "path Command::FocusLine",
         "path RuntimeAction::Configure",
-        "path RuntimeAction::Install"
+        "path RuntimeAction::Install",
+        "path Update::Snapshot"
       ]
     },
     {
@@ -37000,8 +37016,26 @@
       "to": "dim_cli::session_host",
       "references": [
         "path LineProjection::new",
+        "path Worker::new",
         "path suggestion_setting",
         "path transcript_mut"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_cli::update",
+      "references": [
+        "path update"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::tests",
+      "to": "dim_client",
+      "references": [
+        "path Client::open",
+        "path Message::Notice",
+        "path dim_client::ConnectionConfig",
+        "path dim_client::Server"
       ]
     },
     {

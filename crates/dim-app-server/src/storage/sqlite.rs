@@ -1,5 +1,5 @@
 use dim_agent_runtime::{AgentError, Result, panic_message};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags};
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use serde::Serialize;
@@ -866,10 +866,11 @@ impl SqliteStorage {
         let mut connection = Connection::open(&path).map_err(storage)?;
         functions(&connection)?;
         connection.busy_handler(Some(busy)).map_err(storage)?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        // This opening owns the connection, so dropping it before COMMIT rolls back the transaction.
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
             .map_err(storage)?;
-        let actual = schema(&tx)?;
+        let actual = schema(&connection)?;
         let unsupported_version = || {
             storage(format!(
                 "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
@@ -879,12 +880,13 @@ impl SqliteStorage {
         let mut upgraded_from = None;
         if actual.is_empty() {
             for (_, sql) in SCHEMA.iter().chain(super::text::SCHEMA) {
-                tx.execute_batch(sql).map_err(storage)?;
+                connection.execute_batch(sql).map_err(storage)?;
             }
-            tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+            connection
+                .execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                 .map_err(storage)?;
         } else if let Some(version) = known_format(&actual) {
-            let markers = markers(&tx)?;
+            let markers = markers(&connection)?;
             if markers != [i64::from(version)] {
                 write_startup_failure(
                     &path,
@@ -896,53 +898,59 @@ impl SqliteStorage {
                 return Err(unsupported_version());
             }
             if version != FORMAT {
-                tx.execute_batch("DROP TABLE agent_store_format")
+                connection
+                    .execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
-                tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
+                connection
+                    .execute_batch(&format_table(FORMAT))
+                    .map_err(storage)?;
                 // Only an upgrade registers the report, and it clears it
                 // again after the commit: an ordinary open runs no progress
                 // callback.
                 let progress = ctx.map(|ctx| Arc::new(UpgradeProgress::new(ctx, &path, version)));
                 if let Some(progress) = &progress {
                     let reports = Arc::clone(progress);
-                    tx.progress_handler(
-                        UPGRADE_PROGRESS_OPS,
-                        Some(move || {
-                            reports.report(false);
-                            false
-                        }),
-                    )
-                    .map_err(storage)?;
+                    connection
+                        .progress_handler(
+                            UPGRADE_PROGRESS_OPS,
+                            Some(move || {
+                                reports.report(false);
+                                false
+                            }),
+                        )
+                        .map_err(storage)?;
                     progress.report(true);
                 }
                 for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     if *from == 26 {
-                        tx.execute_batch(V27_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V27_COLUMNS).map_err(storage)?;
                     }
                     if *from == 29 {
-                        tx.execute_batch(V30_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V30_COLUMNS).map_err(storage)?;
                     }
                     if *from == 30 {
-                        tx.execute_batch(V31_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V31_COLUMNS).map_err(storage)?;
                         let keys = |list: &[&str]| {
                             list.iter()
                                 .map(|key| format!("'{key}'"))
                                 .collect::<Vec<_>>()
                                 .join(",")
                         };
-                        tx.execute_batch(&format!(
-                            "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
-                            keys(dim_agent_types::CONTEXT_RENDER_KEYS)
-                        ))
-                        .map_err(storage)?;
-                        tx.execute_batch(&format!(
-                            "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
-                            keys(dim_agent_types::CONTEXT_STATE_KEYS)
-                        ))
-                        .map_err(storage)?;
+                        connection
+                            .execute_batch(&format!(
+                                "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
+                                keys(dim_agent_types::CONTEXT_RENDER_KEYS)
+                            ))
+                            .map_err(storage)?;
+                        connection
+                            .execute_batch(&format!(
+                                "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
+                                keys(dim_agent_types::CONTEXT_STATE_KEYS)
+                            ))
+                            .map_err(storage)?;
                     }
                     if *from == 31 && version == 31 {
-                        tx.execute_batch(
+                        connection.execute_batch(
                             "DROP INDEX timeline_events_render; DROP INDEX timeline_events_state",
                         )
                         .map_err(storage)?;
@@ -952,43 +960,47 @@ impl SqliteStorage {
                         .chain(super::text::SCHEMA)
                         .filter(|(name, _)| added.contains(name))
                     {
-                        tx.execute_batch(sql).map_err(storage)?;
+                        connection.execute_batch(sql).map_err(storage)?;
                     }
                     if *from == 22 {
-                        super::catalog::backfill(&tx)?;
+                        super::catalog::backfill(&connection)?;
                     }
                     if *from == 35 {
-                        super::text::backfill(&tx)?;
+                        super::text::backfill(&connection)?;
                     }
                     if *from == 37 {
-                        tx.execute_batch(V38_SESSION_OWNERS).map_err(storage)?;
+                        connection
+                            .execute_batch(V38_SESSION_OWNERS)
+                            .map_err(storage)?;
                     }
                     if *from == 24 {
-                        tx.execute_batch("DROP INDEX timeline_events_by_end")
+                        connection
+                            .execute_batch("DROP INDEX timeline_events_by_end")
                             .map_err(storage)?;
                     }
                     if *from == 25 {
-                        crate::provider::rewrite_stored_limits(&tx)?;
+                        crate::provider::rewrite_stored_limits(&connection)?;
                     }
                     // #1099: only the derived `updated_at_ms` column is
                     // rewritten, by the same backfill the catalog's own
                     // upgrade used.
                     if *from == 33 {
-                        super::catalog::backfill(&tx)?;
+                        super::catalog::backfill(&connection)?;
                     }
                     if let Some(progress) = &progress {
                         progress.report(true);
                     }
                 }
-                tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+                connection
+                    .execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                     .map_err(storage)?;
-                if known_format(&schema(&tx)?) != Some(FORMAT) {
+                if known_format(&schema(&connection)?) != Some(FORMAT) {
                     return Err(storage("upgraded native store has an unexpected schema"));
                 }
                 upgraded_from = Some(version);
             }
         } else {
-            let marker = markers(&tx)
+            let marker = markers(&connection)
                 .ok()
                 .and_then(|markers| single_marker(&markers));
             let failure = match marker {
@@ -1008,9 +1020,9 @@ impl SqliteStorage {
             )));
         }
         for (_, sql) in DERIVED_INDEXES {
-            tx.execute_batch(sql).map_err(storage)?;
+            connection.execute_batch(sql).map_err(storage)?;
         }
-        tx.commit().map_err(storage)?;
+        connection.execute_batch("COMMIT").map_err(storage)?;
         if upgraded_from.is_some() {
             connection
                 .progress_handler(0, None::<fn() -> bool>)
@@ -1135,15 +1147,15 @@ impl SqliteStorage {
     /// The read-only export store's one connection serves both.
     pub(crate) async fn run_read<T: Send + 'static>(
         self: &Arc<Self>,
-        operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let admitted = self.admit()?;
         tokio::task::spawn_blocking(move || {
             let reader = admitted.0.reader();
             match reader {
-                Some(guard) => {
+                Some(mut guard) => {
                     let connection = guard
-                        .as_ref()
+                        .as_mut()
                         .ok_or_else(|| storage("SQLite storage is closed"))?;
                     let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
                     outcome(connection, result)
@@ -1233,7 +1245,7 @@ impl SqliteStorage {
     pub(crate) async fn run_read_cancellable<T: Send + 'static>(
         self: &Arc<Self>,
         cancel: tokio_util::sync::CancellationToken,
-        operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         self.run_read(move |connection| {
             if cancel.is_cancelled() {

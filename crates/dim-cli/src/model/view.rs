@@ -389,6 +389,7 @@ pub struct ViewSnapshot {
     pub ended: Option<(u64, TurnEnd)>,
     /// `main` followed by this Session's lines, as the lines panel lists them.
     pub lines: Vec<LineView>,
+    pub unread_lines: std::collections::BTreeSet<String>,
     pub focus: String,
     /// The line opened beside the shown one, while its panel is open.
     pub side: Option<SideLine>,
