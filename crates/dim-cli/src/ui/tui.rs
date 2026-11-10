@@ -51,7 +51,9 @@ use crate::ui::tasks_panel::TasksPanel;
 use crate::ui::terminal::{
     InputEvent, KeyCode, KeyEvent, Modifiers, Terminal, TerminalError, Wait,
 };
-use crate::ui::text::{RUNNING_MARK, STATUS_MARK, display_width, truncate_cells};
+use crate::ui::text::{
+    RUNNING_MARK, STATUS_MARK, display_width, truncate_cells, truncate_cells_start,
+};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
@@ -944,6 +946,9 @@ struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
     cwd_key: String,
+    /// `cwd_key` with the home written `~`: the composer's label, resolved
+    /// once so a frame does not read the process's directory.
+    workspace: String,
     home: PathBuf,
     /// How tool groups are drawn by default (`/tools`, which redraws every
     /// committed group too).
@@ -1359,6 +1364,7 @@ impl App {
         Self {
             host,
             composer,
+            workspace: crate::ui::tilde(&cwd_key),
             cwd_key,
             tool_detail: saved_tool_detail(&home),
             thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
@@ -3235,7 +3241,7 @@ impl App {
         self.set_notice(t("Stopping"));
     }
 
-    fn place_label(&self) -> String {
+    fn place_label(&self, cells: usize) -> String {
         if let Some(draft) = &self.line_draft {
             let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
             return tf(
@@ -3243,16 +3249,26 @@ impl App {
                 &[("id", &line_name(lines, &draft.parent))],
             );
         }
-        let workspace = workspace_label(self.branch.as_deref());
-        match &self.snapshot {
-            Some(snapshot) if !snapshot.focus.is_empty() && snapshot.focus != "main" => {
-                format!(
-                    "{workspace} · ⑂ {}",
-                    line_path(&snapshot.lines, &snapshot.focus)
-                )
-            }
-            _ => workspace,
+        let branch = self.branch.as_deref();
+        let Some(snapshot) = self
+            .snapshot
+            .as_ref()
+            .filter(|s| !s.focus.is_empty() && s.focus != "main")
+        else {
+            return workspace_label(&self.workspace, branch, cells);
+        };
+        // A shown line outranks the workspace, which keeps its whole form
+        // beside it: the whole place, then `⑂` alone, then the whole place
+        // for the border to drop.
+        let line = format!("⑂ {}", line_path(&snapshot.lines, &snapshot.focus));
+        let whole = format!("{} · {line}", whole_workspace(&self.workspace, branch));
+        if width_of(&whole) <= cells {
+            return whole;
         }
+        if width_of(&line) <= cells {
+            return line;
+        }
+        whole
     }
 
     /// Opens the drafted line with `text` as its opening input.
@@ -5160,7 +5176,13 @@ impl App {
             );
             composer_box[last] = format!(
                 "{margin}{}",
-                border_line(("╰", "╯"), docked.as_deref(), Some(&place), outer, &edge)
+                border_line(
+                    ("╰", "╯"),
+                    docked.as_deref(),
+                    place.as_deref(),
+                    outer,
+                    &edge
+                )
             );
         } else {
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
@@ -5169,7 +5191,7 @@ impl App {
             let last = composer_box.len() - 1;
             composer_box[last] = format!(
                 "{margin}{}",
-                border_line(("╰", "╯"), None, Some(&place), outer, &edge)
+                border_line(("╰", "╯"), None, place.as_deref(), outer, &edge)
             );
         }
         let replaced = !command_entry
@@ -6217,33 +6239,37 @@ impl App {
         (!parts.is_empty()).then(|| parts.join("  "))
     }
 
-    fn composer_place(&self, status: Option<&str>, outer: usize) -> String {
-        let place = fg(
-            &fit_place(self.place_label(), status, outer),
-            &self.palette.muted,
-        );
+    /// The composer's bottom-right label, built to fit the cells the border
+    /// will allow it beside `status`; `None` when nothing fits. The place and
+    /// the unread badge share that one budget, so neither can drift from what
+    /// [`border_line`] draws.
+    fn composer_place(&self, status: Option<&str>, outer: usize) -> Option<String> {
+        let cells = outer.saturating_sub(6 + status.map_or(0, |label| width_of(label) + 3));
+        if cells == 0 {
+            return None;
+        }
+        let place = fg(&self.place_label(cells), &self.palette.muted);
         let count = self
             .snapshot
             .as_ref()
             .map_or(0, |view| view.unread_lines.len());
         if count == 0 {
-            return place;
+            return Some(place);
         }
-        let room = outer.saturating_sub(6 + status.map_or(0, |label| width_of(label) + 3));
         let full = format!("{} ({count}) · /lines", t("Unread"));
         let compact = format!("/lines ({count})");
         let Some(label) = [full.as_str(), compact.as_str(), "/lines", "*"]
             .into_iter()
-            .find(|label| width_of(label) <= room)
+            .find(|label| width_of(label) <= cells)
         else {
-            return place;
+            return Some(place);
         };
         let width = width_of(label);
         let label = fg(label, &self.palette.highlight);
-        if width + 2 + width_of(&place) <= room && width_of(&place) != 0 {
-            format!("{label}  {place}")
+        if width + 2 + width_of(&place) <= cells && width_of(&place) != 0 {
+            Some(format!("{label}  {place}"))
         } else {
-            label
+            Some(label)
         }
     }
 
@@ -6684,17 +6710,41 @@ fn labeled_rows(pairs: &[(&str, &str)], body_width: usize) -> Vec<String> {
     rows
 }
 
-fn fit_place(place: String, status: Option<&str>, outer: usize) -> String {
-    let room = outer.saturating_sub(2);
-    let fits =
-        |label: &str| status.map_or(0, |status| width_of(status) + 3) + width_of(label) + 3 < room;
-    if fits(&place) {
-        return place;
+/// The workspace and its branch, whole: `~/src/app (main)`.
+fn whole_workspace(workspace: &str, branch: Option<&str>) -> String {
+    match branch {
+        Some(branch) => format!("{workspace} ({branch})"),
+        None => workspace.to_owned(),
     }
-    match place.split_once(" · ⑂ ") {
-        Some((_, line)) if fits(&format!("⑂ {line}")) => format!("⑂ {line}"),
-        _ => place,
+}
+
+/// The narrowest path tail worth putting a branch beside: below it
+/// `…o (rex-team/T-4440f2)` names neither the checkout nor the line, so the
+/// path alone says more.
+const MIN_TAIL: usize = 8;
+
+/// The workspace label in at most `cells` columns, degrading in place
+/// rather than being dropped whole by the border: the whole label, the whole
+/// label with the path's front cut once its tail is at least [`MIN_TAIL`],
+/// the path alone when the branch gives way, then the path alone with its
+/// front cut. No form exceeds `cells`, so the caller sizes the border by
+/// measuring the result.
+fn workspace_label(workspace: &str, branch: Option<&str>, cells: usize) -> String {
+    let whole = whole_workspace(workspace, branch);
+    if width_of(&whole) <= cells {
+        return whole;
     }
+    if let Some(branch) = branch {
+        let suffix = format!(" ({branch})");
+        let tail = truncate_cells_start(workspace, cells.saturating_sub(width_of(&suffix)));
+        if width_of(&tail) >= MIN_TAIL {
+            return format!("{tail}{suffix}");
+        }
+    }
+    if width_of(workspace) <= cells {
+        return workspace.to_owned();
+    }
+    truncate_cells_start(workspace, cells)
 }
 
 /// `main ▸ parser race ▸ the guard · after message 4`: the lines from `main` down to
@@ -6731,19 +6781,6 @@ fn line_name(lines: &[LineView], line: &str) -> String {
             truncate_cells(&crate::sanitize::safe(first), NAME_COLUMNS)
         }
         _ => short_id(line).to_owned(),
-    }
-}
-
-/// The working directory, `~` for the home, and the git branch: what the
-/// prompt box writes in its bottom border.
-fn workspace_label(branch: Option<&str>) -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let cwd = crate::ui::tilde(&cwd);
-    match branch {
-        Some(branch) => format!("{cwd} ({branch})"),
-        None => cwd,
     }
 }
 
@@ -6855,7 +6892,8 @@ fn boxed(
 /// One border row `outer` columns wide between `corners`: a styled label
 /// after `─ ` on the left, another before ` ─` on the right, as the prompt
 /// box carries them. A label that does not fit is left out, the right one
-/// first.
+/// first; a caller that can say the same thing shorter composes it that way
+/// before calling, as the composer does for its workspace label.
 fn border_line(
     corners: (&str, &str),
     left: Option<&str>,
@@ -7741,12 +7779,12 @@ mod tests {
             );
             app.fullscreen = fullscreen;
             let frame = app.frame((160, 30));
-            let cwd = crate::ui::tilde(&std::env::current_dir().unwrap().display().to_string());
+            let cwd = crate::ui::tilde(&root.path().to_string_lossy());
             let row = frame
                 .live
                 .iter()
                 .find(|row| row.contains(&cwd))
-                .expect("the composer shows the working directory without Git");
+                .expect("the composer names the workspace it was given, not the process's");
             assert!(
                 !row.contains(&format!("{cwd} (")),
                 "a workspace without Git must show only its path: {row}"
@@ -7880,6 +7918,267 @@ mod tests {
             }
             std::fs::write(&head, saved).unwrap();
         }
+    }
+
+    /// The reported flow: in fullscreen, a linked worktree, a running turn.
+    /// The label must survive 80 columns by degrading, and the border must
+    /// keep its width whatever form it takes.
+    #[test]
+    fn a_running_turn_in_a_worktree_keeps_the_workspace_label_at_eighty_columns() {
+        use crate::ui::render::panel::visible_width;
+
+        i18n::set(i18n::Locale::En);
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let workspace = "~/Projects/repo/dim.worktrees/T-4440f2";
+        let branch = "rex-team/T-4440f2";
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/tmp/T-4440f2".into(),
+        );
+        app.workspace = workspace.to_owned();
+        app.branch = Some(branch.to_owned());
+        app.fullscreen = true;
+        // A running turn: the run status, the elapsed clock and the
+        // interrupt hint, which is the dock the reported screenshot shows.
+        app.snapshot = Some(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            main_running: true,
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        });
+        app.run_started = Some(Instant::now());
+        let border = |app: &mut App, cols| {
+            let size = (cols, 30);
+            let frame = app.frame(size);
+            let row = frame
+                .live
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            let mut screen = FullScreen::new(size, true);
+            let bytes = screen.render(&frame, size, &app.palette, app);
+            let mut emu = crate::ui::render::testterm::Emu::new(cols as usize, 30);
+            emu.feed(&bytes);
+            let painted = emu
+                .rows_text()
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            (row, painted)
+        };
+        for cols in [80u16, 100, 120, 160] {
+            let (row, painted) = border(&mut app, cols);
+            // The frame is the margin plus `outer`, two cells short of the
+            // terminal; the label must not change that.
+            for text in [&row, &painted] {
+                assert_eq!(
+                    visible_width(text),
+                    usize::from(cols) - 2,
+                    "{cols}: the border must keep its width: {text:?}"
+                );
+            }
+        }
+        // At 80 columns the dock leaves too few cells for the whole label:
+        // the tail of the path and the branch survive.
+        let (row, _) = border(&mut app, 80);
+        assert!(
+            row.contains(&format!("orktrees/T-4440f2 ({branch})")),
+            "80: the path's tail and the branch must survive: {row:?}"
+        );
+        assert!(
+            !row.contains(workspace),
+            "80: the whole path must not fit beside this dock: {row:?}"
+        );
+        // The Chinese dock is narrower than the English one, so it keeps a
+        // longer tail at the same width.
+        i18n::set(i18n::Locale::ZhCn);
+        let (zh, _) = border(&mut app, 80);
+        i18n::set(i18n::Locale::En);
+        let (en, _) = border(&mut app, 80);
+        assert!(
+            visible_width(&zh) == visible_width(&en),
+            "both docks must fill the same border: {zh:?} / {en:?}"
+        );
+        assert!(
+            zh.contains("dim.worktrees") && !en.contains("dim.worktrees"),
+            "the narrower dock keeps more of the path: {zh:?} / {en:?}"
+        );
+        // A branch too long beside any usable tail gives way to the path.
+        app.branch = Some("rex-team/T-4440f2-and-a-much-longer-name".into());
+        let (row, _) = border(&mut app, 80);
+        assert!(
+            row.contains("worktrees/T-4440f2") && !row.contains("(rex-team"),
+            "80: the branch gives way when its tail is too short: {row:?}"
+        );
+    }
+
+    /// A launch with an explicit workspace names that workspace, not the
+    /// process's directory, and the unread badge measures against the same
+    /// budget as the place so it cannot push the label out of the border.
+    #[test]
+    fn the_label_names_the_sessions_workspace_and_the_badge_shares_its_budget() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().to_path_buf(),
+            "/tmp/the-launch-directory".into(),
+        );
+        app.workspace = "~/Projects/repo/dim.worktrees/T-4440f2".into();
+        app.branch = Some("rex-team/T-4440f2".into());
+        app.fullscreen = false;
+        let bottom = |app: &mut App, cols| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            rows.iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let row = bottom(&mut app, 160);
+        assert!(
+            row.contains("~/Projects/repo/dim.worktrees/T-4440f2 (rex-team/T-4440f2)"),
+            "the label follows the Session's workspace: {row:?}"
+        );
+        assert!(
+            !row.contains("the-launch-directory"),
+            "the process's directory must not reach the border: {row:?}"
+        );
+
+        let mut snapshot = app.snapshot.clone().unwrap_or_default();
+        snapshot.unread_lines.insert("b-7c".into());
+        app.snapshot = Some(snapshot);
+        for cols in [160u16, 80, 40, 24] {
+            let row = bottom(&mut app, cols);
+            let width = visible_width(&row);
+            assert_eq!(width, usize::from(cols) - 2, "{cols}: {row:?}");
+            assert!(
+                row.contains("╰") && row.contains("╯"),
+                "{cols}: the border stays closed: {row:?}"
+            );
+        }
+        // The place survives beside the badge where the room allows both.
+        let row = bottom(&mut app, 160);
+        assert!(row.contains("Unread (1)"), "{row:?}");
+        assert!(
+            row.contains("T-4440f2"),
+            "the place keeps its tail: {row:?}"
+        );
+    }
+
+    /// The workspace label steps down through four forms instead of
+    /// vanishing: the whole label, the whole label with the path's front
+    /// cut, the path alone, then the path alone cut.
+    #[test]
+    fn the_workspace_label_steps_down_in_four_forms() {
+        let workspace = "~/repo/dim";
+        let branch = "team/long-branch-name";
+        let whole = format!("{workspace} ({branch})");
+        assert_eq!(width_of(&whole), 34);
+        for (cells, expected) in [
+            (34, whole.as_str()),
+            (33, "…repo/dim (team/long-branch-name)"),
+            (32, "…epo/dim (team/long-branch-name)"),
+            (31, workspace),
+            (10, workspace),
+            (9, "…repo/dim"),
+            (8, "…epo/dim"),
+            (1, "…"),
+            (0, ""),
+        ] {
+            let label = workspace_label(workspace, Some(branch), cells);
+            assert_eq!(label, expected, "{cells} cells");
+            assert!(width_of(&label) <= cells, "{cells}: {label:?}");
+        }
+        for cells in 0..=width_of(&whole) {
+            let label = workspace_label(workspace, Some(branch), cells);
+            assert!(width_of(&label) <= cells, "{cells}: {label:?}");
+        }
+        // No branch: the path alone, whole then cut.
+        assert_eq!(workspace_label(workspace, None, 10), workspace);
+        assert_eq!(workspace_label(workspace, None, 6), "…o/dim");
+    }
+
+    /// The branch rung needs a tail worth reading: 8 cells keeps it, 7 drops
+    /// the branch and keeps the whole path instead.
+    #[test]
+    fn a_tail_below_the_minimum_keeps_the_whole_path_instead_of_the_branch() {
+        let workspace = "~/repo/dim";
+        let branch = "team/long-branch-name";
+        let kept = workspace_label(workspace, Some(branch), 32);
+        assert_eq!(kept, format!("…epo/dim ({branch})"));
+        assert_eq!(width_of("…epo/dim"), MIN_TAIL);
+        assert_eq!(width_of(&kept), 32);
+        assert_eq!(workspace_label(workspace, Some(branch), 31), workspace);
+    }
+
+    /// The budget is in cells, not characters: a CJK path keeps half the
+    /// characters of an ASCII one at the same width, so its tail rung holds
+    /// two cells longer.
+    #[test]
+    fn a_cjk_workspace_spends_its_budget_in_cells() {
+        let workspace = "~/项目/dim";
+        assert_eq!(width_of(workspace), 10);
+        assert_eq!(
+            workspace_label(workspace, Some("main"), 17),
+            "~/项目/dim (main)"
+        );
+        let tail = format!("…项目/dim ({})", "main");
+        assert_eq!(width_of(&tail), 16);
+        assert_eq!(workspace_label(workspace, Some("main"), 16), tail);
+        assert_eq!(workspace_label(workspace, Some("main"), 15), workspace);
+        assert_eq!(workspace_label(workspace, None, 9), "…项目/dim");
+    }
+
+    /// A shown line keeps its three forms, and `⑂` outranks every workspace
+    /// form: a path small enough to fit does not displace the line.
+    #[test]
+    fn a_shown_line_keeps_its_forms_and_comes_before_the_workspace() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/w".into(),
+        );
+        app.branch = None;
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            lines: vec![LineView {
+                id: "main".into(),
+                parent: None,
+                purpose: String::new(),
+                state: LineState::Main,
+                cut: None,
+            }],
+            ..ViewSnapshot::default()
+        })));
+        let whole = "/w · ⑂ b-7c";
+        assert_eq!(width_of(whole), 11);
+        assert_eq!(app.place_label(11), whole);
+        assert_eq!(app.place_label(9), "⑂ b-7c");
+        assert_eq!(app.place_label(6), "⑂ b-7c");
+        // Below the line's own form the place is returned whole for the
+        // border to drop, never as a workspace-only label.
+        assert_eq!(app.place_label(5), whole);
+        assert_eq!(app.place_label(2), whole);
     }
 
     #[test]
@@ -8599,7 +8898,7 @@ mod tests {
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
         app.apply(snapshot("main"));
         app.draft_line(4, "try RwLock");
-        assert!(app.place_label().contains("new line from main"));
+        assert!(app.place_label(80).contains("new line from main"));
         app.handle_input(key(KeyCode::Char('!')));
         app.handle_input(key(KeyCode::Enter));
         match sent.borrow().last() {
