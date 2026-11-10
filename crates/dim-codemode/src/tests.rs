@@ -121,10 +121,10 @@ fn text(result: &ToolResult) -> &str {
 }
 
 #[tokio::test]
-async fn calls_a_pinned_tool_and_returns_its_value() {
+async fn calls_a_pinned_tool_and_returns_its_whole_result() {
     let result = run(r#"const value = await tools.call("echo", {x: 1}); return value;"#).await;
     let value: serde_json::Value = serde_json::from_str(text(&result)).unwrap();
-    assert_eq!(value, "{\"x\":1}");
+    assert_eq!(value, json!({"content": "{\"x\":1}"}));
 }
 
 #[tokio::test]
@@ -166,7 +166,7 @@ async fn the_call_budget_is_enforced() {
     )
     .await;
     let value: serde_json::Value = serde_json::from_str(text(&result)).unwrap();
-    assert_eq!(value[0], "{\"i\":0}");
+    assert_eq!(value[0]["content"], "{\"i\":0}");
     assert_eq!(value[1], "call_limit");
 }
 
