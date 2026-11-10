@@ -80,7 +80,7 @@ impl AgentBuilder {
 
 ## 3. 盘点（#1300）
 
-catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`wakeups`、`sessionFiles`、`managedSearch`）；新名字不计入 84。`workflowRuns` 不在其中：109 是 Rust product-profile 目录；optional Workflow 包有自己的 provides 目录，`workflowRuns` 在那里，已经由该包提供为数据面。每个现有名字恰好归类一次；§3.3 的“数据兄弟”列是目标名字，不是被盘点的 Rust-only 名字。
+catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`wakeups`、`sessionFiles`、`managedSearch`）；新名字不计入 84。`workflowRuns` 不在其中：109 是 Rust product-profile 目录；optional Workflow 包有自己的 provides 目录，`workflowRuns` 在那里，已经由该包提供为数据面。每个现有名字在分类表里恰好一行；§3.2/§3.3 的说明句和“数据兄弟”列是引用，不算第二行。
 
 ### 3.1 已经可以跨，但 catalog 列没体现
 
@@ -95,7 +95,7 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `scheduleJobs` | 新数据面 `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md) 的 flat `JobRequest`/`JobReply`；Rust 实现是 `call(request, caller)`，dispatcher 拼成 flat request。`Caller`/`JobReply` 补 serde，`Caller` 用 camelCase |
 | `wakeups` | 新数据面 `wakeups.create/list/cancel` | SchedulerSession 同时注入 `ScheduleJobs` 和 `Wakeups`；只做 `scheduleJobs` 不够。形状按 [Scheduler](plugins/Scheduler.md) §10.2 |
 | `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
-| `managedSearch` | 新数据面，只含 `search` | 原名字保持 internal(secret)，账号/token 不出去 |
+| `managedSearch` | 新数据面，只含 `search` | `managedProviders`（§3.6）保持 internal(secret)，账号/token 不出去 |
 
 `workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致。它不在 109 个 Rust product-profile 名字里，而在该包自己的 provides 目录里；#1292 不新增 provider，只核对形状。
 
@@ -169,27 +169,27 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
-| `serverControl` | process | ServerControl | control | 留宿主/入口/secret |
-| `connectionHub` | process | Connection | control | 留宿主/入口/secret |
-| `pluginFileTransactions` | process | PluginFiles | host-resource | 留宿主/入口/secret |
-| `publication` | process | McpPublication | host-resource | 留宿主/入口/secret |
-| `mcpAuth` | process | Mcp | secret | 留宿主/入口/secret |
-| `grokOAuthService` | process | GrokOAuth | secret | 留宿主/入口/secret |
-| `openAICodexOAuthService` | process | OpenAICodexOAuth | secret | 留宿主/入口/secret |
-| `uiHost` | process | UiHost | control | 留宿主/入口/secret |
-| `uiExtensions` | process | UiExtensions | control | 留宿主/入口/secret |
-| `mentionIndex` | process | WorkspaceToolsOwner | host-resource | 留宿主/入口/secret |
-| `skillsCatalog` | process | SkillsCatalog | host-resource | 留宿主/入口/secret |
-| `mcpService` | process | Mcp | host-resource | 留宿主/入口/secret |
-| `hooksService` | process | HooksSettings | host-resource | 留宿主/入口/secret |
-| `providerService` | process | Provider | secret | 留宿主/入口/secret |
-| `providerConnectionResolver` | process | Provider | host-resource | 留宿主/入口/secret |
-| `collaboration` | process | Collaboration | host-resource | 留宿主/入口/secret |
-| `sessionLoader` | session | SessionScope | control | 留宿主/入口/secret |
-| `timelineFactory` | session | SessionScope | control | 留宿主/入口/secret |
-| `sessionSkills` | session | Skills | host-resource | 留宿主/入口/secret |
-| `skillsBranch` | branch | SkillsBranch | host-resource | 留宿主/入口/secret |
-| `managedProviders` | process | ManagedProviders | secret | 留宿主/入口/secret |
+| `serverControl` | process | ServerControl | control | 留宿主；入口/控制面 |
+| `connectionHub` | process | Connection | control | 留宿主；入口/控制面 |
+| `pluginFileTransactions` | process | PluginFiles | host-resource | 留宿主；本地资源 |
+| `publication` | process | McpPublication | host-resource | 留宿主；本地资源 |
+| `mcpAuth` | process | Mcp | secret | 留宿主；只暴露操作 |
+| `grokOAuthService` | process | GrokOAuth | secret | 留宿主；只暴露操作 |
+| `openAICodexOAuthService` | process | OpenAICodexOAuth | secret | 留宿主；只暴露操作 |
+| `uiHost` | process | UiHost | control | 留宿主；入口/控制面 |
+| `uiExtensions` | process | UiExtensions | control | 留宿主；入口/控制面 |
+| `mentionIndex` | process | WorkspaceToolsOwner | host-resource | 留宿主；本地资源 |
+| `skillsCatalog` | process | SkillsCatalog | host-resource | 留宿主；本地资源 |
+| `mcpService` | process | Mcp | host-resource | 留宿主；本地资源 |
+| `hooksService` | process | HooksSettings | host-resource | 留宿主；本地资源 |
+| `providerService` | process | Provider | secret | 留宿主；只暴露操作 |
+| `providerConnectionResolver` | process | Provider | host-resource | 留宿主；本地资源 |
+| `collaboration` | process | Collaboration | host-resource | 留宿主；本地资源 |
+| `sessionLoader` | session | SessionScope | control | 留宿主；入口/控制面 |
+| `timelineFactory` | session | SessionScope | control | 留宿主；入口/控制面 |
+| `sessionSkills` | session | Skills | host-resource | 留宿主；本地资源 |
+| `skillsBranch` | branch | SkillsBranch | host-resource | 留宿主；本地资源 |
+| `managedProviders` | process | ManagedProviders | secret | 留宿主；只暴露操作 |
 
 ### 3.7 数据内容，但还没有 leaf 消费者
 原因 `legacy-no-consumer`：内容是数据，但还没有 leaf 消费者。它们不是“永远不能跨”。
@@ -295,7 +295,7 @@ managedSearch.search {query, count}
 
 ### 4.7 `wakeups`
 
-`SchedulerSession` 同时注入 `ScheduleJobs` 和 `Wakeups`；只有 `scheduleJobs` 数据面时它仍不能 leaf。按 Scheduler §11.1 的形状：
+`SchedulerSession` 同时注入 `ScheduleJobs` 和 `Wakeups`；只有 `scheduleJobs` 数据面时它仍不能 leaf。按 Scheduler §10.2 的方法表：
 
 ```text
 wakeups.create {sessionId, branchId, at, prompt} -> {wakeupId}
