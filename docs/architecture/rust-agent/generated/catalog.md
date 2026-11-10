@@ -84,6 +84,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `promptRegistry` | session | PromptRegistry | Rust-only | — |
 | `sessionConfig` | session | SessionScope | yes | `get` async |
 | `sessionIdentity` | session | SessionScope | yes | `get` async |
+| `sessionLanguage` | session | PromptSources | Rust-only | — |
 | `sessionLifecycle` | session | SessionScope | yes | `activated` async, `closing` async, `hold` async, `release` async |
 | `sessionLoader` | session | SessionScope | Rust-only | — |
 | `sessionMethods` | session | SessionMethods | yes | `register` async |
@@ -115,6 +116,7 @@ Each catalog name a part of the assembly provides or injects. A name that crosse
 | `modelProvider` | branch | ModelProvider | Rust-only | — |
 | `permission` | branch | Permission | Rust-only | — |
 | `prompt` | branch | Prompt | Rust-only | — |
+| `promptSourcesBranch` | branch | PromptSourcesBranch | Rust-only | — |
 | `skillsBranch` | branch | SkillsBranch | Rust-only | — |
 | `timeline` | branch | BranchScope | yes | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `query` async, `sequence` async |
 | `timelineIdentity` | branch | BranchScope | yes | `get` async |
