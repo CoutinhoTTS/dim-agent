@@ -9,7 +9,7 @@ Decision: [ADR 023](../../adr/023-context-usage.md)。Issue: [#1320](https://git
 
 ContextUsage 是现有上下文功能内的独立 branch Capability，维护有效上下文的数字。生产者继续写原事实，不调用 Usage 更新、确认、删除或清理统计。Timeline/Store 不做 token 计算。
 
-保留现有 session.context.usage 及错误合同，由 ContextPreparation.usage 委托本 owner。read 固定源截止和当前 tools 身份，等待该目标完成后返回；已就绪读不查历史、不计数、不保存。无配置直接 NotConfigured，不先渲染正文；可组合计数不支持返回 Model/Unsupported，不退回完整历史重建。
+保留现有 session.context.usage 及错误合同，由 ContextPreparation.usage 委托本 owner。read 固定源截止和当前 tools 身份，等待该目标完成后返回；已就绪读不查历史消息、不重复消息计数、不保存；当前动态工具身份首次出现时按§3取得固定贡献。无配置直接 NotConfigured，不先渲染正文；可组合计数不支持返回 Model/Unsupported，不退回完整历史重建。
 
 保存已经计算出的数字是必要优化：输入/输出已入上下文后，未来显示不应再次读取它们。处理过无关事件、delta、model-start 不构成保存理由。数字结果与单独 boundary 合为一份；不保存逐源数字树或请求正文。
 
@@ -28,13 +28,17 @@ ContextUsage 是现有上下文功能内的独立 branch Capability，维护有�
 
 数字结果的完整字段：
 
-- `schema=context-usage/v4`、`epoch`、`source_through`、`initialized_from`。
-- `configuration`：配置事件ID、算法、固定内容身份与贡献、模型窗口/输出/阈值；不可用时保存明确状态，不伪造零。
-- `ordinary`：累计贡献、消息数、最后 HistoryEntry ID和来源位置。
-- `compression`：完成事件ID、retain_from位置、removed贡献/消息数、replacement/基线贡献/消息数，或null。
-- `baseline`：request_id、覆盖位置、配置/压缩身份、覆盖位置本地估算、prompt_tokens，或null。
+- 顶层：`schema=context-usage/v4`、`source_through`、`epoch`、`branches`、`initialized`、`current`。
+- `initialized={branch,sequence}`：本 epoch 已初始化范围的起点，branch 是 branches 中的序号。
+- `current={at:{branch,sequence},totals}`：at 是累计值对应的来源位置；不另存重复的 boundary_sequence。
+- `totals.configuration`：Ready 时保存 event_id、request_identity、control_identity、configured_tools、algorithm、fixed 和 limits(window/output/threshold)；不支持/不可用有明确状态。
+- `totals.ordinary={serialized_bytes,images}`、`message_count`、`last_entry={id,at}`、`local`、`growth`：普通消息累计贡献、条数、最后条目、本地估算及压缩策略用的累计增长数字。
+- `totals.compression`：event_id、cut、removed、replacement、removed_messages、replacement_messages，或缺省。
+- `totals.calibration`：request_id、request_at、anchor_at、configuration、compression、request_identity、local、prompt_tokens，或缺省。
 
 不保存 root、节点、逐消息正文、所有请求、Weak引用、started/settled数组。当前用量是固定贡献+ordinary−removed+本次replacement/基线。每次压缩替换上一份 replacement，而不是累加历次摘要。
+
+current.at 是这份累计值对应的来源位置；source_through 是本份结果已处理到的位置。无效果来源只提高处理位置，不产生新 current。两者不能互相替代，否则压缩可能漏掉已经计入的消息。
 
 ## 3. 每种来源读什么、算什么
 
@@ -49,7 +53,7 @@ ContextUsage 是现有上下文功能内的独立 branch Capability，维护有�
 
 六类是恢复源。model-start 不是持久进度源；打开输出的标记由请求控制事实按需取得。context/prepare、model/call、context/budget 用于有限实时关联，不读取它们的历史消息数组，不因为这些回调保存统计。
 
-固定 tools 已在配置中时直接采用它。否则使用原 ToolRegistry 当前声明及 source key/version。集合身份不变直接复用 fixed 数字，不重新序列化工具。读取注册表当前声明的复制成本仍按工具数量计，不冒充零成本；不调用 bind/bind_current。动态集合变化只保存新的固定贡献/身份并撤销基准，重载以当前集合重新取得，不恢复旧运行注册表。
+固定 tools 已在配置中时直接采用它。否则使用原 ToolRegistry 当前声明及 source key/version。集合身份不变直接复用 fixed 数字，不重新序列化工具。读取注册表当前声明的复制成本仍按工具数量计，不冒充零成本；不调用 bind/bind_current。动态集合不产生额外 Timeline 事件。只在内存缓存 configuration ID、source key/version 摘要、实际控制内容身份和固定贡献；source 版本变化但内容相同则复用数字。当前读采用这份固定贡献，并仅采用身份匹配的 provider 基准；重载重新取得当前集合。显式 context/configured 变化仍按原规则保存。
 
 ## 4. 复用已经计算出的数值
 
@@ -64,27 +68,27 @@ ContextUsage 是现有上下文功能内的独立 branch Capability，维护有�
 
 现有历史事实没有逐消息贡献，完整请求的一个总数也不能拆出任意压缩切点。新增输入/结算输出的单源贡献仍各计算一次。这项计算不因“共享了同一个函数”就算成复用了数值。请求构造、host 实际改变内容后的最终计数、压缩新摘要计数是各自真实工作，分别记账。
 
-复用只改已有预算和校验的数值传递，不增加 ModelProvider/AgentLoop 的 Usage confirm/discard，不增加请求事件载荷、请求基准事实或 producer→Usage 更新调用。`UsageEvidence` 中持久 root、任意历史 prefix/growth 接口不保留。临时数值证明不跨重载、不使请求正文常驻。
+复用只改已有预算和校验的数值传递，不增加 ModelProvider/AgentLoop 的 Usage confirm/discard，不增加请求事件载荷、请求基准事实或 producer→Usage 更新调用。`UsageEvidence` 不携带持久 root；压缩策略需要的增长只通过私有累计数字前驱查询相减取得，不增加公开历史统计 API。临时数值证明不跨重载、不使请求正文常驻。
 
 ## 5. 保存与位置缓存
 
 同一原子源批次按原位置处理，用转移结果的标量标记记录变化：新增消息数/贡献、实际配置身份/限制改变、成功压缩、有效基准替换。不要 clone整份状态或重算集合比较。`context-usage/recovered` 的每份结果内部包含该源之后的累计值，不同时写 boundary；本批有几个需要保留切点的内容源，就保存几份，最后一份也是当前结果。提交后才发布。
 
-不同源批次不为少写而等候未来事件。同批多个普通消息源仍须保留压缩切点可寻址的累计值：本批每个实际产生消息的源保存一份 numeric 结果，最后一份同时承担当前结果，不额外再写一份全批快照。仅固定配置/基准变化可合并入末份结果；跨源累积边界不能被合并掉。一个源中的多条 Message 合并为一个边界，因为 retain_from 按源事件切割。
+不同源批次不为少写而等候未来事件。同批多个普通消息源仍须保留压缩切点可寻址的累计值：本批每个实际产生消息的源保存一份 numeric 结果，最后一份同时承担当前结果，不额外再写一份全批快照。固定配置/基准变化也保存其来源边界；不能把较晚基准套到较早切点。一个源中的多条 Message 合并为一个边界，因为 retain_from 按源事件切割。
 
 空消息、失败/跳过压缩、无效/重复 provider 数字没有新 numeric。它们如果发生在最后保存的数字之后，需要确认“已经处理且无效果”，否则每次重载都会重新检查同一段来源。确定保存一种小型派生缓存：
 
 `context-usage/covered`：`schema=context-usage-covered/v1`、`result_id`、`source_through`。result_id指向它延伸的最新数字结果。不含state、贡献数组、正文或请求身份。
 
-仅在以下条件全部满足时写一份：本 owner 已处理固定范围；存在晚于当前 numeric/covered 的相关源；本范围没有需要保存的数字变化；到达 turn/end、closing 的已完成范围，或正在兑现固定 read 目标。无相关源、已被结果覆盖、只有 model-start/delta/interrupt 时不写。多个无效果源在同一交接处只写一份；普通实时回调不写。后续有 numeric 时覆盖这段处理位置，不再另外写 covered。
+仅在以下条件全部满足时写一份：本 owner 已处理固定范围；存在晚于当前 numeric/covered 的相关源；本范围没有需要保存的数字变化；到达 turn/end 的已完成范围，或正在兑现固定 read 目标。无相关源、已被结果覆盖、只有 model-start/delta/interrupt 时不写。多个无效果源在同一交接处只写一份；普通实时回调不写。后续有 numeric 时覆盖这段处理位置，不再另外写 covered。
 
 该缓存是避免重复检查无效果尾部的性能数据，不是业务事实，也不是所有 owner 的通用快照。未变化的普通 getter为0写入；等待新来源的 getter可能等到 owner 完成必要保存，不能把这种情况伪称为已经就绪读取。读一次失败/空来源之后，再次重载不重做这项工作。
 
 ## 6. 恢复、切点和查询范围
 
-正常恢复先读最新 numeric 和最新 covered，各1次。只有 covered.result_id 匹配当前 numeric 且范围合法才采用其位置；更早数字的缓存不延伸新结果。再对六类源各取Last位置，确定是否有未处理源；没有则结束，共8次逻辑query，解码一份数字和至多7份小身份。只需要新工作时才读 `(saved_source_through,S]` 的六类源，身份每页128，正文逐对象消费释放。不读旧正文，不保存完整源队列。
+正常恢复先读最新 numeric 和最新 covered，各1次。只有 covered.result_id 匹配当前 numeric 且范围合法才采用其位置；更早数字的缓存不延伸新结果。再点读保存配置的计数控制字段，并查询 `(saved_source_through,S]` 的六类源，身份每页128；空后缀即结束，正常单分支共4次逻辑 query。非空页逐对象取得必要正文、消费释放；没有额外六次 Last 探测。未显式配置 tools 时，当前集合首次/版本变化另需一次该配置 system 字段点读。不读旧正文，不保存完整源队列。
 
-压缩切点：按 retain_from 的逻辑ID取得来源位置；在同一 epoch 的 numeric 结果中按 `data.source_through < 切点` 倒序取最近累计值，再按其数字扣除。采用已有 Field 排序语法；必须由[源位置索引](../appserver/timeline-state-read-indexes.md)执行，不用事件提交位置代替源位置，不用 LIMIT1 掩盖历史筛选。单分支2次逻辑query（ID位置+数字边界）；祖先切点按固定chain各段定位，最多R次范围探测，R是分支链长度。边界之前无普通消息时累计值为0，不能因此遍历旧来源。
+压缩切点：按 retain_from 的逻辑ID取得来源位置；在同一 epoch 的 numeric 结果中按 `data.current.at.branch = 切点分支序号 AND data.current.at.sequence < 切点` 倒序取最近累计值，再按其数字扣除。采用已有 Field 排序语法；必须由[源位置索引](../appserver/timeline-state-read-indexes.md)执行，不用事件提交位置代替源位置，不用 LIMIT1 掩盖历史筛选。单分支2次逻辑query（ID位置+数字边界）；祖先切点按固定chain各段定位，最多R次范围探测，R是分支链长度。边界之前无普通消息时累计值为0，不能因此遍历旧来源。
 
 本 epoch 初始化保留前缀的累计值为0，切点不允许回到已经替换/未初始化范围。数字结果 source_through 可能小于自身提交位置，查询同时核对事件在固定可见范围；数值索引不是绕过祖先 cutoff 的权限。
 
@@ -94,7 +98,7 @@ known旧context-usage/v1–v3使用一次明确初始化，未知schema/算法�
 
 ## 7. provider 基准与异常
 
-实时关联最多保留一个准备槽和一个最近调用槽：prepare 的 request_id、through、配置/提示身份、消息数及请求Weak；call 与其是同一不可变对象且身份未变，才形成候选。弱引用不保留正文；不持久化地址，不用失效地址比较，不建请求表。覆盖期间配置/压缩/动态工具改变，候选作废。图片或请求专有增补不能证明可校准时使用本地估算，不读取历史 request.messages 补证。
+实时关联最多保留一个准备槽和一个最近调用槽。预算/校验通过数字读取验证实际请求的配置、压缩、消息数和覆盖位置，保存该次验证的 Arc<ModelRequest> 的 Weak、原 prepare 身份和已经算出的 local。call 与这个已验证对象相同且请求/配置/提示身份未变才形成候选；不能只和最初 prepare 对象比较，因为正常准备流程也会生成新的不可变请求。弱引用不保留正文；不持久化地址，不用失效地址比较，不建请求表。覆盖期间配置/压缩/动态工具改变，候选作废。图片或请求专有增补不能证明可校准时使用本地估算，不读取历史 request.messages 补证。
 
 统计覆盖该源位置后，候选只保留配置/压缩身份、覆盖位置本地总量及request_id。有效model/usage要求prompt_tokens有限且>0，且不少于cache_read+cache_write之和。当前估算为实测输入+覆盖后本地增量，缓存量不再重复相加。相同request后续usage替换旧测量；旧候选不覆盖更晚基准。相同身份与数值不写新numeric。已建立基准存numeric；未建立候选在重载作废，旧活任务不重启。
 
@@ -106,15 +110,15 @@ known旧context-usage/v1–v3使用一次明确初始化，未知schema/算法�
 
 | 流程 | 数字/位置新增事件 | 正文读取与计算 |
 | --- | --- | --- |
-| 普通一轮，无工具/压缩，最终usage与output-end同批 | 输入numeric1、输出+基准numeric1，共2；covered0 | 输入/输出各一次贡献，处理B_in+B_out；无旧历史计数；prepare/最终校验复用同一次已确定数值 |
-| usage与output-end分批且都改变结果 | numeric3 | 仍只有输入/输出两次消息贡献；usage只改标量，不再计一次输出 |
+| 普通一轮，无工具/压缩，有新的有效provider基准 | 输入numeric1、基准numeric1、输出numeric1，共3；covered0 | 输入/输出各一次贡献，处理B_in+B_out；无旧历史计数；prepare/最终校验复用同一次已确定数值 |
+| 没有有效或没有变化的provider基准 | 输入/输出numeric2 | 仍只有输入/输出两次消息贡献；usage只改标量，不再计一次输出 |
 | Goal自动执行一轮并继续 | 同上；Goal运行快照0 | 只计算原续行输入与本轮输出 |
 | 固定配置改变 | numeric1；Prompt引用0 | 仅变化固定部分F；消息贡献0次重算 |
 | 同值配置/提示、重复已覆盖统计读取 | 0 | 0贡献计算；提示刷新原逐目标比较另计 |
 | 无内容失败，相关源尚未覆盖后turn结束 | numeric0、covered1 | 空结算判定及小控制查询；旧正文0；再重载不检查这段失败来源 |
 | 中断并保留部分输出 | 该输出numeric1；不另为interrupt保存 | 只读取本请求保留的完整内容+后续片段，按保留字节计一次 |
 | 压缩完成 | 新替换贡献numeric1；原compaction事实保留 | 2次切点定位+replacement/基线贡献；旧前缀0次求和/计数 |
-| 正常已结算重载 | 0 | 8个定位query；1份numeric；0消息正文和计数 |
+| 正常已结算重载 | 0 | 4个逻辑query；1份numeric及配置控制；0消息正文和消息计数，动态tools首次另读system并计算固定贡献 |
 
 一轮原事实明确为input/message、applied、consumed、turn/start/end、model-start/output-end、model/usage、context/budget、context/prepare、model/call各1，加D个原输出事实，共11+D。Usage增加2或3，不是再加2份boundary和逐model-start快照。带工具的一轮按真实tool-call/tool-result及附带消息另列，不用假设积压量作为优化依据。
 

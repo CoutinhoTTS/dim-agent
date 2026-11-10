@@ -302,6 +302,7 @@ async fn indexed_pending_sets_keep_old_pages_and_do_not_read_closed_or_other_gro
             drop(db);
             if size == 128 {
                 let connection = Connection::open(&database.0).unwrap();
+                drop_v40(&connection);
                 connection.execute_batch("DROP TABLE timeline_array_elements; DROP TABLE timeline_member_roots; DROP TABLE timeline_member_origins; DROP TABLE timeline_member_terminals; DROP TABLE timeline_member_nodes; DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 36)); INSERT INTO agent_store_format VALUES (36);").unwrap();
                 for sql in V36_ADDITIONS
                     .iter()
@@ -450,7 +451,7 @@ fn a_failed_v36_member_backfill_rolls_back_the_schema_marker_and_events() {
         .execute("INSERT INTO agent_store_format VALUES(36)", [])
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
-    connection.execute("UPDATE timeline_events SET body=json_set(body,'$.record.event.data.mode','invalid') WHERE kind='input/message'", []).unwrap();
+    connection.execute("UPDATE timeline_events SET body=json_set(body,'$.record.event.sequence','invalid') WHERE kind='input/message'", []).unwrap();
     let original = rows(&connection, "timeline_events");
     drop(connection);
     assert!(SqliteStorage::open(database.0.clone()).is_err());

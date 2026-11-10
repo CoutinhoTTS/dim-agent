@@ -146,9 +146,11 @@ impl PromptSnapshot {
         match kind {
             EventKind::ContextConfigured(data) => {
                 self.configuration = Some((*data.settings).clone());
+                return;
             }
             EventKind::PromptChanged(data) => {
-                self.changed(&data.timeline, &data.revision, &data.changes)
+                self.changed(&data.timeline, &data.revision, &data.changes);
+                return;
             }
             EventKind::TurnStart(data) => {
                 self.set_turn_active(&data.turn_id, true);

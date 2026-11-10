@@ -507,7 +507,8 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
     assert!(
         writes
             .iter()
-            .all(|block| block.sequence <= completed || !block.text.contains("continuation")),
+            .all(|block| block.sequence <= completed
+                || !block.marker.contains(r#"kind="continuation""#)),
         "{writes:#?}"
     );
     let results: Vec<String> = branch_events(&session, "main", ..)
@@ -809,7 +810,7 @@ async fn goal_pending_input_and_interrupts() {
     assert!(
         writes
             .iter()
-            .all(|block| !block.text.contains("continuation")),
+            .all(|block| !block.marker.contains(r#"kind="continuation""#)),
         "{writes:#?}"
     );
     fixture.close().await;
@@ -1312,17 +1313,24 @@ async fn goal_evaluator_restart_writes_no_second_result() {
             .all(|block| !block.marker.contains(r#"reason="evaluation_failed""#)),
         "{writes:#?}"
     );
-    fixture.submit_on(&id, &child, "carry on").await;
-    wait_goal(&session, "main", r#"kind="state" status="completed""#).await;
-    fixture.idle_on(&id, "main").await;
-    let writes = goal_writes(&session, "main").await;
-    assert_eq!(
-        writes
+    let read = fixture
+        .client
+        .rpc("session.goal.get", json!({"sessionId":id}))
+        .await
+        .unwrap();
+    assert_eq!(read["goal"]["status"]["kind"], "paused");
+    let read = fixture
+        .client
+        .rpc("session.goal.get", json!({"sessionId":id}))
+        .await
+        .unwrap();
+    assert_eq!(read["goal"]["status"]["kind"], "paused");
+    assert!(
+        goal_writes(&session, "main")
+            .await
             .iter()
-            .filter(|block| block.marker.contains(r#"kind="state" status="completed""#))
-            .count(),
-        1,
-        "{writes:#?}"
+            .all(|block| !block.marker.contains(r#"kind="state" status="completed""#)),
+        "an old evaluator cannot complete a new instance"
     );
     fixture.close().await;
 }
@@ -1377,7 +1385,13 @@ async fn goal_evaluator_asks_again_and_continues() {
         ),
         "the CONTINUE report"
     );
-    let continuation = goal_block(&session, "main", &needle).await;
+    let continuation = wait_goal(
+        &session,
+        "main",
+        &format!(r#"evaluation="{evaluation}" idle="0""#),
+    )
+    .await
+    .text;
     let count = count_of(&continuation).expect("the continuation's count");
     let after = after_of(&continuation).expect("the continuation's after");
     assert_eq!(

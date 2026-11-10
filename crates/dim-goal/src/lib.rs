@@ -5,7 +5,6 @@
 //! continuation.
 
 mod branch;
-mod driving;
 mod fold;
 mod read;
 mod session;

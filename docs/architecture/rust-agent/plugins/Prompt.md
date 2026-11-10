@@ -6,10 +6,12 @@ Loads and adopts prompt/model/tool configuration in timeline order, exposes
 ConfigureControl and projects adopted prompt and configuration state.
 `Branch::get<PromptSnapshot>()` reads the last adopted `context/configured` without
 replaying history. Prompt owns the current projection and its effective entry references under one
-lock. Recovery reads the latest local `prompt-state/recovered`, its
-configuration identity and paired event/element references, then only source facts
-after `source_through`. Full history initializes a missing result once. The
-publisher receives explicit adopted state; it does not rebuild Prompt history.
+lock. Recovery reads the latest v2 effective references and adoption revisions,
+then the actual prompt changes after changed_through. Configuration is obtained
+separately from its latest fact. Referenced event/element pairs read only effective
+entries, with turn/task lifetime boundaries checked by complete scope keys.
+No turns, tasks or configuration identity is copied into a recovery record.
+The publisher receives explicit adopted state instead of rebuilding history.
 
 ## Dependencies
 

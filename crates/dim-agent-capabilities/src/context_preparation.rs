@@ -54,16 +54,39 @@ impl ConfigurationPublisher {
     /// previously adopted source text, so an entry a loading writer
     /// registered is in force at the adoption that loads it.
     /// `adopted` comes from one consumed prefix of Prompt's owner state.
-    pub(crate) async fn publish(
+    pub(crate) fn publish(
         &self,
         adopted: (&PromptSnapshot, Option<&ContextConfiguredData>),
         changes: Vec<PromptChange>,
         model: Option<ModelSelection>,
         tools: Option<ToolSetAdoption>,
-        inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot) -> Vec<InputBlock> + Send,
+        inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot, &[PromptChange]) -> Vec<InputBlock> + Send,
         register: impl FnOnce(&[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> + Send,
     ) -> dim_agent_runtime::Result<Option<u64>> {
         let (before, previous_configuration) = adopted;
+        if changes.is_empty() {
+            let same_model = model.as_ref().is_none_or(|model| {
+                previous_configuration.is_some_and(|previous| {
+                    let settings = &previous.settings;
+                    settings.provider_id == model.provider_id
+                        && settings.model_id == model.model_id
+                        && settings.capability_snapshot == model.capability_snapshot
+                        && settings.config == model.config
+                        && settings.metadata == model.metadata
+                })
+            });
+            let same_tools = tools.as_ref().is_none_or(|tools| {
+                previous_configuration.is_some_and(|previous| {
+                    previous.settings.tools.as_ref() == Some(&tools.tools)
+                        && previous.settings.tool_sources == tools.tool_sources
+                })
+            });
+            if same_model && same_tools {
+                register(&[])?;
+                return Ok(None);
+            }
+        }
+
         let ancestry: Vec<_> = self
             .timeline
             .ancestors()
@@ -140,7 +163,7 @@ impl ConfigurationPublisher {
             };
             let mut after = before.clone();
             after.changed(&data.timeline, &data.revision, &data.changes);
-            let blocks = inputs(before, &after);
+            let blocks = inputs(before, &after, &data.changes);
             drafts.push(EventKind::PromptChanged(data).into());
             drafts.extend(blocks.into_iter().map(|block| {
                 EventKind::InputMessage(InputMessageData {
@@ -192,7 +215,7 @@ impl ConfigurationPublisher {
             .last()
             .expect("non-empty publication batch")
             .sequence;
-        self.await_published(sequence).await.map(Some)
+        Ok(Some(sequence))
     }
 
     /// Publishes the System over the entries in force now when it differs
@@ -367,7 +390,7 @@ pub struct ContextPreparation {
             String,
             (
                 std::sync::Weak<ModelRequest>,
-                crate::context_usage::UsageEvidence,
+                crate::context_usage::PreparedEstimate,
             ),
         >,
     >,
@@ -768,26 +791,6 @@ impl ContextPreparation {
         }
     }
 
-    pub(crate) async fn confirm_usage(
-        &self,
-        request_id: &str,
-        request: &Arc<ModelRequest>,
-        cancel: CancellationToken,
-    ) -> Result<(), HostError> {
-        let reference = self.references.lock().unwrap().remove(request_id);
-        if let Some((expected, evidence)) = reference
-            && expected
-                .upgrade()
-                .is_some_and(|expected| Arc::ptr_eq(&expected, request))
-        {
-            self.usage.confirm(evidence, cancel).await?
-        }
-        Ok(())
-    }
-
-    pub(crate) fn discard_usage(&self, request_id: &str) {
-        self.references.lock().unwrap().remove(request_id);
-    }
     /// The current head's budget; writes nothing.
     pub async fn usage(
         &self,
@@ -861,33 +864,14 @@ impl ContextPreparation {
             }
             None => Ok(crate::context_policy::PreparedRequest {
                 request,
-                through: source.through,
-                compaction: None,
-                evidence: None,
+                estimate: None,
             }),
         }?;
-        if exact_prefix {
-            let evidence = match prepared.evidence {
-                Some(evidence) => Some(evidence),
-                None => {
-                    self.usage
-                        .reference(
-                            &source.request_id,
-                            source.through,
-                            prepared.through,
-                            &prepared.request,
-                            prepared.compaction.as_deref(),
-                            cancel,
-                        )
-                        .await?
-                }
-            };
-            if let Some(evidence) = evidence {
-                self.references.lock().unwrap().insert(
-                    source.request_id,
-                    (Arc::downgrade(&prepared.request), evidence),
-                );
-            }
+        if let Some(estimate) = prepared.estimate {
+            self.references.lock().unwrap().insert(
+                source.request_id,
+                (Arc::downgrade(&prepared.request), estimate),
+            );
         }
         Ok(prepared.request)
     }
@@ -1029,6 +1013,7 @@ impl DynPlugin for ContextPreparationPlugin {
                         "input/applied",
                         "turn/start",
                         "turn/end",
+                        "step/model-output-end",
                     ]
                     .map(String::from)
                     .to_vec(),
@@ -1041,6 +1026,10 @@ impl DynPlugin for ContextPreparationPlugin {
                         let failures = failures.clone();
                         let lifecycle = lifecycle.clone();
                         Box::pin(async move {
+                            if let EventKind::ModelOutputEnd(data) = &event.kind {
+                                owner.references.lock().unwrap().remove(&data.request_id);
+                                return Ok(());
+                            }
                             if matches!(event.kind, EventKind::ContextCompactionStart(_)) {
                                 owner.state.lock().unwrap().compaction = Some(event.sequence);
                                 return Ok(());

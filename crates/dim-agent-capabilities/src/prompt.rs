@@ -60,8 +60,12 @@ impl InitialPromptConfiguration {
 }
 
 /// Rules and state enter the model context as inputs written with the change.
-fn context_rules(before: &PromptSnapshot, after: &PromptSnapshot) -> Vec<InputBlock> {
-    context_changes(before, after, false)
+fn context_rules(
+    before: &PromptSnapshot,
+    after: &PromptSnapshot,
+    changes: &[PromptChange],
+) -> Vec<InputBlock> {
+    context_changes(before, after, changes, false)
 }
 
 /// Result of [`Prompt::adopt_tools`].
@@ -410,7 +414,7 @@ impl Prompt {
                 Vec::new(),
                 None,
                 Some(tools),
-                |_, _| Vec::new(),
+                |_, _, _| Vec::new(),
                 |_| {
                     if cancel.is_cancelled() {
                         Err(AgentError::Cancelled("tool adoption superseded".into()))
@@ -557,29 +561,42 @@ impl Prompt {
             self.finish(id, Err(error.clone()));
             return Err(error);
         }
-        let current = self.projection.lock().unwrap().snapshot.clone();
-        if update
+        let scopes: Vec<_> = update
             .sources
             .iter()
-            .any(|target| !current.active(&target.scope))
-        {
-            self.finish(id, Ok(ConfigureOutcome::Superseded));
-            return Ok(());
-        }
-        let mut changes = Vec::new();
-        for (target, value) in loaded {
-            let key = (target.source.clone(), target.scope.clone());
-            match value {
-                Some(entry) if current.entries.get(&key) != Some(&entry) => {
-                    changes.push(PromptChange::Set { entry });
-                }
-                None if current.entries.contains_key(&key) => changes.push(PromptChange::Revoke {
-                    source: target.source,
-                    scope: target.scope,
-                }),
-                _ => {}
+            .map(|target| target.scope.clone())
+            .collect();
+        self.ensure_scopes(&scopes, self.timeline.sequence())
+            .await?;
+        let changes = {
+            let projection = self.projection.lock().unwrap();
+            let current = &projection.snapshot;
+            if update
+                .sources
+                .iter()
+                .any(|target| !current.active(&target.scope))
+            {
+                self.finish(id, Ok(ConfigureOutcome::Superseded));
+                return Ok(());
             }
-        }
+            let mut changes = Vec::new();
+            for (target, value) in loaded {
+                let key = (target.source.clone(), target.scope.clone());
+                match value {
+                    Some(entry) if current.entries.get(&key) != Some(&entry) => {
+                        changes.push(PromptChange::Set { entry });
+                    }
+                    None if current.entries.contains_key(&key) => {
+                        changes.push(PromptChange::Revoke {
+                            source: target.source,
+                            scope: target.scope,
+                        })
+                    }
+                    _ => {}
+                }
+            }
+            changes
+        };
         match self
             .adopt(changes, update.model, None, context_rules, |events| {
                 let mut state = self.state.lock().unwrap();
@@ -620,28 +637,22 @@ impl Prompt {
         changes: Vec<PromptChange>,
         model: Option<ModelSelection>,
         tools: Option<ToolSetAdoption>,
-        inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot) -> Vec<InputBlock> + Send,
+        inputs: impl FnOnce(&PromptSnapshot, &PromptSnapshot, &[PromptChange]) -> Vec<InputBlock> + Send,
         register: impl FnOnce(&[Arc<AgentEvent>]) -> Result<()> + Send,
     ) -> Result<Option<u64>> {
-        let (snapshot, configuration) = {
+        let sequence = {
             let projection = self.projection.lock().unwrap();
-            (
-                projection.snapshot.clone(),
-                projection.configuration.clone(),
-            )
-        };
-        let sequence = self
-            .publisher
-            .publish(
-                (&snapshot, configuration.as_ref()),
+            self.publisher.publish(
+                (&projection.snapshot, projection.configuration.as_ref()),
                 changes,
                 model,
                 tools,
                 inputs,
                 register,
-            )
-            .await?;
+            )?
+        };
         if let Some(sequence) = sequence {
+            self.publisher.await_published(sequence).await?;
             self.advance(sequence).await?;
         }
         Ok(sequence)
@@ -914,17 +925,9 @@ impl DynPlugin for PromptPlugin {
                 },
             )?;
             let projected_through = timeline.sequence();
-            let (projection, initialize) =
-                recovery::Projection::restore(&service, projected_through).await?;
+            let projection = recovery::Projection::restore(&service, projected_through).await?;
             state.set(projection.snapshot.clone());
             *service.projection.lock().unwrap() = projection;
-            if initialize && projected_through > 0 {
-                service
-                    .projection
-                    .lock()
-                    .unwrap()
-                    .checkpoint(&service, Vec::new())?;
-            }
             service.recover_sources(projected_through).await?;
             *projecting = projected_through;
             drop(projecting);
@@ -1029,7 +1032,7 @@ impl Prompt {
 
     /// Delivers what the Session's sources hold now, compared with what this
     /// branch already has. A new Session also adopts its model.
-    async fn open(&self, event: &AgentEvent, current: PromptSnapshot) -> Result<()> {
+    async fn open(&self, event: &AgentEvent, mut current: PromptSnapshot) -> Result<()> {
         let Some(initial) = self.initial.get() else {
             return Ok(());
         };
@@ -1046,6 +1049,13 @@ impl Prompt {
             }
         };
         Self::validate_update(&update)?;
+        let scopes: Vec<_> = update
+            .sources
+            .iter()
+            .map(|target| target.scope.clone())
+            .collect();
+        self.opening_scopes(&mut current, &scopes, event.sequence)
+            .await?;
         let cancel = self.lifecycle.child_token();
         let load = self.load(&update, cancel.clone());
         tokio::pin!(load);
@@ -1096,6 +1106,8 @@ impl Prompt {
             })
             .collect();
         self.advance(self.timeline.sequence()).await?;
+        self.ensure_scopes(&scopes, self.timeline.sequence())
+            .await?;
         self.adopt(changes, update.model.clone(), None, context_rules, |_| {
             if cancel.is_cancelled()
                 || matches!(
@@ -1120,84 +1132,101 @@ impl Prompt {
 fn context_changes(
     before: &PromptSnapshot,
     after: &PromptSnapshot,
+    adopted: &[PromptChange],
     ended: bool,
 ) -> Vec<InputBlock> {
-    let delivered = |snapshot: &PromptSnapshot, key: &Key| {
-        snapshot
-            .entries
-            .get(key)
-            .filter(|entry| entry.delivery != PromptDelivery::System)
-            .cloned()
-    };
-    let mut changes: Vec<(PromptEntry, Option<PromptEntry>, Option<PromptEntry>)> = before
-        .entries
-        .keys()
-        .chain(after.entries.keys())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter_map(|key| {
-            let (old, new) = (delivered(before, key), delivered(after, key));
-            if old == new {
-                return None;
-            }
-            Some((new.clone().or(old.clone())?, old, new))
+    let keys: BTreeSet<_> = adopted
+        .iter()
+        .map(|change| match change {
+            PromptChange::Set { entry } => (&entry.source, &entry.scope),
+            PromptChange::Revoke { source, scope } => (source, scope),
         })
         .collect();
-    changes.sort_by(|(a, ..), (b, ..)| {
-        (a.order, &a.source, &a.scope).cmp(&(b.order, &b.source, &b.scope))
-    });
+    let mut changes = Vec::new();
+    for (source, scope) in keys {
+        let key = (source.clone(), scope.clone());
+        let old = before
+            .entries
+            .get(&key)
+            .filter(|entry| entry.delivery != PromptDelivery::System);
+        let new = after
+            .entries
+            .get(&key)
+            .filter(|entry| entry.delivery != PromptDelivery::System);
+        if old != new
+            && let Some(entry) = new.or(old)
+        {
+            changes.push((entry, old.is_some(), new));
+        }
+    }
+    changes.sort_by_key(|(entry, _, _)| (entry.order, &entry.source, &entry.scope));
     changes
         .into_iter()
-        .map(|(entry, old, new)| {
-            let (source, scope) = (&entry.source, &entry.scope);
-            let key = format!(
-                "{}:{source}:{}",
-                if entry.delivery == PromptDelivery::State { "state" } else { "rule" },
-                serde_json::to_string(scope).expect("prompt scope serializes")
-            );
-            match (entry.delivery, new) {
-                (PromptDelivery::State, Some(new)) => context_block::raw(
-                    format!(
-                        "<dim-state source=\"{}\">{}</dim-state>",
-                        context_block::attr(source),
-                        new.body
-                    ),
-                    Some(key),
-                ),
-                (PromptDelivery::State, None) => context_block::retire(
-                    format!(
-                        "<dim-state source=\"{}\" cleared=\"true\"></dim-state>",
-                        context_block::attr(source)
-                    ),
-                    key,
-                ),
-                (_, Some(new)) => context_block::raw(
-                    rule_text(
-                        source,
-                        scope,
-                        if old.is_some() { "replace" } else { "set" },
-                        &new.body,
-                    ),
-                    Some(key),
-                ),
-                (_, None) => {
-                    let scope_text = context_block::text(&scope_text(scope));
-                    let (op, body) = if ended {
-                        (
-                            "expired",
-                            format!("{scope_text} has ended, so this rule no longer applies there. Other scopes are unaffected."),
-                        )
-                    } else {
-                        (
-                            "revoke",
-                            format!("This rule no longer applies to {scope_text}. Other scopes are unaffected."),
-                        )
-                    };
-                    context_block::retire(rule_text(source, scope, op, &body), key)
-                }
-            }
-        })
+        .map(|(entry, old, new)| context_input(entry, old, new, ended))
         .collect()
+}
+
+fn context_input(
+    entry: &PromptEntry,
+    old: bool,
+    new: Option<&PromptEntry>,
+    ended: bool,
+) -> InputBlock {
+    let (source, scope) = (&entry.source, &entry.scope);
+    let key = format!(
+        "{}:{source}:{}",
+        if entry.delivery == PromptDelivery::State {
+            "state"
+        } else {
+            "rule"
+        },
+        serde_json::to_string(scope).expect("prompt scope serializes")
+    );
+    match (entry.delivery, new) {
+        (PromptDelivery::State, Some(new)) => context_block::raw(
+            format!(
+                "<dim-state source=\"{}\">{}</dim-state>",
+                context_block::attr(source),
+                new.body
+            ),
+            Some(key),
+        ),
+        (PromptDelivery::State, None) => context_block::retire(
+            format!(
+                "<dim-state source=\"{}\" cleared=\"true\"></dim-state>",
+                context_block::attr(source)
+            ),
+            key,
+        ),
+        (_, Some(new)) => context_block::raw(
+            rule_text(
+                source,
+                scope,
+                if old { "replace" } else { "set" },
+                &new.body,
+            ),
+            Some(key),
+        ),
+        (_, None) => {
+            let scope_text = context_block::text(&scope_text(scope));
+            let (op, body) = if ended {
+                (
+                    "expired",
+                    format!(
+                        "{scope_text} has ended, so this rule no longer applies there. Other scopes are unaffected."
+                    ),
+                )
+            } else {
+                (
+                    "revoke",
+                    format!(
+                        "This rule no longer applies to {scope_text}. Other scopes are unaffected."
+                    ),
+                )
+            };
+            context_block::retire(rule_text(source, scope, op, &body), key)
+        }
+    }
 }
 
 fn rule_text(source: &str, scope: &PromptScope, op: &str, body: &str) -> String {

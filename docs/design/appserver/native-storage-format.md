@@ -1130,7 +1130,7 @@ to retain the event ID value without its column affinity. Plan acceptance requir
 
 ## 提案：v40 补齐逻辑事件身份与恢复成员
 
-本轮目标格式确定为 v40；该方案已获确认，当前分支实现格式仍为 v39。它支持[身份与恢复操作查询](timeline-identity-reads.md)，不改变公开 query、事件或请求内容编码。不能把新表或新成员描述写入 v39 数据库；本文保留“提案”标题的既有链接锚点，不表示还需选择格式。
+本轮目标格式确定为 v40；该方案已获确认，目标格式为 v40。它支持[身份与恢复操作查询](timeline-identity-reads.md)，不改变公开 query、事件或请求内容编码。不能把新表或新成员描述写入 v39 数据库；本文保留“提案”标题的既有链接锚点，不表示还需选择格式。
 
 ### 输出身份定位
 
@@ -1151,7 +1151,7 @@ CREATE INDEX timeline_output_ids_by_position ON timeline_output_ids
 
 每条 step/text 或 step/thinking 逻辑事件恰有一条 locator，指向包含它的物理行；包括旧 encoding=event 的单条输出，其物理与逻辑序号相同。其它类型不登记。按位置索引用于有界验证、裁剪复制和删除，不用于扫描整条历史来实现 ID 查询。
 
-普通身份索引与此表分别按 session_id、event_id 定位；合并位置并去重后读取物理行。逻辑身份必须仍属于本次分支范围，才可进入后续字段投影。一个 ID 不存在时，两次索引未命中即结束，不补扫输出类型。输出合并只新增片段 locator，原物理行起点不变。
+普通身份索引与此表分别按 session_id、event_id 定位；合并位置并去重后读取物理行。逻辑身份必须仍属于本次分支范围，才可进入后续字段投影。一个 ID 不存在时，两次索引未命中即结束，不补扫输出类型。输出合并只新增片段 locator，原物理行起点不变。ID查询强制使用(session_id,event_id)主键，不让SQLite改选只匹配session/branch的覆盖索引。合并行内records连续，所选下标为logical_sequence−physical_sequence；已选单位置字段读取也直接取该元素，不展开同行其它片段。仍需读取并解析所在物理JSON行；合并在既有4KiB阈值停止追加，大单片段的成本仍按实际字节计。
 
 ### 恢复成员描述
 
@@ -1298,13 +1298,13 @@ Session 复制保留逻辑位置、身份关系和原数组顺序，在目标范
 
 ## v40 状态字段定位补充
 
-本节是尚未实现的v40目标格式细化，与输出locator/五种恢复描述共同升级；不适用于已提交v39。查询匹配、真实范围和缺口见[状态索引设计](timeline-state-read-indexes.md)，业务判断归各owner。
+本节是v40格式细化，与输出locator/五种恢复描述共同升级；不适用于已提交v39。查询匹配、真实范围和缺口见[状态索引设计](timeline-state-read-indexes.md)，业务判断归各owner。
 
 ```sql
 CREATE INDEX timeline_events_turns ON timeline_events(
   session_id,branch_id,kind,
-  json_extract(body,'$.record.event.data.turn_id'),sequence
-) WHERE json_extract(body,'$.record.event.data.turn_id') IS NOT NULL;
+  coalesce(json_extract(body,'$.record.event.data.turn_id'),json_extract(body,'$.turn_id')),sequence
+) WHERE coalesce(json_extract(body,'$.record.event.data.turn_id'),json_extract(body,'$.turn_id')) IS NOT NULL;
 CREATE INDEX timeline_events_scopes ON timeline_events(
   session_id,branch_id,kind,
   json_extract(body,'$.record.event.data.scope.kind'),
@@ -1315,12 +1315,13 @@ CREATE INDEX timeline_events_scopes ON timeline_events(
 CREATE INDEX timeline_events_source_positions ON timeline_events(
   session_id,branch_id,kind,
   json_extract(body,'$.record.event.data.epoch'),
-  json_extract(body,'$.record.event.data.source_through'),sequence
+  json_extract(body,'$.record.event.data.current.at.branch'),
+  json_extract(body,'$.record.event.data.current.at.sequence'),sequence
 ) WHERE kind='context-usage/recovered';
 ```
 
 三个索引只服务实际等值/范围查询，不索引Prompt body或token语义。最后numeric读取仍使用kind/提交位置索引，不在SQL中跳过未知schema。源位置前驱显式固定epoch和逻辑可见范围，额外visible_head筛选成本单独报告。
 
-原input成员的presence分组在v40同时登记handover缺失和存在两种互斥值；缺失组编码与旧根保持不变，存在组使用同一presence编码的true值。每个输入只进入一组，不复制为第三个全集；consumed/deleted按原input_id移除其所属组。Store matcher分别识别Not(Present(data.handover))与Present(data.handover)。
+原input成员的presence分组在v40同时登记handover缺失和存在两种互斥值；缺失组编码与旧根保持不变，存在组使用独立的input-handover/v1描述及presence=true分组，复用相同表/节点；这样可回填新组而不改写旧普通输入根。每个输入只进入一组，不复制为第三个全集；consumed/deleted按原input_id移除其所属组。Store matcher分别识别Not(Present(data.handover))与Present(data.handover)。
 
 v39→v40事务内建立表达式索引并从handover输入与其终态回填存在组，保留已有普通组与旧cutoff根。所有新结构成功、格式校验通过后才写v40 marker；失败回滚。正常写入/导入/复制在原事实事务中维护，删除沿Session原事务。不得为这些字段增加plugin SQL接口或替代业务原事实。

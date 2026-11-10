@@ -92,7 +92,6 @@ impl ModelProvider {
         result: std::result::Result<FinishReason, HostError>,
         started: &[StartedCall],
     ) -> dim_agent_runtime::Result<()> {
-        self.context.discard_usage(request_id);
         let (provider_id, model_id) = model;
         let outcome = match result {
             Ok(finish_reason) => ModelOutputOutcome::Completed { finish_reason },
@@ -487,9 +486,6 @@ impl ModelProvider {
                 let request = images::adapt(&call.request);
                 self.context
                     .validate(&call.request_id, request.clone(), cancel.clone())
-                    .await?;
-                self.context
-                    .confirm_usage(&call.request_id, &request, cancel.clone())
                     .await?;
                 let resolved = match &self.resolver {
                     Some(resolver) => resolver.0.resolve(request.clone(), cancel.clone()).await?,

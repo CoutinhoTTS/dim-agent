@@ -748,16 +748,16 @@ async fn growth_checks_seek_numeric_boundaries_across_larger_restored_histories(
             }
         }
         let numeric_reads = store.property_queries.lock().unwrap().iter().filter(|query|
-            matches!(&query.select, QuerySelect::Fields { fields } if fields == &["kind", "data"]))
+            matches!(&query.select, QuerySelect::Fields { fields } if fields == &["data.current.totals"]))
             .count();
         reads.push(numeric_reads);
         assert!(
             numeric_reads > 0,
-            "this case must read old numeric nodes, not only the in-memory publishing tail"
+            "this case must seek persisted numeric boundaries"
         );
         assert!(
             numeric_reads <= 12,
-            "numeric growth must seek boundary paths, not enumerate leaves: {reads:?}"
+            "numeric growth must seek cumulative values without enumerating earlier results: {reads:?}"
         );
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(
@@ -774,7 +774,7 @@ async fn growth_checks_seek_numeric_boundaries_across_larger_restored_histories(
         reads[1] <= reads[0] + 4,
         "8x history should add at most a tree level: {reads:?}"
     );
-    println!("numeric growth and update node reads: {reads:?}");
+    println!("numeric predecessor reads: {reads:?}");
 }
 
 #[tokio::test]
@@ -1000,6 +1000,21 @@ async fn closing_during_usage_result_publication_is_not_a_statistics_fault() {
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .service::<dim_agent_capabilities::prompt::Prompt>("main")
+            .unwrap()
+            .configure_loaded(
+                Some(ModelSelection {
+                    provider_id: "test".into(),
+                    model_id: "test".into(),
+                    capability_snapshot: None,
+                    config: None,
+                    metadata: None,
+                }),
+                vec![],
+            )
             .await
             .unwrap();
         entered.notified().await;
@@ -3161,4 +3176,226 @@ async fn a_malformed_compaction_cut_replays_the_segment_and_keeps_the_verdict() 
             "cut {at}"
         );
     }
+}
+
+#[derive(Clone, Default)]
+struct ObservedCounter {
+    fixed: Arc<AtomicUsize>,
+    messages: Arc<AtomicUsize>,
+    full: Arc<AtomicUsize>,
+    fixed_value: Arc<std::sync::Mutex<(u64, Vec<String>)>>,
+}
+impl ResolveContextModel for ObservedCounter {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Arc<dyn ContextModel>> {
+        let model = self.clone();
+        Box::pin(async move { Ok(Arc::new(model) as Arc<dyn ContextModel>) })
+    }
+}
+impl ContextModel for ObservedCounter {
+    fn context_window(&self) -> f64 {
+        4096.
+    }
+    fn output_tokens(&self) -> f64 {
+        64.
+    }
+    fn threshold_tokens(&self) -> f64 {
+        10_000.
+    }
+    fn count_tokens(&self, request: &ModelRequest) -> f64 {
+        self.full.fetch_add(1, Ordering::SeqCst);
+        serde_json::to_vec(&(request.system.as_ref(), request.tools.as_ref()))
+            .unwrap()
+            .len() as f64
+            + request
+                .messages
+                .iter()
+                .map(|message| serde_json::to_vec(message).unwrap().len() as f64)
+                .sum::<f64>()
+    }
+    fn contribution_counter(&self) -> Option<&dyn ContextCounter> {
+        Some(self)
+    }
+}
+impl ContextCounter for ObservedCounter {
+    fn algorithm(&self) -> &str {
+        "test/observed-additive/v1"
+    }
+    fn fixed(
+        &self,
+        system: Option<&SystemPrompt>,
+        tools: Option<&[ToolDefinition]>,
+    ) -> ContextContribution {
+        self.fixed.fetch_add(1, Ordering::SeqCst);
+        let bytes = serde_json::to_vec(&(system, tools)).unwrap().len() as u64;
+        *self.fixed_value.lock().unwrap() = (
+            bytes,
+            tools
+                .unwrap_or_default()
+                .iter()
+                .map(|tool| tool.name.clone())
+                .collect(),
+        );
+        ContextContribution {
+            serialized_bytes: bytes,
+            images: 0,
+        }
+    }
+    fn message(&self, message: &Message) -> ContextContribution {
+        self.messages.fetch_add(1, Ordering::SeqCst);
+        ContextContribution {
+            serialized_bytes: serde_json::to_vec(message).unwrap().len() as u64,
+            images: 0,
+        }
+    }
+    fn estimate(&self, contribution: ContextContribution) -> f64 {
+        contribution.serialized_bytes as f64
+    }
+}
+
+#[tokio::test]
+async fn usage_reuses_counted_messages_and_current_registry_tools_without_extra_state_writes() {
+    use dim_agent_capabilities::context_preparation::ContextPreparation;
+    let counter = Arc::new(ObservedCounter::default());
+    let mut profile = builder_with_usage_resolver(counter.clone());
+    profile.timeline_store(Arc::new(MemoryTimelineStore::default()));
+    let cell = Arc::new(std::sync::OnceLock::new());
+    let capture = cell.clone();
+    profile.require_feature(Feature::new("test.raw-timeline").branch(
+        "test.raw-timeline",
+        move |names| {
+            Ok(Box::new(super::manual_compaction::RawTimeline::new(
+                names,
+                capture.clone(),
+            )?))
+        },
+    ));
+    let agent = MinimalHost::start(&profile).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig {
+            tools: Some(vec!["echo".into()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let timeline = cell.get().unwrap();
+    timeline
+        .append(
+            EventKind::ContextConfigured(ContextConfiguredData {
+                timeline: "main".into(),
+                revision: "fixture".into(),
+                previous: None,
+                prompt: None,
+                settings: Box::new(ModelConfiguration {
+                    provider_id: "fixture".into(),
+                    model_id: "counter".into(),
+                    capability_snapshot: None,
+                    tools: None,
+                    tool_sources: vec![],
+                    config: None,
+                    metadata: None,
+                }),
+                system: None,
+                system_source: None,
+            })
+            .into(),
+        )
+        .unwrap();
+    let preparation = session.service::<ContextPreparation>("main").unwrap();
+    let empty = preparation.usage(CancellationToken::new()).await.unwrap();
+    assert_eq!(
+        empty.estimated_input_tokens,
+        counter.fixed_value.lock().unwrap().0 as f64
+    );
+    assert!(
+        counter
+            .fixed_value
+            .lock()
+            .unwrap()
+            .1
+            .iter()
+            .any(|name| name == "echo"),
+        "implicit tools include the current registry declarations"
+    );
+    let input = timeline
+        .append(
+            EventKind::InputMessage(InputMessageData::text(
+                "one adopted input",
+                Some(InputMode::Append),
+            ))
+            .into(),
+        )
+        .unwrap();
+    timeline
+        .append(
+            EventKind::InputConsumed(InputConsumedData {
+                input_id: input.id.clone(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let value = preparation.usage(CancellationToken::new()).await.unwrap();
+    assert!(value.estimated_input_tokens > empty.estimated_input_tokens);
+    assert_eq!(
+        counter.messages.load(Ordering::SeqCst),
+        1,
+        "a newly adopted message is counted once"
+    );
+    let calls = (
+        counter.fixed.load(Ordering::SeqCst),
+        counter.messages.load(Ordering::SeqCst),
+        counter.full.load(Ordering::SeqCst),
+    );
+    let before = chain_events(&session, "main", ..).await.unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            preparation
+                .usage(CancellationToken::new())
+                .await
+                .unwrap()
+                .estimated_input_tokens,
+            value.estimated_input_tokens
+        );
+    }
+    let after = chain_events(&session, "main", ..).await.unwrap();
+    assert_eq!(after.len(), before.len(), "ready reads do not write state");
+    assert_eq!(
+        (
+            counter.fixed.load(Ordering::SeqCst),
+            counter.messages.load(Ordering::SeqCst),
+            counter.full.load(Ordering::SeqCst)
+        ),
+        calls,
+        "ready reads reuse both fixed and message contributions"
+    );
+    assert_eq!(after.iter().filter(|event|matches!(&event.kind,EventKind::Extension(data) if data.key()=="context-usage/recovered")).count(),2,"configuration and the adopted input each save one numeric result");
+    assert!(after.iter().all(|event|!matches!(&event.kind,EventKind::Extension(data) if data.key().starts_with("input-queue/")||data.key()=="context-usage/node"||data.key()=="context-usage/request-base")),"no queue snapshots, numeric nodes or request facts");
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+    let messages = counter.messages.load(Ordering::SeqCst);
+    let agent = MinimalHost::start(&profile).await.unwrap();
+    let restored = agent.restore_session(id).await.unwrap();
+    let reading = restored
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        reading.estimated_input_tokens,
+        counter.fixed_value.lock().unwrap().0 as f64
+            + serde_json::to_vec(&Message::text(Role::User, "one adopted input"))
+                .unwrap()
+                .len() as f64,
+        "reload uses the adopted guide and current tool controls without recounting the input"
+    );
+    assert_eq!(
+        counter.messages.load(Ordering::SeqCst),
+        messages,
+        "reload does not recount settled messages"
+    );
+    agent.close().await.unwrap();
 }

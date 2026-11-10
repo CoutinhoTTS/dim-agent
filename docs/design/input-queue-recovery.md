@@ -27,13 +27,15 @@ handover 从不 applied、不计 queued；仅在所指 turn 打开时保留。�
 ## 3. 具体读取
 
 1. 普通输入：kind=input/message，handover 缺失，不存在 consumed/deleted.input_id=id。Fields(id,position,data.mode)。成员索引直接读当前集合，页128。
-2. handover：同一反关联，改为 handover 存在。Fields(id,position,data.handover.turn_id)。需要 v40 补齐 presence=true 分组；现有实现没有维护它。
-3. 每个当前普通 input_id，分别按 kind+data.input_id 点查最后 applied 与 withdraw。handover 只查 withdraw。当前无 applied 且已有 withdraw 的条目写 deleted；已有 applied 的 withdraw 返回 notHeld，不重新 apply。
+2. handover：同一反关联，改为 handover 存在。Fields(id,position,data.handover.turn_id)。v40 的 input-handover/v1 维护 presence=true 分组。
+3. 每个非空当前成员页最多128个 input_id，一次查询 kind IN(applied,withdraw) AND data.input_id IN(本页ID)，按 kind、input_id 分组取 Last；handover 页只查 withdraw。最多256条控制字段，当页用完释放。当前无 applied 且已有 withdraw 的条目写 deleted；已有 applied 的 withdraw 返回 notHeld，不重新 apply。
 4. start/end 各取最后一条 turn_id、position，构造 turn。存在 released 驱动且 turn 为空时才查最后 interrupt。只比较标量位置，不遍历旧 turns。
-5. 原 mode 缺失时才对该 input_id 查询 user 的 Present/非 null，按已有 effective_mode 规则恢复。不得为判断存在性返回整个 user。SQLite 对内联 JSON 的解析成本仍计入这一个选中对象，不宣称 Fields 自动免解析。
+5. 已有 applied 时采用 applied.mode，缺省为 Queue，与原 Loop 一致。只有未 applied 且 input/message.mode 缺失时才对该 input_id 查询 user 的 Present/非 null，按已有 effective_mode 规则恢复。不得为判断存在性返回整个 user。SQLite 对内联 JSON 的解析成本仍计入这一个选中对象，不宣称 Fields 自动免解析。
 6. 建立当前 entries 后执行原调度：已释放不重放；有效 turn 或 starting 时持有 queue；可释放时写原 applied；无效 handover/有效撤回写原 deleted。
 
 判定 withdraw 使用决定时的状态：applied 在 withdraw 之前已经提交则不可撤回；没有 applied 则 held。按序 owner 不会先写较晚释放再处理较早撤回；发现违背此生产合同的数据报错，不能用最新值掩盖。
+
+每完成一页当前成员读取，调用已有 opening_advanced 报告真实初始化进度；单次查询仍受原超时限制，不用定时心跳掩盖阻塞。
 
 当前输入字段不包含 user 正文、blocks、历史终态、任务句柄或回复 waiter。answers/answered/lifecycle 仍为本代内存；已接受撤回后结果发布未知沿用 publication_unknown，不能返回假 notHeld 或自动重发。
 
@@ -52,7 +54,7 @@ reload -> 当前成员 + 每项决定事实 + 最新控制 -> 当前内存 -> �
 
 ## 5. 成本与修改
 
-空队列正常冷读4次 query（两个当前成员组、两个 turn 边界），无正文、无写入。一个普通 held 输入增加 applied/withdraw 两次点查，解码一个 Entry；若 mode 缺失再加一次存在性。存在 released 驱动且无打开 turn 时再加一次 interrupt。当前集合分多页时每组按128个身份分页，只有有 next 才续页；这些都是当前任务，不是已完成历史。
+空队列正常冷读4次 query（两个当前成员组、两个 turn 边界），无正文、无写入。一个非空成员页增加一次批量控制查询，只解码本页当前 Entry；仅旧未释放输入的 mode 缺失时另查存在性。存在 released 驱动且无打开 turn 时再加一次 interrupt。当前集合分多页时每组按128个身份分页，只有有 next 才续页；这些都是当前任务，不是已完成历史。
 
 普通完整聊天一轮 Queue 仍写原 applied 1条；message、consumed、start/end 归原生产者。本设计额外事件为0。自动续行、配置改变、异常终止、空队列重载的恢复事件同样为0；异常后的实际删除/释放逐项按业务决定计数，不在“0快照”中抹去。
 

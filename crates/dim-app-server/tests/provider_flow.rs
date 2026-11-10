@@ -7869,6 +7869,7 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
                  DROP TABLE timeline_text_fts;
                  DROP TABLE timeline_text_tails;
                  DROP TABLE timeline_array_elements;
+                 DROP TABLE timeline_output_ids;
                  DROP TABLE timeline_member_roots;
                  DROP TABLE timeline_member_origins;
                  DROP TABLE timeline_member_terminals;

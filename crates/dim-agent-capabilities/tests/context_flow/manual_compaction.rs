@@ -1491,12 +1491,12 @@ async fn a_failed_manual_compaction_lets_the_turn_continue_and_recovery_compacts
 
 /// Captures the branch Timeline so a test can write a `context/compact`
 /// that does not come through `AgentLoop::compact`.
-struct RawTimeline {
+pub(super) struct RawTimeline {
     timeline_cell: Arc<std::sync::OnceLock<Arc<Timeline>>>,
     timeline: Key<Timeline>,
 }
 impl RawTimeline {
-    fn new(
+    pub(super) fn new(
         names: &Names<'_>,
         timeline_cell: Arc<std::sync::OnceLock<Arc<Timeline>>>,
     ) -> rutis::Result<Self> {

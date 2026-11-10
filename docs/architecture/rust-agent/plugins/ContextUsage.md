@@ -8,44 +8,36 @@ contributions and request calibration under [ContextUsage](../../../design/plugi
 
 | Service | Purpose |
 | --- | --- |
-| `B:Timeline` | Read selected source properties and numeric nodes; atomically append nodes and recovery results. |
-| `B:Dispatcher` | Observe source publication and report persistence or projection faults. |
-| `B:BranchLifecycle` | Start after publication and cancel when the branch closes. |
-| `S:ContextModelHost` | Resolve the declared additive counter and its algorithm. |
-| `S:HistoryRenderer` | Initialize missing numeric state with the canonical projection. |
+| `B:Timeline` | Read source fields and cumulative numeric results; commit changed results. |
+| `B:Dispatcher` | Observe publication and report owned failures. |
+| `B:BranchLifecycle` | Start after activation and stop when closing. |
+| `S:ContextModelHost` | Resolve the additive counter and algorithm. |
+| `S:ToolRegistry` | Read current declarations when configuration does not specify tools. |
 
 ## Events and lifetime
 
-Consumes `context/configured`, `input/consumed`, `step/model-output-end`,
-`step/tool-result`, `context/compaction` and `model/usage`. Handlers retain only
-the wanted sequence and notify the owned task. It reads at most 128 new source
-identities per page, consumes necessary properties, then saves reachable new
-`context-usage/node` facts and `context-usage/recovered` atomically.
+Consumes configured, consumed-input, output-end, tool-result, completed-compaction
+and provider-usage sources. Handlers notify its own task; it reads source identities
+in pages of 128 and consumes each necessary body immediately. Each source that
+changes numeric state saves one `context-usage/recovered` v4 result containing its
+cumulative contribution. It writes no numeric tree nodes or request-base facts.
+A `context-usage/covered` v1 extends a saved result only for an already checked
+no-effect source tail at a fixed read or turn-end handoff.
 
-Recovery reads the latest local result after the branch opening and processes
-only subsequent sources. Missing old state initializes explicitly; unknown
-schemas or damaged references fail instead of replaying silently. Numeric tree
-nodes contain no messages. Current reads use the root summary; a fixed earlier
-source boundary reads only its numeric prefix path. With no bound resolver the
-part exposes an unavailable read and starts no work.
+Recovery reads the latest numeric result, matching covered position and counter
+controls, then only the unfinished source suffix. Old v1-v3 numeric caches have an
+explicit retained-source initialization; unknown schemas or algorithms fail.
+Current reads use the in-memory totals. Earlier compression cuts seek cumulative
+numbers using epoch, branch ordinal and source sequence, without old messages.
 
-Recovery and request references write v3 schemas and accept the previous v1/v2
-shapes. Numeric summaries retain the last projected entry and per-message growth
-for fixed-source budget and regrowth checks. Missing legacy metadata remains
-unknown. A request-specific fixed-content identity keeps its provider calibration
-separate from the adopted configuration's current usage.
-
-The source counter shares input, settled-output and tool-result projection rules
-with HistoryRenderer. Output settlement selects the last complete content and
-only later fragments of that request. Raw deltas do not produce statistics writes.
-Provider calibration reads the private request reference by request ID. It uses
-the latest compatible request; duplicate usage replaces that measurement.
-
-ContextPreparation passes the exact projected request boundary and retains a
-Weak request reference until ModelProvider confirms the final object after
-before transforms and image adaptation. Confirmation saves
-`context-usage/request-base` before invocation. Changed or unproved requests
-remain subject to the final complete-request budget check.
+Current dynamic tools use a small version/identity/fixed-number cache; no handler
+binding or extra Timeline event is required. New messages are counted once and
+fixed controls are reused. Settled-output projection is shared with history.
+Provider calibration uses one Weak reference to the actual numerically verified
+request and one current-call slot, invalidated by incompatible controls or content.
+It never reloads old request bodies to establish calibration. ContextPreparation
+reuses the estimate for the same final request and counter; transformed requests
+receive the ordinary final full-request check.
 
 ## Tests
 
@@ -58,7 +50,7 @@ remain subject to the final complete-request budget check.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`S:ContextModelHost`、`S:HistoryRenderer` |
+| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`S:ContextModelHost`、`S:ToolRegistry` |
 | 提供 | `B:ContextUsage` |
 | 被注入于 | `ContextPreparation` |
 <!-- /generated -->

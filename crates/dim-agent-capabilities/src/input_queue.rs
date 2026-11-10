@@ -1,4 +1,3 @@
-mod entries;
 mod pending;
 mod recovery;
 
@@ -13,7 +12,6 @@ use dim_agent_runtime::{
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -26,14 +24,6 @@ enum Decision {
     Apply(String, InputMode),
     Delete(String),
 }
-impl Decision {
-    fn input_id(&self) -> &str {
-        match self {
-            Self::Apply(id, _) | Self::Delete(id) => id,
-        }
-    }
-}
-
 /// InputQueue's answer to one `input/withdraw`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Withdrawal {
@@ -44,15 +34,10 @@ pub enum Withdrawal {
 }
 
 /// One committed input until Loop consumes it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Entry {
-    input_id: String,
-    sequence: u64,
+    id: String,
     kind: EntryKind,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum EntryKind {
     /// An input this queue releases by its mode.
     Input { mode: InputMode, released: bool },
@@ -60,10 +45,9 @@ enum EntryKind {
     Handover { turn_id: String },
 }
 /// What InputQueue derives from the events it consumes.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QueueState<R = Arc<entries::Node>> {
-    entries_root: Option<R>,
+#[derive(Default)]
+struct QueueState {
+    entries: Vec<Entry>,
     queued: usize,
     /// The open turn's id, between a dispatched `turn/start` and its
     /// `turn/end`.
@@ -74,38 +58,15 @@ struct QueueState<R = Arc<entries::Node>> {
     /// longer start a turn.
     starting: bool,
 }
-impl<R> Default for QueueState<R> {
-    fn default() -> Self {
-        Self {
-            entries_root: None,
-            queued: 0,
-            turn: None,
-            starting: false,
-        }
-    }
-}
-
 impl QueueState {
-    fn set(&mut self, entry: Entry, batch: u64) {
-        self.entries_root = entries::set(self.entries_root.take(), entry, batch);
-        self.queued = entries::queued(&self.entries_root);
-    }
-    fn remove(&mut self, id: &str, batch: u64) {
-        if entries::get(&self.entries_root, id).is_some() {
-            self.entries_root = entries::remove(self.entries_root.take(), id, batch);
-            self.queued = entries::queued(&self.entries_root);
-        }
-    }
     fn step(&mut self, event: &AgentEvent) -> Vec<Decision> {
         match &event.kind {
             EventKind::InputMessage(data) => self.input(
                 &event.id,
-                event.sequence,
                 data.effective_mode(),
                 data.handover
                     .as_ref()
                     .map(|handover| handover.turn_id.as_str()),
-                event.sequence,
             ),
             EventKind::TurnStart(data) => {
                 self.turn = Some(data.turn_id.clone());
@@ -116,101 +77,108 @@ impl QueueState {
                 self.starting = false;
                 Vec::new()
             }
-            EventKind::TurnEnd(data) => self.end_turn(&data.turn_id, event.sequence),
+            EventKind::TurnEnd(data) => self.end_turn(&data.turn_id),
             EventKind::InputConsumed(data) => {
-                self.remove(&data.input_id, event.sequence);
+                if let Some(index) = self
+                    .entries
+                    .iter()
+                    .position(|entry| entry.id == data.input_id)
+                {
+                    let entry = self.entries.remove(index);
+                    self.queued -= usize::from(matches!(entry.kind, EntryKind::Input { .. }));
+                }
                 Vec::new()
             }
-            EventKind::InputWithdraw(data) => self.withdraw(&data.input_id, event.sequence),
+            EventKind::InputWithdraw(data) => self.withdraw(&data.input_id),
             _ => Vec::new(),
         }
     }
-    fn input(
-        &mut self,
-        id: &str,
-        sequence: u64,
-        mode: InputMode,
-        handover: Option<&str>,
-        batch: u64,
-    ) -> Vec<Decision> {
+    fn input(&mut self, id: &str, mode: InputMode, handover: Option<&str>) -> Vec<Decision> {
         if let Some(turn_id) = handover {
             if self.turn.as_deref() != Some(turn_id) {
                 return vec![Decision::Delete(id.to_owned())];
             }
-            self.set(
-                Entry {
-                    input_id: id.to_owned(),
-                    sequence,
-                    kind: EntryKind::Handover {
-                        turn_id: turn_id.to_owned(),
-                    },
+            self.entries.push(Entry {
+                id: id.to_owned(),
+                kind: EntryKind::Handover {
+                    turn_id: turn_id.to_owned(),
                 },
-                batch,
-            );
+            });
             return Vec::new();
         }
-        let held_queue = self
-            .entries_root
-            .as_ref()
-            .is_some_and(|root| root.data.first_held.is_some());
-        self.set(
-            Entry {
-                input_id: id.to_owned(),
-                sequence,
-                kind: EntryKind::Input {
-                    mode,
-                    released: false,
-                },
+        self.queued += 1;
+        self.entries.push(Entry {
+            id: id.to_owned(),
+            kind: EntryKind::Input {
+                mode,
+                released: false,
             },
-            batch,
-        );
+        });
+        let held_queue = self.entries.iter().any(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::Input {
+                    mode: InputMode::Queue,
+                    released: false
+                }
+            ) && entry.id != id
+        });
         match mode {
             InputMode::Queue if self.turn.is_some() || self.starting || held_queue => Vec::new(),
-            _ => self.release(id, batch),
+            _ => self.release(id),
         }
     }
-    fn end_turn(&mut self, turn: &str, batch: u64) -> Vec<Decision> {
+    fn end_turn(&mut self, turn: &str) -> Vec<Decision> {
         self.turn = None;
-        let mut ended = Vec::new();
-        entries::handovers(&self.entries_root, turn, &mut ended);
-        let mut decisions = Vec::with_capacity(ended.len() + 1);
-        for id in ended {
-            self.remove(&id, batch);
-            decisions.push(Decision::Delete(id));
-        }
-        if let Some(next) = entries::first_held(&self.entries_root) {
-            let next = next.input_id.clone();
-            decisions.extend(self.release(&next, batch));
+        let mut decisions = Vec::new();
+        self.entries.retain(|entry| {
+            let ended = matches!(&entry.kind, EntryKind::Handover { turn_id } if turn_id == turn);
+            if ended {
+                decisions.push(Decision::Delete(entry.id.clone()));
+            }
+            !ended
+        });
+        if let Some(next) = self.entries.iter().find(|entry| {
+            matches!(
+                entry.kind,
+                EntryKind::Input {
+                    mode: InputMode::Queue,
+                    released: false
+                }
+            )
+        }) {
+            let next = next.id.clone();
+            decisions.extend(self.release(&next));
         }
         decisions
     }
-    fn withdraw(&mut self, id: &str, batch: u64) -> Vec<Decision> {
-        if entries::get(&self.entries_root, id)
-            .is_some_and(|entry| !matches!(entry.kind, EntryKind::Input { released: true, .. }))
-        {
-            self.remove(id, batch);
-            vec![Decision::Delete(id.to_owned())]
-        } else {
-            Vec::new()
+    fn withdraw(&mut self, id: &str) -> Vec<Decision> {
+        match self.entries.iter().position(|entry| {
+            entry.id == id && !matches!(entry.kind, EntryKind::Input { released: true, .. })
+        }) {
+            Some(index) => {
+                let entry = self.entries.remove(index);
+                self.queued -= usize::from(matches!(entry.kind, EntryKind::Input { .. }));
+                vec![Decision::Delete(id.to_owned())]
+            }
+            None => Vec::new(),
         }
     }
-    fn release(&mut self, id: &str, batch: u64) -> Vec<Decision> {
-        let Some(entry) = entries::get(&self.entries_root, id) else {
+    /// Releases one input. One that drives a turn while none runs makes a
+    /// turn about to start.
+    fn release(&mut self, id: &str) -> Vec<Decision> {
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) else {
             return Vec::new();
         };
-        let EntryKind::Input { mode, .. } = entry.kind else {
+        let EntryKind::Input { mode, released } = &mut entry.kind else {
             return Vec::new();
         };
-        let mut entry = entry.clone();
-        entry.kind = EntryKind::Input {
-            mode,
-            released: true,
-        };
-        self.set(entry, batch);
+        *released = true;
+        let mode = *mode;
         if self.turn.is_none() && mode != InputMode::Append {
             self.starting = true;
         }
-        vec![Decision::Apply(id.to_owned(), mode)]
+        vec![Decision::Apply(entry.id.clone(), mode)]
     }
 }
 /// Consumes `input/message` and decides by its mode when Loop may consume
@@ -223,9 +191,9 @@ impl QueueState {
 /// to consume what is applied. Consumes `input/withdraw` in order and
 /// writes `input/deleted` for an input it still holds unapplied.
 pub struct InputQueue {
-    state: Mutex<recovery::Recovered>,
+    state: Mutex<QueueState>,
     observable: Arc<StateCell<InputSnapshot>>,
-    published_result: Mutex<u64>,
+    pending_snapshot: Mutex<Option<(u64, usize)>>,
     timeline: Arc<Timeline>,
     /// Answers to `input/withdraw` commands by their sequence, until the
     /// withdrawal that wrote each one collects it.
@@ -247,27 +215,35 @@ impl Drop for WithdrawalWaiter<'_> {
 }
 
 impl InputQueue {
-    fn publish<R>(&self, sequence: u64, state: &QueueState<R>) {
-        let mut published = self.published_result.lock().unwrap();
-        if sequence > *published {
-            self.observable.set(InputSnapshot {
-                queued: state.queued,
-            });
-            *published = sequence;
+    fn publish(&self, through: u64, queued: usize) {
+        let mut pending = self.pending_snapshot.lock().unwrap();
+        let through = through.max(pending.as_ref().map_or(0, |(at, _)| *at));
+        *pending = Some((through, queued));
+        self.publish_ready(&mut pending);
+    }
+    fn publish_ready(&self, pending: &mut Option<(u64, usize)>) {
+        if pending
+            .as_ref()
+            .is_some_and(|(at, _)| self.timeline.sequence() >= *at)
+        {
+            let (_, queued) = pending.take().expect("a published snapshot");
+            if self.observable.get().queued != queued {
+                self.observable.set(InputSnapshot { queued });
+            }
         }
     }
     fn on_event(&self, event: Arc<AgentEvent>) -> Result<()> {
-        if let EventKind::Extension(data) = &event.kind
-            && event.kind.key() == recovery::KEY
-        {
-            let recovered = recovery::Recovered::<String>::decode(data.data().clone())?;
-            self.publish(event.sequence, &recovered.state);
+        if matches!(
+            event.kind,
+            EventKind::InputApplied(_) | EventKind::InputDeleted(_)
+        ) {
+            self.publish_ready(&mut self.pending_snapshot.lock().unwrap());
             return Ok(());
         }
-        let mut recovered = self.state.lock().unwrap();
-        let decisions = recovered.state.step(&event);
-        recovered.source_through = event.sequence;
-        let (published, deleted) = self.checkpoint(&recovered, decisions)?;
+        let mut state = self.state.lock().unwrap();
+        let decisions = state.step(&event);
+        let (published, deleted) = self.write(decisions, event.sequence)?;
+        self.publish(published, state.queued);
         if matches!(event.kind, EventKind::InputWithdraw(_)) {
             let answer = deleted.map_or(Withdrawal::NotHeld, |sequence| Withdrawal::Deleted {
                 sequence,
@@ -378,9 +354,9 @@ impl DynPlugin for InputQueuePlugin {
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let queue = Arc::new(InputQueue {
-                state: Mutex::new(recovery::Recovered::default()),
+                state: Mutex::new(QueueState::default()),
                 observable: Arc::new(StateCell::new(InputSnapshot::default())),
-                published_result: Mutex::new(0),
+                pending_snapshot: Mutex::new(None),
                 timeline,
                 answers: Mutex::new(HashMap::new()),
                 answered: tokio::sync::Notify::new(),
@@ -388,6 +364,7 @@ impl DynPlugin for InputQueuePlugin {
             });
             let owner = queue.clone();
             let read = queue.clone();
+            let context = ctx.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -399,13 +376,15 @@ impl DynPlugin for InputQueuePlugin {
                         "turn/start",
                         "turn/end",
                         "stop/interrupt",
-                        recovery::KEY,
+                        "input/applied",
+                        "input/deleted",
                     ]
                     .map(String::from)
                     .to_vec(),
                     Arc::new(move || {
                         let read = read.clone();
-                        Box::pin(async move { read.rebuild().await })
+                        let context = context.clone();
+                        Box::pin(async move { read.rebuild(&context).await })
                     }),
                     Arc::new(move |event| {
                         let owner = owner.clone();

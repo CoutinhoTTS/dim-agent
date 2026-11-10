@@ -11,9 +11,9 @@ Issue: [#1320](https://github.com/arcships/dim/issues/1320)、[#1147](https://gi
 | 对象 | 采用的设计 | 明确排除 |
 | --- | --- | --- |
 | ContextUsage | 独立branch owner；真实内容/配置/基准变化保存数字；无效果尾部只合并小位置缓存；既有预算/校验复用已算数值。 | 独立boundary、私有数字树、producer confirm/discard、请求基准事实/正文缓存。 |
-| InputQueue | 当前普通/交接输入成员 + 每项applied/withdraw + 最新turn/interrupt；原必要决定事实。 | 完整队列恢复结果、节点事件、持久queued/starting副本、历史八类型重放。 |
+| InputQueue | 当前普通/交接输入成员 + 每页ID批量applied/withdraw + 最新turn/interrupt；原必要决定事实。 | 完整队列恢复结果、节点事件、持久queued/starting副本、历史八类型重放。 |
 | Goal | 只保存完整业务状态；运行期只改内存，重载将 active 映射为内存 paused，显式 set/resume 才执行。 | goal/recovered、运行状态/集合持久化、每输入边界、旧轮次/计数/评估恢复、get 扫历史。 |
-| Prompt | 仅有效引用与revision/system_revision；真实采用/退役同批保存；scope边界按键点读，配置独立取得。 | turns/tasks/configuration_event/source_through持久副本、无条目生命周期快照、QueryRows。 |
+| Prompt | 仅有效引用与revision/system_revision；实际采用后保存引用；退役同批保存；scope边界按键点读，配置独立取得。 | turns/tasks/configuration_event/source_through持久副本、无条目生命周期快照、QueryRows。 |
 | Store pending | 保留按位置排序的版本成员树；同一 through 读取当前成员。 | 仅存当前集合、扫描所有 origin 排除旧 terminal、插件访问 SQL。 |
 | ID 与字段定位 | v40输出locator、五种恢复描述、handover存在组及实际使用的turn/scope/源位置键。 | 必须补kind才能点查、任意JSON索引注册、owner状态数据库。 |
 | 显示 | 有界窗口、完成压缩摘要、一次类型化 detail。 | 每块重读完整详情、文本拼接协议、服务端详情缓存。 |
@@ -74,10 +74,10 @@ Usage -> 最新数字/小位置缓存 -> 仅真正尚未处理来源 -> 数字�
 
 | 对象 | 正常单分支冷读 | 新增写入 |
 | --- | --- | --- |
-| [Usage](plugins/ContextUsage.md) | 数字/位置缓存各1+六类源Last，共8定位query；无旧消息解码 | 每个实际内容源一份numeric（同时是累计边界），配置/基准变化合并；仅无效果尾部交接保存小covered |
+| [Usage](plugins/ContextUsage.md) | 数字/位置缓存/计数控制各1+六类源合并后缀1，共4 query；未指定tools时首次另点读system；无旧消息解码 | 每个实际内容源一份numeric（同时是累计边界），配置/基准变化按实际来源保存；仅无效果尾部交接保存小covered |
 | [队列](input-queue-recovery.md) | 空队列4query；有队列只增加当前对象的applied/withdraw及必要默认mode、interrupt定位 | 恢复事件0；仅原applied/deleted |
 | [Goal](plugins/Goal-state-read.md) | 新格式普通加载1条；兼容/删除修复单列；活get零SQL | 仅真实goal/state；运行进度和重载均0 |
-| [Prompt](prompt-state-read.md) | 引用1+配置1+G个有效正文事件+已知scope键定位 | 真实采用/退役每批1份引用；普通无提示变化的turn0 |
+| [Prompt](prompt-state-read.md) | 引用1+配置1+提示变更后缀检查1+G个有效正文事件+已知scope键定位 | 真实采用/退役每批1份引用；普通无提示变化的turn0 |
 | [pending](appserver/timeline-member-index.md) | 固定through根、当前成员与本页字段 | 原事实事务维护成员路径；不复制整个当前队列 |
 
 表中为逻辑query，不是statement计数。SQL表达式、索引键、当前未匹配条件和额外扫描范围见[状态字段索引](appserver/timeline-state-read-indexes.md)。源码拥有的原有能力与目标新增执行必须分开验证；LIMIT1不是性能证据。
@@ -140,7 +140,7 @@ Goal 的 Session 身份隔离、RPC 边界的既有正确性修复保留为独�
 
 ## 7. 存储格式与兼容
 
-v39 保留已确定的 changes 元素定位编码，不附加数组查询语言。v40 采用已确认的[输出逻辑身份和恢复成员方案](appserver/native-storage-format.md#提案v40-补齐逻辑事件身份与恢复成员)：输出locator和五种恢复描述保留；本次补齐handover存在组与turn/scope/source_through三个定位键，同事务升级、失败回滚。
+v39 保留已确定的 changes 元素定位编码，不附加数组查询语言。v40 采用已确认的[输出逻辑身份和恢复成员方案](appserver/native-storage-format.md#提案v40-补齐逻辑事件身份与恢复成员)：输出locator和五种恢复描述保留；本次补齐handover存在组与turn/scope/epoch及源位置三个定位键，同事务升级、失败回滚。
 
 不向 v39 静默写入 v40 结构；旧程序拒读新格式。owner 的 ExtensionEvent/schema 与 native 格式分开：Queue不再写恢复事件；Prompt新引用为prompt-state/v2，Usage数字为context-usage/v4，小位置缓存为context-usage-covered/v1；Goal业务事件为goal-state/v1，不沿用旧 goal/v1 或提议 goal/v2 的运行快照。旧布局按各 owner 的兼容合同处理，Goal 不初始化运行快照；Store 不执行业务初始化。普通调用继续使用现有 query；旧 QuerySpec 的 Rust 字面量与线上请求不增加可选字段。
 

@@ -74,46 +74,19 @@ observable input queue.
 
 ### Events and lifetime
 
-Consumes `input/message`, `input/consumed`, `input/withdraw`, `turn/start`,
-`turn/end`, `stop/interrupt` and its own `input-queue/recovered`;
-produces `input/applied`, `input/deleted`, `input-queue/node` and `input-queue/recovered`.
-It does not run a model itself.
+Consumes input, withdrawal, turn and interrupt facts; produces only the original
+application/deletion decisions. It writes no queue recovery or node events.
 
-It registers with `Dispatcher::consume`. Recovery reads the latest local result,
-checks its schema, then queries only source positions after its saved
-`source_through` at a fixed cutoff. The result contains an immutable AVL root,
-queued count, turn identity and starting flag. Nodes contain current input
-identities, source order and release modes without user or block content.
-They are loaded by event identity, only from the current root. Results before the latest branch opening or
-Session-fork marker are not used as local state. Missing results initialize once
-from legacy transition fields, settling outstanding decisions before live delivery.
-Default input modes are resolved by a bounded identity query for user-content
-presence; content and content-type arrays are not loaded.
-
-Each handler computes the transition and queues its required outputs and result
-as one atomic batch. It waits for no database I/O. The observable queue changes
-when the result is dispatched after publication, never replacing a newer
-published result with an earlier recovery page; a withdrawal reply also waits
-for that batch to publish. Failed commits publish neither output nor result.
-The queue retains no historical event list, background tasks or external resources. An idle append
-is pending until a driving input; an interrupt is not permission to start a new
-turn from previously unapplied input.
-
-### Handover inputs
-
-A handover input is an `input/message` whose `handover` is `{turn_id,
-request_id}`: it is addressed to one handover's continuation and is
-model-readable only if that continuation consumes it. InputQueue never releases
-one (it writes no `input/applied`) and does not count it in the published queue
-size. It deletes one with `input/deleted` when its turn ends without consuming
-it, or on arrival when its turn is not open. These are the only InputQueue
-rules for it; the Loop consumes it only in the batch that starts its handover's
-continuation. Its instruction is a raw block with no `user`, like Goal's
-automatic inputs; clients that show the operator's words never show it as the
-operator's message.
-
-A handover input is never a [state input](../../../design/model-prompts.md#5-scopes),
-so an ordering rule for state inputs leaves it last.
+Recovery fixes a published cutoff, selects ordinary and handover current members,
+then reads last applied/withdraw controls for each page of at most 128 identities.
+Two last turn boundaries and an interrupt only when needed determine turn/starting.
+It never reads input bodies to recover entries; old missing input modes use an
+identity-driven user-presence query. Applied mode defaults agree with Loop.
+Current entries, queued count, turn, starting and release bits stay in memory.
+Only necessary applied/deleted output waits for its commit before publishing the
+observable queue; empty or unchanged transitions do not publish a new count.
+Public pending semantics still exclude handovers. Old derived recovery records
+are ignored; original facts and native member indexes remain authoritative.
 
 ### Tests
 

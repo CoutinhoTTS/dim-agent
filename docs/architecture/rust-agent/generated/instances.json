@@ -21,7 +21,7 @@
       "alias": "timeline_1",
       "parent": "timeline_0",
       "branchPoint": 0,
-      "createAnchor": 3,
+      "createAnchor": 2,
       "status": {
         "running": false,
         "stopping": false,

@@ -4,7 +4,7 @@ Status: Draft.
 Scope: Goal 的持久状态、运行期内存、异常终止、重载和 session.goal.get。
 Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 
-依据：[Goal](Goal.md)、[旧事件读取](Goal-property-queries.md)、[设计规则](../../architecture/rust-agent/principles.md)、[ADR 002](../../adr/002-plugin-scope.md)、[插件合同](../plugin-contract.md)、[rutis](../rutis-usage.md)。本文件规定目标合同；当前分支实现尚未采用本状态机。
+依据：[Goal](Goal.md)、[旧事件读取](Goal-property-queries.md)、[设计规则](../../architecture/rust-agent/principles.md)、[ADR 002](../../adr/002-plugin-scope.md)、[插件合同](../plugin-contract.md)、[rutis](../rutis-usage.md)。本文件规定状态保存与读取合同。
 
 ## 1. 决定
 
@@ -13,7 +13,7 @@ Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 3. 新 Goal 实例读取最后一个业务状态。若仍为 active，内存状态设为 paused，reason=interrupted_reload；不补写 paused，不恢复旧执行，不重放旧决定。
 4. 只有新的 set 或 resume 开始一次执行。旧 turn/end、任务结束、评估报告、重连和查询都不能使重载后暂停的 Goal 重新执行。
 
-不使用 goal/recovered、goal/input-boundary、goal/driving-node，不保存 source_through 或当前集合来恢复 Goal 执行。Goal 不采用[完整执行状态快照协议](../owner-state-indexed-reads.md)；它恢复目标定义，终止旧执行。
+不使用 goal/recovered、goal/input-boundary、goal/driving-node，不保存 source_through 或当前集合来恢复 Goal 执行。Goal 按[业务保存边界](../owner-state-indexed-reads.md)保存目标状态；它恢复目标定义，终止旧执行。
 
 ## 2. 保存对象
 
@@ -55,7 +55,7 @@ Goal branch 通过自己的 timeline 写私有业务事件 type=goal、name=stat
 | --- | --- |
 | continuation_count、continuation_idle | 本次执行的连续续行、无进展次数。set/resume 从零开始；操作员输入在内存归零；实例终止后丢弃。 |
 | 当前轮次及 continuation_driven | 判断当前轮次、无进展规则；不恢复旧轮次。 |
-| 当前待消费输入、未结束任务的 ID | 实时判断等待，消费/结束后移除。新执行需要现存业务对象时使用原 inventory 查询。 |
+| 当前待消费输入、未结束任务的 ID | 实时判断等待，消费/结束后移除。显式 set/resume 固定当前已提交位置，用已有成员查询重新取得当前未 consumed/deleted 的 queue/steer 输入ID，以及未 ended 的 task_id；不读正文，不加载旧执行。每类按128项分页，无对象时共2次query、零额外事件。普通输入 mode 缺失时按原 user 是否存在判断；handover/Append 不作为驱动。查询期间有新提交则在新固定位置重取，完成交接后由实时事件更新集合。 |
 | 当前评估、首次有效报告、延后结论 | 属于创建评估的这次执行；新实例不重新加载、创建或补发旧评估工作。 |
 | 已处理决定、在途写入及取消资源 | 本实例去重和关闭；不以进程内任务身份恢复旧执行。 |
 

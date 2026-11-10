@@ -1,5 +1,7 @@
 #[path = "storage_flow/recall.rs"]
 mod recall;
+#[path = "storage_flow/state_indexes.rs"]
+mod state_indexes;
 
 #[path = "storage_flow/element_rows.rs"]
 mod element_rows;
@@ -423,6 +425,24 @@ const V37_ADDITIONS: &[&str] = &[
 const V39_ADDITIONS: &[&str] = &[
     "CREATE TABLE timeline_array_elements (session_id TEXT NOT NULL, array_id TEXT NOT NULL, element_index INTEGER NOT NULL CHECK(element_index >= 0), content_ref TEXT NOT NULL, array_length INTEGER, PRIMARY KEY(session_id, array_id, element_index), CHECK((element_index = 0 AND array_length IS NOT NULL AND array_length > 0) OR (element_index > 0 AND array_length IS NULL)))",
 ];
+const V40_ADDITIONS: &[&str] = &[
+    "CREATE TABLE timeline_output_ids (session_id TEXT NOT NULL,event_id TEXT NOT NULL,branch_id TEXT NOT NULL,physical_sequence INTEGER NOT NULL CHECK(physical_sequence > 0),logical_sequence INTEGER NOT NULL CHECK(logical_sequence >= physical_sequence),PRIMARY KEY(session_id,event_id))",
+    "CREATE INDEX timeline_output_ids_by_position ON timeline_output_ids(session_id,branch_id,physical_sequence,logical_sequence,event_id)",
+    "CREATE INDEX timeline_events_turns ON timeline_events(session_id,branch_id,kind,coalesce(json_extract(body,'$.record.event.data.turn_id'),json_extract(body,'$.turn_id')),sequence) WHERE coalesce(json_extract(body,'$.record.event.data.turn_id'),json_extract(body,'$.turn_id')) IS NOT NULL",
+    "CREATE INDEX timeline_events_scopes ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.scope.kind'),json_extract(body,'$.record.event.data.scope.timeline'),json_extract(body,'$.record.event.data.scope.id'),json_extract(body,'$.record.event.data.status'),sequence) WHERE kind='context/scope'",
+    "CREATE INDEX timeline_events_source_positions ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.epoch'),json_extract(body,'$.record.event.data.current.at.branch'),json_extract(body,'$.record.event.data.current.at.sequence'),sequence) WHERE kind='context-usage/recovered'",
+];
+fn drop_v40(connection: &Connection) {
+    for sql in V40_ADDITIONS.iter().rev() {
+        let mut words = sql.split_whitespace();
+        words.next();
+        let kind = words.next().unwrap();
+        let name = words.next().unwrap();
+        connection
+            .execute_batch(&format!("DROP {kind} {name}"))
+            .unwrap();
+    }
+}
 fn schema_of(version: u32) -> Vec<String> {
     let mut statements: Vec<String> = V13_SCHEMA
         .iter()
@@ -440,6 +460,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V36_ADDITIONS.iter().filter(|_| version >= 36))
         .chain(V37_ADDITIONS.iter().filter(|_| version >= 37))
         .chain(V39_ADDITIONS.iter().filter(|_| version >= 39))
+        .chain(V40_ADDITIONS.iter().filter(|_| version >= 40))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {
@@ -674,6 +695,16 @@ async fn documented_native_records_restore_with_legacy_snapshot_bypassed() {
         .unwrap();
     insert_documented_records(&connection, BUSINESS_TABLES);
     write_documented_context_switches(&connection);
+    for session in connection
+        .prepare("SELECT session_id FROM agent_sessions")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+    {
+        let session = session.unwrap();
+        dim_app_server::storage::initialize_session_member_index(&connection, &session).unwrap();
+        dim_app_server::storage::initialize_session_output_id_index(&connection, &session).unwrap();
+    }
     drop(connection);
 
     assert_eq!(store.branches("s1").await.unwrap().len(), 2);
@@ -1437,7 +1468,7 @@ async fn a_cut_on_another_branch_replays_the_segment() {
     .unwrap();
     let connection = Connection::open(&database.0).unwrap();
     connection
-        .execute_batch("INSERT INTO timeline_branches VALUES ('session', 'child', '{}', 0);")
+        .execute_batch("INSERT INTO timeline_branches VALUES ('session', 'child', '{}', 0); INSERT INTO timeline_member_roots SELECT session_id,'child',index_id,group_key,0,NULL FROM timeline_member_roots WHERE session_id='session' AND branch_id='main' AND sequence=0;")
         .unwrap();
     drop(connection);
     append(
@@ -1519,7 +1550,7 @@ async fn a_cut_beyond_the_ancestor_cut_fails_the_stream() {
     }
     let connection = Connection::open(&database.0).unwrap();
     connection
-        .execute_batch("INSERT INTO timeline_branches VALUES ('session', 'child', '{}', 0);")
+        .execute_batch("INSERT INTO timeline_branches VALUES ('session', 'child', '{}', 0); INSERT INTO timeline_member_roots SELECT session_id,'child',index_id,group_key,0,NULL FROM timeline_member_roots WHERE session_id='session' AND branch_id='main' AND sequence=0;")
         .unwrap();
     drop(connection);
     append(

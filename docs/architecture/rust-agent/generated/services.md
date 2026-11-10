@@ -87,8 +87,8 @@ flowchart LR
   p35 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p43
   p35 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p42
   p35 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p42
-  p21 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p41
   p21 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p41
+  p33 -->|"dim_agent_capabilities::tool_registry::ToolRegistry@session"| p41
   p35 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p41
   p35 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p41
   p35 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p41

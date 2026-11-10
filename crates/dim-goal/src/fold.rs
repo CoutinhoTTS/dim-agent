@@ -9,16 +9,15 @@ use crate::text::{self, Judge, Marker, OBJECTIVE_KEY, STATE_KEY, STATUS_KEY};
 use dim_agent_types::{
     AgentEvent, BranchSource, EventKind, InputBlock, InputMode, InterruptScope, TurnOutcome,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub sequence: u64,
     pub summary: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TurnEnd {
     pub sequence: u64,
     pub status: TurnStatus,
@@ -42,8 +41,8 @@ pub enum Progress {
 /// (C7).
 pub const NO_PROGRESS_TURNS: usize = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+
 pub enum TurnStatus {
     Completed,
     Failed,
@@ -61,8 +60,8 @@ impl TurnStatus {
 }
 
 /// The result a conclusion states, and the evaluator's report of a failed turn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+
 pub enum ConclusionKind {
     Done,
     Continue,
@@ -90,7 +89,7 @@ impl ConclusionKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Conclusion {
     pub evaluation: u64,
     pub evaluator: String,
@@ -311,18 +310,17 @@ fn legacy_state(attrs: &Marker, text: &str) -> text::State {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub(crate) struct ConclusionRecord {
     sequence: u64,
     answered: bool,
 }
 
 /// One branch's goal state: the fold of its consumed local events (§2).
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Default)]
+
 pub struct Fold {
     /// The objective the newest Goal block states.
-    #[serde(deserialize_with = "Option::deserialize")]
     pub objective: Option<String>,
     /// The status it states; `None` while the objective has none.
     pub state: text::State,
@@ -331,14 +329,13 @@ pub struct Fold {
     pub active: u64,
     pub last_operator: u64,
     pub turn_start: u64,
-    #[serde(deserialize_with = "Option::deserialize")]
+
     pub turn_end: Option<TurnEnd>,
     /// How many local goal blocks the branch has: any means it has its own
     /// goal history.
     pub local_blocks: usize,
     /// At a `session/forked` opening: which Goal keys the copied facts left
     /// live.
-    #[serde(deserialize_with = "Option::deserialize")]
     pub copied_live: Option<text::Live>,
     /// The newest block of each Goal key on the branch's own segment, which a
     /// `session/forked` opening turns into `copied_live`. A state record
@@ -356,8 +353,7 @@ pub struct Fold {
     /// The `continue` conclusions no input for their evaluation has answered
     /// yet: evaluation → (input sequence, conclusion). A continuation or pause
     /// for the evaluation, a newer turn end or an operator input drops the
-    /// entry. Settling a deferred turn end re-derives it here, so a reload
-    /// keeps it (Pursuit §5).
+    /// entry (Pursuit §5).
     pending_conclusions: BTreeMap<u64, (u64, Conclusion)>,
     /// Sequence of the latest Goal block that is not a continuation.
     pub last_block: u64,
@@ -383,9 +379,9 @@ pub struct Fold {
     /// `turn/end` that closes it keeps the answer.
     pub(crate) turn_continuation_driven: bool,
     pub(crate) decided: BTreeSet<String>,
-    #[serde(skip)]
-    pub(crate) driving: crate::driving::Set,
-    #[serde(skip)]
+
+    pub(crate) driving: HashSet<String>,
+
     pub(crate) invalidated_after: HashSet<u64>,
     /// The highest `after` among the state records this fold has stepped,
     /// deleted changes included; `0` before the first (sequences start at
@@ -395,13 +391,12 @@ pub struct Fold {
     /// A state record that names its trigger by submission id (R5): it states
     /// its change when the very next event is that trigger, and states
     /// nothing when any other event comes first.
-    #[serde(deserialize_with = "Option::deserialize")]
     held_record: Option<HeldRecord>,
 }
 
 /// A `goal:state` record with `trigger="<submission id>"`: the statement it
 /// carries waits for the trigger input it names, the next event (R5).
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 struct HeldRecord {
     sequence: u64,
     trigger: String,
@@ -908,11 +903,6 @@ impl Fold {
             self.continuation_count = 0;
             self.continuation_idle = 0;
         }
-    }
-
-    pub(crate) fn finish_restore(&mut self, opening: Option<u64>) {
-        self.invalidated_after.clear();
-        self.compact(opening);
     }
 
     pub(crate) fn compact(&mut self, opening: Option<u64>) {

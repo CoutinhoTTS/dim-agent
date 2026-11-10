@@ -16,7 +16,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 39;
+pub const FORMAT: u32 = 40;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -55,7 +55,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 39))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 40))",
     ),
     (
         "settings_documents",
@@ -136,6 +136,18 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "timeline_input_submissions",
         "CREATE INDEX timeline_input_submissions ON timeline_events(session_id, branch_id, json_extract(body, '$.record.event.data.submission_id'), sequence) WHERE kind = 'input/message'",
+    ),
+    (
+        "timeline_events_turns",
+        "CREATE INDEX timeline_events_turns ON timeline_events(session_id,branch_id,kind,coalesce(json_extract(body,'$.record.event.data.turn_id'),json_extract(body,'$.turn_id')),sequence) WHERE coalesce(json_extract(body,'$.record.event.data.turn_id'),json_extract(body,'$.turn_id')) IS NOT NULL",
+    ),
+    (
+        "timeline_events_scopes",
+        "CREATE INDEX timeline_events_scopes ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.scope.kind'),json_extract(body,'$.record.event.data.scope.timeline'),json_extract(body,'$.record.event.data.scope.id'),json_extract(body,'$.record.event.data.status'),sequence) WHERE kind='context/scope'",
+    ),
+    (
+        "timeline_events_source_positions",
+        "CREATE INDEX timeline_events_source_positions ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.epoch'),json_extract(body,'$.record.event.data.current.at.branch'),json_extract(body,'$.record.event.data.current.at.sequence'),sequence) WHERE kind='context-usage/recovered'",
     ),
     (
         "timeline_events_context",
@@ -229,7 +241,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 25] = [
+const UPGRADES: [(u32, &[&str]); 26] = [
     (
         13,
         &[
@@ -325,6 +337,16 @@ const UPGRADES: [(u32, &[&str]); 25] = [
     ),
     (37, &[]),
     (38, &["timeline_array_elements"]),
+    (
+        39,
+        &[
+            "timeline_output_ids",
+            "timeline_output_ids_by_position",
+            "timeline_events_turns",
+            "timeline_events_scopes",
+            "timeline_events_source_positions",
+        ],
+    ),
 ];
 
 fn format_table(version: u32) -> String {
@@ -340,6 +362,7 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
         .chain(super::text::SCHEMA)
         .chain(super::members::SCHEMA)
         .chain(super::arrays::SCHEMA)
+        .chain(super::identities::SCHEMA)
         .copied()
         .chain(
             LEGACY_INDEXES
@@ -796,6 +819,7 @@ impl SqliteStorage {
                 .chain(super::text::SCHEMA)
                 .chain(super::members::SCHEMA)
                 .chain(super::arrays::SCHEMA)
+                .chain(super::identities::SCHEMA)
             {
                 tx.execute_batch(sql).map_err(storage)?;
             }
@@ -870,6 +894,7 @@ impl SqliteStorage {
                         .chain(super::text::SCHEMA)
                         .chain(super::members::SCHEMA)
                         .chain(super::arrays::SCHEMA)
+                        .chain(super::identities::SCHEMA)
                         .filter(|(name, _)| added.contains(name))
                     {
                         tx.execute_batch(sql).map_err(storage)?;
@@ -895,6 +920,12 @@ impl SqliteStorage {
                         }) {
                             tx.execute_batch(&format!("DROP INDEX {name}; {sql}"))
                                 .map_err(storage)?;
+                        }
+                    }
+                    if *from == 39 {
+                        super::identities::backfill(&tx)?;
+                        if version >= 37 {
+                            super::members::backfill_v40(&tx)?;
                         }
                     }
                     if *from == 38 {

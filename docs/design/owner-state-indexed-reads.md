@@ -32,7 +32,7 @@ Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 
 不增加 Reader、通用状态 CRUD、插件 SQL 或第二个恢复协调器。QuerySpec 与公开 RPC 保持兼容；存储索引匹配的具体不足见[索引设计](appserver/timeline-state-read-indexes.md)。该文档同时列出现有代码不满足的查询形状，不能把目标设计当作现有能力。
 
-原事实和同一 owner 必需输出保持原原子批次。Prompt 采用的引用结果与该次 prompt/changed、配置、上下文输入同批。Usage 是异步消费者，数字提交后才发布成功结果；保存失败停止统计，不返回未提交数字。InputQueue 不再等待一个并无业务意义的恢复事件才发布 queued。
+原事实和同一 owner 必需输出保持原原子批次。Prompt采用保留原changed/配置/输入批次；引用依据实际提交事实保存，崩溃时仅补changed_through之后的真实提示变更；退役输入与引用结果同批。Usage 是异步消费者，数字提交后才发布成功结果；保存失败停止统计，不返回未提交数字。InputQueue 不再等待一个并无业务意义的恢复事件才发布 queued。
 
 各 owner 的内存交付位置不共用。Usage 的 source_through 只证明已完成统计和必要保存的源前缀，不是结果事件自身的位置；Prompt 不使用它驱动逐源恢复。已知 ID 的正文点查仍使用业务可见范围，不能被源后缀下界截掉。
 
@@ -44,7 +44,7 @@ Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 用户 -> input/message -> Queue -> input/applied
 Loop -> turn/start -> input/consumed -> Usage 计入新输入 -> 数字结果
 请求 -> budget / prepare / call -> model-start -> 输出 -> usage / output-end
-Usage -> 复用实际输入量；结算新输出 -> 数字结果（同批合并）
+Usage -> 复用实际输入量；有效 provider 基准、新输出各保存其变化后的数字
 Loop -> turn/end -> Queue 清 turn；Prompt 清内存 turn
 队列无剩余、提示无变更 -> 两者都不写恢复事件
 ~~~
@@ -54,7 +54,7 @@ Loop -> turn/end -> Queue 清 turn；Prompt 清内存 turn
 ~~~text
 配置采用 -> Prompt 比较本次加载目标 -> 有真实 changes？
            无：零写入
-           有：[prompt/changed，必要上下文输入/配置，引用结果] 同批提交
+           有：[prompt/changed，必要上下文输入/配置] 同批提交 -> 处理实际事实 -> 引用结果
 scope 结束 -> 只找该 scope 的有效条目 -> 有：退役输入+引用结果；无：零写入
 
 中断 -> 资源 owner 结算输出/任务 -> 原终态
@@ -79,7 +79,7 @@ Usage : 最新数字+处理位置缓存 -> 仅未处理内容源 -> 发布当前
 
 | 流程 | 原有必要事实 | 额外保存事件 |
 | --- | --- | --- |
-| 普通聊天一轮 | input/message、applied、consumed、turn/start、turn/end 各1；model-start、usage、output-end 各1；budget、prepare、call 各1；输出 D 条，共11+D | Queue 0、Prompt 0、Goal 0；Usage 输入结果1、输出/基准同批结果1，共2；usage 与 output-end 分批则3 |
+| 普通聊天一轮 | input/message、applied、consumed、turn/start、turn/end 各1；model-start、usage、output-end 各1；budget、prepare、call 各1；输出 D 条，共11+D | Queue 0、Prompt 0、Goal 0；Usage 输入结果1、有效 provider 基准1、输出结果1，共3；无有效或无变化基准时2 |
 | Goal 已 active，自动执行一轮并继续 | 与上行相同，其中 input/message 是原必要续行输入 | Queue/Prompt/Goal 运行快照均0；Usage 同上 |
 | 本轮实际判断完成/暂停 Goal | 原模型/工具/turn 终态不变；原必要模型可见状态输入保留 | goal/state 1；运行快照0；Usage 按真正采用的状态输入计入，不把未采用输入提前计入 |
 | 仅模型或工具配置改变 | context/configured 1 | Queue 0、Prompt 0；Usage 固定贡献/限制/适用基准改变时1 |
@@ -89,7 +89,7 @@ Usage : 最新数字+处理位置缓存 -> 仅未处理内容源 -> 发布当前
 | 正常已结算分支重载 | 无新业务事实 | 全部0；动态配置采用有真实变化时另按配置流程计数 |
 | 硬退出后重载 | 不能补写退出前事实；资源 owner 按原合同补缺失终态 | Goal 内存 paused、Goal/Queue/Prompt 恢复快照0；Usage 仅为新结算内容或最后未完成统计工作保存 |
 
-Usage 的2/3不是强行跨回调合并的承诺：同一个已提交源批次只保存一份最终数字；不同批次立即保持正确性，不新增定时器等 usage。普通轮输出若确实没有 model/usage，原事件数减1，统计只保存输入与输出2份。
+Usage 每个真正改变累计值或基准的来源保存一份数字；同源多条消息合并，最后一份即当前结果。不同来源保留各自边界，不等待未来 usage。普通轮输出若确实没有 model/usage，原事件数减1，统计只保存输入与输出2份。
 
 ## 5. 查询、计算与验收
 
@@ -97,9 +97,9 @@ Usage 的2/3不是强行跨回调合并的承诺：同一个已提交源批次�
 | --- | --- | --- |
 | Goal | 最新业务状态1；兼容及删除修复另按其设计 | 一份目标；不计算旧进度 |
 | Queue，当前为空 | 两个当前成员组+start/end 各Last，共4 | 至多2个 turn 标量；无输入正文、无 entries 序列化 |
-| Queue，当前有输入 | 4+每普通输入2次 applied/withdraw；每 handover 1次 withdraw；有 released 驱动且无 turn 时加1次 interrupt；旧默认 mode 缺失时每输入另1次 user 存在性 | 只解码当前控制字段；不解码 user/blocks；必要释放/删除按原状态机 |
-| Prompt | 引用1、配置1；引用所在 G 个原 changed 事件为G；每个引用涉及的 turn/task scope 两次状态边界，另查相关 branch/start 重置边界 | K个有效 PromptEntry；只处理本次发生变化的键/结束 scope；不重放聊天轮次 |
-| Usage，无未完成内容源 | 数字1、位置缓存1、六种内容/配置源各Last作新源检查，共8；当前 tools 来自内存注册表 | 一份小数字状态、至多6个源位置；0旧消息、0 token 重新计算 |
+| Queue，当前有输入 | 两个成员组的页数+2次 turn 边界；每个非空成员页增加1次批量 applied/withdraw 查询；有 released 驱动且无 turn 时加1次 interrupt；仅未 applied 且 mode 缺失的旧输入另查 user 存在性 | 只解码当前控制字段；不解码 user/blocks；必要释放/删除按原状态机 |
+| Prompt | 引用1、配置1、未保存提示变更检查1；引用所在 G 个原 changed 事件为G；每个引用涉及的 turn/task scope 两次状态边界，另查相关 branch/start 重置边界 | K个有效 PromptEntry；只处理本次发生变化的键/结束 scope；不重放聊天轮次 |
+| Usage，无未完成内容源 | 数字1、位置缓存1、counter 配置字段1、六类源的合并后缀查询1，共4；未显式配置 tools 时首次取得当前集合另点读配置 system 1次 | 一份数字状态和配置控制字段；无后缀时0旧消息、0消息计数；动态工具首次或身份变化时计算固定贡献，后续复用 |
 | Usage，有 U 个未处理内容源 | 上行定位后只读 source_through 之后的对应源；按源的实际字段/正文点查 | 计算真实尚未完成的 U 个来源；不重算已保存前缀 |
 
 这些是逻辑 query 数，不是 SQLite statement 数；一个类型 IN 可拆多个索引范围，一次元素查询也可能访问 locator 与内容表。Query 的范围、索引缺口和 SQL 验证由[索引设计](appserver/timeline-state-read-indexes.md)规定。输入当前成员仍须读完当前集合，不能把它称为整段历史读取。

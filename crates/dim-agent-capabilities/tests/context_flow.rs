@@ -1074,11 +1074,15 @@ async fn provider_usage_baseline_counts_new_history_and_ignores_unusable_measure
         let store = Arc::new(context_reads::CountContextReads::default());
         let mut profile = builder(Arc::new(UsageModel));
         profile.timeline_store(store.clone());
+        store.create_session("usage-baseline", &SessionConfig::default()).await.unwrap();
+        let timeline = Timeline::new(Ctx::root().unwrap(), TimelineKey {session_id:"usage-baseline".into(),branch_id:"main".into()},vec![],store.clone());
+        timeline.append(EventKind::ContextConfigured(ContextConfiguredData {
+            timeline:"main".into(),revision:"fixture".into(),previous:None,prompt:None,
+            settings:Box::new(ModelConfiguration {provider_id:"mock".into(),model_id:"echo".into(),capability_snapshot:None,tools:Some(vec![]),tool_sources:vec![],config:None,metadata:None}),system:None,system_source:None,
+        }).into()).unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline).await.unwrap();
         let agent = MinimalHost::start(&profile).await.unwrap();
-        let session = agent
-            .create_session(SessionConfig::default())
-            .await
-            .unwrap();
+        let session = agent.restore_session("usage-baseline".into()).await.unwrap();
         session
             .submit("first".into(), InputMode::Queue, "main")
             .await
@@ -1196,8 +1200,8 @@ async fn provider_usage_baseline_counts_new_history_and_ignores_unusable_measure
             123. + serde_json::to_vec(&messages).unwrap().len() as f64
                 - Context::default().count_tokens(latest)
         );
-        assert!(events.iter().any(|event| matches!(&event.kind,
-            EventKind::Extension(data) if data.key() == "context-usage/request-base")));
+        assert!(!events.iter().any(|event| matches!(&event.kind,
+            EventKind::Extension(data) if data.key() == "context-usage/request-base" || data.key() == "context-usage/node")));
         let id = session.id().to_owned();
         agent.close().await.unwrap();
         let mut changed = builder_with_context(

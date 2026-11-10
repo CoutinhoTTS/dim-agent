@@ -245,6 +245,7 @@ struct Compiler<'a> {
     physical_ids: Option<Vec<String>>,
     physical_kinds: Option<&'a [Value]>,
     candidate_index: &'static str,
+    candidate_field_order: Option<bool>,
     array_rows: bool,
     element_values: bool,
     resolved_relations: Vec<(&'a QueryFilter, String)>,
@@ -408,9 +409,11 @@ impl<'a> Compiler<'a> {
             physical_candidates: None,
             physical_ids: None,
             physical_kinds: query.filter.as_ref().and_then(kind_values),
+            candidate_field_order: None,
             candidate_index: [
                 ("data.request_id", "timeline_events_requests"),
                 ("data.input_id", "timeline_events_inputs"),
+                ("data.turn_id", "timeline_events_turns"),
             ]
             .into_iter()
             .find_map(|(field, index)| {
@@ -866,6 +869,16 @@ impl<'a> Compiler<'a> {
         let column = |field: &str| match field {
             "kind" => Some(("e.kind", false)),
             "position.branch_id" => Some(("e.branch_id", false)),
+            "position.sequence"
+                if known.is_some_and(|kinds| {
+                    kinds.iter().all(|kind| {
+                        kind.as_str()
+                            .is_some_and(|kind| !matches!(kind, "step/text" | "step/thinking"))
+                    })
+                }) =>
+            {
+                Some(("e.sequence", false))
+            }
             "context.render" => Some(("e.context_render", true)),
             "context.state" => Some(("e.context_state", true)),
             "data.request_id" => Some((
@@ -873,6 +886,29 @@ impl<'a> Compiler<'a> {
                 false,
             )),
             "data.input_id" => Some(("json_extract(e.body,'$.record.event.data.input_id')", false)),
+            "data.turn_id" => Some((
+                "coalesce(json_extract(e.body,'$.record.event.data.turn_id'),json_extract(e.body,'$.turn_id'))",
+                false,
+            )),
+            "data.scope.kind" => Some((
+                "json_extract(e.body,'$.record.event.data.scope.kind')",
+                false,
+            )),
+            "data.scope.timeline" => Some((
+                "json_extract(e.body,'$.record.event.data.scope.timeline')",
+                false,
+            )),
+            "data.scope.id" => Some(("json_extract(e.body,'$.record.event.data.scope.id')", false)),
+            "data.status" => Some(("json_extract(e.body,'$.record.event.data.status')", false)),
+            "data.epoch" => Some(("json_extract(e.body,'$.record.event.data.epoch')", false)),
+            "data.current.at.branch" => Some((
+                "json_extract(e.body,'$.record.event.data.current.at.branch')",
+                false,
+            )),
+            "data.current.at.sequence" => Some((
+                "json_extract(e.body,'$.record.event.data.current.at.sequence')",
+                false,
+            )),
             _ => None,
         };
         match filter {
@@ -965,10 +1001,27 @@ impl<'a> Compiler<'a> {
                     return None;
                 }
                 let (column, boolean) = column(path)?;
+                if matches!(
+                    path.as_str(),
+                    "position.sequence" | "data.current.at.sequence" | "data.current.at.branch"
+                ) && !value.is_number()
+                {
+                    return None;
+                }
                 let value = match (boolean, value) {
                     (true, Value::Bool(value)) => SqlValue::Integer(i64::from(*value)),
                     (false, Value::String(value)) => SqlValue::Text(value.clone()),
-                    _ => return Some("0".into()),
+                    (false, Value::Number(value))
+                        if matches!(
+                            path.as_str(),
+                            "position.sequence"
+                                | "data.current.at.sequence"
+                                | "data.current.at.branch"
+                        ) =>
+                    {
+                        SqlValue::Integer(value.as_i64()?)
+                    }
+                    _ => return None,
                 };
                 let op = match (comparison, reversed) {
                     (QueryComparison::Eq, _) => "=",
@@ -1020,12 +1073,41 @@ impl<'a> Compiler<'a> {
                 {
                     return None;
                 }
+                if matches!(
+                    path.as_str(),
+                    "data.turn_id"
+                        | "data.scope.kind"
+                        | "data.scope.timeline"
+                        | "data.scope.id"
+                        | "data.status"
+                        | "data.epoch"
+                ) && values.iter().any(|value| !value.is_string())
+                {
+                    return None;
+                }
+                if matches!(
+                    path.as_str(),
+                    "position.sequence" | "data.current.at.sequence" | "data.current.at.branch"
+                ) && values.iter().any(|value| value.as_i64().is_none())
+                {
+                    return None;
+                }
                 let (column, boolean) = column(path)?;
                 let values = values
                     .iter()
                     .filter_map(|value| match (boolean, value) {
                         (true, Value::Bool(value)) => Some(self.bind(i64::from(*value))),
                         (false, Value::String(value)) => Some(self.bind(value.clone())),
+                        (false, Value::Number(value))
+                            if matches!(
+                                path.as_str(),
+                                "position.sequence"
+                                    | "data.current.at.sequence"
+                                    | "data.current.at.branch"
+                            ) =>
+                        {
+                            Some(self.bind(value.as_i64()?))
+                        }
                         _ => None,
                     })
                     .collect::<Vec<_>>();
@@ -1078,7 +1160,7 @@ impl<'a> Compiler<'a> {
         };
         let session = self.bind(scope.key.session_id.clone());
         let lower = if self.physical_ids.is_some() {
-            "s.lo".to_owned()
+            "1".to_owned()
         } else {
             format!(
                 "coalesce((SELECT max(p.sequence) FROM timeline_events p WHERE p.session_id={session} AND p.branch_id=s.branch AND p.sequence<=s.lo),s.lo)"
@@ -1089,7 +1171,27 @@ impl<'a> Compiler<'a> {
             && let Some((limit, descending)) = self.candidate_limit
         {
             let direction = if descending { "DESC" } else { "ASC" };
-            let predicate = predicate.replace("e.", "candidate.");
+            let predicate = predicate
+                .split('\'')
+                .enumerate()
+                .map(|(index, fragment)| {
+                    if index % 2 == 0 {
+                        fragment.replace("e.", "candidate.")
+                    } else {
+                        fragment.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("'");
+            let ordering = match self.candidate_field_order {
+                Some(descending) => {
+                    let direction = if descending { "DESC" } else { "ASC" };
+                    format!(
+                        "json_extract(candidate.body,'$.record.event.data.current.at.sequence') {direction},candidate.sequence {direction}"
+                    )
+                }
+                None => format!("candidate.sequence {direction}"),
+            };
             let limit = self.bind(limit.min(i64::MAX as u64) as i64);
             let kinds = self.physical_kinds.map(|kinds| {
                 kinds
@@ -1109,7 +1211,7 @@ impl<'a> Compiler<'a> {
                       WHERE candidate.session_id={session} AND candidate.branch_id=s.branch
                       AND candidate.kind={kind} AND candidate.sequence BETWEEN {lower} AND s.hi
                       AND candidate.last_sequence>=s.lo AND ({predicate})
-                      ORDER BY candidate.sequence {direction} LIMIT {limit})"
+                      ORDER BY {ordering} LIMIT {limit})"
                         )
                     })
                     .collect::<Vec<_>>()
@@ -1122,38 +1224,42 @@ impl<'a> Compiler<'a> {
                     "AND e.sequence IN (SELECT candidate.sequence FROM timeline_events candidate
               WHERE candidate.session_id={session} AND candidate.branch_id=s.branch
               AND candidate.sequence BETWEEN {lower} AND s.hi AND candidate.last_sequence>=s.lo
-              AND ({predicate}) ORDER BY candidate.sequence {direction} LIMIT {limit})"
+              AND ({predicate}) ORDER BY {ordering} LIMIT {limit})"
                 )
             }
         } else {
             String::new()
         };
-        let candidates = if let Some(ids) = &self.physical_ids {
-            let encoded = serde_json::to_string(ids).expect("event identities are strings");
-            let value = self.bind(encoded);
-            format!(" CROSS JOIN json_each({value}) wanted")
-        } else {
-            self.physical_candidates.as_ref().map_or(String::new(), |table| {
+        let identities = self
+            .physical_ids
+            .as_ref()
+            .map(|ids| serde_json::to_string(ids).expect("event identities are strings"));
+        let identities = identities.map(|ids| self.bind(ids));
+        let candidates = self
+            .physical_candidates
+            .as_ref()
+            .map_or(String::new(), |table| {
                 format!(
                     " CROSS JOIN (SELECT DISTINCT ord,physical FROM {table}) hit ON hit.ord=s.ord"
                 )
-            })
-        };
-        let index = if self.physical_ids.is_some() {
-            " INDEXED BY timeline_events_by_id"
-        } else {
-            ""
-        };
-        let location = if self.physical_ids.is_some() {
-            " AND e.event_id=wanted.value"
+            });
+        let location = if let Some(identities) = identities {
+            format!(" AND e.sequence IN (
+              SELECT sequence FROM timeline_events origin INDEXED BY timeline_events_by_id
+              WHERE origin.session_id={session} AND origin.branch_id=s.branch AND origin.sequence BETWEEN s.lo AND s.hi
+              AND origin.event_id IN (SELECT value FROM json_each({identities}))
+              UNION SELECT physical_sequence FROM timeline_output_ids locator INDEXED BY sqlite_autoindex_timeline_output_ids_1
+              WHERE locator.session_id={session} AND locator.branch_id=s.branch
+              AND locator.event_id IN (SELECT value FROM json_each({identities}))
+              AND locator.logical_sequence BETWEEN s.lo AND s.hi)")
         } else if self.physical_candidates.is_some() {
-            " AND e.sequence=hit.physical"
+            " AND e.sequence=hit.physical".to_owned()
         } else {
-            ""
+            String::new()
         };
         format!("WITH scope(ord,branch,lo,hi) AS ({segments}){window}, physical AS NOT MATERIALIZED (
           SELECT s.ord,s.branch,s.lo,s.hi,e.sequence,e.last_sequence,e.kind,e.event_id,json_type(e.body,'$.record.event.data.user') AS user_presence,e.body,e.context_render,e.context_state
-          FROM {source} s{candidates} CROSS JOIN timeline_events e{index} ON e.session_id={session} AND e.branch_id=s.branch{location}
+          FROM {source} s{candidates} CROSS JOIN timeline_events e ON e.session_id={session} AND e.branch_id=s.branch{location}
           WHERE ({predicate}) AND s.lo<=s.hi AND e.sequence<=s.hi AND e.last_sequence>=s.lo
           AND e.sequence>={lower} {bound}
         )")
@@ -1161,16 +1267,37 @@ impl<'a> Compiler<'a> {
 
     fn base(&mut self, scope: &TimelineReadScope, predicate: &str) -> String {
         let physical = self.physical(scope, predicate);
+        let (outputs, value) = if let Some(ids) = &self.physical_ids {
+            let ids = self.bind(serde_json::to_string(ids).expect("event identities are strings"));
+            let session = self.bind(scope.key.session_id.clone());
+            (format!("timeline_output_ids locator INDEXED BY sqlite_autoindex_timeline_output_ids_1 CROSS JOIN physical p ON p.branch=locator.branch_id AND p.sequence=locator.physical_sequence
+              WHERE locator.session_id={session} AND locator.event_id IN (SELECT value FROM json_each({ids}))
+              AND locator.logical_sequence BETWEEN p.lo AND p.hi AND"),
+             "json_extract(p.body,'$.records['||(locator.logical_sequence-p.sequence)||']')")
+        } else if scope
+            .segments
+            .iter()
+            .all(|segment| segment.from == segment.through)
+        {
+            (
+                "physical p WHERE".to_owned(),
+                "json_extract(p.body,'$.records['||(p.lo-p.sequence)||']')",
+            )
+        } else {
+            (
+                "physical p,json_each(p.body,'$.records') r WHERE".to_owned(),
+                "r.value",
+            )
+        };
         format!("{physical}, base AS NOT MATERIALIZED (
-          SELECT ord,branch,sequence AS seq,kind,event_id,user_presence,context_render,context_state,
+          SELECT ord,branch,sequence AS seq,kind,coalesce(event_id,json_extract(body,'$.record.event.id')) AS event_id,user_presence,context_render,context_state,
             body AS wire,0 AS output,NULL AS turn_id,NULL AS request_id FROM physical
             WHERE kind NOT IN ('step/text','step/thinking') OR json_extract(body,'$.encoding')='event'
           UNION ALL
-          SELECT p.ord,p.branch,json_extract(r.value,'$.event.sequence'),p.kind,json_extract(r.value,'$.event.id'),NULL,p.context_render,p.context_state,
-            r.value,1,json_extract(p.body,'$.turn_id'),json_extract(p.body,'$.request_id')
-          FROM physical p,json_each(p.body,'$.records') r
-          WHERE p.kind IN ('step/text','step/thinking') AND json_extract(p.body,'$.encoding')='output'
-            AND json_extract(r.value,'$.event.sequence') BETWEEN p.lo AND p.hi
+          SELECT p.ord,p.branch,json_extract({value},'$.event.sequence'),p.kind,json_extract({value},'$.event.id'),NULL,p.context_render,p.context_state,
+            {value},1,json_extract(p.body,'$.turn_id'),json_extract(p.body,'$.request_id')
+          FROM {outputs} p.kind IN ('step/text','step/thinking') AND json_extract(p.body,'$.encoding')='output'
+            AND json_extract({value},'$.event.sequence') BETWEEN p.lo AND p.hi
         )")
     }
 
@@ -1399,9 +1526,8 @@ fn wire_at(
     let branch = &scope.segments[ordinal].branch_id;
     let encoded: Option<String> = connection.prepare_cached(
         "SELECT CASE json_extract(body,'$.encoding') WHEN 'event' THEN json_remove(json_extract(body,'$.record'),'$.trace') ELSE
-          (SELECT json_remove(json_set(r.value,'$.event.data.turn_id',json_extract(e.body,'$.turn_id'),
-            '$.event.data.request_id',json_extract(e.body,'$.request_id')),'$.trace')
-           FROM json_each(e.body,'$.records') r WHERE json_extract(r.value,'$.event.sequence')=?3) END
+          json_remove(json_set(json_extract(e.body,'$.records['||(?3-e.sequence)||']'),'$.event.data.turn_id',json_extract(e.body,'$.turn_id'),
+            '$.event.data.request_id',json_extract(e.body,'$.request_id')),'$.trace') END
          FROM timeline_events e WHERE session_id=?1 AND branch_id=?2 AND sequence<=?3 AND last_sequence>=?3
          ORDER BY sequence DESC LIMIT 1",
     ).map_err(error)?.query_row(
@@ -1638,9 +1764,9 @@ fn sources<'a>(
                 .map_err(error)?;
         }
         compiler.physical_candidates = Some(table);
-        compiler
-            .resolved_relations
-            .push((members.terminal, "0".into()));
+        for terminal in members.terminals {
+            compiler.resolved_relations.push((terminal, "0".into()));
+        }
     }
     if compiler.direct_relations {
         fn resolve<'a>(
@@ -1779,12 +1905,6 @@ fn sources<'a>(
     }
     if compiler.physical_candidates.is_none()
         && let [filter] = roles.as_slice()
-        && kind_values(filter).is_some_and(|kinds| {
-            kinds.iter().all(|kind| {
-                kind.as_str()
-                    .is_some_and(|kind| !matches!(kind, "step/text" | "step/thinking"))
-            })
-        })
     {
         compiler.physical_ids = equality_values(filter, "id").map(|values| {
             let mut ids: Vec<_> = values
@@ -1946,6 +2066,19 @@ fn sources<'a>(
         for (ordinal, segment) in scope.segments.iter().enumerate() {
             for event in &segment.tail {
                 cancelled(cancel)?;
+                if let Some(table) = compiler.physical_candidates.as_ref().filter(|_| {
+                    compiler
+                        .resolved_relations
+                        .iter()
+                        .any(|(_, expression)| expression == "0")
+                }) && !connection
+                    .prepare_cached(&format!("SELECT 1 FROM {table} WHERE ord=?1 AND seq=?2"))
+                    .map_err(error)?
+                    .exists(params![ordinal as i64, event.sequence as i64])
+                    .map_err(error)?
+                {
+                    continue;
+                }
                 let mut values = vec![
                     SqlValue::Integer(ordinal as i64),
                     segment.branch_id.clone().into(),
@@ -2172,6 +2305,7 @@ fn selected_properties(
         physical_ids: None,
         physical_kinds: None,
         candidate_index: "timeline_events_by_kind",
+        candidate_field_order: None,
         array_rows: false,
         element_values: false,
         resolved_relations: Vec::new(),
@@ -2382,6 +2516,37 @@ pub(super) fn execute(
             },
             descending,
         ));
+    }
+    if query.rows.is_none()
+        && query.group_by.is_empty()
+        && query.pick.is_none()
+        && matches!(
+            query.select,
+            QuerySelect::Fields { .. } | QuerySelect::Events
+        )
+        && page.is_some_and(|page| page.after.is_none())
+        && let [first, last] = query.order_by.as_slice()
+        && matches!(&first.key, QueryOrderKey::Field { path } if path == "data.current.at.sequence")
+        && last.key == QueryOrderKey::Position
+        && first.direction == last.direction
+        && let Some(filter) = &query.filter
+        && kind_values(filter)
+            .is_some_and(|kinds| kinds == [serde_json::json!("context-usage/recovered")])
+        && equality_values(filter, "data.epoch")
+            .is_some_and(|values| values.len() == 1 && values[0].is_string())
+        && equality_values(filter, "data.current.at.branch")
+            .is_some_and(|values| values.len() == 1 && values[0].as_u64().is_some())
+        && compiler.physical_filter(filter, false).is_some()
+    {
+        let descending = first.direction == TimelineQueryDirection::Descending;
+        compiler.candidate_limit = Some((
+            page.expect("a scalar-key page")
+                .limit
+                .get()
+                .saturating_add(1),
+            descending,
+        ));
+        compiler.candidate_field_order = Some(descending);
     }
     if query.rows.is_none()
         && query.group_by.is_empty()

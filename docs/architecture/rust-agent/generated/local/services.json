@@ -1354,12 +1354,12 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "service": "dim_agent_capabilities::host::ContextModelHost@session",
             "scope": null,
             "status": "Ready"
           },
           {
-            "service": "dim_agent_capabilities::host::ContextModelHost@session",
+            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
             "scope": null,
             "status": "Ready"
           },
@@ -1381,15 +1381,15 @@
         ],
         "resolved": [
           {
-            "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "service": "dim_agent_capabilities::host::ContextModelHost@session",
             "scope": null,
             "provider": 33,
             "generation": 1
           },
           {
-            "service": "dim_agent_capabilities::host::ContextModelHost@session",
+            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
             "scope": null,
-            "provider": 33,
+            "provider": 54,
             "generation": 1
           },
           {
@@ -1413,14 +1413,14 @@
         ],
         "reads": [
           {
-            "service": "dim_agent_capabilities::history::HistoryRenderer@session",
+            "service": "dim_agent_capabilities::host::ContextModelHost@session",
             "provider": 33,
             "declared": true,
             "external": true
           },
           {
-            "service": "dim_agent_capabilities::host::ContextModelHost@session",
-            "provider": 33,
+            "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
+            "provider": 54,
             "declared": true,
             "external": true
           },

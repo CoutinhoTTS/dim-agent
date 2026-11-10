@@ -997,6 +997,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
              DROP TABLE timeline_text_fts;
              DROP TABLE timeline_text_tails;
              DROP TABLE timeline_array_elements;
+                 DROP TABLE timeline_output_ids;
              DROP TABLE timeline_member_roots;
              DROP TABLE timeline_member_origins;
              DROP TABLE timeline_member_terminals;

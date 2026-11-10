@@ -28,6 +28,7 @@ use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{HostDispatch, host_key};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ops::RangeInclusive,
@@ -925,6 +926,7 @@ impl SqliteTimelineStore {
             .map_err(error)?;
         let released = files::release(&tx, session_id).map_err(error)?;
         for table in [
+            "timeline_output_ids",
             "timeline_member_roots",
             "timeline_member_origins",
             "timeline_member_terminals",
@@ -1609,9 +1611,6 @@ impl Row {
         }
     }
 }
-/// Whether events of `kind` are streamed model output, which `write_batch`
-/// merges into output rows (native storage format). Output rows carry no
-/// identity index, and a write round of them alone waits for its window.
 fn output_row(kind: &str) -> bool {
     matches!(kind, "step/text" | "step/thinking")
 }
@@ -1719,6 +1718,14 @@ fn write_batch(
                         previous.sequence,
                         &serde_json::to_value(&record.event).map_err(error)?,
                     )?;
+                    super::identities::insert(
+                        connection,
+                        &batch.key.session_id,
+                        &batch.key.branch_id,
+                        previous.sequence,
+                        &record.event.id,
+                        sequence,
+                    )?;
                     previous.bytes = body.len();
                     continue;
                 }
@@ -1742,6 +1749,14 @@ fn write_batch(
                     &batch.key.branch_id,
                     sequence,
                     &serde_json::to_value(&record.event).map_err(error)?,
+                )?;
+                super::identities::insert(
+                    connection,
+                    &batch.key.session_id,
+                    &batch.key.branch_id,
+                    sequence,
+                    &record.event.id,
+                    sequence,
                 )?;
                 outputs.insert(
                     batch.key.branch_id.clone(),
@@ -2297,6 +2312,17 @@ fn copy_fork_rows(
                     &row.get::<_, String>(2).map_err(error)?,
                     at,
                 )?;
+                let kind: String = row.get(1).map_err(error)?;
+                if output_row(&kind) {
+                    super::identities::row(
+                        tx,
+                        fork,
+                        "main",
+                        read_sequence(row, 0).map_err(error)?,
+                        &row.get::<_, String>(2).map_err(error)?,
+                        at,
+                    )?;
+                }
                 super::members::row(
                     tx,
                     fork,
@@ -2450,6 +2476,7 @@ fn drop_session(connection: &mut Connection, session: &str) -> Result<usize> {
         .pragma_update(None, "synchronous", "NORMAL")
         .map_err(error)?;
     for table in [
+        "timeline_output_ids",
         "timeline_member_roots",
         "timeline_member_origins",
         "timeline_member_terminals",
@@ -2730,7 +2757,14 @@ impl TimelineStore for SqliteTimelineStore {
                 };
             }
             let mut reader = Reader::for_validation(self.content_budget);
-            let result = validate_session(&self.db, session_id, &directory, &mut reader).await;
+            let result = validate_session(
+                &self.db,
+                session_id,
+                &directory,
+                &mut reader,
+                super::sqlite::FORMAT,
+            )
+            .await;
             match result {
                 Ok(branches) => {
                     self.validated
@@ -3120,7 +3154,9 @@ pub(super) async fn validate_session(
     session: &str,
     directory: &ValidatedDirectory,
     reader: &mut Reader,
+    format: u32,
 ) -> Result<Vec<StoredBranch>> {
+    let output_index = format >= 40;
     let id = session.to_owned();
     db.run_read(move |connection| {
         let orphan: bool = connection
@@ -3140,6 +3176,7 @@ pub(super) async fn validate_session(
     .await?;
     let branches = directory.branches()?;
     let mut event_ids = BTreeSet::new();
+    let mut output_id_count = 0u64;
     let mut created = BTreeSet::new();
     let mut completions = vec![];
     let mut arrays = false;
@@ -3158,7 +3195,7 @@ pub(super) async fn validate_session(
                         let mut query = connection.prepare_cached("SELECT sequence, last_sequence, kind, body, event_id FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND sequence>=?3 ORDER BY sequence LIMIT 64").map_err(error)?;
                         let mut references = BTreeSet::new();
                         let mut arrays = false;
-                        let fetched = query.query_map(params![key.session_id, key.branch_id, sql_sequence(next)?], |row| Ok((
+                        let fetched: VecDeque<Fetched> = query.query_map(params![key.session_id, key.branch_id, sql_sequence(next)?], |row| Ok((
                             read_sequence(row,0)?, read_sequence(row,1)?, row.get::<_,String>(2)?, row.get::<_,String>(3)?, row.get::<_,Option<String>>(4)?
                         ))).map_err(error)?.map(|row| {
                             let (first, last, kind, body, event_id) = row.map_err(error)?;
@@ -3167,6 +3204,19 @@ pub(super) async fn validate_session(
                             arrays |= fetched.wires.iter().any(|wire| wire.array_references().next().is_some());
                             Ok(fetched)
                         }).collect::<Result<_>>()?;
+                        if output_index && let (Some(first), Some(last)) = (fetched.front(), fetched.back()) {
+                            let mut identities = BTreeSet::new();
+                            for fetched in &fetched {
+                                if output_row(&fetched.kind) {
+                                    for wire in &fetched.wires {
+                                        let sequence = wire.event.get("sequence").and_then(Value::as_u64).ok_or_else(|| error("output has no logical sequence"))?;
+                                        let id = wire.event.get("id").and_then(Value::as_str).ok_or_else(|| error("output has no identity"))?;
+                                        identities.insert((fetched.first, sequence, id.to_owned()));
+                                    }
+                                }
+                            }
+                            super::identities::check_page(connection, &key.session_id, &key.branch_id, first.first, last.first, &identities)?;
+                        }
                         pass.references = references;
                         pass.arrays = arrays;
                         pass.rows.insert(Rows { fetched, decoded: vec![] })
@@ -3190,6 +3240,9 @@ pub(super) async fn validate_session(
                 ..
             } in page
             {
+                if output_row(&kind) {
+                    output_id_count += records.len() as u64;
+                }
                 let indexed = !output_row(&kind);
                 if indexed && event_id.as_deref() != Some(records[0].event.id.as_str())
                     || !indexed && event_id.is_some()
@@ -3293,6 +3346,25 @@ pub(super) async fn validate_session(
                 .await
                 .map_err(|_| error("compaction preparation boundary is inside an atomic batch"))?;
         }
+    }
+    if output_index {
+        let output_session = session.to_owned();
+        db.run_read(move |connection| {
+            let count: i64 = connection
+                .query_row(
+                    "SELECT count(*) FROM timeline_output_ids WHERE session_id=?1",
+                    [&output_session],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            if u64::try_from(count).map_err(error)? != output_id_count {
+                return Err(error(
+                    "output identity index contains missing or extra records",
+                ));
+            }
+            Ok(())
+        })
+        .await?;
     }
     if arrays {
         let session = session.to_owned();

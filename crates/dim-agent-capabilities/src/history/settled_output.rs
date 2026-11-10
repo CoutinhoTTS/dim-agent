@@ -64,10 +64,50 @@ pub(crate) async fn settled_request_output(
     timeline: &Timeline,
     request_id: &str,
     through: u64,
+    before: &TimelinePosition,
     completed: bool,
     legacy_flush: bool,
 ) -> Result<Option<Message>> {
+    let through = if before.branch_id == timeline.branch_id() {
+        through.min(before.sequence.saturating_sub(1))
+    } else {
+        through
+    };
     let segments = timeline.segments(through)?;
+    let before_rank = segments
+        .iter()
+        .position(|(branch, _)| *branch == before.branch_id)
+        .ok_or_else(|| {
+            AgentError::fault("History", "output settlement is outside the branch chain")
+        })?;
+    let query = |request_id: &str, through: u64, kinds: &[&str]| {
+        let mut query = query(request_id, through, kinds);
+        let mut alternatives = Vec::new();
+        for (rank, (branch, _)) in segments.iter().enumerate().take(before_rank + 1) {
+            let mut conditions = vec![field("position.branch_id", vec![branch.clone().into()])];
+            if rank == before_rank {
+                conditions.push(QueryFilter::Compare {
+                    left: QueryOperand::Field {
+                        path: "position.sequence".into(),
+                    },
+                    comparison: dim_agent_runtime::QueryComparison::Lt,
+                    right: QueryOperand::Value {
+                        value: before.sequence.into(),
+                    },
+                });
+            }
+            alternatives.push(QueryFilter::And { conditions });
+        }
+        query.query.filter = Some(QueryFilter::And {
+            conditions: vec![
+                query.query.filter.take().expect("request output kind"),
+                QueryFilter::Or {
+                    conditions: alternatives,
+                },
+            ],
+        });
+        query
+    };
     let mut controls = Vec::new();
     for kinds in [
         &["step/model-start", "step/model-output-end"][..],
@@ -76,7 +116,11 @@ pub(crate) async fn settled_request_output(
     ] {
         let mut boundary = query(request_id, through, kinds);
         if kinds == ["branch/start"] {
-            boundary.query.filter = Some(field("kind", vec!["branch/start".into()]));
+            let mut reset = query("", through, &["branch/start"]);
+            if let Some(QueryFilter::And { conditions }) = &mut reset.query.filter {
+                conditions[0] = field("kind", vec!["branch/start".into()]);
+            }
+            boundary = reset;
         } else if kinds == ["step/tool-result"] {
             boundary.query.filter = Some(QueryFilter::And {
                 conditions: vec![

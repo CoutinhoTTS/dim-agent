@@ -22,7 +22,7 @@ cannot fit the request fails terminally without requesting another recovery.
 | `B:TimelineIdentity` | Identify configuration publication scope; Session and branch ids of the `context.prepare` span. |
 | `B:Dispatcher` | Hand off recovery to live preparation/steer/interrupt transitions and report faults. |
 | `B:Timeline` | Read fixed context, publish handoff and configuration facts. |
-| `B:ContextUsage` | Read persisted statistics and capture the exact request boundary for final confirmation. |
+| `B:ContextUsage` | Read persisted statistics and capture the exact request boundary for estimate reuse. |
 | `B:BranchLifecycle` | Refuse a guide adoption on a closing branch. |
 
 ## Events and lifetime
@@ -58,8 +58,7 @@ and matching model counter and limits; otherwise it counts the actual final requ
 Context pages use one fixed content cutoff and store continuations. Cut discovery
 reads ids and positions; retained input and tool-result queries end at the chosen
 cut before returning bodies. Retry control facts use a separate fixed committed
-cutoff above the original content boundary. Provider-baseline estimates come from
-ContextUsage's numeric prefix and request references. Request preparation and final
+cutoff above the original content boundary. Provider-baseline estimates come from ContextUsage's cumulative numbers and its live verified-request association. Request preparation and final
 validation do not load historical model requests.
 For a compatible numeric reference with a known projection boundary, normal
 preparation also checks growth numerically and returns without a second history

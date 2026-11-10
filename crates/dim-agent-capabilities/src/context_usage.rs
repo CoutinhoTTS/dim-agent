@@ -1,7 +1,7 @@
 use crate::{
     context_preparation::{ContextOpError, ContextUsage as UsageRead},
-    history::HistoryRenderer,
     host::{ContextContribution as Contribution, ContextModel, ContextModelHost, HostError},
+    tool_registry::ToolRegistry,
 };
 use dim_agent_runtime::{
     AgentError, BranchLifecycle, Dispatcher, Names, QueryFilter, QueryOperand, QueryOutput,
@@ -29,7 +29,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 mod numeric;
 mod sources;
-use numeric::{Entry, Numeric, Reference, Summary};
+use numeric::{Entry, Numeric, NumericResult, Summary};
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub(crate) struct Estimate {
@@ -55,20 +56,62 @@ pub(crate) struct LastEntry {
     pub id: Option<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct PreparedEstimate {
+    estimate: Estimate,
+    algorithm: Option<String>,
+    limits: Limits,
+}
+
+impl PreparedEstimate {
+    pub(crate) fn new(estimate: Estimate, model: &dyn ContextModel) -> Self {
+        Self {
+            estimate,
+            algorithm: model
+                .contribution_counter()
+                .map(|counter| counter.algorithm().to_owned()),
+            limits: Limits {
+                window: model.context_window(),
+                output: model.output_tokens(),
+                threshold: model.threshold_tokens(),
+            },
+        }
+    }
+
+    pub(crate) fn estimate(&self, model: &dyn ContextModel) -> Option<Estimate> {
+        (self.algorithm.is_some()
+            && self.algorithm.as_deref()
+                == model
+                    .contribution_counter()
+                    .map(|counter| counter.algorithm())
+            && self.limits
+                == (Limits {
+                    window: model.context_window(),
+                    output: model.output_tokens(),
+                    threshold: model.threshold_tokens(),
+                }))
+        .then(|| self.estimate.clone())
+    }
+}
+
 impl UsageEvidence {
     pub(crate) fn estimate(&self, model: &dyn ContextModel) -> Option<Estimate> {
         (model
             .contribution_counter()
             .is_some_and(|counter| counter.algorithm() == self.base.algorithm)
-            && self.limits.window == model.context_window()
-            && self.limits.output == model.output_tokens()
-            && self.limits.threshold == model.threshold_tokens())
+            && self.limits
+                == (Limits {
+                    window: model.context_window(),
+                    output: model.output_tokens(),
+                    threshold: model.threshold_tokens(),
+                }))
         .then(|| self.estimate.clone())
     }
 }
 
 const RESULT: &str = "context-usage/recovered";
-const SCHEMA: &str = "context-usage/v3";
+const SCHEMA: &str = "context-usage/v4";
+const COVERED: &str = "context-usage/covered";
 const SOURCES: &[&str] = &[
     "context/configured",
     "input/consumed",
@@ -98,6 +141,8 @@ struct Limits {
 struct CounterConfiguration {
     event_id: String,
     request_identity: String,
+    control_identity: String,
+    configured_tools: bool,
     algorithm: String,
     fixed: Contribution,
     limits: Limits,
@@ -124,6 +169,8 @@ struct Compression {
     cut: Key,
     removed: Contribution,
     replacement: Contribution,
+    removed_messages: u64,
+    replacement_messages: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -143,9 +190,10 @@ struct Calibration {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct State {
+    epoch: String,
     branches: Vec<String>,
     initialized: Key,
-    root: Option<Reference>,
+    current: Option<NumericResult>,
 }
 
 impl State {
@@ -169,9 +217,9 @@ impl State {
     }
 
     fn summary(&self) -> Summary {
-        self.root
+        self.current
             .as_ref()
-            .map_or_else(Summary::default, |root| root.summary.clone())
+            .map_or_else(Summary::default, |root| root.totals.clone())
     }
 }
 
@@ -180,14 +228,28 @@ impl State {
 struct Recovered {
     schema: String,
     source_through: u64,
+    #[serde(flatten)]
     state: State,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Covered {
+    schema: String,
+    result_id: String,
+    source_through: u64,
 }
 
 struct Machine {
     state: State,
     source_through: u64,
     result: u64,
+    result_id: Option<String>,
+    saved_through: u64,
+    relevant_through: u64,
     model: Option<Arc<dyn ContextModel>>,
+    unavailable: Option<HostError>,
+    empty: (Contribution, f64),
     numeric: Numeric,
 }
 
@@ -195,22 +257,68 @@ struct Machine {
 struct Progress {
     state: Option<Arc<State>>,
     covered: u64,
-    result: u64,
+    relevant_through: u64,
+    saved_through: u64,
+    unavailable: Option<HostError>,
+    model: Option<Arc<dyn ContextModel>>,
     error: Option<AgentError>,
 }
 
 pub(crate) struct ContextUsage {
     timeline: Arc<Timeline>,
     resolver: Arc<ContextModelHost>,
-    history: Arc<HistoryRenderer>,
+    registry: Arc<ToolRegistry>,
+    dynamic_fixed: Mutex<Option<DynamicFixed>>,
     dispatcher: Arc<Dispatcher>,
     branch: Arc<BranchLifecycle>,
     wanted: AtomicU64,
+    handoff: AtomicU64,
     wake: Notify,
     progress: watch::Sender<Progress>,
     tasks: TaskTracker,
     cancel: CancellationToken,
     errors: Mutex<Vec<AgentError>>,
+    association: Mutex<Association>,
+}
+
+#[derive(Clone)]
+struct DynamicFixed {
+    configuration: String,
+    versions: String,
+    identity: String,
+    fixed: Contribution,
+}
+
+#[derive(Default)]
+struct Association {
+    prepared: Option<PreparedSource>,
+    call: Option<CallSource>,
+}
+
+#[derive(Clone)]
+struct RequestCalibration {
+    configuration: String,
+    compression: Option<String>,
+    request_identity: Option<String>,
+    algorithm: String,
+    local: f64,
+}
+
+struct PreparedSource {
+    request_id: String,
+    through: u64,
+    request: std::sync::Weak<ModelRequest>,
+    configuration: Option<PromptReference>,
+    prompt: Option<PromptReference>,
+    calibration: RequestCalibration,
+}
+
+#[derive(Clone)]
+struct CallSource {
+    request_id: String,
+    source: TimelinePosition,
+    anchor: TimelinePosition,
+    calibration: RequestCalibration,
 }
 
 fn fault(message: impl Into<String>) -> AgentError {
@@ -377,8 +485,12 @@ fn estimation<'a>(
     ))
 }
 
-fn reading(through: u64, summary: &Summary) -> std::result::Result<UsageRead, ContextOpError> {
-    let (estimate, configuration) = estimation(summary, None)?;
+fn reading(
+    through: u64,
+    summary: &Summary,
+    request: Option<(f64, &str)>,
+) -> std::result::Result<UsageRead, ContextOpError> {
+    let (estimate, configuration) = estimation(summary, request)?;
     Ok(UsageRead {
         through,
         context_window: configuration.limits.window,
@@ -390,15 +502,68 @@ fn reading(through: u64, summary: &Summary) -> std::result::Result<UsageRead, Co
 }
 
 impl ContextUsage {
+    fn associate(&self, event: &AgentEvent) {
+        let mut association = self.association.lock().unwrap();
+        match &event.kind {
+            EventKind::ContextPrepare(data) => {
+                if association
+                    .prepared
+                    .as_ref()
+                    .is_some_and(|prepared| prepared.request_id != data.request_id)
+                {
+                    association.prepared = None;
+                }
+            }
+            EventKind::ModelCall(data) => {
+                association.call = None;
+                let Some(prepared) = association.prepared.take().filter(|prepared| {
+                    prepared.request_id == data.request_id
+                        && prepared.configuration == data.configuration
+                        && prepared.prompt == data.prompt
+                        && prepared
+                            .request
+                            .upgrade()
+                            .is_some_and(|request| Arc::ptr_eq(&request, &data.request))
+                }) else {
+                    return;
+                };
+                association.call = Some(CallSource {
+                    request_id: data.request_id.clone(),
+                    source: TimelinePosition {
+                        branch_id: self.timeline.branch_id(),
+                        sequence: prepared.through,
+                    },
+                    anchor: TimelinePosition {
+                        branch_id: self.timeline.branch_id(),
+                        sequence: event.sequence,
+                    },
+                    calibration: prepared.calibration,
+                });
+            }
+            EventKind::ContextConfigured(_)
+            | EventKind::ContextCompaction(ContextCompactionData {
+                outcome: ContextCompactionResult::Completed { .. },
+                ..
+            }) => {
+                association.prepared = None;
+                association.call = None;
+            }
+            _ => (),
+        }
+    }
+
     pub(crate) async fn reference(
         &self,
-        request_id: &str,
-        source_through: u64,
+        source: &ContextPrepareData,
         through: u64,
-        request_value: &ModelRequest,
+        request_value: &Arc<ModelRequest>,
         compaction: Option<&str>,
         cancel: CancellationToken,
     ) -> std::result::Result<Option<UsageEvidence>, HostError> {
+        let source_through = source.through;
+        if through > self.timeline.sequence() && through <= self.timeline.committed() {
+            tokio::select! {result=self.publication(through)=>result.map_err(|error|HostError::failed(error.to_string()))?,_=cancel.cancelled()=>return Err(HostError::Cancelled("Usage proof cancelled".into()))}
+        }
         if through > source_through {
             let changed = self
                 .timeline
@@ -463,9 +628,13 @@ impl ContextUsage {
         if state.at(through) < state.initialized {
             return Ok(None);
         }
-        let numeric = Numeric::new(self.timeline.clone(), view.result);
+        let numeric = Numeric::new(
+            self.timeline.clone(),
+            self.timeline.sequence(),
+            state.epoch.clone(),
+        );
         let summary = numeric
-            .prefix(state.root.as_ref(), state.at(through), true)
+            .prefix(state.current.as_ref(), state.at(through), true)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
         let Some(Configuration::Ready { counter }) = &summary.configuration else {
@@ -479,48 +648,61 @@ impl ContextUsage {
         }) {
             return Ok(None);
         }
+        let active_count = summary
+            .message_count
+            .checked_sub(
+                summary
+                    .compression
+                    .as_ref()
+                    .map_or(0, |compression| compression.removed_messages),
+            )
+            .and_then(|count| {
+                count.checked_add(
+                    summary
+                        .compression
+                        .as_ref()
+                        .map_or(0, |compression| compression.replacement_messages),
+                )
+            })
+            .ok_or_else(|| HostError::failed("Invalid numeric message count"))?;
+        if active_count != request_value.messages.len() as u64 {
+            return Ok(None);
+        }
         let identity = request_identity(request_value, &counter.algorithm)
             .map_err(|error| HostError::failed(error.to_string()))?;
         let request_local = if identity == counter.request_identity {
             None
         } else {
-            let control = self
-                .counter_request(&counter.event_id, through)
-                .await
-                .map_err(|error| HostError::failed(error.to_string()))?;
             let actual_control = control_identity(request_value, &counter.algorithm)
                 .map_err(|error| HostError::failed(error.to_string()))?;
-            let configured_control = control_identity(&control, &counter.algorithm)
-                .map_err(|error| HostError::failed(error.to_string()))?;
-            if actual_control != configured_control {
+            if actual_control != counter.control_identity {
                 return Ok(None);
             }
-            let model = self
-                .resolver
-                .0
+            let model = view
+                .model
                 .as_ref()
-                .expect("bound usage resolver")
-                .resolve(Arc::new(control), cancel)
-                .await?;
-            if counter.limits
-                != (Limits {
-                    window: model.context_window(),
-                    output: model.output_tokens(),
-                    threshold: model.threshold_tokens(),
-                })
-            {
-                return Ok(None);
-            }
+                .ok_or_else(|| HostError::failed("Missing context counter"))?;
             let Some(actual) = model
                 .contribution_counter()
                 .filter(|actual| actual.algorithm() == counter.algorithm)
             else {
                 return Ok(None);
             };
-            let fixed = actual.fixed(
-                request_value.system.as_deref(),
-                request_value.tools.as_deref().map(Vec::as_slice),
-            );
+            let cached = self
+                .dynamic_fixed
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|cached| {
+                    cached.configuration == counter.event_id && cached.identity == identity
+                })
+                .map(|cached| cached.fixed);
+            let fixed = cached.unwrap_or_else(|| {
+                actual.fixed(
+                    request_value.system.as_deref(),
+                    request_value.tools.as_deref().map(Vec::as_slice),
+                )
+            });
             let contribution = total(&summary)
                 .and_then(|total| subtract(total, counter.fixed))
                 .and_then(|messages| add(messages, fixed))
@@ -532,27 +714,45 @@ impl ContextUsage {
             request_local.map(|local| (local, identity.as_str())),
         )
         .map_err(|error| HostError::failed(error.to_string()))?;
+        if total(&summary)
+            .map_err(|error| HostError::failed(error.to_string()))?
+            .images
+            == 0
+        {
+            self.association.lock().unwrap().prepared = Some(PreparedSource {
+                request_id: source.request_id.clone(),
+                through,
+                request: Arc::downgrade(request_value),
+                configuration: source.configuration.clone(),
+                prompt: source.prompt.clone(),
+                calibration: RequestCalibration {
+                    configuration: counter
+                        .identity()
+                        .map_err(|error| HostError::failed(error.to_string()))?,
+                    compression: summary
+                        .compression
+                        .as_ref()
+                        .map(|compression| compression.event_id.clone()),
+                    request_identity: request_local.map(|_| identity),
+                    algorithm: counter.algorithm.clone(),
+                    local: request_local
+                        .or(summary.local)
+                        .ok_or_else(|| HostError::failed("Missing request estimate"))?,
+                },
+            });
+        }
         Ok(Some(UsageEvidence {
             boundary: summary.last_entry.clone(),
             estimate,
             limits: counter.limits.clone(),
             base: sources::RequestBase {
-                schema: "context-usage/request-base/v3".into(),
-                request_id: request_id.into(),
+                epoch: state.epoch.clone(),
                 source: TimelinePosition {
                     branch_id: self.timeline.branch_id(),
                     sequence: through,
                 },
                 algorithm: counter.algorithm.clone(),
-                configuration: counter
-                    .identity()
-                    .map_err(|error| HostError::failed(error.to_string()))?,
-                compression: summary.compression.map(|compression| compression.event_id),
-                request_identity: request_local.map(|_| identity),
-                local: request_local
-                    .or(summary.local)
-                    .ok_or_else(|| HostError::failed("Missing request local estimate"))?,
-                root: state.root.clone(),
+                current: state.current.clone(),
             },
         }))
     }
@@ -576,37 +776,18 @@ impl ContextUsage {
                 sequence: position.sequence,
             })
         };
-        Numeric::new(self.timeline.clone(), self.timeline.sequence())
-            .growth(
-                evidence.base.root.as_ref(),
-                key(after)?,
-                key(&evidence.base.source)?,
-            )
-            .await
-            .map_err(|error| HostError::failed(error.to_string()))
-    }
-
-    pub(crate) async fn confirm(
-        &self,
-        evidence: UsageEvidence,
-        cancel: CancellationToken,
-    ) -> std::result::Result<(), HostError> {
-        let data = serde_json::to_value(evidence.base)
-            .map_err(|error| HostError::failed(error.to_string()))?;
-        let event = self
-            .timeline
-            .append(
-                EventKind::Extension(
-                    ExtensionEvent::new("context-usage", "request-base", data)
-                        .expect("usage request base key"),
-                )
-                .into(),
-            )
-            .map_err(|error| HostError::failed(error.to_string()))?;
-        tokio::select! {
-            result = self.publication(event.sequence) => result.map_err(|error| HostError::failed(error.to_string())),
-            _ = cancel.cancelled() => Err(HostError::Cancelled("Request base confirmation cancelled".into())),
-        }
+        Numeric::new(
+            self.timeline.clone(),
+            self.timeline.sequence(),
+            evidence.base.epoch.clone(),
+        )
+        .growth(
+            evidence.base.current.as_ref(),
+            key(after)?,
+            key(&evidence.base.source)?,
+        )
+        .await
+        .map_err(|error| HostError::failed(error.to_string()))
     }
 
     pub(crate) async fn read(
@@ -629,12 +810,106 @@ impl ContextUsage {
                 "Usage statistics were initialized after this request boundary",
             )));
         }
-        let numeric = Numeric::new(self.timeline.clone(), view.result);
+        let numeric = Numeric::new(
+            self.timeline.clone(),
+            self.timeline.sequence(),
+            state.epoch.clone(),
+        );
         let summary = numeric
-            .prefix(state.root.as_ref(), end, true)
+            .prefix(state.current.as_ref(), end, true)
             .await
             .map_err(ContextOpError::Read)?;
-        reading(through, &summary)
+        if let Some(Configuration::Ready { counter }) = &summary.configuration
+            && !counter.configured_tools
+        {
+            let model = view
+                .model
+                .as_ref()
+                .ok_or_else(|| ContextOpError::Read(fault("missing context counter")))?;
+            let fixed = self
+                .current_tools(counter, model.as_ref(), through)
+                .await
+                .map_err(ContextOpError::Read)?;
+            let counter_model = model
+                .contribution_counter()
+                .ok_or_else(|| ContextOpError::Read(fault("missing additive counter")))?;
+            let local = counter_model.estimate(
+                add(
+                    subtract(
+                        total(&summary).map_err(ContextOpError::Read)?,
+                        counter.fixed,
+                    )
+                    .map_err(ContextOpError::Read)?,
+                    fixed.fixed,
+                )
+                .map_err(ContextOpError::Read)?,
+            );
+            return reading(through, &summary, Some((local, &fixed.identity)));
+        }
+        reading(through, &summary, None)
+    }
+
+    async fn current_tools(
+        &self,
+        configuration: &CounterConfiguration,
+        model: &dyn ContextModel,
+        through: u64,
+    ) -> Result<DynamicFixed> {
+        let sources = self.registry.sources();
+        let versions = fingerprint(
+            &sources
+                .iter()
+                .map(|source| (&source.key, &source.version))
+                .collect::<Vec<_>>(),
+        )?;
+        if let Some(cached) = self
+            .dynamic_fixed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|cached| {
+                cached.configuration == configuration.event_id && cached.versions == versions
+            })
+        {
+            return Ok(cached.clone());
+        }
+        let (tools, sources) = self.registry.snapshot();
+        let versions = fingerprint(
+            &sources
+                .iter()
+                .map(|source| (&source.key, &source.version))
+                .collect::<Vec<_>>(),
+        )?;
+        let mut system = self
+            .fields(&configuration.event_id, through, &["data.system"])
+            .await?;
+        let system: Option<SystemPrompt> = sources::optional(system.remove(0))?;
+        let identity = fingerprint(&(
+            &configuration.control_identity,
+            fingerprint(&(&system, &Some(&tools)))?,
+        ))?;
+        let previous = self
+            .dynamic_fixed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|cached| {
+                cached.configuration == configuration.event_id && cached.identity == identity
+            })
+            .map(|cached| cached.fixed);
+        let counter = model
+            .contribution_counter()
+            .filter(|counter| counter.algorithm() == configuration.algorithm)
+            .ok_or_else(|| fault("context counter algorithm changed"))?;
+        let fixed = previous.unwrap_or_else(|| counter.fixed(system.as_ref(), Some(&tools)));
+        let value = DynamicFixed {
+            configuration: configuration.event_id.clone(),
+            versions,
+            identity,
+            fixed,
+        };
+        *self.dynamic_fixed.lock().unwrap() = Some(value.clone());
+        Ok(value)
     }
 
     async fn at(
@@ -652,6 +927,7 @@ impl ContextUsage {
                 "future usage boundary".into(),
             )));
         }
+        self.handoff.fetch_max(through, Ordering::SeqCst);
         self.wanted.fetch_max(through, Ordering::SeqCst);
         self.wake.notify_one();
         let mut progress = self.progress.subscribe();
@@ -660,7 +936,18 @@ impl ContextUsage {
             if let Some(error) = &view.error {
                 return Err(ContextOpError::Read(error.clone()));
             }
-            if view.state.is_some() && view.covered >= through {
+            if view.state.is_some()
+                && view.covered >= through
+                && (view
+                    .state
+                    .as_ref()
+                    .is_none_or(|state| state.current.is_none())
+                    || view.relevant_through > through
+                    || view.saved_through >= view.relevant_through)
+            {
+                if let Some(error) = &view.unavailable {
+                    return Err(ContextOpError::Model(error.clone()));
+                }
                 return Ok(view);
             }
             tokio::select! {
@@ -688,27 +975,72 @@ impl ContextUsage {
     }
 
     async fn save(&self, machine: &mut Machine) -> Result<()> {
-        let mut drafts = machine.numeric.drafts(machine.state.root.as_ref())?;
-        drafts.push(
-            EventKind::Extension(
+        let pending = machine.numeric.take_pending();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let count = pending.len();
+        let mut drafts = Vec::with_capacity(count);
+        for (index, reference) in pending.into_iter().enumerate() {
+            let at = reference.at;
+            let mut state = machine.state.clone();
+            state.current = Some(reference);
+            let source_through = if index + 1 == count {
+                machine.source_through
+            } else if at.branch == state.branches.len() as u32 - 1 {
+                at.sequence
+            } else {
+                0
+            };
+            drafts.push(EventDraft::new(EventKind::Extension(
                 ExtensionEvent::new(
                     "context-usage",
                     "recovered",
                     serde_json::to_value(Recovered {
                         schema: SCHEMA.into(),
-                        source_through: machine.source_through,
-                        state: machine.state.clone(),
+                        source_through,
+                        state,
                     })
                     .map_err(|error| fault(error.to_string()))?,
                 )
-                .expect("usage result key"),
+                .expect("usage numeric key"),
+            )));
+        }
+        let written = self.timeline.append_batch_registered(drafts, |_| Ok(()))?;
+        let last = written.last().expect("numeric result");
+        self.publication(last.sequence).await?;
+        machine.result = last.sequence;
+        machine.result_id = Some(last.id.clone());
+        machine.saved_through = machine.source_through;
+        machine.numeric.published(machine.result);
+        Ok(())
+    }
+
+    async fn cover(&self, machine: &mut Machine) -> Result<()> {
+        if machine.relevant_through <= machine.saved_through {
+            return Ok(());
+        }
+        let Some(result_id) = &machine.result_id else {
+            return Ok(());
+        };
+        let event = self.timeline.append(
+            EventKind::Extension(
+                ExtensionEvent::new(
+                    "context-usage",
+                    "covered",
+                    serde_json::to_value(Covered {
+                        schema: "context-usage-covered/v1".into(),
+                        result_id: result_id.clone(),
+                        source_through: machine.source_through,
+                    })
+                    .map_err(|error| fault(error.to_string()))?,
+                )
+                .expect("usage covered key"),
             )
             .into(),
-        );
-        let written = self.timeline.append_batch_registered(drafts, |_| Ok(()))?;
-        machine.result = written.last().expect("usage result").sequence;
-        self.publication(machine.result).await?;
-        machine.numeric.published(machine.result);
+        )?;
+        self.publication(event.sequence).await?;
+        machine.saved_through = machine.source_through;
         Ok(())
     }
 
@@ -716,7 +1048,10 @@ impl ContextUsage {
         self.progress.send_replace(Progress {
             state: Some(Arc::new(machine.state.clone())),
             covered,
-            result: machine.result,
+            relevant_through: machine.relevant_through,
+            saved_through: machine.saved_through,
+            unavailable: machine.unavailable.clone(),
+            model: machine.model.clone(),
             error: None,
         });
     }
@@ -726,7 +1061,7 @@ pub(crate) struct ContextUsagePlugin {
     usage: ServiceKey<ContextUsage>,
     timeline: ServiceKey<Timeline>,
     resolver: ServiceKey<ContextModelHost>,
-    history: ServiceKey<HistoryRenderer>,
+    registry: ServiceKey<ToolRegistry>,
     dispatcher: ServiceKey<Dispatcher>,
     branch: ServiceKey<BranchLifecycle>,
 }
@@ -737,7 +1072,7 @@ impl ContextUsagePlugin {
             usage: names.key()?,
             timeline: names.key()?,
             resolver: names.key()?,
-            history: names.key()?,
+            registry: names.key()?,
             dispatcher: names.key()?,
             branch: names.key()?,
         })
@@ -752,7 +1087,7 @@ impl DynPlugin for ContextUsagePlugin {
         vec![
             self.timeline.erase(),
             self.resolver.erase(),
-            self.history.erase(),
+            self.registry.erase(),
             self.dispatcher.erase(),
             self.branch.erase(),
         ]
@@ -762,15 +1097,18 @@ impl DynPlugin for ContextUsagePlugin {
             let owner = Arc::new(ContextUsage {
                 timeline: ctx.require_at(&self.timeline)?,
                 resolver: ctx.require_at(&self.resolver)?,
-                history: ctx.require_at(&self.history)?,
+                registry: ctx.require_at(&self.registry)?,
+                dynamic_fixed: Mutex::new(None),
                 dispatcher: ctx.require_at(&self.dispatcher)?,
                 branch: ctx.require_at(&self.branch)?,
                 wanted: AtomicU64::new(0),
+                handoff: AtomicU64::new(0),
                 wake: Notify::new(),
                 progress: watch::channel(Progress::default()).0,
                 tasks: TaskTracker::new(),
                 cancel: ctx.cancellation_token(),
                 errors: Mutex::new(Vec::new()),
+                association: Mutex::new(Association::default()),
             });
             let cleanup = owner.clone();
             ctx.effect(move || async move {
@@ -781,16 +1119,33 @@ impl DynPlugin for ContextUsagePlugin {
             })?;
             if owner.resolver.0.is_some() {
                 let notify = owner.clone();
-                owner
-                    .dispatcher
-                    .subscribe(ctx, "ContextUsage", SOURCES, move |event| {
+                owner.dispatcher.subscribe(
+                    ctx,
+                    "ContextUsage",
+                    &[
+                        "context/configured",
+                        "input/consumed",
+                        "step/model-output-end",
+                        "step/tool-result",
+                        "context/compaction",
+                        "model/usage",
+                        "context/prepare",
+                        "model/call",
+                        "turn/end",
+                    ],
+                    move |event| {
                         let owner = notify.clone();
                         Box::pin(async move {
+                            owner.associate(&event);
+                            if matches!(event.kind, EventKind::TurnEnd(_)) {
+                                owner.handoff.fetch_max(event.sequence, Ordering::SeqCst);
+                            }
                             owner.wanted.fetch_max(event.sequence, Ordering::SeqCst);
                             owner.wake.notify_one();
                             Ok(())
                         })
-                    })?;
+                    },
+                )?;
                 let task = owner.clone();
                 owner.tasks.spawn(async move {
                     let started = tokio::select! {

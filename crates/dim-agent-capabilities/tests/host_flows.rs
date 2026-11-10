@@ -2658,18 +2658,9 @@ async fn open_turn(session: &dim_agent_runtime::Session) -> String {
         .expect("a started turn")
 }
 
-async fn queue_published_through(session: &dim_agent_runtime::Session, sequence: u64) {
+async fn queue_consumed_through(session: &dim_agent_runtime::Session, sequence: u64) {
     let mut dispatch = session.dispatch_watch("main").unwrap();
-    loop {
-        let events = chain_events(session, "main", sequence..).await.unwrap();
-        if events.iter().any(|event| {
-            matches!(&event.kind, EventKind::Extension(data)
-                if event.kind.key() == "input-queue/recovered"
-                    && data.data()["source_through"].as_u64().is_some_and(|covered| covered >= sequence)
-                    && dispatch.borrow().sequence >= event.sequence)
-        }) {
-            return;
-        }
+    while dispatch.borrow_and_update().sequence < sequence {
         dispatch.changed().await.unwrap();
     }
 }
@@ -2733,7 +2724,7 @@ async fn a_handover_input_is_held_without_being_applied_or_counted() {
             .submit("operator next".into(), InputMode::Queue, "main")
             .await
             .unwrap();
-        queue_published_through(&session, queued.sequence).await;
+        queue_consumed_through(&session, queued.sequence).await;
         assert_eq!(
             session
                 .get::<InputSnapshot>("main")
@@ -2746,7 +2737,7 @@ async fn a_handover_input_is_held_without_being_applied_or_counted() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        queue_published_through(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         assert_eq!(
             session
                 .get::<InputSnapshot>("main")
@@ -2799,7 +2790,7 @@ async fn a_handover_input_is_deleted_at_its_turn_end_and_never_reaches_the_model
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        queue_published_through(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         release.notify_one();
         deleted(&session, &handover.id).await;
         session.idle("main").await.unwrap();
@@ -2941,7 +2932,7 @@ async fn a_consumed_handover_input_is_not_deleted_at_turn_end() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        queue_published_through(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         let timeline = slot.lock().unwrap().clone().expect("the branch Timeline");
         let consumed = timeline
             .append(
@@ -2951,7 +2942,7 @@ async fn a_consumed_handover_input_is_not_deleted_at_turn_end() {
                 .into(),
             )
             .unwrap();
-        queue_published_through(&session, consumed.sequence).await;
+        queue_consumed_through(&session, consumed.sequence).await;
         release.notify_one();
         session.idle("main").await.unwrap();
         let events = chain_events(&session, "main", ..).await.unwrap();
@@ -2994,12 +2985,12 @@ async fn a_held_handover_input_does_not_steal_the_next_queued_input() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        queue_published_through(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         let operator = session
             .submit("operator next".into(), InputMode::Queue, "main")
             .await
             .unwrap();
-        queue_published_through(&session, operator.sequence).await;
+        queue_consumed_through(&session, operator.sequence).await;
         release.notify_one();
         deleted(&session, &handover.id).await;
         session.idle("main").await.unwrap();
@@ -3106,7 +3097,7 @@ async fn a_withdrawn_handover_input_is_deleted_once() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        queue_published_through(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         let queue = session.service::<InputQueue>("main").unwrap();
         let (answer, replacement) = queue
             .withdraw(

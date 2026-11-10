@@ -268,9 +268,7 @@ pub(crate) struct Compacted {
 
 pub(crate) struct PreparedRequest {
     pub request: Arc<ModelRequest>,
-    pub evidence: Option<crate::context_usage::UsageEvidence>,
-    pub through: u64,
-    pub compaction: Option<String>,
+    pub estimate: Option<crate::context_usage::PreparedEstimate>,
 }
 
 /// A completed strategy result composed on the view: its cut, the running
@@ -1093,14 +1091,7 @@ impl ContextPolicy {
                 .await?;
             check_cancel(&cancel)?;
             let evidence = usage
-                .reference(
-                    &source.request_id,
-                    source.through,
-                    source.through,
-                    &request,
-                    None,
-                    cancel.clone(),
-                )
+                .reference(source, source.through, &request, None, cancel.clone())
                 .await?;
             let ready = evidence.as_ref().and_then(|evidence| {
                 Some((
@@ -1130,9 +1121,10 @@ impl ContextPolicy {
                     self.record_budget(source, boundary, &estimate, model.as_ref())?;
                     return Ok(PreparedRequest {
                         request,
-                        through: source.through,
-                        compaction: None,
-                        evidence,
+                        estimate: Some(crate::context_usage::PreparedEstimate::new(
+                            estimate,
+                            model.as_ref(),
+                        )),
                     });
                 }
             }
@@ -1166,8 +1158,7 @@ impl ContextPolicy {
                     Some(usage) => {
                         usage
                             .reference(
-                                &source.request_id,
-                                source.through,
+                                source,
                                 prepared_through,
                                 &view.prepared,
                                 prepared_compaction.as_deref(),
@@ -1198,9 +1189,10 @@ impl ContextPolicy {
         if !recovery && estimate.input < model.threshold_tokens() {
             return Ok(PreparedRequest {
                 request: view.prepared,
-                through: prepared_through,
-                compaction: prepared_compaction,
-                evidence,
+                estimate: Some(crate::context_usage::PreparedEstimate::new(
+                    estimate,
+                    model.as_ref(),
+                )),
             });
         }
         if !recovery
@@ -1211,9 +1203,10 @@ impl ContextPolicy {
         {
             return Ok(PreparedRequest {
                 request: view.prepared,
-                through: prepared_through,
-                compaction: prepared_compaction,
-                evidence,
+                estimate: Some(crate::context_usage::PreparedEstimate::new(
+                    estimate,
+                    model.as_ref(),
+                )),
             });
         }
         let step = CompactionStep {
@@ -1251,9 +1244,15 @@ impl ContextPolicy {
                 }
                 Ok(PreparedRequest {
                     request,
-                    through: compacted.fact.sequence,
-                    compaction: Some(compacted.fact.id.clone()),
-                    evidence: None,
+                    estimate: Some(crate::context_usage::PreparedEstimate::new(
+                        Estimate {
+                            input,
+                            source: BaselineSource::FullEstimate,
+                            baseline: None,
+                            delta: None,
+                        },
+                        model.as_ref(),
+                    )),
                 })
             }
             (ContextCompactionResult::Cancelled { reason }, _) => {
@@ -1267,9 +1266,10 @@ impl ContextPolicy {
             ),
             _ => Ok(PreparedRequest {
                 request: view.prepared,
-                through: prepared_through,
-                compaction: prepared_compaction,
-                evidence,
+                estimate: Some(crate::context_usage::PreparedEstimate::new(
+                    estimate,
+                    model.as_ref(),
+                )),
             }),
         }
     }
@@ -1767,7 +1767,7 @@ impl ContextPolicy {
     pub async fn validate(
         &self,
         request: Arc<ModelRequest>,
-        reference: Option<&crate::context_usage::UsageEvidence>,
+        reference: Option<&crate::context_usage::PreparedEstimate>,
         cancel: CancellationToken,
     ) -> Result<(), HostError> {
         let model = self

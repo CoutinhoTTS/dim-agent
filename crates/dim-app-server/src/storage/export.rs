@@ -81,7 +81,7 @@ async fn write(
     // hash, so a damaged body is refused before the first line is written.
     let mut reader = Reader::new(CONTENT_BUDGET);
     let directory = read_directory(db, session).await?;
-    let branches = validate_session(db, session, &directory, &mut reader).await?;
+    let branches = validate_session(db, session, &directory, &mut reader, format).await?;
     line(
         out,
         &Line::Header {
