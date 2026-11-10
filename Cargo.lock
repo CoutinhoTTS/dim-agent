@@ -6024,6 +6024,7 @@ dependencies = [
  "dim-modality",
  "dim-session-title",
  "futures-util",
+ "libc",
  "rusqlite",
  "rutis",
  "rutis-bridge",
