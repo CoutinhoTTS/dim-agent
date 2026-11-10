@@ -6130,20 +6130,28 @@ impl App {
                 Some(s) if !s.questions.is_empty() => Some(t("answer required").to_owned()),
                 Some(s) if !s.approvals.is_empty() => Some(t("permission required").to_owned()),
                 Some(s) if s.running => Some(t("esc interrupt").to_owned()),
-                Some(s) if s.tasks.iter().any(|task| task.finished.is_none()) => Some(tf(
-                    "{count} in background · /tasks",
-                    &[(
-                        "count",
-                        &s.tasks
-                            .iter()
-                            .filter(|task| task.finished.is_none())
-                            .count()
-                            .to_string(),
-                    )],
-                )),
                 _ => None,
             },
         }
+    }
+
+    /// How many tasks the Session runs apart from the turn, as its own
+    /// status segment: none while every task has ended, so an idle Session
+    /// with nothing in the background draws no segment at all.
+    fn background_label(&self) -> Option<String> {
+        let count = self
+            .snapshot
+            .as_ref()?
+            .tasks
+            .iter()
+            .filter(|task| task.finished.is_none())
+            .count();
+        (count > 0).then(|| {
+            tf(
+                "{count} in background · /tasks",
+                &[("count", &count.to_string())],
+            )
+        })
     }
 
     /// `1.8K / 256K`: the main branch's context use against its window, with
@@ -6199,6 +6207,9 @@ impl App {
                 &p.muted
             };
             parts.push(fg(&slot, color));
+        }
+        if let Some(background) = self.background_label() {
+            parts.push(fg(&background, &p.muted));
         }
         if let Some(goal) = self.goal_label() {
             parts.push(fg(goal, &p.muted));
@@ -6262,6 +6273,10 @@ impl App {
         if let Some(slot) = slot {
             left.push_str("  ");
             left.push_str(&slot);
+        }
+        if let Some(background) = self.background_label() {
+            left.push_str("  ");
+            left.push_str(&background);
         }
         let total = cols.saturating_sub(2);
         let label = self
@@ -8048,6 +8063,71 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    /// An unfinished command task named `label`.
+    fn background_task(id: &str, label: &str) -> crate::model::view::TaskView {
+        crate::model::view::TaskView {
+            id: id.into(),
+            branch_id: "main".into(),
+            kind: crate::model::view::TaskKind::Command(TaskTarget {
+                branch_id: "main".into(),
+                task_id: id.into(),
+            }),
+            label: label.into(),
+            started_at: 0,
+            finished: None,
+        }
+    }
+
+    #[test]
+    fn the_background_count_survives_a_running_turn() {
+        use crate::ui::render::panel::strip_escapes;
+        let theme = test_theme();
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            tasks: vec![
+                background_task("t1", "cargo build"),
+                background_task("t2", "cargo test"),
+            ],
+            ..ViewSnapshot::default()
+        })));
+        let line = strip_escapes(&app.status_line(160));
+        assert!(line.contains("esc interrupt"), "{line}");
+        assert!(line.contains("2 in background · /tasks"), "{line}");
+
+        let docked = app
+            .dock_status(Some("· working…  1s"))
+            .expect("a status corner");
+        let docked = strip_escapes(&docked);
+        assert!(docked.contains("esc interrupt"), "{docked}");
+        assert!(docked.contains("2 in background · /tasks"), "{docked}");
+
+        let mut no_tasks = ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            ..ViewSnapshot::default()
+        };
+        app.apply(Update::Snapshot(Box::new(no_tasks.clone())));
+        let line = strip_escapes(&app.status_line(160));
+        assert!(line.contains("esc interrupt"), "{line}");
+        assert!(!line.contains("in background"), "{line}");
+
+        no_tasks.tasks = vec![background_task("t3", "cargo fmt")];
+        app.apply(Update::Snapshot(Box::new(no_tasks)));
+        assert!(
+            strip_escapes(&app.status_line(160)).contains("1 in background · /tasks"),
+            "a new task counts again"
+        );
     }
 
     /// A session that keeps every command the interface sends.
