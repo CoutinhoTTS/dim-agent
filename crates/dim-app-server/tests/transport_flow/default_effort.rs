@@ -68,6 +68,29 @@ async fn completions(
     )
 }
 
+/// The fake Gemini provider: records every request body and streams a reply.
+async fn google(
+    State(capture): State<Arc<Capture>>,
+    uri: axum::http::Uri,
+    Json(body): Json<Value>,
+) -> impl axum::response::IntoResponse {
+    capture.requests.lock().unwrap().push(body);
+    let reply = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},
+        "finishReason":"STOP","index":0}],
+        "usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10}});
+    if uri.path().contains(":streamGenerateContent") {
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            format!("data: {}\n\n", reply),
+        )
+    } else {
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            reply.to_string(),
+        )
+    }
+}
+
 struct Server {
     child: tokio::process::Child,
     socket: std::path::PathBuf,
@@ -1084,22 +1107,37 @@ async fn a_model_that_does_not_reason_by_default_adopts_its_off_declaration() {
         let app = Router::new()
             .route("/v1/messages", post(messages))
             .route("/v1/chat/completions", post(completions))
+            .fallback(google)
             .with_state(capture.clone());
         let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let directory = directory("default-off-mapped");
         let mut server = launch_product(&directory).await;
         let mut client = connect(&server).await;
 
-        for (provider, driver, base_url) in [
+        for (provider, driver, base_url, off, wire_off, wire_off_value) in [
             (
                 "018ec73f-0000-7000-8000-000000000111",
                 "anthropic",
                 format!("http://{endpoint}"),
+                json!({"kind":"thinking_type","value":"disabled"}),
+                "/thinking/type",
+                json!("disabled"),
             ),
             (
                 "018ec73f-0000-7000-8000-000000000112",
                 "openai-compatible",
                 format!("http://{endpoint}/v1"),
+                json!({"kind":"thinking_type","value":"disabled"}),
+                "/thinking/type",
+                json!("disabled"),
+            ),
+            (
+                "018ec73f-0000-7000-8000-000000000113",
+                "gemini",
+                format!("http://{endpoint}/v1"),
+                json!({"kind":"thinking_budget","value":0}),
+                "/generationConfig/thinkingConfig/thinkingBudget",
+                json!(0),
             ),
         ] {
             create_provider(
@@ -1107,44 +1145,56 @@ async fn a_model_that_does_not_reason_by_default_adopts_its_off_declaration() {
                 provider,
                 driver,
                 &base_url,
-                vec![model_with_off(
-                    "off-mapped",
-                    Some(false),
-                    Some("medium"),
-                    &["low", "medium"],
-                    Some(json!({"kind":"thinking_type","value":"disabled"})),
-                    true,
-                )],
+                vec![
+                    model_with_off(
+                        "off-mapped",
+                        Some(false),
+                        Some("medium"),
+                        &["low", "medium"],
+                        Some(off.clone()),
+                        true,
+                    ),
+                    model_with_off(
+                        "off-mapped-without-effort",
+                        Some(false),
+                        None,
+                        &["low", "medium"],
+                        Some(off.clone()),
+                        true,
+                    ),
+                ],
             )
             .await;
 
-            let created = client
-                .rpc(
-                    "session.create",
-                    json!({"cwd":directory,"tools":[],
-                        "model":{"provider":provider,"modelId":"off-mapped"}}),
-                )
-                .await;
-            assert_ok(&created);
-            assert_eq!(
-                created["result"]["modelPreferences"],
-                json!({"reasoningEffort":"none"}),
-                "{driver}: {created}"
-            );
-            let session_id = created["result"]["sessionId"].clone();
-            turn(&mut client, &session_id, "hello").await;
-            assert_eq!(
-                configured(&mut client, &session_id).await["model_preferences"],
-                json!({"reasoningEffort":"none"}),
-                "{driver}"
-            );
-            let wire = last_body(&capture);
-            assert_eq!(
-                wire["thinking"],
-                json!({"type":"disabled"}),
-                "{driver}: {wire}"
-            );
-            assert_eq!(sent_effort(&capture), None, "{driver}: {wire}");
+            for model_id in ["off-mapped", "off-mapped-without-effort"] {
+                let created = client
+                    .rpc(
+                        "session.create",
+                        json!({"cwd":directory,"tools":[],
+                            "model":{"provider":provider,"modelId":model_id}}),
+                    )
+                    .await;
+                assert_ok(&created);
+                assert_eq!(
+                    created["result"]["modelPreferences"],
+                    json!({"reasoningEffort":"none"}),
+                    "{driver} {model_id}: {created}"
+                );
+                let session_id = created["result"]["sessionId"].clone();
+                turn(&mut client, &session_id, "hello").await;
+                assert_eq!(
+                    configured(&mut client, &session_id).await["model_preferences"],
+                    json!({"reasoningEffort":"none"}),
+                    "{driver} {model_id}"
+                );
+                let wire = last_body(&capture);
+                assert_eq!(
+                    wire.pointer(wire_off),
+                    Some(&wire_off_value),
+                    "{driver} {model_id}: {wire}"
+                );
+                assert_eq!(sent_effort(&capture), None, "{driver} {model_id}: {wire}");
+            }
         }
 
         server.child.kill().await.unwrap();
