@@ -206,7 +206,9 @@ from the line client's above. Image markers are the rule stated under scrollback
   that does not answer within 5 seconds leaves images sent as images.
   Audio and video files are sent as links: user input has no audio or video content block.
 
-The `@` index must not slow the interface, whatever directory the CLI runs in. A project
+The `@` index must not slow the interface, whatever directory the CLI runs in. It indexes the
+workspace the composer names — the attached Session's workspace, or the launch workspace at
+Home — so `@relative/path` names a file in the workspace the Session works in. A project
 directory is walked once on a thread of its own, breadth first, honouring `.gitignore` files and
 skipping dependency and build directories (`node_modules`, `target`, `.git`, `Library` and the
 like), within 8 levels, 50,000 entries and 2 seconds. The picker ranks what has been found so far

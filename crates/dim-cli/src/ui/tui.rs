@@ -1364,8 +1364,7 @@ impl App {
         let mouse = crate::ui::config::read(&home, MOUSE_KEY).is_none_or(|v| v != "off");
         let notify = crate::ui::config::read(&home, crate::ui::notify::NOTIFY_KEY)
             .is_none_or(|v| v != false);
-        let mut composer = Composer::new(past);
-        composer.set_root(PathBuf::from(&cwd_key));
+        let composer = Composer::new(past);
         let mut app = Self {
             host,
             composer,
@@ -5817,13 +5816,15 @@ impl App {
         }
     }
 
-    /// Points the composer's label and its Git source at the workspace the
-    /// daemon reported for the Session being shown, or back at the launch
-    /// workspace for `None` (Home, or a daemon older than the attach record).
-    /// The branch is read once here, without waiting for the next poll.
+    /// Points the composer's label, its `@` mention root and its Git source
+    /// at the workspace the daemon reported for the Session being shown, or
+    /// back at the launch workspace for `None` (Home, or a daemon older than
+    /// the attach record). The branch is read once here, without waiting for
+    /// the next poll.
     fn show_workspace(&mut self, cwd: Option<&str>) {
         let cwd = cwd.unwrap_or(&self.cwd_key);
         self.workspace = crate::ui::tilde(cwd);
+        self.composer.set_root(PathBuf::from(cwd));
         self.git_head = git_head(cwd);
         self.branch = self.git_head.as_deref().and_then(git_branch);
     }
@@ -8215,7 +8216,8 @@ mod tests {
     /// The reported flow: launched in workspace A, the client attaches a
     /// Session that lives in workspace B (an explicit `--cwd`, a `/resume`
     /// into another worktree). The border must name B, its branch included,
-    /// and going Home must put A back.
+    /// its `@` mention picker must offer B's files, and going Home must put
+    /// A back for both.
     #[test]
     fn a_session_attached_elsewhere_moves_the_border_and_home_moves_it_back() {
         use crate::ui::render::panel::{strip_escapes, visible_width};
@@ -8257,6 +8259,10 @@ mod tests {
         }
         let launch_workspace = crate::ui::tilde(&launch.to_string_lossy());
         let session_workspace = crate::ui::tilde(&other.to_string_lossy());
+        // Each workspace holds a file of its own, so an `@` candidate names
+        // the workspace it was found in.
+        std::fs::write(launch.join("launch-note.txt"), "").unwrap();
+        std::fs::write(other.join("session-note.txt"), "").unwrap();
         let theme = test_theme();
         let mut app = App::new(
             Box::new(Idle),
@@ -8281,12 +8287,43 @@ mod tests {
             );
             row
         };
+        // The `@` file names the picker panel offers for `@note`, read from
+        // the frame that draws them.
+        let candidates = |app: &mut App| -> Vec<String> {
+            let names = ["launch-note.txt", "session-note.txt"];
+            typed(app, "@note");
+            let started = Instant::now();
+            loop {
+                let rows: Vec<String> = app
+                    .frame((80, 30))
+                    .live
+                    .iter()
+                    .map(|row| strip_escapes(row))
+                    .collect();
+                let found: Vec<String> = names
+                    .iter()
+                    .filter(|name| rows.iter().any(|row| row.contains(*name)))
+                    .map(|name| (*name).to_owned())
+                    .collect();
+                if !found.is_empty() || started.elapsed() > Duration::from_secs(10) {
+                    app.composer.clear();
+                    return found;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
 
-        // Launched in A: Home names A and its branch.
+        // Launched in A: Home names A and its branch, and `@` offers A's
+        // files, the directory the next Session will work in.
         let row = border(&mut app, 160);
         assert!(
             row.contains(&format!("{launch_workspace} (launch-line)")),
             "Home names the launch workspace: {row:?}"
+        );
+        assert_eq!(
+            candidates(&mut app),
+            ["launch-note.txt"],
+            "Home offers the launch workspace's files"
         );
 
         // A Session in B is attached, as `/resume` into a sibling worktree
@@ -8310,6 +8347,11 @@ mod tests {
             !row.contains(&launch_workspace),
             "the launch workspace must not stand in for it: {row:?}"
         );
+        assert_eq!(
+            candidates(&mut app),
+            ["session-note.txt"],
+            "the mention picker offers the Session's workspace's files"
+        );
 
         // `/new` goes Home: the Session is gone and the launch workspace is
         // what the next Session will work in.
@@ -8322,6 +8364,11 @@ mod tests {
         assert!(
             row.contains(&format!("{launch_workspace} (launch-line)")),
             "Home moves the border back to the launch workspace: {row:?}"
+        );
+        assert_eq!(
+            candidates(&mut app),
+            ["launch-note.txt"],
+            "Home moves the mention picker back to the launch workspace"
         );
     }
 
