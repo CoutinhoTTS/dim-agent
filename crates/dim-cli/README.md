@@ -974,6 +974,7 @@ While a terminal resize is pending, scrollback pauses frame painting until the e
 Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards:
 
 ```text
+ ◐ 2 · cargo build 1m12s · cargo test 34s
  answer row                                                     ▁   scrollbar: last column,
  answer row (streaming tail scrolls with the transcript)        █   thumb in eighths of a row
                                                                 █
@@ -983,6 +984,12 @@ Fullscreen takes the alternate screen, keeps the transcript itself and scrolls i
  │                                                            │      borders carry the model,
  ╰─ · working…  3s  esc interrupt ──── ~/project (branch) ─╯      the status and the place
 ```
+
+The row above the composer names the tasks running apart from the turn, in both
+modes: `◐ <count> · <label> <elapsed>` for each, cut to one line, with `✓` or
+`✗` where a task that just ended keeps its place for five seconds. It reads the
+same Session task list `/tasks` shows and draws nothing while none runs. `Enter`
+on an empty composer opens `/tasks` while it shows.
 
 | Fullscreen input | Effect |
 | --- | --- |
@@ -1253,7 +1260,10 @@ its rows and queued retries are discarded.
 The same collection keeps all unfinished work and the latest 50 terminal facts,
 ordered by the terminal event timestamp and then branch/start-event identity.
 Only actual command ends, delivery failures and delegation results finish rows.
-The status strip counts unfinished work. Enter shows a command's live output or
+The status strip counts unfinished work beside the run status rather than in its
+place, so a running turn does not hide what it left running. A task that ends in
+the background sends one terminal notification, once per task; a reconnect that
+finds tasks already finished sends none. Enter shows a command's live output or
 its recorded final result, or opens a delivered member's read-only conversation.
 Finished delivery results remain available even without a member Session.
 

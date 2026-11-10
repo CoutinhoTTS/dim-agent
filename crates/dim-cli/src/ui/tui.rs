@@ -2893,6 +2893,12 @@ impl App {
                 self.steer();
                 return Outcome::Continue;
             }
+            KeyCode::Enter
+                if key.mods.0 == 0 && self.composer.is_empty() && self.task_line_shown() =>
+            {
+                self.run_command("tasks", "");
+                return Outcome::Continue;
+            }
             KeyCode::Left
                 if key.mods.0 == Modifiers::SHIFT.0
                     && self.composer.is_empty()
@@ -5020,6 +5026,23 @@ impl App {
             let margin = " ".repeat(MARGIN);
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
+        // The tasks running apart from the turn sit on one row above the
+        // composer, in both interfaces; a task that just ended keeps its place
+        // for TASK_FADE seconds so it does not vanish from under the eye. No
+        // task draws no row, so an idle Session keeps the space. It goes above
+        // the anchor, so the row and the executor it names give their space
+        // back rather than moving the composer up.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if self.prompt.is_none()
+            && let Some(snapshot) = &self.snapshot
+            && let Some(line) =
+                task_line(shown_tasks(&snapshot.tasks, now), now, width, &self.palette)
+        {
+            live.push(format!("{}{line}", " ".repeat(MARGIN)));
+        }
         frame.anchor = live.len();
         let live_budget = crate::ui::render::live_row_budget(
             size.1 as usize,
@@ -6198,6 +6221,19 @@ impl App {
         })
     }
 
+    /// Whether the task line draws now: a task runs, or one ended within
+    /// [`TASK_FADE`] seconds.
+    fn task_line_shown(&self) -> bool {
+        let Some(snapshot) = &self.snapshot else {
+            return false;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        !shown_tasks(&snapshot.tasks, now).is_empty()
+    }
+
     /// `1.8K / 256K`: the main branch's context use against its window, with
     /// a note once it nears the automatic compaction threshold.
     fn context_label(&self) -> Option<String> {
@@ -6512,6 +6548,93 @@ fn queue_strip(
         .into_iter()
         .map(|row| format!("{margin}{row}"))
         .collect()
+}
+
+/// A background task's end stays on the persistent line this long (seconds)
+/// after it ended, so it does not vanish from under the eye that just saw it.
+const TASK_FADE: u64 = 5;
+
+/// `elapsed` as the task line writes it: `0s`, `12s`, `1m12s`, `2h05m`.
+fn task_elapsed(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3600 {
+        return format!("{}m{:02}s", seconds / 60, seconds % 60);
+    }
+    format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+}
+
+/// The tasks the line shows at `now` (Unix seconds): every unfinished task,
+/// then each finished one for [`TASK_FADE`] seconds after it ended. The
+/// second value is the task's end, absent while it runs.
+fn shown_tasks(
+    tasks: &[crate::model::view::TaskView],
+    now: u64,
+) -> Vec<(&crate::model::view::TaskView, Option<u64>)> {
+    tasks
+        .iter()
+        .filter_map(|task| match &task.finished {
+            None => Some((task, None)),
+            Some(finish) => {
+                let ended = finish.at / 1000;
+                (ended + TASK_FADE > now).then_some((task, Some(ended)))
+            }
+        })
+        .collect()
+}
+
+/// The line of tasks running apart from the turn: `◐ 2 · cargo build 1m12s ·
+/// cargo test 34s` while both run, with `✓`/`✗` in place of the elapsed time's
+/// lead once one ends. A single row, cut to `width` cells; `None` when there
+/// is nothing to show.
+fn task_line(
+    tasks: Vec<(&crate::model::view::TaskView, Option<u64>)>,
+    now: u64,
+    width: usize,
+    p: &Palette,
+) -> Option<String> {
+    use crate::ui::text::truncate_cells;
+    if tasks.is_empty() {
+        return None;
+    }
+    let running = tasks.iter().filter(|(_, end)| end.is_none()).count();
+    let head = format!("\u{25d0} {running}");
+    let mut row = head.clone();
+    let mut room = width.saturating_sub(display_width(&head));
+    for (shown, (task, end)) in tasks.iter().enumerate() {
+        let started = task.started_at / 1000;
+        let at = end.unwrap_or(now).max(started);
+        let elapsed = task_elapsed(at - started);
+        let label = crate::sanitize::safe(&task.label);
+        let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+        let entry = format!(" · {label} {elapsed}");
+        let fits = display_width(&entry) <= room;
+        if !fits {
+            if shown == 0 {
+                // The first entry still names what runs, shortened to fit.
+                let tail = format!(" {elapsed}");
+                let label = truncate_cells(&label, room.saturating_sub(3 + tail.len()).max(1));
+                row.push_str(&format!(" · {label}{tail}"));
+            } else {
+                row.push_str(&truncate_cells(" · …", room.max(1)));
+            }
+            break;
+        }
+        row.push_str(&entry);
+        room -= display_width(&entry);
+    }
+    let failed = tasks
+        .iter()
+        .any(|(task, end)| end.is_some() && task.finished.as_ref().is_some_and(|f| f.failed));
+    let color = if running > 0 {
+        &p.activity
+    } else if failed {
+        &p.danger
+    } else {
+        &p.success
+    };
+    Some(fg(&truncate_cells(&row, width.max(1)), color))
 }
 
 /// The side panel's line drawn as its transcript, without the opening
@@ -8136,6 +8259,152 @@ mod tests {
             exit_code: None,
         });
         task
+    }
+
+    /// A task that ended at `at_ms`, Unix milliseconds.
+    fn ended_at(
+        mut task: crate::model::view::TaskView,
+        at_ms: u64,
+    ) -> crate::model::view::TaskView {
+        task.finished = Some(crate::model::view::TaskFinish {
+            at: at_ms,
+            status: "Completed",
+            failed: false,
+            text: String::new(),
+            exit_code: None,
+        });
+        task
+    }
+
+    #[test]
+    fn the_task_line_names_running_tasks_and_fades_an_ended_one() {
+        use crate::ui::render::panel::strip_escapes;
+        let p = &test_theme().palette;
+        let now = 1_000;
+        let running = background_task("t1", "cargo build");
+        let mut running = running;
+        running.started_at = (now - 72) * 1000;
+        let line = task_line(shown_tasks(&[running.clone()], now), now, 60, p)
+            .expect("a running task draws a line");
+        let plain = strip_escapes(&line);
+        assert_eq!(plain, "◐ 1 · cargo build 1m12s", "{plain}");
+
+        let mut second = background_task("t2", "cargo test");
+        second.started_at = (now - 34) * 1000;
+        let line = task_line(
+            shown_tasks(&[running.clone(), second.clone()], now),
+            now,
+            60,
+            p,
+        )
+        .expect("two tasks draw one line");
+        let plain = strip_escapes(&line);
+        assert_eq!(plain, "◐ 2 · cargo build 1m12s · cargo test 34s", "{plain}");
+
+        let ended = ended_at(running, now * 1000);
+        let both = [ended.clone(), second.clone()];
+        let shown = shown_tasks(&both, now);
+        let plain = strip_escapes(&task_line(shown.clone(), now, 60, p).expect("a line"));
+        assert!(plain.starts_with("◐ 1 ·"), "{plain}");
+        assert!(plain.contains("cargo build 1m12s"), "{plain}");
+        assert!(plain.contains("cargo test 34s"), "{plain}");
+
+        // Five seconds after the end the ended task leaves; nothing else runs.
+        let later = now + TASK_FADE;
+        assert!(
+            shown_tasks(&[ended], later).is_empty(),
+            "an ended task fades out"
+        );
+        assert!(task_line(Vec::new(), later, 60, p).is_none());
+    }
+
+    #[test]
+    fn a_narrow_task_line_cuts_labels_and_still_names_the_first_task() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+        let p = &test_theme().palette;
+        let now = 100;
+        let mut first = background_task("t1", "cargo build --all-targets --locked");
+        first.started_at = 0;
+        let mut second = background_task("t2", "cargo test --workspace --locked");
+        second.started_at = 0;
+        for width in [20, 30, 40, 120] {
+            let line = task_line(
+                shown_tasks(&[first.clone(), second.clone()], now),
+                now,
+                width,
+                p,
+            )
+            .expect("a line");
+            assert!(
+                visible_width(&line) <= width,
+                "{width}: too wide: {:?}",
+                strip_escapes(&line)
+            );
+            let plain = strip_escapes(&line);
+            assert!(plain.contains("cargo"), "{width}: {plain:?}");
+        }
+    }
+
+    #[test]
+    fn the_dock_draws_the_task_line_above_the_composer_and_enter_opens_the_tasks() {
+        use crate::model::session::Command;
+        use crate::ui::render::panel::strip_escapes;
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let theme = test_theme();
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let mut task = background_task("t1", "cargo build");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        task.started_at = (now - 72) * 1000;
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "main".into(),
+            tasks: vec![task.clone()],
+            ..ViewSnapshot::default()
+        })));
+        for fullscreen in [false, true] {
+            app.fullscreen = fullscreen;
+            let rows: Vec<String> = app
+                .frame((80, 30))
+                .live
+                .iter()
+                .map(|row| strip_escapes(row))
+                .collect();
+            let line = rows
+                .iter()
+                .position(|row| row.contains("cargo build 1m12s"))
+                .unwrap_or_else(|| panic!("{fullscreen}: no task line in {rows:?}"));
+            let composer = rows
+                .iter()
+                .position(|row| row.contains('╭'))
+                .expect("the composer's top border");
+            assert!(line < composer, "{fullscreen}: the line sits above it");
+        }
+
+        app.fullscreen = false;
+        app.handle_input(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Enter,
+            Modifiers::NONE,
+        )));
+        assert!(
+            matches!(app.prompt, Some(Prompt::Tasks(_))),
+            "Enter on the line opens /tasks"
+        );
+        assert!(
+            sent.borrow()
+                .iter()
+                .any(|command| matches!(command, Command::TaskHistory { .. })),
+            "the panel reads the Session's task history"
+        );
     }
 
     #[test]
