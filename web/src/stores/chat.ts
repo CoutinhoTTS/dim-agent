@@ -361,6 +361,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function hydrateTools(channel: Channel, branchId: string, projection: Projection, event: SessionEvent): Promise<void> {
+    if (event.parentCallId !== undefined) return
     const content = event.content
     if (content.kind !== "tool-completed" && content.kind !== "tool-result") return
     const results = content.kind === "tool-result" ? content.results : [{ callId: content.callId, result: content.result }]

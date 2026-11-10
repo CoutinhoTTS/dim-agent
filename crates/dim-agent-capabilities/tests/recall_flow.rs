@@ -984,6 +984,7 @@ impl Recorded {
             sequence: self.events.len() as u64 + 1,
             create_at: self.time,
             tags: None,
+            parent_call_id: None,
             kind,
         }));
         id

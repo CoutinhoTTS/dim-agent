@@ -179,6 +179,7 @@ impl Fixture {
             profile: None,
             client_kind: "other",
             client_name: "Goal flow",
+            protocol_version: 4,
         })
         .await
         .unwrap();

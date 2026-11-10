@@ -197,6 +197,7 @@ mod tests {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,
@@ -792,5 +793,24 @@ mod tests {
                 out
             })
             .collect()
+    }
+    #[test]
+    fn a_program_groups_its_child_calls_without_drawing_the_code() {
+        let mut program = call(
+            "codemode",
+            json!({"code": "const value = await tools.call(\"read\", {path: \"a.rs\"}); return value;"}),
+            Some("ok"),
+        );
+        program.call_id = Some("c1".into());
+        program.tool_lookup_done = true;
+        let mut child = call("read", json!({"path": "a.rs"}), Some("line"));
+        child.call_id = Some("c2".into());
+        child.parent_call_id = Some("c1".into());
+        let rows = [program, child];
+        let collapsed = drawn(&rows, Detail::Collapsed, 80);
+        assert_eq!(collapsed, ["✓ Ran code · 1 tool call ▸"]);
+        let expanded = drawn(&rows, Detail::Expanded, 80).join("\n");
+        assert!(expanded.contains("a.rs"), "{expanded}");
+        assert!(!expanded.contains("tools.call"), "{expanded}");
     }
 }

@@ -716,6 +716,11 @@ pub async fn connect_inner(
         } else {
             "dimcode"
         },
+        protocol_version: if matches!(options.action, crate::args::Action::Acp { .. }) {
+            3
+        } else {
+            4
+        },
     };
     // One client at a time decides whether to reuse, replace or start the
     // daemon; everyone else waits here and then runs the same decision, which

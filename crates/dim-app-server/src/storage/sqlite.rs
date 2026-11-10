@@ -16,7 +16,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 36;
+pub const FORMAT: u32 = 38;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -55,7 +55,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 36))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 38))",
     ),
     (
         "settings_documents",
@@ -95,7 +95,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     ),
     (
         "session_owners",
-        "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)))",
+        "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3, 4)))",
     ),
     (
         "timeline_branches",
@@ -208,6 +208,8 @@ const AGENT_SESSIONS_BEFORE_V27: &str = "CREATE TABLE agent_sessions (session_id
 const AGENTS_BEFORE_V27: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))";
 /// The text of `agent_sessions` from v27 through v29; `schema_of` uses it to
 /// recognize a store older than v30.
+const SESSION_OWNERS_BEFORE_V38: &str = "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)))";
+const V38_SESSION_OWNERS: &str = "DROP INDEX session_owners_by_agent;\nALTER TABLE session_owners RENAME TO session_owners_v37;\nCREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3, 4)));\nINSERT INTO session_owners SELECT session_id, agent_id, protocol_version FROM session_owners_v37;\nDROP TABLE session_owners_v37;\nCREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id);";
 const AGENT_SESSIONS_BEFORE_V30: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id))";
 /// The text of `timeline_events` before v31 adds the two reading switches.
 const TIMELINE_EVENTS_BEFORE_V31: &str = "CREATE TABLE timeline_events (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), last_sequence INTEGER NOT NULL CHECK (last_sequence >= sequence), kind TEXT NOT NULL, body TEXT NOT NULL, event_id TEXT, PRIMARY KEY (session_id, branch_id, sequence), FOREIGN KEY (session_id, branch_id) REFERENCES timeline_branches(session_id, branch_id))";
@@ -229,7 +231,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 22] = [
+const UPGRADES: [(u32, &[&str]); 24] = [
     (
         13,
         &[
@@ -314,6 +316,11 @@ const UPGRADES: [(u32, &[&str]); 22] = [
             "timeline_text_tails",
         ],
     ),
+    // v37: the optional event-envelope `parent_call_id` and child tool-call
+    // batch semantics; the marker only.
+    (36, &[]),
+    // v38: protocol v4 child batches store their connection version.
+    (37, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -344,6 +351,7 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
                 "agent_store_format" => format_table(version),
                 "agent_sessions" if version < 27 => AGENT_SESSIONS_BEFORE_V27.to_owned(),
                 "agent_sessions" if version < 30 => AGENT_SESSIONS_BEFORE_V30.to_owned(),
+                "session_owners" if version < 38 => SESSION_OWNERS_BEFORE_V38.to_owned(),
                 "agents" if version < 27 => AGENTS_BEFORE_V27.to_owned(),
                 "timeline_events" if version < 31 => TIMELINE_EVENTS_BEFORE_V31.to_owned(),
                 _ => sql.to_owned(),
@@ -951,6 +959,9 @@ impl SqliteStorage {
                     }
                     if *from == 35 {
                         super::text::backfill(&tx)?;
+                    }
+                    if *from == 37 {
+                        tx.execute_batch(V38_SESSION_OWNERS).map_err(storage)?;
                     }
                     if *from == 24 {
                         tx.execute_batch("DROP INDEX timeline_events_by_end")

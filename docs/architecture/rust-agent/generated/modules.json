@@ -1284,6 +1284,16 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::tool_registry::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::tool_registry",
+      "file": "crates/dim-agent-capabilities/src/tool_registry.rs",
+      "unexpandedMacros": [
+        "assert",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::toolchain",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -1620,6 +1630,7 @@
         "format",
         "matches",
         "thread_local",
+        "tokio::task_local",
         "unreachable",
         "vec"
       ]
@@ -1645,6 +1656,16 @@
         "map_serializer",
         "matches",
         "missing_scalar"
+      ]
+    },
+    {
+      "id": "dim_agent_runtime::event_property::tests",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime::event_property",
+      "file": "crates/dim-agent-runtime/src/event_property.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
       ]
     },
     {
@@ -3375,7 +3396,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "serde_json::json"
+        "serde_json::json",
+        "vec"
       ]
     },
     {
@@ -15871,6 +15893,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
+        "path HostError::failed",
         "path ToolExecutionContext"
       ]
     },
@@ -15911,6 +15934,7 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path Timeline",
+        "path dim_agent_runtime::core::with_parent_call_id",
         "use dim_agent_runtime::Timeline"
       ]
     },
@@ -15964,6 +15988,7 @@
         "path QuerySelect::Fields",
         "path QuerySpec",
         "path QueryValue::Elements",
+        "path QueryValue::Missing",
         "path QueryValue::Value",
         "path TimelineQuery",
         "use dim_agent_runtime::QueryComparison",
@@ -15991,11 +16016,13 @@
       "references": [
         "path ApprovalCallData",
         "path BranchSource::Tool",
+        "path EventDraft::from",
         "path EventKind::StopInterrupt",
         "path EventKind::ToolCall",
         "path EventKind::ToolCompleted",
         "path EventKind::ToolResult",
         "path EventKind::ToolStart",
+        "path ToolCallData",
         "path ToolCallResult",
         "path ToolCompletedData",
         "path ToolResultData",
@@ -16007,8 +16034,11 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
+        "path ToolDefinition",
+        "path ToolEffect",
         "path ToolResult",
         "path ToolResult::error",
+        "path child",
         "path kind",
         "path tool"
       ]
@@ -16101,6 +16131,13 @@
     },
     {
       "from": "dim_agent_capabilities::tool_registry",
+      "to": "dim_agent_capabilities::tool_registry::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path dim_agent_runtime::SESSION_GROUP"
@@ -16154,6 +16191,39 @@
         "path ToolResult",
         "path ToolSource::Builtin",
         "path tool"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostFuture",
+        "path ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolHandler",
+        "path ToolRegistry",
+        "path ToolSourcesState::default"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolResult",
+        "path ToolResult::text"
       ]
     },
     {
@@ -16590,6 +16660,8 @@
       "to": "dim_agent_runtime::core::timeline",
       "references": [
         "path Timeline",
+        "path dim_agent_runtime::core::current_parent_call_id",
+        "path dim_agent_runtime::core::with_parent_call_id",
         "use dim_agent_runtime::Timeline"
       ]
     },
@@ -18698,6 +18770,13 @@
     },
     {
       "from": "dim_agent_runtime::event_property",
+      "to": "dim_agent_runtime::event_property::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::event_property",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
         "path QueryValue",
@@ -18721,6 +18800,18 @@
       "references": [
         "path AgentEvent",
         "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::event_property::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind::ToolResult",
+        "path ToolResultData",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ToolResultData"
       ]
     },
     {
@@ -21417,6 +21508,13 @@
     },
     {
       "from": "dim_app_server::agent_records",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path crate::protocol::PROTOCOL_VERSION"
+      ]
+    },
+    {
+      "from": "dim_app_server::agent_records",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path SqliteStorage",
@@ -21660,6 +21758,7 @@
         "path SessionOrigin",
         "path crate::protocol::Catalog",
         "path crate::protocol::CatalogResult",
+        "path crate::protocol::PROTOCOL_VERSION",
         "path crate::protocol::SessionInfo",
         "use crate::protocol::AgentInfo",
         "use crate::protocol::SessionOrigin"
@@ -30901,7 +31000,9 @@
         "path AgentEvent",
         "path EventKind::ContextConfigured",
         "path EventKind::SessionForked",
-        "path SessionForkedData"
+        "path EventKind::ToolCall",
+        "path SessionForkedData",
+        "path ToolCallData"
       ]
     },
     {
@@ -30925,7 +31026,8 @@
       "from": "dim_app_server::tree_protocol::tests",
       "to": "dim_app_server::tree_protocol",
       "references": [
-        "path ProductEvent"
+        "path ProductEvent",
+        "path ProductEvent::new"
       ]
     },
     {
@@ -48203,6 +48305,14 @@
     {
       "module": "dim_agent_runtime::config",
       "path": "P::default"
+    },
+    {
+      "module": "dim_agent_runtime::core::timeline",
+      "path": "Clone::clone"
+    },
+    {
+      "module": "dim_agent_runtime::core::timeline",
+      "path": "F::Output"
     },
     {
       "module": "dim_agent_runtime::testing",

@@ -63,6 +63,9 @@ pub struct ViewRow {
     /// The model request a tool call came from: the calls of one request are
     /// drawn as one group.
     pub batch: Option<String>,
+    /// The outer `codemode` call a child call belongs to; absent for a
+    /// top-level call.
+    pub parent_call_id: Option<String>,
     /// Work this row stands for that has not settled yet: a tool call
     /// without its result, or a user message the model has not consumed.
     pub pending: bool,

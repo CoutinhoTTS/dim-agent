@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+dim-codemode.workspace = true
 dim-agent-runtime.workspace = true
 dim-agent-types.workspace = true
 dim-agent-capabilities.workspace = true

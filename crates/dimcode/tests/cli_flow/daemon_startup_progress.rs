@@ -588,7 +588,7 @@ fn a_client_finding_another_daemons_upgrade_waits_for_it() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.catalog");
         assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
         wire.reply(&catalog, json!({"catalog":{"version":1,"disabledModelIds":[],"models":[]}}));
@@ -682,7 +682,7 @@ fn a_progress_note_that_is_not_private_does_not_hold_up_the_start() {
 
 /// The hello of a daemon of another build that an idle replacement stops.
 fn old_hello() -> Value {
-    json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.summaries","daemon.shutdown.completed","daemon.shutdown.ifIdle"]})
+    json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.summaries","daemon.shutdown.completed","daemon.shutdown.ifIdle"]})
 }
 
 /// #1335: a client that already spawned its own daemon and then finds another

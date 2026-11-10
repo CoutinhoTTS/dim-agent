@@ -17,7 +17,7 @@ const { useConnectionStore } = await server.ssrLoadModule("/src/stores/connectio
 function discovery() {
   setActivePinia(createPinia())
   const connection = useConnectionStore()
-  connection.hello = { instanceId: "test", serverVersion: "test", protocolVersion: 3, features: ["provider.list", "provider.catalog", "account.providers"] }
+  connection.hello = { instanceId: "test", serverVersion: "test", protocolVersion: 4, features: ["provider.list", "provider.catalog", "account.providers"] }
   const state = { failedMethod: undefined, collision: false }
   connection.client.call = async (method, params, read) => {
     if (method === state.failedMethod) throw new Error(`${method} is reloading`)

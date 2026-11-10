@@ -37,7 +37,7 @@ fn hello_result(features: &[&str]) -> Value {
     json!({
         "instanceId": "scripted",
         "serverVersion": "test",
-        "protocolVersion": 3,
+        "protocolVersion": 4,
         "features": features,
         "daemonProfile": {"kind": "product"},
     })
@@ -83,6 +83,7 @@ impl Script {
             profile: None,
             client_kind: "cli",
             client_name: "dimcode",
+            protocol_version: 4,
         };
         Client::connect(&config).await.unwrap()
     }

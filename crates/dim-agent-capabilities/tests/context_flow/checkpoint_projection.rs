@@ -18,6 +18,7 @@ fn fixed(events: Vec<EventKind>) -> ContextHistory {
                 sequence: index as u64 + 1,
                 create_at: index as u64,
                 tags: None,
+                parent_call_id: None,
                 kind,
             })
         })
@@ -679,6 +680,7 @@ fn resume(context: &ContextHistory, cut: &str) -> ContextHistory {
             sequence: through + 1,
             create_at: 0,
             tags: None,
+            parent_call_id: None,
             kind: completed(cut, "summary", through, Vec::new()),
         }));
         resumed.positions.push(TimelinePosition {

@@ -444,6 +444,7 @@ async fn serve_one(
         profile: None,
         client_kind: "other",
         client_name: "prompt-eval",
+        protocol_version: 4,
     })
     .await
     {

@@ -891,7 +891,13 @@ impl AgentIndex {
                             AgentError::fault("project authorization", error.to_string())
                         })?;
                 }
-                let session = host.agent.restore_session(id.into()).await?;
+                let version = self
+                    .version_of(id)
+                    .unwrap_or(crate::protocol::PROTOCOL_VERSION);
+                let session = host
+                    .agent
+                    .restore_session_for_version(id.into(), version)
+                    .await?;
                 let ctx = self.ctx.get().expect("AgentsPlugin apply sets its context");
                 ctx.parallel(SessionRestored {
                     agent_id: host.agent_id.clone(),
@@ -1342,6 +1348,8 @@ impl AgentIndex {
         leader: Option<&str>,
         origin: SessionOrigin,
     ) -> dim_agent_runtime::Result<Session> {
+        let mut config = config;
+        config.exclude_codemode_below(version);
         match self
             .prepare_session(host, &config, version, leader, origin)
             .await
@@ -1728,7 +1736,8 @@ impl AgentIndex {
         let version = self
             .version_of(source)
             .ok_or_else(|| AgentError::Closed(source.into()))?;
-        let config = session.config().clone();
+        let mut config = session.config().clone();
+        config.exclude_codemode_below(version);
         let source = source.to_owned();
         let (id, prepare) = self.prepared(config.cwd.clone(), move |fork| {
             Box::pin(async move { store.fork_session(&source, &fork, at).await })
