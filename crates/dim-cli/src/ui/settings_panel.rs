@@ -24,6 +24,7 @@
 //! ╰──────────────────────────────────────────────╯
 //! ```
 
+use crate::model::session::{PromptField, PromptSetting};
 use crate::ui::i18n::t;
 use crate::ui::list_panel::{Event, Item, ListPanel};
 use crate::ui::prompts::Effect;
@@ -47,6 +48,9 @@ pub struct Values {
     /// `Some` is the switch as the daemon reported it; `None` is a read that
     /// has not happened or failed, which the row shows rather than a value.
     pub prompt_suggestion: Option<bool>,
+    /// The `prompts` source's fields: `Some(custom)` is an override, and
+    /// `None` is a read that has not happened or failed.
+    pub prompts: [Option<bool>; 3],
     pub permission: String,
 }
 
@@ -62,11 +66,14 @@ pub enum Setting {
     Notify,
     AcpSessions,
     PromptSuggestion,
+    BasePrompt,
+    SummaryPrompt,
+    SkillsPrompt,
     Permission,
     Isolation,
 }
 
-const ROWS: [(Setting, &str); 11] = [
+const ROWS: [(Setting, &str); 14] = [
     (Setting::Theme, "theme"),
     (Setting::Language, "language"),
     (Setting::StartupForm, "startup-form"),
@@ -76,6 +83,9 @@ const ROWS: [(Setting, &str); 11] = [
     (Setting::Notify, "notify"),
     (Setting::AcpSessions, "acp-sessions"),
     (Setting::PromptSuggestion, "prompt-suggestion"),
+    (Setting::BasePrompt, "base-prompt"),
+    (Setting::SummaryPrompt, "summary-prompt"),
+    (Setting::SkillsPrompt, "skills-prompt"),
     (Setting::Permission, "permission"),
     (Setting::Isolation, "isolation"),
 ];
@@ -104,10 +114,59 @@ impl Setting {
                 | Self::PromptSuggestion
         )
     }
+
+    fn prompt_field(self) -> Option<PromptField> {
+        match self {
+            Self::BasePrompt => Some(PromptField::Base),
+            Self::SummaryPrompt => Some(PromptField::Summary),
+            Self::SkillsPrompt => Some(PromptField::Skills),
+            _ => None,
+        }
+    }
+}
+
+fn prompt_row(field: PromptField) -> Setting {
+    match field {
+        PromptField::Base => Setting::BasePrompt,
+        PromptField::Summary => Setting::SummaryPrompt,
+        PromptField::Skills => Setting::SkillsPrompt,
+    }
+}
+
+fn prompt_label(field: PromptField) -> &'static str {
+    match field {
+        PromptField::Base => "Base prompt",
+        PromptField::Summary => "Compaction prompt",
+        PromptField::Skills => "Skills instructions",
+    }
+}
+
+const HINT: &str = "↑↓ move · Enter select · ←→/Space change · r reset · Esc close";
+const SKILLS_HINT: &str =
+    "skills replaces the marker and call shape; the skill tool and list stay · r reset";
+const PROMPT_HINT: &str = "↑↓ move · Enter edit · r reset · Esc close";
+
+fn hint_for(setting: Setting) -> &'static str {
+    if setting == Setting::SkillsPrompt {
+        SKILLS_HINT
+    } else if setting.prompt_field().is_some() {
+        PROMPT_HINT
+    } else {
+        HINT
+    }
+}
+
+fn prompt_origin(prompt: Option<bool>) -> String {
+    match prompt {
+        Some(true) => format!("{} ›", t("custom")),
+        Some(false) => format!("{} ›", t("built-in")),
+        None => t("Not available").to_owned(),
+    }
 }
 
 pub struct SettingsPanel {
     list: ListPanel,
+    prompts: [Option<bool>; 3],
 }
 
 impl SettingsPanel {
@@ -172,22 +231,26 @@ impl SettingsPanel {
                 },
             ));
         }
+        items.push(Item::heading(t("Prompts")));
+        for (index, field) in PromptField::ALL.into_iter().enumerate() {
+            items.push(row(
+                prompt_row(field),
+                prompt_label(field),
+                prompt_origin(values.prompts[index]),
+            ));
+        }
         items.extend([
             Item::heading(t("Permissions")),
             row(Setting::Permission, "Permission", link(&values.permission)),
             row(Setting::Isolation, "Process isolation", link("")),
         ]);
-        let mut list = ListPanel::new(
-            "Settings",
-            "↑↓ move · Enter select · ←→/Space change · Esc close",
-            "",
-            "",
-            "",
-            false,
-        )
-        .without_filter();
+        let mut list = ListPanel::new("Settings", HINT, "", "", "", false).without_filter();
         list.set_items(Ok(items), Some(select.id()));
-        Self { list }
+        list.set_hint(t(hint_for(select)).to_owned());
+        Self {
+            list,
+            prompts: values.prompts,
+        }
     }
 
     /// A paste goes into the filter.
@@ -207,6 +270,24 @@ impl SettingsPanel {
             .set_detail(Setting::PromptSuggestion.id(), t("Not available"));
     }
 
+    /// Shows each prompt text's origin once the source has been read.
+    pub fn set_prompts(&mut self, setting: &PromptSetting) {
+        for (index, field) in PromptField::ALL.into_iter().enumerate() {
+            self.prompts[index] = Some(setting.text(field).is_some());
+            self.list
+                .set_detail(prompt_row(field).id(), prompt_origin(self.prompts[index]));
+        }
+    }
+
+    /// Shows that the prompts source could not be read.
+    pub fn set_prompts_unavailable(&mut self) {
+        self.prompts = [None; 3];
+        for field in PromptField::ALL {
+            self.list
+                .set_detail(prompt_row(field).id(), t("Not available"));
+        }
+    }
+
     pub fn selected(&self) -> Setting {
         self.list
             .selected_id()
@@ -216,6 +297,16 @@ impl SettingsPanel {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         let setting = self.selected();
+        if let Some(field) = setting.prompt_field() {
+            let custom = PromptField::ALL
+                .iter()
+                .position(|candidate| *candidate == field)
+                .and_then(|index| self.prompts[index])
+                == Some(true);
+            if key.mods.0 == 0 && key.code == KeyCode::Char('r') && custom {
+                return Effect::ResetPrompt(field);
+            }
+        }
         if setting.switch()
             && key.mods.0 == 0
             && matches!(
@@ -225,11 +316,23 @@ impl SettingsPanel {
         {
             return Effect::Setting(setting);
         }
-        match self.list.handle_key(key) {
+        let event = self.list.handle_key(key);
+        self.set_hint();
+        match event {
             Event::Close => Effect::Close,
-            Event::Pick(id) => Setting::of(&id).map_or(Effect::None, Effect::Setting),
+            Event::Pick(id) => match Setting::of(&id) {
+                Some(setting) => match setting.prompt_field() {
+                    Some(field) => Effect::EditPrompt(field),
+                    None => Effect::Setting(setting),
+                },
+                None => Effect::None,
+            },
             Event::None | Event::Refresh => Effect::None,
         }
+    }
+
+    fn set_hint(&mut self) {
+        self.list.set_hint(t(hint_for(self.selected())).to_owned());
     }
 
     pub fn render(&self, width: usize, rows: usize, p: &Palette) -> Vec<String> {

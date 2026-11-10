@@ -83,6 +83,12 @@ Commands:\n\
   hooks edit                       Edit the user's hook document\n\
   hooks set PATH                   Write the user's hook document from PATH,\n\
                                    or from stdin for -\n\
+  prompt                           List the built-in prompt overrides\n\
+  prompt show NAME                 Print one override (base, summary, skills)\n\
+  prompt edit NAME                 Edit one override in the editor; an\n\
+                                   empty draft writes nothing\n\
+  prompt set NAME PATH             Write one override from PATH, or stdin for -\n\
+  prompt reset NAME                Remove one override\n\
   scheduled list                   List scheduled jobs, their windows and\n\
                                    last runs\n\
   scheduled enable|disable ID      Pause or resume one job\n\
@@ -365,6 +371,8 @@ pub enum Action {
     McpImport(McpImport),
     /// `<area> ...`: one request to a management area's owner.
     Management(crate::model::session::ManagementRequest),
+    /// `prompt ...`: the user's overrides of the built-in policy texts.
+    Prompt(crate::prompt_command::Command),
     /// `<area> edit [ID]`: the area's document in the external editor, or one
     /// entry's for an area whose documents are per entry.
     ManagementEdit {
@@ -1160,6 +1168,31 @@ impl Options {
                         action,
                     });
                 }
+                "prompt" if matches!(options.action, Action::Chat) => {
+                    use crate::prompt_command::{Command, field};
+                    options.action = match args.next().as_deref() {
+                        None => Action::Prompt(Command::List),
+                        Some("show") => Action::Prompt(Command::Show {
+                            field: field(&value(&mut args)?)?,
+                        }),
+                        Some("edit") => Action::Prompt(Command::Edit {
+                            field: field(&value(&mut args)?)?,
+                        }),
+                        Some("set") => Action::Prompt(Command::Set {
+                            field: field(&value(&mut args)?)?,
+                            path: value(&mut args)?,
+                        }),
+                        Some("reset") => Action::Prompt(Command::Reset {
+                            field: field(&value(&mut args)?)?,
+                        }),
+                        Some(other) => {
+                            return Err(format!(
+                                "Use prompt [show|edit|set|reset] NAME, or prompt alone to list; {other} is not a prompt command"
+                            )
+                            .into());
+                        }
+                    };
+                }
                 "hooks" if matches!(options.action, Action::Chat) => {
                     use crate::model::session::{Area, ManagementAction, ManagementRequest};
                     let verb = value(&mut args)?;
@@ -1930,6 +1963,7 @@ impl Options {
             | Action::ManagementAdd { area, .. }
             | Action::ManagementStart { area, .. } => area.names_workspace(),
             Action::Modality(_)
+            | Action::Prompt(_)
             | Action::Realtime { .. }
             | Action::Migration(_)
             | Action::Acp { .. }

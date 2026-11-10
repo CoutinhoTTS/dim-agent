@@ -648,6 +648,48 @@ A model permitted to write the settings source can change the next process's bou
 a user can through this control; that write creates no grant and changes no running process
 ([ADR 011 D2](../adr/011-execution-settings.md)). File access is not OS isolation for shell code.
 
+## Prompt overrides
+
+`/settings` lists the three policy texts under `Prompts`: `Base prompt`, `Compaction prompt` and
+`Skills instructions`. A row shows `built-in`, `custom` or `Not available`, and it is read from
+the daemon's `prompts` Settings source when the panel opens. Enter opens the current text in
+`$VISUAL`, `$EDITOR` or the platform default; `r` on a custom row removes the override after
+keeping the old text in a draft file. An empty draft writes nothing. A save replaces one field
+and preserves the others, and applies to new Sessions.
+
+```text
++------------------------------------------+
+| Settings                                 |
+|   Interface                              |
+|   ...                                    |
+|   Prompts                                |
+| > Base prompt                built-in >  |
+|   Compaction prompt          custom >    |
+|   Skills instructions        built-in >  |
+|   Permissions                            |
+|   ...                                    |
+| up/down move · Enter edit · r reset      |
++------------------------------------------+
+```
+
+The headless surface is `dimcode prompt`:
+
+| Command | What it does |
+| --- | --- |
+| `dimcode prompt` | List the `prompts` source and each text's origin: `base`, `summary`, `skills`. |
+| `dimcode prompt show NAME` | Print one override; a built-in text is named on stderr and the command exits nonzero. |
+| `dimcode prompt edit NAME` | Open the override (empty for a built-in) in the external editor; an empty draft writes nothing and is not a reset. |
+| `dimcode prompt set NAME PATH` | Write one override from `PATH`, or from stdin for `-`; empty or whitespace-only text is refused. |
+| `dimcode prompt reset NAME` | Remove one override. |
+
+`NAME` is `base`, `summary` or `skills`. `skills` is a mixed text, and both surfaces warn that
+its override replaces the marker and call shape while the `skill` tool and `dim/skills/list`
+stay. Both surfaces use `settings.read` and `settings.update`
+with `source: "prompts"` and `scope: "user"`: every write reads the revision and the document
+first, changes one field and writes the whole document back, so a concurrent change is reported
+rather than overwritten. `edit` needs a terminal; a failed write keeps the draft and names it.
+The command menu is unchanged: the entry lives inside `/settings`, not as a new slash command.
+
 ## Management surfaces
 
 A management area is one owner's management methods. The App Server serves each area through its

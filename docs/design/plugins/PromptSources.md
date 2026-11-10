@@ -48,6 +48,10 @@ The factory configuration carries the three policy texts, in the shape [the summ
 
 A candidate is installed through the shipped assembly — the same plugin, constructed with a configuration — never by patching text at a request boundary ([model-facing prompts §8.1](../model-prompts.md#81-the-rule)).
 
+### 2.1 The product's user override
+
+The product profile sets no factory text, so the App Server may supply the operator's `base` from its user settings ([prompt overrides](../appserver/prompt-overrides.md)). The port is `BasePromptSettingsHost`, optional and read while the Session's sources are assembled: the factory `base` outranks it, a read failure keeps the built-in text, and the value applies to Sessions loaded after the change. The port replaces one field; the shell and file-encoding guidance stay factory-only, because their shape is per shell edition and platform.
+
 ## 3. The "Agent prompt language" state source
 
 The source names the language the model writes to the operator in ([model-facing prompts §7](../model-prompts.md#7-language)). It settles the case where the operator's environment language and their messages' language disagree — English logs or code pasted into a Chinese session — by making the answer language an explicit choice instead of an inference from the last message.
