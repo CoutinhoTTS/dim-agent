@@ -170,12 +170,18 @@ impl Delivery {
             )
     }
 
-    /// Whether this design wrote the record (A.7): a `session` delivery names
-    /// its branch from the start, a `launch` delivery is `delivering` before
-    /// its Session exists, and only this design's lookup pass writes
-    /// `attempts` — an earlier build's reader refuses it on a legacy record.
-    /// `job_revision` is not evidence: every record an earlier build wrote
-    /// carries it too.
+    /// Whether this design wrote the record (A.7). The two writers' state
+    /// vocabularies overlap only on `delivering`, `delivered`, `failed`,
+    /// `lost` and `missed`, and an earlier build's record in those states
+    /// satisfies this design's invariants too, so classifying by shape is
+    /// safe: its `launch` records are `launching`, `submitted`, `running`,
+    /// `completed`, `cancelled`, `timed_out` or `skipped`, which carry
+    /// neither `delivering`/`delivered` nor a `branch_id`, so they fall to
+    /// `validate_legacy`; its `session` records do carry the overlapping
+    /// states and a `branch_id`, and pass `validate_own` because that path
+    /// writes `session_origin` and `policy` together or not at all.
+    /// `attempts` is this design's lookup pass alone. `job_revision` is not
+    /// evidence: every record an earlier build wrote carries it too.
     fn written_here(&self) -> bool {
         self.branch_id.is_some()
             || self.attempts.is_some()

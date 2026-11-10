@@ -187,6 +187,48 @@ fn legacy_launch_record(run_id: &str, job_id: &str, state: &str) -> Value {
     record
 }
 
+/// The states an earlier build wrote for a `session` target (A.7), and the
+/// `detail` each carried. Its `delivering`/`delivered`/`failed`/`missed` are
+/// the states both vocabularies name, so these are the records that reach
+/// `validate_own` rather than `validate_legacy`.
+const LEGACY_SESSION_RECORDS: [(&str, &str); 4] = [
+    ("delivering", ""),
+    ("delivered", ""),
+    ("failed", "branch_missing"),
+    ("missed", "missed"),
+];
+
+/// A `session` record in the shape an earlier build wrote, field for field
+/// (`engine.rs`'s `record()`, `settle_delivered()` and `finish()` before this
+/// change): the write named the Session and its branch with no stop time,
+/// origin or policy, `settle_delivered()` added the receipt and `ended_at`,
+/// and `finish()` added `ended_at` and `detail`. A `missed` window wrote
+/// neither a Session nor a branch. Every record carried `job_revision`.
+fn legacy_session_record(run_id: &str, job_id: &str, state: &str, detail: &str) -> Value {
+    let at = "2026-01-01T00:00:00.000Z";
+    let named = state != "missed";
+    let mut record = json!({
+        "run_id": run_id,
+        "job_id": job_id,
+        "window": at,
+        "state": state,
+        "submission_id": format!("scheduler:{run_id}"),
+        "created_at": at,
+        "detail": detail,
+        "job_revision": 1,
+    });
+    if named {
+        record["session_id"] = json!("legacy-session");
+        record["branch_id"] = json!("main");
+    }
+    if state == "delivered" {
+        record["input_event_id"] = json!(format!("{run_id}-input"));
+    }
+    if matches!(state, "delivered" | "failed" | "missed") {
+        record["ended_at"] = json!(at);
+    }
+    record
+}
 /// A restart leaves an earlier build's records exactly as written, active and
 /// terminal alike: nothing settles them, nothing is written again, and the
 /// store still loads (A.7).
@@ -252,6 +294,156 @@ async fn a_restart_leaves_earlier_build_records_as_written() {
         seeded,
         "the records keep their bytes"
     );
+}
+
+/// A restart keeps an earlier build's settled `session` records as written.
+/// These are the records whose states both vocabularies name, so they reach
+/// the current invariants rather than the legacy ones; an answer of `accepted`
+/// or no lookup at all leaves every byte alone.
+///
+/// `delivering` is covered separately: it is the one state a restart does act
+/// on, and it acts the same way an earlier build did (A.6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_leaves_earlier_build_session_records_as_written() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir_all(home.path().join("scheduler")).unwrap();
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    select_model(&mut client).await;
+
+    let saved: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"name": "nightly", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Summarize the day.",
+                "target": {"kind": "launch", "cwd": home.path()}}}),
+        )
+        .await
+        .unwrap();
+    let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let settled: Vec<(&str, &str)> = LEGACY_SESSION_RECORDS
+        .iter()
+        .copied()
+        .filter(|(state, _)| *state != "delivering")
+        .collect();
+    let seeded: Vec<Value> = settled
+        .iter()
+        .map(|(state, detail)| {
+            legacy_session_record(&format!("legacy-{state}"), &job_id, state, detail)
+        })
+        .collect();
+    edit_runs(home.path(), |runs| runs.extend(seeded.clone()));
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let history: Value = client
+        .typed::<Value>("schedule.history", json!({"job_id": job_id, "limit": 50}))
+        .await
+        .unwrap();
+    let shown = history["runs"].as_array().unwrap();
+    for (state, _) in settled {
+        let run_id = format!("legacy-{state}");
+        assert!(
+            shown
+                .iter()
+                .any(|run| run["run_id"] == run_id.as_str() && run["state"] == *state),
+            "{state} is shown as written: {history}"
+        );
+    }
+    assert_eq!(model.count(), 0, "recovery submits no turn");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    assert_eq!(
+        stored_runs(home.path()),
+        seeded,
+        "the records keep their bytes"
+    );
+}
+
+/// An earlier build's `session` record still in `delivering` is settled by
+/// lookup, exactly as that build settled it (A.6): a target that is gone
+/// answers `session_closed`, the record turns `failed` with that `detail`,
+/// and the restart writes once. This is not history being rewritten — it is
+/// the lookup the record was left waiting for.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_settles_an_earlier_build_delivering_session_record() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir_all(home.path().join("scheduler")).unwrap();
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    select_model(&mut client).await;
+
+    let saved: Value = client
+        .typed(
+            "schedule.save",
+            json!({"job": {"name": "nightly", "schedule": {"at": "2030-01-01T00:00:00Z"},
+                "prompt": "Summarize the day.",
+                "target": {"kind": "launch", "cwd": home.path()}}}),
+        )
+        .await
+        .unwrap();
+    let job_id = saved["job"]["id"].as_str().unwrap().to_owned();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let seeded = vec![legacy_session_record(
+        "legacy-delivering",
+        &job_id,
+        "delivering",
+        "",
+    )];
+    edit_runs(home.path(), |runs| runs.extend(seeded.clone()));
+
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let settled: Value = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let history: Value = client
+                .typed("schedule.history", json!({"job_id": job_id, "limit": 50}))
+                .await
+                .unwrap();
+            let run = history["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|run| run["run_id"] == json!("legacy-delivering"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            if !run.is_null() && run["state"] != json!("delivering") {
+                return run;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the delivering record settles");
+    assert_eq!(settled["state"], "failed", "{settled}");
+    assert_eq!(settled["detail"], "session_closed", "{settled}");
+    assert_eq!(
+        settled["attempts"],
+        json!(1),
+        "the pass persists its attempt: {settled}"
+    );
+    assert_eq!(model.count(), 0, "recovery submits no turn");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
 }
 
 /// A launch delivery whose input was never confirmed is settled by lookup at
