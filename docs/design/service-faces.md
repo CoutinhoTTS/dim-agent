@@ -95,11 +95,11 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `scheduleJobs` | 新数据面 `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md) 的 flat `JobRequest`/`JobReply`；Rust 实现是 `call(request, caller)`，dispatcher 拼成 flat request。`Caller`/`JobReply` 补 serde，`Caller` 用 camelCase |
 | `wakeups` | 新数据面 `wakeups.create/list/cancel` | SchedulerSession 同时注入 `ScheduleJobs` 和 `Wakeups`；只做 `scheduleJobs` 不够。形状按 [Scheduler](plugins/Scheduler.md) §10.2 |
 | `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
-| `managedSearch` | 新数据面，只含 `search` | `managedProviders` 保持 internal(secret)，账号/token 不出去 |
+| `managedSearch` | 新数据面，只含 `search` | 原名字保持 internal(secret)，账号/token 不出去 |
 
 `workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致。它不在 109 个 Rust product-profile 名字里，而在该包自己的 provides 目录里；#1292 不新增 provider，只核对形状。
 
-`settingsService` 和 `modelHost` **不进第一批**：它们保留类型化调用。`settings.read` 会新建取消 token、并返回 `SettingsResult` 信封；GoalBranch 需要自己的 stop token，改成数据面会丢取消。`auxiliaryModel.complete` 没有 tools、config 和 cached prefix；PromptSuggestion 克隆的是整轮 `ModelRequest`，换过去是行为变化，不只是形状。它们已有数据兄弟给其他消费者；有 leaf 消费者时再按 §4 的规则扩展。
+两个 owner API **不进第一批**：它们保留类型化调用。`settings.read` 会新建取消 token、并返回 `SettingsResult` 信封；GoalBranch 需要自己的 stop token，改成数据面会丢取消。`auxiliaryModel.complete` 没有 tools、config 和 cached prefix；PromptSuggestion 克隆的是整轮 `ModelRequest`，换过去是行为变化，不只是形状。它们已有数据兄弟给其他消费者；有 leaf 消费者时再按 §4 的规则扩展。
 
 ### 3.3 所有者 API，已有数据兄弟
 
@@ -136,22 +136,82 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 这些面即使有数据接口，实例核心仍默认留在宿主；它们列在这里是为了说明“对象形状”不是永久 internal，而是需要操作化；原因 `object`。
 
 ### 3.5 热路径与顺序：契约上 internal
-
-`agentLoop`、`loopState`、`modelProvider`、`prompt`、`contextPreparation`、`toolBinding`、`toolExecutor`、`branchOpening`、`configurationPublisher`、`configureControl`、`fileReads`、`branchLine`、`submitChecks`、`commandRulesHost`、`promptHost`、`promptRegistry`、`initialPromptConfiguration`、`historyRenderer`、`contextModelHost`、`prepareModelHost`、`prepareContextHost`、`compactionStrategyHost`、`faultReporter`。
-
 原因 `hot-path`：每回合/每条输入的状态机、严格本地顺序，或同步回调。跨了要重写顺序和失败语义，收益不成比例。
 
+| 名字 | scope | provider | reason | 动作 |
+| --- | --- | --- | --- | --- |
+| `agentLoop` | branch | Loop | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `loopState` | branch | Loop | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `modelProvider` | branch | ModelProvider | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `prompt` | branch | Prompt | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `contextPreparation` | branch | ContextPreparation | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `toolBinding` | branch | ToolBinding | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `toolExecutor` | branch | ToolExecutor | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `branchOpening` | branch | BranchScope | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `configurationPublisher` | branch | ContextPreparation | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `configureControl` | branch | Prompt | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `fileReads` | branch | FileReads | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `branchLine` | branch | BranchLine | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `submitChecks` | session | InputMethods | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `commandRulesHost` | session | CommandRules | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `promptHost` | session | PromptRegistry | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `promptRegistry` | session | PromptRegistry | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `initialPromptConfiguration` | session | PromptRegistry | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `historyRenderer` | session | SessionScope | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `contextModelHost` | session | SessionScope | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `prepareModelHost` | session | PrepareModelHost | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `prepareContextHost` | session | SessionScope | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `compactionStrategyHost` | session | ProductSummaryStrategy | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+| `faultReporter` | session | SessionScope | hot-path | 留宿主；有 leaf 消费者时再加数据面 |
+
 ### 3.6 入口、secret 与宿主资源
+原因 `control`（入口/控制面）、`secret`（凭据/token）或 `host-resource`（FS 索引、活进程）。`managedProviders` 的搜索走新的 `managedSearch`；账号与 token 仍留在这个 internal 名字上。
 
-`serverControl`、`connectionHub`、`pluginFileTransactions`、`publication`、`mcpAuth`、`grokOAuthService`、`openAICodexOAuthService`、`uiHost`、`uiExtensions`、`mentionIndex`、`skillsCatalog`、`mcpService`、`hooksService`、`providerService`、`providerConnectionResolver`、`collaboration`、`sessionLoader`、`timelineFactory`、`sessionSkills`、`skillsBranch`、`managedProviders`。
-
-逐项原因：`serverControl`、`connectionHub`、`uiHost`、`uiExtensions`、`sessionLoader`、`timelineFactory` 是 `control`；`mcpAuth`、`grokOAuthService`、`openAICodexOAuthService`、`providerService`、`managedProviders` 是 `secret`；`pluginFileTransactions`、`publication`、`mentionIndex`、`skillsCatalog`、`mcpService`、`hooksService`、`providerConnectionResolver`、`collaboration`、`sessionSkills`、`skillsBranch` 是 `host-resource`。`managedProviders` 的搜索走新的 `managedSearch`；账号与 token 仍留在这个 internal 名字上。
+| 名字 | scope | provider | reason | 动作 |
+| --- | --- | --- | --- | --- |
+| `serverControl` | process | ServerControl | control | 留宿主/入口/secret |
+| `connectionHub` | process | Connection | control | 留宿主/入口/secret |
+| `pluginFileTransactions` | process | PluginFiles | host-resource | 留宿主/入口/secret |
+| `publication` | process | McpPublication | host-resource | 留宿主/入口/secret |
+| `mcpAuth` | process | Mcp | secret | 留宿主/入口/secret |
+| `grokOAuthService` | process | GrokOAuth | secret | 留宿主/入口/secret |
+| `openAICodexOAuthService` | process | OpenAICodexOAuth | secret | 留宿主/入口/secret |
+| `uiHost` | process | UiHost | control | 留宿主/入口/secret |
+| `uiExtensions` | process | UiExtensions | control | 留宿主/入口/secret |
+| `mentionIndex` | process | WorkspaceToolsOwner | host-resource | 留宿主/入口/secret |
+| `skillsCatalog` | process | SkillsCatalog | host-resource | 留宿主/入口/secret |
+| `mcpService` | process | Mcp | host-resource | 留宿主/入口/secret |
+| `hooksService` | process | HooksSettings | host-resource | 留宿主/入口/secret |
+| `providerService` | process | Provider | secret | 留宿主/入口/secret |
+| `providerConnectionResolver` | process | Provider | host-resource | 留宿主/入口/secret |
+| `collaboration` | process | Collaboration | host-resource | 留宿主/入口/secret |
+| `sessionLoader` | session | SessionScope | control | 留宿主/入口/secret |
+| `timelineFactory` | session | SessionScope | control | 留宿主/入口/secret |
+| `sessionSkills` | session | Skills | host-resource | 留宿主/入口/secret |
+| `skillsBranch` | branch | SkillsBranch | host-resource | 留宿主/入口/secret |
+| `managedProviders` | process | ManagedProviders | secret | 留宿主/入口/secret |
 
 ### 3.7 数据内容，但还没有 leaf 消费者
-
-`executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost`、`modelSelectionHost`、`modalityConnectionHost`、`worktreeAssociations`、`listenAddresses`、`credentialVariablesHost`、`reservedMethods`、`agentConfig`、`collaborationConfig`、`skillsConfig`、`collaborationDirectory`、`sessionClientsHost`、`collaborationSession`。
-
 原因 `legacy-no-consumer`：内容是数据，但还没有 leaf 消费者。它们不是“永远不能跨”。
+
+| 名字 | scope | provider | reason | 动作 |
+| --- | --- | --- | --- | --- |
+| `executionSettingsHost` | process | ExecutionSettings | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `toolchainSourceHost` | process | ToolchainSource | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `selectableModelsHost` | process | Provider | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `modelSelectionHost` | process | Provider | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `worktreeAssociations` | process | SessionStore | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `listenAddresses` | process | Transport | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `credentialVariablesHost` | process | root | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `reservedMethods` | process | — | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `agentConfig` | session | SessionScope | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `collaborationConfig` | session | SessionScope | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `skillsConfig` | session | SessionScope | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `collaborationDirectory` | process | CollaborationDirectory | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `sessionClientsHost` | process | Connection | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `collaborationSession` | session | CollaborationSession | legacy-no-consumer | 有 leaf 消费者时加数据面 |
 
 ## 4. 第一批改造（#1292）
 
