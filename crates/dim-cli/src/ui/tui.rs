@@ -5828,10 +5828,13 @@ impl App {
     /// The `@` mention root does not move: interactive local file paths keep
     /// the CLI's selected `--cwd` as their base, whichever Session is
     /// attached (cli-attachment-input), and the reported workspace may be a
-    /// directory this client cannot see.
+    /// directory this client cannot see. When the border names a directory
+    /// other than that base, the file picker's title names the base, so the
+    /// screen still says which files a mention reads.
     fn show_workspace(&mut self, cwd: Option<&str>) {
         let cwd = cwd.unwrap_or(&self.cwd_key);
         self.workspace = crate::ui::tilde(cwd);
+        self.composer.name_root(cwd != self.cwd_key);
         self.git_head = git_head(cwd);
         self.branch = self.git_head.as_deref().and_then(git_branch);
     }
@@ -8296,14 +8299,15 @@ mod tests {
             );
             row
         };
-        // The `@` file names the picker panel offers for `@note`, read from
-        // one frame once the walk reports that it has finished.
-        let candidates = |app: &mut App| -> Vec<String> {
+        // The `@` picker for `@note`: the panel's title row and the file
+        // names it offers, read from one frame once the walk reports that it
+        // has finished.
+        let picker = |app: &mut App, cols: u16| -> (String, Vec<String>) {
             let names = ["launch-note.txt", "session-note.txt"];
             typed(app, "@note");
             let started = Instant::now();
             let rows = loop {
-                let frame = app.frame((80, 30));
+                let frame = app.frame((cols, 30));
                 let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
                 if !app.composer.mention_searching() {
                     break rows;
@@ -8315,24 +8319,38 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             };
             app.composer.clear();
-            names
+            // The title row is where the panel writes its heading: the row
+            // carrying the `Files` title, whatever its box draws above it.
+            let title = rows
+                .iter()
+                .find(|row| row.contains("Files"))
+                .cloned()
+                .expect("the picker draws its title");
+            let offered = names
                 .iter()
                 .filter(|name| rows.iter().any(|row| row.contains(*name)))
                 .map(|name| (*name).to_owned())
-                .collect()
+                .collect();
+            (title, offered)
         };
 
         // Launched in A: Home names A and its branch, and `@` offers A's
-        // files, the base pasted and dropped paths also use.
+        // files, the base pasted and dropped paths also use. The picker's
+        // title says nothing extra while the border names that base too.
         let row = border(&mut app, 160);
         assert!(
             row.contains(&format!("{launch_workspace} (launch-line)")),
             "Home names the launch workspace: {row:?}"
         );
+        let (title, offered) = picker(&mut app, 160);
         assert_eq!(
-            candidates(&mut app),
+            offered,
             ["launch-note.txt"],
             "Home offers the launch workspace's files"
+        );
+        assert!(
+            title.contains("Files") && !title.contains(&launch_workspace),
+            "Home's border already names the base: {title:?}"
         );
 
         // A Session in B is attached, as `/resume` into a sibling worktree
@@ -8356,14 +8374,26 @@ mod tests {
             !row.contains(&launch_workspace),
             "the launch workspace must not stand in for it: {row:?}"
         );
+        let (title, offered) = picker(&mut app, 160);
         assert_eq!(
-            candidates(&mut app),
+            offered,
             ["launch-note.txt"],
             "the mention picker keeps the local `--cwd` while the border names the Session's workspace"
         );
         assert!(
-            !app.composer.mention_searching(),
-            "the picker's candidates were read from a finished walk"
+            title.contains(&format!("Files · {launch_workspace}")),
+            "the picker names the base the border no longer does: {title:?}"
+        );
+        assert!(
+            !title.contains(&session_workspace),
+            "the picker names the base, not the border's workspace: {title:?}"
+        );
+        // Too narrow for the whole path, the title keeps its tail, as the
+        // border's does, so the checkout it ends in is still readable.
+        let (narrow, _) = picker(&mut app, 80);
+        assert!(
+            narrow.contains("Files · …") && narrow.contains("/A"),
+            "a narrow title keeps the path's tail: {narrow:?}"
         );
 
         // `/new` goes Home: the Session is gone and the launch workspace is
@@ -8378,10 +8408,15 @@ mod tests {
             row.contains(&format!("{launch_workspace} (launch-line)")),
             "Home moves the border back to the launch workspace: {row:?}"
         );
+        let (title, offered) = picker(&mut app, 160);
         assert_eq!(
-            candidates(&mut app),
+            offered,
             ["launch-note.txt"],
             "Home keeps the mention picker on the launch workspace"
+        );
+        assert!(
+            !title.contains(&launch_workspace),
+            "Home's border names the base again, so the picker drops it: {title:?}"
         );
     }
 
