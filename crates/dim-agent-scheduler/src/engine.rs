@@ -48,22 +48,29 @@ pub(crate) fn uncertain(code: &str) -> bool {
     is_reloading(code) || matches!(code, "publication_unknown" | "ambiguous")
 }
 
-/// Whether the flow tests' seam drops this write's reply, which leaves an
-/// accepted write's outcome open the way a lost transport reply does (A.5,
+/// Applies the flow tests' seam to one write's reply: it consumes the armed
+/// flag once, right after the call, and turns the reply into a transport
+/// failure — the write reached the target and its answer was lost (A.5,
 /// A.6). Feature `testing` only.
-fn drops_input_reply(shared: &Shared) -> bool {
+fn lose_input_reply(
+    shared: &Shared,
+    reply: Result<Result<Value, String>, String>,
+) -> Result<Result<Value, String>, String> {
     #[cfg(feature = "testing")]
     {
-        shared
+        if shared
             .holds
             .as_ref()
             .is_some_and(|holds| holds.take_lost_input_reply())
+        {
+            return Err("input reply lost".to_owned());
+        }
     }
     #[cfg(not(feature = "testing"))]
     {
         let _ = shared;
-        false
     }
+    reply
 }
 
 /// The codes that say the target can never accept the input: its Session or
@@ -1074,18 +1081,16 @@ async fn write_input(
         "rawBlocks": [{"text": marker(job, &run.run_id)}],
         "content": [{"type": "text", "text": job.prompt}],
     });
-    match sessions(shared.sessions.as_ref(), "input", input).await {
-        Ok(Ok(receipt)) if !drops_input_reply(shared) => {
+    let reply = lose_input_reply(
+        shared,
+        sessions(shared.sessions.as_ref(), "input", input).await,
+    );
+    match reply {
+        Ok(Ok(receipt)) => {
             let input_id = receipt["inputId"]
                 .as_str()
                 .ok_or_else(|| SchedulerError::invalid_data("input reply has no inputId"))?;
             settle_delivered(shared, &run.run_id, input_id).await
-        }
-        // A lost reply leaves the write's outcome open even though the input
-        // was accepted, which is exactly what the lookup settles (A.5, A.6).
-        Ok(Ok(_)) => {
-            lookup_now(shared, &run.run_id).await;
-            Ok(())
         }
         Ok(Err(code)) if uncertain(&code) => {
             lookup_now(shared, &run.run_id).await;
