@@ -121,7 +121,9 @@ ordinary user text, not an authenticated attachment handle.
 Type `@` and a local path to see matching entries. Up/Down selects a suggestion;
 Tab enters a directory or inserts a file, and Esc closes suggestions without changing
 the draft. The displayed `local files` directory is the CLI's selected `--cwd`, including
-after resume. Paths outside that directory remain usable as explicit selections.
+after resume. The border's workspace label names the attached Session's workspace, which can
+differ from `local files` after a cross-workspace resume. Paths outside that directory remain
+usable as explicit selections.
 
 ```text
 local files: /work/project
