@@ -321,7 +321,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | 不含 `interactive`（C2 之前的全部记录，C2 之后的交互式记录） | 交互 | 交互 |
 | `"interactive": false` | 非交互 | 交互（忽略该字段；可以接受） |
 
-`language` 是操作者为该 Session 选择的回复语言：`en`、`zh-CN`、`zh-Hant`、`ja`、`ko`、`id`、`de`、`fr`、`es`、`pt-BR` 与 `pt-PT` 之一，英文名由 [PromptSources §3](../plugins/PromptSources.md#3-agent-prompt-language-状态来源) 给出。`session.create` 接受 `language?`；`session.language.get` 与 `session.language.update` 读取并修改它，更新取一个代码或 `{action: "clear"}`。客户端只在 `hello.features` 列出 `session.language` 时发送创建参数，因为 `session.create` 会拒绝旧版守护进程上的未知字段。记录中没有该成员表示没有选择，也不产生状态块。原生存储保持版本 13，并在 Session 运行时就地更新该成员；旧版守护进程忽略它。fork 随其余配置一起复制该值。
+`language` 是操作者为该 Session 选择的回复语言：`en`、`zh-CN`、`zh-Hant`、`ja`、`ko`、`id`、`de`、`fr`、`es`、`pt-BR` 与 `pt-PT` 之一，英文名由 [PromptSources §3](../plugins/PromptSources.md#3-agent-prompt-language-状态来源) 给出。`session.create` 接受 `language?`；`session.language.get` 与 `session.language.update` 读取并修改它，更新取一个代码或 `{action: "clear"}`。客户端只在 `hello.features` 列出 `session.language` 时发送创建参数，因为 `session.create` 会拒绝旧版守护进程上的未知字段。记录中没有该成员表示没有选择，也不产生状态块。原生存储保持版本 13，并在 Session 运行时就地更新该成员；旧版守护进程忽略它。fork 随其余配置一起复制该值。更新先在 `main` 上采纳，并在回复之前让每个已加载的分支也采纳，因此分支的下一次请求就带着新值、无需唤醒；之后加载的分支读到当前值，各分支的定时检查是兜底。
 
 `tools` 是 Session 可选的挂载列表，创建时确定。`session.create {tools?}` 设置它；不带该参数时 Session 取其 Agent profile 可选的 `tools`，profile 没有列表时 Session 也没有（产品默认如此）。profile 或成员的列表限定该 agent 能看到的工具；有列表的 Collaboration 成员总是挂载 `agent`。没有挂载列表时，Session 按宿主的顺序声明全部宿主工具，再按名称声明部件经 `toolRegistry` 注册的全部工具。有挂载列表时，Session 按列表顺序只声明其中列出的宿主工具与注册工具；`[]` 不声明其中任何一个。两种情况下其他来源（MCP）的工具都排在其后，由来源自己的配置决定。列出但没有任何部件注册的工具不声明，并报告一次；有部件注册后即声明。重复名称使 Session 创建失败。已声明工具的调用是否执行由 Permission 决定，Permission 从不改变工具声明（[session-boundary A.5](session-boundary.md#a5-工具贡献)）。原生存储只在 Session 有挂载列表时写入 `tools`。
 

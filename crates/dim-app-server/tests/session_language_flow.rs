@@ -637,16 +637,6 @@ async fn open_line(client: &mut Client, session: &str, parent: &str, prompt: &st
         .to_owned()
 }
 
-async fn wait_for_language(session: &Session, branch: &str, count: usize) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while language_blocks_on(session, branch).await.len() < count {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the branch's check delivered the language block");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_loaded_side_branch_adopts_an_update_without_a_wake() {
     let home = Home::new();
@@ -659,21 +649,35 @@ async fn a_loaded_side_branch_adopts_an_update_without_a_wake() {
 
     let session = live_session(&server, &sid);
     let turns = turn_starts(&events_on(&session, &side).await);
+    let sent = requests_on(&session, &side).await.len();
     let changed = client.update(&sid, json!("fr")).await;
     assert_eq!(changed["result"]["outcome"], "adopted", "{changed}");
-    wait_for_language(&session, &side, 1).await;
+    // The reply waits for the branch's adoption: the update itself starts no
+    // turn, so the single request that follows belongs to the submission and
+    // must already carry the value.
     assert_eq!(
         turn_starts(&events_on(&session, &side).await),
         turns,
-        "the branch's adoption starts no turn"
+        "the update starts no turn"
     );
 
     client.submit_on(&sid, &side, "second").await;
+    let requests = requests_on(&session, &side).await;
+    assert_eq!(
+        requests.len(),
+        sent + 1,
+        "exactly one request follows the update"
+    );
     let text = last_request_text_on(&session, &side).await;
     assert_eq!(
         text.matches(&format!("{BLOCK}French.")).count(),
         1,
         "{text}"
+    );
+    assert_eq!(
+        turn_starts(&events_on(&session, &side).await),
+        turns + 1,
+        "only the submission's turn runs"
     );
 
     drop(client);

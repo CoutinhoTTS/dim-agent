@@ -3110,6 +3110,7 @@
       "unexpandedMacros": [
         "json",
         "tokio::select",
+        "tracing::warn",
         "vec"
       ]
     },

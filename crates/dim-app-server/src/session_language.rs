@@ -142,6 +142,31 @@ async fn change(
         result = adoption => crate::connection::configuration_outcome(result.map_err(RpcError::from)?)?,
         _ = cancel.cancelled() => return Err(RpcError::interrupted()),
     };
+    // Every loaded branch adopts the value before this reply, so a request on
+    // a side branch right after the update carries it; an idle branch only
+    // gains a state entry and no turn. A cancellation abandons the remaining
+    // branches to the periodic check, as on main. Unloaded branches read the
+    // value when they load, and the periodic check remains the fallback.
+    for info in tree.list() {
+        if info.id == "main" {
+            continue;
+        }
+        let Ok(side) = tree.get(&info.id) else {
+            continue;
+        };
+        let adoption = side.configure(prompt_sources::language_update());
+        let result = tokio::select! {
+            result = adoption => result,
+            _ = cancel.cancelled() => return Err(RpcError::interrupted()),
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                %error,
+                branch = %info.id,
+                "the reply language was not adopted on a loaded branch"
+            );
+        }
+    }
     let mut answer = language_value(applied);
     answer["outcome"] = json!(outcome);
     Ok(answer)
