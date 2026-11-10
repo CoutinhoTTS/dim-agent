@@ -827,8 +827,8 @@ enum LookupStep {
     /// The stored count was already at the bound; the record settled `lost`.
     Exhausted(Box<Delivery>),
     /// This pass persisted the next attempt on the record it returns, whose
-    /// identity is the one the lookup uses.
-    Attempt(Box<Delivery>),
+    /// identity is the one the lookup uses; `attempt` is the count it wrote.
+    Attempt { run: Box<Delivery>, attempt: u32 },
     /// The record settled or moved meanwhile; nothing to look up.
     Settled,
 }
@@ -858,7 +858,13 @@ async fn lookup_once(shared: &Arc<Shared>, run_id: &str) -> Result<(), Scheduler
         }
         run.attempts = Some(attempts + 1);
         run.validate().map_err(SchedulerError::invalid_data)?;
-        Ok((true, LookupStep::Attempt(Box::new(run.clone()))))
+        Ok((
+            true,
+            LookupStep::Attempt {
+                run: Box::new(run.clone()),
+                attempt: attempts + 1,
+            },
+        ))
     })
     .await?;
     match step {
@@ -868,8 +874,7 @@ async fn lookup_once(shared: &Arc<Shared>, run_id: &str) -> Result<(), Scheduler
             shared.spawn(prune(shared.clone()));
             Ok(())
         }
-        LookupStep::Attempt(run) => {
-            let attempt = run.attempts.unwrap_or(0);
+        LookupStep::Attempt { run, attempt } => {
             let (Some(session_id), Some(branch_id)) =
                 (run.session_id.clone(), run.branch_id.clone())
             else {
