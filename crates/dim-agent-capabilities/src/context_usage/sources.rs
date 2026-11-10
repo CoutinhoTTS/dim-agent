@@ -51,6 +51,22 @@ fn measured_prompt(usage: &Usage) -> Option<f64> {
     .then_some(usage.prompt_tokens)
 }
 
+fn message(
+    summary: &mut Summary,
+    counter: &dyn crate::host::ContextCounter,
+    message: &Message,
+) -> Result<()> {
+    let contribution = counter.message(message);
+    let empty = counter.fixed(None, None);
+    let growth = counter.estimate(add(empty, contribution)?) - counter.estimate(empty);
+    if !growth.is_finite() || growth < 0. {
+        return Err(fault("invalid message growth contribution"));
+    }
+    summary.ordinary = add(summary.ordinary, contribution)?;
+    summary.growth = Some(summary.growth.unwrap_or(0.) + growth);
+    Ok(())
+}
+
 impl ContextUsage {
     pub(super) async fn run(&self) -> Result<()> {
         let initial = self.timeline.sequence();
@@ -142,7 +158,7 @@ impl ContextUsage {
             let data: Value = decode(data)?;
             if !matches!(
                 data.get("schema").and_then(Value::as_str),
-                Some("context-usage/v1" | SCHEMA)
+                Some("context-usage/v1" | "context-usage/v2" | SCHEMA)
             ) {
                 return Err(fault("unsupported usage recovery schema"));
             }
@@ -503,22 +519,26 @@ impl ContextUsage {
             } else {
                 None
             };
+            if stream.history.is_empty() {
+                summary.last_entry = Some(LastEntry {
+                    at: initialized,
+                    id: None,
+                });
+            }
             for entry in stream.history {
-                let contribution = counter.message(&entry.message);
                 let at = machine.state.key(&entry.position)?;
+                let mut part = Summary {
+                    last_entry: Some(LastEntry {
+                        at,
+                        id: Some(entry.id),
+                    }),
+                    ..Default::default()
+                };
+                message(&mut part, counter, &entry.message)?;
                 machine.state.root = Some(
                     machine
                         .numeric
-                        .append(
-                            machine.state.root.take(),
-                            Entry {
-                                at,
-                                summary: Summary {
-                                    ordinary: contribution,
-                                    ..Default::default()
-                                },
-                            },
-                        )
+                        .append(machine.state.root.take(), Entry { at, summary: part })
                         .await?,
                 );
             }
@@ -603,6 +623,7 @@ impl ContextUsage {
             && entry.configuration.is_none()
             && entry.compression.is_none()
             && entry.calibration.is_none()
+            && entry.last_entry.is_none()
         {
             return Ok(());
         }
@@ -727,7 +748,11 @@ impl ContextUsage {
                 let mut fields = self.fields(&input, through, &["data"]).await?;
                 let input: InputMessageData = decode(fields.remove(0))?;
                 for projection in render_input(id, &input) {
-                    entry.ordinary = add(entry.ordinary, counter.message(&projection.message))?;
+                    message(&mut entry, counter, &projection.message)?;
+                    entry.last_entry = Some(LastEntry {
+                        at,
+                        id: Some(projection.id),
+                    });
                 }
             }
             "step/model-output-end" => {
@@ -738,7 +763,7 @@ impl ContextUsage {
                 .expect("output settlement fields");
                 let request: String = decode(request)?;
                 let status: String = decode(status)?;
-                if let Some(message) = settled_request_output(
+                if let Some(output) = settled_request_output(
                     &self.timeline,
                     &request,
                     through - 1,
@@ -747,7 +772,11 @@ impl ContextUsage {
                 )
                 .await?
                 {
-                    entry.ordinary = counter.message(&message);
+                    message(&mut entry, counter, &output)?;
+                    entry.last_entry = Some(LastEntry {
+                        at,
+                        id: Some(id.into()),
+                    });
                 }
             }
             "step/tool-result" => {
@@ -769,11 +798,15 @@ impl ContextUsage {
                 .expect("tool result properties");
                 let request: String = decode(request)?;
                 if optional::<String>(call)?.is_none()
-                    && let Some(message) =
+                    && let Some(output) =
                         settled_request_output(&self.timeline, &request, through - 1, false, true)
                             .await?
                 {
-                    entry.ordinary = add(entry.ordinary, counter.message(&message))?
+                    message(&mut entry, counter, &output)?;
+                    entry.last_entry = Some(LastEntry {
+                        at,
+                        id: Some(id.into()),
+                    });
                 }
                 let calls = elements(calls)?
                     .into_iter()
@@ -797,15 +830,28 @@ impl ContextUsage {
                 {
                     return Err(fault("unaligned tool result properties"));
                 }
-                for (((call, content), error), context) in
-                    calls.into_iter().zip(contents).zip(errors).zip(contexts)
+                for (index, (((call, content), error), context)) in calls
+                    .into_iter()
+                    .zip(contents)
+                    .zip(errors)
+                    .zip(contexts)
+                    .enumerate()
                 {
-                    entry.ordinary = add(
-                        entry.ordinary,
-                        counter.message(&tool_result_message(&call, &content, error)),
+                    message(
+                        &mut entry,
+                        counter,
+                        &tool_result_message(&call, &content, error),
                     )?;
-                    for message in context.into_iter().flatten() {
-                        entry.ordinary = add(entry.ordinary, counter.message(&message))?;
+                    entry.last_entry = Some(LastEntry {
+                        at,
+                        id: Some(format!("{id}:{index}")),
+                    });
+                    for (context_index, context) in context.into_iter().flatten().enumerate() {
+                        message(&mut entry, counter, &context)?;
+                        entry.last_entry = Some(LastEntry {
+                            at,
+                            id: Some(format!("{id}:{index}:{context_index}")),
+                        });
                     }
                 }
             }
@@ -831,8 +877,12 @@ impl ContextUsage {
                 let mut fields = self.fields(&cut, through, &["position"]).await?;
                 let cut: TimelinePosition = decode(fields.remove(0))?;
                 let cut = machine.state.key(&cut)?;
-                let previous = machine.state.summary().compression;
-                if previous.as_ref().is_some_and(|previous| previous.cut > cut) {
+                let current = machine.state.summary();
+                if current
+                    .compression
+                    .as_ref()
+                    .is_some_and(|previous| previous.cut > cut)
+                {
                     return Err(fault("compaction cut precedes the active cut"));
                 }
                 let replacement: Vec<Message> = decode(replacement)?;
@@ -849,6 +899,13 @@ impl ContextUsage {
                     .prefix(machine.state.root.as_ref(), cut, false)
                     .await?
                     .ordinary;
+                if current
+                    .last_entry
+                    .as_ref()
+                    .is_some_and(|last| last.id.is_some() && last.at < cut)
+                {
+                    entry.last_entry = Some(LastEntry { at, id: None });
+                }
                 entry.compression = Some(Compression {
                     event_id: id.into(),
                     cut,
@@ -919,7 +976,9 @@ impl ContextUsage {
         let position: TimelinePosition = decode(position)?;
         if !matches!(
             base.schema.as_str(),
-            "context-usage/request-base/v1" | "context-usage/request-base/v2"
+            "context-usage/request-base/v1"
+                | "context-usage/request-base/v2"
+                | "context-usage/request-base/v3"
         ) {
             return Err(fault("unsupported usage request base schema"));
         }

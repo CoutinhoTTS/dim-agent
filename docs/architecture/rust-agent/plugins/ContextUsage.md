@@ -29,8 +29,10 @@ nodes contain no messages. Current reads use the root summary; a fixed earlier
 source boundary reads only its numeric prefix path. With no bound resolver the
 part exposes an unavailable read and starts no work.
 
-Recovery and request references write v2 schemas and accept the previous v1
-shape. A request-specific fixed-content identity keeps its provider calibration
+Recovery and request references write v3 schemas and accept the previous v1/v2
+shapes. Numeric summaries retain the last projected entry and per-message growth
+for fixed-source budget and regrowth checks. Missing legacy metadata remains
+unknown. A request-specific fixed-content identity keeps its provider calibration
 separate from the adopted configuration's current usage.
 
 The source counter shares input, settled-output and tool-result projection rules

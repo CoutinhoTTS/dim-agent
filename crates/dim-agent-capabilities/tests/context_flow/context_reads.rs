@@ -460,6 +460,324 @@ impl TimelineStore for CountContextReads {
 }
 
 #[tokio::test]
+async fn prepared_requests_use_saved_boundaries_and_growth_after_compaction_and_resume() {
+    use dim_agent_capabilities::{context_preparation::ContextPreparation, prompt::Prompt};
+    let store = Arc::new(CountContextReads::default());
+    let mut profile = builder_with_context(
+        Arc::new(EchoModel),
+        HistoryRenderer::default(),
+        Context {
+            threshold: Some(1_000.),
+            ..Context::default()
+        },
+    );
+    profile.timeline_store(store.clone());
+    let agent = MinimalHost::start(&profile).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .service::<Prompt>("main")
+        .unwrap()
+        .configure_loaded(
+            Some(ModelSelection {
+                provider_id: "fixture".into(),
+                model_id: "counter".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            }),
+            vec![],
+        )
+        .await
+        .unwrap();
+    session
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    session
+        .submit("x".repeat(1_200), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let usage = session
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        usage.estimated_input_tokens >= usage.threshold_tokens,
+        "the next preparation must test growth despite being above threshold: {usage:?}"
+    );
+    let first = chain_events(&session, "main", ..).await.unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ContextCompactionStart(_)))
+            .count(),
+        1
+    );
+    store.context_pages.lock().unwrap().clear();
+    session
+        .submit("small".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    session
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.context_pages.lock().unwrap().len(),
+        1,
+        "growth and budget checks must not project a second history"
+    );
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ContextCompactionStart(_)))
+            .count(),
+        1,
+        "too little new history must not trigger another compaction"
+    );
+    let budget = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextBudget(data) => Some(data),
+            _ => None,
+        })
+        .unwrap();
+    assert!(budget.estimated_input_tokens >= usage.threshold_tokens);
+    let source = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextPrepare(data) if data.request_id == budget.request_id => {
+                Some(data.through)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let history = HistoryRenderer::default()
+        .context_in(&session, "main", source)
+        .await
+        .unwrap();
+    assert_eq!(
+        budget.boundary,
+        project_context_history(&history)
+            .unwrap()
+            .last()
+            .map(|entry| entry.id.clone())
+    );
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+    drop(session);
+    store.context_pages.lock().unwrap().clear();
+    let agent = MinimalHost::start(&profile).await.unwrap();
+    let session = agent.restore_session(id).await.unwrap();
+    session
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        store.context_pages.lock().unwrap().is_empty(),
+        "resume must reuse saved numeric boundaries and growth"
+    );
+    session
+        .submit("z".repeat(800), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ContextCompactionStart(_)))
+            .count(),
+        2,
+        "enough growth after resume must still trigger compaction"
+    );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn growth_checks_seek_numeric_boundaries_across_larger_restored_histories() {
+    use dim_agent_capabilities::context_preparation::ContextPreparation;
+    let mut reads = Vec::new();
+    for size in [256usize, 2_048] {
+        let store = Arc::new(CountContextReads::default());
+        store
+            .create_session("growth", &SessionConfig::default())
+            .await
+            .unwrap();
+        let timeline = Timeline::new(
+            Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: "growth".into(),
+                branch_id: "main".into(),
+            },
+            vec![],
+            store.clone(),
+        );
+        let mut drafts = vec![
+            EventDraft::new(EventKind::BranchStart(BranchStartData {
+                parent: None,
+                create_event: None,
+            })),
+            EventDraft::new(EventKind::ContextConfigured(ContextConfiguredData {
+                timeline: "main".into(),
+                revision: "fixture".into(),
+                previous: None,
+                prompt: None,
+                settings: Box::new(ModelConfiguration {
+                    provider_id: "fixture".into(),
+                    model_id: "counter".into(),
+                    capability_snapshot: None,
+                    tools: Some(vec![]),
+                    tool_sources: vec![],
+                    config: None,
+                    metadata: None,
+                }),
+                system: None,
+                system_source: None,
+            })),
+        ];
+        for n in 0..size {
+            let id = format!("historic-{n}");
+            drafts.push(
+                EventDraft::new(EventKind::InputMessage(InputMessageData::text("x", None)))
+                    .with_id(id.clone()),
+            );
+            drafts.push(EventDraft::new(EventKind::InputConsumed(
+                InputConsumedData { input_id: id },
+            )));
+        }
+        timeline
+            .append_batch_registered(drafts, |_| Ok(()))
+            .unwrap();
+        let through = 2 + 2 * (size / 3) as u64;
+        let start = timeline
+            .append(
+                EventKind::ContextCompactionStart(ContextCompactionStartData {
+                    turn_id: Some("fixture".into()),
+                    request_id: Some("attempt".into()),
+                    command: None,
+                    through,
+                    trigger: CompactionTrigger::Threshold,
+                    strategy: "test".into(),
+                })
+                .into(),
+            )
+            .unwrap();
+        timeline
+            .append(
+                EventKind::ContextCompaction(ContextCompactionData {
+                    turn_id: Some("fixture".into()),
+                    request_id: Some("attempt".into()),
+                    command: None,
+                    start: Some(start.sequence),
+                    through,
+                    outcome: ContextCompactionResult::Cancelled {
+                        reason: "fixture settled".into(),
+                    },
+                })
+                .into(),
+            )
+            .unwrap();
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
+        let mut profile = builder_with_context(
+            Arc::new(EchoModel),
+            HistoryRenderer::default(),
+            Context {
+                threshold: Some(100.),
+                window: 1_000_000.,
+                ..Context::default()
+            },
+        );
+        profile.timeline_store(store.clone());
+        let agent = MinimalHost::start(&profile).await.unwrap();
+        let session = agent.restore_session("growth".into()).await.unwrap();
+        session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        agent.close().await.unwrap();
+        drop(session);
+        let agent = MinimalHost::start(&profile).await.unwrap();
+        let session = agent.restore_session("growth".into()).await.unwrap();
+        session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        store.context_pages.lock().unwrap().clear();
+        store.property_queries.lock().unwrap().clear();
+        session
+            .submit("new".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        let mut last = None;
+        for page in store.context_pages.lock().unwrap().iter() {
+            if let (Some(first), Some(end)) = (page.first, page.last) {
+                assert!(
+                    last.is_none_or(|last| first > last),
+                    "the policy reread a historical context range: {page:?}"
+                );
+                last = Some(end);
+            }
+        }
+        let numeric_reads = store.property_queries.lock().unwrap().iter().filter(|query|
+            matches!(&query.select, QuerySelect::Fields { fields } if fields == &["kind", "data"]))
+            .count();
+        reads.push(numeric_reads);
+        assert!(
+            numeric_reads > 0,
+            "this case must read old numeric nodes, not only the in-memory publishing tail"
+        );
+        assert!(
+            numeric_reads <= 12,
+            "numeric growth must seek boundary paths, not enumerate leaves: {reads:?}"
+        );
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ContextCompactionStart(_)))
+                .count(),
+            1,
+            "the saved range has less than a quarter-window of new history"
+        );
+        agent.close().await.unwrap();
+    }
+    assert!(
+        reads[1] <= reads[0] + 4,
+        "8x history should add at most a tree level: {reads:?}"
+    );
+    println!("numeric growth and update node reads: {reads:?}");
+}
+
+#[tokio::test]
 async fn persisted_usage_reads_and_restores_without_projecting_history() {
     for threshold in [None, Some(900.)] {
         let store = Arc::new(CountContextReads::default());

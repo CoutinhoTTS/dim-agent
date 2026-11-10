@@ -61,6 +61,11 @@ cut before returning bodies. Retry control facts use a separate fixed committed
 cutoff above the original content boundary. Provider-baseline estimates come from
 ContextUsage's numeric prefix and request references. Request preparation and final
 validation do not load historical model requests.
+For a compatible numeric reference with a known projection boundary, normal
+preparation also checks growth numerically and returns without a second history
+projection. Recovery, a reusable completed compaction, or an actual threshold
+compaction reads the policy view. Legacy unknown statistics and unsupported
+counters retain their explicit local-count/projection path.
 The mock profile
 has no context resolver. Completed compaction facts remain authoritative across
 checkpoint selection. Recovery snapshots are built from the final adopted cut,

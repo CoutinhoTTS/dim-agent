@@ -670,15 +670,15 @@ impl ContextPolicy {
         Ok(CutOrder { branches, events })
     }
 
-    /// Whether at least `RETAINED_SHARE × B` of new history has accumulated
-    /// since the branch's latest compaction attempt, of any trigger and any
-    /// outcome (ContextCompaction §5.6).
-    async fn regrown(&self, view: &View, model: &dyn ContextModel) -> Result<bool, HostError> {
+    async fn latest_start(
+        &self,
+        through: u64,
+    ) -> Result<Option<(TimelinePosition, u64)>, HostError> {
         let reply = self
             .timeline
             .query(newest_chain(
                 Some("context/compaction-start"),
-                view.through,
+                through,
                 None,
                 QuerySelect::Fields {
                     fields: vec!["position".into(), "data.through".into()],
@@ -689,7 +689,7 @@ impl ContextPolicy {
         let QueryOutput::Rows { rows } = reply.result else {
             unreachable!("field selection returns rows")
         };
-        let start = rows.into_iter().next().map(|row| {
+        Ok(rows.into_iter().next().map(|row| {
             let [
                 QueryValue::Value { value: position },
                 QueryValue::Value { value: through },
@@ -702,7 +702,14 @@ impl ContextPolicy {
             let through: u64 = serde_json::from_value(through.clone())
                 .expect("compaction bound follows the event contract");
             (position, through)
-        });
+        }))
+    }
+
+    /// Whether at least `RETAINED_SHARE × B` of new history has accumulated
+    /// since the branch's latest compaction attempt, of any trigger and any
+    /// outcome (ContextCompaction §5.6).
+    async fn regrown(&self, view: &View, model: &dyn ContextModel) -> Result<bool, HostError> {
+        let start = self.latest_start(view.through).await?;
         Ok(regrown(
             view,
             start.as_ref().map(|(at, through)| (at, *through)),
@@ -961,18 +968,40 @@ impl ContextPolicy {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    fn record_budget(
+        &self,
+        source: &ContextPrepareData,
+        boundary: Option<String>,
+        estimate: &Estimate,
+        model: &dyn ContextModel,
+    ) -> Result<(), HostError> {
+        self.timeline
+            .append(
+                EventKind::ContextBudget(ContextBudgetData {
+                    turn_id: source.turn_id.clone(),
+                    request_id: source.request_id.clone(),
+                    boundary,
+                    estimated_input_tokens: estimate.input,
+                    baseline_source: estimate.source,
+                    baseline_prompt_tokens: estimate.baseline,
+                    delta_tokens: estimate.delta,
+                    context_window: model.context_window(),
+                    output_tokens: model.output_tokens(),
+                })
+                .into(),
+            )
+            .map_err(|e| HostError::failed(e.to_string()))?;
+        Ok(())
+    }
+
     pub async fn prepare(
         &self,
         request: Arc<ModelRequest>,
         source: &ContextPrepareData,
-        context: PolicyContext,
-        history: Vec<HistoryEntry>,
         usage: Option<&crate::context_usage::ContextUsage>,
         cancel: CancellationToken,
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<PreparedRequest, HostError> {
-        let boundary = history.last().map(|entry| entry.id.clone());
         let mut reusable = Vec::new();
         let through = self.timeline.committed();
         let mut after = None;
@@ -1049,54 +1078,113 @@ impl ContextPolicy {
                 }
             }
         }
+        let mut preliminary = None;
+        let mut numeric_regrowth = None;
+        if source.recovery.is_none()
+            && !reusable.iter().any(|event| {
+                matches!(&event.kind,
+                EventKind::ContextCompaction(data) if checkpoint(data).is_some())
+            })
+            && let Some(usage) = usage
+        {
+            let model = self
+                .resolver
+                .resolve(request.clone(), cancel.clone())
+                .await?;
+            check_cancel(&cancel)?;
+            let evidence = usage
+                .reference(
+                    &source.request_id,
+                    source.through,
+                    source.through,
+                    &request,
+                    None,
+                    cancel.clone(),
+                )
+                .await?;
+            let ready = evidence.as_ref().and_then(|evidence| {
+                Some((
+                    evidence.boundary.as_ref()?.id.clone(),
+                    evidence.estimate(model.as_ref())?,
+                ))
+            });
+            if let Some((boundary, estimate)) = ready
+                && estimate.input <= input_budget(model.as_ref())
+            {
+                if estimate.input >= model.threshold_tokens() {
+                    numeric_regrowth = match self.latest_start(source.through).await? {
+                        None => Some(true),
+                        Some((mut at, through)) => {
+                            at.sequence = through;
+                            usage
+                                .growth(evidence.as_ref().expect("proved request"), &at)
+                                .await?
+                                .map(|tokens| {
+                                    tokens >= RETAINED_SHARE * input_budget(model.as_ref())
+                                })
+                        }
+                    };
+                }
+                check_cancel(&cancel)?;
+                if estimate.input < model.threshold_tokens() || numeric_regrowth == Some(false) {
+                    self.record_budget(source, boundary, &estimate, model.as_ref())?;
+                    return Ok(PreparedRequest {
+                        request,
+                        through: source.through,
+                        compaction: None,
+                        evidence,
+                    });
+                }
+            }
+            preliminary = Some((model, evidence));
+        }
+        let streamed = self
+            .history
+            .rendered_stream(&self.timeline, source.through, 256)
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let boundary = streamed.history.last().map(|entry| entry.id.clone());
+        let context = PolicyContext::from_stream(&streamed);
+        let original = request.clone();
         let view = self
-            .view(request, context, history, source.through, reusable)
+            .view(request, context, streamed.history, source.through, reusable)
             .await?;
         let prepared_through = view
             .adopted
             .as_ref()
             .map_or(source.through, |(sequence, _)| *sequence);
         let prepared_compaction = view.adopted.as_ref().map(|(_, id)| id.clone());
-        let model = self
-            .resolver
-            .resolve(view.prepared.clone(), cancel.clone())
-            .await?;
-        check_cancel(&cancel)?;
-        let evidence = match usage {
-            Some(usage) => {
-                usage
-                    .reference(
-                        &source.request_id,
-                        source.through,
-                        prepared_through,
-                        &view.prepared,
-                        prepared_compaction.as_deref(),
-                        cancel.clone(),
-                    )
-                    .await?
+        let (model, evidence) = match preliminary {
+            Some(preliminary) if Arc::ptr_eq(&original, &view.prepared) => preliminary,
+            _ => {
+                let model = self
+                    .resolver
+                    .resolve(view.prepared.clone(), cancel.clone())
+                    .await?;
+                check_cancel(&cancel)?;
+                let evidence = match usage {
+                    Some(usage) => {
+                        usage
+                            .reference(
+                                &source.request_id,
+                                source.through,
+                                prepared_through,
+                                &view.prepared,
+                                prepared_compaction.as_deref(),
+                                cancel.clone(),
+                            )
+                            .await?
+                    }
+                    None => None,
+                };
+                (model, evidence)
             }
-            None => None,
         };
         let estimate = evidence
             .as_ref()
             .and_then(|evidence| evidence.estimate(model.as_ref()))
             .unwrap_or_else(|| Self::local_estimate(&view.prepared, model.as_ref()));
-        self.timeline
-            .append(
-                EventKind::ContextBudget(ContextBudgetData {
-                    turn_id: source.turn_id.clone(),
-                    request_id: source.request_id.clone(),
-                    boundary,
-                    estimated_input_tokens: estimate.input,
-                    baseline_source: estimate.source,
-                    baseline_prompt_tokens: estimate.baseline,
-                    delta_tokens: estimate.delta,
-                    context_window: model.context_window(),
-                    output_tokens: model.output_tokens(),
-                })
-                .into(),
-            )
-            .map_err(|e| HostError::failed(e.to_string()))?;
+        self.record_budget(source, boundary, &estimate, model.as_ref())?;
         let provider_budget = source.recovery.clone().or_else(|| {
             (estimate.input > input_budget(model.as_ref())).then(|| ProviderOutputBudgetFacts {
                 input_tokens: estimate.input,
@@ -1115,7 +1203,12 @@ impl ContextPolicy {
                 evidence,
             });
         }
-        if !recovery && !self.regrown(&view, model.as_ref()).await? {
+        if !recovery
+            && !match numeric_regrowth {
+                Some(regrown) => regrown,
+                None => self.regrown(&view, model.as_ref()).await?,
+            }
+        {
             return Ok(PreparedRequest {
                 request: view.prepared,
                 through: prepared_through,

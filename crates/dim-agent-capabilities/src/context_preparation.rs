@@ -1,5 +1,5 @@
 use crate::{
-    context_policy::{ContextPolicy, PolicyContext},
+    context_policy::ContextPolicy,
     history::HistoryRenderer,
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
@@ -849,18 +849,10 @@ impl ContextPreparation {
         };
         let prepared = match &self.policy {
             Some(policy) => {
-                let streamed = policy
-                    .history
-                    .rendered_stream(&self.timeline, source.through, 256)
-                    .await
-                    .map_err(|error| HostError::failed(error.to_string()))?;
-                let context = PolicyContext::from_stream(&streamed);
                 policy
                     .prepare(
                         request,
                         &source,
-                        context,
-                        streamed.history,
                         exact_prefix.then_some(self.usage.as_ref()),
                         cancel.clone(),
                         &cancelled,

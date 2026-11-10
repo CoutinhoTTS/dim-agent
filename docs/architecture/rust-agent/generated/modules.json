@@ -10045,11 +10045,9 @@
       "references": [
         "path ContextPolicy",
         "path ContextPolicy::bind",
-        "path PolicyContext::from_stream",
         "path crate::context_policy::PreparedRequest",
         "path crate::context_policy::check_cancel",
-        "use crate::context_policy::ContextPolicy",
-        "use crate::context_policy::PolicyContext"
+        "use crate::context_policy::ContextPolicy"
       ]
     },
     {
@@ -10465,12 +10463,14 @@
         "path Compression",
         "path Configuration",
         "path Key",
+        "path LastEntry",
         "path add",
         "path fault",
         "use super::Calibration",
         "use super::Compression",
         "use super::Configuration",
         "use super::Key",
+        "use super::LastEntry",
         "use super::add",
         "use super::fault"
       ]
@@ -10487,6 +10487,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path Contribution",
+        "path Contribution::default",
         "use super::Contribution"
       ]
     },
@@ -10551,6 +10552,7 @@
         "path ContextUsage",
         "path CounterConfiguration",
         "path Key",
+        "path LastEntry",
         "path Limits",
         "path Machine",
         "path RESULT",
@@ -10604,6 +10606,7 @@
       "references": [
         "path Contribution::default",
         "path ModelSettings",
+        "path crate::host::ContextCounter",
         "use crate::host::ModelSettings"
       ]
     },

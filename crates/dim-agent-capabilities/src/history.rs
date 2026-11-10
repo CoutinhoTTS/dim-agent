@@ -783,7 +783,7 @@ impl HistoryRenderer {
 /// One message an input or the projection places, with the in-effect
 /// state it changes: `Some((key, None))` ends a key.
 pub(crate) struct ProjectionEntry {
-    id: String,
+    pub(crate) id: String,
     pub(crate) message: Arc<Message>,
     state: Option<(String, Option<ContextBaselineEntry>)>,
 }

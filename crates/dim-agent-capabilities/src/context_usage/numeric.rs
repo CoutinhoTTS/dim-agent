@@ -1,4 +1,4 @@
-use super::{Calibration, Compression, Configuration, Contribution, Key, add, fault};
+use super::{Calibration, Compression, Configuration, Contribution, Key, LastEntry, add, fault};
 use dim_agent_runtime::{BoxFuture, QueryOutput, QuerySelect, QueryValue, Result, Timeline};
 use dim_agent_types::{EventDraft, EventKind, ExtensionEvent};
 use serde::{Deserialize, Serialize};
@@ -20,10 +20,26 @@ pub(super) struct Summary {
     pub calibration: Option<Calibration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_entry: Option<LastEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub growth: Option<f64>,
 }
 
 impl Summary {
     pub fn join(&mut self, next: &Self) -> Result<()> {
+        self.growth = match (self.growth, next.growth) {
+            (Some(left), Some(right)) => Some(left + right),
+            (Some(left), None) if next.ordinary == Contribution::default() => Some(left),
+            (None, Some(right)) if self.ordinary == Contribution::default() => Some(right),
+            _ => None,
+        };
+        if self
+            .growth
+            .is_some_and(|growth| !growth.is_finite() || growth < 0.)
+        {
+            return Err(fault("invalid numeric history growth"));
+        }
         self.ordinary = add(self.ordinary, next.ordinary)?;
         if next.configuration.is_some() {
             self.configuration.clone_from(&next.configuration);
@@ -36,6 +52,9 @@ impl Summary {
         }
         if next.local.is_some() {
             self.local = next.local;
+        }
+        if next.last_entry.is_some() {
+            self.last_entry.clone_from(&next.last_entry);
         }
         Ok(())
     }
@@ -79,6 +98,11 @@ impl Node {
                     }
                 }
                 for entry in entries {
+                    if entry.summary.last_entry.as_ref().is_some_and(|last| {
+                        last.at > entry.at || last.id.as_ref().is_some_and(String::is_empty)
+                    }) {
+                        return Err(fault("invalid numeric history boundary"));
+                    }
                     summary.join(&entry.summary)?;
                 }
                 (entries[0].at, entries[entries.len() - 1].at, 0)
@@ -279,6 +303,52 @@ impl Numeric {
                 }
             }
             Ok(summary)
+        })
+    }
+
+    pub fn growth<'a>(
+        &'a self,
+        root: Option<&'a Reference>,
+        after: Key,
+        through: Key,
+    ) -> BoxFuture<'a, Result<Option<f64>>> {
+        Box::pin(async move {
+            let Some(root) = root else {
+                return Ok(Some(0.));
+            };
+            if root.last <= after || root.first > through {
+                return Ok(Some(0.));
+            }
+            if root.first > after && root.last <= through {
+                return Ok(root
+                    .summary
+                    .growth
+                    .or_else(|| (root.summary.ordinary == Contribution::default()).then_some(0.)));
+            }
+            let mut growth = 0.;
+            match self.load(root).await? {
+                Node::Leaf { entries } => {
+                    for entry in entries {
+                        if entry.at > after && entry.at <= through {
+                            let Some(tokens) = entry.summary.growth.or_else(|| {
+                                (entry.summary.ordinary == Contribution::default()).then_some(0.)
+                            }) else {
+                                return Ok(None);
+                            };
+                            growth += tokens;
+                        }
+                    }
+                }
+                Node::Branch { children } => {
+                    for child in &children {
+                        let Some(tokens) = self.growth(Some(child), after, through).await? else {
+                            return Ok(None);
+                        };
+                        growth += tokens;
+                    }
+                }
+            }
+            Ok(Some(growth))
         })
     }
 

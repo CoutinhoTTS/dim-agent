@@ -1091,6 +1091,7 @@ async fn provider_usage_baseline_counts_new_history_and_ignores_unusable_measure
             .await
             .unwrap();
         store.property_queries.lock().unwrap().clear();
+        store.context_pages.lock().unwrap().clear();
         session
             .submit("second".into(), InputMode::Queue, "main")
             .await
@@ -1102,6 +1103,11 @@ async fn provider_usage_baseline_counts_new_history_and_ignores_unusable_measure
             .usage(CancellationToken::new())
             .await
             .unwrap();
+        assert_eq!(
+            store.context_pages.lock().unwrap().len(),
+            1,
+            "only construction of the actual request may read the context history"
+        );
         for query in store.property_queries.lock().unwrap().iter() {
             let mut pending: Vec<_> = query.filter.iter().collect();
             let mut model_call = false;
@@ -1133,6 +1139,30 @@ async fn provider_usage_baseline_counts_new_history_and_ignores_unusable_measure
             })
             .collect();
         assert_eq!(budgets.len(), 2);
+        for budget in &budgets {
+            let through = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    EventKind::ContextPrepare(data) if data.request_id == budget.request_id => {
+                        Some(data.through)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let history = HistoryRenderer::default()
+                .context_in(&session, "main", through)
+                .await
+                .unwrap();
+            let expected = project_context_history(&history)
+                .unwrap()
+                .last()
+                .map(|entry| entry.id.clone());
+            assert_eq!(
+                budget.boundary, expected,
+                "the budget retains the actual last projected entry ID"
+            );
+        }
+
         assert_eq!(budgets[0].baseline_source, BaselineSource::FullEstimate);
         assert_eq!(budgets[1].baseline_source, BaselineSource::ProviderBaseline);
         assert_eq!(budgets[1].baseline_prompt_tokens, Some(123.));

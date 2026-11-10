@@ -44,6 +44,15 @@ pub(crate) struct UsageEvidence {
     base: sources::RequestBase,
     estimate: Estimate,
     limits: Limits,
+    pub boundary: Option<LastEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LastEntry {
+    at: Key,
+    #[serde(deserialize_with = "Option::<String>::deserialize")]
+    pub id: Option<String>,
 }
 
 impl UsageEvidence {
@@ -59,7 +68,7 @@ impl UsageEvidence {
 }
 
 const RESULT: &str = "context-usage/recovered";
-const SCHEMA: &str = "context-usage/v2";
+const SCHEMA: &str = "context-usage/v3";
 const SOURCES: &[&str] = &[
     "context/configured",
     "input/consumed",
@@ -524,10 +533,11 @@ impl ContextUsage {
         )
         .map_err(|error| HostError::failed(error.to_string()))?;
         Ok(Some(UsageEvidence {
+            boundary: summary.last_entry.clone(),
             estimate,
             limits: counter.limits.clone(),
             base: sources::RequestBase {
-                schema: "context-usage/request-base/v2".into(),
+                schema: "context-usage/request-base/v3".into(),
                 request_id: request_id.into(),
                 source: TimelinePosition {
                     branch_id: self.timeline.branch_id(),
@@ -545,6 +555,35 @@ impl ContextUsage {
                 root: state.root.clone(),
             },
         }))
+    }
+
+    pub(crate) async fn growth(
+        &self,
+        evidence: &UsageEvidence,
+        after: &TimelinePosition,
+    ) -> std::result::Result<Option<f64>, HostError> {
+        let segments = self
+            .timeline
+            .segments(self.timeline.sequence())
+            .map_err(|error| HostError::failed(error.to_string()))?;
+        let key = |position: &TimelinePosition| -> std::result::Result<Key, HostError> {
+            let branch = segments
+                .iter()
+                .position(|(branch, _)| *branch == position.branch_id)
+                .ok_or_else(|| HostError::failed("Growth boundary is outside the branch chain"))?;
+            Ok(Key {
+                branch: branch as u32,
+                sequence: position.sequence,
+            })
+        };
+        Numeric::new(self.timeline.clone(), self.timeline.sequence())
+            .growth(
+                evidence.base.root.as_ref(),
+                key(after)?,
+                key(&evidence.base.source)?,
+            )
+            .await
+            .map_err(|error| HostError::failed(error.to_string()))
     }
 
     pub(crate) async fn confirm(
