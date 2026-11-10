@@ -138,23 +138,46 @@ fn stored_runs(home: &Path) -> Vec<Value> {
     inner["runs"].as_array().unwrap().clone()
 }
 
-/// One record in the shape an earlier build wrote (A.7): a launch that was
-/// accepted and never settled, with the fields that shape carried.
-fn active_legacy_record(run_id: &str, job_id: &str, state: &str) -> Value {
+/// The states an earlier build wrote for a launch window (A.7).
+const LEGACY_LAUNCH_STATES: [&str; 7] = [
+    "launching",
+    "submitted",
+    "running",
+    "completed",
+    "cancelled",
+    "timed_out",
+    "skipped",
+];
+
+/// One launch record in the shape an earlier build wrote, field for field
+/// (`engine.rs`'s `record()` and its later `update_run`s before this change):
+/// every record carried `job_revision`, a launch fixed `deadline_at` when it
+/// was accepted, the launch reply added the Session, its origin and its
+/// policy together, and a terminal state carried `ended_at`. A `skipped`
+/// window wrote neither a stop time nor a Session.
+fn legacy_launch_record(run_id: &str, job_id: &str, state: &str) -> Value {
     let at = "2026-01-01T00:00:00.000Z";
+    let launched = matches!(
+        state,
+        "submitted" | "running" | "completed" | "cancelled" | "timed_out"
+    );
     let mut record = json!({
         "run_id": run_id,
         "job_id": job_id,
         "window": at,
         "state": state,
-        "deadline_at": "2030-01-01T00:00:00.000Z",
         "submission_id": format!("scheduler:{run_id}"),
         "created_at": at,
-        "ended_at": at,
-        "detail": "",
+        "detail": if state == "skipped" { "overlap" } else { "" },
+        "job_revision": 1,
     });
-    record.as_object_mut().unwrap().remove("ended_at");
-    if state != "launching" {
+    if state != "skipped" {
+        record["deadline_at"] = json!("2030-01-01T00:00:00.000Z");
+    }
+    if matches!(state, "completed" | "cancelled" | "timed_out" | "skipped") {
+        record["ended_at"] = json!(at);
+    }
+    if launched {
         record["session_id"] = json!("legacy-session");
         record["session_origin"] = json!("launch");
         record["policy"] =
@@ -164,11 +187,11 @@ fn active_legacy_record(run_id: &str, job_id: &str, state: &str) -> Value {
     record
 }
 
-/// A restart leaves an earlier build's `launching`, `submitted` and `running`
-/// records exactly as written: nothing settles them and nothing writes again
-/// (A.7).
+/// A restart leaves an earlier build's records exactly as written, active and
+/// terminal alike: nothing settles them, nothing is written again, and the
+/// store still loads (A.7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_restart_leaves_earlier_build_active_records_as_written() {
+async fn a_restart_leaves_earlier_build_records_as_written() {
     let home = tempfile::tempdir().unwrap();
     std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::create_dir_all(home.path().join("scheduler")).unwrap();
@@ -192,9 +215,9 @@ async fn a_restart_leaves_earlier_build_active_records_as_written() {
     server.shutdown();
     server.join().await.unwrap();
 
-    let seeded: Vec<Value> = ["launching", "submitted", "running"]
+    let seeded: Vec<Value> = LEGACY_LAUNCH_STATES
         .iter()
-        .map(|state| active_legacy_record(&format!("legacy-{state}"), &job_id, state))
+        .map(|state| legacy_launch_record(&format!("legacy-{state}"), &job_id, state))
         .collect();
     edit_runs(home.path(), |runs| runs.extend(seeded.clone()));
 
@@ -206,7 +229,7 @@ async fn a_restart_leaves_earlier_build_active_records_as_written() {
         .await
         .unwrap();
     let shown = history["runs"].as_array().unwrap();
-    for state in ["launching", "submitted", "running"] {
+    for state in LEGACY_LAUNCH_STATES {
         let run_id = format!("legacy-{state}");
         assert!(
             shown

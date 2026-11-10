@@ -170,12 +170,15 @@ impl Delivery {
             )
     }
 
-    /// Whether this design wrote the record. `branch_id`, the job revision
-    /// and the states `delivering` and `delivered` are its own, and no record
-    /// written before it carries one (A.7).
+    /// Whether this design wrote the record (A.7): a `session` delivery names
+    /// its branch from the start, a `launch` delivery is `delivering` before
+    /// its Session exists, and only this design's lookup pass writes
+    /// `attempts` — an earlier build's reader refuses it on a legacy record.
+    /// `job_revision` is not evidence: every record an earlier build wrote
+    /// carries it too.
     fn written_here(&self) -> bool {
         self.branch_id.is_some()
-            || self.job_revision.is_some()
+            || self.attempts.is_some()
             || matches!(
                 self.state,
                 DeliveryState::Delivering | DeliveryState::Delivered
