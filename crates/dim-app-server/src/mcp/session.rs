@@ -543,6 +543,32 @@ impl Lease {
     }
 }
 
+/// Publishes the entry as `Connecting` and runs one discovery for it with
+/// `cancel` and `lease`.
+fn start_discovery(
+    directory: &Arc<McpService>,
+    owner: &Arc<McpSession>,
+    project: Option<usize>,
+    id: &str,
+    cancel: &CancellationToken,
+    lease: &Arc<Lease>,
+    tasks: &TaskTracker,
+) {
+    owner.state.update(|state| {
+        state
+            .servers
+            .insert(id.to_owned(), McpSourceState::Connecting);
+    });
+    tasks.spawn(discover(
+        directory.clone(),
+        owner.clone(),
+        project,
+        id.to_owned(),
+        cancel.clone(),
+        lease.clone(),
+    ));
+}
+
 async fn reconcile(
     directory: Arc<McpService>,
     owner: Arc<McpSession>,
@@ -586,20 +612,17 @@ async fn reconcile(
                     for (id, active) in active.iter_mut() {
                         active.cancel.cancel();
                         active.cancel = owner.stopped.child_token();
-                        if !active.entry.enabled() {
-                            continue;
+                        if active.entry.enabled() {
+                            start_discovery(
+                                &directory,
+                                &owner,
+                                project,
+                                id,
+                                &active.cancel,
+                                &active.lease,
+                                &tasks,
+                            );
                         }
-                        owner.state.update(|state| {
-                            state.servers.insert(id.clone(), McpSourceState::Connecting);
-                        });
-                        tasks.spawn(discover(
-                            directory.clone(),
-                            owner.clone(),
-                            project,
-                            id.clone(),
-                            active.cancel.clone(),
-                            active.lease.clone(),
-                        ));
                     }
                 }
                 for (id, entry) in entries {
@@ -609,17 +632,7 @@ async fn reconcile(
                     let cancel = owner.stopped.child_token();
                     let lease = Arc::new(Lease::default());
                     if entry.enabled() {
-                        owner.state.update(|state| {
-                            state.servers.insert(id.clone(), McpSourceState::Connecting);
-                        });
-                        tasks.spawn(discover(
-                            directory.clone(),
-                            owner.clone(),
-                            project,
-                            id.clone(),
-                            cancel.clone(),
-                            lease.clone(),
-                        ));
+                        start_discovery(&directory, &owner, project, &id, &cancel, &lease, &tasks);
                     } else {
                         owner.publish(&id, None, McpSourceState::Disabled, &cancel);
                     }
