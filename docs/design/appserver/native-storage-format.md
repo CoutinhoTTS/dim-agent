@@ -1128,6 +1128,49 @@ compiled join uses `json_extract(r.body,'$.record.event.data.input_id') = +(e.ev
 to retain the event ID value without its column affinity. Plan acceptance requires
 `<expr>=?` in `timeline_events_inputs`; merely naming that index is insufficient.
 
+## 提案：v40 补齐逻辑事件身份与恢复成员
+
+本节是待确认的下一格式方案；当前已实现格式仍为 v39。它支持[身份与恢复操作查询](timeline-identity-reads.md)，不改变公开 query、事件或请求内容编码。不能把新表或新成员描述直接写入 v39 数据库。
+
+### 输出身份定位
+
+普通事件继续使用 timeline_events_by_id。新增表只覆盖合并输出的逻辑事件：
+
+```sql
+CREATE TABLE timeline_output_ids (
+  session_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  branch_id TEXT NOT NULL,
+  physical_sequence INTEGER NOT NULL CHECK(physical_sequence > 0),
+  logical_sequence INTEGER NOT NULL CHECK(logical_sequence >= physical_sequence),
+  PRIMARY KEY(session_id,event_id)
+);
+CREATE INDEX timeline_output_ids_by_position ON timeline_output_ids
+  (session_id,branch_id,physical_sequence,logical_sequence,event_id);
+```
+
+每条 step/text 或 step/thinking 逻辑事件恰有一条 locator，指向包含它的物理行；包括旧 encoding=event 的单条输出，其物理与逻辑序号相同。其它类型不登记。按位置索引用于有界验证、裁剪复制和删除，不用于扫描整条历史来实现 ID 查询。
+
+普通身份索引与此表分别按 session_id、event_id 定位；合并位置并去重后读取物理行。逻辑身份必须仍属于本次分支范围，才可进入后续字段投影。一个 ID 不存在时，两次索引未命中即结束，不补扫输出类型。输出合并只新增片段 locator，原物理行起点不变。
+
+### 恢复成员描述
+
+在原 member 表中增加五种版本描述，身份、关联字段及消费者仅在[执行设计 §3](timeline-identity-reads.md#3-恢复操作的成员集合)定义。复用原 AVL 节点、根和关闭键，不添加第二套索引表。已有四种描述的身份、键编码和旧根不变。
+
+新描述的关联键统一使用 tuple-v1：先写 4 字节无符号大端字段数量，每个字段依次写 8 字节无符号大端长度和 QueryValue.scalar_key 的字节。单字段的新描述也使用此编码；旧描述保持旧编码。字段顺序由描述固定，缺失字段不生成关联键，不能写成 null。不能用字符串拼接或原始 JSON 文本比较。
+
+### 原子升级与校验
+
+v39 到 v40 在原准入事务内建表、回填并检查，再更新 marker；任何阶段失败全部回滚。旧程序按原机制拒读 v40。不得先写 marker，再把回填留到后台。
+
+输出 locator 回填只读取 step/text、step/thinking 的物理行，解析 encoding=output 的 records 或 encoding=event 的单条事件。缺失/无效身份、重复身份、错误逻辑位置均报错。新成员只回放涉及新描述的逻辑事实；不重建已有成员索引，不加载模型请求的 messages/tools/system。
+
+普通写入、输出合并、Session 创建/复制/删除都在事实原事务内更新对应结构。fork 内部切点按逻辑序号裁剪，不能照抄父行全部 locator。升级、写入失败和复制失败均不得遗留半套索引。
+
+完整性校验沿物理页核对输出和 locator 的双向对应，覆盖漏项、多项、错误物理行、类型和逻辑位置；不能每条输出另扫一遍索引或事实。原内容/引用校验继续执行，普通 query 不代替准入校验。新增成员按其原校验合同检查。
+
+验收覆盖旧格式逐级升级、回滚、旧程序拒读、合并输出命中/未命中、批次内部 through、祖先切点、fork/复制/删除及成员终态乱序；性能与写入量按执行设计计入同一份累计结果。无证据前不承诺恢复耗时或写入收益。
+
 ## 提案：状态读取索引与数组元素
 
 Status: Draft. 本节定义下一格式 v39 的数组编码；不能把它加入已提交的 v38。基础 member 结构沿用本文件开头的 v37 决定，不重新建立第二套成员树。

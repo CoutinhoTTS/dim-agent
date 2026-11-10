@@ -45,6 +45,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [状态结果与未处理输入](design/owner-state-indexed-reads.md)（中文，草案）：沿用 append/query，保存完整状态与已完成源位置，恢复按索引读取其后的新输入
 - [Timeline 数组元素查询](design/timeline-array-rows.md)（中文，草案）：元素行、原下标、固定范围与按身份取值
 - [Timeline 未完成成员索引](design/appserver/timeline-member-index.md)（中文，草案）：版本集合、同事务维护、分页和新增读写成本
+- [Timeline 身份与恢复操作查询](design/appserver/timeline-identity-reads.md)（中文，草案）：ID 定位、模型/压缩未完成集合及索引验收
 - [Timeline 属性查询与消费端改造](design/timeline-property-query.md)（中文）：查询契约、SQL 与内容解码、恢复和请求构造的修改方案
 - [Timeline read consumers and page execution](design/timeline-read-followups.md): bounded Web windows, title/activity field reads and cumulative SQL page costs
 - [输入、轮次及活动输出的当前状态读取](design/input-state-read.md)：输入队列、轮次身份和输出字符水位
