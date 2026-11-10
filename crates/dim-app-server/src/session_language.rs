@@ -130,6 +130,10 @@ async fn change(
     let branch = tree.get("main").map_err(RpcError::from)?;
     let language_cell = cell(tree)?.language();
     let _guard = language_cell.gate().await;
+    // A failure before this write leaves the value unchanged; once the record
+    // is written and the cell replaced, a later failure or a cancellation
+    // keeps the new value stored and leaves its delivery to each branch's
+    // periodic check.
     if let Some(store) = store {
         store
             .set_session_language(&session_id, language)
