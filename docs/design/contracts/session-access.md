@@ -343,6 +343,7 @@ Not in this contract: `createdBy` (the Session's origin) and the `client` parame
 | Write path | The service appends `input/withdraw`, then replies with InputQueue's decision for that command. InputQueue's recheck uses only its own decision state (held set), never a lock on another owner's facts |
 | Withdraw and re-submit as Steer | One atomic batch: `input/withdraw` for the old input plus the new Steer `input/message`. The withdraw takes effect only if the old input is still held; the new input is written either way |
 | After apply | An applied input cannot be withdrawn; Loop consumes it as usual and needs no change |
+| Refused `steer` | The steer is validated as the operator sent it before any submit check and before the withdrawal is decided, so a steer without operator content fails the call with `session_invalid_input`; a steer for an input the queue does not hold answers that error rather than `notHeld`, and neither the withdrawal nor the replacement is written |
 
 ### A.5 Fixed-prefix read
 
