@@ -149,7 +149,7 @@ fn native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader
     rpc(
         &mut stream,
         "hello",
-        json!({"protocolVersion":3,"clientKind":"cli"}),
+        json!({"protocolVersion":4,"clientKind":"cli"}),
     );
     let agents = rpc(&mut stream, "agent.list", json!({}));
     let holder = agents[0]["agentId"].as_str().unwrap().to_owned();

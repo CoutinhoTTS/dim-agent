@@ -144,6 +144,8 @@ pub struct ToolRegistry {
     /// registered tools it declares, in this order. `None` declares every
     /// host tool and every registered tool.
     configured: Option<Vec<String>>,
+    /// Names removed even when the mount list is absent or names them.
+    excluded: HashSet<String>,
     tools: Arc<Registrations<Arc<ToolContribution>>>,
     providers: Arc<Registrations<Arc<dyn ToolProvider>>>,
     /// The set each registered tool is offered as.
@@ -203,6 +205,7 @@ impl ToolRegistry {
         let mounted: Vec<Arc<ToolContribution>> = match &self.configured {
             Some(names) => names
                 .iter()
+                .filter(|name| !self.excluded.contains(*name))
                 .filter_map(|name| {
                     self.fixed(name).or_else(|| {
                         sources
@@ -223,13 +226,15 @@ impl ToolRegistry {
                         .filter(|set| is_contributed(&set.key))
                         .flat_map(|set| set.tools.iter().cloned()),
                 )
+                .filter(|tool| !self.excluded.contains(&tool.definition.name))
                 .collect(),
         };
         let other = sources
             .current
             .values()
             .filter(|set| !is_contributed(&set.key))
-            .flat_map(|set| set.tools.iter().cloned());
+            .flat_map(|set| set.tools.iter().cloned())
+            .filter(|tool| !self.excluded.contains(&tool.definition.name));
         mounted
             .into_iter()
             .chain(other)
@@ -238,9 +243,11 @@ impl ToolRegistry {
     }
     /// Whether the Session mounts `name`.
     fn mounts(&self, name: &str) -> bool {
-        self.configured
-            .as_ref()
-            .is_none_or(|names| names.iter().any(|mounted| mounted == name))
+        !self.excluded.contains(name)
+            && self
+                .configured
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|mounted| mounted == name))
     }
     fn is_host(&self, name: &str) -> bool {
         self.host.iter().any(|tool| tool.definition.name == name)
@@ -265,6 +272,9 @@ impl ToolRegistry {
     }
     /// The current version of a registered tool.
     pub fn contributed(&self, name: &str) -> Option<Arc<ToolContribution>> {
+        if self.excluded.contains(name) {
+            return None;
+        }
         let sources = self.sources.lock().unwrap();
         let set = sources.current.get(&format!("{CONTRIBUTED}:{name}"))?;
         set.tools.first().cloned()
@@ -767,6 +777,7 @@ impl DynPlugin for ToolRegistryPlugin {
             let registry = Arc::new(ToolRegistry {
                 host: host_tools,
                 configured: config.tools.clone(),
+                excluded: config.excluded_tools.iter().cloned().collect(),
                 tools: Arc::default(),
                 providers: Arc::default(),
                 offered: Mutex::default(),
@@ -824,5 +835,62 @@ impl DynPlugin for ToolRegistryPlugin {
             ctx.provide_at(self.registry.clone(), registry)?;
             Ok(Effect::Done)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Noop;
+
+    impl ToolHandler for Noop {
+        fn execute(
+            &self,
+            _: ToolCall,
+            _: ToolExecutionContext,
+            _: CancellationToken,
+        ) -> HostFuture<'_, ToolResult> {
+            Box::pin(async { Ok(ToolResult::text("ok")) })
+        }
+    }
+
+    fn registry(tools: Option<Vec<String>>, excluded_tools: Vec<String>) -> ToolRegistry {
+        let config = Arc::new(SessionConfig {
+            tools,
+            excluded_tools,
+            ..Default::default()
+        });
+        ToolRegistry {
+            host: vec![Arc::new(ToolContribution {
+                definition: definition("codemode", "code", json!({"type": "object"})),
+                handler: Arc::new(Noop),
+            })],
+            configured: config.tools.clone(),
+            excluded: config.excluded_tools.iter().cloned().collect(),
+            tools: Arc::default(),
+            providers: Arc::default(),
+            offered: Mutex::default(),
+            missing: Mutex::default(),
+            session_id: "session".into(),
+            config,
+            refreshing: Mutex::default(),
+            sources: Mutex::default(),
+            state: watch::Sender::new(ToolSourcesState::default()),
+        }
+    }
+
+    #[test]
+    fn an_excluded_tool_is_absent_from_the_all_tools_mount() {
+        let registry = registry(None, vec!["codemode".into()]);
+        assert!(registry.definitions().is_empty());
+        assert!(registry.fixed("codemode").is_none());
+        assert!(registry.contributed("codemode").is_none());
+    }
+
+    #[test]
+    fn an_excluded_tool_is_absent_from_an_explicit_mount() {
+        let registry = registry(Some(vec!["codemode".into()]), vec!["codemode".into()]);
+        assert!(registry.definitions().is_empty());
     }
 }

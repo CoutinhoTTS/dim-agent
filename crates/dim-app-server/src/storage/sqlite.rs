@@ -1,5 +1,5 @@
 use dim_agent_runtime::{AgentError, Result, panic_message};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags};
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use serde::Serialize;
@@ -16,7 +16,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 36;
+pub const FORMAT: u32 = 38;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -55,7 +55,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 36))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 38))",
     ),
     (
         "settings_documents",
@@ -95,7 +95,7 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     ),
     (
         "session_owners",
-        "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)))",
+        "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3, 4)))",
     ),
     (
         "timeline_branches",
@@ -208,6 +208,8 @@ const AGENT_SESSIONS_BEFORE_V27: &str = "CREATE TABLE agent_sessions (session_id
 const AGENTS_BEFORE_V27: &str = "CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)))";
 /// The text of `agent_sessions` from v27 through v29; `schema_of` uses it to
 /// recognize a store older than v30.
+const SESSION_OWNERS_BEFORE_V38: &str = "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)))";
+const V38_SESSION_OWNERS: &str = "DROP INDEX session_owners_by_agent;\nALTER TABLE session_owners RENAME TO session_owners_v37;\nCREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3, 4)));\nINSERT INTO session_owners SELECT session_id, agent_id, protocol_version FROM session_owners_v37;\nDROP TABLE session_owners_v37;\nCREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id);";
 const AGENT_SESSIONS_BEFORE_V30: &str = "CREATE TABLE agent_sessions (session_id TEXT NOT NULL PRIMARY KEY, config TEXT NOT NULL, created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0), leader_session_id TEXT REFERENCES agent_sessions(session_id))";
 /// The text of `timeline_events` before v31 adds the two reading switches.
 const TIMELINE_EVENTS_BEFORE_V31: &str = "CREATE TABLE timeline_events (session_id TEXT NOT NULL, branch_id TEXT NOT NULL, sequence INTEGER NOT NULL CHECK (sequence > 0), last_sequence INTEGER NOT NULL CHECK (last_sequence >= sequence), kind TEXT NOT NULL, body TEXT NOT NULL, event_id TEXT, PRIMARY KEY (session_id, branch_id, sequence), FOREIGN KEY (session_id, branch_id) REFERENCES timeline_branches(session_id, branch_id))";
@@ -229,7 +231,7 @@ ALTER TABLE timeline_events ADD COLUMN context_state INTEGER NOT NULL DEFAULT 0;
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 22] = [
+const UPGRADES: [(u32, &[&str]); 24] = [
     (
         13,
         &[
@@ -314,6 +316,11 @@ const UPGRADES: [(u32, &[&str]); 22] = [
             "timeline_text_tails",
         ],
     ),
+    // v37: the optional event-envelope `parent_call_id` and child tool-call
+    // batch semantics; the marker only.
+    (36, &[]),
+    // v38: protocol v4 child batches store their connection version.
+    (37, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -344,6 +351,7 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
                 "agent_store_format" => format_table(version),
                 "agent_sessions" if version < 27 => AGENT_SESSIONS_BEFORE_V27.to_owned(),
                 "agent_sessions" if version < 30 => AGENT_SESSIONS_BEFORE_V30.to_owned(),
+                "session_owners" if version < 38 => SESSION_OWNERS_BEFORE_V38.to_owned(),
                 "agents" if version < 27 => AGENTS_BEFORE_V27.to_owned(),
                 "timeline_events" if version < 31 => TIMELINE_EVENTS_BEFORE_V31.to_owned(),
                 _ => sql.to_owned(),
@@ -758,10 +766,11 @@ impl SqliteStorage {
         let mut connection = Connection::open(&path).map_err(storage)?;
         functions(&connection)?;
         connection.busy_handler(Some(busy)).map_err(storage)?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        // This opening owns the connection, so dropping it before COMMIT rolls back the transaction.
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
             .map_err(storage)?;
-        let actual = schema(&tx)?;
+        let actual = schema(&connection)?;
         let unsupported_version = || {
             storage(format!(
                 "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
@@ -771,12 +780,13 @@ impl SqliteStorage {
         let mut upgraded_from = None;
         if actual.is_empty() {
             for (_, sql) in SCHEMA.iter().chain(super::text::SCHEMA) {
-                tx.execute_batch(sql).map_err(storage)?;
+                connection.execute_batch(sql).map_err(storage)?;
             }
-            tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+            connection
+                .execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                 .map_err(storage)?;
         } else if let Some(version) = known_format(&actual) {
-            let markers = markers(&tx)?;
+            let markers = markers(&connection)?;
             if markers != [i64::from(version)] {
                 write_startup_failure(
                     &path,
@@ -788,53 +798,59 @@ impl SqliteStorage {
                 return Err(unsupported_version());
             }
             if version != FORMAT {
-                tx.execute_batch("DROP TABLE agent_store_format")
+                connection
+                    .execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
-                tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
+                connection
+                    .execute_batch(&format_table(FORMAT))
+                    .map_err(storage)?;
                 // Only an upgrade registers the report, and it clears it
                 // again after the commit: an ordinary open runs no progress
                 // callback.
                 let progress = ctx.map(|ctx| Arc::new(UpgradeProgress::new(ctx, &path, version)));
                 if let Some(progress) = &progress {
                     let reports = Arc::clone(progress);
-                    tx.progress_handler(
-                        UPGRADE_PROGRESS_OPS,
-                        Some(move || {
-                            reports.report(false);
-                            false
-                        }),
-                    )
-                    .map_err(storage)?;
+                    connection
+                        .progress_handler(
+                            UPGRADE_PROGRESS_OPS,
+                            Some(move || {
+                                reports.report(false);
+                                false
+                            }),
+                        )
+                        .map_err(storage)?;
                     progress.report(true);
                 }
                 for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     if *from == 26 {
-                        tx.execute_batch(V27_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V27_COLUMNS).map_err(storage)?;
                     }
                     if *from == 29 {
-                        tx.execute_batch(V30_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V30_COLUMNS).map_err(storage)?;
                     }
                     if *from == 30 {
-                        tx.execute_batch(V31_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V31_COLUMNS).map_err(storage)?;
                         let keys = |list: &[&str]| {
                             list.iter()
                                 .map(|key| format!("'{key}'"))
                                 .collect::<Vec<_>>()
                                 .join(",")
                         };
-                        tx.execute_batch(&format!(
-                            "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
-                            keys(dim_agent_types::CONTEXT_RENDER_KEYS)
-                        ))
-                        .map_err(storage)?;
-                        tx.execute_batch(&format!(
-                            "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
-                            keys(dim_agent_types::CONTEXT_STATE_KEYS)
-                        ))
-                        .map_err(storage)?;
+                        connection
+                            .execute_batch(&format!(
+                                "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
+                                keys(dim_agent_types::CONTEXT_RENDER_KEYS)
+                            ))
+                            .map_err(storage)?;
+                        connection
+                            .execute_batch(&format!(
+                                "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
+                                keys(dim_agent_types::CONTEXT_STATE_KEYS)
+                            ))
+                            .map_err(storage)?;
                     }
                     if *from == 31 && version == 31 {
-                        tx.execute_batch(
+                        connection.execute_batch(
                             "DROP INDEX timeline_events_render; DROP INDEX timeline_events_state",
                         )
                         .map_err(storage)?;
@@ -844,40 +860,47 @@ impl SqliteStorage {
                         .chain(super::text::SCHEMA)
                         .filter(|(name, _)| added.contains(name))
                     {
-                        tx.execute_batch(sql).map_err(storage)?;
+                        connection.execute_batch(sql).map_err(storage)?;
                     }
                     if *from == 22 {
-                        super::catalog::backfill(&tx)?;
+                        super::catalog::backfill(&connection)?;
                     }
                     if *from == 35 {
-                        super::text::backfill(&tx)?;
+                        super::text::backfill(&connection)?;
+                    }
+                    if *from == 37 {
+                        connection
+                            .execute_batch(V38_SESSION_OWNERS)
+                            .map_err(storage)?;
                     }
                     if *from == 24 {
-                        tx.execute_batch("DROP INDEX timeline_events_by_end")
+                        connection
+                            .execute_batch("DROP INDEX timeline_events_by_end")
                             .map_err(storage)?;
                     }
                     if *from == 25 {
-                        crate::provider::rewrite_stored_limits(&tx)?;
+                        crate::provider::rewrite_stored_limits(&connection)?;
                     }
                     // #1099: only the derived `updated_at_ms` column is
                     // rewritten, by the same backfill the catalog's own
                     // upgrade used.
                     if *from == 33 {
-                        super::catalog::backfill(&tx)?;
+                        super::catalog::backfill(&connection)?;
                     }
                     if let Some(progress) = &progress {
                         progress.report(true);
                     }
                 }
-                tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+                connection
+                    .execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                     .map_err(storage)?;
-                if known_format(&schema(&tx)?) != Some(FORMAT) {
+                if known_format(&schema(&connection)?) != Some(FORMAT) {
                     return Err(storage("upgraded native store has an unexpected schema"));
                 }
                 upgraded_from = Some(version);
             }
         } else {
-            let marker = markers(&tx)
+            let marker = markers(&connection)
                 .ok()
                 .and_then(|markers| single_marker(&markers));
             let failure = match marker {
@@ -897,9 +920,9 @@ impl SqliteStorage {
             )));
         }
         for (_, sql) in DERIVED_INDEXES {
-            tx.execute_batch(sql).map_err(storage)?;
+            connection.execute_batch(sql).map_err(storage)?;
         }
-        tx.commit().map_err(storage)?;
+        connection.execute_batch("COMMIT").map_err(storage)?;
         if upgraded_from.is_some() {
             connection
                 .progress_handler(0, None::<fn() -> bool>)
@@ -1024,15 +1047,15 @@ impl SqliteStorage {
     /// The read-only export store's one connection serves both.
     pub(crate) async fn run_read<T: Send + 'static>(
         self: &Arc<Self>,
-        operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let admitted = self.admit()?;
         tokio::task::spawn_blocking(move || {
             let reader = admitted.0.reader();
             match reader {
-                Some(guard) => {
+                Some(mut guard) => {
                     let connection = guard
-                        .as_ref()
+                        .as_mut()
                         .ok_or_else(|| storage("SQLite storage is closed"))?;
                     let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
                     outcome(connection, result)
@@ -1122,7 +1145,7 @@ impl SqliteStorage {
     pub(crate) async fn run_read_cancellable<T: Send + 'static>(
         self: &Arc<Self>,
         cancel: tokio_util::sync::CancellationToken,
-        operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         self.run_read(move |connection| {
             if cancel.is_cancelled() {

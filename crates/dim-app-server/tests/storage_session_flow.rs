@@ -112,6 +112,7 @@ impl DynPlugin for GenericCleanupFault {
                 timeline.append(EventDraft {
                     id: None,
                     tags: Some(vec!["cleanup".into()]),
+                    parent_call_id: None,
                     kind: EventKind::PermissionChanged(PermissionChangedData {
                         policy: PermissionPolicy::default(),
                     }),
@@ -265,6 +266,7 @@ impl DynPlugin for RecordCleanup {
                 timeline.append(EventDraft {
                     id: None,
                     tags: Some(vec!["finalizer".into()]),
+                    parent_call_id: None,
                     kind: EventKind::PermissionChanged(PermissionChangedData {
                         policy: PermissionPolicy::default(),
                     }),

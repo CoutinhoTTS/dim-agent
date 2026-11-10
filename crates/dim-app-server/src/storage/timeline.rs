@@ -1728,7 +1728,7 @@ fn write_batch(
                     &batch.key,
                     sequence,
                     kind,
-                    record.event.kind.context_flags(),
+                    record.event.context_flags(),
                     &row,
                 )?;
                 outputs.insert(
@@ -1748,7 +1748,7 @@ fn write_batch(
                     &batch.key,
                     sequence,
                     kind,
-                    record.event.kind.context_flags(),
+                    record.event.context_flags(),
                     &Row::Event {
                         record: Box::new(wire),
                     },
@@ -2361,6 +2361,7 @@ fn copy_fork_rows(
                     sequence: at + 1,
                     create_at: dim_agent_runtime::core::unix_millis(),
                     tags: None,
+                    parent_call_id: None,
                     kind: EventKind::SessionForked(SessionForkedData {}),
                 }),
                 trace: None,
@@ -2376,7 +2377,7 @@ fn copy_fork_rows(
                 &key,
                 at + 1,
                 forked.event.kind.key(),
-                forked.event.kind.context_flags(),
+                forked.event.context_flags(),
                 &Row::Event {
                     record: Box::new(wire),
                 },
@@ -3397,6 +3398,7 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
                 sequence,
                 create_at: dim_agent_runtime::core::unix_millis(),
                 tags: None,
+                parent_call_id: None,
                 kind: EventKind::InputMessage(InputMessageData::text("saved", None)),
             }),
             trace: None,
@@ -3520,6 +3522,7 @@ async fn release_flow_preserves_history_and_tolerates_a_stopped_writer() {
             sequence,
             create_at: dim_agent_runtime::core::unix_millis(),
             tags: None,
+            parent_call_id: None,
             kind: EventKind::InputMessage(dim_agent_types::InputMessageData::text("saved", None)),
         }),
         trace: None,

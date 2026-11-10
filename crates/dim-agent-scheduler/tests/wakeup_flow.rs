@@ -120,6 +120,7 @@ async fn connect(server: &RunningServer) -> Client {
         profile: None,
         client_kind: "cli",
         client_name: "wakeup-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     let created = client

@@ -4895,10 +4895,7 @@ impl App {
                 .map(|label| fg(&label, &p.highlight));
             let title = title.map(|(text, label)| label(text));
             let docked = self.dock_status(status.as_deref());
-            let place = fg(
-                &fit_place(self.place_label(), docked.as_deref(), outer),
-                &p.muted,
-            );
+            let place = self.composer_place(docked.as_deref(), outer);
             let last = composer_box.len() - 1;
             composer_box[0] = format!(
                 "{margin}{}",
@@ -4911,7 +4908,7 @@ impl App {
         } else {
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
             let margin = " ".repeat(MARGIN);
-            let place = fg(&fit_place(self.place_label(), None, outer), &p.muted);
+            let place = self.composer_place(None, outer);
             let last = composer_box.len() - 1;
             composer_box[last] = format!(
                 "{margin}{}",
@@ -5961,6 +5958,36 @@ impl App {
             parts.push(fg(&context, color));
         }
         (!parts.is_empty()).then(|| parts.join("  "))
+    }
+
+    fn composer_place(&self, status: Option<&str>, outer: usize) -> String {
+        let place = fg(
+            &fit_place(self.place_label(), status, outer),
+            &self.palette.muted,
+        );
+        let count = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |view| view.unread_lines.len());
+        if count == 0 {
+            return place;
+        }
+        let room = outer.saturating_sub(6 + status.map_or(0, |label| width_of(label) + 3));
+        let full = format!("{} ({count}) · /lines", t("Unread"));
+        let compact = format!("/lines ({count})");
+        let Some(label) = [full.as_str(), compact.as_str(), "/lines", "*"]
+            .into_iter()
+            .find(|label| width_of(label) <= room)
+        else {
+            return place;
+        };
+        let width = width_of(label);
+        let label = fg(label, &self.palette.highlight);
+        if width + 2 + width_of(&place) <= room && width_of(&place) != 0 {
+            format!("{label}  {place}")
+        } else {
+            label
+        }
     }
 
     fn status_line(&self, cols: usize) -> String {
@@ -8327,6 +8354,7 @@ mod tests {
                 tool_name: tool.map(Into::into),
                 tool_input: tool.map(|_| serde_json::json!({"path": "cache.rs"})),
                 batch: tool.map(|_| "q1".into()),
+                parent_call_id: None,
                 pending: tool.is_some(),
                 parked: false,
                 result_text: None,
@@ -8715,6 +8743,7 @@ mod tests {
                         tool_name: None,
                         tool_input: None,
                         batch: None,
+                        parent_call_id: None,
                         pending: false,
                         parked: false,
                         result_text: None,
@@ -8975,6 +9004,87 @@ mod tests {
     }
 
     #[test]
+    fn an_unread_reply_points_to_its_line_in_both_tui_modes() {
+        use crate::ui::render::panel::strip_escapes;
+
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let mut snapshot = ViewSnapshot {
+                session_id: "s1".into(),
+                history_complete: true,
+                focus: "main".into(),
+                lines: vec![
+                    LineView {
+                        id: "main".into(),
+                        parent: None,
+                        purpose: String::new(),
+                        state: LineState::Main,
+                        cut: None,
+                    },
+                    LineView {
+                        id: "b-7c".into(),
+                        parent: Some("main".into()),
+                        purpose: "parser race".into(),
+                        state: LineState::Waiting,
+                        cut: Some(crate::model::view::LineCut {
+                            sequence: 1,
+                            messages: 1,
+                        }),
+                    },
+                ],
+                ..ViewSnapshot::default()
+            };
+            drawn
+                .app
+                .apply(Update::Snapshot(Box::new(snapshot.clone())));
+            drawn.app.composer.set_draft("keep typing");
+            snapshot.unread_lines.insert("b-7c".into());
+            drawn
+                .app
+                .apply(Update::Snapshot(Box::new(snapshot.clone())));
+            let frame = drawn.app.frame((80, 24));
+            assert!(frame.live.join("\n").contains("Unread (1) · /lines"));
+            assert_eq!(drawn.app.composer.text(), "keep typing");
+            let narrow = drawn.app.frame((24, 24)).live.join("\n");
+            assert!(narrow.contains("/lines (1)"), "{narrow}");
+            let compact = drawn.app.frame((16, 24)).live.join("\n");
+            assert!(compact.contains("/lines"), "{compact}");
+            assert!(!compact.contains("/lines (1)"), "{compact}");
+
+            drawn.app.run_command("lines", "");
+            let frame = drawn.app.frame((80, 24));
+            let rows = frame
+                .overlay
+                .as_ref()
+                .map_or(&frame.live, |panel| &panel.rows);
+            let lines = strip_escapes(&rows.join("\n"));
+            assert!(lines.contains("* parser race"), "{lines}");
+            assert!(lines.contains("Unread · after message 1"), "{lines}");
+            let Some(Prompt::Lines(panel)) = &mut drawn.app.prompt else {
+                panic!("/lines opens the line list");
+            };
+            assert!(matches!(
+                panel.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE)),
+                Effect::FocusLine(line) if line == "b-7c"
+            ));
+
+            drawn.app.prompt = None;
+            snapshot.focus = "b-7c".into();
+            snapshot.unread_lines.clear();
+            drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+            assert!(
+                !drawn
+                    .app
+                    .frame((80, 24))
+                    .live
+                    .join("\n")
+                    .contains("Unread (1) · /lines")
+            );
+        }
+    }
+
+    #[test]
     fn switching_lines_draws_each_transcript_under_its_boundary() {
         let mut drawn = Drawn::new((80, 40), None, true);
         drawn.show(&[("user-1", "main one")], "main", true);
@@ -9091,6 +9201,7 @@ mod tests {
                 tool_name: None,
                 tool_input: None,
                 batch: None,
+                parent_call_id: None,
                 pending: false,
                 parked: false,
                 result_text: None,
@@ -9217,6 +9328,7 @@ mod tests {
                     tool_name: None,
                     tool_input: None,
                     batch: None,
+                    parent_call_id: None,
                     pending: false,
                     parked: false,
                     result_text: None,
@@ -9257,6 +9369,7 @@ mod tests {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending,
             parked: false,
             result_text: None,
@@ -9286,6 +9399,7 @@ mod tests {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,

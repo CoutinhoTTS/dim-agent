@@ -257,7 +257,7 @@ impl Home {
         .unwrap();
         std::fs::write(
             assets.join("dimcode-web.json"),
-            r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"test"}"#,
+            r#"{"version":"0.0.1","protocolVersion":4,"sourceCommit":"test"}"#,
         )
         .unwrap();
         Self { root, home, assets }
@@ -304,7 +304,7 @@ impl Home {
         let mut rpc = Rpc::connect(&self.socket());
         rpc.ok(
             "hello",
-            json!({"protocolVersion": 3, "clientKind": "cli", "clientName": "ui-leaf-test"}),
+            json!({"protocolVersion": 4, "clientKind": "cli", "clientName": "ui-leaf-test"}),
         );
         rpc
     }

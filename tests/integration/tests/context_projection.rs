@@ -11,6 +11,7 @@ fn event(sequence: u64, kind: EventKind) -> Arc<AgentEvent> {
         sequence,
         create_at: sequence,
         tags: None,
+        parent_call_id: None,
         kind,
     })
 }

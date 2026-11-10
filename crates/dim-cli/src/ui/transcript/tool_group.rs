@@ -186,6 +186,7 @@ impl Detail {
 struct Call<'a> {
     name: String,
     input: Option<&'a Value>,
+    parent: Option<&'a str>,
     state: State,
     result: Option<&'a str>,
     diff: Option<&'a str>,
@@ -205,6 +206,7 @@ impl<'a> Call<'a> {
         Self {
             name: row.tool_name.as_deref().unwrap_or("tool").to_lowercase(),
             input: row.tool_input.as_ref(),
+            parent: row.parent_call_id.as_deref(),
             state,
             result: row.result_text.as_deref(),
             diff: row.diff.as_deref(),
@@ -241,6 +243,7 @@ enum ExploreKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
+    Program,
     Explore,
     Command,
     Edit,
@@ -250,6 +253,9 @@ enum Section {
 }
 
 enum Item<'a> {
+    Program {
+        call: Call<'a>,
+    },
     Explore {
         call: Call<'a>,
         kind: ExploreKind,
@@ -280,7 +286,8 @@ enum Item<'a> {
 impl<'a> Item<'a> {
     fn call(&self) -> &Call<'a> {
         match self {
-            Item::Explore { call, .. }
+            Item::Program { call }
+            | Item::Explore { call, .. }
             | Item::Command { call, .. }
             | Item::Edit { call, .. }
             | Item::Check { call }
@@ -291,6 +298,7 @@ impl<'a> Item<'a> {
 
     fn section(&self) -> Section {
         match self {
+            Item::Program { .. } => Section::Program,
             Item::Explore { .. } => Section::Explore,
             Item::Command { .. } => Section::Command,
             Item::Edit { .. } => Section::Edit,
@@ -325,19 +333,26 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
     let states: Vec<State> = items.iter().map(|item| item.call().state).collect();
     let state = group_state(&states);
     let mark = state_mark(state);
-    let sections = ordered_sections(&items);
-    let mut header = header_spans(&items, &sections);
+    let roots: Vec<&Item<'_>> = items
+        .iter()
+        .filter(|item| item.call().parent.is_none())
+        .collect();
+    let children: Vec<&Item<'_>> = items
+        .iter()
+        .filter(|item| item.call().parent.is_some())
+        .collect();
+    let sections = ordered_sections(&roots);
+    let mut header = header_spans(&roots, &sections);
     if let Some(first) = header.first_mut() {
         first.text = capitalize(&first.text);
     }
-    let mut expanded = vec![header_line(0, mark, header.clone())];
-    if sections.len() == 1 {
-        let members: Vec<&Item<'_>> = items.iter().collect();
-        append_section(&mut expanded, sections[0], &members, false);
-    } else {
-        for run in section_runs(&items) {
-            append_section(&mut expanded, run[0].section(), &run, true);
-        }
+    if !children.is_empty() {
+        let calls = if children.len() == 1 {
+            "1 tool call".to_owned()
+        } else {
+            format!("{} tool calls", children.len())
+        };
+        header.push(span(format!(" · {calls}"), Tone::Muted));
     }
     let started = items.iter().filter(|item| !item.rejected()).count();
     let failed = items
@@ -350,12 +365,28 @@ pub fn project_group(rows: &[&ViewRow], detail: Detail) -> ToolGroup {
             Tone::Danger,
         ));
     }
+
+    let mut expanded = vec![header_line(0, mark, header.clone())];
+    for run in section_runs(&roots) {
+        if run[0].section() == Section::Program {
+            continue;
+        }
+        append_section(&mut expanded, run[0].section(), &run, roots.len() > 1);
+    }
+    for run in section_runs(&children) {
+        append_section(&mut expanded, run[0].section(), &run, true);
+    }
+
     let mut summary = vec![header_line(0, mark, header.clone())];
-    for item in &items {
+    for item in roots.iter().chain(children.iter()) {
+        if item.section() == Section::Program {
+            continue;
+        }
         append_summary(&mut summary, item);
     }
+
     let mut programs: Vec<(String, usize)> = Vec::new();
-    for item in &items {
+    for item in &roots {
         let call = item.call();
         if matches!(call.name.as_str(), "exec" | "execute" | "bash")
             && let Some(program) = call.string("command").and_then(command_program)
@@ -465,6 +496,7 @@ fn classify(call: Call<'_>) -> Item<'_> {
         detail,
     };
     match call.name.as_str() {
+        "codemode" => Item::Program { call },
         "read" => {
             let detail = base_name(call.path()).to_owned();
             explore(call, ExploreKind::File, "Read", detail)
@@ -600,12 +632,11 @@ fn explore_command(
     }
 }
 
-fn header_spans(items: &[Item<'_>], sections: &[Section]) -> Vec<Span> {
+fn header_spans(items: &[&Item<'_>], sections: &[Section]) -> Vec<Span> {
     if let [section] = sections {
-        let members: Vec<&Item<'_>> = items.iter().collect();
         return match section {
-            Section::Explore => explore_header(&members),
-            _ => phrase(phrase_key(&items[0]), &members),
+            Section::Explore => explore_header(items),
+            _ => phrase(phrase_key(items[0]), items),
         };
     }
     let mut keys: Vec<PhraseKey> = Vec::new();
@@ -620,7 +651,11 @@ fn header_spans(items: &[Item<'_>], sections: &[Section]) -> Vec<Span> {
         if !spans.is_empty() {
             spans.push(span(t(", "), Tone::Text));
         }
-        let members: Vec<&Item<'_>> = items.iter().filter(|i| phrase_key(i) == key).collect();
+        let members: Vec<&Item<'_>> = items
+            .iter()
+            .copied()
+            .filter(|item| phrase_key(item) == key)
+            .collect();
         spans.extend(phrase(key, &members));
     }
     spans
@@ -628,6 +663,7 @@ fn header_spans(items: &[Item<'_>], sections: &[Section]) -> Vec<Span> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PhraseKey {
+    Program,
     Search,
     Explore,
     Skill,
@@ -640,6 +676,7 @@ enum PhraseKey {
 
 fn phrase_key(item: &Item<'_>) -> PhraseKey {
     match item {
+        Item::Program { .. } => PhraseKey::Program,
         Item::Explore { kind, .. } => match kind {
             ExploreKind::Search => PhraseKey::Search,
             ExploreKind::Skill => PhraseKey::Skill,
@@ -666,6 +703,12 @@ fn phrase(key: PhraseKey, members: &[&Item<'_>]) -> Vec<Span> {
     };
     let n = members.len();
     let text = match key {
+        PhraseKey::Program => t(if running(members) {
+            "Running code"
+        } else {
+            "Ran code"
+        })
+        .to_owned(),
         PhraseKey::Search => format!("{} {}", verb("ran", "running"), counted(n, SEARCH)),
         PhraseKey::Skill => format!("{} {}", verb("read", "reading"), counted(n, SKILL)),
         PhraseKey::Explore => {
@@ -800,6 +843,7 @@ fn append_section(lines: &mut Vec<Line>, section: Section, items: &[&Item<'_>], 
         .filter(|item| item.section() == section)
         .collect();
     match section {
+        Section::Program => {}
         Section::Explore => {
             if nested {
                 let states: Vec<State> = members.iter().map(|i| i.call().state).collect();
@@ -1362,7 +1406,7 @@ fn state_mark(state: State) -> Mark {
     }
 }
 
-fn ordered_sections(items: &[Item<'_>]) -> Vec<Section> {
+fn ordered_sections(items: &[&Item<'_>]) -> Vec<Section> {
     let mut sections = Vec::new();
     for item in items {
         if !sections.contains(&item.section()) {
@@ -1372,9 +1416,9 @@ fn ordered_sections(items: &[Item<'_>]) -> Vec<Section> {
     sections
 }
 
-fn section_runs<'b, 'a>(items: &'b [Item<'a>]) -> Vec<Vec<&'b Item<'a>>> {
+fn section_runs<'b, 'a>(items: &[&'b Item<'a>]) -> Vec<Vec<&'b Item<'a>>> {
     let mut runs: Vec<Vec<&Item<'_>>> = Vec::new();
-    for item in items {
+    for item in items.iter().copied() {
         match runs.last_mut() {
             Some(run) if run[0].section() == item.section() => run.push(item),
             _ => runs.push(vec![item]),

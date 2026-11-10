@@ -896,7 +896,7 @@ fn the_product_profile_installs_native_goal_without_a_foreign_runtime() {
         &mut wire,
         &mut id,
         "hello",
-        json!({"protocolVersion":3,"clientKind":"cli"}),
+        json!({"protocolVersion":4,"clientKind":"cli"}),
     );
     assert_eq!(
         hello["result"]["daemonProfile"]["kind"], "product",

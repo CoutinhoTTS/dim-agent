@@ -661,6 +661,7 @@ fn a_v1_connection_receives_a_tool_result_without_its_effects() {
         sequence: 1,
         create_at: 0,
         tags: None,
+        parent_call_id: None,
         kind: EventKind::ToolResult(ToolResultData {
             turn_id: "turn-1".into(),
             request_id: "request-1".into(),
