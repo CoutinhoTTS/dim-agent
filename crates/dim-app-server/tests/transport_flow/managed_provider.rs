@@ -279,6 +279,7 @@ async fn an_injected_managed_provider_serves_accounts_and_recovers_credentials()
         &mut builder,
         ModelProviderPlugin::process,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.join("output"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
@@ -876,6 +877,7 @@ async fn a_managed_model_made_usable_by_its_edit_is_governed_by_its_effective_li
         &mut builder,
         ModelProviderPlugin::process,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.join("output"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),

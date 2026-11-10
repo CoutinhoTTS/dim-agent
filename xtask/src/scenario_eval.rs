@@ -6878,16 +6878,6 @@ mod tests {
         text.contains("You check statements")
             .then(|| content(r#"[{"id":"ran","verdict":"present","quote":"turn/end"}]"#))
     }
-    /// The first subscription id a request carries: the `events` tool's
-    /// subscribe answer.
-    fn subscription_id(text: &str) -> Option<String> {
-        let start = text.find("sub_")? + "sub_".len();
-        let rest = &text[start..];
-        let end = rest
-            .find(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
-            .unwrap_or(rest.len());
-        (end > 0).then(|| format!("sub_{}", &rest[..end]))
-    }
     /// Every distinct subscription id a request carries, first seen first:
     /// the `events` tool's subscribe answers, in the order they arrived.
     fn subscription_ids(text: &str) -> Vec<String> {
@@ -9142,28 +9132,28 @@ mod tests {
         );
     }
 
-    /// A model that unsubscribes before its event fires leaves the publish
-    /// with no deliveries; that is the run's outcome, recorded, not a failed
-    /// run (EventHub design A.3, A.4).
+    /// A subscription whose `match` excludes the event directs no delivery:
+    /// a started clock whose publish matches nobody is the run's outcome,
+    /// recorded, not a failed run (EventHub design A.3, A.4).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn an_event_the_model_unsubscribed_from_is_recorded_not_failed() {
+    async fn an_event_no_subscription_takes_is_recorded_not_failed() {
         const GUIDE: &str = "CI publishes a failure notice when a build breaks.";
-        /// The judge's verdict, an `events` subscribe call, an `unsubscribe`
-        /// of the id it answered, and plain text after.
+        /// The judge's verdict, one `events` subscribe whose `match`
+        /// excludes the event, and plain text after.
         fn answers(text: &str) -> Option<Value> {
-            judged(text).or_else(|| match text.matches("sub_").count() {
-                0 => Some(tool_call(
-                    "events",
-                    &json!({"action": "subscribe", "types": ["ci.*"], "mode": "steer"}).to_string(),
-                )),
-                1 => {
-                    let id = subscription_id(text).expect("the subscribe result carries an id");
-                    Some(tool_call(
+            judged(text).or_else(|| {
+                (!text.contains("sub_")).then(|| {
+                    tool_call(
                         "events",
-                        &json!({"action": "unsubscribe", "subscriptionId": id}).to_string(),
-                    ))
-                }
-                _ => None,
+                        &json!({
+                            "action": "subscribe",
+                            "types": ["ci.*"],
+                            "match": {"branch": "release"},
+                            "mode": "steer"
+                        })
+                        .to_string(),
+                    )
+                })
             })
         }
         let fixture = Fixture::start(
@@ -9186,6 +9176,7 @@ mod tests {
                     "id": "f-1",
                     "title": "The build failed",
                     "body": "The build failed on the release branch.",
+                    "attributes": {"branch": "main"},
                     "afterSubscribedSeconds": 1
                 }],
                 "budget": {"turns": 6, "seconds": 30, "window": 24000},
@@ -9270,6 +9261,13 @@ mod tests {
             "{}",
             record.events[0].receipt
         );
+        assert!(
+            record.events[0].receipt["deliveries"][0]["subscriptionIds"]
+                .as_array()
+                .is_some_and(|ids| !ids.is_empty()),
+            "the model's own subscription carried the event: {}",
+            record.events[0].receipt
+        );
     }
 
     /// The scenario's own `append` subscription delivers without a turn, so
@@ -9325,13 +9323,15 @@ mod tests {
 
     /// A subscription's `match` can exclude an event, and it then directs no
     /// delivery: the mode comes from the subscriptions the receipt lists, so
-    /// a `steer` subscription that excluded the event starts no turn
-    /// (EventHub design §3.1, A.2).
+    /// a `steer` subscription that excluded the event starts no turn. The
+    /// event fires on a later tool call the model makes only after both
+    /// subscribe results are in its request (EventHub design §3.1, A.2).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_delivery_takes_its_mode_from_the_subscriptions_that_directed_it() {
         const GUIDE: &str = "CI publishes a failure notice when a build breaks.";
         /// The judge's verdict, a `steer` subscribe whose `match` excludes
-        /// the event, an `append` subscribe, and plain text after.
+        /// the event, an `append` subscribe, a read once both ids are in the
+        /// request, and plain text after.
         fn answers(text: &str) -> Option<Value> {
             judged(text).or_else(|| match text.matches("sub_").count() {
                 0 => Some(tool_call(
@@ -9349,7 +9349,8 @@ mod tests {
                     &json!({"action": "subscribe", "types": ["ci.failure"], "mode": "append"})
                         .to_string(),
                 )),
-                _ => None,
+                _ => (!text.contains("build output"))
+                    .then(|| tool_call("read", r#"{"path":"build.txt"}"#)),
             })
         }
         let fixture = Fixture::start(
@@ -9373,12 +9374,12 @@ mod tests {
                     "title": "The build failed",
                     "body": "The build failed on the release branch.",
                     "attributes": {"branch": "main"},
-                    "afterSubscribedSeconds": 2
+                    "whenToolCall": "read"
                 }],
                 "budget": {"turns": 6, "seconds": 30, "window": 24000},
                 "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
             }),
-            &[],
+            &[("build.txt", "build output\n")],
         )
         .await;
         let options = fixture.options(fixture.directory.join("out"));
@@ -9457,81 +9458,6 @@ mod tests {
             record.events.is_empty(),
             "the event was never published: {:?}",
             record.events
-        );
-    }
-
-    /// A timed delivery's mode comes from the subscriptions that directed it:
-    /// a model that subscribes with `append` to a type declared `queue`
-    /// receives the `afterSeconds` event as an `append` input, which starts
-    /// no turn, so the run ends idle rather than at its seconds budget
-    /// (EventHub design §3.1, A.2).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_timed_append_delivery_starts_no_turn() {
-        /// The judge's verdict, the `events` subscribe call until its result
-        /// is in the request, and plain text after.
-        fn answers(text: &str) -> Option<Value> {
-            judged(text).or_else(|| {
-                (!text.contains("sub_")).then(|| {
-                    tool_call(
-                        "events",
-                        &json!({"action": "subscribe", "types": ["ci.failure"], "mode": "append"})
-                            .to_string(),
-                    )
-                })
-            })
-        }
-        let fixture = Fixture::start(
-            "eventhub-tool-timed-append",
-            answers,
-            json!({
-                "message": "Subscribe to CI failures with append, then finish.",
-                "sources": [{
-                    "name": "ci",
-                    "guide": "CI publishes a failure notice when a build breaks.",
-                    "types": [{
-                        "type": "ci.failure",
-                        "description": "A failed build.",
-                        "mode": "queue"
-                    }]
-                }],
-                "events": [{
-                    "source": "ci",
-                    "type": "ci.failure",
-                    "id": "f-1",
-                    "title": "The build failed",
-                    "body": "The build failed on the release branch.",
-                    "afterSeconds": 1
-                }],
-                "budget": {"turns": 4, "seconds": 30, "window": 24000},
-                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
-            }),
-            &[],
-        )
-        .await;
-        let options = fixture.options(fixture.directory.join("out"));
-        let record = run_arm(&fixture, &options, "current", &Overrides::default(), 0).await;
-        assert_eq!(record.error, None);
-        assert!(
-            !record.failed,
-            "the delivery is correct and nothing is outstanding"
-        );
-        assert_eq!(
-            record.stop, "idle",
-            "an append delivery starts no turn: {:?}",
-            record.events
-        );
-        assert_eq!(record.events.len(), 1, "one event was published");
-        let receipt = &record.events[0].receipt;
-        assert_eq!(
-            receipt["deliveries"][0]["status"],
-            json!("delivered"),
-            "{receipt}"
-        );
-        assert!(
-            receipt["deliveries"][0]["subscriptionIds"]
-                .as_array()
-                .is_some_and(|ids| !ids.is_empty()),
-            "the model's own subscription carried the event: {receipt}"
         );
     }
 

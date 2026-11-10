@@ -5000,10 +5000,30 @@ fn repicking_the_current_model_keeps_the_effort() {
     terminal.write(b"\r");
     terminal.until("Ask anything...");
     terminal.until("test / model · high");
+    // The picker closes and the label redraws before the host task reads
+    // provider management twice and sends the update; wait for the call the
+    // test asserts, so the deliberate kill cannot land inside that window.
+    let deadline = Instant::now() + PATIENCE;
+    let mut calls: Vec<Value> = Vec::new();
+    while !calls
+        .iter()
+        .any(|call| call["method"] == "session.model.update")
+    {
+        match observed.recv_timeout(Duration::from_millis(20)) {
+            Ok(call) => calls.push(call),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => assert!(
+                Instant::now() < deadline,
+                "the model was re-picked: {calls:?}"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the daemon stopped before the model was re-picked: {calls:?}")
+            }
+        }
+    }
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
-    let calls: Vec<Value> = observed.try_iter().collect();
+    calls.extend(observed.try_iter());
     let update = calls
         .iter()
         .find(|call| call["method"] == "session.model.update")
@@ -10824,6 +10844,19 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
         thread::sleep(Duration::from_millis(10));
     }
     terminal.until("Broken: no models · dimcode models broken --refresh");
+    // `listed` counts provider.list calls, and a refill reply re-reads the
+    // list, so reaching 4 does not prove this open ran; a repaint of the
+    // previous picker can satisfy the row above. Wait for the refresh the
+    // assertion below checks before the deliberate kill.
+    let refresh_deadline = Instant::now() + PATIENCE;
+    while refreshed.lock().unwrap().len() < 3 {
+        assert!(
+            Instant::now() < refresh_deadline,
+            "the written catalog version was not listed again: {:?}",
+            refreshed.lock().unwrap()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
