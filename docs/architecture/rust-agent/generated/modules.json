@@ -1,7 +1,7 @@
 {
   "analysis": {
     "source": "syn AST: mod declarations, use trees, item definitions and symbol paths",
-    "scope": "dim-agent-*, dim-app-server, dim-client, dim-acp, dim-cli, dim-migration, dim-session-title and dim-goal library/binary targets; cfg branches are conservatively included",
+    "scope": "dim-agent-*, dim-app-server, dim-client, dim-acp, dim-cli, dim-migration, dim-session-title, dim-goal and dim-report library/binary targets; cfg branches are conservatively included",
     "glob": "glob/re-export chains are resolved for referenced names; an unused glob does not create every possible dependency",
     "limitations": [
       "Macros are not expanded; unexpandedMacros names are reported per module",
@@ -6825,6 +6825,50 @@
         "format",
         "matches",
         "msg_send"
+      ]
+    },
+    {
+      "id": "dim_report",
+      "crate": "dim_report",
+      "parent": null,
+      "file": "crates/dim-report/src/lib.rs",
+      "unexpandedMacros": [
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_report::draft",
+      "crate": "dim_report",
+      "parent": "dim_report",
+      "file": "crates/dim-report/src/draft.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tokio::pin",
+        "tokio::select",
+        "unreachable"
+      ]
+    },
+    {
+      "id": "dim_report::evidence",
+      "crate": "dim_report",
+      "parent": "dim_report",
+      "file": "crates/dim-report/src/evidence.rs",
+      "unexpandedMacros": [
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_report::render",
+      "crate": "dim_report",
+      "parent": "dim_report",
+      "file": "crates/dim-report/src/render.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "writeln"
       ]
     },
     {
@@ -48259,6 +48303,304 @@
       "to": "dim_ocr::platform",
       "references": [
         "path crate::platform::macos_version"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path SessionMethods",
+        "use dim_agent_capabilities::methods::SessionMethods"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionLifecycle",
+        "use dim_agent_runtime::SessionLifecycle"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path PartRegistry",
+        "path PartScope::Session",
+        "use dim_agent_runtime::PartRegistry",
+        "use dim_agent_runtime::PartScope"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_app_server::methods",
+      "references": [
+        "path ManagementMethods",
+        "use dim_app_server::methods::ManagementMethods"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_report::draft",
+      "references": [
+        "mod draft",
+        "path draft::Session",
+        "path draft::register"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_report::evidence",
+      "references": [
+        "mod evidence"
+      ]
+    },
+    {
+      "from": "dim_report",
+      "to": "dim_report::render",
+      "references": [
+        "mod render"
+      ]
+    },
+    {
+      "from": "dim_report::draft",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path Caller",
+        "path Interruption::Report",
+        "path MethodCall",
+        "path MethodDecl::new",
+        "path MethodTable",
+        "path RpcError",
+        "path RpcError::invalid",
+        "path RpcError::service",
+        "path params",
+        "path reply",
+        "use dim_agent_capabilities::methods::Caller",
+        "use dim_agent_capabilities::methods::Interruption",
+        "use dim_agent_capabilities::methods::MethodCall",
+        "use dim_agent_capabilities::methods::MethodDecl",
+        "use dim_agent_capabilities::methods::MethodTable",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::params",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_report::draft",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_report::draft",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionHold",
+        "path SessionLifecycle",
+        "use dim_agent_runtime::SessionHold",
+        "use dim_agent_runtime::SessionLifecycle"
+      ]
+    },
+    {
+      "from": "dim_report::draft",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_report::draft",
+      "to": "dim_report::evidence",
+      "references": [
+        "path ErrorReference",
+        "path Snapshot",
+        "use crate::evidence::ErrorReference",
+        "use crate::evidence::Snapshot"
+      ]
+    },
+    {
+      "from": "dim_report::draft",
+      "to": "dim_report::render",
+      "references": [
+        "path InstructionsStatus",
+        "path Reviewed",
+        "path render::review",
+        "use crate::render",
+        "use crate::render::InstructionsStatus",
+        "use crate::render::Reviewed"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::invalid",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_capabilities::prompt_state",
+      "references": [
+        "path PromptSnapshot",
+        "use dim_agent_capabilities::prompt_state::PromptSnapshot"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::AgentError::InvalidInput",
+        "path dim_agent_runtime::AgentError::UnknownBranch"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryFilter::In",
+        "path QueryOperand::Field",
+        "path QueryOutput::Events",
+        "path QueryPage",
+        "path QuerySelect::Events",
+        "path QuerySpec",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryFilter",
+        "use dim_agent_runtime::QueryOperand",
+        "use dim_agent_runtime::QueryOutput",
+        "use dim_agent_runtime::QueryPage",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QuerySpec",
+        "use dim_agent_runtime::TimelineQuery"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition",
+        "use dim_agent_types::TimelinePosition"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path BranchCreateFailedData::Cancelled",
+        "path BranchCreateFailedData::Failed",
+        "path EventKind",
+        "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchEnd",
+        "path EventKind::BranchEnded",
+        "path EventKind::BranchResume",
+        "path EventKind::BranchStart",
+        "path EventKind::ModelOutputEnd",
+        "path EventKind::TurnEnd",
+        "path EventKind::TurnStart",
+        "path ModelOutputOutcome::Cancelled",
+        "path ModelOutputOutcome::Completed",
+        "path ModelOutputOutcome::Failed",
+        "path TurnOutcome::Cancelled",
+        "path TurnOutcome::Completed",
+        "path TurnOutcome::Failed",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::BranchCreateFailedData",
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ModelOutputOutcome",
+        "use dim_agent_types::TurnOutcome"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_report::render",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::service",
+        "path reply",
+        "use dim_agent_capabilities::methods::RpcError",
+        "use dim_agent_capabilities::methods::reply"
+      ]
+    },
+    {
+      "from": "dim_report::render",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path PROTOCOL_VERSION",
+        "path SERVER_VERSION",
+        "use dim_app_server::protocol::PROTOCOL_VERSION",
+        "use dim_app_server::protocol::SERVER_VERSION"
+      ]
+    },
+    {
+      "from": "dim_report::render",
+      "to": "dim_report::evidence",
+      "references": [
+        "path CapturedError",
+        "path Missing",
+        "path Missing::FailureUnavailable",
+        "path Missing::NoReference",
+        "path Missing::Omitted",
+        "path Missing::ReadFailed",
+        "path Snapshot",
+        "path TimelineEvidence",
+        "use crate::evidence::CapturedError",
+        "use crate::evidence::Missing",
+        "use crate::evidence::Snapshot",
+        "use crate::evidence::TimelineEvidence"
       ]
     },
     {

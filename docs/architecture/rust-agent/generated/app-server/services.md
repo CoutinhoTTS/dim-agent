@@ -8,10 +8,11 @@ flowchart LR
   subgraph process["process"]
     p1["root"]
     p2["rutis-loader"]
-    p72["Attachments"]
+    p73["Attachments"]
+    p72["Report"]
     p71["goal"]
     p70["eventhub"]
-    p73["eventhub-ready"]
+    p74["eventhub-ready"]
     p69["Questions"]
     p68["PromptSuggestion"]
     p67["Modality"]
@@ -80,14 +81,16 @@ flowchart LR
     p4["FileStorage"]
     p3["ServerControl"]
   end
+  p45 -->|"dim_agent_runtime::parts::PartRegistry"| p73
   p45 -->|"dim_agent_runtime::parts::PartRegistry"| p72
+  p9 -->|"dim_app_server::methods::ManagementMethods"| p72
   p45 -->|"dim_agent_runtime::parts::PartRegistry"| p71
   p18 -->|"dim_app_server::settings::SettingsService"| p71
   p45 -->|"dim_agent_runtime::parts::PartRegistry"| p70
   p9 -->|"dim_app_server::methods::ManagementMethods"| p70
   p13 -->|"dim_app_server::plugin_files::PluginFileTransactions"| p70
   p37 -->|"dyn rutis_bridge::session::services::HostDispatch#sessions"| p70
-  p70 -->|"dim_event_hub::bridge::EventHub"| p73
+  p70 -->|"dim_event_hub::bridge::EventHub"| p74
   p45 -->|"dim_agent_runtime::parts::PartRegistry"| p69
   p45 -->|"dim_agent_runtime::parts::PartRegistry"| p68
   p17 -->|"dim_agent_capabilities::host::ModelSelectionHost"| p67

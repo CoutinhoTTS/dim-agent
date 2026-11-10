@@ -416,6 +416,34 @@
     "to": "dim-client"
   },
   {
+    "from": "dim-report",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-report",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-client"
+  },
+  {
     "from": "dim-modality-aimux",
     "to": "dim-agent-aimux"
   },
@@ -485,6 +513,10 @@
   },
   {
     "from": "dimcode",
+    "to": "dim-report"
+  },
+  {
+    "from": "dimcode",
     "to": "dim-session-title"
   },
   {
@@ -542,6 +574,10 @@
   {
     "from": "xtask",
     "to": "dim-modality"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-report"
   },
   {
     "from": "xtask",
