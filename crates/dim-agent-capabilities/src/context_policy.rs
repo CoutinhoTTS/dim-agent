@@ -1,4 +1,5 @@
 use crate::{
+    context_usage::Estimate,
     history::{
         HistoryEntry, HistoryRenderer, chain_by_id, context_compaction, context_configuration,
         digest_message, truncate_middle, user_message,
@@ -109,12 +110,6 @@ pub(crate) struct ContextPolicy {
     pub strategy: Arc<dyn CompactionStrategy>,
     pub history: Arc<HistoryRenderer>,
 }
-pub(crate) struct Estimate {
-    pub input: f64,
-    pub source: BaselineSource,
-    baseline: Option<f64>,
-    delta: Option<f64>,
-}
 
 /// The caller of a compaction step and its reason; the ids and `through`
 /// are written into both facts.
@@ -193,14 +188,6 @@ impl PolicyContext {
         crate::history::projected_messages(self.compaction(), history)
     }
 
-    /// The same messages by reference, for checks that only compare them.
-    pub fn message_refs<'a>(
-        &'a self,
-        history: &'a [HistoryEntry],
-    ) -> impl Iterator<Item = &'a Message> + 'a {
-        crate::history::projected_message_refs(self.compaction(), history)
-    }
-
     /// The index of the first entry at or after a chain position.
     pub fn position_entry(&self, history: &[HistoryEntry], position: &TimelinePosition) -> usize {
         let rank = |branch: &str| self.branches.iter().position(|name| name == branch);
@@ -230,9 +217,6 @@ impl PolicyContext {
         self.full.as_ref()
     }
 }
-
-/// One fact a request's estimate compares against, with where it sits.
-pub(crate) type EstimateEvent = (TimelinePosition, Arc<AgentEvent>);
 
 /// One event a compaction step may cut at, with where it sits.
 struct OrderEvent {
@@ -268,13 +252,11 @@ pub(crate) struct View {
     history: Vec<HistoryEntry>,
     /// The sequence the preparation reads to.
     through: u64,
-    /// The events an estimate compares against, oldest first, and the ones a
-    /// retry may reuse.
-    events: Vec<Arc<AgentEvent>>,
     checkpoint: Option<CompactionCheckpoint>,
     /// `request` projected under `checkpoint`.
     pub prepared: Arc<ModelRequest>,
     adopted: Option<(u64, String)>,
+    reused_compaction: Option<ContextCompactionData>,
 }
 
 /// The committed result of a step and, when it completed, the request
@@ -286,6 +268,7 @@ pub(crate) struct Compacted {
 
 pub(crate) struct PreparedRequest {
     pub request: Arc<ModelRequest>,
+    pub evidence: Option<crate::context_usage::UsageEvidence>,
     pub through: u64,
     pub compaction: Option<String>,
 }
@@ -471,11 +454,11 @@ impl ContextPolicy {
         context: PolicyContext,
         history: Vec<HistoryEntry>,
         through: u64,
-        events: Vec<Arc<AgentEvent>>,
         reusable: Vec<Arc<AgentEvent>>,
     ) -> Result<View, HostError> {
         let prefix_len = context.messages_len(&history);
         let mut reused = None;
+        let mut reused_compaction = None;
         for event in reusable.iter().rev() {
             let EventKind::ContextCompaction(data) = &event.kind else {
                 continue;
@@ -494,6 +477,7 @@ impl ContextPolicy {
                     context.position_entry(&history, &position)
                 }
             };
+            reused_compaction = Some(data.clone());
             reused = Some((checkpoint, kept, event.sequence, event.id.clone()));
             break;
         }
@@ -518,18 +502,16 @@ impl ContextPolicy {
                 request.clone(),
             ),
         };
-        let mut events = events;
-        events.extend(reusable);
         Ok(View {
             request,
             prefix_len,
             context,
             history,
             through,
-            events,
             checkpoint,
             prepared,
             adopted,
+            reused_compaction,
         })
     }
 
@@ -986,7 +968,7 @@ impl ContextPolicy {
         source: &ContextPrepareData,
         context: PolicyContext,
         history: Vec<HistoryEntry>,
-        events: Vec<Arc<AgentEvent>>,
+        usage: Option<&crate::context_usage::ContextUsage>,
         cancel: CancellationToken,
         cancelled: &(dyn Fn() -> String + Sync),
     ) -> Result<PreparedRequest, HostError> {
@@ -1068,7 +1050,7 @@ impl ContextPolicy {
             }
         }
         let view = self
-            .view(request, context, history, source.through, events, reusable)
+            .view(request, context, history, source.through, reusable)
             .await?;
         let prepared_through = view
             .adopted
@@ -1080,7 +1062,25 @@ impl ContextPolicy {
             .resolve(view.prepared.clone(), cancel.clone())
             .await?;
         check_cancel(&cancel)?;
-        let estimate = self.estimate(&view.prepared, model.as_ref(), &view.events)?;
+        let evidence = match usage {
+            Some(usage) => {
+                usage
+                    .reference(
+                        &source.request_id,
+                        source.through,
+                        prepared_through,
+                        &view.prepared,
+                        prepared_compaction.as_deref(),
+                        cancel.clone(),
+                    )
+                    .await?
+            }
+            None => None,
+        };
+        let estimate = evidence
+            .as_ref()
+            .and_then(|evidence| evidence.estimate(model.as_ref()))
+            .unwrap_or_else(|| Self::local_estimate(&view.prepared, model.as_ref()));
         self.timeline
             .append(
                 EventKind::ContextBudget(ContextBudgetData {
@@ -1112,6 +1112,7 @@ impl ContextPolicy {
                 request: view.prepared,
                 through: prepared_through,
                 compaction: prepared_compaction,
+                evidence,
             });
         }
         if !recovery && !self.regrown(&view, model.as_ref()).await? {
@@ -1119,6 +1120,7 @@ impl ContextPolicy {
                 request: view.prepared,
                 through: prepared_through,
                 compaction: prepared_compaction,
+                evidence,
             });
         }
         let step = CompactionStep {
@@ -1158,6 +1160,7 @@ impl ContextPolicy {
                     request,
                     through: compacted.fact.sequence,
                     compaction: Some(compacted.fact.id.clone()),
+                    evidence: None,
                 })
             }
             (ContextCompactionResult::Cancelled { reason }, _) => {
@@ -1173,6 +1176,7 @@ impl ContextPolicy {
                 request: view.prepared,
                 through: prepared_through,
                 compaction: prepared_compaction,
+                evidence,
             }),
         }
     }
@@ -1665,11 +1669,12 @@ impl ContextPolicy {
         }
     }
 
-    /// Fails with budget facts when the trigger's estimate of `request`,
-    /// over the branch's committed events, exceeds the input budget.
+    /// Checks the final request against the input budget. Compatible preparation
+    /// evidence supplies its estimate; otherwise the actual request is counted.
     pub async fn validate(
         &self,
         request: Arc<ModelRequest>,
+        reference: Option<&crate::context_usage::UsageEvidence>,
         cancel: CancellationToken,
     ) -> Result<(), HostError> {
         let model = self
@@ -1677,14 +1682,10 @@ impl ContextPolicy {
             .resolve(request.clone(), cancel.clone())
             .await?;
         check_cancel(&cancel)?;
-        let events: Vec<Arc<AgentEvent>> =
-            estimate_events(&self.timeline, self.timeline.sequence())
-                .await
-                .map_err(|error| HostError::failed(error.to_string()))?
-                .into_iter()
-                .map(|(_, event)| event)
-                .collect();
-        let input = self.estimate(&request, model.as_ref(), &events)?.input;
+        let input = reference
+            .and_then(|reference| reference.estimate(model.as_ref()))
+            .unwrap_or_else(|| Self::local_estimate(&request, model.as_ref()))
+            .input;
         if input <= input_budget(model.as_ref()) {
             return Ok(());
         }
@@ -1703,79 +1704,17 @@ impl ContextPolicy {
         })
     }
 
-    pub fn estimate(
-        &self,
-        request: &ModelRequest,
-        model: &dyn ContextModel,
-        events: &[Arc<AgentEvent>],
-    ) -> Result<Estimate, HostError> {
-        let mut usage: Option<&ModelUsageData> = None;
-        for event in events.iter().rev() {
-            match &event.kind {
-                EventKind::ContextCompaction(data)
-                    if usage.is_none()
-                        && matches!(data.outcome, ContextCompactionResult::Completed { .. }) =>
-                {
-                    break;
-                }
-                EventKind::ModelUsage(data) if usage.is_none() => usage = Some(data),
-                EventKind::ModelCall(data)
-                    if usage.is_some_and(|u| {
-                        u.request_id == data.request_id && u.turn_id == data.turn_id
-                    }) =>
-                {
-                    let value = &usage.expect("matched usage").usage;
-                    let previous = &data.request;
-                    if value.prompt_tokens > 0.
-                        && value.prompt_tokens
-                            >= value.cache_read_tokens.unwrap_or(0.)
-                                + value.cache_write_tokens.unwrap_or(0.)
-                        && previous.provider_id == request.provider_id
-                        && previous.model_id == request.model_id
-                        && previous.capability_snapshot == request.capability_snapshot
-                        && previous.tools == request.tools
-                        && previous.system == request.system
-                        && previous.config == request.config
-                        && previous.metadata == request.metadata
-                        && request.messages.starts_with(&previous.messages)
-                    {
-                        let delta = if previous.messages.len() == request.messages.len() {
-                            0.
-                        } else {
-                            model.count_tokens(&ModelRequest {
-                                messages: request.messages[previous.messages.len()..].to_vec(),
-                                ..ModelRequest::new(
-                                    &request.provider_id,
-                                    &request.model_id,
-                                    Vec::new(),
-                                )
-                            })
-                        };
-                        return Ok(Estimate {
-                            input: value.prompt_tokens + delta,
-                            source: BaselineSource::ProviderBaseline,
-                            baseline: Some(value.prompt_tokens),
-                            delta: Some(delta),
-                        });
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-        Ok(Estimate {
+    pub fn local_estimate(request: &ModelRequest, model: &dyn ContextModel) -> Estimate {
+        Estimate {
             input: model.count_tokens(request),
             source: BaselineSource::FullEstimate,
             baseline: None,
             delta: None,
-        })
+        }
     }
 }
 
 impl View {
-    pub fn events(&self) -> &[Arc<AgentEvent>] {
-        &self.events
-    }
     /// The request with `history[..kept]` replaced and its token estimate.
     fn compacted(
         &self,
@@ -1912,22 +1851,10 @@ fn digest_entries(
     window: &CutWindow,
     model: &dyn ContextModel,
 ) -> Option<DigestEntries> {
-    // The compaction in effect is the latest completed record of the view,
-    // wherever the new cut falls: a record is written after the events it
-    // keeps, so it can sit after the new cut, and a retry reads records from
-    // the reusable events too.
     let previous = view
-        .events
-        .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            EventKind::ContextCompaction(data)
-                if matches!(data.outcome, ContextCompactionResult::Completed { .. }) =>
-            {
-                Some(data)
-            }
-            _ => None,
-        });
+        .reused_compaction
+        .as_ref()
+        .or_else(|| view.context.compaction());
     {
         let (mut entries, mut dropped) = match previous {
             Some(data) => {
@@ -2019,18 +1946,10 @@ fn digest_key(effect: &ToolEffect) -> (u8, &str) {
 /// this lookup does not depend on one.
 fn carried_pins(view: &View, turn_id: &str) -> Option<CarriedPins> {
     let data = view
-        .events
-        .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            EventKind::ContextCompaction(data)
-                if data.turn_id.as_deref() == Some(turn_id)
-                    && matches!(data.outcome, ContextCompactionResult::Completed { .. }) =>
-            {
-                Some(data)
-            }
-            _ => None,
-        })?;
+        .reused_compaction
+        .as_ref()
+        .or_else(|| view.context.compaction())
+        .filter(|data| data.turn_id.as_deref() == Some(turn_id))?;
     let ContextCompactionResult::Completed {
         retain_from,
         replacement,
@@ -2099,6 +2018,10 @@ fn pinned_inputs(
         .and_then(|context| context.checkpoint.as_ref())
         .map(|checkpoint| checkpoint.state.inputs.as_slice())
         .unwrap_or_default();
+    let carried_ids: std::collections::HashSet<&str> = carried
+        .into_iter()
+        .flat_map(|carried| carried.pins.iter().filter_map(|pin| pin.id.as_deref()))
+        .collect();
     let mut pins = carried
         .map(|carried| carried.pins.clone())
         .unwrap_or_default();
@@ -2106,6 +2029,9 @@ fn pinned_inputs(
         let EventKind::InputConsumed(data) = &event.kind else {
             continue;
         };
+        if carried_ids.contains(data.input_id.as_str()) {
+            continue;
+        }
         let input = messages.get(data.input_id.as_str()).copied().or_else(|| {
             checkpointed
                 .iter()
@@ -2675,110 +2601,4 @@ pub(crate) fn check_cancel(cancel: &CancellationToken) -> Result<(), HostError> 
     } else {
         Ok(())
     }
-}
-
-/// The facts a request's estimate compares against, oldest first on the
-/// chain: the newest provider usage, the model call it measured, the newest
-/// completed compaction and the newest adopted configuration. One page each.
-pub(crate) async fn estimate_events(
-    timeline: &Timeline,
-    through: u64,
-) -> dim_agent_runtime::Result<Vec<EstimateEvent>> {
-    let mut facts: Vec<EstimateEvent> = Vec::new();
-    let usage = timeline
-        .query(newest_chain(
-            Some("model/usage"),
-            through,
-            None,
-            QuerySelect::Events,
-        ))
-        .await?;
-    let QueryOutput::Events { events } = usage.result else {
-        unreachable!("event selection returns events")
-    };
-    let Some(row) = events.into_iter().next() else {
-        return Ok(Vec::new());
-    };
-    let EventKind::ModelUsage(data) = &row.event.kind else {
-        unreachable!("query selects model usage")
-    };
-    let request_id = data.request_id.clone();
-    let turn_id = data.turn_id.clone();
-    facts.push((row.position, row.event));
-    for (kind, filter) in [
-        (
-            "model/call",
-            Some(QueryFilter::And {
-                conditions: vec![
-                    QueryFilter::In {
-                        value: QueryOperand::Field {
-                            path: "data.request_id".into(),
-                        },
-                        values: vec![request_id.into()],
-                    },
-                    QueryFilter::In {
-                        value: QueryOperand::Field {
-                            path: "data.turn_id".into(),
-                        },
-                        values: vec![turn_id.into()],
-                    },
-                ],
-            }),
-        ),
-        (
-            "context/compaction",
-            Some(QueryFilter::In {
-                value: QueryOperand::Field {
-                    path: "data.status".into(),
-                },
-                values: vec!["completed".into()],
-            }),
-        ),
-        ("context/configured", None),
-    ] {
-        let reply = timeline
-            .query(newest_chain(
-                Some(kind),
-                through,
-                filter,
-                QuerySelect::Events,
-            ))
-            .await?;
-        let QueryOutput::Events { events } = reply.result else {
-            unreachable!("event selection returns events")
-        };
-        facts.extend(events.into_iter().map(|row| (row.position, row.event)));
-    }
-    let branches: Vec<String> = timeline
-        .ancestors()
-        .into_iter()
-        .map(|(branch, _)| branch)
-        .chain(std::iter::once(timeline.branch_id()))
-        .collect();
-    facts.sort_by_key(|(position, _)| {
-        let rank = branches
-            .iter()
-            .position(|branch| branch == &position.branch_id);
-        (rank, position.sequence)
-    });
-    Ok(facts)
-}
-
-/// The same facts a decoded context already holds, oldest first.
-pub(crate) fn estimate_events_in(context: &ContextHistory) -> Vec<EstimateEvent> {
-    context
-        .events
-        .iter()
-        .zip(context.positions.iter())
-        .filter(|(event, _)| {
-            matches!(
-                &event.kind,
-                EventKind::ContextConfigured(_)
-                    | EventKind::ContextCompaction(_)
-                    | EventKind::ModelUsage(_)
-                    | EventKind::ModelCall(_)
-            )
-        })
-        .map(|(event, position)| (position.clone(), event.clone()))
-        .collect()
 }

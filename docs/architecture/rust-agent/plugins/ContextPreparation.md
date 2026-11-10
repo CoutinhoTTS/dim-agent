@@ -52,14 +52,15 @@ Recovery queries preparation identities without a matching model call or output
 end, and automatic compaction starts without a matching result, at one committed
 boundary. It reads only settlement and control fields, then writes terminal
 facts without reconstructing historical requests or rerunning host work.
-Preparation and policy hold no complete request between operations; validation
-estimates the actual request it receives, including changes made before commit.
+Preparation and policy retain only a weak reference and numeric evidence for the
+in-flight request. Validation reuses that estimate for the unchanged final object
+and matching model counter and limits; otherwise it counts the actual final request.
 Context pages use one fixed content cutoff and store continuations. Cut discovery
 reads ids and positions; retained input and tool-result queries end at the chosen
 cut before returning bodies. Retry control facts use a separate fixed committed
-cutoff above the original content boundary. Provider-baseline validation reads
-the matching historical request when its exact prefix comparison requires it;
-that request remains local to the operation.
+cutoff above the original content boundary. Provider-baseline estimates come from
+ContextUsage's numeric prefix and request references. Request preparation and final
+validation do not load historical model requests.
 The mock profile
 has no context resolver. Completed compaction facts remain authoritative across
 checkpoint selection. Recovery snapshots are built from the final adopted cut,

@@ -31,10 +31,35 @@ mod numeric;
 mod sources;
 use numeric::{Entry, Numeric, Reference, Summary};
 
-pub(crate) struct UsageEvidence(sources::RequestBase);
+#[derive(Clone)]
+pub(crate) struct Estimate {
+    pub input: f64,
+    pub source: BaselineSource,
+    pub baseline: Option<f64>,
+    pub delta: Option<f64>,
+}
+
+#[derive(Clone)]
+pub(crate) struct UsageEvidence {
+    base: sources::RequestBase,
+    estimate: Estimate,
+    limits: Limits,
+}
+
+impl UsageEvidence {
+    pub(crate) fn estimate(&self, model: &dyn ContextModel) -> Option<Estimate> {
+        (model
+            .contribution_counter()
+            .is_some_and(|counter| counter.algorithm() == self.base.algorithm)
+            && self.limits.window == model.context_window()
+            && self.limits.output == model.output_tokens()
+            && self.limits.threshold == model.threshold_tokens())
+        .then(|| self.estimate.clone())
+    }
+}
 
 const RESULT: &str = "context-usage/recovered";
-const SCHEMA: &str = "context-usage/v1";
+const SCHEMA: &str = "context-usage/v2";
 const SOURCES: &[&str] = &[
     "context/configured",
     "input/consumed",
@@ -100,6 +125,8 @@ struct Calibration {
     anchor_at: Key,
     configuration: String,
     compression: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_identity: Option<String>,
     local: f64,
     prompt_tokens: f64,
 }
@@ -227,6 +254,32 @@ fn fingerprint<T: Serialize>(value: &T) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+fn control_identity(request: &ModelRequest, algorithm: &str) -> Result<String> {
+    fingerprint(&(
+        &request.provider_id,
+        &request.model_id,
+        &request.capability_snapshot,
+        &request.config,
+        request
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.startup.as_ref()),
+        request
+            .metadata
+            .as_ref()
+            .map(|metadata| &metadata.extensions)
+            .filter(|extensions| !extensions.is_empty()),
+        algorithm,
+    ))
+}
+
+fn request_identity(request: &ModelRequest, algorithm: &str) -> Result<String> {
+    fingerprint(&(
+        control_identity(request, algorithm)?,
+        fingerprint(&(&request.system, &request.tools))?,
+    ))
+}
+
 fn request(
     scope: TimelineQueryScope,
     through: u64,
@@ -260,7 +313,10 @@ fn request(
     }
 }
 
-fn reading(through: u64, summary: &Summary) -> std::result::Result<UsageRead, ContextOpError> {
+fn estimation<'a>(
+    summary: &'a Summary,
+    request: Option<(f64, &str)>,
+) -> std::result::Result<(Estimate, &'a CounterConfiguration), ContextOpError> {
     let configuration = match &summary.configuration {
         Some(Configuration::Ready { counter }) => counter,
         Some(Configuration::Unsupported { .. }) => {
@@ -273,12 +329,16 @@ fn reading(through: u64, summary: &Summary) -> std::result::Result<UsageRead, Co
         }
         None => return Err(ContextOpError::NotConfigured),
     };
-    let local = summary
-        .local
-        .ok_or_else(|| ContextOpError::Read(fault("missing local estimate")))?;
+    let local = match request {
+        Some((local, _)) => local,
+        None => summary
+            .local
+            .ok_or_else(|| ContextOpError::Read(fault("missing local estimate")))?,
+    };
     let identity = configuration.identity().map_err(ContextOpError::Read)?;
     let compatible = summary.calibration.as_ref().filter(|baseline| {
         baseline.configuration == identity
+            && baseline.request_identity.as_deref() == request.map(|(_, identity)| identity)
             && baseline.compression.as_deref()
                 == summary
                     .compression
@@ -297,13 +357,26 @@ fn reading(through: u64, summary: &Summary) -> std::result::Result<UsageRead, Co
             "invalid calibrated input estimate",
         )));
     }
+    Ok((
+        Estimate {
+            input,
+            source,
+            baseline: compatible.map(|baseline| baseline.prompt_tokens),
+            delta: compatible.map(|baseline| local - baseline.local),
+        },
+        configuration,
+    ))
+}
+
+fn reading(through: u64, summary: &Summary) -> std::result::Result<UsageRead, ContextOpError> {
+    let (estimate, configuration) = estimation(summary, None)?;
     Ok(UsageRead {
         through,
         context_window: configuration.limits.window,
         output_tokens: configuration.limits.output,
         threshold_tokens: configuration.limits.threshold,
-        estimated_input_tokens: input,
-        baseline_source: source,
+        estimated_input_tokens: estimate.input,
+        baseline_source: estimate.source,
     })
 }
 
@@ -311,12 +384,68 @@ impl ContextUsage {
     pub(crate) async fn reference(
         &self,
         request_id: &str,
+        source_through: u64,
         through: u64,
         request_value: &ModelRequest,
         compaction: Option<&str>,
         cancel: CancellationToken,
     ) -> std::result::Result<Option<UsageEvidence>, HostError> {
-        let view = match self.at(through, cancel).await {
+        if through > source_through {
+            let changed = self
+                .timeline
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: Some(TimelinePosition {
+                        branch_id: self.timeline.branch_id(),
+                        sequence: source_through + 1,
+                    }),
+                    through: Some(through),
+                    include_publishing: false,
+                    query: QuerySpec {
+                        rows: None,
+                        filter: Some(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: [
+                                        "input/consumed",
+                                        "step/model-output-end",
+                                        "step/tool-result",
+                                        "context/configured",
+                                        "context/compaction",
+                                    ]
+                                    .into_iter()
+                                    .map(Into::into)
+                                    .collect(),
+                                },
+                                QueryFilter::Not {
+                                    condition: Box::new(QueryFilter::In {
+                                        value: QueryOperand::Field { path: "id".into() },
+                                        values: compaction.into_iter().map(Into::into).collect(),
+                                    }),
+                                },
+                            ],
+                        }),
+                        select: QuerySelect::Exists,
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: None,
+                })
+                .await
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            let QueryOutput::Exists { exists } = changed.result else {
+                unreachable!("request prefix changes")
+            };
+            if exists {
+                return Ok(None);
+            }
+        }
+
+        let view = match self.at(through, cancel.clone()).await {
             Ok(view) => view,
             Err(ContextOpError::Model(_) | ContextOpError::NotConfigured) => return Ok(None),
             Err(ContextOpError::Read(error)) => return Err(HostError::failed(error.to_string())),
@@ -330,7 +459,7 @@ impl ContextUsage {
             .prefix(state.root.as_ref(), state.at(through), true)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        let Some(Configuration::Ready { counter }) = summary.configuration else {
+        let Some(Configuration::Ready { counter }) = &summary.configuration else {
             return Ok(None);
         };
         if compaction.is_some_and(|id| {
@@ -341,39 +470,81 @@ impl ContextUsage {
         }) {
             return Ok(None);
         }
-        let control = ModelRequest {
-            provider_id: request_value.provider_id.clone(),
-            model_id: request_value.model_id.clone(),
-            capability_snapshot: request_value.capability_snapshot.clone(),
-            messages: Vec::new(),
-            tools: None,
-            system: None,
-            config: request_value.config.clone(),
-            metadata: request_value.metadata.clone(),
-        };
-        let identity = fingerprint(&(&request_value.system, &request_value.tools))
-            .and_then(|fixed| fingerprint(&(&control, fixed, &counter.algorithm)))
+        let identity = request_identity(request_value, &counter.algorithm)
             .map_err(|error| HostError::failed(error.to_string()))?;
-        if identity != counter.request_identity {
-            return Ok(None);
-        }
-        Ok(Some(UsageEvidence(sources::RequestBase {
-            schema: "context-usage/request-base/v1".into(),
-            request_id: request_id.into(),
-            source: TimelinePosition {
-                branch_id: self.timeline.branch_id(),
-                sequence: through,
+        let request_local = if identity == counter.request_identity {
+            None
+        } else {
+            let control = self
+                .counter_request(&counter.event_id, through)
+                .await
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            let actual_control = control_identity(request_value, &counter.algorithm)
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            let configured_control = control_identity(&control, &counter.algorithm)
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            if actual_control != configured_control {
+                return Ok(None);
+            }
+            let model = self
+                .resolver
+                .0
+                .as_ref()
+                .expect("bound usage resolver")
+                .resolve(Arc::new(control), cancel)
+                .await?;
+            if counter.limits
+                != (Limits {
+                    window: model.context_window(),
+                    output: model.output_tokens(),
+                    threshold: model.threshold_tokens(),
+                })
+            {
+                return Ok(None);
+            }
+            let Some(actual) = model
+                .contribution_counter()
+                .filter(|actual| actual.algorithm() == counter.algorithm)
+            else {
+                return Ok(None);
+            };
+            let fixed = actual.fixed(
+                request_value.system.as_deref(),
+                request_value.tools.as_deref().map(Vec::as_slice),
+            );
+            let contribution = total(&summary)
+                .and_then(|total| subtract(total, counter.fixed))
+                .and_then(|messages| add(messages, fixed))
+                .map_err(|error| HostError::failed(error.to_string()))?;
+            Some(actual.estimate(contribution))
+        };
+        let (estimate, _) = estimation(
+            &summary,
+            request_local.map(|local| (local, identity.as_str())),
+        )
+        .map_err(|error| HostError::failed(error.to_string()))?;
+        Ok(Some(UsageEvidence {
+            estimate,
+            limits: counter.limits.clone(),
+            base: sources::RequestBase {
+                schema: "context-usage/request-base/v2".into(),
+                request_id: request_id.into(),
+                source: TimelinePosition {
+                    branch_id: self.timeline.branch_id(),
+                    sequence: through,
+                },
+                algorithm: counter.algorithm.clone(),
+                configuration: counter
+                    .identity()
+                    .map_err(|error| HostError::failed(error.to_string()))?,
+                compression: summary.compression.map(|compression| compression.event_id),
+                request_identity: request_local.map(|_| identity),
+                local: request_local
+                    .or(summary.local)
+                    .ok_or_else(|| HostError::failed("Missing request local estimate"))?,
+                root: state.root.clone(),
             },
-            algorithm: counter.algorithm.clone(),
-            configuration: counter
-                .identity()
-                .map_err(|error| HostError::failed(error.to_string()))?,
-            compression: summary.compression.map(|compression| compression.event_id),
-            local: summary
-                .local
-                .ok_or_else(|| HostError::failed("Missing request local estimate"))?,
-            root: state.root.clone(),
-        })))
+        }))
     }
 
     pub(crate) async fn confirm(
@@ -381,7 +552,7 @@ impl ContextUsage {
         evidence: UsageEvidence,
         cancel: CancellationToken,
     ) -> std::result::Result<(), HostError> {
-        let data = serde_json::to_value(evidence.0)
+        let data = serde_json::to_value(evidence.base)
             .map_err(|error| HostError::failed(error.to_string()))?;
         let event = self
             .timeline

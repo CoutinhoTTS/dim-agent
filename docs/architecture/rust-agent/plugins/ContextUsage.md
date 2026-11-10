@@ -29,6 +29,10 @@ nodes contain no messages. Current reads use the root summary; a fixed earlier
 source boundary reads only its numeric prefix path. With no bound resolver the
 part exposes an unavailable read and starts no work.
 
+Recovery and request references write v2 schemas and accept the previous v1
+shape. A request-specific fixed-content identity keeps its provider calibration
+separate from the adopted configuration's current usage.
+
 The source counter shares input, settled-output and tool-result projection rules
 with HistoryRenderer. Output settlement selects the last complete content and
 only later fragments of that request. Raw deltas do not produce statistics writes.
@@ -46,7 +50,7 @@ remain subject to the final complete-request budget check.
 [context_flow.rs](../../../../crates/dim-agent-capabilities/tests/context_flow.rs):
 `persisted_usage_reads_and_restores_without_projecting_history`,
 `unconfigured_usage_does_not_project_legacy_messages`,
-`provider_usage_baseline_counts_only_new_history_after_a_matching_request`.
+`provider_usage_baseline_counts_new_history_and_ignores_unusable_measurements`.
 
 <!-- generated:plugin ContextUsage — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

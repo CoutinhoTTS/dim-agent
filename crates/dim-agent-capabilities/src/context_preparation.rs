@@ -1,5 +1,5 @@
 use crate::{
-    context_policy::{ContextPolicy, PolicyContext, estimate_events},
+    context_policy::{ContextPolicy, PolicyContext},
     history::HistoryRenderer,
     host::*,
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
@@ -371,7 +371,6 @@ pub struct ContextPreparation {
             ),
         >,
     >,
-    history: Arc<HistoryRenderer>,
     timeline: Arc<Timeline>,
     identity: Arc<TimelineIdentity>,
 }
@@ -744,14 +743,27 @@ impl ContextPreparation {
         );
         AgentError::aggregate(submitted.err().into_iter().chain(fault).collect())
     }
+    /// Checks the actual final request. Its preparation estimate is reused only
+    /// for the same request object and compatible model counter and limits.
     pub async fn validate(
         &self,
+        request_id: &str,
         request: Arc<ModelRequest>,
         cancel: CancellationToken,
     ) -> std::result::Result<(), HostError> {
         validate_capability_snapshot(&request)?;
         match &self.policy {
-            Some(policy) => policy.validate(request, cancel).await,
+            Some(policy) => {
+                let reference = self.references.lock().unwrap().get(request_id).and_then(
+                    |(expected, evidence)| {
+                        expected
+                            .upgrade()
+                            .filter(|expected| Arc::ptr_eq(expected, &request))
+                            .map(|_| evidence.clone())
+                    },
+                );
+                policy.validate(request, reference.as_ref(), cancel).await
+            }
             None => Ok(()),
         }
     }
@@ -805,25 +817,20 @@ impl ContextPreparation {
             )
             .await?;
         validate_capability_snapshot(&request)?;
-        let streamed = self
-            .history
-            .rendered_stream(&self.timeline, source.through, 256)
-            .await
-            .map_err(|error| HostError::failed(error.to_string()))?;
-        let context = PolicyContext::from_stream(&streamed);
-        let history = streamed.history;
         crate::context_policy::check_cancel(&cancel)?;
-        if request.messages.len() < context.messages_len(&history)
-            || !context
-                .message_refs(&history)
+        if request.messages.len() < source.request.messages.len()
+            || !source
+                .request
+                .messages
+                .iter()
                 .zip(&request.messages)
-                .all(|(entry, message)| entry == message.as_ref())
+                .all(|(entry, message)| Arc::ptr_eq(entry, message) || entry == message)
         {
             return Err(HostError::failed(
                 "Context preparation must preserve the timeline history prefix; additional messages may be appended.",
             ));
         }
-        let exact_prefix = request.messages.len() == context.messages_len(&history);
+        let exact_prefix = request.messages.len() == source.request.messages.len();
         let cancelled = || {
             let state = self.state.lock().unwrap();
             if generation.is_cancelled() || state.closed {
@@ -842,19 +849,19 @@ impl ContextPreparation {
         };
         let prepared = match &self.policy {
             Some(policy) => {
-                let events = estimate_events(&self.timeline, self.timeline.sequence())
+                let streamed = policy
+                    .history
+                    .rendered_stream(&self.timeline, source.through, 256)
                     .await
-                    .map_err(|error| HostError::failed(error.to_string()))?
-                    .into_iter()
-                    .map(|(_, event)| event)
-                    .collect();
+                    .map_err(|error| HostError::failed(error.to_string()))?;
+                let context = PolicyContext::from_stream(&streamed);
                 policy
                     .prepare(
                         request,
                         &source,
                         context,
-                        history,
-                        events,
+                        streamed.history,
+                        exact_prefix.then_some(self.usage.as_ref()),
                         cancel.clone(),
                         &cancelled,
                     )
@@ -864,78 +871,26 @@ impl ContextPreparation {
                 request,
                 through: source.through,
                 compaction: None,
+                evidence: None,
             }),
         }?;
         if exact_prefix {
-            let mut unchanged = true;
-            if prepared.through > source.through {
-                let changed = self
-                    .timeline
-                    .query(TimelineQuery {
-                        scope: TimelineQueryScope::Branch,
-                        from: Some(TimelinePosition {
-                            branch_id: self.identity.branch_id.clone(),
-                            sequence: source.through + 1,
-                        }),
-                        through: Some(prepared.through),
-                        include_publishing: false,
-                        query: QuerySpec {
-                            rows: None,
-                            filter: Some(QueryFilter::And {
-                                conditions: vec![
-                                    QueryFilter::In {
-                                        value: QueryOperand::Field {
-                                            path: "kind".into(),
-                                        },
-                                        values: [
-                                            "input/consumed",
-                                            "step/model-output-end",
-                                            "step/tool-result",
-                                            "context/configured",
-                                            "context/compaction",
-                                        ]
-                                        .into_iter()
-                                        .map(Into::into)
-                                        .collect(),
-                                    },
-                                    QueryFilter::Not {
-                                        condition: Box::new(QueryFilter::In {
-                                            value: QueryOperand::Field { path: "id".into() },
-                                            values: prepared
-                                                .compaction
-                                                .iter()
-                                                .map(|id| id.clone().into())
-                                                .collect(),
-                                        }),
-                                    },
-                                ],
-                            }),
-                            select: QuerySelect::Exists,
-                            group_by: vec![],
-                            pick: None,
-                            order_by: vec![],
-                        },
-                        page: None,
-                    })
-                    .await
-                    .map_err(|error| HostError::failed(error.to_string()))?;
-                let QueryOutput::Exists { exists } = changed.result else {
-                    unreachable!("request prefix changes")
-                };
-                unchanged = !exists;
-            }
-            if unchanged
-                && let Some(evidence) = self
-                    .usage
-                    .reference(
-                        &source.request_id,
-                        prepared.through,
-                        &prepared.request,
-                        prepared.compaction.as_deref(),
-                        cancel,
-                    )
-                    .await?
-            {
+            let evidence = match prepared.evidence {
+                Some(evidence) => Some(evidence),
+                None => {
+                    self.usage
+                        .reference(
+                            &source.request_id,
+                            source.through,
+                            prepared.through,
+                            &prepared.request,
+                            prepared.compaction.as_deref(),
+                            cancel,
+                        )
+                        .await?
+                }
+            };
+            if let Some(evidence) = evidence {
                 self.references.lock().unwrap().insert(
                     source.request_id,
                     (Arc::downgrade(&prepared.request), evidence),
@@ -1049,7 +1004,6 @@ impl DynPlugin for ContextPreparationPlugin {
                 policy: ContextPolicy::bind(&timeline, &context, &strategy, &history)
                     .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?,
                 timeline,
-                history,
                 identity,
             });
             let owner = service.clone();

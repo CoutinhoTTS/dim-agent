@@ -989,11 +989,25 @@ impl ModelDriver for UsageModel {
                 cost: None,
                 currency: None,
             };
-            Ok(
-                Box::pin(stream.chain(futures_util::stream::once(async move {
-                    Ok(ModelChunk::Usage(usage))
-                }))) as ModelStream,
-            )
+            let unavailable = Usage {
+                prompt_tokens: 0.,
+                completion_tokens: 0.,
+                total_tokens: 0.,
+                ..usage.clone()
+            };
+            let incomplete = Usage {
+                prompt_tokens: 100.,
+                total_tokens: 102.,
+                cache_read_tokens: Some(200.),
+                ..usage.clone()
+            };
+            Ok(Box::pin(
+                stream.chain(futures_util::stream::iter(
+                    [usage, unavailable, incomplete]
+                        .into_iter()
+                        .map(|usage| Ok(ModelChunk::Usage(usage))),
+                )),
+            ) as ModelStream)
         })
     }
 }
@@ -1055,9 +1069,9 @@ async fn a_final_request_transform_does_not_calibrate_the_canonical_context() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provider_usage_baseline_counts_only_new_history_after_a_matching_request() {
+async fn provider_usage_baseline_counts_new_history_and_ignores_unusable_measurements() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        let store = Arc::new(MemoryTimelineStore::default());
+        let store = Arc::new(context_reads::CountContextReads::default());
         let mut profile = builder(Arc::new(UsageModel));
         profile.timeline_store(store.clone());
         let agent = MinimalHost::start(&profile).await.unwrap();
@@ -1071,10 +1085,45 @@ async fn provider_usage_baseline_counts_only_new_history_after_a_matching_reques
             .unwrap();
         session.idle("main").await.unwrap();
         session
+            .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        store.property_queries.lock().unwrap().clear();
+        session
             .submit("second".into(), InputMode::Queue, "main")
             .await
             .unwrap();
         session.idle("main").await.unwrap();
+        session
+            .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        for query in store.property_queries.lock().unwrap().iter() {
+            let mut pending: Vec<_> = query.filter.iter().collect();
+            let mut model_call = false;
+            while let Some(filter) = pending.pop() {
+                match filter {
+                    QueryFilter::In {
+                        value: QueryOperand::Field { path },
+                        values,
+                    } if path == "kind" => {
+                        model_call |= values.iter().any(|value| value == "model/call")
+                    }
+                    QueryFilter::And { conditions } | QueryFilter::Or { conditions } => {
+                        pending.extend(conditions)
+                    }
+                    _ => (),
+                }
+            }
+            assert!(
+                !model_call || !matches!(query.select, QuerySelect::Events),
+                "request preparation or final validation reread a historical ModelCall: {query:?}"
+            );
+        }
         let events = chain_events(&session, "main", ..).await.unwrap();
         let budgets: Vec<_> = events
             .iter()

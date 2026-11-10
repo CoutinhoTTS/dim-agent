@@ -7,7 +7,7 @@ use dim_agent_runtime::{QueryOrder, QueryOrderKey, TimelineQueryDirection};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RequestBase {
     pub schema: String,
@@ -16,6 +16,8 @@ pub(super) struct RequestBase {
     pub algorithm: String,
     pub configuration: String,
     pub compression: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_identity: Option<String>,
     pub local: f64,
     pub root: Option<Reference>,
 }
@@ -39,6 +41,14 @@ fn elements(value: QueryValue) -> Result<Vec<QueryValue>> {
         return Err(fault("missing usage array projection"));
     };
     Ok(values)
+}
+
+fn measured_prompt(usage: &Usage) -> Option<f64> {
+    (usage.prompt_tokens.is_finite()
+        && usage.prompt_tokens > 0.
+        && usage.prompt_tokens
+            >= usage.cache_read_tokens.unwrap_or(0.) + usage.cache_write_tokens.unwrap_or(0.))
+    .then_some(usage.prompt_tokens)
 }
 
 impl ContextUsage {
@@ -130,7 +140,10 @@ impl ContextUsage {
             let [position, data] = <[_; 2]>::try_from(row).expect("usage recovery fields");
             let position: TimelinePosition = decode(position)?;
             let data: Value = decode(data)?;
-            if data.get("schema").and_then(Value::as_str) != Some(SCHEMA) {
+            if !matches!(
+                data.get("schema").and_then(Value::as_str),
+                Some("context-usage/v1" | SCHEMA)
+            ) {
                 return Err(fault("unsupported usage recovery schema"));
             }
             let saved: Recovered =
@@ -260,7 +273,7 @@ impl ContextUsage {
         .request(vec![]))
     }
 
-    async fn counter_request(&self, id: &str, through: u64) -> Result<ModelRequest> {
+    pub(super) async fn counter_request(&self, id: &str, through: u64) -> Result<ModelRequest> {
         let mut kind = self.fields(id, through, &["kind"]).await?;
         let kind: String = decode(kind.remove(0))?;
         let prefix = match kind.as_str() {
@@ -333,7 +346,6 @@ impl ContextUsage {
         let configuration = match model.contribution_counter() {
             None => Configuration::Unsupported { event_id: id },
             Some(counter) => {
-                let fixed_identity = fingerprint(&(&request.system, &request.tools))?;
                 let limits = Limits {
                     window: model.context_window(),
                     output: model.output_tokens(),
@@ -349,11 +361,7 @@ impl ContextUsage {
                 Configuration::Ready {
                     counter: Box::new(CounterConfiguration {
                         event_id: id,
-                        request_identity: fingerprint(&(
-                            &control,
-                            &fixed_identity,
-                            counter.algorithm(),
-                        ))?,
+                        request_identity: request_identity(&request, counter.algorithm())?,
                         algorithm: counter.algorithm().into(),
                         fixed: counter.fixed(
                             request.system.as_deref(),
@@ -403,15 +411,15 @@ impl ContextUsage {
                     TimelineQueryScope::Chain,
                     through,
                     &["model/usage"],
-                    &["data.request_id", "data.usage.promptTokens"],
+                    &["data.request_id", "data.usage"],
                 ))
                 .await?;
             let call = if let Some(fields) = measured {
                 let [request_id, prompt] =
                     <[_; 2]>::try_from(fields).expect("legacy measurement properties");
                 let request_id: String = decode(request_id)?;
-                let prompt: f64 = decode(prompt)?;
-                if prompt.is_finite() && prompt >= 0. {
+                let usage: Usage = decode(prompt)?;
+                if measured_prompt(&usage).is_some() {
                     let mut call = request(
                         TimelineQueryScope::Chain,
                         through,
@@ -537,7 +545,7 @@ impl ContextUsage {
                     TimelineQueryScope::Chain,
                     through,
                     &["model/usage"],
-                    &["data.usage.promptTokens"],
+                    &["data.usage"],
                 );
                 usage.query.filter = Some(QueryFilter::And {
                     conditions: vec![
@@ -551,9 +559,8 @@ impl ContextUsage {
                     ],
                 });
                 if let Some(mut fields) = self.newest(usage).await? {
-                    let prompt_tokens: f64 = decode(fields.remove(0))?;
-                    if prompt_tokens.is_finite()
-                        && prompt_tokens >= 0.
+                    let usage: Usage = decode(fields.remove(0))?;
+                    if let Some(prompt_tokens) = measured_prompt(&usage)
                         && local.is_finite()
                         && local >= 0.
                     {
@@ -570,6 +577,7 @@ impl ContextUsage {
                                 .compression
                                 .as_ref()
                                 .map(|compression| compression.event_id.clone()),
+                            request_identity: None,
                             local,
                             prompt_tokens,
                         });
@@ -861,15 +869,15 @@ impl ContextUsage {
             return Ok(());
         }
         let [request_id, prompt] = <[_; 2]>::try_from(
-            self.fields(id, through, &["data.request_id", "data.usage.promptTokens"])
+            self.fields(id, through, &["data.request_id", "data.usage"])
                 .await?,
         )
         .expect("provider usage properties");
         let request_id: String = decode(request_id)?;
-        let prompt_tokens: f64 = decode(prompt)?;
-        if !prompt_tokens.is_finite() || prompt_tokens < 0. {
+        let usage: Usage = decode(prompt)?;
+        let Some(prompt_tokens) = measured_prompt(&usage) else {
             return Ok(());
-        }
+        };
         let mut query = request(
             TimelineQueryScope::Chain,
             through,
@@ -909,7 +917,10 @@ impl ContextUsage {
         let [data, position] = <[_; 2]>::try_from(fields).expect("request base properties");
         let base: RequestBase = decode(data)?;
         let position: TimelinePosition = decode(position)?;
-        if base.schema != "context-usage/request-base/v1" {
+        if !matches!(
+            base.schema.as_str(),
+            "context-usage/request-base/v1" | "context-usage/request-base/v2"
+        ) {
             return Err(fault("unsupported usage request base schema"));
         }
         if base.request_id != request_id || !base.local.is_finite() || base.local < 0. {
@@ -947,6 +958,7 @@ impl ContextUsage {
                     anchor_at,
                     configuration: base.configuration,
                     compression: base.compression,
+                    request_identity: base.request_identity,
                     local: base.local,
                     prompt_tokens,
                 }),

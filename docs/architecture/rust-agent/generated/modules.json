@@ -476,6 +476,7 @@
         "format",
         "matches",
         "tokio::select",
+        "unreachable",
         "vec"
       ]
     },
@@ -9106,10 +9107,10 @@
         "path CompactionStep",
         "path ContextPolicy",
         "path ContextPolicy::bind",
+        "path ContextPolicy::local_estimate",
         "path configured_request",
         "path crate::context_policy::PolicyContext::from_context",
         "path crate::context_policy::PolicyContext::from_stream",
-        "path crate::context_policy::estimate_events_in",
         "use crate::context_policy::CompactionStep",
         "use crate::context_policy::ContextPolicy",
         "use crate::context_policy::configured_request"
@@ -9837,6 +9838,16 @@
     },
     {
       "from": "dim_agent_capabilities::context_policy",
+      "to": "dim_agent_capabilities::context_usage",
+      "references": [
+        "path Estimate",
+        "path crate::context_usage::ContextUsage",
+        "path crate::context_usage::UsageEvidence",
+        "use crate::context_usage::Estimate"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_capabilities::history",
       "references": [
         "path HistoryEntry",
@@ -9845,7 +9856,6 @@
         "path context_compaction",
         "path context_configuration",
         "path crate::history::StreamedContext",
-        "path crate::history::projected_message_refs",
         "path crate::history::projected_messages",
         "path crate::history::projected_messages_len",
         "path digest_message",
@@ -9893,13 +9903,6 @@
         "path Timeline",
         "use dim_agent_runtime::ContextHistory",
         "use dim_agent_runtime::Timeline"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::context_policy",
-      "to": "dim_agent_runtime::error",
-      "references": [
-        "path dim_agent_runtime::Result"
       ]
     },
     {
@@ -9980,12 +9983,9 @@
         "path EventKind::ContextCompactionStart",
         "path EventKind::InputConsumed",
         "path EventKind::InputMessage",
-        "path EventKind::ModelCall",
-        "path EventKind::ModelUsage",
         "path EventKind::ToolResult",
         "path InputBlock::Raw",
         "path InputMessageData",
-        "path ModelUsageData",
         "path ReplacementParts",
         "path events"
       ]
@@ -10001,9 +10001,7 @@
       "from": "dim_agent_capabilities::context_policy",
       "to": "dim_agent_types::model",
       "references": [
-        "path BaselineSource",
         "path BaselineSource::FullEstimate",
-        "path BaselineSource::ProviderBaseline",
         "path CompactionDiagnosticsRecord",
         "path CompactionReason::Auto",
         "path CompactionReason::Manual",
@@ -10050,10 +10048,8 @@
         "path PolicyContext::from_stream",
         "path crate::context_policy::PreparedRequest",
         "path crate::context_policy::check_cancel",
-        "path estimate_events",
         "use crate::context_policy::ContextPolicy",
-        "use crate::context_policy::PolicyContext",
-        "use crate::context_policy::estimate_events"
+        "use crate::context_policy::PolicyContext"
       ]
     },
     {
@@ -10199,11 +10195,9 @@
         "path QueryOperand::Field",
         "path QueryOperand::Outer",
         "path QueryOperand::Value",
-        "path QueryOutput::Exists",
         "path QueryOutput::Rows",
         "path QueryPage",
         "path QueryPick::Last",
-        "path QuerySelect::Exists",
         "path QuerySelect::Fields",
         "path QuerySpec",
         "path QueryValue::Missing",
@@ -10219,13 +10213,6 @@
         "use dim_agent_runtime::QuerySpec",
         "use dim_agent_runtime::QueryValue",
         "use dim_agent_runtime::TimelineQuery"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::context_preparation",
-      "to": "dim_agent_types::checkpoint",
-      "references": [
-        "path TimelinePosition"
       ]
     },
     {
@@ -10251,8 +10238,7 @@
         "path ModelCallData",
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Cancelled",
-        "path ModelOutputOutcome::Failed",
-        "path events"
+        "path ModelOutputOutcome::Failed"
       ]
     },
     {
@@ -10403,6 +10389,7 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQueryScope",
+        "path TimelineQueryScope::Branch",
         "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
@@ -10410,9 +10397,12 @@
       "from": "dim_agent_capabilities::context_usage",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
+        "path QueryFilter::And",
         "path QueryFilter::In",
         "path QueryOperand::Field",
+        "path QueryOutput::Exists",
         "path QueryPage",
+        "path QuerySelect::Exists",
         "path QuerySelect::Fields",
         "path QuerySpec",
         "path TimelineQuery",
@@ -10453,9 +10443,11 @@
       "from": "dim_agent_capabilities::context_usage",
       "to": "dim_agent_types::model",
       "references": [
+        "path BaselineSource",
         "path BaselineSource::FullEstimate",
         "path BaselineSource::ProviderBaseline",
-        "path ModelRequest"
+        "path ModelRequest",
+        "path model"
       ]
     },
     {
@@ -10563,13 +10555,12 @@
         "path Machine",
         "path RESULT",
         "path Recovered",
-        "path SCHEMA",
         "path SOURCES",
         "path State",
         "path add",
         "path fault",
-        "path fingerprint",
         "path request",
+        "path request_identity",
         "path total"
       ]
     },
@@ -10686,6 +10677,7 @@
       "references": [
         "path ModelRequest",
         "path ModelRequest::new",
+        "path Usage",
         "path model"
       ]
     },
