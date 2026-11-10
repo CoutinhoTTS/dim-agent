@@ -64,4 +64,9 @@ impl Holds {
     pub(crate) fn take_release_failure(&self) -> bool {
         self.fail_release.swap(false, Ordering::SeqCst)
     }
+
+    /// Whether an injected release failure is still waiting to be taken.
+    pub fn release_failure_armed(&self) -> bool {
+        self.fail_release.load(Ordering::SeqCst)
+    }
 }

@@ -709,7 +709,7 @@ async fn save(
 ) -> Result<Value, SchedulerError> {
     let host = host_bound(shared).await?;
     let id = input.job.id.clone();
-    let (job, _) = save_job(
+    let (job, previous) = save_job(
         shared,
         cancel,
         id.as_deref(),
@@ -720,10 +720,16 @@ async fn save(
         move |previous| merge(previous, input.job),
     )
     .await?;
-    // The settings write has committed, so the reply reports that save even
-    // when the release below fails; the failure wakes a retention pass,
-    // which re-derives the release from the saved document (A.7).
+    // Only the save that replaced the binding releases it: a later save that
+    // keeps the stored target has nothing to retire, so it does not read the
+    // delivery file or risk a release failure (A.7). A release that fails on
+    // the replacing save still wakes a retention pass, which re-derives it
+    // from the saved document. The settings write has committed, so the reply
+    // reports that save even when the release fails.
     if job.replaced_reuse_binding()
+        && previous
+            .as_ref()
+            .is_none_or(|before| before.target != job.target)
         && let Err(error) = release_owned_runs(shared, &job).await
     {
         tracing::warn!(%error, "scheduler ownership release failed");

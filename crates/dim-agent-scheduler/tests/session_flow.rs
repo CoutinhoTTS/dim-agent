@@ -2264,3 +2264,67 @@ async fn a_failed_release_wakes_a_retention_pass() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// A later save of a job whose target was already replaced releases nothing
+/// again: the ownership records are not rewritten, the delivery file keeps
+/// its modification time, and the save attempts no release at all (A.7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_save_of_a_retargeted_job_releases_nothing_again() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let launched = create_session(&mut client, home.path(), true).await;
+    let retarget = create_session(&mut client, home.path(), true).await;
+    save_session_job(
+        &mut client,
+        "seed",
+        &launched,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    seed_legacy_reuse_job(home.path(), &launched);
+
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    // The first save replaces the legacy binding and releases run-1.
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": "reuse",
+                "target": {"kind": "session", "session_id": retarget, "branch_id": "main"}}}),
+        )
+        .await
+        .unwrap();
+    let path = home.path().join("scheduler/runs.json");
+    let before = std::fs::read(&path).unwrap();
+    let before_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // A later save that keeps the target must not release or rewrite again.
+    let holds = support::holds(home.path());
+    holds.fail_next_release();
+    client
+        .typed::<Value>(
+            "schedule.save",
+            json!({"job": {"id": "reuse", "name": "renamed"}}),
+        )
+        .await
+        .unwrap();
+    let after = std::fs::read(&path).unwrap();
+    let after_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert_eq!(before, after, "the ownership records are not rewritten");
+    assert_eq!(
+        before_modified, after_modified,
+        "the ownership file keeps its modification time"
+    );
+    assert!(
+        holds.release_failure_armed(),
+        "the later save attempts no release"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
