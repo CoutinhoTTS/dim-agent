@@ -2053,6 +2053,7 @@
       "parent": "dim_agent_types::markup",
       "file": "crates/dim-agent-types/src/markup.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -20887,7 +20888,8 @@
       "from": "dim_agent_types::markup::tests",
       "to": "dim_agent_types::markup",
       "references": [
-        "use super::escaped"
+        "use super::escaped",
+        "use super::runtime_context"
       ]
     },
     {
@@ -30136,6 +30138,14 @@
         "path InputMessageData",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::InputMessageData"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path runtime_context",
+        "use dim_agent_types::markup::runtime_context"
       ]
     },
     {
@@ -49351,6 +49361,14 @@
     },
     {
       "from": "dim_session_title",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path runtime_context",
+        "use dim_agent_types::markup::runtime_context"
+      ]
+    },
+    {
+      "from": "dim_session_title",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
@@ -49622,6 +49640,10 @@
     {
       "module": "dim_agent_types::finite_number",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_agent_types::markup",
+      "path": "char::is_whitespace"
     },
     {
       "module": "dim_agent_types::model",
