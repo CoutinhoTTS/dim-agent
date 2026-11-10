@@ -119,7 +119,6 @@ impl Operation {
             Self::SessionRead => &[
                 "session_closed",
                 "session_build_failed",
-                "session_unavailable",
                 "session_protocol_version",
                 "session_invalid_input",
                 "branch_ended",

@@ -159,63 +159,70 @@ mod tests {
         let endpoint = home.path().join("daemon.sock");
         let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
         std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let daemon =
-            tokio::spawn(async move {
-                let (stream, _) = listener.accept().await.unwrap();
-                let (reader, mut writer) = stream.into_split();
-                let mut lines = BufReader::new(reader).lines();
-                let mut exchange = async |method: &str, result: Value| {
-                    let line = lines.next_line().await.unwrap().unwrap();
-                    let request: Value = serde_json::from_str(&line).unwrap();
-                    assert_eq!(request["method"], method);
-                    let mut reply = result;
-                    reply["id"] = request["id"].clone();
-                    reply["jsonrpc"] = json!("2.0");
-                    writer
-                        .write_all(format!("{reply}\n").as_bytes())
-                        .await
-                        .unwrap();
-                    request["params"].clone()
-                };
-                let failure = |code: &str| {
-                    json!({"error":{
-                        "code":-32000, "message":"private detail", "data":{"appError":code}
-                    }})
-                };
-                exchange("hello", json!({"result":{
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let mut exchange = async |method: &str, result: Value| {
+                let line = lines.next_line().await.unwrap().unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], method);
+                let mut reply = result;
+                reply["id"] = request["id"].clone();
+                reply["jsonrpc"] = json!("2.0");
+                writer
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+                request["params"].clone()
+            };
+            let failure = |code: &str| {
+                json!({"error":{
+                    "code":-32000, "message":"private detail", "data":{"appError":code}
+                }})
+            };
+            exchange("hello", json!({"result":{
                 "instanceId":"report-test", "serverVersion":"test", "protocolVersion":4,
                 "features":["session.create","session.history","session.methods","report.prepare"],
                 "daemonProfile":{"kind":"product"}
             }})).await;
-                exchange("session.detach", failure("session_unavailable")).await;
-                let attach = exchange("session.attach", failure("session_unavailable")).await;
-                assert_eq!(attach["sessionId"], "original");
-                for code in [None, Some("unknown_method"), Some("report_cancelled")] {
-                    let methods = match code {
-                        None => json!([]),
-                        Some(_) => json!([{"name":"session.report.prepare","mutating":true}]),
-                    };
-                    let table =
-                        exchange("session.methods", json!({"result":{"methods":methods}})).await;
-                    assert_eq!(table["sessionId"], "original");
-                    if let Some(code) = code {
-                        let params = exchange("session.report.prepare", failure(code)).await;
-                        assert_eq!(params["sessionId"], "original");
-                        assert!(!params.to_string().contains("private detail"));
-                    }
-                    let params = exchange("report.prepare", json!({"result":{
-                    "reportId":"r1", "plan":{
-                        "planId":"p1", "generation":{"kind":"local"},
-                        "evidence":{"unavailable":"no_reference"}, "instructionsStatus":"none"
-                    }
-                }})).await;
-                    assert_eq!(params["error"]["kind"], "observed");
-                    assert_eq!(params["error"]["observed"]["code"], "session_unavailable");
-                    assert_eq!(params.as_object().unwrap().len(), 1);
+            let internal = json!({"error":{"code":-32603, "message":"private detail"}});
+            exchange("session.detach", internal.clone()).await;
+            let attach = exchange("session.attach", internal.clone()).await;
+            assert_eq!(attach["sessionId"], "original");
+            let listed =
+                json!({"result":{"methods":[{"name":"session.report.prepare","mutating":true}]}});
+            for (methods, prepare_failure) in [
+                (internal.clone(), None),
+                (json!({"result":{"methods":[]}}), None),
+                (listed.clone(), Some(failure("unknown_method"))),
+                (listed.clone(), Some(failure("report_cancelled"))),
+                (listed, Some(internal)),
+            ] {
+                let table = exchange("session.methods", methods).await;
+                assert_eq!(table["sessionId"], "original");
+                if let Some(prepare_failure) = prepare_failure {
+                    let params = exchange("session.report.prepare", prepare_failure).await;
+                    assert_eq!(params["sessionId"], "original");
                     assert!(!params.to_string().contains("private detail"));
-                    assert!(!params.to_string().contains("original"));
                 }
-            });
+                let params = exchange(
+                    "report.prepare",
+                    json!({"result":{
+                        "reportId":"r1", "plan":{
+                            "planId":"p1", "generation":{"kind":"local"},
+                            "evidence":{"unavailable":"no_reference"}, "instructionsStatus":"none"
+                        }
+                    }}),
+                )
+                .await;
+                assert_eq!(params["error"]["kind"], "observed");
+                assert!(params["error"]["observed"]["code"].is_null());
+                assert_eq!(params.as_object().unwrap().len(), 1);
+                assert!(!params.to_string().contains("private detail"));
+                assert!(!params.to_string().contains("original"));
+            }
+        });
         let client = dim_client::Client::connect(&dim_client::ConnectionConfig {
             endpoint,
             server: dim_client::Server {
@@ -270,7 +277,7 @@ mod tests {
         assert!(matches!(error.operation, Operation::SessionRead));
         worker.session_id = "other".into();
         worker.methods.insert("session.report.prepare".into());
-        for panel in 0..3 {
+        for panel in 0..5 {
             worker
                 .report_request(Request {
                     panel,

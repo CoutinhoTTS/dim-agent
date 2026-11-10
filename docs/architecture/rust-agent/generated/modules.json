@@ -23942,7 +23942,6 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_runtime::error",
       "references": [
-        "path AgentError",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -36246,6 +36245,13 @@
       "to": "dim_cli",
       "references": [
         "path crate::Error"
+      ]
+    },
+    {
+      "from": "dim_cli::report",
+      "to": "dim_client",
+      "references": [
+        "path dim_client::RpcError"
       ]
     },
     {

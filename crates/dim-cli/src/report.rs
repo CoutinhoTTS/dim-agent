@@ -181,11 +181,8 @@ pub struct Sharing {
 pub fn session_admission_failed(error: &crate::Error) -> bool {
     matches!(
         dim_client::app_error(error),
-        Some(
-            "session_closed"
-                | "session_build_failed"
-                | "session_protocol_version"
-                | "session_unavailable"
-        )
-    )
+        Some("session_closed" | "session_build_failed" | "session_protocol_version")
+    ) || error
+        .downcast_ref::<dim_client::RpcError>()
+        .is_some_and(|rpc| rpc.code == -32603 && rpc.data.is_none())
 }
