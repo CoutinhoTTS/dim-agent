@@ -40,6 +40,8 @@ mod models;
 mod permission;
 #[path = "cli_flow/prompt_suggestion.rs"]
 mod prompt_suggestion;
+#[path = "cli_flow/prompts.rs"]
+mod prompts;
 #[path = "cli_flow/question.rs"]
 mod question;
 #[path = "cli_flow/realtime.rs"]

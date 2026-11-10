@@ -69,6 +69,12 @@ text at a request boundary
 The shell and file-encoding guidance stay inside the environment state block,
 where the model reads them today.
 
+The product profile sets no factory text, so the App Server may fill `base` from
+its `prompts` setting through `BasePromptSettingsHost`. The port is optional and
+read while the part applies; the factory configuration stays authoritative, a
+read failure keeps the built-in text, and a change applies to Sessions loaded
+after it.
+
 ### Events and lifetime
 
 No Timeline subscriptions/production or background tasks in this Session plugin.

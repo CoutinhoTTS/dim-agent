@@ -31,7 +31,7 @@ testing = []
 
 [dev-dependencies]
 dim-agent-scheduler = { path = ".", features = ["testing"] }
-rusqlite = "0.40.2"
+rusqlite = "0.41.1"
 tempfile = "3"
 tokio.workspace = true
 serde_json.workspace = true

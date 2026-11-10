@@ -1,5 +1,5 @@
 use dim_agent_runtime::{AgentError, Result, panic_message};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags};
 use rutis::host::ErrorKind;
 use rutis::{Ctx, Plugin};
 use serde::Serialize;
@@ -443,11 +443,33 @@ fn storage(error: impl std::fmt::Display) -> AgentError {
     AgentError::Storage(error.to_string())
 }
 
+/// The store upgrade a running daemon reports beside the store, when the note
+/// there is that kind: the process to wait for and the formats it moves
+/// between.
+struct UpgradeNote {
+    pid: u32,
+    from: u32,
+    to: u32,
+}
+
 enum StartupFailure {
-    Newer { marker: i64 },
-    Mismatched { schema: u32, marker: Option<i64> },
-    Unrecognized { marker: Option<i64> },
-    TooOld { marker: i64 },
+    Newer {
+        marker: i64,
+    },
+    Mismatched {
+        schema: u32,
+        marker: Option<i64>,
+    },
+    Unrecognized {
+        marker: Option<i64>,
+    },
+    TooOld {
+        marker: i64,
+    },
+    /// Another process holds the store's admission lease.
+    Owned {
+        upgrade: Option<UpgradeNote>,
+    },
 }
 impl StartupFailure {
     /// The note a CLI-started daemon leaves for its client; the first line
@@ -479,6 +501,15 @@ impl StartupFailure {
             Self::TooOld { marker } => format!(
                 "Cannot open native store {path}.\n  Store format: v{marker} (no longer read by this daemon)\n  Daemon format: v{FORMAT}\n  This daemon cannot read the store. Existing data was preserved.\n  Use a build that reads v{marker}, or use --home PATH for a separate environment."
             ),
+            Self::Owned {
+                upgrade: Some(upgrade),
+            } => format!(
+                "Cannot open native store {path}.\n  Another dimcode-server (pid {}) is upgrading it from format v{} to v{}.\n  The store stays with that process until the upgrade finishes; wait for it, then run the command again.",
+                upgrade.pid, upgrade.from, upgrade.to
+            ),
+            Self::Owned { upgrade: None } => format!(
+                "Cannot open native store {path}.\n  Another dimcode-server is using the store.\n  Wait for it to finish, then run the command again."
+            ),
         };
         format!(
             "dimcode-startup-failure v1 pid={}\n{body}",
@@ -498,7 +529,8 @@ fn single_marker(markers: &[i64]) -> Option<i64> {
 }
 
 /// The note's body is written beside it and renamed over it, so a reader sees
-/// one complete note. Best effort: the caller's error does not depend on it.
+/// one complete note, or none while Windows replaces it. Best effort: the
+/// caller's error does not depend on it.
 fn write_note(target: &Path, note: &str) {
     let temp = target.with_file_name(format!(
         "{}.{}.tmp",
@@ -518,6 +550,11 @@ fn write_note(target: &Path, note: &str) {
     let written = options.open(&temp).and_then(|mut file| {
         file.write_all(note.as_bytes())?;
         drop(file);
+        // Unix replaces the target in the rename itself, so a reader never
+        // sees the note missing. Windows removes it first, as this writer
+        // always has, so the replace does not depend on how another process
+        // opened the note.
+        #[cfg(windows)]
         let _ = std::fs::remove_file(target);
         std::fs::rename(&temp, target)
     });
@@ -542,6 +579,56 @@ fn write_startup_progress(path: &std::path::Path, from: u32, to: u32, counter: u
             std::process::id()
         ),
     );
+}
+
+/// The text of a note written as this program writes it: a regular file of a
+/// bounded size, owned by the current user and private on Unix, like the CLI
+/// reads it (`crates/dim-cli/src/client.rs`).
+fn read_note(path: &std::path::Path) -> Option<String> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
+            return None;
+        }
+    }
+    String::from_utf8(std::fs::read(path).ok()?).ok()
+}
+
+/// The upgrade a running daemon reports beside `path`, when the note there is
+/// a progress note: the process that owns the store and the formats it moves
+/// between. That note is the only channel that names a live owner (#1335); a
+/// body that does not parse is no note.
+fn upgrade_note(path: &std::path::Path) -> Option<UpgradeNote> {
+    let text = read_note(&startup_note_path(path))?;
+    let (header, body) = text.split_once('\n')?;
+    let pid = header
+        .strip_prefix("dimcode-startup-progress v1 pid=")?
+        .parse()
+        .ok()?;
+    let mut fields = body.lines().next()?.split_whitespace();
+    if fields.next()? != "store-upgrade" {
+        return None;
+    }
+    let (mut from, mut to) = (None, None);
+    for field in fields {
+        let (name, value) = field.split_once('=')?;
+        match name {
+            "from" => from = Some(value.parse().ok()?),
+            "to" => to = Some(value.parse().ok()?),
+            // `progress` and any field a later kind adds do not matter here.
+            _ => {}
+        }
+    }
+    Some(UpgradeNote {
+        pid,
+        from: from?,
+        to: to?,
+    })
 }
 
 /// How often the SQLite progress handler reports a running store upgrade: it
@@ -756,20 +843,34 @@ impl SqliteStorage {
             .open(lock_path)
             .map_err(storage)?;
         admission.try_lock().map_err(|error| match error {
-            std::fs::TryLockError::WouldBlock => storage(format!(
-                "another process owns the SQLite database: {}",
-                path.display()
-            )),
+            std::fs::TryLockError::WouldBlock => {
+                // The store belongs to a process that is serving it or is
+                // starting it; either way this launch cannot have it. Its
+                // progress note names the owner while an upgrade runs, and
+                // the note is the client's only report of what to wait for
+                // (#1335).
+                write_startup_failure(
+                    &path,
+                    StartupFailure::Owned {
+                        upgrade: upgrade_note(&path),
+                    },
+                );
+                storage(format!(
+                    "another process owns the SQLite database: {}",
+                    path.display()
+                ))
+            }
             std::fs::TryLockError::Error(error) => storage(error),
         })?;
         let admission = DatabaseLease(admission);
         let mut connection = Connection::open(&path).map_err(storage)?;
         functions(&connection)?;
         connection.busy_handler(Some(busy)).map_err(storage)?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        // This opening owns the connection, so dropping it before COMMIT rolls back the transaction.
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
             .map_err(storage)?;
-        let actual = schema(&tx)?;
+        let actual = schema(&connection)?;
         let unsupported_version = || {
             storage(format!(
                 "unsupported Timeline storage format version at {}; the database was preserved. Use a compatible daemon to access it, or choose a new database path for a fresh start.",
@@ -779,12 +880,13 @@ impl SqliteStorage {
         let mut upgraded_from = None;
         if actual.is_empty() {
             for (_, sql) in SCHEMA.iter().chain(super::text::SCHEMA) {
-                tx.execute_batch(sql).map_err(storage)?;
+                connection.execute_batch(sql).map_err(storage)?;
             }
-            tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+            connection
+                .execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                 .map_err(storage)?;
         } else if let Some(version) = known_format(&actual) {
-            let markers = markers(&tx)?;
+            let markers = markers(&connection)?;
             if markers != [i64::from(version)] {
                 write_startup_failure(
                     &path,
@@ -796,53 +898,59 @@ impl SqliteStorage {
                 return Err(unsupported_version());
             }
             if version != FORMAT {
-                tx.execute_batch("DROP TABLE agent_store_format")
+                connection
+                    .execute_batch("DROP TABLE agent_store_format")
                     .map_err(storage)?;
-                tx.execute_batch(&format_table(FORMAT)).map_err(storage)?;
+                connection
+                    .execute_batch(&format_table(FORMAT))
+                    .map_err(storage)?;
                 // Only an upgrade registers the report, and it clears it
                 // again after the commit: an ordinary open runs no progress
                 // callback.
                 let progress = ctx.map(|ctx| Arc::new(UpgradeProgress::new(ctx, &path, version)));
                 if let Some(progress) = &progress {
                     let reports = Arc::clone(progress);
-                    tx.progress_handler(
-                        UPGRADE_PROGRESS_OPS,
-                        Some(move || {
-                            reports.report(false);
-                            false
-                        }),
-                    )
-                    .map_err(storage)?;
+                    connection
+                        .progress_handler(
+                            UPGRADE_PROGRESS_OPS,
+                            Some(move || {
+                                reports.report(false);
+                                false
+                            }),
+                        )
+                        .map_err(storage)?;
                     progress.report(true);
                 }
                 for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= version) {
                     if *from == 26 {
-                        tx.execute_batch(V27_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V27_COLUMNS).map_err(storage)?;
                     }
                     if *from == 29 {
-                        tx.execute_batch(V30_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V30_COLUMNS).map_err(storage)?;
                     }
                     if *from == 30 {
-                        tx.execute_batch(V31_COLUMNS).map_err(storage)?;
+                        connection.execute_batch(V31_COLUMNS).map_err(storage)?;
                         let keys = |list: &[&str]| {
                             list.iter()
                                 .map(|key| format!("'{key}'"))
                                 .collect::<Vec<_>>()
                                 .join(",")
                         };
-                        tx.execute_batch(&format!(
-                            "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
-                            keys(dim_agent_types::CONTEXT_RENDER_KEYS)
-                        ))
-                        .map_err(storage)?;
-                        tx.execute_batch(&format!(
-                            "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
-                            keys(dim_agent_types::CONTEXT_STATE_KEYS)
-                        ))
-                        .map_err(storage)?;
+                        connection
+                            .execute_batch(&format!(
+                                "UPDATE timeline_events SET context_render=1 WHERE kind IN ({});",
+                                keys(dim_agent_types::CONTEXT_RENDER_KEYS)
+                            ))
+                            .map_err(storage)?;
+                        connection
+                            .execute_batch(&format!(
+                                "UPDATE timeline_events SET context_state=1 WHERE kind IN ({});",
+                                keys(dim_agent_types::CONTEXT_STATE_KEYS)
+                            ))
+                            .map_err(storage)?;
                     }
                     if *from == 31 && version == 31 {
-                        tx.execute_batch(
+                        connection.execute_batch(
                             "DROP INDEX timeline_events_render; DROP INDEX timeline_events_state",
                         )
                         .map_err(storage)?;
@@ -852,43 +960,47 @@ impl SqliteStorage {
                         .chain(super::text::SCHEMA)
                         .filter(|(name, _)| added.contains(name))
                     {
-                        tx.execute_batch(sql).map_err(storage)?;
+                        connection.execute_batch(sql).map_err(storage)?;
                     }
                     if *from == 22 {
-                        super::catalog::backfill(&tx)?;
+                        super::catalog::backfill(&connection)?;
                     }
                     if *from == 35 {
-                        super::text::backfill(&tx)?;
+                        super::text::backfill(&connection)?;
                     }
                     if *from == 37 {
-                        tx.execute_batch(V38_SESSION_OWNERS).map_err(storage)?;
+                        connection
+                            .execute_batch(V38_SESSION_OWNERS)
+                            .map_err(storage)?;
                     }
                     if *from == 24 {
-                        tx.execute_batch("DROP INDEX timeline_events_by_end")
+                        connection
+                            .execute_batch("DROP INDEX timeline_events_by_end")
                             .map_err(storage)?;
                     }
                     if *from == 25 {
-                        crate::provider::rewrite_stored_limits(&tx)?;
+                        crate::provider::rewrite_stored_limits(&connection)?;
                     }
                     // #1099: only the derived `updated_at_ms` column is
                     // rewritten, by the same backfill the catalog's own
                     // upgrade used.
                     if *from == 33 {
-                        super::catalog::backfill(&tx)?;
+                        super::catalog::backfill(&connection)?;
                     }
                     if let Some(progress) = &progress {
                         progress.report(true);
                     }
                 }
-                tx.execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
+                connection
+                    .execute("INSERT INTO agent_store_format VALUES (?1)", [FORMAT])
                     .map_err(storage)?;
-                if known_format(&schema(&tx)?) != Some(FORMAT) {
+                if known_format(&schema(&connection)?) != Some(FORMAT) {
                     return Err(storage("upgraded native store has an unexpected schema"));
                 }
                 upgraded_from = Some(version);
             }
         } else {
-            let marker = markers(&tx)
+            let marker = markers(&connection)
                 .ok()
                 .and_then(|markers| single_marker(&markers));
             let failure = match marker {
@@ -908,9 +1020,9 @@ impl SqliteStorage {
             )));
         }
         for (_, sql) in DERIVED_INDEXES {
-            tx.execute_batch(sql).map_err(storage)?;
+            connection.execute_batch(sql).map_err(storage)?;
         }
-        tx.commit().map_err(storage)?;
+        connection.execute_batch("COMMIT").map_err(storage)?;
         if upgraded_from.is_some() {
             connection
                 .progress_handler(0, None::<fn() -> bool>)
@@ -1035,15 +1147,15 @@ impl SqliteStorage {
     /// The read-only export store's one connection serves both.
     pub(crate) async fn run_read<T: Send + 'static>(
         self: &Arc<Self>,
-        operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let admitted = self.admit()?;
         tokio::task::spawn_blocking(move || {
             let reader = admitted.0.reader();
             match reader {
-                Some(guard) => {
+                Some(mut guard) => {
                     let connection = guard
-                        .as_ref()
+                        .as_mut()
                         .ok_or_else(|| storage("SQLite storage is closed"))?;
                     let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
                     outcome(connection, result)
@@ -1133,7 +1245,7 @@ impl SqliteStorage {
     pub(crate) async fn run_read_cancellable<T: Send + 'static>(
         self: &Arc<Self>,
         cancel: tokio_util::sync::CancellationToken,
-        operation: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+        operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         self.run_read(move |connection| {
             if cancel.is_cancelled() {

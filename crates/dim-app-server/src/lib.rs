@@ -23,6 +23,7 @@ pub mod permission_rules;
 mod pipe_client;
 pub mod plugin_files;
 pub mod plugin_manager;
+pub mod prompt_settings;
 pub mod prompt_suggestion_settings;
 pub mod protocol;
 pub mod provider;
@@ -110,6 +111,14 @@ pub struct ServerConfig {
     /// a plugin's data directory. The product sets it through a product
     /// home; a host without one names it here.
     pub plugin_files: Option<PathBuf>,
+    /// Whether the `plugin` management tool is offered to the Sessions this
+    /// process serves. `true` by default. `false` leaves the `PluginTools`
+    /// Session part unregistered, so no Session, a collaboration member
+    /// included, can name the tool; the process's plugins still load and the
+    /// `plugin.*` management methods stay registered. The scenario
+    /// evaluation serves with `false`, so the registered tools, not a
+    /// Session's mount list, are the ceiling a run's Sessions can declare.
+    pub plugin_tools: bool,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -136,6 +145,7 @@ impl Default for ServerConfig {
             plugin_defaults: None,
             plugin_configs: BTreeMap::new(),
             plugin_files: None,
+            plugin_tools: true,
         }
     }
 }
@@ -831,10 +841,22 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         dim_agent_runtime::names::register::<
             dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost,
         >(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::prompt_sources::BasePromptSettingsHost,
+        >(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::skills::SkillsInstructionsSettingsHost,
+        >(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost,
+        >(builder.catalog_mut(), None);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(
                 prompt_suggestion_settings::PromptSuggestionSettingsPlugin::new(names)?,
             ))
+        })?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(prompt_settings::PromptSettingsPlugin::new(names)?))
         })?);
         rows.push(register_part(
             &mut builtins,
@@ -938,6 +960,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .transpose()?;
     if let Some(state) = &plugins {
         let state = state.clone();
+        let plugin_tools = config.plugin_tools;
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
@@ -945,6 +968,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 Ok(Box::new(plugin_manager::PluginManagerPlugin::new(
                     names,
                     state.clone(),
+                    plugin_tools,
                 )?))
             },
         )?);

@@ -66,6 +66,25 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 删除。只认失败首行的旧版 CLI 读到进度说明时按“没有说明”处理，退回通用错误文本；
 CLI 等待规则见 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
 
+**库被其他进程占用。** 存储的准入租约 `<database>.lock` 已被另一个进程持有：它正在服务
+这个库，或正在启动。本次启动拿不到库，返回的错误文本不变；拒绝时同样写一份启动说明，
+正文点名占用者。库旁有进度说明时，正文带上该进程的 pid 和它正在升级的格式；否则只说库
+正被另一个 dimcode-server 使用；两种正文都让用户等它结束再运行命令。这次写入会盖掉旁边
+的进度说明，占用者的下一次进度报告会把它改写回来；等待中的客户端在这一次轮询里读不到
+进展。占用不是格式诊断：库本身没有被改动。
+
+```text
+Cannot open native store <path>.
+  Another dimcode-server (pid <pid>) is upgrading it from format v<from> to v<to>.
+  The store stays with that process until the upgrade finishes; wait for it, then run the command again.
+```
+
+```text
+Cannot open native store <path>.
+  Another dimcode-server is using the store.
+  Wait for it to finish, then run the command again.
+```
+
 “本构建认识的形状”指当前格式的表和索引集合，或某个升级步骤起点的集合：结构完全相符时
 先看标记是否等于该版本，再看是否需要升级。结构不相符时按可读的单一标记分类，下表四行
 互斥。

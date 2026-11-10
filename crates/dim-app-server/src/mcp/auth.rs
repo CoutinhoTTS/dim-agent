@@ -508,7 +508,7 @@ impl McpAuth {
         let Some(slot) = attempts.get_mut(&key).filter(|slot| slot.is(attempt_id)) else {
             drop(attempts);
             if let (Ok(tokens), Some(endpoint)) = (&response, &binding.revocation_endpoint) {
-                self.revoke(endpoint, &client, tokens).await;
+                self.revoke(endpoint, &key.url, &client, tokens).await;
             }
             return Err(McpAuthError::AttemptClosed);
         };
@@ -556,21 +556,30 @@ impl McpAuth {
         slot.current = None;
         drop(attempts);
         if let (Some(tokens), Some(endpoint)) = (&unwritten, &binding.revocation_endpoint) {
-            self.revoke(endpoint, &client, tokens).await;
+            self.revoke(endpoint, &key.url, &client, tokens).await;
         }
         result
     }
 
     /// Revokes the refresh token, then the access token (RFC 7009), best
     /// effort. Returns whether the authorization server confirmed both.
-    async fn revoke(&self, endpoint: &str, client: &store::Client, tokens: &store::Tokens) -> bool {
+    async fn revoke(
+        &self,
+        endpoint: &str,
+        resource: &str,
+        client: &store::Client,
+        tokens: &store::Tokens,
+    ) -> bool {
+        let Some(endpoint) = oauth::stored_endpoint(endpoint, resource) else {
+            return false;
+        };
         let mut revoked = true;
         if let Some(refresh) = &tokens.refresh_token {
-            revoked &= oauth::revoke(&self.http, endpoint, client, refresh, "refresh_token").await;
+            revoked &= oauth::revoke(&self.http, &endpoint, client, refresh, "refresh_token").await;
         }
         revoked &= oauth::revoke(
             &self.http,
-            endpoint,
+            &endpoint,
             client,
             &tokens.access_token,
             "access_token",
@@ -599,7 +608,7 @@ impl McpAuth {
                         client: Some(client),
                         tokens: Some(tokens),
                         ..
-                    }) => auth.revoke(endpoint, client, tokens).await,
+                    }) => auth.revoke(endpoint, &target.url, client, tokens).await,
                     _ => false,
                 };
                 if record.is_some() {

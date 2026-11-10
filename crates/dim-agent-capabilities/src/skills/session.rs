@@ -141,6 +141,9 @@ pub struct SkillsPlugin {
     /// not every such assembly installs the capability, so a part with no
     /// name to declare keeps the built-in [`super::INSTRUCTIONS`].
     factory: Option<Key<super::SkillsConfig>>,
+    /// The host's user override of the instructions, when the host provides
+    /// one.
+    settings: Option<Key<super::SkillsInstructionsSettingsHost>>,
 }
 impl SkillsPlugin {
     pub fn new(names: &Names<'_>) -> Result<Self, Error> {
@@ -157,6 +160,10 @@ impl SkillsPlugin {
             factory: names
                 .registered::<super::SkillsConfig>()
                 .then(|| names.key::<super::SkillsConfig>())
+                .transpose()?,
+            settings: names
+                .registered::<super::SkillsInstructionsSettingsHost>()
+                .then(|| names.key::<super::SkillsInstructionsSettingsHost>())
                 .transpose()?,
         })
     }
@@ -225,14 +232,36 @@ impl DynPlugin for SkillsPlugin {
                 })
                 .await?;
             // The factory configuration's text replaces the built-in
-            // instructions ([`super::SkillsConfig`]).
-            let instructions: Arc<str> = match &self.factory {
-                Some(key) => ctx
-                    .require_at(key)?
-                    .instructions
-                    .clone()
-                    .unwrap_or_else(|| super::INSTRUCTIONS.into()),
-                None => super::INSTRUCTIONS.into(),
+            // instructions ([`super::SkillsConfig`]); the host's user
+            // override fills in when the factory sets none
+            // ([`super::SkillsInstructionsSettingsHost`]).
+            let factory = match &self.factory {
+                Some(key) => ctx.require_at(key)?.instructions.clone(),
+                None => None,
+            };
+            let instructions: Arc<str> = match factory {
+                Some(text) => text,
+                None => {
+                    let settings = match &self.settings {
+                        Some(key) => ctx.get_at(key),
+                        None => None,
+                    };
+                    match settings {
+                        Some(settings) => match settings
+                            .0
+                            .instructions(ctx.cancellation_token().child_token())
+                            .await
+                        {
+                            Ok(Some(text)) => text,
+                            Ok(None) => super::INSTRUCTIONS.into(),
+                            Err(error) => {
+                                tracing::warn!(%error, "skills instructions setting was not read");
+                                super::INSTRUCTIONS.into()
+                            }
+                        },
+                        None => super::INSTRUCTIONS.into(),
+                    }
+                }
             };
             let skills = Arc::new(SessionSkills::new(initial, instructions));
             let owner = skills.clone();

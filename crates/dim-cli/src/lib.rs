@@ -28,6 +28,7 @@ mod permission_command;
 mod plugin_command;
 mod plugins;
 mod projection;
+mod prompt_command;
 mod question;
 mod realtime_command;
 mod recording;
@@ -875,6 +876,9 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         }
         Action::Management(request) => {
             management_command::run(&mut client, &options, request).await
+        }
+        Action::Prompt(command) => {
+            prompt_command::run(&mut client, &options, command.clone()).await
         }
         Action::ManagementEdit { area, id } => {
             management_command::edit(&mut client, &options, area.clone(), id.clone()).await
