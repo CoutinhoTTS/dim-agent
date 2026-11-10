@@ -177,13 +177,17 @@ impl<'a> Names<'a> {
         }
     }
     /// The key of `T`'s name for this copy.
-    pub fn key<T: ?Sized + 'static>(&self) -> Result<Key<T>, Error> {
-        let name = name_of::<T>();
-        if let Some(reason) = self.faces.and_then(|faces| faces.reason(&name)) {
+    fn reject_internal(&self, name: &str) -> Result<(), Error> {
+        if let Some(reason) = self.faces.and_then(|faces| faces.reason(name)) {
             return Err(rutis::Error::from(ErrorKind::PluginFailed(
-                format!("{name} is internal: {reason}").into(),
+                format!("internal_service: {name} is internal: {reason}").into(),
             )));
         }
+        Ok(())
+    }
+    pub fn key<T: ?Sized + 'static>(&self) -> Result<Key<T>, Error> {
+        let name = name_of::<T>();
+        self.reject_internal(&name)?;
         let failed = |message: String| rutis::Error::from(ErrorKind::PluginFailed(message.into()));
         let group = match self.catalog.key_in(&name, &Build::default()) {
             Ok(key) => {
@@ -227,6 +231,7 @@ impl<'a> Names<'a> {
     /// then `dyn HostDispatch`: there a provider of any language is found.
     /// [`Self::key`] is the form for a name registered with a Rust type.
     pub fn named<T: ?Sized + 'static>(&self, name: &str) -> Result<Key<T>, Error> {
+        self.reject_internal(name)?;
         let failed = |message: String| rutis::Error::from(ErrorKind::PluginFailed(message.into()));
         let key = match self.catalog.key_in(name, &Build::default()) {
             Ok(key) => key,

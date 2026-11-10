@@ -216,6 +216,18 @@ pub(crate) struct Assembly {
     /// name in the group it registers.
     pub catalog: Arc<rutis_loader::ServiceCatalog>,
 }
+/// The closed set of reasons a service face is internal (#1289).
+pub const FACE_REASONS: [&str; 8] = [
+    "object",
+    "hot-path",
+    "lock-callback",
+    "secret",
+    "owner-api",
+    "control",
+    "host-resource",
+    "legacy-no-consumer",
+];
+
 /// Why a service face is internal, by its catalog name.
 #[derive(Clone, Debug, Default)]
 pub struct Faces {
@@ -293,12 +305,20 @@ impl AgentBuilder {
     }
     /// Marks the name of `T` internal with `reason`.
     pub fn internal<T: ?Sized + 'static>(&mut self, reason: &'static str) {
+        assert!(
+            FACE_REASONS.contains(&reason),
+            "unknown internal reason {reason}"
+        );
         self.faces
             .reasons
             .insert(crate::names::name_of::<T>(), reason);
     }
     /// Marks a hand-written dispatcher name internal with `reason`.
     pub fn internal_name(&mut self, name: &str, reason: &'static str) {
+        assert!(
+            FACE_REASONS.contains(&reason),
+            "unknown internal reason {reason}"
+        );
         self.faces.reasons.insert(name.to_owned(), reason);
     }
     /// The internal names and their reasons.

@@ -19,7 +19,7 @@
 
 ### 2.1 标记
 
-**数据面 = 名字在 catalog 里 shared，并且在 `host_key(name)` 上有一个 `HostDispatch`。** 两个条件缺一不可。`#[rutis::service]`、`register_shared`、`register_shared_instance` 都是标记写法，但 shared 本身不是数据面：`localId`、`loaderService`、`pluginMounter` 今天是 shared 却没有 dispatcher，leaf 不能调用它们。
+**数据面 = 名字在 catalog 里 shared，并且在 `host_key(name)` 上有一个 `HostDispatch`。** 两个条件缺一不可。`#[rutis::service]`、`register_shared`、`register_shared_instance` 都是标记写法，但 shared 本身不是数据面：`loaderService`、`pluginMounter` 今天是 shared 却没有 dispatcher，leaf 不能调用它们。
 
 `internal` 需要一条原因，放在 `AgentBuilder` 的旁表里，不改 rutis 的 `ServiceCatalog`：
 
@@ -48,15 +48,15 @@ impl AgentBuilder {
   - 非 shared 且没有 reason：生成失败，报名字。
 - `xtask check` 双向检查：
   - 一个在 `host_key(name)` 上有 dispatcher、但没有 shared 的名字失败（`managementMethods` 是这一类）；
-  - 一个 shared、但没有 dispatcher 的名字失败（`localId`、`loaderService`、`pluginMounter` 是这一类）；
+  - 一个 shared、但没有 dispatcher 的名字失败；`loaderService`、`pluginMounter` 是仅有的两个例外，catalog 显示 `shared-no-dispatcher`；
   - 一个名字同时 shared 和有 reason 是矛盾，失败。
 - `managementMethods` 不是只加一行：`session_typescript.rs:80` 已经 `register_shared`，但 `xtask/src/catalog.rs:81` 在 `serve` 注册 typed 名字之前调用 `share_names`，后者会被覆盖。改动是让 shared 注册发生在 typed 注册之后，或让 `register_names` 保留已有的 shared；这是 #1289 的代码项。
-- `localId`、`loaderService`、`pluginMounter` 三个 shared-without-dispatcher 在 #1289 里逐个解决：需要 leaf 的补一个 `get`/`status` dispatcher，不需要的停止 shared 并写 reason。检查在解决前会失败，这是有意的。
+- `localId` 由 root 的 `get` dispatcher 变成 `data`。`loaderService`、`pluginMounter` 保持 `shared-no-dispatcher`：它们是 rutis-loader 的外部名字，leaf 不能调用，去掉或补 dispatcher 需要上游改动。检查只对这两个名字放行。
 - `xtask/src/catalog.rs` 的 `crosses` 字段改名 `face`，枚举 `Data | Internal(&'static str) | SharedNoDispatcher`。
 
 ### 2.3 leaf 的运行时拒绝
 
-- `PartRegistry` 挂载 leaf 部件前，`Names` 解析每个 `inject` 名字：`face != data` → 失败，错误码 `internal_service`，消息写明名字和原因。
+- `PartRegistry` 挂载 leaf 部件前，`Names` 解析每个 `inject` 名字：`face != data` → 失败，`ErrorKind::PluginFailed`，消息以 `internal_service:` 开头并写明名字和原因。
 - 一个 leaf 行声明 `provides` 的名字时，同样要求 data；否则它的服务在宿主侧不可解析，直接拒绝，不等到第一次调用。
 - `Names` 需要读到 `Faces`：新增 `Names::copy_with_faces(catalog, build, faces)`；`Names::copy` 保持原签名并传空表。不要给 `copy` 加可选参数（Rust 没有），也不要改所有调用点。
 
@@ -76,7 +76,7 @@ impl AgentBuilder {
 
 ### 2.5 存量迁移
 
-存量不一次改完。每个非 shared 名字按 §3 的分类标 reason（`object`/`hot-path`/`secret`/…）；#1300 的清单就是映射，出现 leaf 消费者时再改数据面。这样 `xtask check` 从第一天就能拦住“新写的服务忘了形状”，而不用等 84 个名字全部迁完。
+存量不一次改完。每个非 shared 名字按 §3 的分类标 reason（`object`/`hot-path`/`secret`/…）；#1300 的清单就是映射，出现 leaf 消费者时再改数据面。这样 `xtask check` 从第一天就能拦住“新写的服务忘了形状”，而不用等所有名字全部迁完。
 
 ## 3. 盘点（#1300）
 
@@ -299,7 +299,7 @@ managedSearch.search {query, count}
 - 取消是协议动作（调用方丢弃调用或发 bridge cancel），不是请求字段。
 - `managedProviders` 保持 internal(secret)：账号、登录、token、租约仍在类型化面。
 - Web 的搜索改调 `managedSearch`；Web 的 settings 仍走 `settings`。
-- 新名字使 catalog 多一行；它不在 84 个现有名字里。
+- 新名字使 catalog 多一行；它不在当前 91 个 internal 名字里。
 
 ### 4.7 `wakeups`
 
@@ -318,7 +318,7 @@ wakeups.cancel {sessionId, wakeupId} -> {} | {state}
 
 ## 5. 验证
 
-- `xtask check`：双向测试（dispatcher 未 shared 失败；shared 无 dispatcher 失败；shared+reason 失败）。
+- `xtask check`：双向测试（dispatcher 未 shared 失败；shared 无 dispatcher 失败，两个外部名字除外；shared+reason 失败；reason 不在闭集失败）。
 - `xtask graph`：catalog 的 `face` 列与真实装配一致；`catalog.md` 的 diff 作为评审材料。
 - 每个服务：现有 flow 测试 + 一个 loopback session 的跨边界用例；不新增 mock-only 测试。
 - 数量：不改 `cargo test` 的总量要求；按受影响 crate 跑，最终 `cargo test --workspace --locked`。
@@ -330,12 +330,12 @@ wakeups.cancel {sessionId, wakeupId} -> {} | {state}
 2. **secret**：`providerService`、`mcpAuth`、OAuth 服务、`managedProviders` 保持 internal；数据面只暴露操作，不暴露值。
 3. **`workflowRuns` 已经是数据面**：optional Workflow 包已提供；#1292 只核对形状，不新增 provider。
 4. **`Faces` 的传播**：`Names`、`PartRegistry`、`SessionResolver` 都要拿到同一份原因表；独立 host / 测试用空表，检查只在装配和 leaf 加载处生效。
-5. **legacy 标记**：84 个名字里 16 个是“数据内容、无消费者”，先标 `legacy-no-consumer`；不是永久 internal。
-6. **shared 与 dispatcher 不一致**：`managementMethods`、`localId`、`loaderService`、`pluginMounter` 证明 shared 不等于数据面；#1289 必须把这三类逐个解决，检查双向失败。
+5. **legacy 标记**：当前 91 个 internal 名字里 18 个是“数据内容、无消费者”，标 `legacy-no-consumer`；不是永久 internal。
+6. **shared 与 dispatcher 不一致**：`managementMethods`、`localId` 已在 #1289 变成 `data`；`loaderService`、`pluginMounter` 是仅有的两个 `shared-no-dispatcher` 例外，检查不放行其他 shared-without-dispatcher。
 
 ## 7. 交付顺序
 
-1. **#1289**：`Faces`、`AgentBuilder::internal`、catalog `face`、双向 `xtask check`、leaf 拒绝、`managementMethods` 注册顺序、`localId`/`loaderService`/`pluginMounter` 的 dispatcher 或去 shared、模板/清单。此 PR 只加检查和标记，不改服务行为。
+1. **#1289**：`Faces`、`AgentBuilder::internal`、catalog `face`、双向 `xtask check`、leaf 拒绝、`managementMethods` 注册顺序、`localId` dispatcher；`loaderService`/`pluginMounter` 作为两个外部 `shared-no-dispatcher` 例外。
 2. **#1300**：按 §3 的分组在 catalog 里补齐 reason；`xtask graph` 的 diff 就是盘点结果。此 PR 不改服务。
 3. **#1292**：按 `scheduleJobs` → `wakeups` → `sessionFiles` → `managedSearch` 的顺序，一项一个 PR。`workflowRuns` 已是数据面，只核对；`settingsService`、`modelHost` 不迁移。
 4. 每项都带现有 flow 测试；不新增适配层，不写第二份逻辑。

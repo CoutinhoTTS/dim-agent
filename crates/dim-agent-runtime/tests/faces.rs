@@ -1,4 +1,5 @@
 use dim_agent_runtime::{AgentBuilder, AgentConfig, Names, PartRegistry};
+use rutis_bridge::session::HostDispatch;
 
 struct Demo;
 
@@ -21,5 +22,14 @@ fn a_leaf_cannot_key_an_internal_name() {
     let catalog = dim_agent_runtime::names::catalog();
     let build = rutis_loader::resolve::Build::default();
     let names = Names::copy_with_faces(&catalog, &build, builder.faces());
-    assert!(names.key::<PartRegistry>().is_err());
+    let error = names.key::<PartRegistry>().unwrap_err();
+    assert!(error.to_string().contains("internal_service"));
+    assert!(names.named::<dyn HostDispatch>("partRegistry").is_err());
+}
+
+#[test]
+#[should_panic(expected = "unknown internal reason")]
+fn an_unknown_reason_is_rejected_at_registration() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.internal_name("x", "hotpath");
 }

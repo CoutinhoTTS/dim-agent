@@ -1563,6 +1563,7 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/assembly.rs",
       "unexpandedMacros": [
+        "assert",
         "format",
         "json",
         "matches",

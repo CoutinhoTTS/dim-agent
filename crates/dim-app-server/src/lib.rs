@@ -678,6 +678,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let mut builtins = Modules::new();
     dim_agent_capabilities::register_names(&mut builder);
     register_names(builder.catalog_mut());
+    // Share the foreign-part names after every typed name exists: a later
+    // typed registration overwrites a shared key (managementMethods).
     crate::session_typescript::share_names(builder.catalog_mut());
     register_faces(&mut builder);
     dim_agent_runtime::names::register::<dim_agent_capabilities::methods::ReservedMethods>(

@@ -9,7 +9,7 @@
 //! parts that are Capabilities because they inject `dispatcher` or `timeline`.
 //! `check` builds the same assembly and fails when the file differs.
 use crate::app_server;
-use dim_agent_runtime::{Faces, Feature, SessionConfig, names::name_of_type};
+use dim_agent_runtime::{FACE_REASONS, Faces, Feature, SessionConfig, names::name_of_type};
 use rutis::host::diagnostics::RuntimeDiagnostics;
 use rutis::host::{CtxHost, InstanceId, TypeKey};
 use rutis::{Ctx, Plugin};
@@ -125,7 +125,12 @@ fn face(name: &str, shared: bool, dispatcher: bool, reason: Option<&str>) -> Res
         (true, false, None) if EXTERNAL_SHARED.contains(&name) => Ok("shared-no-dispatcher".into()),
         (true, false, None) => Err(format!("{name}: shared but has no dispatcher").into()),
         (false, true, _) => Err(format!("{name}: has a dispatcher but is not shared").into()),
-        (false, false, Some(reason)) => Ok(format!("internal({reason})")),
+        (false, false, Some(reason)) if FACE_REASONS.contains(&reason) => {
+            Ok(format!("internal({reason})"))
+        }
+        (false, false, Some(reason)) => {
+            Err(format!("{name}: unknown internal reason {reason}").into())
+        }
         (false, false, None) => Err(format!("{name}: no face and no internal reason").into()),
         (true, _, Some(reason)) => Err(format!("{name}: shared and internal({reason})").into()),
     }
@@ -232,6 +237,19 @@ impl Table {
             service.face = face(name, shared, dispatch.is_some(), reason)?;
             if let Some(methods) = dispatch.and_then(|dispatch| dispatch.methods()) {
                 service.methods = serde_json::from_value(methods)?;
+            }
+        }
+        for (name, reason) in faces.iter() {
+            match services.get(name) {
+                None => {
+                    return Err(
+                        format!("{name}: internal({reason}) names no catalog service").into(),
+                    );
+                }
+                Some(service) if service.face == "data" => {
+                    return Err(format!("{name}: internal({reason}) is also a data face").into());
+                }
+                Some(_) => {}
             }
         }
         capabilities.sort_by(|a, b| (order(a.group), &a.part).cmp(&(order(b.group), &b.part)));
@@ -366,5 +384,6 @@ mod face_tests {
         assert!(face("x", true, true, Some("secret")).is_err());
         assert!(face("x", false, false, None).is_err());
         assert!(face("x", true, false, None).is_err());
+        assert!(face("x", false, false, Some("hotpath")).is_err());
     }
 }
