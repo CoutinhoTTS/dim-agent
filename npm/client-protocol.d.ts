@@ -177,6 +177,8 @@ export type SessionEvent = {
   sequence: number
   /** Unix milliseconds the runtime wrote the event at. */
   createAt: number
+  /** v4 only: the outer call of a child tool batch. */
+  parentCallId?: string
   content: EventContent
 }
 
@@ -282,6 +284,8 @@ export interface AgentEvent {
   type: string;
   name: string;
   data: JsonObject;
+  /** v4 only: the outer call of a child tool batch. */
+  parent_call_id?: string;
   /** Extension events only: the producer's reading switches. */
   context_render?: boolean;
   context_state?: boolean;

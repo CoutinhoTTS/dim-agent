@@ -15,15 +15,25 @@ use futures_util::FutureExt;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::{
+    future::Future,
     num::NonZeroU64,
     panic::AssertUnwindSafe,
-    sync::{Arc, Mutex},
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
+use tokio::{sync::oneshot, time::timeout};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Default)]
 struct ToolState {
     current: Option<CancellationToken>,
+    /// The context of the current top-level batch. A nested gate opens only
+    /// for this context.
+    current_context: Option<ToolExecutionContext>,
     /// Set by `stop/interrupt` until the interrupted turn ends or the next
     /// one starts: requests that still arrive belong to the interrupted turn
     /// and are cancelled. Folded from consumed events, so rebuilt on load.
@@ -34,6 +44,200 @@ pub struct ToolExecutor {
     state: Mutex<ToolState>,
     tasks: TaskTracker,
     errors: Mutex<Vec<AgentError>>,
+    binding: Arc<ToolBinding>,
+    approval: Arc<Approval>,
+    timeline: Arc<Timeline>,
+}
+
+/// The child-call gate of one outer tool call. `invoke` writes a child
+/// `step/tool-call` batch and its terminal `step/tool-result`; `close` rejects
+/// new children and waits for every child task.
+pub trait NestedGate: Send + Sync + 'static {
+    fn invoke(
+        &self,
+        call: ToolCall,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>>;
+    fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    fn effects(&self) -> Vec<ToolEffect>;
+}
+
+type ChildEffects = Arc<Mutex<Vec<(u64, Vec<ToolEffect>)>>>;
+
+struct NestedGateImpl {
+    executor: Arc<ToolExecutor>,
+    parent_call_id: String,
+    context: ToolExecutionContext,
+    cancel: CancellationToken,
+    tasks: TaskTracker,
+    state: Mutex<GateState>,
+    next: AtomicU64,
+    effects: ChildEffects,
+}
+
+#[derive(Default)]
+struct GateState {
+    closing: bool,
+}
+
+impl NestedGate for NestedGateImpl {
+    fn invoke(
+        &self,
+        call: ToolCall,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolResult, HostError>> + Send + '_>> {
+        Box::pin(async move {
+            let (sender, receiver) = oneshot::channel();
+            {
+                let state = self.state.lock().unwrap();
+                if state.closing {
+                    return Err(HostError::failed("the Code Mode child gate is closed"));
+                }
+                let executor = self.executor.clone();
+                let parent_call_id = self.parent_call_id.clone();
+                let context = self.context.clone();
+                let cancel = self.cancel.clone();
+                let effects = self.effects.clone();
+                let sequence = self.next.fetch_add(1, Ordering::SeqCst);
+                self.tasks.spawn(async move {
+                    let result = run_child(
+                        executor,
+                        parent_call_id,
+                        context,
+                        call,
+                        cancel,
+                        sequence,
+                        effects,
+                    )
+                    .await;
+                    let _ = sender.send(result);
+                });
+            }
+            receiver
+                .await
+                .unwrap_or_else(|_| Err(HostError::failed("a Code Mode child task ended")))
+        })
+    }
+
+    fn close(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            self.state.lock().unwrap().closing = true;
+            self.cancel.cancel();
+            self.tasks.close();
+            let _ = timeout(Duration::from_secs(5), self.tasks.wait()).await;
+        })
+    }
+
+    fn effects(&self) -> Vec<ToolEffect> {
+        let mut collected = std::mem::take(&mut *self.effects.lock().unwrap());
+        collected.sort_by_key(|(sequence, _)| *sequence);
+        collected
+            .into_iter()
+            .flat_map(|(_, effects)| effects)
+            .collect()
+    }
+}
+
+async fn run_child(
+    executor: Arc<ToolExecutor>,
+    parent_call_id: String,
+    context: ToolExecutionContext,
+    call: ToolCall,
+    cancel: CancellationToken,
+    sequence: u64,
+    effects: ChildEffects,
+) -> Result<ToolResult, HostError> {
+    let batch = executor
+        .timeline
+        .append(
+            EventDraft::from(EventKind::ToolCall(ToolCallData {
+                turn_id: context.turn_id.clone(),
+                request_id: context.request_id.clone(),
+                calls: vec![call.clone()],
+            }))
+            .with_parent_call_id(parent_call_id.clone()),
+        )
+        .map_err(|error| HostError::failed(error.to_string()))?;
+    let child_call_id = call.id.clone();
+    let outcome = AssertUnwindSafe(dim_agent_runtime::core::with_parent_call_id(
+        child_call_id,
+        async {
+            execute(
+                &executor.binding,
+                &executor.approval,
+                call.clone(),
+                context.clone(),
+                cancel,
+            )
+            .await
+        },
+    ))
+    .catch_unwind()
+    .await;
+    let result = match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => ToolResult::error(error.to_string()),
+        Err(panic) => ToolResult::error(panic_message(panic)),
+    };
+    if let Some(child_effects) = result.effects.clone() {
+        effects.lock().unwrap().push((sequence, child_effects));
+    }
+    executor
+        .timeline
+        .append(
+            EventDraft::from(EventKind::ToolResult(ToolResultData {
+                turn_id: context.turn_id,
+                request_id: context.request_id,
+                call_event_id: Some(batch.id.clone()),
+                results: vec![ToolCallResult {
+                    call_id: call.id,
+                    result: result.clone(),
+                }],
+            }))
+            .with_parent_call_id(parent_call_id),
+        )
+        .map_err(|error| HostError::failed(error.to_string()))?;
+    Ok(result)
+}
+impl ToolExecutor {
+    /// The declarations the request pinned, for a program that may only see
+    /// the tools its own request declared.
+    pub fn definitions(&self, request_id: &str) -> Result<Vec<ToolDefinition>, String> {
+        self.binding.definitions(request_id)
+    }
+    /// Opens the child-call gate for the current top-level batch. A gate
+    /// exists only while its context matches the current batch; a closed or
+    /// interrupted executor refuses.
+    pub fn open(
+        self: &Arc<Self>,
+        parent_call_id: String,
+        context: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> Result<Arc<dyn NestedGate>, HostError> {
+        let state = self.state.lock().unwrap();
+        if state.closed {
+            return Err(HostError::failed("ToolExecutor is closed"));
+        }
+        if let Some(reason) = &state.interrupted {
+            return Err(HostError::failed(format!(
+                "ToolExecutor is interrupted: {reason}"
+            )));
+        }
+        if state.current.is_none() || state.current_context.as_ref() != Some(&context) {
+            return Err(HostError::failed(
+                "no current tool batch accepts a Code Mode child",
+            ));
+        }
+        drop(state);
+        Ok(Arc::new(NestedGateImpl {
+            executor: self.clone(),
+            parent_call_id,
+            context,
+            cancel,
+            tasks: TaskTracker::new(),
+            state: Mutex::new(GateState::default()),
+            next: AtomicU64::new(0),
+            effects: Arc::new(Mutex::new(Vec::new())),
+        }))
+    }
 }
 pub struct ToolExecutorPlugin {
     pub emit_progress: bool,
@@ -82,6 +286,9 @@ impl DynPlugin for ToolExecutorPlugin {
                 state: Mutex::new(ToolState::default()),
                 tasks: TaskTracker::new(),
                 errors: Mutex::new(Vec::new()),
+                binding: binding.clone(),
+                approval: approval.clone(),
+                timeline: timeline.clone(),
             });
             let closing = service.clone();
             ctx.effect(move || async move {
@@ -147,6 +354,9 @@ impl DynPlugin for ToolExecutorPlugin {
                         let EventKind::ToolCall(batch) = &event.kind else {
                             unreachable!()
                         };
+                        if event.parent_call_id.is_some() {
+                            return Ok(());
+                        }
                         if state.closed {
                             return Err(AgentError::Closed("ToolExecutor".into()));
                         }
@@ -176,6 +386,11 @@ impl DynPlugin for ToolExecutorPlugin {
                         let cancel = lifecycle.child_token();
                         let generation = lifecycle.clone();
                         state.current = Some(cancel.clone());
+                        state.current_context = Some(ToolExecutionContext {
+                            turn_id: batch.turn_id.clone(),
+                            request_id: batch.request_id.clone(),
+                            branch_id: identity.branch_id.clone(),
+                        });
                         let batch = batch.clone();
                         let call_event_id = event.id.clone();
                         let worker = owner.clone();
@@ -296,6 +511,7 @@ impl DynPlugin for ToolExecutorPlugin {
                             let unloading = {
                                 let mut state = worker.state.lock().unwrap();
                                 state.current = None;
+                                state.current_context = None;
                                 state.closed || generation.is_cancelled()
                             };
                             let (mut results, mut errors) = match outcome {
@@ -311,8 +527,19 @@ impl DynPlugin for ToolExecutorPlugin {
                                 }
                             };
                             if unloading {
+                                let through = timeline.committed();
                                 for item in &mut results {
+                                    let mut effects = item.result.effects.take();
+                                    if effects.is_none() {
+                                        let (_, child) = child_effects(&timeline, &item.call_id, through)
+                                            .await
+                                            .unwrap_or_default();
+                                        if !child.is_empty() {
+                                            effects = Some(child);
+                                        }
+                                    }
                                     item.result = reload_cancelled();
+                                    item.result.effects = effects;
                                 }
                             }
                             let published = std::panic::catch_unwind(AssertUnwindSafe(|| {
@@ -380,6 +607,95 @@ async fn execute(
         )
         .await?;
     tool.handler.execute(call, context, cancel).await
+}
+
+struct OpenBatch {
+    parent_call_id: Option<String>,
+    call_event_id: String,
+    turn_id: String,
+    request_id: String,
+    calls: Vec<String>,
+}
+
+async fn child_effects(
+    timeline: &Timeline,
+    parent_call_id: &str,
+    through: u64,
+) -> dim_agent_runtime::Result<(usize, Vec<ToolEffect>)> {
+    let mut seen = 0usize;
+    let mut request = TimelineQuery {
+        scope: TimelineQueryScope::Branch,
+        from: None,
+        through: Some(through),
+        include_publishing: true,
+        query: QuerySpec {
+            filter: Some(QueryFilter::And {
+                conditions: vec![
+                    QueryFilter::Compare {
+                        left: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        comparison: QueryComparison::Eq,
+                        right: QueryOperand::Value {
+                            value: "step/tool-result".into(),
+                        },
+                    },
+                    QueryFilter::Compare {
+                        left: QueryOperand::Field {
+                            path: "parent_call_id".into(),
+                        },
+                        comparison: QueryComparison::Eq,
+                        right: QueryOperand::Value {
+                            value: parent_call_id.into(),
+                        },
+                    },
+                ],
+            }),
+            select: QuerySelect::Fields {
+                fields: vec!["data".into()],
+            },
+            group_by: Vec::new(),
+            pick: None,
+            order_by: Vec::new(),
+        },
+        page: Some(QueryPage {
+            limit: NonZeroU64::new(256).expect("a page contains tool results"),
+            after: None,
+        }),
+    };
+    let mut effects = Vec::new();
+    loop {
+        let reply = timeline.query(request.clone()).await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("tool effects selects result data")
+        };
+        for row in rows {
+            let Some(QueryValue::Value { value }) = row.values.into_iter().next() else {
+                return Err(AgentError::fault(
+                    "ToolExecutor",
+                    "a child result has no data",
+                ));
+            };
+            let data: ToolResultData = serde_json::from_value(value).map_err(|error| {
+                AgentError::fault("ToolExecutor", format!("invalid child result: {error}"))
+            })?;
+            for result in data.results {
+                seen += 1;
+                if let Some(child) = result.result.effects {
+                    effects.extend(child);
+                }
+            }
+        }
+        let Some(next) = reply.next else {
+            break;
+        };
+        request
+            .page
+            .as_mut()
+            .expect("tool result queries are paged")
+            .after = Some(next);
+    }
+    Ok((seen, effects))
 }
 
 /// A committed batch without results was left by a reload and settles as
@@ -460,6 +776,7 @@ async fn rebuild(owner: &ToolExecutor, timeline: &Timeline) -> dim_agent_runtime
             "data.turn_id".into(),
             "data.request_id".into(),
             "data.calls[].id".into(),
+            "parent_call_id".into(),
         ],
     };
     request.query.filter = Some(QueryFilter::And {
@@ -499,6 +816,7 @@ async fn rebuild(owner: &ToolExecutor, timeline: &Timeline) -> dim_agent_runtime
             },
         ],
     });
+    let mut batches = Vec::new();
     loop {
         let reply = timeline.query(request.clone()).await?;
         let QueryOutput::Rows { rows } = reply.result else {
@@ -517,15 +835,31 @@ async fn rebuild(owner: &ToolExecutor, timeline: &Timeline) -> dim_agent_runtime
                         value: serde_json::Value::String(request_id),
                     },
                     QueryValue::Elements { values: calls },
+                    parent,
                 ],
-            ) = <[_; 4]>::try_from(row.values)
+            ) = <[_; 5]>::try_from(row.values)
             else {
                 return Err(AgentError::fault(
                     "ToolExecutor",
                     "a tool batch has invalid operation identities",
                 ));
             };
-            let results = calls
+            let parent_call_id = match parent {
+                QueryValue::Missing
+                | QueryValue::Value {
+                    value: serde_json::Value::Null,
+                } => None,
+                QueryValue::Value {
+                    value: serde_json::Value::String(value),
+                } => Some(value),
+                _ => {
+                    return Err(AgentError::fault(
+                        "ToolExecutor",
+                        "a tool batch has an invalid parent",
+                    ));
+                }
+            };
+            let calls = calls
                 .into_iter()
                 .map(|call| {
                     let QueryValue::Value {
@@ -537,23 +871,16 @@ async fn rebuild(owner: &ToolExecutor, timeline: &Timeline) -> dim_agent_runtime
                             "a tool call has no identity",
                         ));
                     };
-                    Ok(ToolCallResult {
-                        call_id,
-                        result: reload_settled(ToolResult::error(format!(
-                            "Tool was not executed: {CAPABILITY_RELOADING}"
-                        ))),
-                    })
+                    Ok(call_id)
                 })
                 .collect::<dim_agent_runtime::Result<Vec<_>>>()?;
-            timeline.append(
-                EventKind::ToolResult(ToolResultData {
-                    turn_id,
-                    request_id,
-                    call_event_id: Some(call_event_id),
-                    results,
-                })
-                .into(),
-            )?;
+            batches.push(OpenBatch {
+                parent_call_id,
+                call_event_id,
+                turn_id,
+                request_id,
+                calls,
+            });
         }
         let Some(next) = reply.next else {
             break;
@@ -563,6 +890,52 @@ async fn rebuild(owner: &ToolExecutor, timeline: &Timeline) -> dim_agent_runtime
             .as_mut()
             .expect("operation queries are paged")
             .after = Some(next);
+    }
+    // Children settle first, so the outer aggregation can read their
+    // terminal results and copy the confirmed effects.
+    batches.sort_by_key(|batch| batch.parent_call_id.is_none());
+    for batch in batches {
+        let mut children = 0usize;
+        let mut effects = Vec::new();
+        if batch.parent_call_id.is_none() {
+            let through = timeline.committed();
+            for call_id in &batch.calls {
+                let (seen, child) = child_effects(timeline, call_id, through).await?;
+                children += seen;
+                effects.extend(child);
+            }
+        }
+        let mut result = if children > 0 {
+            reload_settled(ToolResult::error(
+                "Tool did not finish before Capability reload; an effect may have happened",
+            ))
+        } else {
+            reload_settled(ToolResult::error(format!(
+                "Tool was not executed: {CAPABILITY_RELOADING}"
+            )))
+        };
+        if !effects.is_empty() {
+            result.effects = Some(effects);
+        }
+        let results = batch
+            .calls
+            .into_iter()
+            .map(|call_id| ToolCallResult {
+                call_id,
+                result: result.clone(),
+            })
+            .collect();
+        let event = EventDraft::from(EventKind::ToolResult(ToolResultData {
+            turn_id: batch.turn_id,
+            request_id: batch.request_id,
+            call_event_id: Some(batch.call_event_id),
+            results,
+        }));
+        let event = match batch.parent_call_id {
+            Some(parent_call_id) => event.with_parent_call_id(parent_call_id),
+            None => event,
+        };
+        timeline.append(event)?;
     }
     Ok(through)
 }

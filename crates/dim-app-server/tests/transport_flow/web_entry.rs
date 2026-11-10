@@ -93,7 +93,7 @@ pub(super) async fn web_client(address: &str, cookie: &str) -> Client {
         features: Value::Null,
     };
     let hello = client
-        .rpc("hello", json!({"protocolVersion":3,"clientKind":"web"}))
+        .rpc("hello", json!({"protocolVersion":4,"clientKind":"web"}))
         .await;
     client.features = hello["result"]["features"].clone();
     client
@@ -111,7 +111,7 @@ pub(super) fn frontend_fixture() -> std::path::PathBuf {
     std::fs::write(assets.join("assets/app-1.js"), "export {}").unwrap();
     std::fs::write(
         assets.join("dimcode-web.json"),
-        r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"x"}"#,
+        r#"{"version":"0.0.1","protocolVersion":4,"sourceCommit":"x"}"#,
     )
     .unwrap();
     assets
@@ -286,7 +286,7 @@ async fn a_web_assets_directory_built_for_another_protocol_is_refused() {
     );
     std::fs::write(
         assets.join("dimcode-web.json"),
-        r#"{"version":"0.0.1","protocolVersion":3,"sourceCommit":"x"}"#,
+        r#"{"version":"0.0.1","protocolVersion":4,"sourceCommit":"x"}"#,
     )
     .unwrap();
     assert!(local.rpc("web.open", json!({})).await["result"]["url"].is_string());

@@ -569,7 +569,7 @@ async fn an_attached_client_holds_its_session_until_it_detaches_or_disconnects()
     assert_ok(&client.rpc("session.detach", attach.clone()).await);
 
     let session = agent.get_session(&id).unwrap();
-    let mut other = Client::new_version(&server, false, 3).await;
+    let mut other = Client::new_version(&server, false, 4).await;
     assert_ok(&other.rpc("session.attach", attach.clone()).await);
     passes(&sessions, &agent).await;
     assert!(!session.is_unloading());

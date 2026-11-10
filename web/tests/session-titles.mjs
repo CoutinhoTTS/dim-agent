@@ -175,7 +175,7 @@ test("reconnect reads current titles after attaching so a rename without a liste
   const handshake = async () => {
     connection.client.start()
     socket.onopen()
-    reply("hello", { instanceId: "fixture", serverVersion: "test", protocolVersion: 3, features: ["session.summaries", "session.attach", "session.history", "session.history.latestTurn", "session.methods"] })
+    reply("hello", { instanceId: "fixture", serverVersion: "test", protocolVersion: 4, features: ["session.summaries", "session.attach", "session.history", "session.history.latestTurn", "session.methods"] })
     await flush()
   }
   await handshake()

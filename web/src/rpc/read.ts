@@ -665,10 +665,14 @@ function readEvent(value: unknown, at: string): SessionEvent {
   const source = obj(value, at)
   const type = str(source, "type", at)
   const name = str(source, "name", at)
+  const parent = source.parent_call_id === undefined || source.parent_call_id === null
+    ? undefined
+    : str(source, "parent_call_id", at)
   return {
     id: str(source, "id", at),
     sequence: num(source, "sequence", at),
     createAt: num(source, "create_at", at),
+    ...(parent === undefined ? {} : { parentCallId: parent }),
     content: content(type, name, obj(source.data, `${at}.data`), `${at}.data`),
   }
 }

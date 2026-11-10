@@ -31,7 +31,7 @@ async fn content_and_resources_follow_plugin_session_and_publisher_lifetimes() {
         !stale.exists(),
         "abandoned cache generations must be removed at startup"
     );
-    let mut local = Client::new_version(&server, false, 3).await;
+    let mut local = Client::new_version(&server, false, 4).await;
     let opened = local.rpc("web.open", json!({"port":0})).await["result"].clone();
     let address = opened["address"].as_str().unwrap();
     let bootstrap = opened["url"]
@@ -456,7 +456,7 @@ async fn node_typescript_publishes_files_without_binary_bridge_callbacks() {
     ];
     config.session_typescript = Some(parts);
     let server = launch(Arc::new(MockTools), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client.rpc("session.create", json!({"cwd":home})).await;
     let id = created["result"]["sessionId"]
         .as_str()
@@ -494,7 +494,7 @@ async fn failed_record_migration_and_unknown_versions_preserve_original_bytes() 
     std::fs::write(source.join("dim-plugin.json"), manifest().to_string()).unwrap();
     std::fs::write(source.join("ui/panel.js"), "export {}").unwrap();
     let server = launch(Arc::new(MockTools), config.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let refused = client
         .rpc("plugin.install", json!({"source":{"path":source}}))
         .await;
@@ -564,7 +564,7 @@ async fn a_local_client_reads_snapshot_resources_by_generation() {
     )
     .unwrap();
     let (server, _agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut local = Client::new_version(&server, false, 3).await;
+    let mut local = Client::new_version(&server, false, 4).await;
     assert!(
         local
             .features
@@ -774,7 +774,7 @@ async fn a_local_client_reads_session_resources_with_its_session() {
     let media = home.join("media.bin");
     std::fs::write(&media, &data).unwrap();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut local = Client::new_version(&server, false, 3).await;
+    let mut local = Client::new_version(&server, false, 4).await;
     let created = local.rpc("session.create", json!({"cwd":home})).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
@@ -952,7 +952,7 @@ async fn a_withdrawal_racing_a_page_read_never_returns_part_of_a_page() {
     let media = home.join("large.bin");
     std::fs::write(&media, &data).unwrap();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut local = Client::new_version(&server, false, 3).await;
+    let mut local = Client::new_version(&server, false, 4).await;
     let created = local.rpc("session.create", json!({"cwd":home})).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
@@ -1027,7 +1027,7 @@ async fn a_daemon_restart_ends_old_generations_and_session_resources() {
     .unwrap();
     let (generation, session, resource) = {
         let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
-        let mut local = Client::new_version(&server, false, 3).await;
+        let mut local = Client::new_version(&server, false, 4).await;
         let installed = local
             .rpc("plugin.install", json!({"source":{"path":source}}))
             .await;
@@ -1072,7 +1072,7 @@ async fn a_daemon_restart_ends_old_generations_and_session_resources() {
         (generation, session, reference.id)
     };
     let (server, _agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut local = Client::new_version(&server, false, 3).await;
+    let mut local = Client::new_version(&server, false, 4).await;
     let stale = local
         .rpc(
             "ui.extensions.read",

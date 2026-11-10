@@ -4669,6 +4669,7 @@ mod tests {
                 profile: None,
                 client_kind: "cli",
                 client_name: "dim-cli-test",
+                protocol_version: 4,
             },
             false,
         )

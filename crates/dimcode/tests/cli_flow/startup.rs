@@ -423,7 +423,7 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
             if wire.2 && wire.empty_state(&request) { continue; }
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-                    "protocolVersion":3,"daemonProfile":{"kind":"product"},
+                    "protocolVersion":4,"daemonProfile":{"kind":"product"},
                     "features":["session.create","session.create.modelFromSession","session.history","session.history.latestTurn","session.methods","provider.list"]}),
                 "session.create" => {
                     creates += 1;
@@ -917,7 +917,7 @@ fn configured_model_selection_preserves_legacy_creation() {
         wire.reply(
             &hello,
             json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-            "protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":digest},
+            "protocolVersion":4,"daemonProfile":{"kind":"configured","modelConfigSha256":digest},
             "features":["session.create","session.history","session.history.latestTurn","session.methods"]}),
         );
         let create = wire.read("session.create");
@@ -1070,7 +1070,7 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
                             features.push("provider.management");
                         }
                         json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-                            "protocolVersion":3,"daemonProfile":{"kind":"product"},"features":features})
+                            "protocolVersion":4,"daemonProfile":{"kind":"product"},"features":features})
                     }
                     "session.attach" => {
                         let mut record = attach_record(&request);

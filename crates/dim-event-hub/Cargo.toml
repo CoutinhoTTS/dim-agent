@@ -26,7 +26,7 @@ futures-util.workspace = true
 sha2 = "0.10.9"
 
 [dev-dependencies]
-rusqlite = "0.40.2"
+rusqlite = "0.41.1"
 dim-agent-runtime = { workspace = true, features = ["testing"] }
 tempfile = "3"
 tokio.workspace = true

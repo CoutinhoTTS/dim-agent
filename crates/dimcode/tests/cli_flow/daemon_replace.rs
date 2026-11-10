@@ -8,7 +8,7 @@ fn old_hello(server: &str, features: Value) -> Value {
     json!({
         "instanceId": "old",
         "serverVersion": server,
-        "protocolVersion": 3,
+        "protocolVersion": 4,
         "daemonProfile": {"kind": "product"},
         "features": features,
     })
@@ -49,7 +49,7 @@ fn serve_successor(successor: &UnixListener) {
         assert_eq!(hello["method"], "hello");
         wire.reply(
             &hello,
-            json!({"instanceId":"new","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
+            json!({"instanceId":"new","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
         );
         let catalog = wire.read("provider.catalog");
         wire.reply(&catalog, json!({"catalog":null}));

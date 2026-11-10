@@ -188,6 +188,35 @@ impl Projection {
                 self.questions
                     .asked(branch_id, &event.id, &data.request_id, &data.calls);
                 if self.owns(branch_id) {
+                    if let Some(parent) = &event.parent_call_id {
+                        if !self
+                            .tool_rows
+                            .contains_key(&(data.request_id.clone(), parent.clone()))
+                        {
+                            return;
+                        }
+                        for call in &data.calls {
+                            if self
+                                .tool_rows
+                                .contains_key(&(data.request_id.clone(), call.id.clone()))
+                            {
+                                continue;
+                            }
+                            let row_id = serde_json::to_string(&(&data.request_id, &call.id))
+                                .expect("tool identity is JSON");
+                            let index = self.push(row_id, RowKind::ToolCall, String::new());
+                            let row = self.row(index);
+                            row.call_id = Some(call.id.clone());
+                            row.tool_lookup_done = true;
+                            row.tool_name = Some(call.name.clone());
+                            row.tool_input = Some(Value::Object(call.input.clone()));
+                            row.batch = Some(data.request_id.clone());
+                            row.parent_call_id = Some(parent.clone());
+                            row.pending = true;
+                            self.tool_rows
+                                .insert((data.request_id.clone(), call.id.clone()), index);
+                        }
+                    }
                     for call in data
                         .calls
                         .iter()
@@ -468,11 +497,16 @@ impl Projection {
                     .insert((data.request_id.clone(), data.call.id.clone()), index);
             }
             EventContent::ToolCompleted(data) => {
-                self.complete_tool(&data.request_id, &data.call_id, &data.result);
+                self.complete_tool(&data.request_id, &data.call_id, &data.result, true);
             }
             EventContent::ToolResult(data) => {
                 for result in &data.results {
-                    self.complete_tool(&data.request_id, &result.call_id, &result.result);
+                    self.complete_tool(
+                        &data.request_id,
+                        &result.call_id,
+                        &result.result,
+                        event.parent_call_id.is_none(),
+                    );
                 }
             }
             EventContent::CompactionStart(_) => {
@@ -1392,6 +1426,7 @@ impl Projection {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,
@@ -1487,7 +1522,13 @@ impl Projection {
         }
     }
 
-    fn complete_tool(&mut self, request_id: &str, call_id: &str, result: &ToolResult) {
+    fn complete_tool(
+        &mut self,
+        request_id: &str,
+        call_id: &str,
+        result: &ToolResult,
+        create_if_missing: bool,
+    ) {
         let index = self
             .tool_rows
             .remove(&(request_id.to_owned(), call_id.to_owned()))
@@ -1497,15 +1538,21 @@ impl Projection {
                         && row.batch.as_deref() == Some(request_id)
                 })
             })
-            .unwrap_or_else(|| {
+            .or_else(|| {
+                if !create_if_missing {
+                    return None;
+                }
                 let row_id =
                     serde_json::to_string(&(request_id, call_id)).expect("tool identity is JSON");
                 let index = self.push(row_id, RowKind::ToolCall, String::new());
                 let row = self.row(index);
                 row.call_id = Some(call_id.into());
                 row.batch = Some(request_id.into());
-                index
+                Some(index)
             });
+        let Some(index) = index else {
+            return;
+        };
         let row = self.row(index);
         row.pending = false;
         row.parked = false;
