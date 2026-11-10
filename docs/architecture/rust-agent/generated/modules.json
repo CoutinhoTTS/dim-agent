@@ -44764,6 +44764,7 @@
       "references": [
         "path crate::ui::notify::Event",
         "path crate::ui::notify::NOTIFY_KEY",
+        "path crate::ui::notify::Terminal",
         "path crate::ui::notify::Terminal::from_env",
         "path crate::ui::notify::sequence"
       ]
@@ -45765,7 +45766,8 @@
         "path overlay_panel_rows",
         "path queue_strip",
         "path side_reply",
-        "path web_panel"
+        "path web_panel",
+        "path write_notifications"
       ]
     },
     {
@@ -50793,6 +50795,22 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "ModelFailureKind::ServerError"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Multiplexer::None"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Multiplexer::Screen"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Multiplexer::Tmux"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "NotifyTerminal::default"
     },
     {
       "module": "dim_cli::ui::tui::tests",
