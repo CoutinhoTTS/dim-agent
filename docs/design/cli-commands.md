@@ -432,8 +432,9 @@ flow; a signed-in one shows its state and offers `Sign out`. A row whose
 namespace is `account` opens the Dim account's `/login` panel instead, with its
 identity, plan and usage. A Provider without a descriptor keeps the connection
 form, and opening it starts nothing. With a saved connection and no pending
-edits, `Edit models` opens the Provider's model area, including when disabled.
-Ctrl+R in that area fetches the catalog when the Provider offers `refresh`.
+edits, `Edit models` opens the Provider's [model management panel](#the-models-area)
+(`Models · <name>`), including when disabled. Ctrl+R in that management panel
+fetches the catalog when the Provider offers `refresh`.
 
 ```text
 /connect
