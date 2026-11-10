@@ -950,7 +950,8 @@ struct App {
     /// The workspace shown in the composer's label, with the home written
     /// `~`: the workspace the attached Session reports, or [`Self::cwd_key`]
     /// at Home. Never read from the process's directory, which a frame would
-    /// otherwise see change under it.
+    /// otherwise see change under it. Display form only: a caller that needs
+    /// a path uses [`Self::git_head`] or the Session's cwd.
     workspace: String,
     home: PathBuf,
     /// How tool groups are drawn by default (`/tools`, which redraws every
