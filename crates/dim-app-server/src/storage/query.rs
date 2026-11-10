@@ -1721,6 +1721,32 @@ fn sources<'a>(
             .collect::<Vec<_>>()
             .join(" OR ")
     };
+    let physical = match roles
+        .iter()
+        .map(|role| equality_values(role, "kind"))
+        .collect::<Option<Vec<_>>>()
+    {
+        Some(roles) if roles.len() > 1 => {
+            let mut kinds = roles
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect::<Vec<_>>();
+            kinds.sort();
+            kinds.dedup();
+            if kinds.is_empty() {
+                "0".into()
+            } else {
+                let kinds = kinds
+                    .into_iter()
+                    .map(|kind| compiler.bind(kind))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("e.kind IN ({kinds}) AND ({physical})")
+            }
+        }
+        _ => physical,
+    };
     if compiler.physical_candidates.is_none()
         && let [filter] = roles.as_slice()
         && let Some(kinds) = kind_values(filter)

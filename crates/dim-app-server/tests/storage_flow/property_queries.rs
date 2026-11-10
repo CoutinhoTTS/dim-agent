@@ -7,6 +7,139 @@ use serde_json::{Value, json};
 use std::num::NonZeroU64;
 
 #[tokio::test]
+async fn recovery_relations_bound_all_physical_roles_before_projection() {
+    let mut costs = Vec::new();
+    for unrelated in [100, 5_000] {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        let memory = MemoryTimelineStore::default();
+        for storage in [&*store as &dyn TimelineStore, &memory] {
+            storage
+                .create_session("properties", &SessionConfig::default())
+                .await
+                .unwrap();
+        }
+        let mut records: Vec<_> = (1..=unrelated)
+            .map(|sequence| {
+                record(
+                    sequence,
+                    EventKind::Extension(
+                        ExtensionEvent::new("other", "saved", json!({"payload":"x".repeat(1024)}))
+                            .unwrap(),
+                    ),
+                )
+            })
+            .collect();
+        for (offset, (kind, turn, request)) in [
+            ("start", "turn-a", "request-a"),
+            ("start", "turn-a", "request-b"),
+            ("start", "turn-b", "request-a"),
+            ("end", "turn-a", "request-a"),
+            ("failed", "turn-a", "request-b"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            records.push(record(
+                unrelated + offset as u64 + 1,
+                EventKind::Extension(
+                    ExtensionEvent::new("work", kind, json!({"turn_id":turn,"request_id":request}))
+                        .unwrap(),
+                ),
+            ));
+        }
+        append(&store, key("properties", "main"), records.clone())
+            .await
+            .unwrap();
+        memory
+            .append(
+                key("properties", "main"),
+                records,
+                Box::new(|result| result.unwrap()),
+            )
+            .unwrap();
+        let mut query = fields(&["data.turn_id", "data.request_id"]);
+        let terminal = QueryFilter::And {
+            conditions: vec![
+                QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec![json!("work/end"), json!("work/failed")],
+                },
+                QueryFilter::Compare {
+                    left: QueryOperand::Field {
+                        path: "data.turn_id".into(),
+                    },
+                    comparison: QueryComparison::Eq,
+                    right: QueryOperand::Outer {
+                        path: "data.turn_id".into(),
+                    },
+                },
+                QueryFilter::Compare {
+                    left: QueryOperand::Field {
+                        path: "data.request_id".into(),
+                    },
+                    comparison: QueryComparison::Eq,
+                    right: QueryOperand::Outer {
+                        path: "data.request_id".into(),
+                    },
+                },
+            ],
+        };
+        query.filter = Some(QueryFilter::And {
+            conditions: vec![
+                eq("kind", json!("work/start")),
+                QueryFilter::Not {
+                    condition: Box::new(QueryFilter::Exists {
+                        condition: Box::new(terminal),
+                    }),
+                },
+            ],
+        });
+        let range = scope(unrelated + 5);
+        let mut measured = Vec::new();
+        for direction in [
+            TimelineQueryDirection::Ascending,
+            TimelineQueryDirection::Descending,
+        ] {
+            query.order_by = vec![QueryOrder {
+                key: QueryOrderKey::Position,
+                direction,
+            }];
+            store.record_query_statistics();
+            parity(&store, &memory, &range, &query).await;
+            let stats = store.take_query_statistics();
+            assert!(
+                stats
+                    .iter()
+                    .flat_map(|stat| &stat.plan)
+                    .any(|line| line.contains("timeline_events_by_kind")),
+                "all recovery roles should use bounded kinds: {stats:?}"
+            );
+            measured.push(
+                stats
+                    .iter()
+                    .map(|stat| i64::from(stat.vm_steps))
+                    .sum::<i64>(),
+            );
+        }
+        costs.push(measured);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+    }
+    assert!(
+        costs[1]
+            .iter()
+            .zip(&costs[0])
+            .all(|(large, small)| large < &(small * 2)),
+        "50x unrelated history must not enter the recovery role set: {costs:?}"
+    );
+    println!("recovery physical role VM steps: {costs:?}");
+}
+
+#[tokio::test]
 async fn mixed_kind_identity_queries_seek_the_association_index() {
     let mut costs = Vec::new();
     for size in [100u64, 5_000] {
