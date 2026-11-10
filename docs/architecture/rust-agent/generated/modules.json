@@ -3891,10 +3891,10 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/login.rs",
       "unexpandedMacros": [
+        "eprintln",
         "format",
         "json",
         "println",
-        "tokio::pin",
         "tokio::select"
       ]
     },
@@ -28449,7 +28449,6 @@
         "path ProviderError::AuthRequired",
         "path ProviderError::Conflict",
         "path ProviderError::Failed",
-        "path ProviderError::InvalidConfig",
         "path ProviderError::NotFound",
         "path ProviderError::Unsupported",
         "path ProviderError::from",
@@ -28693,6 +28692,7 @@
         "path ProviderRecordError",
         "path ProviderService",
         "path StaticAuth",
+        "path StaticAuth::Anonymous",
         "path StaticProviderRecord",
         "path StaticRecordKind::Builtin",
         "path bundled_seeds",
@@ -32982,6 +32982,7 @@
       "from": "dim_cli::login",
       "to": "dim_cli::sanitize",
       "references": [
+        "path crate::sanitize::safe_line",
         "use crate::sanitize::safe"
       ]
     },
@@ -36223,6 +36224,7 @@
         "path crate::login::attempt",
         "path crate::login::browser_begin",
         "path crate::login::device_begin",
+        "path crate::login::refresh_models",
         "path crate::login::target"
       ]
     },
@@ -36316,6 +36318,7 @@
         "path Command::ReadModelPolicy",
         "path Command::ReadSuggestionSetting",
         "path Command::Recording",
+        "path Command::RefreshAccountModels",
         "path Command::Rename",
         "path Command::ResetIsolation",
         "path Command::Resume",
@@ -36372,6 +36375,7 @@
         "path OauthEvent::Device",
         "path OauthEvent::Done",
         "path OauthEvent::Exchanging",
+        "path OauthEvent::ModelsRefreshed",
         "path OauthEvent::Url",
         "path OauthStart",
         "path PluginItem",
@@ -39795,6 +39799,7 @@
         "path OauthEvent::Device",
         "path OauthEvent::Done",
         "path OauthEvent::Exchanging",
+        "path OauthEvent::ModelsRefreshed",
         "path OauthEvent::SlowDown",
         "path OauthEvent::Url",
         "path OauthStart",
@@ -39847,6 +39852,7 @@
       "references": [
         "path Effect",
         "path Effect::Connected",
+        "path Effect::LoginStatus",
         "path Effect::LoginUsage",
         "path Effect::Logout",
         "path Effect::None",
@@ -39856,6 +39862,7 @@
         "path Effect::OauthStart",
         "path Effect::OpenModels",
         "path Effect::OpenUrl",
+        "path Effect::RefreshAccountModels",
         "use crate::ui::prompts::Effect"
       ]
     },
@@ -40562,6 +40569,7 @@
       "references": [
         "path ACCOUNT_NAMESPACE",
         "path Account",
+        "path Area::Models",
         "path OauthEvent",
         "path ProviderAction::Configure",
         "path ProviderAction::Create",
@@ -40570,6 +40578,7 @@
         "path Usage",
         "use crate::model::session::ACCOUNT_NAMESPACE",
         "use crate::model::session::Account",
+        "use crate::model::session::Area",
         "use crate::model::session::OauthEvent",
         "use crate::model::session::ProviderAction",
         "use crate::model::session::ProviderEntry",
@@ -40638,6 +40647,7 @@
         "path Effect::None",
         "path Effect::OauthBack",
         "path Effect::OauthCancel",
+        "path Effect::OpenArea",
         "path Effect::Provider",
         "path Effect::Refresh",
         "use crate::ui::prompts::Effect"
@@ -43455,6 +43465,7 @@
         "path Command::ReadModelPolicy",
         "path Command::ReadSuggestionSetting",
         "path Command::Recording",
+        "path Command::RefreshAccountModels",
         "path Command::Rename",
         "path Command::ResetIsolation",
         "path Command::Resume",
@@ -43902,6 +43913,7 @@
         "path Effect::ReadIsolation",
         "path Effect::ReadModelPolicy",
         "path Effect::Refresh",
+        "path Effect::RefreshAccountModels",
         "path Effect::ResetIsolation",
         "path Effect::Restart",
         "path Effect::Resume",
