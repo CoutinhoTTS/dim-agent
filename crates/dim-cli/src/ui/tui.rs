@@ -947,8 +947,10 @@ struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
     cwd_key: String,
-    /// `cwd_key` with the home written `~`: the composer's label, resolved
-    /// once so a frame does not read the process's directory.
+    /// The workspace shown in the composer's label, with the home written
+    /// `~`: the workspace the attached Session reports, or [`Self::cwd_key`]
+    /// at Home. Never read from the process's directory, which a frame would
+    /// otherwise see change under it.
     workspace: String,
     home: PathBuf,
     /// How tool groups are drawn by default (`/tools`, which redraws every
@@ -1363,12 +1365,10 @@ impl App {
             .is_none_or(|v| v != false);
         let mut composer = Composer::new(past);
         composer.set_root(PathBuf::from(&cwd_key));
-        let git_head = git_head(&cwd_key);
-        let branch = git_head.as_deref().and_then(git_branch);
-        Self {
+        let mut app = Self {
             host,
             composer,
-            workspace: crate::ui::tilde(&cwd_key),
+            workspace: String::new(),
             cwd_key,
             tool_detail: saved_tool_detail(&home),
             thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
@@ -1440,8 +1440,8 @@ impl App {
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
-            branch,
-            git_head,
+            branch: None,
+            git_head: None,
             git_checked: Instant::now(),
             shell: None,
             clipboard: None,
@@ -1465,7 +1465,9 @@ impl App {
             prompt_draft: None,
             pending_prompt: None,
             next_prompt_request: 0,
-        }
+        };
+        app.show_workspace(None);
+        app
     }
 
     /// The wheel over an overlay: moves the picker's or the palette's
@@ -2089,10 +2091,15 @@ impl App {
                     &[("count", &count.to_string())],
                 ));
             }
-            Update::Switched { session_id, kind } => {
+            Update::Switched {
+                session_id,
+                kind,
+                cwd,
+            } => {
                 if !session_id.is_empty() {
                     self.unsent = None;
                 }
+                self.show_workspace(cwd.as_deref());
                 self.switch_session(session_id, kind)
             }
             Update::Skills(entries) => {
@@ -3323,6 +3330,13 @@ impl App {
         self.set_notice(t("Stopping"));
     }
 
+    /// The composer's bottom-right label in at most `cells`: the workspace
+    /// and its branch, or the shown line's place. A shown line outranks the
+    /// workspace, which then keeps its whole form beside it: the whole
+    /// place, then `⑂` alone, and only then the whole place again for
+    /// [`border_line`] to drop. That last form is deliberately wider than
+    /// `cells`, so a shown line is never displaced by a shortened path;
+    /// [`workspace_label`] never returns one, so the form only appears here.
     fn place_label(&self, cells: usize) -> String {
         if let Some(draft) = &self.line_draft {
             let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
@@ -5802,6 +5816,17 @@ impl App {
         }
     }
 
+    /// Points the composer's label and its Git source at the workspace the
+    /// daemon reported for the Session being shown, or back at the launch
+    /// workspace for `None` (Home, or a daemon older than the attach record).
+    /// The branch is read once here, without waiting for the next poll.
+    fn show_workspace(&mut self, cwd: Option<&str>) {
+        let cwd = cwd.unwrap_or(&self.cwd_key);
+        self.workspace = crate::ui::tilde(cwd);
+        self.git_head = git_head(cwd);
+        self.branch = self.git_head.as_deref().and_then(git_branch);
+    }
+
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
         let first = self.session_id.is_empty();
         // Home's first message started this Session: nothing shown to clear.
@@ -8186,74 +8211,305 @@ mod tests {
         );
     }
 
-    /// The workspace label steps down through four forms instead of
-    /// vanishing: the whole label, the whole label with the path's front
-    /// cut, the path alone, then the path alone cut.
+    /// The reported flow: launched in workspace A, the client attaches a
+    /// Session that lives in workspace B (an explicit `--cwd`, a `/resume`
+    /// into another worktree). The border must name B, its branch included,
+    /// and going Home must put A back.
     #[test]
-    fn the_workspace_label_steps_down_in_four_forms() {
-        let workspace = "~/repo/dim";
-        let branch = "team/long-branch-name";
-        let whole = format!("{workspace} ({branch})");
-        assert_eq!(width_of(&whole), 34);
-        for (cells, expected) in [
-            (34, whole.as_str()),
-            (33, "…repo/dim (team/long-branch-name)"),
-            (32, "…epo/dim (team/long-branch-name)"),
-            (31, workspace),
-            (10, workspace),
-            (9, "…repo/dim"),
-            (8, "…epo/dim"),
-            (1, "…"),
-            (0, ""),
-        ] {
-            let label = workspace_label(workspace, Some(branch), cells);
-            assert_eq!(label, expected, "{cells} cells");
-            assert!(width_of(&label) <= cells, "{cells}: {label:?}");
-        }
-        for cells in 0..=width_of(&whole) {
-            let label = workspace_label(workspace, Some(branch), cells);
-            assert!(width_of(&label) <= cells, "{cells}: {label:?}");
-        }
-        // No branch: the path alone, whole then cut.
-        assert_eq!(workspace_label(workspace, None, 10), workspace);
-        assert_eq!(workspace_label(workspace, None, 6), "…o/dim");
-    }
+    fn a_session_attached_elsewhere_moves_the_border_and_home_moves_it_back() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
 
-    /// The branch rung needs a tail worth reading: 8 cells keeps it, 7 drops
-    /// the branch and keeps the whole path instead.
-    #[test]
-    fn a_tail_below_the_minimum_keeps_the_whole_path_instead_of_the_branch() {
-        let workspace = "~/repo/dim";
-        let branch = "team/long-branch-name";
-        let kept = workspace_label(workspace, Some(branch), 32);
-        assert_eq!(kept, format!("…epo/dim ({branch})"));
-        assert_eq!(width_of("…epo/dim"), MIN_TAIL);
-        assert_eq!(width_of(&kept), 32);
-        assert_eq!(workspace_label(workspace, Some(branch), 31), workspace);
-    }
-
-    /// The budget is in cells, not characters: a CJK path keeps half the
-    /// characters of an ASCII one at the same width, so its tail rung holds
-    /// two cells longer.
-    #[test]
-    fn a_cjk_workspace_spends_its_budget_in_cells() {
-        let workspace = "~/项目/dim";
-        assert_eq!(width_of(workspace), 10);
-        assert_eq!(
-            workspace_label(workspace, Some("main"), 17),
-            "~/项目/dim (main)"
+        let root = tempfile::tempdir().unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let launch = root.path().join("A");
+        let other = root.path().join("B");
+        for (path, branch) in [(&launch, "launch-line"), (&other, "session-line")] {
+            std::fs::create_dir(path).unwrap();
+            git(path, &["init", "-q", "-b", branch]);
+            git(
+                path,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "Initial",
+                ],
+            );
+        }
+        let launch_workspace = crate::ui::tilde(&launch.to_string_lossy());
+        let session_workspace = crate::ui::tilde(&other.to_string_lossy());
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            launch.to_string_lossy().into_owned(),
         );
-        let tail = format!("…项目/dim ({})", "main");
-        assert_eq!(width_of(&tail), 16);
-        assert_eq!(workspace_label(workspace, Some("main"), 16), tail);
-        assert_eq!(workspace_label(workspace, Some("main"), 15), workspace);
-        assert_eq!(workspace_label(workspace, None, 9), "…项目/dim");
+        let border = |app: &mut App, cols: u16| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width: {row:?}"
+            );
+            row
+        };
+
+        // Launched in A: Home names A and its branch.
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{launch_workspace} (launch-line)")),
+            "Home names the launch workspace: {row:?}"
+        );
+
+        // A Session in B is attached, as `/resume` into a sibling worktree
+        // does: the daemon reports B and the border moves with it.
+        app.apply(Update::Switched {
+            session_id: "s-b".into(),
+            kind: SwitchKind::Resumed,
+            cwd: Some(other.to_string_lossy().into_owned()),
+        });
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s-b".into(),
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        })));
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{session_workspace} (session-line)")),
+            "the border names the Session's workspace and its branch: {row:?}"
+        );
+        assert!(
+            !row.contains(&launch_workspace),
+            "the launch workspace must not stand in for it: {row:?}"
+        );
+
+        // `/new` goes Home: the Session is gone and the launch workspace is
+        // what the next Session will work in.
+        app.apply(Update::Switched {
+            session_id: String::new(),
+            kind: SwitchKind::New,
+            cwd: None,
+        });
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{launch_workspace} (launch-line)")),
+            "Home moves the border back to the launch workspace: {row:?}"
+        );
     }
 
-    /// A shown line keeps its three forms, and `⑂` outranks every workspace
-    /// form: a path small enough to fit does not displace the line.
+    /// The workspace label steps down through four forms in the border
+    /// instead of vanishing, and the border keeps its width through all of
+    /// them: the whole label, the whole label with the path's front cut while
+    /// its tail is still worth reading, the path alone, then the path alone
+    /// cut. Each workspace is attached the way `/resume` attaches one, so the
+    /// path and the branch are the daemon's answer rather than a field a test
+    /// filled in. The border gives a right label `cols - 9` cells: the margin,
+    /// the two border cells, and the `─ ` and ` ─` around it.
     #[test]
-    fn a_shown_line_keeps_its_forms_and_comes_before_the_workspace() {
+    fn the_workspace_label_steps_down_in_four_forms_in_the_border() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        /// The cells the border keeps for itself around a right label.
+        const BORDER: usize = 9;
+        /// The narrowest path tail worth putting a branch beside.
+        const TAIL: usize = 8;
+
+        let root = tempfile::tempdir().unwrap();
+        let repository = |name: &str, branch: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git")
+                    .current_dir(&path)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "git {args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            git(&["init", "-q", "-b", branch]);
+            git(&[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ]);
+            crate::ui::tilde(&path.to_string_lossy())
+        };
+
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            root.path().join("launch").to_string_lossy().into_owned(),
+        );
+        // The row the border draws the workspace in: the label sits between
+        // the `─ ` and ` ─` the border keeps around it.
+        let label_row = |app: &mut App, cells: usize| {
+            let cols = (cells + BORDER) as u16;
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width whatever the label: {row:?}"
+            );
+            row
+        };
+        let label = |app: &mut App, cells: usize| {
+            let row = label_row(app, cells);
+            let label = row
+                .split("─ ")
+                .nth(1)
+                .and_then(|rest| rest.split(" ─").next())
+                .unwrap_or_default()
+                .to_owned();
+            assert!(
+                visible_width(&label) <= cells,
+                "{cells}: the label stays inside its cells: {label:?}"
+            );
+            label
+        };
+        let attach = |app: &mut App, id: &str, cwd: &str| {
+            app.apply(Update::Switched {
+                session_id: id.into(),
+                kind: SwitchKind::Resumed,
+                cwd: Some(cwd.into()),
+            });
+        };
+
+        // A branch wider than the path, so the path-alone rung is reachable:
+        // it takes over once the tail beside the branch would be too short.
+        let path = root.path().join("checkout").to_string_lossy().into_owned();
+        let branch = format!("team/{}", "x".repeat(width_of(&crate::ui::tilde(&path))));
+        let path = repository("checkout", &branch);
+        let suffix = format!(" ({branch})");
+        let whole = format!("{path}{suffix}");
+        assert!(
+            width_of(&suffix) + TAIL > width_of(&path),
+            "this repository shows the path-alone rung"
+        );
+        attach(&mut app, "s-a", &path);
+
+        // The whole label, at the last column that holds it.
+        assert_eq!(label(&mut app, width_of(&whole)), whole);
+        // One column short: the path's front is cut and the branch stays.
+        let cut = label(&mut app, width_of(&whole) - 1);
+        assert!(cut.ends_with(&suffix), "the branch stays: {cut:?}");
+        assert!(cut.starts_with('…'), "the cut is marked: {cut:?}");
+        // A tail of exactly eight cells is still worth reading beside it.
+        let tail = label(&mut app, width_of(&suffix) + TAIL);
+        assert!(
+            tail.ends_with(&suffix),
+            "an eight-cell tail keeps it: {tail:?}"
+        );
+        // Seven is not: the branch gives way, and the path is all there is.
+        let without = label(&mut app, width_of(&suffix) + TAIL - 1);
+        assert!(
+            !without.contains(&branch),
+            "the branch gives way: {without:?}"
+        );
+        // The path alone, whole at its own width, then cut from the front.
+        assert_eq!(
+            label(&mut app, width_of(&path)),
+            path,
+            "the whole path stays when the branch gives way"
+        );
+        let cut = label(&mut app, width_of(&path) - 1);
+        assert!(
+            cut.starts_with('…') && cut != path,
+            "the path is cut: {cut:?}"
+        );
+        // No form fits: with a cell left the label is the cut mark alone,
+        // and only a border with no cells at all drops it.
+        assert_eq!(label(&mut app, 1), "\u{2026}");
+        assert!(label(&mut app, 0).is_empty());
+
+        // The budget is in cells, not characters: a CJK path spends two cells
+        // on a character, so the same columns hold fewer of them.
+        let ascii = repository("ascii", "main");
+        let cjk = repository("项目", "main");
+        assert!(
+            width_of(&cjk) > cjk.chars().count(),
+            "{cjk:?} must spend two cells on a character"
+        );
+        let tail_of = |app: &mut App, path: &str| {
+            attach(app, "s-b", path);
+            let tail = label(app, width_of(" (main)") + TAIL);
+            assert!(tail.ends_with(" (main)"), "{tail:?}");
+            tail
+        };
+        let ascii_tail = tail_of(&mut app, &ascii);
+        let cjk_tail = tail_of(&mut app, &cjk);
+        assert_eq!(
+            width_of(&ascii_tail),
+            width_of(&cjk_tail),
+            "both tails spend the same cells: {ascii_tail:?} / {cjk_tail:?}"
+        );
+        assert!(
+            cjk_tail.chars().count() < ascii_tail.chars().count(),
+            "the CJK tail holds fewer characters at the same width: \
+             {cjk_tail:?} / {ascii_tail:?}"
+        );
+        assert!(
+            cjk_tail.starts_with('…'),
+            "the CJK tail is cut, not dropped: {cjk_tail:?}"
+        );
+    }
+
+    /// A shown line outranks the workspace in the border: where the whole
+    /// place fits it is drawn whole, one column short of that it keeps `⑂`
+    /// alone, and where even that does not fit the border drops the label
+    /// rather than falling back to a shortened path.
+    #[test]
+    fn a_shown_line_keeps_its_forms_in_the_border_and_comes_before_the_workspace() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
         let home = tempfile::tempdir().unwrap();
         let theme = test_theme();
         let mut app = App::new(
@@ -8263,7 +8519,6 @@ mod tests {
             home.path().to_path_buf(),
             "/w".into(),
         );
-        app.branch = None;
         app.apply(Update::Snapshot(Box::new(ViewSnapshot {
             session_id: "s1".into(),
             focus: "b-7c".into(),
@@ -8276,15 +8531,42 @@ mod tests {
             }],
             ..ViewSnapshot::default()
         })));
-        let whole = "/w · ⑂ b-7c";
-        assert_eq!(width_of(whole), 11);
-        assert_eq!(app.place_label(11), whole);
-        assert_eq!(app.place_label(9), "⑂ b-7c");
-        assert_eq!(app.place_label(6), "⑂ b-7c");
-        // Below the line's own form the place is returned whole for the
-        // border to drop, never as a workspace-only label.
-        assert_eq!(app.place_label(5), whole);
-        assert_eq!(app.place_label(2), whole);
+        let border = |app: &mut App, cols: u16| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width: {row:?}"
+            );
+            row
+        };
+        // `/w · ⑂ b-7c` is 11 cells and `⑂ b-7c` is 6, so the border's nine
+        // fixed cells put the whole place at 20 columns and `⑂` alone at 15:
+        // one column short of the line's own width drops it.
+        let row = border(&mut app, 20);
+        assert!(row.contains("/w · ⑂ b-7c"), "{row:?}");
+        let row = border(&mut app, 19);
+        assert!(
+            row.contains("⑂ b-7c") && !row.contains("/w"),
+            "a column short, the line keeps itself and the path gives way: {row:?}"
+        );
+        let row = border(&mut app, 15);
+        assert!(
+            row.contains("⑂ b-7c") && !row.contains("/w"),
+            "the `⑂` form survives to its own width: {row:?}"
+        );
+        let row = border(&mut app, 14);
+        assert!(
+            !row.contains('⑂'),
+            "below the line's own form the border drops it: {row:?}"
+        );
     }
 
     #[test]
@@ -9070,6 +9352,7 @@ mod tests {
         app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: SwitchKind::Forked,
+            cwd: None,
         });
         assert_eq!(app.composer.text(), "try RwLock");
     }
@@ -10810,6 +11093,7 @@ mod tests {
                 drawn.app.apply(Update::Switched {
                     session_id: "forked".into(),
                     kind: SwitchKind::Forked,
+                    cwd: None,
                 });
             }
             assert!(drawn.app.composer.text().contains("look [Image #7]"));
@@ -10907,6 +11191,7 @@ mod tests {
         drawn.app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: crate::model::session::SwitchKind::Resumed,
+            cwd: None,
         });
         drawn.show(&[("m2", "second session work")], "main", true);
         let committed = |app: &App| format!("{:?}", app.history);
@@ -10942,6 +11227,7 @@ mod tests {
         drawn.app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: crate::model::session::SwitchKind::Resumed,
+            cwd: None,
         });
         drawn.app.apply(snapshot("s2", "main", true));
         drawn.draw();
