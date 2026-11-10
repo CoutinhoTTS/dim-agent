@@ -12391,6 +12391,13 @@
     },
     {
       "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path markup::runtime_context"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_types::tool",
       "references": [
         "path kind"
