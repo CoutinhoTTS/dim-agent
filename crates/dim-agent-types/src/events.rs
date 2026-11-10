@@ -85,6 +85,10 @@ impl UserInput {
     /// Whether the content carries anything the operator supplied: a block
     /// that is not an empty text. Only such content is worth appending a
     /// context after, and only such content makes an input valid.
+    ///
+    /// The content is what the operator sent, so a marker the operator wrote
+    /// counts as their words. That matches `crate::markup::runtime_context`,
+    /// which never takes the first block for runtime content.
     pub fn has_operator_content(&self) -> bool {
         self.content
             .iter()
