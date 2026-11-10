@@ -38184,6 +38184,13 @@
     },
     {
       "from": "dim_cli::ui::composer",
+      "to": "dim_cli::ui",
+      "references": [
+        "path crate::ui::tilde"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
       "to": "dim_cli::ui::commands",
       "references": [
         "path crate::ui::commands::COMMANDS",
@@ -38385,20 +38392,25 @@
         "path Row",
         "path footer",
         "path panel_row",
+        "path title_room",
         "use crate::ui::rows::Columns",
         "use crate::ui::rows::Kind",
         "use crate::ui::rows::Row",
         "use crate::ui::rows::footer",
         "use crate::ui::rows::panel_row",
-        "use crate::ui::rows::title"
+        "use crate::ui::rows::title",
+        "use crate::ui::rows::title_room"
       ]
     },
     {
       "from": "dim_cli::ui::composer::mentions",
       "to": "dim_cli::ui::text",
       "references": [
+        "path display_width",
         "path truncate_cells",
-        "use crate::ui::text::truncate_cells"
+        "use crate::ui::text::display_width",
+        "use crate::ui::text::truncate_cells",
+        "use crate::ui::text::truncate_cells_start"
       ]
     },
     {

@@ -26,13 +26,13 @@ The existing run/approval loop takes keyboard ownership after a successful submi
 Account, OAuth and approval prompts retain their existing plain or hidden input behavior.
 
 Interactive file paths use the CLI's selected local `--cwd` as their base, including after
-resume. The composer's `local files` line displays that base. It does not obtain local files
-relative to a daemon's storage path. The border's workspace label is the Session's, so after a
-cross-workspace resume it can name a different directory than `local files` does
-([timeline UI](timeline-ui.md) §4.5). Headless `--image` arguments use the invoking process's
-current directory, like ordinary command-line file arguments. Paths returned by `attachment.put`
-are already paths on the Session's resource node; the CLI uses them directly without local path
-resolution.
+resume. The line client shows that base on its `local files` line. It does not obtain local files
+relative to a daemon's storage path. The terminal UI's border names the attached Session's
+workspace ([timeline UI](timeline-ui.md) §4.5), so when that differs from `--cwd` the `@` picker
+names the base in its title; while the two agree the title is plain, and the border already says
+it. Headless `--image` arguments use the invoking process's current directory, like ordinary
+command-line file arguments. Paths returned by `attachment.put` are already paths on the
+Session's resource node; the CLI uses them directly without local path resolution.
 
 ## Scrollback layout
 
