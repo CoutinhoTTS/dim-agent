@@ -213,6 +213,19 @@ async fn report_rpc_keeps_evidence_private_and_returns_the_reviewed_zip() {
         "sessionId":id, "reportId":report_id, "generation":{"kind":"model", "model":{"providerId":"test","modelId":"report-fixture"}}, "redact":true
     })).await.unwrap_err();
     assert_eq!(app_error(&unavailable), Some("report_model_unavailable"));
+    let redacted = owner
+        .rpc(
+            "session.report.plan",
+            json!({
+                "sessionId":id, "reportId":report_id, "generation":{"kind":"local"},
+                "redact":true, "instructions":"keep correlation ids, omit timeline"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(redacted["instructionsStatus"], "partially_applied");
+    assert_eq!(redacted["evidence"]["unavailable"], "omitted");
+    assert!(redacted["evidence"].get("timeline").is_none());
     let plan = owner
         .rpc(
             "session.report.plan",
@@ -244,6 +257,7 @@ async fn report_rpc_keeps_evidence_private_and_returns_the_reviewed_zip() {
         .unwrap();
     let diagnostics = archive(&generated);
     assert_eq!(diagnostics["version"], 1);
+    assert!(diagnostics.get("architecture").is_none());
     let mut reviewed = plan["evidence"].clone();
     let unavailable = reviewed
         .as_object_mut()

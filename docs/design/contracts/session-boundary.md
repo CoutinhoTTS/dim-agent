@@ -518,6 +518,7 @@ result it describes, and v1's frozen shape does not change.
 | Session method candidate whose `sessionId` is not a string | `-32602` |
 | Session method candidate whose `sessionId` is empty | `-32602`, `invalid_params` ("sessionId must not be empty") |
 | Session method candidate whose `sessionId` names no Session | `-32000`, `session_closed` |
+| A Session cannot be opened due to a storage error during admission | `-32603`, `session_unavailable` |
 | Session reloading, or a withdrawn namespace whose registering row (or its copy in the Session) is not running and has not failed (not started yet, Pending, Loading, or between generations), or a withdrawn Session namespace whose copy is Active or absent | `-32000`, `service_reloading` (retryable) |
 | A withdrawn namespace whose registering row, or that row's copy in the Session, is Failed, Unresolved, Disposed or Stopped | `-32000`, `service_unavailable` (not retryable) |
 | `report` call interrupted | `-32000`, `operation_interrupted` |

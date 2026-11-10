@@ -36,7 +36,6 @@ struct ProcessDiagnostics {
     product_version: &'static str,
     protocol_version: u32,
     platform: &'static str,
-    architecture: &'static str,
 }
 
 #[derive(Serialize)]
@@ -66,7 +65,7 @@ pub(super) fn review(
             "omit error codes" => code = false,
             "keep error codes" => code = true,
             "omit correlation ids" => correlation = false,
-            "keep correlation ids" => correlation = true,
+            "keep correlation ids" if !redact => correlation = true,
             _ => {
                 unsupported = true;
                 continue;
@@ -104,7 +103,6 @@ pub(super) fn review(
                     product_version: SERVER_VERSION,
                     protocol_version: PROTOCOL_VERSION,
                     platform: std::env::consts::OS,
-                    architecture: std::env::consts::ARCH,
                 },
             },
             unavailable,
@@ -118,12 +116,11 @@ impl Reviewed {
         let error = &self.evidence.captured_error;
         let title = error.summary;
         let mut body = format!(
-            "## Error\n\n{title}.\n\n- Observed at {}\n- Dim {} (protocol {})\n- Platform {} ({})\n",
+            "## Error\n\n{title}.\n\n- Observed at {}\n- Dim {} (protocol {})\n- Platform {}\n",
             error.observed_at.to_rfc3339(),
             self.evidence.process.product_version,
             self.evidence.process.protocol_version,
             self.evidence.process.platform,
-            self.evidence.process.architecture,
         );
         if let Some(code) = error.code {
             writeln!(body, "- Error code `{code}`").expect("writing to a string");

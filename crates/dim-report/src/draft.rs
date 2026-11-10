@@ -330,7 +330,7 @@ impl Reports {
         };
         let response = plan.evidence.generate();
         let mut drafts = self.drafts.lock().unwrap();
-        let draft = get(&mut drafts, caller, request.report_id).map_err(|_| cancelled())?;
+        let draft = get(&mut drafts, caller, request.report_id)?;
         let run = draft
             .running
             .take()

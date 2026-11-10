@@ -1,6 +1,6 @@
 use super::Worker;
 use crate::model::session::Update;
-use crate::report::{Action, Captured, Draft, Prepared, Reply, Request};
+use crate::report::{Action, Captured, Draft, Prepared, Reply, Request, session_admission_failed};
 use serde_json::{Value, json};
 
 impl Worker {
@@ -66,25 +66,27 @@ impl Worker {
     }
 
     async fn prepare_report(&mut self, error: Captured) -> crate::Result<Reply> {
+        let process_report = self.client.offers("report.prepare");
         if !error.session.is_empty() {
-            let mut params = error.params(true);
-            params["sessionId"] = json!(error.session);
-            match self
-                .client
-                .typed::<Prepared>("session.report.prepare", params)
-                .await
-            {
-                Ok(prepared) => return Ok(Reply::Prepared(Some(error.session), prepared)),
+            match self.prepare_session_report(&error).await {
+                Ok(Some(prepared)) => return Ok(Reply::Prepared(Some(error.session), prepared)),
+                Ok(None) => {}
                 Err(failure)
-                    if !self.client.offers("report.prepare")
-                        || !session_admission_failed(&failure) =>
-                {
-                    return Err(failure);
-                }
-                Err(_) => {}
+                    if process_report
+                        && (session_admission_failed(&failure)
+                            || matches!(
+                                dim_client::app_error(&failure),
+                                Some(
+                                    "unknown_method"
+                                        | "report_cancelled"
+                                        | "service_reloading"
+                                        | "service_unavailable"
+                                )
+                            )) => {}
+                Err(failure) => return Err(failure),
             }
         }
-        if !self.client.offers("report.prepare") {
+        if !process_report {
             return Err("Error reporting is unavailable on this App Server".into());
         }
         self.client
@@ -93,10 +95,39 @@ impl Worker {
             .map(|prepared| Reply::Prepared(None, prepared))
     }
 
+    async fn prepare_session_report(
+        &mut self,
+        error: &Captured,
+    ) -> crate::Result<Option<Prepared>> {
+        let method = "session.report.prepare";
+        if self.session_id != error.session || !self.methods.contains(method) {
+            if !self.client.offers("session.methods") {
+                return Ok(None);
+            }
+            let table: dim_client::wire::MethodTable = self
+                .client
+                .typed("session.methods", json!({"sessionId": error.session}))
+                .await?;
+            if !table.methods.iter().any(|entry| entry.name == method) {
+                return Ok(None);
+            }
+        }
+        let mut params = error.params(true);
+        params["sessionId"] = json!(error.session);
+        self.client.typed(method, params).await.map(Some)
+    }
+
     pub(super) fn report_reply(&self, panel: u64, result: crate::Result<Reply>) {
         self.send(Update::ReportReply {
             panel,
-            reply: result.unwrap_or_else(|error| Reply::Failed(error.to_string())),
+            reply: result.unwrap_or_else(|error| Reply::Failed {
+                draft_missing: session_admission_failed(&error)
+                    || matches!(
+                        dim_client::app_error(&error),
+                        Some("report_not_found" | "unknown_method" | "service_unavailable")
+                    ),
+                message: error.to_string(),
+            }),
         });
     }
 }
@@ -112,11 +143,145 @@ fn report_call(draft: &Draft, suffix: &str, mut params: Value) -> (String, Value
     (format!("{namespace}.{suffix}"), params)
 }
 
-fn session_admission_failed(error: &crate::Error) -> bool {
-    matches!(
-        dim_client::app_error(error),
-        Some("session_closed" | "session_build_failed" | "session_protocol_version")
-    ) || error
-        .downcast_ref::<dim_client::RpcError>()
-        .is_some_and(|rpc| rpc.code == -32603 && rpc.message == "Session operation failed")
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::args::Options;
+    use crate::model::session::SwitchKind;
+    use crate::report::Operation;
+    use rutis::host::CtxHost;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn only_session_admission_is_reportable_and_fallback_keeps_the_error_private() {
+        let home = tempfile::tempdir().unwrap();
+        let endpoint = home.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let daemon =
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                let mut exchange = async |method: &str, result: Value| {
+                    let line = lines.next_line().await.unwrap().unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    assert_eq!(request["method"], method);
+                    let mut reply = result;
+                    reply["id"] = request["id"].clone();
+                    reply["jsonrpc"] = json!("2.0");
+                    writer
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    request["params"].clone()
+                };
+                let failure = |code: &str| {
+                    json!({"error":{
+                        "code":-32000, "message":"private detail", "data":{"appError":code}
+                    }})
+                };
+                exchange("hello", json!({"result":{
+                "instanceId":"report-test", "serverVersion":"test", "protocolVersion":4,
+                "features":["session.create","session.history","session.methods","report.prepare"],
+                "daemonProfile":{"kind":"product"}
+            }})).await;
+                exchange("session.detach", failure("session_unavailable")).await;
+                let attach = exchange("session.attach", failure("session_unavailable")).await;
+                assert_eq!(attach["sessionId"], "original");
+                for code in [None, Some("unknown_method"), Some("report_cancelled")] {
+                    let methods = match code {
+                        None => json!([]),
+                        Some(_) => json!([{"name":"session.report.prepare","mutating":true}]),
+                    };
+                    let table =
+                        exchange("session.methods", json!({"result":{"methods":methods}})).await;
+                    assert_eq!(table["sessionId"], "original");
+                    if let Some(code) = code {
+                        let params = exchange("session.report.prepare", failure(code)).await;
+                        assert_eq!(params["sessionId"], "original");
+                        assert!(!params.to_string().contains("private detail"));
+                    }
+                    let params = exchange("report.prepare", json!({"result":{
+                    "reportId":"r1", "plan":{
+                        "planId":"p1", "generation":{"kind":"local"},
+                        "evidence":{"unavailable":"no_reference"}, "instructionsStatus":"none"
+                    }
+                }})).await;
+                    assert_eq!(params["error"]["kind"], "observed");
+                    assert_eq!(params["error"]["observed"]["code"], "session_unavailable");
+                    assert_eq!(params.as_object().unwrap().len(), 1);
+                    assert!(!params.to_string().contains("private detail"));
+                    assert!(!params.to_string().contains("original"));
+                }
+            });
+        let client = dim_client::Client::connect(&dim_client::ConnectionConfig {
+            endpoint,
+            server: dim_client::Server {
+                program: "dimcode".into(),
+                embedded: false,
+            },
+            profile: None,
+            client_kind: "cli",
+            client_name: "dim-cli-test",
+            protocol_version: 4,
+        })
+        .await
+        .unwrap();
+        let options =
+            Options::parse(["--home".into(), home.path().to_str().unwrap().to_owned()].into_iter())
+                .unwrap();
+        let (updates, receiver) = std::sync::mpsc::channel();
+        let mut worker = Worker::new(
+            options,
+            client,
+            updates,
+            rutis::Ctx::root().unwrap(),
+            tokio::sync::oneshot::channel().0,
+        );
+        worker.session_id = "attached".into();
+        assert!(
+            worker
+                .attach("original".into(), SwitchKind::Resumed)
+                .await
+                .is_err()
+        );
+        assert!(
+            !receiver.try_iter().any(|update| matches!(
+                update,
+                Update::Switched { .. } | Update::Reportable { .. }
+            ))
+        );
+        worker
+            .attach("original".into(), SwitchKind::Resumed)
+            .await
+            .unwrap();
+        let error = receiver
+            .try_iter()
+            .find_map(|update| match update {
+                Update::Reportable {
+                    error,
+                    show_error: true,
+                } => Some(error),
+                _ => None,
+            })
+            .expect("the failed admission offered a report");
+        assert!(matches!(error.operation, Operation::SessionRead));
+        worker.session_id = "other".into();
+        worker.methods.insert("session.report.prepare".into());
+        for panel in 0..3 {
+            worker
+                .report_request(Request {
+                    panel,
+                    action: Action::Prepare(error.clone()),
+                })
+                .await;
+            assert!(matches!(
+                receiver.try_recv().unwrap(),
+                Update::ReportReply { panel: received, reply: Reply::Prepared(None, _) } if received == panel
+            ));
+        }
+        daemon.await.unwrap();
+    }
 }

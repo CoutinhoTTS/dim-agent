@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-use crate::report::{Action, Captured, Draft, GeneratedReport, Plan, Reply};
+use crate::report::{Action, Captured, Draft, EvidenceUnavailable, GeneratedReport, Plan, Reply};
 use crate::ui::i18n::t;
 use crate::ui::line_input::LineInput;
 use crate::ui::render::panel::{bordered, follow_window, wrap};
@@ -23,7 +23,7 @@ enum Busy {
 pub struct Panel {
     pub id: u64,
     pub draft: Option<Draft>,
-    message: String,
+    capture: Option<Captured>,
     model: Option<dim_agent_types::ModelId>,
     generated: Option<GeneratedReport>,
     plan: Option<Plan>,
@@ -49,7 +49,7 @@ impl Panel {
         Self {
             id,
             draft: None,
-            message: crate::sanitize::safe_line(&error.message),
+            capture: Some(error.clone()),
             model: None,
             generated: None,
             plan: None,
@@ -65,7 +65,7 @@ impl Panel {
         }
     }
 
-    pub fn reply(&mut self, reply: Reply) {
+    pub fn reply(&mut self, reply: Reply) -> Option<Action> {
         self.busy = None;
         self.note.clear();
         match reply {
@@ -76,6 +76,9 @@ impl Panel {
                     report_id: prepared.report_id,
                     plan_id: prepared.plan.plan_id.clone(),
                 });
+                if !self.redact || !self.instructions.is_empty() {
+                    return self.replan();
+                }
                 self.plan = Some(prepared.plan);
             }
             Reply::Plan(plan) => {
@@ -89,13 +92,28 @@ impl Panel {
                 self.generated = Some(report);
                 self.focus = 0;
             }
-            Reply::Failed(error) => self.note = crate::sanitize::safe_line(&error),
+            Reply::Failed {
+                message,
+                draft_missing,
+            } => {
+                if draft_missing {
+                    self.draft = None;
+                }
+                self.plan = None;
+                self.note = crate::sanitize::safe_line(&message);
+            }
         }
+        None
     }
 
     pub fn disconnected(&mut self, message: &str) {
+        self.capture = None;
         self.draft = None;
         self.busy = None;
+        self.editing = false;
+        if self.generated.is_none() {
+            self.focus = 0;
+        }
         self.note = crate::sanitize::safe_line(message);
     }
 
@@ -105,18 +123,22 @@ impl Panel {
         }
     }
 
-    fn replan(&mut self) -> Input {
-        let Some(draft) = self.draft.clone() else {
-            return Input::None;
+    fn replan(&mut self) -> Option<Action> {
+        let (busy, action) = match self.draft.clone() {
+            Some(draft) => (
+                Busy::Plan,
+                Action::Plan {
+                    draft,
+                    redact: self.redact,
+                    instructions: self.instructions.clone(),
+                },
+            ),
+            None => (Busy::Prepare, Action::Prepare(self.capture.clone()?)),
         };
-        self.busy = Some(Busy::Plan);
+        self.busy = Some(busy);
         self.plan = None;
         self.note.clear();
-        Input::Send(Action::Plan {
-            draft,
-            redact: self.redact,
-            instructions: self.instructions.clone(),
-        })
+        Some(action)
     }
 
     pub fn key(&mut self, key: KeyEvent, workspace: &Path) -> Input {
@@ -144,7 +166,7 @@ impl Panel {
                 }
                 self.instructions = self.options.text().to_owned();
                 self.editing = false;
-                return self.replan();
+                return self.replan().map_or(Input::None, Input::Send);
             }
             self.options.handle_key(key);
             return Input::None;
@@ -156,20 +178,20 @@ impl Panel {
             KeyCode::Up => self.focus = self.focus.saturating_sub(1),
             KeyCode::Down => self.focus = (self.focus + 1).min(count - 1),
             KeyCode::Enter if self.generated.is_some() => return self.generated_key(workspace),
-            KeyCode::Enter if self.focus == 4 || self.draft.is_none() && self.busy.is_none() => {
+            KeyCode::Enter if self.focus == 4 || self.capture.is_none() => {
                 return Input::Close;
             }
             KeyCode::Enter if self.busy.is_none() => match self.focus {
                 0 => self.note = t("Local generation makes zero model requests.").into(),
                 1 => {
                     self.redact = !self.redact;
-                    return self.replan();
+                    return self.replan().map_or(Input::None, Input::Send);
                 }
                 2 => {
                     self.options = LineInput::new(&self.instructions);
                     self.editing = true;
                 }
-                3 if self.plan.is_none() => return self.replan(),
+                3 if self.plan.is_none() => return self.replan().map_or(Input::None, Input::Send),
                 3 => {
                     if let Some(draft) = self.draft.clone() {
                         self.busy = Some(Busy::Generate);
@@ -245,6 +267,8 @@ impl Panel {
             } else {
                 vec![t("Save ZIP"), t("Close")]
             }
+        } else if self.capture.is_none() {
+            vec![t("Close")]
         } else {
             vec![
                 t("Model · Generate locally"),
@@ -254,7 +278,13 @@ impl Panel {
                     t("Redact [ ]")
                 },
                 t("Options"),
-                t("Generate report"),
+                if self.busy.is_some() || self.plan.is_some() {
+                    t("Generate report")
+                } else if self.draft.is_some() {
+                    t("Refresh report plan")
+                } else {
+                    t("Prepare report again")
+                },
                 t("Cancel"),
             ]
         }
@@ -331,7 +361,11 @@ impl Panel {
                 t("ZIP contents: report.md, diagnostics.json")
             )
         } else {
-            let mut body = self.message.clone();
+            let mut body = self
+                .capture
+                .as_ref()
+                .map(|error| crate::sanitize::safe_line(&error.message))
+                .unwrap_or_default();
             if let Some(model) = &self.model {
                 body.push_str(&format!(
                     "\n{} {}/{}",
@@ -349,7 +383,19 @@ impl Panel {
                 body.push_str(if plan.evidence.timeline.is_some() {
                     t("Evidence · Timeline failure captured")
                 } else {
-                    t("Evidence · Observed error only")
+                    match plan.evidence.unavailable.as_ref() {
+                        Some(EvidenceUnavailable::Omitted) => t("Evidence · Timeline omitted"),
+                        Some(EvidenceUnavailable::FailureUnavailable) => {
+                            t("Evidence · Timeline failure unavailable")
+                        }
+                        Some(EvidenceUnavailable::ReadFailed) => {
+                            t("Evidence · Timeline read failed")
+                        }
+                        Some(EvidenceUnavailable::Unknown) => t("Evidence · Timeline unavailable"),
+                        Some(EvidenceUnavailable::NoReference) | None => {
+                            t("Evidence · Observed error only")
+                        }
+                    }
                 });
                 if matches!(
                     plan.instructions_status.as_str(),
@@ -377,7 +423,7 @@ impl Panel {
 fn save_zip(workspace: &Path, report: &GeneratedReport) -> crate::Result<PathBuf> {
     let bytes = STANDARD.decode(&report.archive.base64)?;
     if bytes.len() > 64 * 1024 || !bytes.starts_with(b"PK\x03\x04") {
-        return Err("Invalid report ZIP".into());
+        return Err(t("Invalid report ZIP").into());
     }
     let path = workspace.join(format!("dim-report-{}.zip", uuid::Uuid::new_v4()));
     let mut options = OpenOptions::new();

@@ -4447,7 +4447,8 @@
       "parent": "dim_cli",
       "file": "crates/dim-cli/src/report.rs",
       "unexpandedMacros": [
-        "json"
+        "json",
+        "matches"
       ]
     },
     {
@@ -4542,6 +4543,18 @@
         "format",
         "json",
         "matches"
+      ]
+    },
+    {
+      "id": "dim_cli::session_host::report::tests",
+      "crate": "dim_cli",
+      "parent": "dim_cli::session_host::report",
+      "file": "crates/dim-cli/src/session_host/report.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "format",
+        "json"
       ]
     },
     {
@@ -23929,6 +23942,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -36229,6 +36243,13 @@
     },
     {
       "from": "dim_cli::report",
+      "to": "dim_cli",
+      "references": [
+        "path crate::Error"
+      ]
+    },
+    {
+      "from": "dim_cli::report",
       "to": "dim_client::wire",
       "references": [
         "path Event",
@@ -37071,7 +37092,8 @@
         "path crate::report::Operation::BranchCreate",
         "path crate::report::Operation::SessionFork",
         "path crate::report::Operation::SessionRead",
-        "path crate::report::Reply::Generated"
+        "path crate::report::Reply::Generated",
+        "path crate::report::session_admission_failed"
       ]
     },
     {
@@ -37365,7 +37387,6 @@
       "from": "dim_cli::session_host::report",
       "to": "dim_cli",
       "references": [
-        "path crate::Error",
         "path crate::Result"
       ]
     },
@@ -37394,12 +37415,14 @@
         "path Reply::Plan",
         "path Reply::Prepared",
         "path Request",
+        "path session_admission_failed",
         "use crate::report::Action",
         "use crate::report::Captured",
         "use crate::report::Draft",
         "use crate::report::Prepared",
         "use crate::report::Reply",
-        "use crate::report::Request"
+        "use crate::report::Request",
+        "use crate::report::session_admission_failed"
       ]
     },
     {
@@ -37412,9 +37435,58 @@
     },
     {
       "from": "dim_cli::session_host::report",
+      "to": "dim_cli::session_host::report::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report",
+      "to": "dim_client::wire",
+      "references": [
+        "path dim_client::wire::MethodTable"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report::tests",
+      "to": "dim_cli::args",
+      "references": [
+        "path Options::parse",
+        "use crate::args::Options"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report::tests",
+      "to": "dim_cli::model::session",
+      "references": [
+        "path SwitchKind::Resumed",
+        "path Update::Reportable",
+        "use crate::model::session::SwitchKind"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report::tests",
+      "to": "dim_cli::report",
+      "references": [
+        "path Action::Prepare",
+        "path Request",
+        "use crate::report::Operation"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report::tests",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path Worker::new"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::report::tests",
       "to": "dim_client",
       "references": [
-        "path dim_client::RpcError"
+        "path dim_client::Client::connect",
+        "path dim_client::ConnectionConfig",
+        "path dim_client::Server"
       ]
     },
     {
@@ -41939,8 +42011,14 @@
         "path Action::Cancel",
         "path Action::Generate",
         "path Action::Plan",
+        "path Action::Prepare",
         "path Captured",
         "path Draft",
+        "path EvidenceUnavailable::FailureUnavailable",
+        "path EvidenceUnavailable::NoReference",
+        "path EvidenceUnavailable::Omitted",
+        "path EvidenceUnavailable::ReadFailed",
+        "path EvidenceUnavailable::Unknown",
         "path GeneratedReport",
         "path Plan",
         "path Reply",
@@ -41951,6 +42029,7 @@
         "use crate::report::Action",
         "use crate::report::Captured",
         "use crate::report::Draft",
+        "use crate::report::EvidenceUnavailable",
         "use crate::report::GeneratedReport",
         "use crate::report::Plan",
         "use crate::report::Reply"
@@ -45348,6 +45427,7 @@
         "path SwitchKind::Forked",
         "path Update",
         "path Update::EffortChoices",
+        "path Update::Failed",
         "path Update::Isolation",
         "path Update::Management",
         "path Update::Oauth",
@@ -45357,6 +45437,8 @@
         "path Update::Plugins",
         "path Update::PromptSettings",
         "path Update::Ready",
+        "path Update::ReportReply",
+        "path Update::Reportable",
         "path Update::Runtimes",
         "path Update::Skills",
         "path Update::Snapshot",
@@ -45406,6 +45488,16 @@
       "to": "dim_cli::projection",
       "references": [
         "path crate::projection::Projection::default"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::report",
+      "references": [
+        "path crate::report::Captured::observed",
+        "path crate::report::EvidenceUnavailable::Omitted",
+        "path crate::report::Operation::SessionRead",
+        "path crate::report::Prepared"
       ]
     },
     {
@@ -45628,6 +45720,7 @@
         "path Prompt::Lines",
         "path Prompt::Login",
         "path Prompt::Management",
+        "path Prompt::Report",
         "path Prompt::Runtime",
         "path Prompt::Sessions",
         "path QUEUE_HINT",
@@ -50699,6 +50792,22 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "RemoveVerb::Remove"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Reply::Failed"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Reply::Generated"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Reply::Plan"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Reply::Prepared"
     },
     {
       "module": "dim_cli::ui::tui::tests",

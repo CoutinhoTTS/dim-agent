@@ -817,10 +817,35 @@ impl Worker {
                 .await?;
             self.ui_id = None;
         }
-        let attached: Attached = self
+        let attached: Attached = match self
             .client
             .typed("session.attach", json!({"sessionId": session_id}))
-            .await?;
+            .await
+        {
+            Ok(attached) => attached,
+            Err(error)
+                if kind != SwitchKind::New
+                    && self.client.offers("report.prepare")
+                    && crate::report::session_admission_failed(&error) =>
+            {
+                self.send(Update::Switched {
+                    session_id: String::new(),
+                    kind,
+                });
+                self.reportable(
+                    crate::report::Captured::observed(
+                        &session_id,
+                        "main",
+                        crate::report::Operation::SessionRead,
+                        dim_client::app_error(&error),
+                        error.to_string(),
+                    ),
+                    true,
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         // Without a record, find the model in the catalog: this is the only
         // caller of `list()` besides `/resume`, and only for an older server.
         self.model_through = attached.sequence;
@@ -948,31 +973,7 @@ impl Worker {
 
     async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        match self
-            .enter(session_id.clone(), None, kind, attached_session)
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let report = crate::report::Captured::observed(
-                    &session_id,
-                    "main",
-                    crate::report::Operation::SessionRead,
-                    dim_client::app_error(&error),
-                    error.to_string(),
-                );
-                if self.client.offers("report.prepare") {
-                    self.send(Update::Switched {
-                        session_id: self.session_id.clone(),
-                        kind,
-                    });
-                    self.reportable(report, true);
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            }
-        }
+        self.enter(session_id, None, kind, attached_session).await
     }
 
     async fn suggestion_offered(&mut self) -> bool {

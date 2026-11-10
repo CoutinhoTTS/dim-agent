@@ -486,7 +486,11 @@ impl Connection {
             return Err(integration_pending());
         }
         self.authorize(rpc, &session_id)?;
-        let usage = rpc.index.acquire(&session_id).await?;
+        let usage = rpc
+            .index
+            .acquire(&session_id)
+            .await
+            .map_err(session_admission_error)?;
         let provider = crate::methods::session_provider(&rpc.loader, &usage.session, &method)?;
         if rpc.stopping.is_cancelled() {
             return Err(RpcError::reloading());
@@ -795,7 +799,7 @@ impl Connection {
     fn authorize(&self, rpc: &RpcService, id: &str) -> Result<(), RpcError> {
         self.authorize_version(rpc, id)?;
         if let Some(reason) = rpc.index.unavailable_session(id) {
-            return Err(RpcError::from(AgentError::Storage(reason)));
+            return Err(session_admission_error(AgentError::Storage(reason)));
         }
         Ok(())
     }
@@ -884,7 +888,7 @@ impl Connection {
         let usage = if let Some(session_id) = session_id {
             match rpc.index.acquire(session_id).await {
                 Ok(usage) => Some(usage),
-                Err(error) => return Some(Err(RpcError::from(error))),
+                Err(error) => return Some(Err(session_admission_error(error))),
             }
         } else {
             None
@@ -2506,4 +2510,13 @@ fn failure(method: &str, connection: &str, error: NotifyError) -> BridgeError {
         },
         None,
     )
+}
+
+fn session_admission_error(error: AgentError) -> RpcError {
+    match error {
+        AgentError::Storage(_) => {
+            RpcError::app(-32603, "session_unavailable", "Session operation failed")
+        }
+        error => error.into(),
+    }
 }

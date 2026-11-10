@@ -1784,6 +1784,7 @@ impl App {
             | Some(Prompt::Timeline(_))
             | Some(Prompt::Queue(_))
             | Some(Prompt::Export(_))
+            | Some(Prompt::Report(_))
             | Some(Prompt::Fork(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
@@ -2140,7 +2141,12 @@ impl App {
                 if let Some(Prompt::Report(report)) = &mut self.prompt
                     && report.id == panel
                 {
-                    report.reply(reply);
+                    if let Some(action) = report.reply(reply) {
+                        self.host.send(Command::ErrorReport(crate::report::Request {
+                            panel,
+                            action,
+                        }));
+                    }
                 } else if let crate::report::Reply::Prepared(session, prepared) = reply {
                     self.host.send(Command::ErrorReport(crate::report::Request {
                         panel,
@@ -4578,7 +4584,7 @@ impl App {
                 } else if let Some(error) = self.report_error.clone() {
                     self.report_sequence += 1;
                     let panel = self.report_sequence;
-                    self.prompt = Some(Prompt::Report(Box::new(report_panel::Panel::new(
+                    self.open_prompt(Prompt::Report(Box::new(report_panel::Panel::new(
                         panel, &error,
                     ))));
                     self.host.send(Command::ErrorReport(crate::report::Request {
@@ -5799,7 +5805,9 @@ impl App {
         self.planner.reset();
         self.commits = CommitState::default();
         self.answered.clear();
-        self.prompt = None;
+        if !matches!(self.prompt, Some(Prompt::Report(_))) {
+            self.prompt = None;
+        }
         self.snapshot = None;
         self.runs = Runs::default();
         self.window_floor = 0;
@@ -11512,6 +11520,219 @@ mod tests {
             Some(&["option 0".to_owned()][..]),
             "the question came back with its selection"
         );
+    }
+
+    fn open_test_report(app: &mut App) -> u64 {
+        app.apply(Update::Reportable {
+            error: crate::report::Captured::observed(
+                "s1",
+                "main",
+                crate::report::Operation::SessionRead,
+                Some("session_closed"),
+                "Could not read conversation state".into(),
+            ),
+            show_error: true,
+        });
+        press(app, KeyCode::Char('/'));
+        typed(app, "report");
+        press(app, KeyCode::Enter);
+        match &app.prompt {
+            Some(Prompt::Report(report)) => report.id,
+            _ => panic!("expected report panel"),
+        }
+    }
+
+    fn prepared_report(report_id: &str, plan_id: &str) -> crate::report::Prepared {
+        serde_json::from_value(serde_json::json!({
+            "reportId": report_id,
+            "plan": {
+                "planId": plan_id, "generation": {"kind": "local"},
+                "evidence": {"unavailable": "no_reference"}, "instructionsStatus": "none"
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn report_stays_open_on_snapshot_and_restores_the_pending_answer_on_close() {
+        use crate::report::{Action, Reply, Request};
+
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = asked();
+            app.fullscreen = fullscreen;
+            press(&mut app, KeyCode::Char(' '));
+            let answer = selection(&app).expect("selected answer");
+            let panel = open_test_report(&mut app);
+            let mut snapshot = app.snapshot.clone().unwrap();
+            snapshot.history_complete = true;
+            app.apply(Update::Snapshot(Box::new(snapshot)));
+            assert!(matches!(app.prompt, Some(Prompt::Report(_))));
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Prepared(Some("s1".into()), prepared_report("r1", "p1")),
+            });
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(selection(&app), Some(answer));
+            assert!(matches!(
+                sent.borrow().last(),
+                Some(Command::ErrorReport(Request { action: Action::Cancel { draft, generation: false }, .. }))
+                    if draft.report_id == "r1"
+            ));
+        }
+    }
+
+    #[test]
+    fn report_replans_after_a_failed_generate_and_preserves_options_after_expiry() {
+        use crate::report::{Action, Reply, Request};
+
+        let (mut app, sent, _home) = asked();
+        let panel = open_test_report(&mut app);
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Prepared(Some("s1".into()), prepared_report("r1", "p1")),
+        });
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Plan(prepared_report("r1", "p2").plan),
+        });
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        typed(&mut app, "omit timeline");
+        press(&mut app, KeyCode::Enter);
+        let mut plan = prepared_report("r1", "p3").plan;
+        plan.evidence.unavailable = Some(crate::report::EvidenceUnavailable::Omitted);
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Plan(plan),
+        });
+        let Some(Prompt::Report(report)) = &app.prompt else {
+            panic!("expected report panel");
+        };
+        assert!(
+            report
+                .render(90, 20, &app.palette)
+                .join("\n")
+                .contains(t("Evidence · Timeline omitted"))
+        );
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ErrorReport(Request { action: Action::Generate(draft), .. }))
+                if draft.plan_id == "p3"
+        ));
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Failed {
+                message: "Generation cancelled".into(),
+                draft_missing: false,
+            },
+        });
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ErrorReport(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
+                if draft.report_id == "r1" && instructions == "omit timeline"
+        ));
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Failed {
+                message: "Report not found".into(),
+                draft_missing: true,
+            },
+        });
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ErrorReport(Request { action: Action::Prepare(error), .. }))
+                if error.session == "s1" && error.message == "Could not read conversation state"
+        ));
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Prepared(None, prepared_report("r2", "p4")),
+        });
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ErrorReport(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
+                if draft.report_id == "r2" && draft.session.is_none() && instructions == "omit timeline"
+        ));
+    }
+
+    #[test]
+    fn report_saves_only_bounded_zip_bytes_after_disconnect() {
+        use crate::report::{Archive, GeneratedReport, Reply, Sharing};
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        let valid = b"PK\x03\x04fixture".to_vec();
+        let mut oversized = valid.clone();
+        oversized.resize(64 * 1024 + 1, 0);
+        for (bytes, should_save) in [
+            (b"invalid".to_vec(), false),
+            (oversized, false),
+            (valid, true),
+        ] {
+            let (mut app, _sent, home) = asked();
+            app.cwd_key = home.path().display().to_string();
+            let panel = open_test_report(&mut app);
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Generated(GeneratedReport {
+                    title: "Test report".into(),
+                    archive: Archive {
+                        base64: STANDARD.encode(&bytes),
+                    },
+                    sharing: Sharing {
+                        github_issue_url: "https://github.com/another/repo/issues/new".into(),
+                        discord_url: String::new(),
+                        description: String::new(),
+                    },
+                }),
+            });
+            app.apply(Update::Failed("Disconnected".into()));
+            press(&mut app, KeyCode::Enter);
+            let Some(Prompt::Report(report)) = &app.prompt else {
+                panic!("expected report panel");
+            };
+            assert_eq!(report.saved_path().is_some(), should_save);
+            if let Some(path) = report.saved_path() {
+                assert_eq!(path.parent(), Some(home.path()));
+                assert!(
+                    path.file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with("dim-report-")
+                );
+                assert_eq!(
+                    path.extension().and_then(std::ffi::OsStr::to_str),
+                    Some("zip")
+                );
+                assert_eq!(std::fs::read(path).unwrap(), bytes);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(
+                        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                }
+                press(&mut app, KeyCode::Down);
+                press(&mut app, KeyCode::Enter);
+                let Some(Prompt::Report(report)) = &app.prompt else {
+                    panic!("expected report panel");
+                };
+                assert!(
+                    report
+                        .render(90, 20, &app.palette)
+                        .join("\n")
+                        .contains(t("Could not open the share destination"))
+                );
+            } else {
+                assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+            }
+        }
     }
 
     /// A question answered elsewhere while its panel is open is not

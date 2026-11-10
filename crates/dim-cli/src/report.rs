@@ -111,7 +111,10 @@ pub enum Reply {
     Prepared(Option<String>, Prepared),
     Plan(Plan),
     Generated(GeneratedReport),
-    Failed(String),
+    Failed {
+        message: String,
+        draft_missing: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -141,6 +144,18 @@ enum LocalGeneration {
 #[derive(Deserialize)]
 pub struct Evidence {
     pub timeline: Option<Value>,
+    pub unavailable: Option<EvidenceUnavailable>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceUnavailable {
+    NoReference,
+    FailureUnavailable,
+    ReadFailed,
+    Omitted,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Deserialize)]
@@ -161,4 +176,16 @@ pub struct Sharing {
     pub github_issue_url: String,
     pub discord_url: String,
     pub description: String,
+}
+
+pub fn session_admission_failed(error: &crate::Error) -> bool {
+    matches!(
+        dim_client::app_error(error),
+        Some(
+            "session_closed"
+                | "session_build_failed"
+                | "session_protocol_version"
+                | "session_unavailable"
+        )
+    )
 }
