@@ -1,4 +1,4 @@
-use dim_agent_runtime::{AgentBuilder, AgentConfig};
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Names, PartRegistry};
 
 struct Demo;
 
@@ -12,4 +12,14 @@ fn internal_reasons_are_recorded_by_catalog_name() {
     assert_eq!(builder.faces().reason("demo"), Some("owner-api"));
     assert_eq!(builder.faces().reason("dataHost"), None);
     assert_eq!(builder.faces().iter().count(), 2);
+}
+
+#[test]
+fn a_leaf_cannot_key_an_internal_name() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.internal_name("partRegistry", "owner-api");
+    let catalog = dim_agent_runtime::names::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy_with_faces(&catalog, &build, builder.faces());
+    assert!(names.key::<PartRegistry>().is_err());
 }

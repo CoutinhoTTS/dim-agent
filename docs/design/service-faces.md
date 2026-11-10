@@ -44,7 +44,7 @@ impl AgentBuilder {
 - `xtask graph` 把 `Crosses languages` 列换成 `face`：
   - shared 且有 dispatcher：`data`；
   - 非 shared 且有 reason：`internal(<reason>)`；
-  - shared 但没有 dispatcher：`shared-no-dispatcher`，生成失败；
+  - shared 但没有 dispatcher：`shared-no-dispatcher`；除 `loaderService`、`pluginMounter` 两个 rutis-loader 外部名字外，生成失败；
   - 非 shared 且没有 reason：生成失败，报名字。
 - `xtask check` 双向检查：
   - 一个在 `host_key(name)` 上有 dispatcher、但没有 shared 的名字失败（`managementMethods` 是这一类）；
@@ -80,13 +80,15 @@ impl AgentBuilder {
 
 ## 3. 盘点（#1300）
 
-catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个现有名字，并在 §3.2 标出 4 个新名字（`scheduleJobs`、`wakeups`、`sessionFiles`、`managedSearch`）；新名字不计入 84。`workflowRuns` 不在其中：109 是 Rust product-profile 目录；optional Workflow 包有自己的 provides 目录，`workflowRuns` 在那里，已经由该包提供为数据面。每个现有名字在分类表里恰好一行；§3.2/§3.3 的说明句和“数据兄弟”列是引用，不算第二行。
+catalog 现在 118 个名字：25 data、91 internal、2 shared-no-dispatcher。§3 表覆盖这 91 个 internal 名字；§3.2 的 `scheduleJobs`、`wakeups` 目前还是 internal(owner-api)，#1292 转成数据面；`sessionFiles`、`managedSearch` 是 #1292 的新名字，不在当前 catalog。`workflowRuns` 不在其中：它是 optional Workflow 包自己的 provides 目录，已经是数据面。每个名字在分类表里恰好一行；说明句和“数据兄弟”列是引用，不算第二行。
 
 ### 3.1 已经可以跨，但 catalog 列没体现
 
 | 名字 | 处理 |
 | --- | --- |
 | `managementMethods` | 在 `host_key` 上有 dispatcher；修 shared 注册顺序后 catalog 变 `data`。它是 #1289 的代码项，不是迁移。 |
+| `localId` | 由 root 提供的 `get` dispatcher；catalog 是 `data`。 |
+| `loaderService`、`pluginMounter` | rutis-loader 的 shared 名字，没有 host dispatcher；catalog 是 `shared-no-dispatcher`，leaf 不能调用。 |
 
 ### 3.2 第一批数据面（#1292）
 
@@ -97,7 +99,7 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `sessionFiles` | 新数据面，按 owner 契约 | 名字、base64 `content`、`owned_paths`、取消都按 [Session files](appserver/session-files.md) §9.1；`SessionFilesHost` 保持 Rust 类型键 |
 | `managedSearch` | 新数据面，只含 `search` | `managedProviders`（§3.6）保持 internal(secret)，账号/token 不出去 |
 
-`workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致。它不在 109 个 Rust product-profile 名字里，而在该包自己的 provides 目录里；#1292 不新增 provider，只核对形状。
+`workflowRuns` 已经是数据面：optional Workflow 包（`runtime/plugins/workflow`）提供 `workflowRuns`，`call: async`，`RunRequest`/`RunReply` 与 [Workflow](plugins/Workflow.md) 一致。它不在 Rust product-profile 的 118 个名字里，而在该包自己的 provides 目录里；#1292 不新增 provider，只核对形状。
 
 两个 owner API **不进第一批**：它们保留类型化调用。`settings.read` 会新建取消 token、并返回 `SettingsResult` 信封；GoalBranch 需要自己的 stop token，改成数据面会丢取消。`auxiliaryModel.complete` 没有 tools、config 和 cached prefix；PromptSuggestion 克隆的是整轮 `ModelRequest`，换过去是行为变化，不只是形状。它们已有数据兄弟给其他消费者；有 leaf 消费者时再按 §4 的规则扩展。
 
@@ -113,6 +115,9 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `auxiliaryModelHost` | `auxiliaryModel` | 模型调用走 `complete` |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
 | `sessionFilesHost` | `sessionFiles` | Rust 绑定；wire 名按 owner 契约 |
+| `basePromptSettingsHost` | — | 宿主 prompt settings 端口；`owner-api` |
+| `skillsInstructionsSettingsHost` | — | 宿主 skills settings 端口；`owner-api` |
+| `summaryPromptSettingsHost` | — | 宿主 summary settings 端口；`owner-api` |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
 | `toolSourcesView` | `toolRegistry` | 工具贡献走注册表 |
@@ -132,6 +137,7 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 | `approval`、`permission` | 决策状态 | `decide` 数据面 |
 | `inputQueue` | 队列状态 | `submit`/`withdraw` 数据面 |
 | `wait` | `WaitResult`、`CancellationToken` | `start`/`wait`/`result` 操作面 |
+| `promptSourcesBranch` | 分支 prompt 装配 | 留宿主；`hot-path` |
 
 这些面即使有数据接口，实例核心仍默认留在宿主；它们列在这里是为了说明“对象形状”不是永久 internal，而是需要操作化；原因 `object`。
 
@@ -196,6 +202,8 @@ catalog 现在 109 个名字：25 shared、84 Rust-only。§3 盘点这 84 个�
 
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
+| `eventSubscriptions` | process | eventhub | legacy-no-consumer | 有 leaf 消费者时加数据面 |
+| `sessionLanguage` | session | PromptSources | legacy-no-consumer | 有 leaf 消费者时加数据面 |
 | `executionSettingsHost` | process | ExecutionSettings | legacy-no-consumer | 有 leaf 消费者时加数据面 |
 | `toolchainSourceHost` | process | ToolchainSource | legacy-no-consumer | 有 leaf 消费者时加数据面 |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | legacy-no-consumer | 有 leaf 消费者时加数据面 |

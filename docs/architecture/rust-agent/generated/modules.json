@@ -18271,6 +18271,7 @@
         "path assembly",
         "path build_session",
         "path check_scope",
+        "path crate::Faces",
         "path crate::assembly::with_copies",
         "path group",
         "path required",
@@ -19195,6 +19196,7 @@
         "path BRANCH_GROUP",
         "path SESSION_GROUP",
         "path TimelineFactory",
+        "path crate::Faces",
         "path group"
       ]
     },
@@ -21190,6 +21192,7 @@
         "path AgentBuilder",
         "path Modules::new",
         "path StartupProgress::new",
+        "path dim_agent_runtime::AgentBuilder",
         "path register_part",
         "path wait_active",
         "use dim_agent_runtime::AgentBuilder",
@@ -21226,6 +21229,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path dim_agent_runtime::Names::copy",
+        "path dim_agent_runtime::names::name_of",
         "path dim_agent_runtime::names::register"
       ]
     },
@@ -21558,6 +21562,7 @@
       "to": "dim_app_server::session_typescript",
       "references": [
         "mod session_typescript",
+        "path crate::session_typescript::share_names",
         "path session_typescript::Parts::new",
         "path session_typescript::SessionTypeScriptConfig"
       ]
