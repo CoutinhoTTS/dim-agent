@@ -5,7 +5,7 @@
 //! shares when it hosts foreign parts (`session_typescript::share_names`), opens
 //! one Session and writes `generated/catalog.md` from that assembly: every
 //! catalog name one of its parts provides or injects, with its group, provider,
-//! whether it crosses languages and the methods its dispatcher serves, and the
+//! its face and the methods its dispatcher serves, and the
 //! parts that are Capabilities because they inject `dispatcher` or `timeline`.
 //! `check` builds the same assembly and fails when the file differs.
 use crate::app_server;
@@ -248,8 +248,8 @@ Generated from the real assembly: the App Server product profile (`serve` with a
 `cargo run -p xtask -- check` fails when this file is stale. \
 The rules for names are in [How Dim uses rutis §3](../../../design/rutis-usage.md#3-services-by-name).\n\n\
 ## Services\n\n\
-Each catalog name a part of the assembly provides or injects. A name that crosses languages lists the methods its dispatcher serves, each `sync` or `async` (callers in other languages always get a Promise); other methods of its Rust type are Rust-only. \
-A Rust-only name has no dispatcher: Rust parts reach it at its type's key.\n\n\
+Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async` (callers in other languages always get a Promise). \
+A non-data name is reached by Rust parts at its type's key.\n\n\
 | Name | Group | Provider | Face | Methods |\n| --- | --- | --- | --- | --- |\n",
         );
         let mut rows: Vec<_> = self.services.iter().collect();
