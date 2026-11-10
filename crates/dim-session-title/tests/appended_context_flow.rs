@@ -45,20 +45,31 @@ async fn start() -> (
 }
 
 /// The `UserPromptSubmit` command the user's hooks run, if the Session gets
-/// one: a script answering with `HOOK_CONTEXT` as its additional context. A
-/// script keeps the command's own shell quoting out of the fixture.
+/// one: a script that records each run and answers with `HOOK_CONTEXT` as its
+/// additional context. A script keeps the command's own shell quoting out of
+/// the fixture.
 fn hook(home: &std::path::Path) -> String {
     use std::os::unix::fs::PermissionsExt;
     let script = home.join("prompt-context.sh");
+    let runs = home.join("hook-runs");
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\nprintf '%s' '{{\"hookSpecificOutput\":{{\"additionalContext\":\"{HOOK_CONTEXT}\"}}}}'\n"
+            "#!/bin/sh\nprintf 'run\\n' >> '{}'\nprintf '%s' '{{\"hookSpecificOutput\":{{\"additionalContext\":\"{HOOK_CONTEXT}\"}}}}'\n",
+            runs.display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     script.to_string_lossy().into_owned()
+}
+
+/// How many times the `UserPromptSubmit` hook command ran.
+fn hook_runs(store: &Store) -> usize {
+    std::fs::read_to_string(store.0.join("hook-runs"))
+        .unwrap_or_default()
+        .lines()
+        .count()
 }
 
 /// [`start`] with the user's hooks document running the `UserPromptSubmit`
@@ -193,7 +204,7 @@ async fn submit(client: &mut Client, id: &str, content: Vec<&str>) {
 async fn submit_content(
     client: &mut Client,
     id: &str,
-    content: Vec<Value>,
+    content: Value,
 ) -> Result<Value, dim_client::Error> {
     client
         .rpc(
@@ -284,47 +295,168 @@ async fn an_input_without_appended_context_titles_unchanged() {
     server.join().await.unwrap();
 }
 
-/// #1386: an input with no operator content has nothing to append a context
-/// after, so the hook's context is dropped rather than placed at index 0,
-/// where every reader takes it for the operator's words. Such an input carries
-/// no user content at all, so the entry refuses it exactly as it does with no
-/// hook installed: nothing is written, nothing is titled, no preview is
-/// decided.
+/// The operator-input entries refuse a content with no operator content before
+/// any submit check runs (#1386). Each refused shape is the same input the
+/// entry would refuse with no hook installed; the difference is that no check
+/// may run first, because a check's context would be the only content and would
+/// make the invalid input valid.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_input_with_no_operator_content_takes_no_context_and_writes_nothing() {
-    let (store, server, mut client, mut requests) = start_with(true).await;
-    let id = session(&mut client, &store.0).await;
-    let refused = submit_content(&mut client, &id, vec![])
-        .await
-        .expect_err("an input with no operator content is refused");
-    assert_eq!(
-        dim_client::app_error(&refused),
-        Some("session_invalid_input"),
-        "{refused}"
-    );
+async fn an_empty_input_shape_is_refused_before_any_check_runs() {
+    for content in [
+        json!([{"type":"text","text":""}]),
+        json!([]),
+        json!([
+            {"type":"text","text":""},
+            {"type":"text","text":""}
+        ]),
+    ] {
+        let (store, server, mut client, mut requests) = start_with(true).await;
+        let id = session(&mut client, &store.0).await;
+        let refused = submit_content(&mut client, &id, content.clone())
+            .await
+            .expect_err("an input with no operator content is refused");
+        assert_eq!(
+            dim_client::app_error(&refused),
+            Some("session_invalid_input"),
+            "{content}: {refused}"
+        );
+        assert_eq!(
+            hook_runs(&store),
+            0,
+            "{content}: a refused input ran the hook"
+        );
+        refused_wrote_nothing(&mut client, &id, content, &mut requests).await;
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+/// The same refusal through `session.input.withdraw` with `steer`: neither the
+/// withdrawal nor the replacement is written, and no check runs. An input the
+/// queue does not hold would otherwise answer `notHeld` and still write both,
+/// so the refusal has to come first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_steer_is_refused_before_any_check_runs_and_withdraws_nothing() {
+    for content in [
+        json!([{"type":"text","text":""}]),
+        json!([]),
+        json!([
+            {"type":"text","text":""},
+            {"type":"text","text":""}
+        ]),
+    ] {
+        let (store, server, mut client, mut requests) = start_with(true).await;
+        let id = session(&mut client, &store.0).await;
+        let refused = client
+            .rpc(
+                "session.input.withdraw",
+                json!({"sessionId":id,"branchId":"main","inputId":"not-held",
+                    "steer":{"content":content}}),
+            )
+            .await
+            .expect_err("an empty steer is refused");
+        assert_eq!(
+            dim_client::app_error(&refused),
+            Some("session_invalid_input"),
+            "{content}: {refused}"
+        );
+        assert_eq!(
+            hook_runs(&store),
+            0,
+            "{content}: a refused steer ran the hook"
+        );
+        let history = history(&mut client, &id).await;
+        assert!(
+            !history.iter().any(|event| event["name"] == "withdraw"),
+            "{content}: a refused steer wrote its withdrawal: {history:?}"
+        );
+        assert!(
+            !history
+                .iter()
+                .any(|event| event["name"] == "message" && event["data"].get("user").is_some()),
+            "{content}: a refused steer wrote a replacement: {history:?}"
+        );
+        refused_wrote_nothing(&mut client, &id, content, &mut requests).await;
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
+
+/// The refused input changed nothing observable: no title request, no preview,
+/// no operator input in history.
+async fn refused_wrote_nothing(
+    client: &mut Client,
+    id: &str,
+    content: Value,
+    requests: &mut mpsc::UnboundedReceiver<Request>,
+) {
     assert!(
         tokio::time::timeout(Duration::from_secs(5), requests.recv())
             .await
             .is_err(),
-        "a context the operator did not write titles nothing"
+        "{content}: a context the operator did not write titles nothing"
     );
-    let preview = summary(&mut client, &id).await["preview"].clone();
-    assert!(preview.is_null(), "no preview: {preview}");
-    let history = client
+    let preview = summary(client, id).await["preview"].clone();
+    assert!(preview.is_null(), "{content}: no preview: {preview}");
+    assert!(
+        !history(client, id)
+            .await
+            .iter()
+            .any(|event| event["name"] == "message" && event["data"].get("user").is_some()),
+        "{content}: the refused input wrote nothing"
+    );
+}
+
+async fn history(client: &mut Client, id: &str) -> Vec<Value> {
+    client
         .rpc(
             "session.history",
             json!({"sessionId":id,"branchId":"main","after":0,"limit":64}),
         )
         .await
-        .unwrap();
+        .unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// An image-only input has operator content, so the entry accepts it and the
+/// hook's context goes after the image, where both readers skip it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_image_only_input_takes_the_context_and_neither_reader_uses_it() {
+    let (store, server, mut client, mut requests) = start_with(true).await;
+    let id = session(&mut client, &store.0).await;
+    submit_content(
+        &mut client,
+        &id,
+        json!([{"type":"image","source":{"type":"url","mediaType":"image/png",
+            "url":"https://example.com/image.png"}}]),
+    )
+    .await
+    .expect("an image-only input is valid");
+    let events = history(&mut client, &id).await;
+    let user = events
+        .iter()
+        .filter(|event| event["name"] == "message")
+        .filter_map(|event| event["data"]["user"]["content"].as_array().cloned())
+        .find(|content| content[0]["type"] == "image")
+        .unwrap_or_else(|| panic!("the image input is in history: {events:#?}"));
     assert!(
-        !history["events"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|event| event["name"] == "message" && event["data"].get("user").is_some()),
-        "the refused input wrote nothing: {history}"
+        matches!(&user[1], Value::Object(block) if block["text"]
+        .as_str()
+        .is_some_and(|text| text.starts_with("<dim-hooks kind=\"prompt-submit\">"))),
+        "{user:?}"
     );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), requests.recv())
+            .await
+            .is_err(),
+        "the context does not title an image-only input"
+    );
+    let preview = summary(&mut client, &id).await["preview"].clone();
+    assert!(preview.is_null(), "no preview: {preview}");
     drop(client);
     server.shutdown();
     server.join().await.unwrap();

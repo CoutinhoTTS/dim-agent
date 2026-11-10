@@ -12235,6 +12235,7 @@
       "references": [
         "path MethodCall",
         "path RpcError::app",
+        "path RpcError::from",
         "path RpcError::interrupted",
         "path SessionMethods",
         "path params",

@@ -632,18 +632,17 @@ impl SubmitChecks {
 }
 
 /// Appends the checks' contexts after the operator's own content (Hooks
-/// A.6.2); an input with no user content takes none. Content that is present
-/// but empty is no user content either: there is no operator text to append
-/// after, and a context placed there would be the input's first block, which
-/// every reader takes for the operator's words.
+/// A.6.2); an input without operator content takes none. A context placed
+/// there would be the input's first block, which every reader takes for the
+/// operator's words.
 pub fn append_blocks(user: &mut Option<UserInput>, blocks: Vec<String>) {
     match user {
-        Some(user) if !user.content.is_empty() => user
+        Some(user) if user.has_operator_content() => user
             .content
             .extend(blocks.into_iter().map(|text| ContentBlock::Text { text })),
         _ => {
             if !blocks.is_empty() {
-                tracing::warn!("submit check contexts dropped: the input has no user content");
+                tracing::warn!("submit check contexts dropped: the input has no operator content");
             }
         }
     }
@@ -716,6 +715,13 @@ impl DynPlugin for InputMethodsPlugin {
                             ..Default::default()
                         });
                         if let Some(input) = &steer {
+                            // The operator's own content is validated before
+                            // the checks run: a check's context must never be
+                            // what makes an input valid, and a refusal here
+                            // writes neither the withdrawal nor a replacement.
+                            input
+                                .validate()
+                                .map_err(|reason| RpcError::from(AgentError::InvalidInput(reason.into())))?;
                             // A blocked steer writes neither the withdrawal nor
                             // the new input (Hooks A.6.2).
                             match checks
