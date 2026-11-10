@@ -73,8 +73,7 @@ impl Holds {
         self.fail_release.swap(false, Ordering::SeqCst)
     }
 
-    /// The Session whose input reply the next call loses, when one is to be
-    /// lost once.
+    /// Whether the next input reply is to be lost, once.
     pub(crate) fn take_lost_input_reply(&self) -> bool {
         self.lose_input_reply.swap(false, Ordering::SeqCst)
     }
