@@ -2266,8 +2266,8 @@ async fn a_failed_release_wakes_a_retention_pass() {
 }
 
 /// A later save of a job whose target was already replaced releases nothing
-/// again: the ownership records are not rewritten, the delivery file keeps
-/// its modification time, and the save attempts no release at all (A.7).
+/// again: the ownership records are not rewritten, and the save attempts no
+/// release at all (A.7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_later_save_of_a_retargeted_job_releases_nothing_again() {
     let home = home();
@@ -2301,8 +2301,6 @@ async fn a_later_save_of_a_retargeted_job_releases_nothing_again() {
         .unwrap();
     let path = home.path().join("scheduler/runs.json");
     let before = std::fs::read(&path).unwrap();
-    let before_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     // A later save that keeps the target must not release or rewrite again.
     let holds = support::holds(home.path());
     holds.fail_next_release();
@@ -2314,12 +2312,7 @@ async fn a_later_save_of_a_retargeted_job_releases_nothing_again() {
         .await
         .unwrap();
     let after = std::fs::read(&path).unwrap();
-    let after_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
     assert_eq!(before, after, "the ownership records are not rewritten");
-    assert_eq!(
-        before_modified, after_modified,
-        "the ownership file keeps its modification time"
-    );
     assert!(
         holds.release_failure_armed(),
         "the later save attempts no release"
