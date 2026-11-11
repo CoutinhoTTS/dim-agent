@@ -45,6 +45,13 @@ including the line side panel. Changing either setting updates its retained
 history and live content without changing the other setting. Scrollback already
 written to the terminal remains append-only; fullscreen redraws retained history.
 
+In scrollback, expanded thinking streams its complete body into native terminal
+history, without a preview line limit or an omitted-prefix marker. Only the
+unfinished wrapping tail remains live. A streamed thought has a fixed `Thought`
+heading and appends its duration below the body on completion; it never prints
+the body again to replace the heading. Collapsed thinking remains a single-row
+summary. Fullscreen and the line side panel retain their existing previews.
+
 ## Command menu
 
 In both scrollback and fullscreen TUI, list commands in one fixed, curated

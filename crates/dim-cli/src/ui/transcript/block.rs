@@ -42,6 +42,7 @@ pub enum Block {
         text: String,
         elapsed_ms: Option<u64>,
         expanded: bool,
+        streamed: bool,
     },
     /// The calls of one model request.
     ToolGroup(ToolGroup),
@@ -115,6 +116,7 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
             text: row.text.clone(),
             elapsed_ms: row.elapsed_ms,
             expanded: detail == Detail::Expanded,
+            streamed: false,
         },
         RowKind::ToolCall => Block::ToolGroup(project_group(&group_rows(rows, index), detail)),
         RowKind::Compaction => match &row.compaction {

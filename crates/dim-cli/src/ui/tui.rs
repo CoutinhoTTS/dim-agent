@@ -64,7 +64,7 @@ use crate::ui::title::WindowTitle;
 use crate::ui::transcript::block::{Block, Tone, group_rows, opens_group, project_row};
 use crate::ui::transcript::blocks::{
     SHELL_PREVIEW_LINES, boundary_line, gutter_text, live_thinking, render_block, render_shell,
-    width_of,
+    streamed_thinking, thinking_prefix, width_of,
 };
 #[cfg(test)]
 use crate::ui::transcript::blocks::{THINKING_ROWS, settled_thinking};
@@ -115,6 +115,10 @@ enum Placement {
     Stream,
     /// More of the streamed block the last `Stream` began.
     Continue,
+    Thought {
+        id: String,
+        finished: bool,
+    },
 }
 
 /// `config.json` key of the fullscreen mouse switch (`"on"` / `"off"`).
@@ -960,6 +964,18 @@ impl ModelLabel {
     }
 }
 
+#[derive(Default)]
+struct ThoughtStream {
+    written: usize,
+    block: Option<usize>,
+}
+
+struct ThoughtFrame {
+    commit: String,
+    source: Block,
+    tail: Vec<String>,
+}
+
 struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
@@ -993,6 +1009,7 @@ struct App {
     exit_code: Option<i32>,
     failure_committed: bool,
     planner: StreamPlanner,
+    thoughts: HashMap<String, ThoughtStream>,
     commits: CommitState,
     markdown: MarkdownRenderer,
     palette: Palette,
@@ -1416,6 +1433,7 @@ impl App {
             exit_code: None,
             failure_committed: false,
             planner: StreamPlanner::new(),
+            thoughts: HashMap::new(),
             commits: CommitState::default(),
             markdown,
             palette,
@@ -5000,8 +5018,22 @@ impl App {
                     self.stream_block = Some(self.dropped + self.history.len() - 1);
                 }
                 Placement::Continue => self.rewrite_stream_block(source),
+                Placement::Thought { id, finished } => {
+                    let stream = self.thoughts.get_mut(&id).expect("planned thought");
+                    if let Some(index) = stream.block.and_then(|id| id.checked_sub(self.dropped)) {
+                        self.history[index] = source;
+                    } else {
+                        stream.block = Some(self.dropped + self.history.len());
+                        self.record(source);
+                    }
+                    if finished {
+                        self.thoughts.remove(&id);
+                    }
+                }
             }
-            frame.commits.push(text);
+            if !text.is_empty() {
+                frame.commits.push(text);
+            }
         }
         if !self.awaiting_window
             && let Some(kind) = self.pending_boundary.take()
@@ -5625,6 +5657,96 @@ impl App {
         true
     }
 
+    fn thought_frames(&mut self, width: usize) -> HashMap<String, ThoughtFrame> {
+        let mut frames = HashMap::new();
+        let Some(snapshot) = &self.snapshot else {
+            return frames;
+        };
+        if self.fullscreen {
+            return frames;
+        }
+        let expanded = self.thinking_detail == Detail::Expanded;
+        for row in snapshot.rows.iter().skip(self.window_floor) {
+            if row.kind != RowKind::Thinking || row.text.trim().is_empty() {
+                continue;
+            }
+            if !self.thoughts.contains_key(&row.row_id) && expanded {
+                let text = crate::sanitize::safe(&row.text).replace("**", "");
+                let previous = self.thoughts.iter().find_map(|(id, stream)| {
+                    if snapshot.rows.iter().any(|row| row.row_id == *id) {
+                        return None;
+                    }
+                    let block = stream.block?.checked_sub(self.dropped)?;
+                    match self.history.get(block)? {
+                        Block::Thinking { text: prefix, .. } if text.starts_with(prefix) => {
+                            Some(id.clone())
+                        }
+                        _ => None,
+                    }
+                });
+                if let Some(previous) = previous {
+                    let stream = self.thoughts.remove(&previous).expect("found thought");
+                    self.thoughts.insert(row.row_id.clone(), stream);
+                }
+            }
+            if !(row.streaming && expanded) && !self.thoughts.contains_key(&row.row_id) {
+                continue;
+            }
+            if row.streaming && !expanded {
+                continue;
+            }
+            let stream = self.thoughts.entry(row.row_id.clone()).or_default();
+            let text = crate::sanitize::safe(&row.text).replace("**", "");
+            let source_text = if row.streaming {
+                thinking_prefix(&text, width)
+            } else {
+                text.clone()
+            };
+            let elapsed_ms = if row.streaming { None } else { row.elapsed_ms };
+            let source = Block::Thinking {
+                text: source_text.clone(),
+                elapsed_ms,
+                expanded,
+                streamed: true,
+            };
+            let rows = if expanded {
+                streamed_thinking(&text, elapsed_ms, width, &self.palette)
+            } else {
+                render_block(&source, width, &self.palette, &self.markdown)
+            };
+            let stable = if row.streaming && source_text.is_empty() {
+                0
+            } else {
+                render_block(&source, width, &self.palette, &self.markdown).len()
+            };
+            let continues = stream.written > 0;
+            let new = &rows[stream.written.min(stable)..stable];
+            let commit = if new.is_empty() {
+                String::new()
+            } else if continues {
+                pad_block(new)
+            } else {
+                chunk(new)
+            };
+            stream.written = stable;
+            frames.insert(
+                row.row_id.clone(),
+                ThoughtFrame {
+                    commit,
+                    source,
+                    tail: rows.into_iter().skip(stable).collect(),
+                },
+            );
+        }
+        self.thoughts.retain(|id, _| {
+            snapshot
+                .rows
+                .iter()
+                .any(|row| row.row_id == *id && !row.text.trim().is_empty())
+        });
+        frames
+    }
+
     /// Commits owed this frame and the live rows (unclosed streaming tail,
     /// the reasoning preview and running tools, in transcript order).
     #[allow(clippy::type_complexity)]
@@ -5632,6 +5754,7 @@ impl App {
         if !self.arm_window() {
             return (Vec::new(), Vec::new(), Vec::new());
         }
+        let thought_frames = self.thought_frames(width);
         let Some(snapshot) = &self.snapshot else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
@@ -5642,7 +5765,7 @@ impl App {
 
         enum LiveItem {
             Text(String),
-            Thinking(String),
+            Thinking(usize),
             Tool(usize),
             Row(usize),
         }
@@ -5668,7 +5791,7 @@ impl App {
                 }
                 RowKind::Thinking if row.text.trim().is_empty() => {}
                 RowKind::Thinking if row.streaming => {
-                    live_items.push(LiveItem::Thinking(row.text.clone()));
+                    live_items.push(LiveItem::Thinking(index));
                 }
                 RowKind::ToolCall if !opens_group(&snapshot.rows, index) => {}
                 RowKind::ToolCall
@@ -5768,6 +5891,18 @@ impl App {
         let draw = |index: usize,
                     finalized: Option<crate::ui::transcript::stream::Batch>|
          -> (String, Option<(Block, Placement)>) {
+            if let Some(thought) = thought_frames.get(&snapshot.rows[index].row_id) {
+                return (
+                    thought.commit.clone(),
+                    Some((
+                        thought.source.clone(),
+                        Placement::Thought {
+                            id: snapshot.rows[index].row_id.clone(),
+                            finished: true,
+                        },
+                    )),
+                );
+            }
             match (snapshot.rows[index].kind, finalized) {
                 (RowKind::AssistantMessage, Some(batch)) if batch.lines.is_empty() => {
                     (String::new(), None)
@@ -5870,8 +6005,32 @@ impl App {
                     }
                     _ => Vec::new(),
                 },
-                LiveItem::Thinking(text) => {
-                    live_thinking(text, self.thinking_detail == Detail::Expanded, width, p)
+                LiveItem::Thinking(index) => {
+                    let row = &snapshot.rows[*index];
+                    if let Some(thought) = thought_frames.get(&row.row_id) {
+                        if !thought.commit.is_empty() {
+                            commits.push(thought.commit.clone());
+                            sources.push((
+                                thought.source.clone(),
+                                Placement::Thought {
+                                    id: row.row_id.clone(),
+                                    finished: false,
+                                },
+                            ));
+                        }
+                        if self.thoughts[&row.row_id].written > 0 {
+                            tail.extend(thought.tail.iter().map(|r| format!("{pad}{r}")));
+                            continue;
+                        }
+                        thought.tail.clone()
+                    } else {
+                        live_thinking(
+                            &row.text,
+                            self.thinking_detail == Detail::Expanded,
+                            width,
+                            p,
+                        )
+                    }
                 }
                 LiveItem::Tool(index) => {
                     tail_groups.push((tail.len() + 1, snapshot.rows[*index].row_id.clone()));
@@ -5901,6 +6060,7 @@ impl App {
 
     fn switch_line(&mut self, line: String) {
         self.planner.reset();
+        self.thoughts.clear();
         self.commits = CommitState::default();
         self.answered.clear();
         self.runs = Runs::default();
@@ -5972,6 +6132,7 @@ impl App {
         }
         self.session_id = session_id;
         self.planner.reset();
+        self.thoughts.clear();
         self.commits = CommitState::default();
         self.answered.clear();
         if !matches!(self.prompt, Some(Prompt::Report(_))) {
@@ -6105,6 +6266,7 @@ impl App {
     /// line switch draws a line's.
     fn rebuild_window(&mut self, floor: usize) {
         self.planner.reset();
+        self.thoughts.clear();
         self.commits = CommitState::default();
         self.window_floor = floor;
         self.history_floor = floor;
@@ -6381,10 +6543,34 @@ impl App {
 
     /// The history for a scrollback rewrite, laid out for `cols` columns,
     /// one string per row: the newest `REWRITE_MAX_ROWS` rows at most.
-    fn reflow_history(&self, cols: usize) -> Vec<String> {
+    fn reflow_history(&mut self, cols: usize) -> Vec<String> {
+        let width = cols.saturating_sub(2 + MARGIN).max(1);
+        let frames = self.thought_frames(width);
+        for (id, stream) in &mut self.thoughts {
+            if let Some(frame) = frames.get(id) {
+                if let Some(index) = stream.block.and_then(|id| id.checked_sub(self.dropped)) {
+                    self.history[index] = frame.source.clone();
+                } else {
+                    stream.written = 0;
+                }
+            } else {
+                stream.written = 0;
+            }
+        }
         let mut chunks = Vec::new();
         let mut rows = 0;
-        for source in self.history.iter().rev() {
+        for (index, source) in self.history.iter().enumerate().rev() {
+            if self.thinking_detail != Detail::Expanded
+                && self
+                    .thoughts
+                    .values()
+                    .any(|stream| stream.block == Some(self.dropped + index))
+            {
+                continue;
+            }
+            if matches!(source, Block::Thinking { text, .. } if text.is_empty()) {
+                continue;
+            }
             let chunk: Vec<String> = raw_rows(&self.render_source(source, cols)).collect();
             rows += chunk.len();
             chunks.push(chunk);
@@ -11583,6 +11769,135 @@ mod tests {
             .app
             .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
         drawn
+    }
+
+    #[test]
+    fn expanded_thinking_streams_into_native_history_without_repeating_on_completion() {
+        let paragraphs = (1..=45)
+            .map(|n| format!("Step{n:02}: inspect the lock before waiting."))
+            .collect::<Vec<_>>();
+        for synchronized in [false, true] {
+            for separator in ["\n\n", " "] {
+                let mut drawn = Drawn::new((72, 20), Some(0), synchronized);
+                drawn.app.thinking_detail = Detail::Expanded;
+                let mut thought = (*message(false)).clone();
+                thought.kind = RowKind::Thinking;
+                thought.streaming = true;
+                for end in 1..=paragraphs.len() {
+                    thought.row_id = if end < 10 {
+                        "progress"
+                    } else {
+                        "thinking-event"
+                    }
+                    .into();
+                    thought.text = paragraphs[..end].join(separator);
+                    show(&mut drawn, vec![std::sync::Arc::new(thought.clone())]);
+                    if end == 20 {
+                        drawn.size = (45, 20);
+                        drawn.emu = crate::ui::render::testterm::Emu::new(45, 20);
+                        let rows = drawn.app.reflow_history(45);
+                        let frame = drawn.app.frame(drawn.size);
+                        let wanted = drawn.screen.wanted_for(drawn.size, frame.live.len());
+                        let mut bytes = drawn.screen.rewrite(drawn.size, &rows, wanted);
+                        bytes.extend(drawn.screen.render(&frame, drawn.size));
+                        drawn.emu.feed(&bytes);
+                    }
+                    let transcript = drawn.transcript();
+                    for n in 1..=end {
+                        assert_eq!(
+                            transcript.matches(&format!("Step{n:02}:")).count(),
+                            1,
+                            "{transcript}"
+                        );
+                    }
+                }
+                assert!(
+                    drawn
+                        .emu
+                        .scrollback
+                        .iter()
+                        .any(|row| row.contains("Step01:"))
+                );
+                let before = drawn.transcript();
+                drawn.draw();
+                assert_eq!(drawn.transcript(), before);
+                let anchor = drawn.anchor();
+                thought.row_id = "thinking-finished".into();
+                thought.streaming = false;
+                thought.elapsed_ms = Some(2700);
+                show(&mut drawn, vec![std::sync::Arc::new(thought)]);
+                let transcript = drawn.transcript();
+                for n in 1..=45 {
+                    assert_eq!(
+                        transcript.matches(&format!("Step{n:02}:")).count(),
+                        1,
+                        "{transcript}"
+                    );
+                }
+                assert!(transcript.contains("Thought for 2.7s"), "{transcript}");
+                assert_eq!(transcript.matches("◆ Thought").count(), 2, "{transcript}");
+                assert!(drawn.transcript().contains("Step45:"));
+                assert_eq!(drawn.anchor(), anchor);
+            }
+        }
+    }
+
+    #[test]
+    fn thinking_keeps_every_character_across_wrapping_and_detail_changes() {
+        for text in [
+            "Inspect **the locking boundary** before waiting. ".repeat(20),
+            "先检查**锁的边界**，等待任务前释放资源。\n\n继续检查下一步！".repeat(20),
+            format!("prefix {} suffix", "abcdefghij".repeat(80)),
+        ] {
+            let mut drawn = Drawn::new((34, 20), Some(0), false);
+            drawn.app.thinking_detail = Detail::Expanded;
+            let mut thought = (*message(false)).clone();
+            thought.kind = RowKind::Thinking;
+            thought.streaming = true;
+            for end in text.char_indices().map(|(at, c)| at + c.len_utf8()) {
+                thought.text = text[..end].into();
+                show(&mut drawn, vec![std::sync::Arc::new(thought.clone())]);
+            }
+            let body = |transcript: String| {
+                transcript
+                    .lines()
+                    .filter_map(|row| row.trim_start().strip_prefix('▎'))
+                    .filter(|row| !row.contains('◆'))
+                    .flat_map(str::chars)
+                    .filter(|c| !c.is_whitespace() && *c != '\0')
+                    .collect::<String>()
+            };
+            let expected: String = text
+                .replace("**", "")
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            assert_eq!(body(drawn.transcript()), expected);
+            for expanded in [false, true] {
+                drawn.app.thinking_detail = if expanded {
+                    Detail::Expanded
+                } else {
+                    Detail::Collapsed
+                };
+                let rows = drawn.app.reflow_history(drawn.size.0 as usize);
+                let frame = drawn.app.frame(drawn.size);
+                let wanted = drawn.screen.wanted_for(drawn.size, frame.live.len());
+                drawn.emu = crate::ui::render::testterm::Emu::new(34, 20);
+                let mut bytes = drawn.screen.rewrite(drawn.size, &rows, wanted);
+                bytes.extend(drawn.screen.render(&frame, drawn.size));
+                drawn.emu.feed(&bytes);
+                if expanded {
+                    assert_eq!(body(drawn.transcript()), expected);
+                } else {
+                    assert!(drawn.transcript().contains("Thinking…"));
+                    assert!(body(drawn.transcript()).is_empty());
+                }
+            }
+            thought.streaming = false;
+            thought.elapsed_ms = Some(1500);
+            show(&mut drawn, vec![std::sync::Arc::new(thought)]);
+            assert_eq!(body(drawn.transcript()), expected);
+        }
     }
 
     #[test]
