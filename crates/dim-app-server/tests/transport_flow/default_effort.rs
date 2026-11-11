@@ -1631,3 +1631,147 @@ async fn a_model_that_declares_no_summary_sends_the_baseline_body() {
     .await
     .unwrap();
 }
+
+/// #1377 r3: a configuration stored under a `--model-config` profile lands in a
+/// store a product daemon later opens, and `session.model.update` starts from
+/// that stored configuration. The profile's model file can put a style in the
+/// generic `reasoning.summary` field, so the rule sees a style it did not write:
+/// it keeps a `concise`, and drops a `detailed` beside `none`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stored_generic_summary_keeps_its_style_and_follows_the_effort() {
+    tokio::time::timeout(Duration::from_secs(180), async {
+        let (capture, base, http) = summary_endpoint().await;
+        let directory = directory("stored-generic-summary");
+        let provider = "018ec73f-0000-7000-8000-000000000308";
+
+        // The product daemon creates the Provider the profile names, so the
+        // product catalog can resolve it after the profile wrote the store.
+        let mut server = launch_product(&directory).await;
+        let mut client = connect(&server).await;
+        create_provider(
+            &mut client,
+            provider,
+            "openai-responses",
+            &format!("{base}/v1"),
+            vec![summarising(
+                "summarised",
+                Some("medium"),
+                &["low", "medium", "high"],
+            )],
+        )
+        .await;
+        server.child.kill().await.unwrap();
+
+        for (style, effort, expected) in [
+            ("concise", "high", Some("concise")),
+            ("detailed", "none", None),
+        ] {
+            // The profile names the same provider and model and puts `style` in
+            // the generic field, beside an effort the update then moves.
+            let configuration = directory.join(format!("{style}.json"));
+            std::fs::write(
+                &configuration,
+                serde_json::to_vec(&json!({
+                    "defaultModel":{"providerId":provider,"modelId":"summarised"},
+                    "providers":[{"id":provider,"kind":"openai-responses",
+                        "baseUrl":format!("{base}/v1"),
+                        "models":[{
+                            "id":"summarised","contextWindow":32_000,
+                            "maxOutputTokens":4_096,
+                            "config":{"maxTokens":4096,
+                                "reasoning":{"effort":"low","summary":style}}
+                        }]}]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let mut configured = launch_configured(&directory, &configuration).await;
+            let mut profile = connect(&configured).await;
+            let created = profile
+                .rpc(
+                    "session.create",
+                    json!({"cwd":directory,"tools":[],
+                        "model":{"provider":provider,"modelId":"summarised"}}),
+                )
+                .await;
+            assert_ok(&created);
+            let session_id = created["result"]["sessionId"].clone();
+            turn(&mut profile, &session_id, "hello").await;
+            assert_eq!(
+                sent_summary(&capture).as_deref(),
+                Some(style),
+                "the profile carried the style"
+            );
+            configured.child.kill().await.unwrap();
+
+            // The product daemon reopens the store and moves the effort, so the
+            // stored configuration is the base the rule sees.
+            let mut server = launch_product(&directory).await;
+            let mut client = connect(&server).await;
+            assert_ok(
+                &client
+                    .rpc(
+                        "session.model.update",
+                        json!({"sessionId":session_id,"branchId":"main",
+                            "modelPreferences":{"reasoningEffort":effort}}),
+                    )
+                    .await,
+            );
+            let stored = stored_configuration(&directory, &session_id).await;
+            let generic = stored
+                .pointer("/config/reasoning/summary")
+                .and_then(Value::as_str);
+            let provider = stored
+                .pointer("/config/providerOptions/openai/summary")
+                .and_then(Value::as_str);
+            assert_eq!(
+                provider.or(generic),
+                expected,
+                "{style} {effort}: the style the body carries: {stored}"
+            );
+            if expected.is_some() {
+                // A kept style stays in the field it was configured in.
+                assert_eq!(generic, Some(style), "{style} {effort}: {stored}");
+            } else {
+                assert_eq!(generic, None, "{style} {effort}: {stored}");
+            }
+            server.child.kill().await.unwrap();
+        }
+
+        http.abort();
+        std::fs::remove_dir_all(directory).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// The newest stored `context/configured` settings of `session`, read after the
+/// daemon that wrote them exited.
+async fn stored_configuration(directory: &std::path::Path, session_id: &Value) -> Value {
+    let database = directory.join("state/dimcode.sqlite");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let read = (|| -> Option<Value> {
+            let connection = rusqlite::Connection::open(&database).ok()?;
+            let body: String = connection
+                .query_row(
+                    "SELECT body FROM timeline_events WHERE session_id=?1
+                     AND branch_id='main' AND kind='context/configured'
+                     ORDER BY sequence DESC LIMIT 1",
+                    [session_id.as_str()?],
+                    |row| row.get(0),
+                )
+                .ok()?;
+            let record: Value = serde_json::from_str(&body).ok()?;
+            Some(record.pointer("/record/event/data/settings")?.clone())
+        })();
+        if let Some(settings) = read {
+            return settings;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no stored configuration"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}

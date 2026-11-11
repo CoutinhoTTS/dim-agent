@@ -1,48 +1,13 @@
 use dim_agent_capabilities::host::{ModelProtocol, adopted_preferences, reasoning_config};
 use dim_agent_types::*;
 
-/// Which `metadata.reasoning` declarations configure a request, and which only
-/// describe the model.
+/// The base configuration an adoption starts from: `base` with the model's
+/// declared default reasoning effort and service tier applied.
 ///
-/// A declaration configures a request when all three hold: a field in the typed
-/// configuration carries it, the request builder sends that field for some
-/// protocol after validation, and the vendor adapter that receives it changes
-/// the bytes it writes. The applied set is therefore the declared reasoning
-/// effort, the declared service tier, and the declared reasoning summary.
-/// Everything else describes the model:
-///
-/// - `default_enabled`, `off` and `effort_options` describe the effort control
-///   and are read through it, not sent on their own.
-/// - `supported` denies every control the others describe.
-/// - `summaries` is applied by [`declared_summary`], which owns its own guard
-///   because the summary follows the resulting effort.
-/// - `mode`, `level`, `level_options`, `verbosity`, `verbosity_options` and
-///   `budget` have no field on any dim request path; the first four would need
-///   their own control dispatch before they could configure anything.
-/// - `visibility`, `continuation` and `notes` have no reader at all.
-/// - `interleaved` is not expressible on any dim protocol path. The wire field
-///   that would carry it (`interleavedThinking`) is rejected before the
-///   request leaves, on every protocol, and no vendor adapter reads it; the
-///   Anthropic control it stands for is `thinking.type: "between_tools"`,
-///   which dim's thinking type cannot spell.
-///
-/// The base configuration an adoption starts from: the model's declared
-/// configuration with the catalog's own defaults applied.
-///
-/// `docs/design/appserver/provider-management.md` §3.3 says omitted
-/// preferences "still start at catalog defaults", and
-/// `docs/design/model-configuration.md` says a cleared field carries "the
-/// value an explicit adoption of the same model with no preference for that
-/// field would carry". The declared reasoning effort and service tier are
-/// therefore part of that base, applied through the same mapping an explicit
-/// preference uses, so the adopted configuration, every read and every
-/// request agree on the value.
-///
-/// A declared default applies only when the model declares the control: the
-/// effort is one of the picker's `effortOptions` (or `none` beside a
-/// reasoning-off declaration), the tier is supported and listed, and the
-/// protocol can express the value. Otherwise the base comes back unchanged.
-/// Unlike an explicit preference, a default never makes an adoption fail.
+/// A declared default applies only when the model declares the control and the
+/// protocol can express it; otherwise `base` comes back unchanged. Unlike an
+/// explicit preference, a default never fails an adoption. Which declarations
+/// configure a request is in `docs/design/model-configuration.md`.
 pub(super) fn catalog_defaults(
     base: &ModelConfig,
     snapshot: &ModelCapabilitySnapshot,
@@ -106,81 +71,79 @@ fn declared_service_tier(snapshot: &ModelCapabilitySnapshot) -> Option<String> {
         .then(|| default.clone())
 }
 
-/// Applies the model's declared reasoning summary to a configuration that is
-/// otherwise final.
+/// Sets the summary style the configuration sends, as the last step of
+/// [`configure`] so that it follows the effort the result carries.
 ///
-/// The summary is derived, not stored: it follows the reasoning effort the
-/// configuration actually sends, so [`configure`] recomputes it after the
-/// preferences are applied instead of writing it once into the base. A base
-/// written once would survive an update to effort `none` and reach the wire as
-/// `{"effort":"none","summary":"detailed"}`, and it would go stale when the
-/// effort is cleared back to the declared default.
+/// On a model that declares `summaries`, on the OpenAI Responses protocol,
+/// `provider_options.openai.summary` is `Detailed` when the effort is present and
+/// not `none`, and absent otherwise, and `reasoning.summary` is cleared so the
+/// two cannot disagree. A style other than `Detailed` in either field is the
+/// configuration's own and is left as set. Every other model and protocol is left
+/// untouched.
 ///
-/// The rule needs no record of where a value came from, because the only value
-/// this function writes is `Detailed`:
-///
-/// 1. Off the OpenAI Responses protocol, or on a model that does not declare
-///    summaries, the configuration comes back untouched. A model this function
-///    does not apply to never loses a summary of its own.
-/// 2. A configuration carrying a style other than `Detailed` states it itself,
-///    so it is left exactly as it is.
-/// 3. Otherwise the declaration decides: `Detailed` when the resulting effort
-///    is present and not `none`, and no summary when it is not.
-///
-/// Step 2 has one consequence worth stating: on a model that declares
-/// summaries, `Detailed` cannot be told apart from the value this function
-/// derives, so it follows the effort. `Detailed` beside an effort of `none` is
-/// therefore dropped, because that request contradicts itself. Every other
-/// style survives any effort.
-///
-/// The effort guard is not a detail. Without an effort, a summary alone flips
-/// the adapter into reasoning mode through `forceReasoning`, which changes the
-/// system role to `developer` and drops temperature and top-p. The adapter's own
-/// default already sends a summary exactly when an effort other than `none` is
-/// set; the declaration makes that default explicit and stable rather than
-/// widening it.
-///
-/// Only the OpenAI Responses body has a place for a summary style. Every other
-/// protocol rejects the field, so nothing is applied or cleared there.
+/// The xAI Responses exclusion is deliberate: the request builder accepts
+/// `reasoning.summary` there and writes `reasoningSummary`, but the xAI adapter
+/// drops that deprecated field and sends no `reasoning` key, so a style applied
+/// there would change no bytes.
 fn declared_summary(
-    config: &ModelConfig,
+    config: &mut ModelConfig,
     snapshot: &ModelCapabilitySnapshot,
     protocol: ModelProtocol,
-) -> ModelConfig {
-    if protocol != ModelProtocol::OpenaiResponses {
-        return config.clone();
-    }
-    // A model that does not declare summaries is not this rule's business, so
-    // whatever its configuration says about a summary stays said.
-    let declares = snapshot
-        .reasoning
-        .as_ref()
-        .is_some_and(|reasoning| reasoning.supported && reasoning.summaries == Some(true))
-        && snapshot.capabilities.reasoning;
+) {
+    let declares = protocol == ModelProtocol::OpenaiResponses
+        && snapshot.capabilities.reasoning
+        && snapshot
+            .reasoning
+            .as_ref()
+            .is_some_and(|reasoning| reasoning.supported && reasoning.summaries == Some(true));
     if !declares {
-        return config.clone();
+        return;
     }
-    let mut config = config.clone();
     let configured = config
         .provider_options
         .as_ref()
         .and_then(|options| options.openai.as_ref())
-        .and_then(|options| options.summary);
+        .and_then(|options| options.summary)
+        .or_else(|| {
+            config
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.summary)
+        });
     if configured.is_some_and(|style| style != SummaryStyle::Detailed) {
-        return config;
+        return;
     }
-    let effort =
-        adopted_preferences(&config, protocol).and_then(|preferences| preferences.reasoning_effort);
-    let derived = effort
+    // A `Detailed` in either field cannot be told apart from the derived value,
+    // so it follows the effort and the provider option is what the body carries.
+    let derived = adopted_preferences(config, protocol)
+        .and_then(|preferences| preferences.reasoning_effort)
         .is_some_and(|effort| effort != "none")
         .then_some(SummaryStyle::Detailed);
-    let options = config
-        .provider_options
-        .get_or_insert_default()
-        .openai
-        .get_or_insert_default();
-    options.summary = derived;
-    config
+    if let Some(reasoning) = config.reasoning.as_mut() {
+        reasoning.summary = None;
+        if *reasoning == ProviderReasoningConfig::default() {
+            config.reasoning = None;
+        }
+    }
+    match derived {
+        Some(style) => {
+            config
+                .provider_options
+                .get_or_insert_default()
+                .openai
+                .get_or_insert_default()
+                .summary = Some(style);
+        }
+        None => {
+            if let Some(options) = config
+                .provider_options
+                .as_mut()
+                .and_then(|options| options.openai.as_mut())
+            {
+                options.summary = None;
+            }
+        }
+    }
 }
 
 /// Applies preferences to a copy of `base`, validating them against the
@@ -223,7 +186,8 @@ pub(super) fn configure(
             _ => return Err("Service tier is not supported by this protocol"),
         }
     }
-    Ok(declared_summary(&config, snapshot, protocol))
+    declared_summary(&mut config, snapshot, protocol);
+    Ok(config)
 }
 
 fn restore<T: Clone>(current: &mut Option<T>, declared: Option<&T>) {
@@ -400,144 +364,5 @@ pub(super) fn restore_service_tier(
             }
         }
         _ => {}
-    }
-}
-
-/// Rules 1 and 2 of [`declared_summary`] are unreachable from a flow test, so
-/// they are pinned here. A configuration carrying a summary style can only come
-/// from `--model-config`, and that profile resolves models through Aimux's own
-/// resolver rather than `ProviderService`, so no flow drives this function with
-/// a configured summary. The rules still have to be right: they are what keeps
-/// this function from clearing a value it did not write.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn snapshot(reasoning: Option<ModelReasoning>) -> ModelCapabilitySnapshot {
-        ModelCapabilitySnapshot {
-            target: ModelId {
-                provider_id: "p".into(),
-                model_id: "m".into(),
-            },
-            capabilities: ModelCapabilities {
-                reasoning: reasoning.is_some(),
-                ..ModelCapabilities::with_limits(32_000, 4_096)
-            },
-            reasoning,
-            service_tier: None,
-        }
-    }
-
-    fn declaring(summaries: Option<bool>) -> ModelReasoning {
-        ModelReasoning {
-            supported: true,
-            summaries,
-            ..Default::default()
-        }
-    }
-
-    fn carrying(style: Option<SummaryStyle>) -> ModelConfig {
-        ModelConfig {
-            provider_options: Some(ProviderOptions {
-                openai: Some(OpenAiProviderOptions {
-                    summary: style,
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-
-    fn summary_of(config: &ModelConfig) -> Option<SummaryStyle> {
-        config
-            .provider_options
-            .as_ref()
-            .and_then(|options| options.openai.as_ref())
-            .and_then(|options| options.summary)
-    }
-
-    /// Rule 1: a model that does not declare summaries is not this rule's
-    /// business, so a style its configuration sets survives untouched.
-    #[test]
-    fn a_non_declaring_model_keeps_a_configured_summary() {
-        for declared in [None, Some(false)] {
-            let config = carrying(Some(SummaryStyle::Concise));
-            let applied = declared_summary(
-                &config,
-                &snapshot(Some(declaring(declared))),
-                ModelProtocol::OpenaiResponses,
-            );
-            assert_eq!(
-                summary_of(&applied),
-                Some(SummaryStyle::Concise),
-                "{declared:?}"
-            );
-            assert_eq!(applied, config);
-        }
-        // And a non-declaring model with no summary stays without one.
-        let applied = declared_summary(
-            &carrying(None),
-            &snapshot(Some(declaring(None))),
-            ModelProtocol::OpenaiResponses,
-        );
-        assert_eq!(summary_of(&applied), None);
-    }
-
-    /// Rule 1: a protocol with no place for a summary style is never touched.
-    #[test]
-    fn another_protocol_is_left_alone() {
-        let config = carrying(Some(SummaryStyle::Concise));
-        let applied = declared_summary(
-            &config,
-            &snapshot(Some(declaring(Some(true)))),
-            ModelProtocol::OpenaiChat,
-        );
-        assert_eq!(applied, config);
-    }
-
-    /// Rule 2: a style other than `Detailed` is the configuration's own, on a
-    /// declaring model too, whatever the effort says.
-    #[test]
-    fn a_non_detailed_style_survives_on_a_declaring_model() {
-        for effort in [Some("high"), Some("none"), None] {
-            let mut config = carrying(Some(SummaryStyle::Auto));
-            config.reasoning = effort.map(|effort| ProviderReasoningConfig {
-                effort: Some(effort.into()),
-                ..Default::default()
-            });
-            let applied = declared_summary(
-                &config,
-                &snapshot(Some(declaring(Some(true)))),
-                ModelProtocol::OpenaiResponses,
-            );
-            assert_eq!(summary_of(&applied), Some(SummaryStyle::Auto), "{effort:?}");
-        }
-    }
-
-    /// Rule 3, the consequence the doc comment states: on a declaring model,
-    /// `Detailed` cannot be told apart from the derived value, so it follows
-    /// the effort. Beside `none` it is dropped, and with no effort at all it is
-    /// dropped too.
-    #[test]
-    fn a_configured_detailed_follows_the_effort() {
-        let with_effort = |effort: Option<&str>| {
-            let mut config = carrying(Some(SummaryStyle::Detailed));
-            config.reasoning = effort.map(|effort| ProviderReasoningConfig {
-                effort: Some(effort.into()),
-                ..Default::default()
-            });
-            declared_summary(
-                &config,
-                &snapshot(Some(declaring(Some(true)))),
-                ModelProtocol::OpenaiResponses,
-            )
-        };
-        assert_eq!(
-            summary_of(&with_effort(Some("high"))),
-            Some(SummaryStyle::Detailed)
-        );
-        assert_eq!(summary_of(&with_effort(Some("none"))), None);
-        assert_eq!(summary_of(&with_effort(None)), None);
     }
 }
