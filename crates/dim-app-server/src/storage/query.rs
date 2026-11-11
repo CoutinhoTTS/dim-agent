@@ -911,6 +911,19 @@ impl<'a> Compiler<'a> {
             )),
             _ => None,
         };
+        let type_guard = |path: &str, numeric: bool| {
+            let record = format!("json_type(e.body,'$.record.event.{path}')");
+            let kind = match path {
+                "data.request_id" => format!("coalesce({record},json_type(e.body,'$.request_id'))"),
+                "data.turn_id" => format!("coalesce({record},json_type(e.body,'$.turn_id'))"),
+                _ => record,
+            };
+            if numeric {
+                format!("({kind} IS 'integer' OR {kind} IS 'real')")
+            } else {
+                format!("{kind} IS 'text'")
+            }
+        };
         match filter {
             QueryFilter::Exists { condition } => self
                 .resolved_relations
@@ -1031,7 +1044,14 @@ impl<'a> Compiler<'a> {
                     (QueryComparison::Gt, false) | (QueryComparison::Lt, true) => ">",
                     (QueryComparison::Ge, false) | (QueryComparison::Le, true) => ">=",
                 };
-                Some(format!("{column}{op}{}", self.bind(value)))
+                let guard = path
+                    .starts_with("data.")
+                    .then(|| type_guard(path, matches!(value, SqlValue::Integer(_))));
+                let comparison = format!("{column}{op}{}", self.bind(value));
+                Some(match guard {
+                    Some(guard) => format!("({guard} AND {comparison})"),
+                    None => comparison,
+                })
             }
             QueryFilter::Present {
                 value: QueryOperand::Field { path },
@@ -1114,7 +1134,16 @@ impl<'a> Compiler<'a> {
                 Some(if values.is_empty() {
                     "0".into()
                 } else {
-                    format!("{column} IN ({})", values.join(","))
+                    let comparison = format!("{column} IN ({})", values.join(","));
+                    if path.starts_with("data.") {
+                        let numeric = matches!(
+                            path.as_str(),
+                            "data.current.at.sequence" | "data.current.at.branch"
+                        );
+                        format!("({} AND {comparison})", type_guard(path, numeric))
+                    } else {
+                        comparison
+                    }
                 })
             }
             QueryFilter::And { conditions } => {

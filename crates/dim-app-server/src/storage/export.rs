@@ -104,9 +104,25 @@ async fn write(
             branch_id: branch.info.id.clone(),
         };
         let mut next = 1;
+        let mut expected = 1;
+        let mut batch_end = 0;
         while next <= branch.sequence {
             let last = branch.sequence.min(next + PAGE - 1);
             for record in read_range(db, &mut reader, &key, next..=last, false).await? {
+                let sequence = record.event.sequence;
+                if sequence != expected {
+                    return Err(error("Timeline export contains a sequence gap"));
+                }
+                if batch_end < sequence {
+                    batch_end = record.batch_end;
+                }
+                if record.batch_end != batch_end
+                    || batch_end < sequence
+                    || batch_end > branch.sequence
+                {
+                    return Err(error("Timeline export contains an invalid batch boundary"));
+                }
+                expected += 1;
                 line(
                     out,
                     &Line::Event {
@@ -119,6 +135,9 @@ async fn write(
                 events += 1;
             }
             next = last + 1;
+        }
+        if expected != branch.sequence + 1 || batch_end != branch.sequence {
+            return Err(error("Timeline export does not reach the branch head"));
         }
     }
     line(

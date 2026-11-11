@@ -422,7 +422,19 @@ impl Projection {
             )
             .into(),
         );
-        let events = owner.timeline.append_batch_registered(drafts, |_| Ok(()))?;
+        let expected: Vec<_> = drafts.iter().map(|draft| draft.kind.clone()).collect();
+        let events = owner.timeline.append_batch_registered(drafts, |events| {
+            if events
+                .iter()
+                .zip(&expected)
+                .any(|(event, expected)| event.kind != *expected)
+            {
+                return Err(AgentError::InvalidInput(
+                    "before changed Prompt retirement inputs or saved references".into(),
+                ));
+            }
+            Ok(())
+        })?;
         self.written_result = events.last().expect("prompt result").sequence;
         Ok(())
     }

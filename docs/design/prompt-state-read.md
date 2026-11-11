@@ -35,7 +35,7 @@ prompt/changed及其必要输入/配置保留原采用批次。Prompt处理实�
 
 源提交到结果提交之间的崩溃，通过changed_through之后的prompt/changed类型/位置范围查询补齐；只处理未纳入的提示采用，不重新生成已在原批次提交的模型可见输入，不读取中间turn/scope历史。这个位置有明确重载用途，不是逐回调完整快照要求。
 
-scope 结束时，从内存按 scope 定位受影响的键。只有确实移除了引用才写 `[必要退役输入, 最终引用结果]`；没有条目则零写入。引用结果与退役输入的同批提交使重复恢复不会重复退役。scope 结束不伪造 prompt/changed 版本，revision/system_revision 沿用原语义。
+scope 结束时，从内存按 scope 定位受影响的键。只有确实移除了引用才写 `[必要退役输入, 最终引用结果]`；没有条目则零写入。提交回调核对 before 处理后的退役输入及完整引用结果与本次生成的数据一致；任一项被改变则拒绝整个批次，保留已提交源事实供重载重新结算。通过核对后，同批提交使重复恢复不会重复退役。scope 结束不伪造 prompt/changed 版本，revision/system_revision 沿用原语义。
 
 同值刷新在 `Prompt::consume_result` 比较本次加载的目标条目，发现没有 changes 则不生成 prompt/changed 或引用结果；只改变模型/tools 配置也不写引用结果。不要先 clone 整个 Snapshot 或遍历全部键来检测“无变化”。变化键的旧/新条目和 scope 退役项足以生成 context_changes；System 变化才重排/拼接当前 System 条目。
 

@@ -257,3 +257,7 @@ in the App Server's `transport_flow`, and `export_writes_the_timeline_without_st
 | D4 | One line per branch and per event, with an end line | One JSON document; no end line | Large Sessions stream without holding everything; the end line detects a truncated file |
 | D5 | Snake_case envelope | camelCase as in the protocol | The carried serializations (`create_at`, `branch_point`, `event_id`) are snake_case; one casing per file |
 | D6 | No Session configuration in the header | Configuration in the header | D3 limits the export to the Timeline; the model of each call is in its request |
+
+### Streaming completeness
+
+The single export traversal carries the next expected sequence and the current atomic batch end across pages. Every decoded record must have that sequence and agree with its batch; the batch cannot end before the record or beyond the directory head. Before writing `end`, each branch must reach its advertised head at a batch end. Missing middle/tail rows and inconsistent cross-page batch ends fail the export without `end`. This adds no preflight and no Session admission scan.

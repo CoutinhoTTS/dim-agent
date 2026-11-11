@@ -2650,3 +2650,138 @@ async fn related_text_candidates_keep_unindexed_kinds_when_the_same_filter_is_in
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn optional_physical_properties_keep_typed_boolean_semantics() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let memory = MemoryTimelineStore::default();
+    for storage in [&*store as &dyn TimelineStore, &memory] {
+        storage
+            .create_session("properties", &SessionConfig::default())
+            .await
+            .unwrap();
+    }
+    let paths = [
+        "data.status",
+        "data.epoch",
+        "data.request_id",
+        "data.input_id",
+        "data.turn_id",
+        "data.scope.kind",
+        "data.scope.id",
+        "data.scope.timeline",
+        "data.current.at.branch",
+        "data.current.at.sequence",
+    ];
+    let values = [
+        None,
+        Some(Value::Null),
+        Some(json!(false)),
+        Some(json!(true)),
+        Some(json!(1)),
+        Some(json!(1.5)),
+        Some(json!("completed")),
+        Some(json!("other")),
+        Some(json!([])),
+        Some(json!({})),
+    ];
+    let records: Vec<_> = values
+        .into_iter()
+        .enumerate()
+        .map(|(i, value)| {
+            let mut data = json!({});
+            if let Some(value) = value {
+                for path in paths {
+                    let mut object = &mut data;
+                    let mut parts = path.strip_prefix("data.").unwrap().split('.').peekable();
+                    while let Some(part) = parts.next() {
+                        if parts.peek().is_none() {
+                            object[part] = value.clone();
+                        } else {
+                            object = object
+                                .as_object_mut()
+                                .unwrap()
+                                .entry(part)
+                                .or_insert_with(|| json!({}));
+                        }
+                    }
+                }
+            }
+            record(
+                i as u64 + 1,
+                EventKind::Extension(ExtensionEvent::new("properties", "saved", data).unwrap()),
+            )
+        })
+        .collect();
+    append(&store, key("properties", "main"), records.clone())
+        .await
+        .unwrap();
+    memory
+        .append(
+            key("properties", "main"),
+            records,
+            Box::new(|result| result.unwrap()),
+        )
+        .unwrap();
+    for path in paths {
+        let value = if path.starts_with("data.current.") {
+            json!(1)
+        } else {
+            json!("completed")
+        };
+        let field = QueryOperand::Field { path: path.into() };
+        let constant = QueryOperand::Value {
+            value: value.clone(),
+        };
+        let mut filters = vec![QueryFilter::In {
+            value: field.clone(),
+            values: vec![value],
+        }];
+        for comparison in [
+            QueryComparison::Eq,
+            QueryComparison::Ne,
+            QueryComparison::Lt,
+            QueryComparison::Le,
+            QueryComparison::Gt,
+            QueryComparison::Ge,
+        ] {
+            filters.push(QueryFilter::Compare {
+                left: field.clone(),
+                comparison,
+                right: constant.clone(),
+            });
+            filters.push(QueryFilter::Compare {
+                left: constant.clone(),
+                comparison,
+                right: field.clone(),
+            });
+        }
+        for filter in filters {
+            for negated in [false, true] {
+                for select in [
+                    QuerySelect::Fields {
+                        fields: vec!["id".into()],
+                    },
+                    QuerySelect::Events,
+                    QuerySelect::Count,
+                    QuerySelect::Exists,
+                ] {
+                    let mut query = fields(&["id"]);
+                    query.filter = Some(if negated {
+                        QueryFilter::Not {
+                            condition: Box::new(filter.clone()),
+                        }
+                    } else {
+                        filter.clone()
+                    });
+                    query.select = select;
+                    parity(&store, &memory, &scope(10), &query).await;
+                }
+            }
+        }
+    }
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}

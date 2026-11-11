@@ -697,3 +697,82 @@ async fn timeline_export_carries_before_traces() {
     );
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test]
+async fn exports_reject_missing_sequences_and_inconsistent_batches_across_pages() {
+    let directory =
+        std::env::temp_dir().join(format!("dim-export-completeness-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let database = directory.join("source.sqlite");
+    let db = SqliteStorage::open(database.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("export", &dim_agent_runtime::SessionConfig::default())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        rutis::Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: "export".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    timeline
+        .append_batch_registered(
+            (1..=300)
+                .map(|n| {
+                    EventKind::Extension(
+                        dim_agent_types::ExtensionEvent::new("export", "fact", json!({"n":n}))
+                            .unwrap(),
+                    )
+                    .into()
+                })
+                .collect(),
+            |_| Ok(()),
+        )
+        .unwrap();
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    assert_eq!(
+        exported(&database, "export").await.last().unwrap()["events"],
+        300
+    );
+    for (name, sql) in [
+        ("gap", "DELETE FROM timeline_events WHERE sequence=2"),
+        ("tail", "DELETE FROM timeline_events WHERE sequence=300"),
+        ("page-gap", "DELETE FROM timeline_events WHERE sequence=257"),
+        (
+            "batch",
+            "UPDATE timeline_events SET body=json_set(body,'$.record.batch_end',299) WHERE sequence=257",
+        ),
+        (
+            "terminal",
+            "UPDATE timeline_events SET body=json_set(body,'$.record.batch_end',301) WHERE sequence=300",
+        ),
+    ] {
+        let copy = directory.join(format!("{name}.sqlite"));
+        std::fs::copy(&database, &copy).unwrap();
+        let connection = rusqlite::Connection::open(&copy).unwrap();
+        assert_eq!(connection.execute(sql, []).unwrap(), 1);
+        drop(connection);
+        let failed = export(&copy, "export").await;
+        assert_eq!(
+            failed.status.code(),
+            Some(1),
+            "{name}: {}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        let partial: Vec<Value> = String::from_utf8(failed.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(partial.iter().all(|line| line["kind"] != "end"), "{name}");
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
