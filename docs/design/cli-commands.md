@@ -1349,24 +1349,11 @@ owner reports the list and its Settings revision with `permission.rules`, and re
 list at that revision with `permission.set_rules`; a stale revision is
 `permission_rules_conflict`.
 
-The row is appended after the three presets, so the existing rows keep their positions. It opens
-this area's panel, and Esc there returns to the Permissions panel.
+The row is in the Permissions panel's Related settings group, after the three presets (see
+[permission controls](#permission-controls)). It opens this area's panel, and Esc there returns
+to Permissions with Command rules still focused.
 
 ```text
-╭─ Permissions ─────────────────────────────────────────────────╮
-│ >                                                             │
-│   Read only            reads only; writes and commands are    │
-│                        refused                                │
-│   Workspace write      writes inside the workspace; asks      │
-│                        outside it                             │
-│   Full access          no path limits; tools run without      │
-│                        asking                                 │
-│   Command rules                                             › │
-│   Process isolation                                Settings › │
-│                                                               │
-│   The preset fixes the path boundary.                         │
-╰──── ↑↓/Tab move · Enter apply · Esc close ────────────────────╯
-
 ╭─ Command rules ───────────────────────────────────────────────╮
 │ >                                                             │
 │   user                                                        │
@@ -2211,19 +2198,9 @@ remain `session.grants.add/remove` ([ADR 012](../adr/012-session-grants.md)).
 | Path scope | Fixed by the preset and Session grants | [file access facts](../adr/014-file-access-facts.md) |
 | Process isolation | Off / Sandboxed · No network / Sandboxed · Network allowed | `execution` settings, not Permission |
 
-```text
-/permissions
-  > Read only        reads only; writes and commands are refused
-    Workspace write  writes inside the workspace; asks outside it
-    Full access      no path limits; tools run without asking
-    Command rules    >
-    Process isolation  Settings >
-  The preset fixes the path boundary.
-```
-
-`↑↓` moves, `Enter` applies the highlighted preset, `Esc` closes. There is no second policy
-control: a preset answers both what may run and what is asked first, so a client never presents
-file scope or process isolation as a permission dimension
+The [Permissions panel](#permissions) groups the Session's preset separately from user-wide
+settings. There is no second policy control: a preset answers both what may run and what is
+asked first, so a client never presents file scope or process isolation as a permission dimension
 ([ADR 018](../adr/018-permission-is-the-preset.md)).
 
 The presets decide by risk, after `disallowedTools` and deny rules, with the existing file checks
@@ -2233,7 +2210,7 @@ taking precedence:
 | --- | --- |
 | `read-only` | Reads of the workspace, system roots, Session-owned files and granted paths run, and other reads ask; Session tools run; file writes, commands, network and unclassified tools are denied |
 | `workspace-write` | Those reads run and other reads ask; workspace file writes and Session tools run; writes to system roots or Session-owned files are denied; other outside writes without a matching write grant, commands, network and unclassified tools ask |
-| `full-access` | Every tool call runs without asking |
+| `full-access` | Skips preset approval; explicit denials and process isolation remain in force |
 
 A deny rule applies under every preset. An allow rule only turns a question into a run for a
 simple command; it never lifts a denial. The product and configured daemon profiles create
@@ -2418,10 +2395,11 @@ approves nor cancels work by that fact alone.
 same preset picker as compatibility aliases. The control applies to `main`; selecting a preset
 uses the current policy and version, preserving the tool lists. A failed save neither changes remembered choices nor falls back to another preset.
 
-The Process isolation row links to the Settings control; Esc returns to this panel.
+The Process isolation row links to the Settings control; Esc returns to this panel with that row focused.
 The Command rules row opens the management panel
 of [The command rules area](#the-command-rules-area), where the rules are listed, added and
-removed; Esc there returns to this panel.
+removed; Esc there returns to this panel with Command rules focused. Both TUI modes preserve
+focus on return, including when Permissions was opened from Settings.
 
 Arguments after `/permissions` in the terminal UI open that panel instead of being ignored, and
 it opens holding one line that says where arguments work — the line prompt and `dimcode
@@ -2429,25 +2407,45 @@ permissions` — which stands above the panel's answers until the user's first k
 long the opening read takes; the compact grammar belongs to the line prompt.
 
 ```text
-Permissions (main branch)
-> Read only        reads only; writes and commands are refused
-  Workspace write  writes inside the workspace; asks outside it
-  Full access      no path limits; tools run without asking
-  Command rules                             >
-  Process isolation                 Settings >
-
-The preset fixes the path boundary.
-
-↑↓/Tab move · Enter apply · Esc close
+╭─ Permissions ──────────────────────────────────────────────────────────╮
+│ Permission mode                                                        │
+│   ( ) Read only                                                        │
+│   (*) Workspace write                                                  │
+│   ( ) Full access                                                      │
+│ Related settings                                                       │
+│   Command rules  ›                                                     │
+│   Process isolation  ›                                                 │
+│                                                                        │
+│ Hint: Current session; remembered for new sessions. Workspace writes    │
+│       allowed; commands, network and ungranted outside access usually   │
+│       ask.                                                             │
+╰──── ↑↓/Tab move · Enter keep mode · Esc close ──────────────────────────╯
 ```
 
-Each row states what its preset allows and what it asks, so the choice needs no second menu.
-Merely opening the panel writes nothing; `Enter` writes the preset through the versioned update,
-and the tool lists are preserved. The notes state that the preset fixes the path boundary and
-point to Settings for process isolation.
+The two group headings are not selectable. Their titles use bold accent text, aligned two
+columns to the left of the choices, without scope captions. The panel title remains in
+the border and explanations remain below the choices. Color and indentation distinguish
+headings from selectable content without adding rows on short terminals.
+`(*)` marks the effective preset, independently of
+the focused row; other presets use `( )`. Focus uses the existing selection highlight.
+Related settings use `›`, not radio markers. Live policy updates change the effective marker
+without moving focus. Only the focused entry's explanation appears in Hint. For presets,
+it states that the choice applies to the current Session and is remembered for new Sessions;
+the startup behavior remains defined by [Startup selection](#startup-selection). Read only denies
+writes and commands while external reads may
+ask; Workspace write permits workspace writes and usually asks for commands, network and
+ungranted outside access; Full access skips preset approval and reevaluates pending calls on
+the target branch, while explicit denials and isolation remain. Command rules are user-wide;
+allow rules only skip asks, never denials. Process isolation's Hint identifies its user-wide
+scope; it opens Settings, affects new
+processes and is independent of the permission mode.
 
-Choosing Full access explains that explicit denies remain and process
-isolation is unchanged; it does not claim every call will run. No combined permissive shortcut
+`↑↓`/`Tab` move between entries and `Esc` closes. The footer says `Enter use mode` for an
+inactive preset, `Enter keep mode` for the effective preset, or `Enter open` for a submenu.
+Merely opening or navigating the panel writes nothing; `Enter` applies the focused preset
+through the versioned update, preserving the tool lists. The existing remembered preference
+for later Sessions is unchanged (see [Startup selection](#startup-selection)); on Home the
+marker reflects that preference until a Session exists. No combined permissive shortcut
 appears in an approval prompt.
 
 At the line prompt the no-argument command prints the effective preset and numbered command rules

@@ -104,6 +104,7 @@ flowchart LR
   p44 -->|"dim_agent_capabilities::permission::Permission@main"| p38
   p35 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p38
   p35 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p38
+  p44 -->|"dim_agent_runtime::state::StateCell<dim_agent_capabilities::permission::PermissionState>@main"| p38
   p21 -->|"dim_agent_capabilities::host::ToolHost@session"| p33
   p21 -->|"dim_agent_runtime::config::SessionConfig@session"| p33
   p21 -->|"dim_agent_runtime::config::SessionIdentity@session"| p33

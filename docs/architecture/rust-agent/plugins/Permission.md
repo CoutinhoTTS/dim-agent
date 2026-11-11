@@ -224,7 +224,9 @@ the reason and a Session-scoped grant action for file tools:
   Session identity and the optional facts service; WorkspaceTools uses its
   existing HostPlatform dependency. The bound handler's `resolve_write`
   prepares the actual call at its external path boundary before admission; it
-  reads metadata and performs no file mutation or process execution.
+  reads metadata and performs no file mutation or process execution. Approval
+  declares Permission's existing state cell as a dependency; its per-call waits
+  observe dispatched changes through that cell and ask Permission to decide again.
 - ADR 002 D4–D5: the language-neutral policy is a preset and tool lists under ADR 018;
   approval request/reply formats stay unchanged. No structural configuration changes.
 - §4 rule 8: no new Timeline, Dispatcher, loader or rutis mechanism is required.
@@ -296,13 +298,15 @@ and exits 3.
 
 Owner: [approval.rs](../../../../crates/dim-agent-capabilities/src/approval.rs).
 Turns permission decisions into call admission or durable approval requests and
-rechecks policy before allowing an approved call to start.
+rechecks policy before allowing an approved call to start. Dispatched policy changes also
+re-evaluate every waiting call on that branch, without a new client response.
 
 ### Dependencies
 
 | Service | Purpose |
 | --- | --- |
 | `B:Permission` | Evaluate current policy and recheck an allowed response. |
+| `B:StateCell<PermissionState>` | Observe the policy after Permission dispatches a change. |
 | `B:Dispatcher` | Recover abandoned requests, then receive approval responses. |
 | `B:Timeline` | Commit requests/cancellations. |
 
@@ -317,6 +321,30 @@ at one fixed committed boundary. It consumes each result page immediately;
 historical call arguments are not needed for cancellation.
 Responses are not unconditional authority: cancelled batches and changed policy
 can prevent execution. Approval does not sandbox an admitted tool.
+
+Each admission observes policy changes before its initial decision, so a change between
+that decision and request registration cannot leave a stale question. Its existing
+per-call task rechecks the current policy and command rules when the dispatched policy
+changes; the Dispatcher never waits for those reads. Allow ends the question and admits
+the call, Ask keeps it pending, and Deny ends it with the policy's refusal. Explicit
+advisor asks remain pending until answered, even when the preset allows the call;
+advice is retained for that admission, not run again on a policy change. A change on
+another branch affects none of these waiters. Completed, rejected and cancelled calls
+are never restarted, and running calls are not interrupted by this mechanism.
+
+An automatically ended question writes `approval/cancelled`, whose contract ends an
+unanswered request, not necessarily the tool execution. For an allowed call its reason
+is `Approval no longer required by the permission policy`; for a refusal it is the
+current denial reason. It does not fabricate an `approval/respond` or a user decision.
+Automatic admission waits for its terminal's durable publication, not merely append
+acceptance, before the call starts; cancellation or storage failure prevents the start. Cancellation,
+manual responses and automatic settlement compete for the same pending request; only
+one can remove it. Automatic settlement waits for earlier committed facts to be
+dispatched and checks that boundary again while registering its terminal under the
+Timeline commit lock. If another fact arrived during the asynchronous policy read,
+it waits and rechecks rather than overtaking that fact. An earlier committed manual
+response therefore wins, including a refusal not yet consumed when policy changed.
+A cancelled batch cannot start a call.
 
 ### Model-facing texts
 
@@ -336,8 +364,10 @@ attach for pending requests; `approval/cancelled` → `approval.cancelled`;
 `approval/respond` is the command, so every committed response is projected.
 Approval accepts the first one it consumes in sequence order: the first
 `approval.resolved` per `requestId` carries the accepted decision, a later one
-was answered `Unknown`, and an `approval.cancelled` after it means the call did
-not start. The decision is the user's answer, not the tool's outcome. A client
+was answered `Unknown`, and an `approval.cancelled` after an accepted allow means
+the call did not start. Without an accepted response, cancellation may instead mean
+that the new policy no longer requires a question. The decision is the user's answer,
+not the tool's outcome. A client
 that attaches after a response is committed but before Approval consumes it is
 replayed the request without that response; its own `approval.respond` then
 fails with `invalid_params`, which ends the prompt.
@@ -345,17 +375,24 @@ fails with `invalid_params`, which ends the prompt.
 ### Tests
 
 [permission_flow.rs](../../../../crates/dim-agent-capabilities/tests/permission_flow.rs):
-`an_allowed_approval_is_rechecked_against_the_current_policy`,
+`full_access_releases_all_waiting_calls_without_user_responses`,
+`a_policy_denial_settles_a_waiting_call_without_a_user_response`,
+`full_access_keeps_advisor_questions_without_repeating_advice`,
+`a_policy_change_during_advice_does_not_leave_a_stale_question`,
 `a_response_that_finds_its_batch_stopped_ends_as_an_interrupt`,
 `a_deny_rule_written_while_approval_is_pending_cancels_the_allowed_call`,
 `advisors_are_not_asked_on_the_recheck_after_an_answer`;
-[local_product.rs](../../../../tests/integration/tests/local_product.rs).
+[local_product.rs](../../../../tests/integration/tests/local_product.rs);
+[approval.rs](../../../../crates/dim-app-server/tests/transport_flow/approval.rs):
+`a_policy_change_ends_pending_questions_for_every_attached_client`,
+`automatic_permission_settlement_cannot_overtake_a_committed_denial` and
+`automatic_admission_waits_for_its_terminal_to_be_stored`.
 
 <!-- generated:plugin Approval — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Permission`、`B:Timeline` |
+| 注入 | `B:Dispatcher`、`B:Permission`、`B:StateCell<PermissionState>`、`B:Timeline` |
 | 提供 | `B:Approval` |
 | 被注入于 | `HooksBranch`、`ToolExecutor` |
 <!-- /generated -->

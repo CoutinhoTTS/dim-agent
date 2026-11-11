@@ -46,6 +46,13 @@ pub enum Decision {
     Deny { reason: String },
 }
 
+/// An admission decision and whether an advisor requires an explicit response.
+pub struct ToolAdmission {
+    pub decision: Decision,
+    /// A policy change cannot answer an advisor's approval question.
+    pub advisor_approval: bool,
+}
+
 const CANCELLED: &str = "Tool execution cancelled.";
 
 /// Permission's own decision when advisors are asked: `allow` or `ask`,
@@ -168,10 +175,15 @@ impl Permission {
         source: &BranchSource,
         risk: Option<&str>,
         cancel: &CancellationToken,
-    ) -> Result<Decision, HostError> {
+    ) -> Result<ToolAdmission, HostError> {
         let decision = self.decide(call, risk, cancel).await?;
         let own = match decision {
-            Decision::Deny { .. } => return Ok(decision),
+            Decision::Deny { .. } => {
+                return Ok(ToolAdmission {
+                    decision,
+                    advisor_approval: false,
+                });
+            }
             Decision::Allow => AdmissionDecision::Allow,
             Decision::Ask { .. } => AdmissionDecision::Ask,
         };
@@ -208,11 +220,14 @@ impl Permission {
                 Some(Ok(ToolAdviceReply::Allow)) => allow = true,
             }
         }
-        Ok(match (deny, ask) {
-            (Some(reason), _) => Decision::Deny { reason },
-            (None, Some(reason)) => Decision::Ask { reason },
-            (None, None) if allow => Decision::Allow,
-            (None, None) => decision,
+        Ok(ToolAdmission {
+            advisor_approval: ask.is_some(),
+            decision: match (deny, ask) {
+                (Some(reason), _) => Decision::Deny { reason },
+                (None, Some(reason)) => Decision::Ask { reason },
+                (None, None) if allow => Decision::Allow,
+                (None, None) => decision,
+            },
         })
     }
 
