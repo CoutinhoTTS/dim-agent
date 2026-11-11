@@ -217,7 +217,8 @@ Once a queued message's steer, delete or recall request succeeds, further queue
 actions for that input do nothing while its committed events catch up with the
 client projection. Actions on inputs the projection no longer holds also do
 nothing. A failed request leaves the held input available for retry.
-With an empty draft and no held messages, Enter does nothing.
+With an empty draft and no held messages, Enter retains the task-line shortcut
+defined in [Run keys and queue](#run-keys-and-queue).
 
 The panel advertises steer and delete only when the selected message is held.
 An applied-only strip offers `/queue` to view the messages, not held-only edit
