@@ -29,6 +29,7 @@
 //!
 //! On by default; `/settings` switches it (`tuiNotifyOnComplete`).
 
+use crate::model::view::TaskOutcome;
 use crate::ui::i18n::{t, tf};
 
 /// `config.json` key of the switch; absent means on.
@@ -42,10 +43,10 @@ pub enum Event {
     Permission(String),
     Question,
     /// A background task that ran apart from the turn ended: its label, and
-    /// whether it ended in failure.
+    /// how it ended.
     BackgroundFinished {
         label: String,
-        failed: bool,
+        outcome: TaskOutcome,
     },
 }
 
@@ -133,11 +134,11 @@ pub fn sequence(terminal: &Terminal, event: &Event) -> Vec<u8> {
         Event::Complete => t("Task complete").to_owned(),
         Event::Permission(tool) => tf("Permission needed: {tool}", &[("tool", tool)]),
         Event::Question => t("Question waiting for your answer").to_owned(),
-        Event::BackgroundFinished { label, failed } => tf(
-            if *failed {
-                "Background task failed: {label}"
-            } else {
-                "Background task finished: {label}"
+        Event::BackgroundFinished { label, outcome } => tf(
+            match outcome {
+                TaskOutcome::Completed => "Background task finished: {label}",
+                TaskOutcome::Failed => "Background task failed: {label}",
+                TaskOutcome::Stopped => "Background task stopped: {label}",
             },
             &[("label", label)],
         ),
@@ -266,7 +267,7 @@ mod tests {
                 &on("iTerm.app", "xterm-256color"),
                 &Event::BackgroundFinished {
                     label: "cargo build; rm -rf /".into(),
-                    failed: false,
+                    outcome: TaskOutcome::Completed,
                 }
             ),
             b"\x1b]9;DIM: Background task finished: cargo build, rm -rf /\x07"
@@ -276,17 +277,27 @@ mod tests {
                 &on("ghostty", "xterm-ghostty"),
                 &Event::BackgroundFinished {
                     label: "cargo test".into(),
-                    failed: true,
+                    outcome: TaskOutcome::Failed,
                 }
             ),
             "\x1b]777;notify;DIM;Background task failed: cargo test\x07".as_bytes()
         );
         assert_eq!(
             sequence(
+                &on("iTerm.app", "xterm-256color"),
+                &Event::BackgroundFinished {
+                    label: "cargo test".into(),
+                    outcome: TaskOutcome::Stopped,
+                }
+            ),
+            b"\x1b]9;DIM: Background task stopped: cargo test\x07"
+        );
+        assert_eq!(
+            sequence(
                 &in_mux(Multiplexer::Tmux, "iTerm.app", "tmux-256color"),
                 &Event::BackgroundFinished {
                     label: "cargo build".into(),
-                    failed: false,
+                    outcome: TaskOutcome::Completed,
                 }
             ),
             b"\x1bPtmux;\x1b\x1b]9;DIM: Background task finished: cargo build\x07\x1b\\\x07"
@@ -296,7 +307,7 @@ mod tests {
                 &in_mux(Multiplexer::Screen, "", "xterm-kitty"),
                 &Event::BackgroundFinished {
                     label: "cargo build".into(),
-                    failed: true,
+                    outcome: TaskOutcome::Failed,
                 }
             ),
             b"\x07"

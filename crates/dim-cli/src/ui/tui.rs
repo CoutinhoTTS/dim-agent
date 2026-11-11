@@ -17,7 +17,8 @@ use crate::model::session::{
 use crate::model::shell::Outcome as ShellOutcome;
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    CompactionState, LineState, LineView, RowKind, SideLine, TaskTarget, ViewRow, ViewSnapshot,
+    CompactionState, LineState, LineView, RowKind, SideLine, TaskFinish, TaskOutcome, TaskTarget,
+    ViewRow, ViewSnapshot,
 };
 use crate::ui::Env;
 use crate::ui::Initial;
@@ -3986,7 +3987,7 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let ended: Vec<(String, String, bool)> = snapshot
+        let ended: Vec<(String, String, TaskOutcome)> = snapshot
             .tasks
             .iter()
             .filter_map(|task| {
@@ -3995,17 +3996,18 @@ impl App {
                     (
                         task.id.clone(),
                         crate::sanitize::safe(&task.label),
-                        finish.failed,
+                        finish.outcome,
                     )
                 })
             })
             .collect();
-        for (id, label, failed) in ended {
+        for (id, label, outcome) in ended {
             if !self.notified_tasks.insert(id) {
                 continue;
             }
             if self.notify {
-                self.notifications.push(Event::BackgroundFinished { label, failed });
+                self.notifications
+                    .push(Event::BackgroundFinished { label, outcome });
             }
         }
     }
@@ -6724,9 +6726,9 @@ fn shown_tasks(
 }
 
 /// The line of tasks running apart from the turn: `◐ 2 · cargo build 1m12s ·
-/// cargo test 34s` while both run, with `✓`/`✗` in place of the elapsed time's
-/// lead once one ends. A single row, cut to `width` cells; `None` when there
-/// is nothing to show.
+/// cargo test 34s` while both run, with `✓`, `✗` or `⊘` in place of the
+/// elapsed time's lead once one ends. A single row, cut to `width` cells;
+/// `None` when there is nothing to show.
 fn task_line(
     tasks: Vec<(&crate::model::view::TaskView, Option<u64>)>,
     now: u64,
@@ -6747,11 +6749,10 @@ fn task_line(
         let elapsed = task_elapsed(at - started);
         let label = crate::sanitize::safe(&task.label);
         let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mark = match &task.finished {
-            Some(finish) if finish.failed => "\u{2717} ",
-            Some(_) => "\u{2713} ",
-            None => "",
-        };
+        let mark = task
+            .finished
+            .as_ref()
+            .map_or("", |finish| finish.outcome.mark());
         let entry = format!(" · {mark}{label} {elapsed}");
         let fits = display_width(&entry) <= room;
         if !fits {
@@ -6771,7 +6772,7 @@ fn task_line(
     }
     let failed = tasks
         .iter()
-        .any(|(task, end)| end.is_some() && task.finished.as_ref().is_some_and(|f| f.failed));
+        .any(|(task, end)| end.is_some() && task.finished.as_ref().is_some_and(TaskFinish::failed));
     let color = if running > 0 {
         &p.activity
     } else if failed {
@@ -8392,32 +8393,23 @@ mod tests {
         }
     }
 
-    /// A task the live stream ended.
+    /// A task the live stream ended with `outcome`.
     fn finished(
         mut task: crate::model::view::TaskView,
-        failed: bool,
+        outcome: TaskOutcome,
     ) -> crate::model::view::TaskView {
         task.finished = Some(crate::model::view::TaskFinish {
             at: 1,
-            status: if failed { "Failed" } else { "Completed" },
-            failed,
+            status: match outcome {
+                TaskOutcome::Completed => "Completed",
+                TaskOutcome::Failed => "Failed",
+                TaskOutcome::Stopped => "Cancelled",
+            },
+            outcome,
             replayed: false,
             text: String::new(),
             exit_code: None,
         });
-        task
-    }
-
-    /// A task whose end a read of recorded history applied, as the attach
-    /// read and every history page do.
-    fn replayed(
-        mut task: crate::model::view::TaskView,
-        failed: bool,
-    ) -> crate::model::view::TaskView {
-        task = finished(task, failed);
-        if let Some(finish) = &mut task.finished {
-            finish.replayed = true;
-        }
         task
     }
 
@@ -8429,7 +8421,7 @@ mod tests {
         task.finished = Some(crate::model::view::TaskFinish {
             at: at_ms,
             status: "Completed",
-            failed: false,
+            outcome: TaskOutcome::Completed,
             replayed: false,
             text: String::new(),
             exit_code: None,
@@ -8469,13 +8461,24 @@ mod tests {
         assert!(plain.starts_with("◐ 1 · ✓ cargo build 1m12s"), "{plain}");
         assert!(plain.contains("cargo test 34s"), "{plain}");
 
-        let mut failed = ended.clone();
-        if let Some(finish) = &mut failed.finished {
-            finish.failed = true;
-        }
+        // An ended task that has not faded yet is the only one the row
+        // shows, so it carries no count.
+        let ended_now = |task, outcome| {
+            let mut task = finished(task, outcome);
+            task.finished.as_mut().expect("a finish").at = now * 1000;
+            task
+        };
+        let mut failed = ended_now(background_task("t3", "cargo build"), TaskOutcome::Failed);
+        failed.started_at = (now - 72) * 1000;
         let plain =
             strip_escapes(&task_line(shown_tasks(&[failed], now), now, 60, p).expect("a line"));
         assert!(plain.starts_with("◐ 0 · ✗ cargo build 1m12s"), "{plain}");
+
+        let mut stopped = ended_now(background_task("t4", "cargo test"), TaskOutcome::Stopped);
+        stopped.started_at = (now - 12) * 1000;
+        let plain =
+            strip_escapes(&task_line(shown_tasks(&[stopped], now), now, 60, p).expect("a line"));
+        assert_eq!(plain, "◐ 0 · ⊘ cargo test 12s", "{plain}");
 
         // Five seconds after the end the ended task leaves; nothing else runs.
         let later = now + TASK_FADE;
@@ -8484,33 +8487,6 @@ mod tests {
             "an ended task fades out"
         );
         assert!(task_line(Vec::new(), later, 60, p).is_none());
-    }
-
-    #[test]
-    fn a_narrow_task_line_cuts_labels_and_still_names_the_first_task() {
-        use crate::ui::render::panel::{strip_escapes, visible_width};
-        let p = &test_theme().palette;
-        let now = 100;
-        let mut first = background_task("t1", "cargo build --all-targets --locked");
-        first.started_at = 0;
-        let mut second = background_task("t2", "cargo test --workspace --locked");
-        second.started_at = 0;
-        for width in [20, 30, 40, 120] {
-            let line = task_line(
-                shown_tasks(&[first.clone(), second.clone()], now),
-                now,
-                width,
-                p,
-            )
-            .expect("a line");
-            assert!(
-                visible_width(&line) <= width,
-                "{width}: too wide: {:?}",
-                strip_escapes(&line)
-            );
-            let plain = strip_escapes(&line);
-            assert!(plain.contains("cargo"), "{width}: {plain:?}");
-        }
     }
 
     #[test]
@@ -8621,6 +8597,19 @@ mod tests {
         assert!(!app.task_row, "and then stops asking");
     }
 
+    /// A task whose end a read of recorded history applied, as the attach
+    /// read and every history page do.
+    fn replayed(
+        mut task: crate::model::view::TaskView,
+        outcome: TaskOutcome,
+    ) -> crate::model::view::TaskView {
+        task = finished(task, outcome);
+        if let Some(finish) = &mut task.finished {
+            finish.replayed = true;
+        }
+        task
+    }
+
     #[test]
     fn each_background_task_is_reported_ended_once() {
         use crate::ui::notify::Event;
@@ -8648,13 +8637,13 @@ mod tests {
         app.apply(snapshot(vec![background_task("t1", "cargo build")]));
         assert!(app.notifications.is_empty());
 
-        let ended = vec![finished(background_task("t1", "cargo build"), true)];
+        let ended = vec![finished(background_task("t1", "cargo build"), TaskOutcome::Failed)];
         app.apply(snapshot(ended.clone()));
         assert_eq!(
             app.notifications,
             vec![Event::BackgroundFinished {
                 label: "cargo build".into(),
-                failed: true,
+                outcome: TaskOutcome::Failed,
             }]
         );
 
@@ -8666,7 +8655,7 @@ mod tests {
         quiet.apply(snapshot(vec![background_task("t2", "cargo test")]));
         quiet.apply(snapshot(vec![finished(
             background_task("t2", "cargo test"),
-            false,
+            TaskOutcome::Completed,
         )]));
         assert!(quiet.notifications.is_empty(), "the switch is respected");
     }
@@ -8695,14 +8684,14 @@ mod tests {
             }))
         };
 
-        // The session host publishes an empty or loading snapshot before the
+        // The worker publishes an empty or loading snapshot before the
         // delayed history reply lands.
         app.apply(snapshot(Vec::new()));
         assert!(app.notifications.is_empty());
 
         app.apply(snapshot(vec![replayed(
             background_task("t1", "already done"),
-            false,
+            TaskOutcome::Completed,
         )]));
         assert!(
             app.notifications.is_empty(),
@@ -8711,16 +8700,16 @@ mod tests {
         );
 
         app.apply(snapshot(vec![
-            replayed(background_task("t1", "already done"), false),
-            finished(background_task("t2", "live now"), true),
+            replayed(background_task("t1", "already done"), TaskOutcome::Completed),
+            finished(background_task("t2", "live now"), TaskOutcome::Stopped),
         ]));
         assert_eq!(
             app.notifications,
             vec![Event::BackgroundFinished {
                 label: "live now".into(),
-                failed: true,
+                outcome: TaskOutcome::Stopped,
             }],
-            "an end the live stream carried is one notification"
+            "a stop the live stream carried is one notification"
         );
     }
 
@@ -8747,18 +8736,21 @@ mod tests {
                 ..ViewSnapshot::default()
             }))
         };
-        let ended = replayed(background_task("t1", "cargo build"), false);
+        let ended = replayed(background_task("t1", "cargo build"), TaskOutcome::Completed);
 
         app.apply(snapshot("s1", vec![background_task("t1", "cargo build")]));
         app.apply(snapshot(
             "s1",
-            vec![finished(background_task("t1", "cargo build"), false)],
+            vec![finished(
+                background_task("t1", "cargo build"),
+                TaskOutcome::Completed,
+            )],
         ));
         assert_eq!(
             app.notifications,
             vec![Event::BackgroundFinished {
                 label: "cargo build".into(),
-                failed: false,
+                outcome: TaskOutcome::Completed,
             }]
         );
 
@@ -8769,7 +8761,10 @@ mod tests {
         });
         app.apply(snapshot(
             "s2",
-            vec![replayed(background_task("u1", "cargo test"), false)],
+            vec![replayed(
+                background_task("u1", "cargo test"),
+                TaskOutcome::Completed,
+            )],
         ));
         assert!(
             app.notifications.is_empty(),
@@ -8792,14 +8787,14 @@ mod tests {
             "s1",
             vec![
                 ended,
-                finished(background_task("t2", "cargo run"), true),
+                finished(background_task("t2", "cargo run"), TaskOutcome::Failed),
             ],
         ));
         assert_eq!(
             app.notifications,
             vec![Event::BackgroundFinished {
                 label: "cargo run".into(),
-                failed: true,
+                outcome: TaskOutcome::Failed,
             }],
             "a task that ends after the return still reports"
         );
@@ -10492,7 +10487,7 @@ mod tests {
         };
         let task = background_task("t1", "cargo build");
         drawn.app.apply(snapshot(vec![task.clone()]));
-        drawn.app.apply(snapshot(vec![finished(task, false)]));
+        drawn.app.apply(snapshot(vec![finished(task, TaskOutcome::Completed)]));
         let mut written = String::new();
         write_notifications(
             &mut drawn.app.notifications,

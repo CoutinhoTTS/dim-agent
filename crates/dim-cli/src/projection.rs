@@ -20,8 +20,8 @@ use crate::model::shell::ShellRun;
 use crate::model::view::{
     ApprovalView, CompactionPart, CompactionPartSize, CompactionState, CompactionView,
     FailureDetail, LineCut, LineState, LineView, MemberCard, MemberConversationState, MemberTarget,
-    QueuedInput, RetryView, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd,
-    ViewRow, ViewSnapshot, WorkflowView,
+    QueuedInput, RetryView, RowKind, RowTone, TaskFinish, TaskKind, TaskOutcome, TaskTarget,
+    TaskView, TurnEnd, ViewRow, ViewSnapshot, WorkflowView,
 };
 use crate::wire::{Event, EventContent, Progress, WorkflowRun, WorkflowState};
 
@@ -362,7 +362,11 @@ impl Projection {
                             ExecStatus::Failed => "Failed",
                             ExecStatus::Cancelled => "Cancelled",
                         },
-                        failed: data.status == ExecStatus::Failed,
+                        outcome: match data.status {
+                            ExecStatus::Completed => TaskOutcome::Completed,
+                            ExecStatus::Failed => TaskOutcome::Failed,
+                            ExecStatus::Cancelled => TaskOutcome::Stopped,
+                        },
                         replayed,
                         text: result_text(&data.result),
                         exit_code: data
@@ -399,19 +403,25 @@ impl Projection {
                 self.delegation_delivered(branch_id, data, event.create_at, replayed)
             }
             EventContent::CollaborationResult(data) => {
-                let (status, failed, text) = match &data.outcome {
-                    CollaborationOutcome::Completed => ("Completed", false, data.text.clone()),
-                    CollaborationOutcome::Failed { reason } => {
-                        ("Failed", true, format!("{reason}\n{}", data.text))
+                let (status, outcome, text) = match &data.outcome {
+                    CollaborationOutcome::Completed => {
+                        ("Completed", TaskOutcome::Completed, data.text.clone())
                     }
-                    CollaborationOutcome::Cancelled { reason } => {
-                        ("Cancelled", false, format!("{reason}\n{}", data.text))
-                    }
+                    CollaborationOutcome::Failed { reason } => (
+                        "Failed",
+                        TaskOutcome::Failed,
+                        format!("{reason}\n{}", data.text),
+                    ),
+                    CollaborationOutcome::Cancelled { reason } => (
+                        "Cancelled",
+                        TaskOutcome::Stopped,
+                        format!("{reason}\n{}", data.text),
+                    ),
                 };
                 let finish = TaskFinish {
                     at: event.create_at,
                     status,
-                    failed,
+                    outcome,
                     replayed,
                     text,
                     exit_code: None,
@@ -904,7 +914,7 @@ impl Projection {
                 task.finished = Some(TaskFinish {
                     at: started_at,
                     status: "Failed",
-                    failed: true,
+                    outcome: TaskOutcome::Failed,
                     replayed,
                     text: serde_json::to_value(error)
                         .expect("typed delivery error serializes")
@@ -1209,17 +1219,17 @@ impl Projection {
     /// reads the run's own record, so a run that already ended is history.
     pub fn set_workflow(&mut self, branch_id: &str, run: WorkflowRun) {
         let finished = (!run.state.unfinished()).then(|| {
-            let (status, failed) = match run.state {
-                WorkflowState::Completed => ("Completed", false),
-                WorkflowState::Failed => ("Failed", true),
-                WorkflowState::Stopped => ("Stopped", false),
-                WorkflowState::Interrupted => ("Interrupted", true),
+            let (status, outcome) = match run.state {
+                WorkflowState::Completed => ("Completed", TaskOutcome::Completed),
+                WorkflowState::Failed => ("Failed", TaskOutcome::Failed),
+                WorkflowState::Stopped => ("Stopped", TaskOutcome::Stopped),
+                WorkflowState::Interrupted => ("Interrupted", TaskOutcome::Failed),
                 WorkflowState::Running | WorkflowState::Stopping => unreachable!("terminal"),
             };
             TaskFinish {
                 at: run.ended_at.unwrap_or(run.created_at),
                 status,
-                failed,
+                outcome,
                 replayed: true,
                 text: String::new(),
                 exit_code: None,
@@ -3189,12 +3199,12 @@ mod tests {
                 },
             })
         };
-        for (task, status, result, failed) in [
+        for (task, status, result, outcome) in [
             (
                 "timed-out",
                 "failed",
                 serde_json::json!({"content": "Command timed out.", "isError": true}),
-                true,
+                TaskOutcome::Failed,
             ),
             (
                 "killed",
@@ -3204,7 +3214,7 @@ mod tests {
                     "isError": true,
                     "structuredContent": {"signal": "SIGKILL"},
                 }),
-                true,
+                TaskOutcome::Failed,
             ),
             (
                 "exit-seven",
@@ -3214,19 +3224,23 @@ mod tests {
                     "isError": true,
                     "structuredContent": {"exitCode": 7},
                 }),
-                true,
+                TaskOutcome::Failed,
             ),
             (
                 "done",
                 "completed",
                 serde_json::json!({"content": "Command finished."}),
-                false,
+                TaskOutcome::Completed,
             ),
             (
                 "stopped",
                 "cancelled",
-                serde_json::json!({"content": "Command stopped by user."}),
-                false,
+                serde_json::json!({
+                    "content": "Command stopped by user.",
+                    "isError": true,
+                    "structuredContent": {"signal": "SIGTERM"},
+                }),
+                TaskOutcome::Stopped,
             ),
         ] {
             let mut projection = Projection::default();
@@ -3249,7 +3263,7 @@ mod tests {
                 .finished
                 .as_ref()
                 .expect("a finished task");
-            assert_eq!(finish.failed, failed, "{task}: {finish:?}");
+            assert_eq!(finish.outcome, outcome, "{task}: {finish:?}");
             assert_eq!(finish.at, 2000, "{task}: the end's own time");
             assert!(
                 !finish.replayed,

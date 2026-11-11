@@ -1102,11 +1102,16 @@ fn tui_task_end_restored_by_history_is_not_notified_but_a_live_one_is() {
     );
     terminal.write(b"\x1b[27u");
     go_live.send(()).unwrap();
-    terminal.until("Background task finished: live build");
+    terminal.until("Background task stopped: live build");
     assert_eq!(
         terminal.transcript.matches(notification).count(),
         1,
         "the live end notifies once: {}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal.transcript.contains("Background task finished"),
+        "the cancelled task is not reported as finished: {}",
         terminal.transcript
     );
     home.kill(&terminal);

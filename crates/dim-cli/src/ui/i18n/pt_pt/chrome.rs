@@ -536,6 +536,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Task complete" => "Tarefa concluída",
         "Background task finished: {label}" => "Tarefa em segundo plano concluída: {label}",
         "Background task failed: {label}" => "Tarefa em segundo plano falhou: {label}",
+        "Background task stopped: {label}" => "Tarefa em segundo plano interrompida: {label}",
         "Permission needed: {tool}" => "Permissão necessária: {tool}",
         "Question waiting for your answer" => "Pergunta à espera de resposta",
         "Notify when agent needs you" => "Notificar quando o agente precisar de si",

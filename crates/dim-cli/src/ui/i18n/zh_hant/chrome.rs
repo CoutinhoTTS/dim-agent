@@ -460,6 +460,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Task complete" => "任務已完成",
         "Background task finished: {label}" => "後台任務已完成：{label}",
         "Background task failed: {label}" => "後台任務失敗：{label}",
+        "Background task stopped: {label}" => "後台任務已停止：{label}",
         "Permission needed: {tool}" => "需要授權：{tool}",
         "Question waiting for your answer" => "有問題等你回答",
         "Notify when agent needs you" => "需要你時通知",
