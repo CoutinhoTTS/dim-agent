@@ -188,27 +188,42 @@ declared service tier and the declared reasoning summary.
 | `effort`, `effortOptions` | configures | the effort mapping, validated against the advertised options |
 | `defaultEnabled`, `off`, `supported` | configures | they select or deny the effort control and send nothing themselves |
 | `serviceTier` | configures | the tier mapping, validated against the advertised options |
-| `summaries` | configures | the summary style, on the one protocol that carries it |
+| `summaries` | configures | the summary style, in the one body that carries it |
 | `mode`, `level`, `levelOptions`, `verbosity`, `verbosityOptions`, `budget` | not applied | no field exists on any request path; the first five would need their own control dispatch |
 | `visibility`, `continuation`, `notes` | describes | no reader; they are upstream prose |
 | `interleaved` | describes | not expressible on any dim protocol path |
 
-A summary is sent only where the protocol carries one (the OpenAI Responses
-body), and only beside a reasoning effort other than `none`. It follows the
-effort the adopted configuration finally sends, so it is recomputed whenever a
-configuration is finalized rather than stored once: an update to `none` sends
-none, and clearing the effort back to the declared default brings it back with
-the effort. Without an effort the declaration adds nothing, because a summary
-alone would put the adapter into reasoning mode and change the system role,
-temperature and top-p along with it.
+A summary reaches the wire only in the OpenAI Responses body, and only beside a
+reasoning effort other than `none`. It follows the effort the adopted
+configuration finally sends, so it is recomputed whenever a configuration is
+finalized rather than stored once: an update to `none` sends none, and clearing
+the effort back to the declared default brings it back with the effort. Without
+an effort the declaration adds nothing, because a summary alone would put the
+adapter into reasoning mode and change the system role, temperature and top-p
+along with it.
 
-The rule needs no record of where a value came from, because `detailed` is the
-only style it ever writes. A model that does not declare `summaries`, and a
-protocol that cannot carry one, are left entirely alone, so a style set in the
-model's own configuration survives on them. On a model that does declare
-`summaries`, a `detailed` style cannot be told apart from the derived one, so it
-follows the effort: beside `none` it is dropped, because that request
-contradicts itself. Every other style survives any effort.
+Dim's request builder accepts `reasoning.summary` on xAI Responses as well, and
+writes `reasoningSummary` for it, but the xAI adapter treats that field as
+deprecated and sends no `reasoning` key; the vendor test
+`accepts_deprecated_reasoning_summary_without_sending_it` pins that. Applying the
+declaration there would change no bytes, so it is not applied: only the OpenAI
+Responses body carries the style.
+
+The rule reads a style from either field that reaches the wire,
+`provider_options.openai.summary` first and then `reasoning.summary`, because the
+generic field is a valid way to configure one. It writes only the provider option
+and clears the generic field, so the two never disagree. A style other than
+`detailed` in either field is the configuration's own and is left as set; a
+`detailed` cannot be told apart from the derived one, so it follows the effort
+and is dropped beside `none`, because that request contradicts itself. A model
+that does not declare `summaries`, and every protocol but OpenAI Responses, are
+left entirely alone.
+
+The generic field is reachable, which is why it is read: `session.model.update`
+starts from the Session's stored configuration, and a store written under a
+`--model-config` profile can carry a style in the model's own configuration there.
+Reading only the provider option would overwrite a configured `concise` with
+`detailed`.
 
 `interleaved` is not applied. The wire field that would carry it,
 `interleavedThinking`, is rejected before a request leaves, on every protocol,

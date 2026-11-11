@@ -217,7 +217,7 @@ session.create/session.model.update。指定目标不可用就报错，不去掉
 服务端不自动应用保存偏好；显式目标省略偏好仍从目录默认开始，包括模型声明的默认推理档位、
 服务层级和推理摘要；无目标 F3 只改已采用模型的
 指定参数。哪些目录声明会被应用、其余为何只描述模型，见
-[模型配置规则](../../design/model-configuration.md#模型参数)。
+[模型配置规则](../../../design/model-configuration.md#model-parameters)。
 `/fast` 仍只修改当前 Session；保存 serviceTier 是持久 fast/tier 选择，但只有客户端
 显式传入才生效。其他消费模型不自动继承聊天偏好。
 
