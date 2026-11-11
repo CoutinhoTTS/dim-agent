@@ -477,6 +477,7 @@ pub(super) fn encode(
             sequence: source.sequence,
             create_at: source.create_at,
             tags: source.tags.clone(),
+            parent_call_id: source.parent_call_id.clone(),
             kind,
         }),
         None => serde_json::to_value(source),
@@ -488,6 +489,7 @@ pub(super) fn encode(
             Some(kind) => serde_json::to_value(EventDraft {
                 id: draft.id.clone(),
                 tags: draft.tags.clone(),
+                parent_call_id: draft.parent_call_id.clone(),
                 kind,
             }),
             None => serde_json::to_value(draft),

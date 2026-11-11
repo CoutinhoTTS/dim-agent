@@ -2208,6 +2208,7 @@ mod tests {
             sequence,
             create_at: 0,
             tags: None,
+            parent_call_id: None,
             kind,
         }
     }

@@ -54,12 +54,15 @@ pub struct Overrides {
     /// The `events` tool's description in place of the shipped one (EventHub
     /// design A.4).
     pub eventhub_tool: Option<Arc<str>>,
+    /// The `schedule` tool's description in place of the shipped one
+    /// (Scheduler design §5.1).
+    pub scheduler_description: Option<Arc<str>>,
 }
 
 /// What one run adds to the product assembly: the overrides above, the model
 /// configuration file `dim-app-server --model-config` serves, and the local
 /// endpoint a client connects to. The product path leaves every field empty.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RunSettings {
     pub overrides: Overrides,
     pub model_config: Option<PathBuf>,
@@ -72,6 +75,30 @@ pub struct RunSettings {
     /// `defaults` is set.
     pub node: Option<PathBuf>,
     pub js_runtime: Option<PathBuf>,
+    /// The file-tool root boundary an isolated run's sessions serve: reads
+    /// in the workspace, the disposable home and the system roots, writes
+    /// only in the workspace. The product path leaves it empty.
+    pub boundary: Option<dim_agent_capabilities::workspace_tools::FileToolBoundary>,
+    /// Whether the served process registers the `plugin` management tool.
+    /// The product and the other evaluations keep it; an isolated scenario
+    /// run turns it off, so the tools the process registers are the ceiling
+    /// its Sessions can declare.
+    pub plugin_tools: bool,
+}
+
+impl Default for RunSettings {
+    fn default() -> Self {
+        Self {
+            overrides: Overrides::default(),
+            model_config: None,
+            unix_path: None,
+            defaults: None,
+            node: None,
+            js_runtime: None,
+            boundary: None,
+            plugin_tools: true,
+        }
+    }
 }
 
 impl RunSettings {
@@ -123,10 +150,19 @@ pub async fn serve_home(
     observe: impl FnOnce(&mut AgentBuilder),
 ) -> Result<RunningServer> {
     let home = home.to_path_buf();
-    // The product CLI creates `<root>/eventhub` beside `scheduler/` for the
+    // The product CLI creates `<root>/scheduler` and `<root>/eventhub` for the
     // authorized file transactions (`crates/dim-app-server/src/cli.rs`); a
-    // served profile creates it too.
-    std::fs::create_dir_all(home.join("eventhub"))?;
+    // served profile creates them too.
+    for name in ["scheduler", "eventhub"] {
+        let mut directory = std::fs::DirBuilder::new();
+        directory.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            directory.mode(0o700);
+        }
+        directory.create(home.join(name))?;
+    }
     let product = run.model_config.is_none();
     let mut config = ServerConfig {
         websocket_address: Some(([127, 0, 0, 1], 0).into()),
@@ -137,6 +173,11 @@ pub async fn serve_home(
         } else {
             home.clone()
         }),
+        // The served profile's option: an isolated scenario run turns it
+        // off, so the tools the process registers are the ceiling a run's
+        // Sessions can declare, members included. The product path and the
+        // other evaluations keep the tool.
+        plugin_tools: run.plugin_tools,
         ..Default::default()
     };
     config.session_defaults.cwd = cwd.to_string_lossy().into_owned();
@@ -176,7 +217,7 @@ pub async fn serve_home(
         &mut builder,
         ModelProviderPlugin::process,
         WorkspaceToolsConfig {
-            boundary: None,
+            boundary: run.boundary.clone(),
             output_root,
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig {
@@ -216,6 +257,15 @@ pub async fn serve_home(
     dim_agent_capabilities::prompt_suggestion::install(&mut builder);
     dim_app_server::collaboration::install(&mut builder);
     dim_agent_questions::install(&mut builder);
+    // The product installs Scheduler (`crates/dimcode/src/main.rs`), so the
+    // served profile installs it too; its `schedule` description comes from
+    // the factory configuration the product leaves at the shipped text
+    // (Scheduler design §5.1).
+    let mut scheduler = dim_agent_scheduler::SchedulerTexts::default();
+    if let Some(description) = &run.overrides.scheduler_description {
+        scheduler.description = description.to_string();
+    }
+    dim_agent_scheduler::install_with(&mut builder, scheduler)?;
     // The product installs EventHub (`crates/dimcode/src/main.rs`), so the
     // served profile installs it too; its entry text comes from the factory
     // configuration the product leaves at the shipped text (EventHub A.6).
@@ -235,6 +285,7 @@ pub async fn serve_home(
         texts.continuation = continuation.to_string();
     }
     dim_goal::install_with(&mut builder, texts);
+    dim_report::install(&mut builder);
     observe(&mut builder);
     Ok(serve(builder, config).await?)
 }

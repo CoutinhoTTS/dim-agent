@@ -1461,7 +1461,7 @@ fn value_text(value: QueryValue) -> Result<SqlValue> {
 }
 
 struct Temporary<'a> {
-    connection: &'a Connection,
+    connection: &'a mut Connection,
     names: Vec<String>,
 }
 
@@ -1596,9 +1596,7 @@ fn related_filters<'a>(filter: &'a QueryFilter, result: &mut Vec<&'a QueryFilter
     }
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 fn sources<'a>(
-    connection: &Connection,
     scope: &TimelineReadScope,
     query: &'a QuerySpec,
     compiler: &mut Compiler<'a>,
@@ -1703,6 +1701,7 @@ fn sources<'a>(
         let statement = super::text::candidates(scope, field, partition_by, terms, &table);
         let supported = statement.is_some();
         if let Some((sql, parameters)) = statement {
+            let connection = &*temporary.connection;
             connection
                 .execute_batch(&format!(
                     "CREATE INDEX {table}_physical ON {table}(ord,physical)"
@@ -1743,7 +1742,7 @@ fn sources<'a>(
     }
     if let Some((limit, _)) = compiler.candidate_limit
         && let Some(members) = super::members::candidates(
-            connection,
+            &*temporary.connection,
             scope,
             query,
             usize::try_from(limit).unwrap_or(usize::MAX),
@@ -1755,6 +1754,7 @@ fn sources<'a>(
     {
         let table =
             temporary.table("ord INTEGER,seq INTEGER,physical INTEGER,PRIMARY KEY(ord,seq)")?;
+        let connection = &*temporary.connection;
         let mut insert = connection
             .prepare(&format!("INSERT INTO {table} VALUES(0,?1,?1)"))
             .map_err(error)?;
@@ -1982,6 +1982,7 @@ fn sources<'a>(
         let table = temporary.table(&format!(
             "ord INTEGER,seq INTEGER,{columns},PRIMARY KEY(ord,seq)"
         ))?;
+        let connection = &*temporary.connection;
         let candidates = if roles.is_empty() {
             "1".into()
         } else {
@@ -2054,6 +2055,7 @@ fn sources<'a>(
         let table = temporary.table(&format!(
             "ord INTEGER,branch TEXT,seq INTEGER{columns},PRIMARY KEY(ord,seq)"
         ))?;
+        let connection = &*temporary.connection;
         let placeholders = std::iter::repeat_n(
             "?",
             fields.len() + prefixes.len() + 3 + 3 * usize::from(compiler.array_rows),
@@ -2425,7 +2427,7 @@ fn selected_properties(
 
 #[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 pub(super) fn execute(
-    connection: &Connection,
+    connection: &mut Connection,
     scope: &TimelineReadScope,
     query: &QuerySpec,
     page: Option<&QueryPage>,
@@ -2596,7 +2598,6 @@ pub(super) fn execute(
         names: Vec::new(),
     };
     let source = sources(
-        connection,
         scope,
         query,
         &mut compiler,
@@ -2627,7 +2628,6 @@ pub(super) fn execute(
         };
         if compiler.array_rows {
             arrays::expand(
-                connection,
                 scope,
                 query,
                 page,
@@ -2653,6 +2653,7 @@ pub(super) fn execute(
     } else {
         (source, "events")
     };
+    let connection = &*temporary.connection;
     let filter = if element_conditions.is_empty() {
         "1".to_owned()
     } else {

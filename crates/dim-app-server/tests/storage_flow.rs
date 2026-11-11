@@ -113,6 +113,7 @@ fn record(sequence: u64, kind: EventKind) -> StoredEvent {
             sequence,
             create_at: 1000 + sequence,
             tags: Some(vec!["stored".into()]),
+            parent_call_id: None,
             kind,
         }),
         trace: None,
@@ -442,7 +443,12 @@ fn drop_v40(connection: &Connection) {
             .execute_batch(&format!("DROP {kind} {name}"))
             .unwrap();
     }
+    connection.execute_batch(&format!(
+        "DROP INDEX session_owners_by_agent; ALTER TABLE session_owners RENAME TO session_owners_before_v41; {SESSION_OWNERS_V37}; INSERT INTO session_owners SELECT * FROM session_owners_before_v41; DROP TABLE session_owners_before_v41; CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id);"
+    )).unwrap();
 }
+const SESSION_OWNERS_V37: &str = "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)))";
+const SESSION_OWNERS_V38: &str = "CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3, 4)))";
 fn schema_of(version: u32) -> Vec<String> {
     let mut statements: Vec<String> = V13_SCHEMA
         .iter()
@@ -493,6 +499,13 @@ fn schema_of(version: u32) -> Vec<String> {
                 sql
             } else {
                 sql.replace(AGENT_SESSIONS_V27, AGENT_SESSIONS_V30)
+            }
+        })
+        .map(|sql| {
+            if version < 41 {
+                sql
+            } else {
+                sql.replace(SESSION_OWNERS_V37, SESSION_OWNERS_V38)
             }
         })
         .collect();
@@ -821,6 +834,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
             result: Some(EventDraft {
                 id: None,
                 tags: first.event.tags.clone(),
+                parent_call_id: None,
                 kind: prepare,
             }),
         }],
@@ -849,6 +863,7 @@ async fn committed_history_round_trips_requests_outputs_traces_and_branch_direct
             result: Some(EventDraft {
                 id: None,
                 tags: fifth.event.tags.clone(),
+                parent_call_id: None,
                 kind: fifth.event.kind.clone(),
             }),
         }],
@@ -2097,6 +2112,7 @@ fn request_history() -> Vec<(&'static str, StoredEvent)> {
         Some(EventDraft {
             id: None,
             tags: traced.event.tags.clone(),
+            parent_call_id: None,
             kind: prepare(request),
         })
     };
@@ -3924,6 +3940,72 @@ fn read_startup_note(database: &std::path::Path) -> String {
         assert_eq!(mode & 0o077, 0, "{note}");
     }
     body.to_owned()
+}
+
+/// #1335: a store another process owns leaves a startup note that says so,
+/// and names the owner and the formats when the owner's progress note does.
+#[test]
+fn an_owned_store_leaves_a_note_that_names_the_owner() {
+    let database = Database::new();
+    let lease = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(format!("{}.lock", database.0.display()))
+        .unwrap();
+    lease.lock().unwrap();
+    let Err(AgentError::Storage(message)) = SqliteStorage::open(database.0.clone()) else {
+        panic!("an owned store must be refused");
+    };
+    assert!(
+        message.contains("another process owns the SQLite database"),
+        "{message}"
+    );
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains("Another dimcode-server is using the store."),
+        "{note}"
+    );
+    assert!(
+        note.contains("Wait for it to finish, then run the command again."),
+        "{note}"
+    );
+    // A running upgrade reports itself beside the store; the refusal then
+    // names the process and the formats to wait for.
+    std::fs::write(
+        startup_note(&database.0),
+        format!(
+            "dimcode-startup-progress v1 pid={}\nstore-upgrade from=34 to=36 progress=7\n",
+            std::process::id()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            startup_note(&database.0),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    let Err(AgentError::Storage(message)) = SqliteStorage::open(database.0.clone()) else {
+        panic!("an owned store must be refused");
+    };
+    assert!(
+        message.contains("another process owns the SQLite database"),
+        "{message}"
+    );
+    let note = read_startup_note(&database.0);
+    assert!(
+        note.contains(&format!(
+            "Another dimcode-server (pid {}) is upgrading it from format v34 to v36.",
+            std::process::id()
+        )),
+        "{note}"
+    );
+    lease.unlock().unwrap();
 }
 
 #[test]
@@ -6778,7 +6860,15 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
             .unwrap();
     }
 
-    sessions.fork_session("source", "fork", 4).await.unwrap();
+    let config = sessions
+        .session_config_text("source")
+        .await
+        .unwrap()
+        .unwrap();
+    sessions
+        .fork_session("source", "fork", 4, &config)
+        .await
+        .unwrap();
     let column = |sql: &str| -> Vec<String> {
         connection
             .prepare(sql)
@@ -6879,14 +6969,58 @@ async fn a_fork_copies_main_through_the_cut_with_its_content_and_snapshots() {
         Some(3)
     );
 
+    // The source can disappear after the caller's read; the copy still
+    // refuses a source the transaction cannot find.
     assert!(matches!(
-        sessions.fork_session("missing", "orphan", 0).await,
+        sessions.fork_session("missing", "orphan", 0, "{}").await,
         Err(AgentError::Closed(_))
     ));
     assert!(column("SELECT session_id FROM agent_sessions WHERE session_id='orphan'").is_empty());
     drop((connection, sessions));
     store.close().await.unwrap();
     db.close().await.unwrap();
+}
+
+/// #1330: the first thinking event of a block records the block's start, so
+/// the span it forms with the next event survives a reload and a fork.
+#[tokio::test]
+async fn a_thinking_blocks_start_survives_a_reload_and_a_fork() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    store
+        .create_session("source", &SessionConfig::default())
+        .await
+        .unwrap();
+    let mut opened = record(
+        1,
+        EventKind::Thinking(DeltaData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            delta: "weigh".into(),
+        }),
+    );
+    Arc::make_mut(&mut opened.event).create_at = 1_000;
+    let mut answer = text(2, "answer");
+    Arc::make_mut(&mut answer.event).create_at = 6_000;
+    append(&store, key("source", "main"), vec![opened, answer])
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+
+    let store = SqliteTimelineStore::new(db.clone());
+    let read = store.read(&key("source", "main"), 1..=2).await.unwrap();
+    assert_eq!(read[0].event.create_at, 1_000);
+    assert_eq!(read[1].event.create_at, 6_000);
+
+    let config = store.session_config_text("source").await.unwrap().unwrap();
+    store
+        .fork_session("source", "fork", 2, &config)
+        .await
+        .unwrap();
+    let forked = store.read(&key("fork", "main"), 1..=2).await.unwrap();
+    assert_eq!(forked[0].event.create_at, 1_000);
+    assert_eq!(forked[1].event.create_at, 6_000);
 }
 
 #[tokio::test]
@@ -7541,7 +7675,8 @@ async fn session_grants_upsert_remove_survive_restart_and_are_not_forked() {
         ]
     );
 
-    sessions.fork_session("s", "f", 0).await.unwrap();
+    let config = sessions.session_config_text("s").await.unwrap().unwrap();
+    sessions.fork_session("s", "f", 0, &config).await.unwrap();
     assert!(sessions.grants("f").await.unwrap().is_empty());
 
     drop(sessions);
@@ -7642,7 +7777,15 @@ async fn output_ownership_survives_a_fork_and_a_source_delete() {
             .unwrap()
     );
 
-    sessions.fork_session("source", "fork", 0).await.unwrap();
+    let config = sessions
+        .session_config_text("source")
+        .await
+        .unwrap()
+        .unwrap();
+    sessions
+        .fork_session("source", "fork", 0, &config)
+        .await
+        .unwrap();
     assert!(sessions.owns("fork", output.clone()).await.unwrap());
     assert!(sessions.owns("fork", attachment.clone()).await.unwrap());
     assert_eq!(
@@ -7820,6 +7963,7 @@ fn query_record(sequence: u64, batch_end: u64, id: &str, kind: EventKind) -> Sto
             sequence,
             create_at: 1000 + sequence,
             tags: None,
+            parent_call_id: None,
             kind,
         }),
         trace: None,
@@ -8085,3 +8229,174 @@ async fn interleaved_histories(store: Arc<dyn TimelineStore>) -> Timeline {
 
 #[path = "storage_flow/position_queries.rs"]
 mod position_queries;
+
+#[tokio::test]
+async fn main_and_branch_formats_upgrade_to_v41_without_reinterpreting_their_markers() {
+    for (version, main_layout) in [
+        (37, true),
+        (38, true),
+        (37, false),
+        (38, false),
+        (39, false),
+        (40, false),
+    ] {
+        let database = Database::new();
+        let connection = Connection::open(&database.0).unwrap();
+        let mut statements = schema_of(if main_layout { 36 } else { version });
+        statements.sort_by_key(|sql| {
+            !sql.starts_with("CREATE TABLE ") && !sql.starts_with("CREATE VIRTUAL TABLE ")
+        });
+        for mut sql in statements {
+            if sql.starts_with("CREATE TABLE agent_store_format ") {
+                sql = format!(
+                    "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}))"
+                );
+            } else if main_layout && version == 38 {
+                sql = sql.replace(SESSION_OWNERS_V37, SESSION_OWNERS_V38);
+            }
+            connection.execute_batch(&sql).unwrap();
+        }
+        connection
+            .execute("INSERT INTO agent_store_format VALUES (?1)", [version])
+            .unwrap();
+        insert_documented_records(&connection, BUSINESS_TABLES);
+        write_documented_context_switches(&connection);
+        if main_layout && version == 38 {
+            connection
+                .execute("UPDATE session_owners SET protocol_version=4", [])
+                .unwrap();
+        }
+        if !main_layout {
+            for id in ["s1", "s2"] {
+                dim_app_server::storage::initialize_session_member_index(&connection, id).unwrap();
+                if version >= 40 {
+                    dim_app_server::storage::initialize_session_output_id_index(&connection, id)
+                        .unwrap();
+                }
+            }
+        }
+        if !main_layout && version < 40 {
+            for table in [
+                "timeline_member_roots",
+                "timeline_member_origins",
+                "timeline_member_terminals",
+            ] {
+                connection.execute(&format!("DELETE FROM {table} WHERE index_id NOT IN ('input/v1','tool/v1','exec/v1','collaboration/v1')"),[]).unwrap();
+            }
+        }
+        let facts = rows(&connection, "timeline_events");
+        let owners = rows(&connection, "session_owners");
+        drop(connection);
+        let mut before = Vec::new();
+        dim_app_server::storage::export_timeline(database.0.clone(), "s1", &mut before)
+            .await
+            .unwrap();
+        let connection = Connection::open(&database.0).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT version FROM agent_store_format", [], |row| row
+                    .get::<_, u32>(0))
+                .unwrap(),
+            version
+        );
+        drop(connection);
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        assert_eq!(db.upgraded_from(), Some(version));
+        let store = SqliteTimelineStore::new(db.clone());
+        assert_eq!(store.branches("s1").await.unwrap().len(), 2);
+        assert_eq!(
+            store.read(&key("s1", "main"), 1..=7).await.unwrap().len(),
+            7
+        );
+        let connection = Connection::open(&database.0).unwrap();
+        assert_eq!(
+            rows(&connection, "timeline_events"),
+            facts,
+            "facts changed: v{version}, main={main_layout}"
+        );
+        assert_eq!(rows(&connection, "session_owners"), owners);
+        assert_eq!(
+            connection
+                .query_row("SELECT version FROM agent_store_format", [], |row| row
+                    .get::<_, u32>(0))
+                .unwrap(),
+            STORE_FORMAT
+        );
+        connection
+            .execute("UPDATE session_owners SET protocol_version=4", [])
+            .unwrap();
+        assert!(
+            connection
+                .prepare("SELECT * FROM timeline_member_roots")
+                .is_ok()
+        );
+        assert!(
+            connection
+                .prepare("SELECT * FROM timeline_array_elements")
+                .is_ok()
+        );
+        assert!(
+            connection
+                .prepare("SELECT * FROM timeline_output_ids")
+                .is_ok()
+        );
+        drop(connection);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
+        let mut after = Vec::new();
+        dim_app_server::storage::export_timeline(database.0.clone(), "s1", &mut after)
+            .await
+            .unwrap();
+        assert_eq!(
+            before.split(|b| *b == b'\n').skip(1).collect::<Vec<_>>(),
+            after.split(|b| *b == b'\n').skip(1).collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn a_failed_main_format_upgrade_rolls_back_all_added_structures_and_the_marker() {
+    for version in [37, 38] {
+        let database = Database::new();
+        let connection = Connection::open(&database.0).unwrap();
+        let mut statements = schema_of(36);
+        statements.sort_by_key(|sql| {
+            !sql.starts_with("CREATE TABLE ") && !sql.starts_with("CREATE VIRTUAL TABLE ")
+        });
+        for mut sql in statements {
+            if sql.starts_with("CREATE TABLE agent_store_format ") {
+                sql = format!(
+                    "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}))"
+                );
+            } else if version == 38 {
+                sql = sql.replace(SESSION_OWNERS_V37, SESSION_OWNERS_V38);
+            }
+            connection.execute_batch(&sql).unwrap();
+        }
+        connection
+            .execute("INSERT INTO agent_store_format VALUES (?1)", [version])
+            .unwrap();
+        insert_documented_records(&connection, BUSINESS_TABLES);
+        write_documented_context_switches(&connection);
+        connection
+            .execute(
+                "UPDATE timeline_events SET body='{}' WHERE session_id='s1' AND sequence=2",
+                [],
+            )
+            .unwrap();
+        let before = schema(&connection);
+        let facts = rows(&connection, "timeline_events");
+        drop(connection);
+        assert!(SqliteStorage::open(database.0.clone()).is_err());
+        let connection = Connection::open(&database.0).unwrap();
+        assert_eq!(schema(&connection), before);
+        assert_eq!(rows(&connection, "timeline_events"), facts);
+        assert_eq!(
+            connection
+                .query_row("SELECT version FROM agent_store_format", [], |row| row
+                    .get::<_, u32>(0))
+                .unwrap(),
+            version
+        );
+    }
+}

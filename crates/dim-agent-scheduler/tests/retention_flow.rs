@@ -72,6 +72,7 @@ async fn connect(server: &RunningServer) -> Client {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-retention-test",
+        protocol_version: 4,
     };
     Client::connect(&config).await.unwrap()
 }
@@ -120,7 +121,8 @@ async fn the_store_keeps_the_newest_hundred_terminal_runs_per_job() {
         .typed(
             "schedule.save",
             json!({"job": {"name": "nightly", "schedule": {"at": "2030-01-01T00:00:00Z"},
-                "prompt": "Summarize the day.", "cwd": home.path()}}),
+                "prompt": "Summarize the day.",
+                "target": {"kind": "launch", "cwd": home.path()}}}),
         )
         .await
         .unwrap();

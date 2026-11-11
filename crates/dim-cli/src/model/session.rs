@@ -54,6 +54,53 @@ pub struct SuggestionSetting {
     pub document: dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings,
 }
 
+/// One field of the `prompts` source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptField {
+    Base,
+    Summary,
+    Skills,
+}
+
+impl PromptField {
+    pub const ALL: [Self; 3] = [Self::Base, Self::Summary, Self::Skills];
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "base" => Some(Self::Base),
+            "summary" => Some(Self::Summary),
+            "skills" => Some(Self::Skills),
+            _ => None,
+        }
+    }
+
+    /// The field's name in the document and on the command line.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Summary => "summary",
+            Self::Skills => "skills",
+        }
+    }
+}
+
+/// The `prompts` source as `settings.read` and `settings.update` answer it.
+/// The document stays a JSON object so a field this client does not know
+/// survives a write.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct PromptSetting {
+    pub revision: String,
+    pub document: serde_json::Value,
+}
+
+impl PromptSetting {
+    pub fn text(&self, field: PromptField) -> Option<&str> {
+        self.document
+            .get(field.key())
+            .and_then(serde_json::Value::as_str)
+    }
+}
+
 /// The host's answer to `host.execution.backend`; the Execution panel shows
 /// the reason when the platform has no sandbox backend.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +159,7 @@ pub enum SessionsScope {
 }
 
 pub enum Command {
+    ErrorReport(crate::report::Request),
     Submit(String, SubmitMode),
     /// A draft with pastes to store or content blocks to send.
     SubmitDraft(Vec<DraftPart>, SubmitMode),
@@ -254,6 +302,22 @@ pub enum Command {
         enabled: bool,
         max_chars: u32,
     },
+    /// Read the `prompts` source.
+    ReadPromptSettings,
+    /// Replace one prompt field, merging the rest of the document. `revision`
+    /// is the one the client displayed; a newer one is a conflict.
+    SavePromptSetting {
+        field: PromptField,
+        text: String,
+        revision: String,
+        request: u64,
+    },
+    /// Remove one prompt field, merging the rest of the document.
+    ResetPromptSetting {
+        field: PromptField,
+        revision: String,
+        request: u64,
+    },
     ClearModelPreferences {
         provider_id: String,
         model_id: String,
@@ -282,6 +346,11 @@ pub enum Command {
     OauthCancel,
     /// A callback URL the user pasted.
     OauthPaste(String),
+    /// Refresh the signed-in account's model catalog from its panel.
+    RefreshAccountModels {
+        provider_id: String,
+        attempt: u64,
+    },
     /// The `/login` panel opened: report the provider's account.
     LoginStatus(String),
     /// The `/login` panel shows a signed-in account: report its usage.
@@ -797,8 +866,12 @@ pub enum OauthEvent {
     Exchanging,
     #[allow(dead_code)]
     SlowDown(u64),
+    ModelsRefreshed {
+        after_login: bool,
+        result: Result<(), String>,
+    },
     /// Signed in, or why not (`None` error text = cancelled).
-    Done(Result<String, Option<String>>),
+    Done(Result<(), Option<String>>),
 }
 
 /// One change to a provider.
@@ -1060,6 +1133,14 @@ pub enum RenameReply {
 
 #[allow(dead_code)]
 pub enum Update {
+    Reportable {
+        error: crate::report::Captured,
+        show_error: bool,
+    },
+    ReportReply {
+        panel: u64,
+        reply: crate::report::Reply,
+    },
     /// A queued input the TUI withdrew (`Command::InputControl` with action
     /// `withdraw`) is deleted: its complete content goes back into the draft.
     Withdrawn(dim_agent_types::UserInput),
@@ -1107,6 +1188,11 @@ pub enum Update {
     Switched {
         session_id: String,
         kind: SwitchKind,
+        /// The workspace the Session works in, as the daemon reported it
+        /// when the Session was attached: a resumed Session may live outside
+        /// the directory this client was started in. `None` for Home, and for
+        /// a daemon older than the attach record.
+        cwd: Option<String>,
     },
     /// The Session's Skills as the palette lists them: enabled and not
     /// shadowed. An empty list when the daemon has no catalog.
@@ -1150,6 +1236,13 @@ pub enum Update {
     SuggestionMethods(bool),
     /// The `prompt-suggestion` switch, as last read or written.
     SuggestionSetting(Result<SuggestionSetting, String>),
+    /// The `prompts` source, as last read or written. `field` names the write
+    /// that produced it; a read carries none.
+    PromptSettings {
+        result: Result<PromptSetting, String>,
+        field: Option<PromptField>,
+        request: Option<u64>,
+    },
     /// A turn completed on `main`: the interface may ask for the next
     /// message when nothing else has its attention.
     TurnCompleted {

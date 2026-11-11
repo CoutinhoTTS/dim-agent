@@ -326,7 +326,11 @@ async fn indexed_pending_sets_keep_old_pages_and_do_not_read_closed_or_other_gro
                     .unwrap()
             );
             if size == 128 {
-                store.fork_session("members", "copy", size).await.unwrap();
+                let config = store.session_config_text("members").await.unwrap().unwrap();
+                store
+                    .fork_session("members", "copy", size, &config)
+                    .await
+                    .unwrap();
                 let copy = read_scope("copy", size);
                 let result = store.query(&copy, &query, Some(&first)).await.unwrap();
                 let expected = store.query(&old, &query, Some(&first)).await.unwrap();

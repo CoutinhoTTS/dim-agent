@@ -47,6 +47,12 @@ impl Connection {
             mode: params.mode,
             ..InputMessageData::default()
         };
+        // The checks' contexts are appended to the operator's own content, so
+        // an input that carries none must be refused before the checks run:
+        // otherwise a check's context would be the only content, and the input
+        // it made valid would be written and titled after all.
+        data.validate()
+            .map_err(|reason| RpcError::from(AgentError::InvalidInput(reason.into())))?;
         match self
             .submit_check(
                 rpc,
@@ -66,7 +72,7 @@ impl Connection {
             SubmitCheckReply::Proceed { blocks } => append_blocks(&mut data.user, blocks),
         }
         let event = session.input(data, branch).await.map_err(RpcError::from)?;
-        if self.protocol_version() == 3 {
+        if self.protocol_version() >= 3 {
             let mut published = publication.watch();
             tokio::select! {
                 biased;
@@ -210,9 +216,9 @@ impl Connection {
             };
             let before = params.before.unwrap_or_else(|| through.saturating_add(1));
             let read = if session.ended_head(branch).is_some() {
-                HistoryRead::Ended(&tree)
+                HistoryRead::Ended(&tree, self.protocol_version())
             } else {
-                HistoryRead::Open(&session)
+                HistoryRead::Open(&session, self.protocol_version())
             };
             let reply = window_at(&read, branch, before, limit, through, turn, display).await;
             // The owner is chosen before the read: a line that ends in between
@@ -226,7 +232,7 @@ impl Connection {
                         .is_some_and(|data| data.app_error == "branch_ended") =>
                 {
                     window_at(
-                        &HistoryRead::Ended(&tree),
+                        &HistoryRead::Ended(&tree, self.protocol_version()),
                         branch,
                         before,
                         limit,
@@ -250,9 +256,9 @@ impl Connection {
             .session_service::<TreeCommands>()
             .map_err(history_error)?;
         let read = if session.ended_head(branch).is_some() {
-            HistoryRead::Ended(&tree)
+            HistoryRead::Ended(&tree, self.protocol_version())
         } else {
-            HistoryRead::Open(&session)
+            HistoryRead::Open(&session, self.protocol_version())
         };
         let reply = forward_page(&read, branch, after, limit, through, display).await;
         let reply = match reply {
@@ -263,7 +269,7 @@ impl Connection {
                     .is_some_and(|data| data.app_error == "branch_ended") =>
             {
                 forward_page(
-                    &HistoryRead::Ended(&tree),
+                    &HistoryRead::Ended(&tree, self.protocol_version()),
                     branch,
                     after,
                     limit,
@@ -413,9 +419,20 @@ impl Connection {
             let tree = session
                 .session_service::<TreeCommands>()
                 .map_err(history_error)?;
-            scan_keys(&HistoryRead::Ended(&tree), branch, through).await?
+            scan_keys(
+                &HistoryRead::Ended(&tree, self.protocol_version()),
+                branch,
+                through,
+            )
+            .await?
         } else {
-            match scan_keys(&HistoryRead::Open(&session), branch, through).await {
+            match scan_keys(
+                &HistoryRead::Open(&session, self.protocol_version()),
+                branch,
+                through,
+            )
+            .await
+            {
                 // The line ended while the scan ran: the tree serves the same
                 // read at its fixed head (ADR 021 D2).
                 Err(error)
@@ -427,7 +444,12 @@ impl Connection {
                     let tree = session
                         .session_service::<TreeCommands>()
                         .map_err(history_error)?;
-                    scan_keys(&HistoryRead::Ended(&tree), branch, through).await?
+                    scan_keys(
+                        &HistoryRead::Ended(&tree, self.protocol_version()),
+                        branch,
+                        through,
+                    )
+                    .await?
                 }
                 other => other?,
             }
@@ -836,8 +858,8 @@ async fn turn_window(
 /// Timeline, through its Session, or an ended line's stored history, through
 /// the tree that owns its fixed head (ADR 021 D2).
 enum HistoryRead<'a> {
-    Open(&'a Session),
-    Ended(&'a TreeCommands),
+    Open(&'a Session, u32),
+    Ended(&'a TreeCommands, u32),
 }
 
 struct DetailBytes {
@@ -870,15 +892,15 @@ impl HistoryRead<'_> {
         query: TimelineQuery,
     ) -> Result<dim_agent_runtime::TimelineQueryReply, AgentError> {
         match self {
-            Self::Open(session) => session.query(branch, query).await,
-            Self::Ended(tree) => tree.query(branch.to_owned(), query).await,
+            Self::Open(session, _) => session.query(branch, query).await,
+            Self::Ended(tree, _) => tree.query(branch.to_owned(), query).await,
         }
     }
 
     async fn batch_end(&self, branch: &str, sequence: u64) -> Result<(), AgentError> {
         match self {
-            Self::Open(session) => session.batch_end(branch, sequence).await,
-            Self::Ended(tree) => tree.batch_end(branch.to_owned(), sequence).await,
+            Self::Open(session, _) => session.batch_end(branch, sequence).await,
+            Self::Ended(tree, _) => tree.batch_end(branch.to_owned(), sequence).await,
         }
     }
 }
@@ -1217,7 +1239,10 @@ async fn window_items(
     let QueryOutput::Events { events } = reply.result else {
         unreachable!("event selection returns events")
     };
-    let mut visible = history_items(events.into_iter().map(|row| row.event).collect())?;
+    let version = match read {
+        HistoryRead::Open(_, version) | HistoryRead::Ended(_, version) => *version,
+    };
+    let mut visible = history_items(events.into_iter().map(|row| row.event).collect(), version)?;
     if display {
         let reply = read
             .query(
@@ -1333,11 +1358,12 @@ struct HistoryItem {
 /// and carried in that same form.
 fn history_items(
     events: Vec<Arc<dim_agent_types::AgentEvent>>,
+    version: u32,
 ) -> Result<Vec<HistoryItem>, RpcError> {
     let mut items = Vec::with_capacity(events.len());
     for event in events {
         let sequence = event.sequence;
-        let encoded = match wire::ProductEvent::new(event, 3) {
+        let encoded = match wire::ProductEvent::new(event, version) {
             Some(product) => Some(
                 serde_json::value::to_raw_value(&product)
                     .map_err(|error| RpcError::wire(-32603, error.to_string()))?,

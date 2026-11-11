@@ -275,7 +275,7 @@ export const useChatStore = defineStore("chat", () => {
         if (stream.syncing) {
           channel.lines.apply(branchId, notification.event)
           const content = notification.event.content
-          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use") && content.requestId === stream.progress?.requestId)) stream.progress = undefined
+          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use-start" || content.kind === "tool-use") && content.requestId === stream.progress?.requestId)) stream.progress = undefined
           stream.queued.push(notification.event)
         } else if (!stream.opened) {
           applyEvent(channel, branchId, notification.event)
@@ -353,7 +353,7 @@ export const useChatStore = defineStore("chat", () => {
     }
     if (!stream.projection.apply(event)) return
     const applied = event.content
-    if (applied.kind === "turn-end" || ((applied.kind === "model-end" || applied.kind === "tool-use") && applied.requestId === stream.progress?.requestId)) stream.progress = undefined
+    if (applied.kind === "turn-end" || ((applied.kind === "model-end" || applied.kind === "tool-use-start" || applied.kind === "tool-use") && applied.requestId === stream.progress?.requestId)) stream.progress = undefined
     if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
     if (branchId === MAIN_BRANCH && event.content.kind === "permission-changed") channel.view.permission = event.content.policy
     if (branchId === MAIN_BRANCH && (applied.kind === "input-deleted" || ((applied.kind === "input" || applied.kind === "source-input") && applied.blocks.some(block => block.key?.startsWith("goal:"))))) void refreshGoal(channel)
@@ -361,6 +361,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function hydrateTools(channel: Channel, branchId: string, projection: Projection, event: SessionEvent): Promise<void> {
+    if (event.parentCallId !== undefined) return
     const content = event.content
     if (content.kind !== "tool-completed" && content.kind !== "tool-result") return
     const results = content.kind === "tool-result" ? content.results : [{ callId: content.callId, result: content.result }]
@@ -488,7 +489,7 @@ export const useChatStore = defineStore("chat", () => {
         branch.through = through
         for (const event of loaded.events) {
           const content = event.content
-          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use") && content.requestId === branch.progress?.requestId)) branch.progress = undefined
+          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use-start" || content.kind === "tool-use") && content.requestId === branch.progress?.requestId)) branch.progress = undefined
         }
         branch.queued = branch.queued.filter(event => event.sequence > through)
         branch.syncing = false

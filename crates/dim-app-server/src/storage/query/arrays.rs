@@ -2,7 +2,6 @@ use super::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn expand(
-    connection: &Connection,
     scope: &TimelineReadScope,
     query: &QuerySpec,
     page: Option<&QueryPage>,
@@ -170,6 +169,7 @@ pub(super) fn expand(
     let sql = format!(
         "{source} SELECT a.ord,a.seq,a.element_index,a.array_id,a.array_length,a.inline_value FROM array_keys a"
     );
+    let connection = &*temporary.connection;
     let mut statement = connection.prepare(&sql).map_err(error)?;
     let mut rows = statement
         .query(params_from_iter(&compiler.parameters))

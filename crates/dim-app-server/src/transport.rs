@@ -758,6 +758,7 @@ async fn run_connection(
                                             "session.branch_create",
                                             "session.branch_end",
                                             "session.create.origin",
+                                            "session.language",
                                         ]);
                                         if params.protocol_version >= 3 {
                                             features.extend([

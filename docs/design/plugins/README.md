@@ -13,6 +13,7 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [Questions](Questions.md) | — | `ask_user` tool, `session.question.respond`, waiters of running `ask_user` calls; no events | — | M2; #262 |
 | [ShellInput](ShellInput.md) | — | `shell.*` methods, command runs | — | P1 |
 | [Attachments](Attachments.md) | — | `attachment.put`, Session files | — | P1 |
+| [Report](Report.md) | error-only `report.*` and its connection-bound drafts | `session.report.*` and its connection-bound drafts | — | [#1319](https://github.com/arcships/dim/issues/1319) |
 | [SessionTitle](SessionTitle.md) | — | observes adoption of the first user input, `session.rename` | — | P1 |
 | [PromptSuggestion](PromptSuggestion.md) | `PromptSuggestionSettings` in App Server: the `prompt-suggestion` Settings source | observes the completed turn's events, `session.suggestion.request` and `session.suggestion.respond`, the offer in flight and the shown offer; no events | — | P1; [#943](https://github.com/arcships/dim/issues/943) |
 | [Goal](Goal.md) | — | `goal_update` tool, `session.goal.*` | goal state folded from `goal:objective` and `goal:status` blocks, continuation | P2 |
@@ -28,7 +29,7 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
 | [Scheduler](Scheduler.md) | triggers, run history (jobs in Settings) | `schedule` tool | — | P2 |
 | [Workflow](Workflow.md) | runs (definitions in Settings or project files) | `workflow` tool | — | P2 |
-| [Code Mode](CodeMode.md) | `CodeModeSettings`: user `codemode` source and execution caps (when optional package is enabled) | `codemode` tool and runtime factory | one-shot program execution and programmatic tool-result correlation | Draft P3; planned `runtime/plugins/codemode/` package, not yet present; [#1276](https://github.com/arcships/dim/issues/1276) |
+| [Code Mode](CodeMode.md) | `CodeMode`: structural bounds, the branch runner map, the program semaphore and part registrations (when installed) | `codemode` tool (v4 clients only) | one-shot QuickJS program execution, child call batches, effects and cancellation; client boundary in [child tool batches](../appserver/child-tool-batches.md) | Draft P3; native crate `crates/dim-codemode/`; [#1276](https://github.com/arcships/dim/issues/1276) |
 | [Collaboration](Collaboration.md) | member relations and temporary agents | `agent` tool, including the `models` action that lists the models a new member can run; reports and messages; the two markers' guide entries | the delegation's facts, wake inputs and settlement | #551 |
 | [ExternalAgent](ExternalAgent.md) | external conversations, Collaboration member kind `external-agent`; bridge row per node | — (delegation and decisions are Collaboration's) | — | P3 |
 | [AcpGateway](AcpGateway.md) | client-host plugin: ACP/RPC connections, requests and cleanup; outside the daemon | — | — | #436; PR #441; [acceptance](../acp-gateway-acceptance.md) |
@@ -45,6 +46,6 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 
 | Scope | Parts |
 | --- | --- |
-| Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source), `CodeModeSettings` when the optional Code Mode package is enabled, light-ocr in the daemon, EventHub; AcpGateway in its client host process |
-| Session parts | Questions, ShellInput, Attachments, SessionTitle, PromptSuggestion, Goal, Web, Recall, EventHub, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), Code Mode when enabled |
+| Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source), `CodeMode` when installed, light-ocr in the daemon, EventHub, Report; AcpGateway in its client host process |
+| Session parts | Questions, ShellInput, Attachments, SessionTitle, Report, PromptSuggestion, Goal, Web, Recall, EventHub, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), Code Mode when enabled |
 | Branch parts | Goal (with Pursuit), ModelRecovery, Hooks, Prompt, Code Mode when enabled |

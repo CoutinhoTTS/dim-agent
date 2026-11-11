@@ -149,6 +149,11 @@ impl Approval {
             unreachable!("before transforms keep the event key");
         };
         let approval_id = &data.approval_id;
+        let mut pending = PendingDrop {
+            approval: self,
+            approval_id: approval_id.clone(),
+            armed: true,
+        };
         let decision = tokio::select! {
             biased;
             decision = received => decision,
@@ -160,6 +165,7 @@ impl Approval {
                 return Err(HostError::Cancelled(CANCELLED.into()));
             }
         };
+        pending.disarm();
         match decision {
             Err(_) => Err(HostError::Cancelled(CAPABILITY_RELOADING.into())),
             Ok(None) => Err(HostError::Cancelled(CANCELLED.into())),
@@ -373,6 +379,30 @@ impl Approval {
         };
         for item in pending {
             self.cancelled(&item.request.approval_id, CAPABILITY_RELOADING);
+        }
+    }
+}
+
+/// Removes a pending request when its admission future is dropped, so a
+/// cancelled child does not leave a prompt that can authorize nothing.
+struct PendingDrop<'a> {
+    approval: &'a Approval,
+    approval_id: String,
+    armed: bool,
+}
+impl PendingDrop<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for PendingDrop<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let taken = take(&mut self.approval.inner.lock().unwrap(), &self.approval_id);
+        if taken.is_some() {
+            self.approval.cancelled(&self.approval_id, CANCELLED);
         }
     }
 }

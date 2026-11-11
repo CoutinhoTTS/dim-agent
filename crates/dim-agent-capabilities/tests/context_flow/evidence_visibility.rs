@@ -31,6 +31,7 @@ fn context(events: Vec<EventKind>) -> ContextHistory {
                 sequence: index as u64 + 1,
                 create_at: index as u64,
                 tags: None,
+                parent_call_id: None,
                 kind,
             })
         })

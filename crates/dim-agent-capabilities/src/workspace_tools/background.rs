@@ -214,35 +214,43 @@ impl BackgroundExec {
         let task_id = data.task_id.clone();
         let owner = self.clone();
         let supervised = task_id.clone();
+        let parent = dim_agent_runtime::core::current_parent_call_id();
         self.tasks.spawn(async move {
-            let (status, result) = process.finish_background(&supervised, cancel).await;
-            let mut ended = owner.timeline.append(
-                EventKind::ExecEnded(ExecEndedData {
-                    task_id: supervised.clone(),
-                    status,
-                    result,
-                })
-                .into(),
-            );
-            drop(hold);
-            if let Ok(event) = &ended {
-                let mut publication = owner.timeline.watch();
-                let _ = publication
-                    .wait_for(|(sequence, closed)| *sequence >= event.sequence || *closed)
-                    .await;
-                let published = publication.borrow().0;
-                if published < event.sequence
-                    && let Some(error) = owner.timeline.failure()
-                {
-                    ended = Err(error);
+            let run = async {
+                let (status, result) = process.finish_background(&supervised, cancel).await;
+                let mut ended = owner.timeline.append(
+                    EventKind::ExecEnded(ExecEndedData {
+                        task_id: supervised.clone(),
+                        status,
+                        result,
+                    })
+                    .into(),
+                );
+                drop(hold);
+                if let Ok(event) = &ended {
+                    let mut publication = owner.timeline.watch();
+                    let _ = publication
+                        .wait_for(|(sequence, closed)| *sequence >= event.sequence || *closed)
+                        .await;
+                    let published = publication.borrow().0;
+                    if published < event.sequence
+                        && let Some(error) = owner.timeline.failure()
+                    {
+                        ended = Err(error);
+                    }
                 }
-            }
-            let mut state = owner.state.lock().unwrap();
-            if let Err(error) = ended {
-                tracing::warn!(%error, task_id = supervised, "exec/ended was not written");
-                state.tasks.remove(&supervised);
-            } else if let Some(task) = state.tasks.get_mut(&supervised) {
-                task.output = None;
+                let mut state = owner.state.lock().unwrap();
+                if let Err(error) = ended {
+                    tracing::warn!(%error, task_id = supervised, "exec/ended was not written");
+                    state.tasks.remove(&supervised);
+                } else if let Some(task) = state.tasks.get_mut(&supervised) {
+                    task.output = None;
+                }
+            };
+            if let Some(parent) = parent {
+                dim_agent_runtime::core::with_parent_call_id(parent, run).await
+            } else {
+                run.await
             }
         });
         Ok(task_id)

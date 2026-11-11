@@ -4,14 +4,14 @@
 //! diff (2.3). The terminal layer (2.2) guarantees the exit contract.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DraftPart, ManagementAction,
-    ManagementRefusal, ManagementRequest, ManagementResult, RenameReply, SessionPort, SubmitMode,
-    SuggestionSetting, SwitchKind, Update,
+    ManagementRefusal, ManagementRequest, ManagementResult, PromptField, PromptSetting,
+    RenameReply, SessionPort, SubmitMode, SuggestionSetting, SwitchKind, Update,
 };
 #[cfg(test)]
 use crate::model::shell::Outcome as ShellOutcome;
@@ -43,6 +43,7 @@ use crate::ui::render::fullscreen::MouseOutcome;
 use crate::ui::render::markdown::MarkdownRenderer;
 use crate::ui::render::panel::{clip, wrap, wrap_words};
 use crate::ui::render::{Frame, FullScreen, Overlay, Screen};
+use crate::ui::report_panel;
 use crate::ui::runtime_panel::RuntimePanel;
 use crate::ui::sessions_panel::SessionsPanel;
 use crate::ui::settings_panel::{Setting, SettingsPanel, Values as SettingValues};
@@ -51,7 +52,9 @@ use crate::ui::tasks_panel::TasksPanel;
 use crate::ui::terminal::{
     InputEvent, KeyCode, KeyEvent, Modifiers, Terminal, TerminalError, Wait,
 };
-use crate::ui::text::{RUNNING_MARK, STATUS_MARK, display_width, truncate_cells};
+use crate::ui::text::{
+    RUNNING_MARK, STATUS_MARK, display_width, truncate_cells, truncate_cells_start,
+};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
@@ -217,6 +220,20 @@ pub fn print_web_panel(opened: &WebOpened) {
     }
 }
 
+/// Writes each notification the run queued since the last frame (`ui::notify`)
+/// through `write`, in the order they came, and empties the queue. `write` is
+/// the terminal's write; an error ends the interface as that one does.
+fn write_notifications(
+    notifications: &mut Vec<crate::ui::notify::Event>,
+    terminal: &crate::ui::notify::Terminal,
+    mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    for event in std::mem::take(notifications) {
+        write(&crate::ui::notify::sequence(terminal, &event))?;
+    }
+    Ok(())
+}
+
 fn run_terminal(
     host: Box<dyn SessionPort>,
     surroundings: Env,
@@ -250,9 +267,12 @@ fn run_terminal(
     let background = terminal
         .background_report()
         .and_then(detect::parse_background_report);
+    // A terminal that answered the program status query keeps the record of
+    // the run, so the title and the bar leave the job to it.
+    let program_status = terminal.program_status();
     let env = detect::env_from_process();
-    let mut progress = ProgressBar::from_env(&env);
-    let mut title = WindowTitle::new(crate::ui::title::apple_terminal(), Instant::now());
+    let mut progress = ProgressBar::from_env(&env, program_status);
+    let mut title = WindowTitle::from_env(program_status, Instant::now());
     let (default_id, detected) = Theme::detect(&env, true, background.as_deref());
     let saved = crate::ui::theme_panel::saved_theme_id(&surroundings.home);
     let theme = match &saved {
@@ -325,15 +345,14 @@ fn run_terminal(
                 return code;
             }
         }
-        for event in std::mem::take(&mut app.notifications) {
-            if terminal
-                .write(&crate::ui::notify::sequence(&notify_terminal, &event))
-                .is_err()
-            {
-                let code = terminal.lost();
-                app.host.shutdown();
-                return code;
-            }
+        if write_notifications(&mut app.notifications, &notify_terminal, |bytes| {
+            terminal.write(bytes)
+        })
+        .is_err()
+        {
+            let code = terminal.lost();
+            app.host.shutdown();
+            return code;
         }
         let program_status = app.program_status();
         if let Some(report) = status.report(program_status.clone())
@@ -679,6 +698,20 @@ fn run_terminal(
                     title.forget();
                     dirty = true;
                 }
+                Outcome::EditPrompt {
+                    field,
+                    text,
+                    revision,
+                } => {
+                    if let Err(code) = edit_prompt(&mut app, &mut terminal, field, text, revision) {
+                        app.host.shutdown();
+                        return code;
+                    }
+                    status.forget();
+                    progress.forget();
+                    title.forget();
+                    dirty = true;
+                }
                 Outcome::Exit(code) => break code,
                 Outcome::Web => {
                     app.host.send(Command::ToggleWeb);
@@ -741,11 +774,102 @@ enum Outcome {
         text: String,
         seed: Option<serde_json::Value>,
     },
+    /// A prompt row's edit: the field, the text the editor opens with, and
+    /// the revision it was displayed at.
+    EditPrompt {
+        field: PromptField,
+        text: String,
+        revision: String,
+    },
     /// `/web`: flip the daemon-owned Web entry switch without leaving.
     Web,
     /// Start the updated CLI from this path on the session.
     Restart(PathBuf),
     Exit(i32),
+}
+
+/// Opens the external editor on a prompt field and sends what it leaves.
+/// `Err` is the code the terminal lost.
+fn edit_prompt(
+    app: &mut App,
+    terminal: &mut Terminal,
+    field: PromptField,
+    text: String,
+    revision: String,
+) -> std::result::Result<(), i32> {
+    let draft = match app.prompt_draft.as_ref().map(|(kept, _)| *kept) {
+        Some(kept) if kept == field => app.prompt_draft.take().expect("the kept prompt draft").1,
+        _ => match editor::Draft::open_text(&app.home, field.key(), "md", &text) {
+            Ok(draft) => draft,
+            Err(error) => {
+                app.set_notice(error);
+                return Ok(());
+            }
+        },
+    };
+    let path = draft.path().display().to_string();
+    let mut command = editor::command(draft.path());
+    let program = command.get_program().to_string_lossy().into_owned();
+    let ran = match terminal.run_external(&mut command) {
+        Ok(ran) => ran,
+        Err(_) => return Err(terminal.lost()),
+    };
+    match ran {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            app.prompt_draft = Some((field, draft));
+            app.set_notice(format!(
+                "{} Nothing was written. Your text is kept in {path}.",
+                editor::exited(status)
+            ));
+            return Ok(());
+        }
+        Err(error) => {
+            app.prompt_draft = Some((field, draft));
+            app.set_notice(format!("{program}: {error}"));
+            return Ok(());
+        }
+    }
+    let text = match draft.text() {
+        Ok(text) => text,
+        Err(error) => {
+            app.prompt_draft = Some((field, draft));
+            app.set_notice(format!("{error} Your text is kept in {path}."));
+            return Ok(());
+        }
+    };
+    if text.trim().is_empty() {
+        draft.remove();
+        app.set_notice(format!(
+            "An empty draft writes nothing; press r on {} to reset it",
+            field.key()
+        ));
+        return Ok(());
+    }
+    let current = app
+        .prompt_setting
+        .as_ref()
+        .and_then(|setting| setting.text(field))
+        .unwrap_or_default();
+    if text == current {
+        draft.remove();
+        app.set_notice(format!("{}: unchanged", field.key()));
+        return Ok(());
+    }
+    let request = app.next_prompt_request;
+    app.next_prompt_request = app.next_prompt_request.wrapping_add(1);
+    app.pending_prompt = Some(PendingPrompt {
+        request,
+        field,
+        draft: Some(draft),
+    });
+    app.host.send(Command::SavePromptSetting {
+        field,
+        text,
+        revision,
+        request,
+    });
+    Ok(())
 }
 
 /// Opens the external editor on a management draft and writes what it
@@ -839,6 +963,12 @@ struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
     cwd_key: String,
+    /// The workspace shown in the composer's label, with the home written
+    /// `~`: the workspace the attached Session reports, or [`Self::cwd_key`]
+    /// at Home. Never read from the process's directory, which a frame would
+    /// otherwise see change under it. Display form only: a caller that needs
+    /// a path uses [`Self::git_head`] or the Session's cwd.
+    workspace: String,
     home: PathBuf,
     /// How tool groups are drawn by default (`/tools`, which redraws every
     /// committed group too).
@@ -852,6 +982,8 @@ struct App {
     tail_groups: Vec<(usize, String)>,
     notices: Vec<String>,
     reports: Vec<Block>,
+    report_error: Option<crate::report::Captured>,
+    report_sequence: u64,
     banner_committed: bool,
     snapshot: Option<ViewSnapshot>,
     /// The adopted model and its reasoning effort, once the session exists.
@@ -1026,6 +1158,21 @@ struct App {
     /// A flip asked for before the switch was known: the read that answers
     /// it sends the flip.
     suggestion_flip: bool,
+    /// The `prompts` source as last read or written.
+    prompt_setting: Option<PromptSetting>,
+    /// A draft a refused prompt write kept, for the next edit of its field.
+    prompt_draft: Option<(PromptField, editor::Draft)>,
+    /// The prompt write in flight: only its own reply settles it.
+    pending_prompt: Option<PendingPrompt>,
+    /// The next prompt write's id.
+    next_prompt_request: u64,
+}
+
+struct PendingPrompt {
+    request: u64,
+    field: PromptField,
+    /// The save's draft; a reset keeps no draft and leaves its copy behind.
+    draft: Option<editor::Draft>,
 }
 
 /// An offer the Session made for the message the user would send next.
@@ -1201,6 +1348,7 @@ enum Prompt {
     Timeline(Box<TimelinePanel>),
     Queue(QueuePanel),
     Export(ListPanel),
+    Report(Box<report_panel::Panel>),
     Fork(ForkAsk),
     Models(ModelsPanel),
     Providers(Box<ProvidersPanel>),
@@ -1232,13 +1380,15 @@ impl App {
         let mouse = crate::ui::config::read(&home, MOUSE_KEY).is_none_or(|v| v != "off");
         let notify = crate::ui::config::read(&home, crate::ui::notify::NOTIFY_KEY)
             .is_none_or(|v| v != false);
+        // The `@` index, pasted paths and dropped files all resolve against
+        // the local `--cwd` (cli-attachment-input), which an attach does not
+        // change; the border's workspace label is the Session's and does.
         let mut composer = Composer::new(past);
         composer.set_root(PathBuf::from(&cwd_key));
-        let git_head = git_head(&cwd_key);
-        let branch = git_head.as_deref().and_then(git_branch);
-        Self {
+        let mut app = Self {
             host,
             composer,
+            workspace: String::new(),
             cwd_key,
             tool_detail: saved_tool_detail(&home),
             thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
@@ -1247,6 +1397,8 @@ impl App {
             home,
             notices: Vec::new(),
             reports: Vec::new(),
+            report_error: None,
+            report_sequence: 0,
             banner_committed: false,
             snapshot: None,
             label: None,
@@ -1308,8 +1460,8 @@ impl App {
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
-            branch,
-            git_head,
+            branch: None,
+            git_head: None,
             git_checked: Instant::now(),
             shell: None,
             clipboard: None,
@@ -1329,7 +1481,13 @@ impl App {
             suggestion_setting: None,
             suggestion_methods: false,
             suggestion_flip: false,
-        }
+            prompt_setting: None,
+            prompt_draft: None,
+            pending_prompt: None,
+            next_prompt_request: 0,
+        };
+        app.show_workspace(None);
+        app
     }
 
     /// The wheel over an overlay: moves the picker's or the palette's
@@ -1654,6 +1812,7 @@ impl App {
             | Some(Prompt::Timeline(_))
             | Some(Prompt::Queue(_))
             | Some(Prompt::Export(_))
+            | Some(Prompt::Report(_))
             | Some(Prompt::Fork(_)) => {}
             Some(Prompt::Tasks(_)) if approval.is_none() && question.is_none() => {}
             Some(Prompt::Upgrade(_)) if approval.is_none() && question.is_none() => {}
@@ -1952,10 +2111,15 @@ impl App {
                     &[("count", &count.to_string())],
                 ));
             }
-            Update::Switched { session_id, kind } => {
+            Update::Switched {
+                session_id,
+                kind,
+                cwd,
+            } => {
                 if !session_id.is_empty() {
                     self.unsent = None;
                 }
+                self.show_workspace(cwd.as_deref());
                 self.switch_session(session_id, kind)
             }
             Update::Skills(entries) => {
@@ -1989,6 +2153,47 @@ impl App {
                 }
             }
             Update::Toast(text) => self.set_notice(text),
+            Update::Reportable { error, show_error } => {
+                let hint = t(crate::report::HINT);
+                let text = if show_error {
+                    format!("{}\n{hint}", crate::sanitize::safe_line(&error.message))
+                } else {
+                    hint.to_owned()
+                };
+                if show_error
+                    || !matches!(error.operation, crate::report::Operation::ModelGeneration)
+                {
+                    self.reports.push(Block::Status {
+                        text,
+                        tone: Tone::Warning,
+                    });
+                }
+                self.report_error = Some(error);
+            }
+            Update::ReportReply { panel, reply } => {
+                if let Some(Prompt::Report(report)) = &mut self.prompt
+                    && report.id == panel
+                {
+                    if let Some(action) = report.reply(reply) {
+                        self.host.send(Command::ErrorReport(crate::report::Request {
+                            panel,
+                            action,
+                        }));
+                    }
+                } else if let crate::report::Reply::Prepared(session, prepared) = reply {
+                    self.host.send(Command::ErrorReport(crate::report::Request {
+                        panel,
+                        action: crate::report::Action::Cancel {
+                            draft: crate::report::Draft {
+                                session,
+                                report_id: prepared.report_id,
+                                plan_id: prepared.plan.plan_id,
+                            },
+                            generation: false,
+                        },
+                    }));
+                }
+            }
             Update::Report { text, warning } => self.reports.push(Block::Status {
                 text,
                 tone: if warning { Tone::Warning } else { Tone::Muted },
@@ -2370,6 +2575,62 @@ impl App {
                     self.set_notice(tf("Prompt suggestion: {error}", &[("error", &error)]));
                 }
             },
+            Update::PromptSettings {
+                result,
+                field,
+                request,
+            } => {
+                let settled = request.is_some_and(|request| {
+                    self.pending_prompt
+                        .as_ref()
+                        .is_some_and(|pending| pending.request == request)
+                });
+                match result {
+                    Ok(setting) => {
+                        self.prompt_setting = Some(setting.clone());
+                        if settled {
+                            if let Some(pending) = self.pending_prompt.take()
+                                && let Some(draft) = pending.draft
+                            {
+                                draft.remove();
+                            }
+                            if field.is_some() {
+                                self.set_notice(t("Prompt saved; applies to new Sessions"));
+                            }
+                        }
+                        if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                            panel.set_prompts(&setting);
+                        }
+                    }
+                    Err(error) => {
+                        if settled {
+                            let pending = self.pending_prompt.take().expect("settled prompt");
+                            if let Some(draft) = pending.draft {
+                                let path = draft.path().display().to_string();
+                                self.prompt_draft = Some((pending.field, draft));
+                                self.set_notice(tf(
+                                    "{field}: {error} Your text is kept in {path}",
+                                    &[
+                                        ("field", pending.field.key()),
+                                        ("error", &error),
+                                        ("path", &path),
+                                    ],
+                                ));
+                            } else {
+                                self.set_notice(tf(
+                                    "{field}: {error}",
+                                    &[("field", pending.field.key()), ("error", &error)],
+                                ));
+                            }
+                        } else if request.is_none() {
+                            if let Some(Prompt::Settings(panel)) = &mut self.prompt {
+                                panel.set_prompts_unavailable();
+                            }
+                            self.set_notice(tf("Prompts: {error}", &[("error", &error)]));
+                        }
+                    }
+                }
+            }
             Update::TurnCompleted { turn_id } => self.turn_completed(&turn_id),
             Update::SuggestionOffer { turn_id, text } => {
                 self.suggestion = Some(Suggestion { turn_id, text });
@@ -2437,6 +2698,9 @@ impl App {
                     .remove(&(branch_id.clone(), request_id.clone()));
             }
             Update::Failed(message) => {
+                if let Some(Prompt::Report(report)) = &mut self.prompt {
+                    report.disconnected(&message);
+                }
                 self.restore_unsent();
                 self.failure = Some(message);
                 self.run_started = None;
@@ -2500,6 +2764,7 @@ impl App {
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
                     Some(Prompt::Isolation(panel)) => panel.paste(&text),
                     Some(Prompt::Management(panel)) => panel.paste(&text),
+                    Some(Prompt::Report(panel)) => panel.paste(&text),
                     Some(Prompt::Ask(prompt)) => prompt.paste(&text),
                     Some(_) => {}
                 }
@@ -2524,6 +2789,35 @@ impl App {
             }
         };
         let ctrl = key.mods.contains(Modifiers::CTRL);
+        if let Some(Prompt::Report(report)) = &mut self.prompt {
+            let panel = report.id;
+            let action = match report.key(key, std::path::Path::new(&self.cwd_key)) {
+                report_panel::Input::None => None,
+                report_panel::Input::Send(action) => Some(action),
+                report_panel::Input::Close => {
+                    if let Some(path) = report.saved_path() {
+                        self.notices.push(format!(
+                            "{} {}",
+                            t("Saved ZIP"),
+                            crate::sanitize::safe_line(&path.display().to_string())
+                        ));
+                    }
+                    let draft = report.draft.take();
+                    self.prompt = None;
+                    draft.map(|draft| crate::report::Action::Cancel {
+                        draft,
+                        generation: false,
+                    })
+                }
+            };
+            if let Some(action) = action {
+                self.host.send(Command::ErrorReport(crate::report::Request {
+                    panel,
+                    action,
+                }));
+            }
+            return Outcome::Continue;
+        }
         if self.failure.is_some() {
             if (ctrl && matches!(key.code, KeyCode::Char('c' | 'd')))
                 || (key.code == KeyCode::Enter && self.composer.text().trim() == "/exit")
@@ -2584,6 +2878,7 @@ impl App {
                     ListEvent::None | ListEvent::Refresh => Effect::None,
                 },
                 Prompt::Fork(p) => p.handle_key(key),
+                Prompt::Report(_) => unreachable!("report handles its own input"),
                 Prompt::Models(p) => p.handle_key(key),
                 Prompt::Providers(p) => p.handle_key(key),
                 Prompt::Plugins(p) => p.handle_key(key),
@@ -3055,7 +3350,14 @@ impl App {
         self.set_notice(t("Stopping"));
     }
 
-    fn place_label(&self) -> String {
+    /// The composer's bottom-right label in at most `cells`: the workspace
+    /// and its branch, or the shown line's place. A shown line outranks the
+    /// workspace, which then keeps its whole form beside it: the whole
+    /// place, then `⑂` alone, and only then the whole place again for
+    /// [`border_line`] to drop. That last form is deliberately wider than
+    /// `cells`, so a shown line is never displaced by a shortened path;
+    /// [`workspace_label`] never returns one, so the form only appears here.
+    fn place_label(&self, cells: usize) -> String {
         if let Some(draft) = &self.line_draft {
             let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
             return tf(
@@ -3063,16 +3365,26 @@ impl App {
                 &[("id", &line_name(lines, &draft.parent))],
             );
         }
-        let workspace = workspace_label(self.branch.as_deref());
-        match &self.snapshot {
-            Some(snapshot) if !snapshot.focus.is_empty() && snapshot.focus != "main" => {
-                format!(
-                    "{workspace} · ⑂ {}",
-                    line_path(&snapshot.lines, &snapshot.focus)
-                )
-            }
-            _ => workspace,
+        let branch = self.branch.as_deref();
+        let Some(snapshot) = self
+            .snapshot
+            .as_ref()
+            .filter(|s| !s.focus.is_empty() && s.focus != "main")
+        else {
+            return workspace_label(&self.workspace, branch, cells);
+        };
+        // A shown line outranks the workspace, which keeps its whole form
+        // beside it: the whole place, then `⑂` alone, then the whole place
+        // for the border to drop.
+        let line = format!("⑂ {}", line_path(&snapshot.lines, &snapshot.focus));
+        let whole = format!("{} · {line}", whole_workspace(&self.workspace, branch));
+        if width_of(&whole) <= cells {
+            return whole;
         }
+        if width_of(&line) <= cells {
+            return line;
+        }
+        whole
     }
 
     /// Opens the drafted line with `text` as its opening input.
@@ -3388,6 +3700,62 @@ impl App {
                     self.permissions_return = true;
                 }
             }
+            Effect::EditPrompt(field) => {
+                if self.pending_prompt.is_some() {
+                    self.set_notice(t("A prompt save is still in progress"));
+                    return Outcome::Continue;
+                }
+                let Some(setting) = &self.prompt_setting else {
+                    self.set_notice(t("Prompt settings are not available"));
+                    return Outcome::Continue;
+                };
+                let text = setting.text(field).unwrap_or_default().to_owned();
+                let revision = setting.revision.clone();
+                return Outcome::EditPrompt {
+                    field,
+                    text,
+                    revision,
+                };
+            }
+            Effect::ResetPrompt(field) => {
+                if self.pending_prompt.is_some() {
+                    self.set_notice(t("A prompt save is still in progress"));
+                    return Outcome::Continue;
+                }
+                let Some(setting) = &self.prompt_setting else {
+                    self.set_notice(t("Prompt settings are not available"));
+                    return Outcome::Continue;
+                };
+                let revision = setting.revision.clone();
+                let old = setting.text(field).map(str::to_owned);
+                if let Some(text) = old {
+                    match editor::Draft::open_text(&self.home, field.key(), "md", &text) {
+                        Ok(draft) => {
+                            let path = draft.path().display().to_string();
+                            self.set_notice(tf(
+                                "Resetting {field}; the old text is kept in {path}",
+                                &[("field", field.key()), ("path", &path)],
+                            ));
+                        }
+                        Err(error) => {
+                            self.set_notice(error);
+                            return Outcome::Continue;
+                        }
+                    }
+                }
+                let request = self.next_prompt_request;
+                self.next_prompt_request = self.next_prompt_request.wrapping_add(1);
+                self.pending_prompt = Some(PendingPrompt {
+                    request,
+                    field,
+                    draft: None,
+                });
+                self.host.send(Command::ResetPromptSetting {
+                    field,
+                    revision,
+                    request,
+                });
+            }
             Effect::ThemePreview(id) => self.paint_theme(&id),
             Effect::ThemeRestore(id) => {
                 self.prompt = None;
@@ -3432,6 +3800,13 @@ impl App {
             Effect::OauthCancel => self.host.send(Command::OauthCancel),
             Effect::OauthBack => {}
             Effect::OauthPaste(url) => self.host.send(Command::OauthPaste(url)),
+            Effect::RefreshAccountModels {
+                provider_id,
+                attempt,
+            } => self.host.send(Command::RefreshAccountModels {
+                provider_id,
+                attempt,
+            }),
             Effect::Connected(provider_id) => {
                 self.set_notice(tf("Connected {provider}", &[("provider", &provider_id)]));
                 if provider_id == DIM_OAUTH_ID {
@@ -3635,6 +4010,7 @@ impl App {
                 if self.suggestion_methods {
                     self.host.send(Command::ReadSuggestionSetting);
                 }
+                self.host.send(Command::ReadPromptSettings);
                 self.open_settings(Setting::Theme);
             }
             (Some("recording"), None, None) => {
@@ -3675,9 +4051,19 @@ impl App {
                 .suggestion_setting
                 .as_ref()
                 .map(|setting| setting.document.enabled),
+            prompts: self.prompt_origins(),
             permission: crate::permission::name(self.permission_policy.preset).to_owned(),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
+    }
+
+    /// Each prompt text's origin, as the last read or write reported it.
+    fn prompt_origins(&self) -> [Option<bool>; 3] {
+        PromptField::ALL.map(|field| {
+            self.prompt_setting
+                .as_ref()
+                .map(|setting| setting.text(field).is_some())
+        })
     }
 
     /// Flips a `/settings` switch, or opens the picker behind a row.
@@ -3693,6 +4079,9 @@ impl App {
                 self.open_prompt(Prompt::Language(LanguagePanel::new(i18n::saved_locale(
                     &self.home,
                 ))));
+            }
+            Setting::BasePrompt | Setting::SummaryPrompt | Setting::SkillsPrompt => {
+                self.settings_return = None;
             }
             Setting::Permission => {
                 let panel = ApprovalsPanel::new(&self.permission_policy);
@@ -4237,6 +4626,24 @@ impl App {
                 let text = format!("/{name} {args}");
                 self.host
                     .send(Command::Configure(text.trim_end().to_owned()));
+                Outcome::Continue
+            }
+            "report" => {
+                if !args.trim().is_empty() {
+                    self.set_notice(t("Usage: /report"));
+                } else if let Some(error) = self.report_error.clone() {
+                    self.report_sequence += 1;
+                    let panel = self.report_sequence;
+                    self.open_prompt(Prompt::Report(Box::new(report_panel::Panel::new(
+                        panel, &error,
+                    ))));
+                    self.host.send(Command::ErrorReport(crate::report::Request {
+                        panel,
+                        action: crate::report::Action::Prepare(error),
+                    }));
+                } else {
+                    self.set_notice(t("No reportable error in this interface."));
+                }
                 Outcome::Continue
             }
             "exit" => Outcome::Exit(0),
@@ -4895,10 +5302,7 @@ impl App {
                 .map(|label| fg(&label, &p.highlight));
             let title = title.map(|(text, label)| label(text));
             let docked = self.dock_status(status.as_deref());
-            let place = fg(
-                &fit_place(self.place_label(), docked.as_deref(), outer),
-                &p.muted,
-            );
+            let place = self.composer_place(docked.as_deref(), outer);
             let last = composer_box.len() - 1;
             composer_box[0] = format!(
                 "{margin}{}",
@@ -4906,16 +5310,22 @@ impl App {
             );
             composer_box[last] = format!(
                 "{margin}{}",
-                border_line(("╰", "╯"), docked.as_deref(), Some(&place), outer, &edge)
+                border_line(
+                    ("╰", "╯"),
+                    docked.as_deref(),
+                    place.as_deref(),
+                    outer,
+                    &edge
+                )
             );
         } else {
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
             let margin = " ".repeat(MARGIN);
-            let place = fg(&fit_place(self.place_label(), None, outer), &p.muted);
+            let place = self.composer_place(None, outer);
             let last = composer_box.len() - 1;
             composer_box[last] = format!(
                 "{margin}{}",
-                border_line(("╰", "╯"), None, Some(&place), outer, &edge)
+                border_line(("╰", "╯"), None, place.as_deref(), outer, &edge)
             );
         }
         let replaced = !command_entry
@@ -4931,6 +5341,7 @@ impl App {
                         | Prompt::Timeline(_)
                         | Prompt::Queue(_)
                         | Prompt::Export(_)
+                        | Prompt::Report(_)
                 )
             );
         if !replaced {
@@ -4957,6 +5368,7 @@ impl App {
             Some(Prompt::Timeline(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Queue(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Export(prompt)) => Some(prompt.cursor(width)),
+            Some(Prompt::Report(prompt)) => Some(prompt.cursor()),
             Some(Prompt::Models(prompt)) => Some(prompt.cursor(width)),
             Some(Prompt::Providers(prompt)) => Some(prompt.cursor(width, height)),
             Some(Prompt::Login(prompt)) => Some(prompt.cursor(width, height)),
@@ -4997,6 +5409,7 @@ impl App {
                         }
                         Some(Prompt::Queue(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Export(prompt)) => Some(prompt.render(list_width, budget, p)),
+                        Some(Prompt::Report(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Fork(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Models(prompt)) => Some(prompt.render(list_width, budget, p)),
                         Some(Prompt::Providers(prompt)) => {
@@ -5047,6 +5460,7 @@ impl App {
             Some(Prompt::Timeline(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Queue(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Export(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Report(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Fork(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Models(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Providers(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -5422,6 +5836,28 @@ impl App {
         }
     }
 
+    /// Points the composer's label and its Git source at the workspace the
+    /// daemon reported for the Session being shown, or back at the launch
+    /// workspace for `None` (Home, or a daemon older than the attach record).
+    /// The branch is read once here, without waiting for the next poll.
+    ///
+    /// The `@` mention root does not move: interactive local file paths keep
+    /// the CLI's selected `--cwd` as their base, whichever Session is
+    /// attached (cli-attachment-input), and the reported workspace may be a
+    /// directory this client cannot see. When the border names a directory
+    /// other than that base, the file picker's title names the base, so the
+    /// screen still says which files a mention reads.
+    fn show_workspace(&mut self, cwd: Option<&str>) {
+        let cwd = cwd.unwrap_or(&self.cwd_key);
+        self.workspace = crate::ui::tilde(cwd);
+        // Paths compare by component, so `A/` is `A`; not canonicalized: I/O
+        // per switch, and a resolved symlink is a display question.
+        self.composer
+            .name_root(Path::new(cwd) != Path::new(&self.cwd_key));
+        self.git_head = git_head(cwd);
+        self.branch = self.git_head.as_deref().and_then(git_branch);
+    }
+
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
         let first = self.session_id.is_empty();
         // Home's first message started this Session: nothing shown to clear.
@@ -5447,7 +5883,9 @@ impl App {
         self.planner.reset();
         self.commits = CommitState::default();
         self.answered.clear();
-        self.prompt = None;
+        if !matches!(self.prompt, Some(Prompt::Report(_))) {
+            self.prompt = None;
+        }
         self.snapshot = None;
         self.runs = Runs::default();
         self.window_floor = 0;
@@ -5963,6 +6401,40 @@ impl App {
         (!parts.is_empty()).then(|| parts.join("  "))
     }
 
+    /// The composer's bottom-right label, built to fit the cells the border
+    /// will allow it beside `status`; `None` when nothing fits. The place and
+    /// the unread badge share that one budget, so neither can drift from what
+    /// [`border_line`] draws.
+    fn composer_place(&self, status: Option<&str>, outer: usize) -> Option<String> {
+        let cells = outer.saturating_sub(6 + status.map_or(0, |label| width_of(label) + 3));
+        if cells == 0 {
+            return None;
+        }
+        let place = fg(&self.place_label(cells), &self.palette.muted);
+        let count = self
+            .snapshot
+            .as_ref()
+            .map_or(0, |view| view.unread_lines.len());
+        if count == 0 {
+            return Some(place);
+        }
+        let full = format!("{} ({count}) · /lines", t("Unread"));
+        let compact = format!("/lines ({count})");
+        let Some(label) = [full.as_str(), compact.as_str(), "/lines", "*"]
+            .into_iter()
+            .find(|label| width_of(label) <= cells)
+        else {
+            return Some(place);
+        };
+        let width = width_of(label);
+        let label = fg(label, &self.palette.highlight);
+        if width + 2 + width_of(&place) <= cells && width_of(&place) != 0 {
+            Some(format!("{label}  {place}"))
+        } else {
+            Some(label)
+        }
+    }
+
     fn status_line(&self, cols: usize) -> String {
         let slot = self.slot();
         let approval = permission_label(self.permission_policy.preset);
@@ -6400,17 +6872,41 @@ fn labeled_rows(pairs: &[(&str, &str)], body_width: usize) -> Vec<String> {
     rows
 }
 
-fn fit_place(place: String, status: Option<&str>, outer: usize) -> String {
-    let room = outer.saturating_sub(2);
-    let fits =
-        |label: &str| status.map_or(0, |status| width_of(status) + 3) + width_of(label) + 3 < room;
-    if fits(&place) {
-        return place;
+/// The workspace and its branch, whole: `~/src/app (main)`.
+fn whole_workspace(workspace: &str, branch: Option<&str>) -> String {
+    match branch {
+        Some(branch) => format!("{workspace} ({branch})"),
+        None => workspace.to_owned(),
     }
-    match place.split_once(" · ⑂ ") {
-        Some((_, line)) if fits(&format!("⑂ {line}")) => format!("⑂ {line}"),
-        _ => place,
+}
+
+/// The narrowest path tail worth putting a branch beside: below it
+/// `…o (rex-team/T-4440f2)` names neither the checkout nor the line, so the
+/// path alone says more.
+const MIN_TAIL: usize = 8;
+
+/// The workspace label in at most `cells` columns, degrading in place
+/// rather than being dropped whole by the border: the whole label, the whole
+/// label with the path's front cut once its tail is at least [`MIN_TAIL`],
+/// the path alone when the branch gives way, then the path alone with its
+/// front cut. No form exceeds `cells`, so the caller sizes the border by
+/// measuring the result.
+fn workspace_label(workspace: &str, branch: Option<&str>, cells: usize) -> String {
+    let whole = whole_workspace(workspace, branch);
+    if width_of(&whole) <= cells {
+        return whole;
     }
+    if let Some(branch) = branch {
+        let suffix = format!(" ({branch})");
+        let tail = truncate_cells_start(workspace, cells.saturating_sub(width_of(&suffix)));
+        if width_of(&tail) >= MIN_TAIL {
+            return format!("{tail}{suffix}");
+        }
+    }
+    if width_of(workspace) <= cells {
+        return workspace.to_owned();
+    }
+    truncate_cells_start(workspace, cells)
 }
 
 /// `main ▸ parser race ▸ the guard · after message 4`: the lines from `main` down to
@@ -6447,19 +6943,6 @@ fn line_name(lines: &[LineView], line: &str) -> String {
             truncate_cells(&crate::sanitize::safe(first), NAME_COLUMNS)
         }
         _ => short_id(line).to_owned(),
-    }
-}
-
-/// The working directory, `~` for the home, and the git branch: what the
-/// prompt box writes in its bottom border.
-fn workspace_label(branch: Option<&str>) -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let cwd = crate::ui::tilde(&cwd);
-    match branch {
-        Some(branch) => format!("{cwd} ({branch})"),
-        None => cwd,
     }
 }
 
@@ -6571,7 +7054,8 @@ fn boxed(
 /// One border row `outer` columns wide between `corners`: a styled label
 /// after `─ ` on the left, another before ` ─` on the right, as the prompt
 /// box carries them. A label that does not fit is left out, the right one
-/// first.
+/// first; a caller that can say the same thing shorter composes it that way
+/// before calling, as the composer does for its workspace label.
 fn border_line(
     corners: (&str, &str),
     left: Option<&str>,
@@ -7457,12 +7941,12 @@ mod tests {
             );
             app.fullscreen = fullscreen;
             let frame = app.frame((160, 30));
-            let cwd = crate::ui::tilde(&std::env::current_dir().unwrap().display().to_string());
+            let cwd = crate::ui::tilde(&root.path().to_string_lossy());
             let row = frame
                 .live
                 .iter()
                 .find(|row| row.contains(&cwd))
-                .expect("the composer shows the working directory without Git");
+                .expect("the composer names the workspace it was given, not the process's");
             assert!(
                 !row.contains(&format!("{cwd} (")),
                 "a workspace without Git must show only its path: {row}"
@@ -7596,6 +8080,657 @@ mod tests {
             }
             std::fs::write(&head, saved).unwrap();
         }
+    }
+
+    /// The reported flow: in fullscreen, a linked worktree, a running turn.
+    /// The label must survive 80 columns by degrading, and the border must
+    /// keep its width whatever form it takes.
+    #[test]
+    fn a_running_turn_in_a_worktree_keeps_the_workspace_label_at_eighty_columns() {
+        use crate::ui::render::panel::visible_width;
+
+        i18n::set(i18n::Locale::En);
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let workspace = "~/Projects/repo/dim.worktrees/T-4440f2";
+        let branch = "rex-team/T-4440f2";
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/tmp/T-4440f2".into(),
+        );
+        app.workspace = workspace.to_owned();
+        app.branch = Some(branch.to_owned());
+        app.fullscreen = true;
+        // A running turn: the run status, the elapsed clock and the
+        // interrupt hint, which is the dock the reported screenshot shows.
+        app.snapshot = Some(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            main_running: true,
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        });
+        app.run_started = Some(Instant::now());
+        let border = |app: &mut App, cols| {
+            let size = (cols, 30);
+            let frame = app.frame(size);
+            let row = frame
+                .live
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            let mut screen = FullScreen::new(size, true);
+            let bytes = screen.render(&frame, size, &app.palette, app);
+            let mut emu = crate::ui::render::testterm::Emu::new(cols as usize, 30);
+            emu.feed(&bytes);
+            let painted = emu
+                .rows_text()
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            (row, painted)
+        };
+        for cols in [80u16, 100, 120, 160] {
+            let (row, painted) = border(&mut app, cols);
+            // The frame is the margin plus `outer`, two cells short of the
+            // terminal; the label must not change that.
+            for text in [&row, &painted] {
+                assert_eq!(
+                    visible_width(text),
+                    usize::from(cols) - 2,
+                    "{cols}: the border must keep its width: {text:?}"
+                );
+            }
+        }
+        // At 80 columns the dock leaves too few cells for the whole label:
+        // the tail of the path and the branch survive.
+        let (row, _) = border(&mut app, 80);
+        assert!(
+            row.contains(&format!("orktrees/T-4440f2 ({branch})")),
+            "80: the path's tail and the branch must survive: {row:?}"
+        );
+        assert!(
+            !row.contains(workspace),
+            "80: the whole path must not fit beside this dock: {row:?}"
+        );
+        // The Chinese dock is narrower than the English one, so it keeps a
+        // longer tail at the same width.
+        i18n::set(i18n::Locale::ZhCn);
+        let (zh, _) = border(&mut app, 80);
+        i18n::set(i18n::Locale::En);
+        let (en, _) = border(&mut app, 80);
+        assert!(
+            visible_width(&zh) == visible_width(&en),
+            "both docks must fill the same border: {zh:?} / {en:?}"
+        );
+        assert!(
+            zh.contains("dim.worktrees") && !en.contains("dim.worktrees"),
+            "the narrower dock keeps more of the path: {zh:?} / {en:?}"
+        );
+        // A branch too long beside any usable tail gives way to the path.
+        app.branch = Some("rex-team/T-4440f2-and-a-much-longer-name".into());
+        let (row, _) = border(&mut app, 80);
+        assert!(
+            row.contains("worktrees/T-4440f2") && !row.contains("(rex-team"),
+            "80: the branch gives way when its tail is too short: {row:?}"
+        );
+    }
+
+    /// A launch with an explicit workspace names that workspace, not the
+    /// process's directory, and the unread badge measures against the same
+    /// budget as the place so it cannot push the label out of the border.
+    #[test]
+    fn the_label_names_the_sessions_workspace_and_the_badge_shares_its_budget() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().to_path_buf(),
+            "/tmp/the-launch-directory".into(),
+        );
+        app.workspace = "~/Projects/repo/dim.worktrees/T-4440f2".into();
+        app.branch = Some("rex-team/T-4440f2".into());
+        app.fullscreen = false;
+        let bottom = |app: &mut App, cols| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            rows.iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let row = bottom(&mut app, 160);
+        assert!(
+            row.contains("~/Projects/repo/dim.worktrees/T-4440f2 (rex-team/T-4440f2)"),
+            "the label follows the Session's workspace: {row:?}"
+        );
+        assert!(
+            !row.contains("the-launch-directory"),
+            "the process's directory must not reach the border: {row:?}"
+        );
+
+        let mut snapshot = app.snapshot.clone().unwrap_or_default();
+        snapshot.unread_lines.insert("b-7c".into());
+        app.snapshot = Some(snapshot);
+        for cols in [160u16, 80, 40, 24] {
+            let row = bottom(&mut app, cols);
+            let width = visible_width(&row);
+            assert_eq!(width, usize::from(cols) - 2, "{cols}: {row:?}");
+            assert!(
+                row.contains("╰") && row.contains("╯"),
+                "{cols}: the border stays closed: {row:?}"
+            );
+        }
+        // The place survives beside the badge where the room allows both.
+        let row = bottom(&mut app, 160);
+        assert!(row.contains("Unread (1)"), "{row:?}");
+        assert!(
+            row.contains("T-4440f2"),
+            "the place keeps its tail: {row:?}"
+        );
+    }
+
+    /// The reported flow: launched in workspace A, the client attaches a
+    /// Session that lives in workspace B (an explicit `--cwd`, a `/resume`
+    /// into another worktree). The border must name B, its branch included,
+    /// and going Home must put A back. `@` file completion is not the
+    /// Session's: interactive local paths keep the selected `--cwd` as their
+    /// base, so it offers A's files throughout, and that is asserted here so
+    /// the border cannot quietly take the mention root with it.
+    #[test]
+    fn a_session_attached_elsewhere_moves_the_border_but_not_the_mention_base() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let root = tempfile::tempdir().unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        // Long enough that the narrow title's tail cannot hold it whole under
+        // any platform's temp root, and short enough that the wide title
+        // still names the whole path.
+        const LONG: &str = "a-checkout-longer-than-the-narrow-titles-tail-can-hold";
+        let launch = root.path().join(LONG).join("A");
+        let other = root.path().join("B");
+        for (path, branch) in [(&launch, "launch-line"), (&other, "session-line")] {
+            std::fs::create_dir_all(path).unwrap();
+            git(path, &["init", "-q", "-b", branch]);
+            git(
+                path,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "Initial",
+                ],
+            );
+        }
+        let launch_workspace = crate::ui::tilde(&launch.to_string_lossy());
+        let session_workspace = crate::ui::tilde(&other.to_string_lossy());
+        // Each workspace holds a file of its own, so an `@` candidate names
+        // the workspace it was found in.
+        std::fs::write(launch.join("launch-note.txt"), "").unwrap();
+        std::fs::write(other.join("session-note.txt"), "").unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            launch.to_string_lossy().into_owned(),
+        );
+        let border = |app: &mut App, cols: u16| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width: {row:?}"
+            );
+            row
+        };
+        // The `@` picker for `@note`: the panel's title row and the file
+        // names it offers, read from one frame once the walk reports that it
+        // has finished.
+        let picker = |app: &mut App, cols: u16| -> (String, Vec<String>) {
+            let names = ["launch-note.txt", "session-note.txt"];
+            typed(app, "@note");
+            let started = Instant::now();
+            let rows = loop {
+                let frame = app.frame((cols, 30));
+                let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+                if !app.composer.mention_searching() {
+                    break rows;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the `@` walk did not finish"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            app.composer.clear();
+            // The title row is where the panel writes its heading: the row
+            // carrying the `Files` title, whatever its box draws above it.
+            let title = rows
+                .iter()
+                .find(|row| row.contains("Files"))
+                .cloned()
+                .expect("the picker draws its title");
+            let offered = names
+                .iter()
+                .filter(|name| rows.iter().any(|row| row.contains(*name)))
+                .map(|name| (*name).to_owned())
+                .collect();
+            (title, offered)
+        };
+
+        // Launched in A: Home names A and its branch, and `@` offers A's
+        // files, the base pasted and dropped paths also use. The picker's
+        // title says nothing extra while the border names that base too.
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{launch_workspace} (launch-line)")),
+            "Home names the launch workspace: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "Home offers the launch workspace's files"
+        );
+        assert!(
+            title.contains("Files") && !title.contains(&launch_workspace),
+            "Home's border already names the base: {title:?}"
+        );
+
+        // A Session in B is attached, as `/resume` into a sibling worktree
+        // does: the daemon reports B and the border moves with it.
+        app.apply(Update::Switched {
+            session_id: "s-b".into(),
+            kind: SwitchKind::Resumed,
+            cwd: Some(other.to_string_lossy().into_owned()),
+        });
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s-b".into(),
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        })));
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{session_workspace} (session-line)")),
+            "the border names the Session's workspace and its branch: {row:?}"
+        );
+        assert!(
+            !row.contains(&launch_workspace),
+            "the launch workspace must not stand in for it: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "the mention picker keeps the local `--cwd` while the border names the Session's workspace"
+        );
+        assert!(
+            title.contains(&format!("Files · {launch_workspace}")),
+            "the picker names the base the border no longer does: {title:?}"
+        );
+        assert!(
+            !title.contains(&session_workspace),
+            "the picker names the base, not the border's workspace: {title:?}"
+        );
+        // Too narrow for the whole path, the title keeps its tail, as the
+        // border's does, so the checkout it ends in is still readable. The
+        // title leaves 54 path cells at 80 columns, and the fixture's path
+        // outgrows them under any platform's temp root.
+        const NARROW: u16 = 80;
+        use std::path::MAIN_SEPARATOR;
+        let (narrow, _) = picker(&mut app, NARROW);
+        let named = narrow
+            .split("Files · ")
+            .nth(1)
+            .unwrap_or_default()
+            .split("esc close")
+            .next()
+            .unwrap_or_default()
+            .trim_end();
+        assert!(
+            named.starts_with('…'),
+            "a narrow title cuts the path's front: {narrow:?}"
+        );
+        assert!(
+            named.ends_with(&format!("{MAIN_SEPARATOR}A")),
+            "a narrow title keeps the checkout it ends in: {narrow:?}"
+        );
+        assert!(
+            !narrow.contains(LONG),
+            "a narrow title keeps the tail, not the whole path: {narrow:?}"
+        );
+
+        // The daemon may spell the same directory another way. A trailing
+        // separator changes nothing, so the picker stays plain: the border
+        // already names that base.
+        let spelled = format!("{}{MAIN_SEPARATOR}", launch.to_string_lossy());
+        app.apply(Update::Switched {
+            session_id: "s-a".into(),
+            kind: SwitchKind::Resumed,
+            cwd: Some(spelled),
+        });
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&launch_workspace) && row.contains("(launch-line)"),
+            "the border names that base and its branch: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "the picker keeps the launch workspace's files"
+        );
+        assert!(
+            !title.contains(&launch_workspace),
+            "the same directory in another spelling is not another base: {title:?}"
+        );
+
+        // `/new` goes Home: the Session is gone and the launch workspace is
+        // what the next Session will work in.
+        app.apply(Update::Switched {
+            session_id: String::new(),
+            kind: SwitchKind::New,
+            cwd: None,
+        });
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{launch_workspace} (launch-line)")),
+            "Home moves the border back to the launch workspace: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "Home keeps the mention picker on the launch workspace"
+        );
+        assert!(
+            !title.contains(&launch_workspace),
+            "Home's border names the base again, so the picker drops it: {title:?}"
+        );
+    }
+
+    /// The workspace label steps down through four forms in the border
+    /// instead of vanishing, and the border keeps its width through all of
+    /// them: the whole label, the whole label with the path's front cut while
+    /// its tail is still worth reading, the path alone, then the path alone
+    /// cut. Each workspace is attached the way `/resume` attaches one, so the
+    /// path and the branch are the daemon's answer rather than a field a test
+    /// filled in. The border gives a right label `cols - 9` cells: the margin,
+    /// the two border cells, and the `─ ` and ` ─` around it.
+    #[test]
+    fn the_workspace_label_steps_down_in_four_forms_in_the_border() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        /// The cells the border keeps for itself around a right label.
+        const BORDER: usize = 9;
+        /// The narrowest path tail worth putting a branch beside.
+        const TAIL: usize = 8;
+
+        let root = tempfile::tempdir().unwrap();
+        let repository = |name: &str, branch: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git")
+                    .current_dir(&path)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "git {args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            git(&["init", "-q", "-b", branch]);
+            git(&[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ]);
+            crate::ui::tilde(&path.to_string_lossy())
+        };
+
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            root.path().join("launch").to_string_lossy().into_owned(),
+        );
+        // The row the border draws the workspace in: the label sits between
+        // the `─ ` and ` ─` the border keeps around it.
+        let label_row = |app: &mut App, cells: usize| {
+            let cols = (cells + BORDER) as u16;
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width whatever the label: {row:?}"
+            );
+            row
+        };
+        let label = |app: &mut App, cells: usize| {
+            let row = label_row(app, cells);
+            let label = row
+                .split("─ ")
+                .nth(1)
+                .and_then(|rest| rest.split(" ─").next())
+                .unwrap_or_default()
+                .to_owned();
+            assert!(
+                visible_width(&label) <= cells,
+                "{cells}: the label stays inside its cells: {label:?}"
+            );
+            label
+        };
+        let attach = |app: &mut App, id: &str, cwd: &str| {
+            app.apply(Update::Switched {
+                session_id: id.into(),
+                kind: SwitchKind::Resumed,
+                cwd: Some(cwd.into()),
+            });
+        };
+
+        // A branch wider than the path, so the path-alone rung is reachable:
+        // it takes over once the tail beside the branch would be too short.
+        let path = root.path().join("checkout").to_string_lossy().into_owned();
+        let branch = format!("team/{}", "x".repeat(width_of(&crate::ui::tilde(&path))));
+        let path = repository("checkout", &branch);
+        let suffix = format!(" ({branch})");
+        let whole = format!("{path}{suffix}");
+        assert!(
+            width_of(&suffix) + TAIL > width_of(&path),
+            "this repository shows the path-alone rung"
+        );
+        attach(&mut app, "s-a", &path);
+
+        // The whole label, at the last column that holds it.
+        assert_eq!(label(&mut app, width_of(&whole)), whole);
+        // One column short: the path's front is cut and the branch stays.
+        let cut = label(&mut app, width_of(&whole) - 1);
+        assert!(cut.ends_with(&suffix), "the branch stays: {cut:?}");
+        assert!(cut.starts_with('…'), "the cut is marked: {cut:?}");
+        // A tail of exactly eight cells is still worth reading beside it.
+        let tail = label(&mut app, width_of(&suffix) + TAIL);
+        assert!(
+            tail.ends_with(&suffix),
+            "an eight-cell tail keeps it: {tail:?}"
+        );
+        // Seven is not: the branch gives way, and the path is all there is.
+        let without = label(&mut app, width_of(&suffix) + TAIL - 1);
+        assert!(
+            !without.contains(&branch),
+            "the branch gives way: {without:?}"
+        );
+        // The path alone, whole at its own width, then cut from the front.
+        assert_eq!(
+            label(&mut app, width_of(&path)),
+            path,
+            "the whole path stays when the branch gives way"
+        );
+        let cut = label(&mut app, width_of(&path) - 1);
+        assert!(
+            cut.starts_with('…') && cut != path,
+            "the path is cut: {cut:?}"
+        );
+        // No form fits: with a cell left the label is the cut mark alone,
+        // and only a border with no cells at all drops it.
+        assert_eq!(label(&mut app, 1), "\u{2026}");
+        assert!(label(&mut app, 0).is_empty());
+
+        // The budget is in cells, not characters: a CJK path spends two cells
+        // on a character, so the same columns hold fewer of them.
+        let ascii = repository("ascii", "main");
+        let cjk = repository("项目", "main");
+        assert!(
+            width_of(&cjk) > cjk.chars().count(),
+            "{cjk:?} must spend two cells on a character"
+        );
+        let tail_of = |app: &mut App, path: &str| {
+            attach(app, "s-b", path);
+            let tail = label(app, width_of(" (main)") + TAIL);
+            assert!(tail.ends_with(" (main)"), "{tail:?}");
+            tail
+        };
+        let ascii_tail = tail_of(&mut app, &ascii);
+        let cjk_tail = tail_of(&mut app, &cjk);
+        assert_eq!(
+            width_of(&ascii_tail),
+            width_of(&cjk_tail),
+            "both tails spend the same cells: {ascii_tail:?} / {cjk_tail:?}"
+        );
+        assert!(
+            cjk_tail.chars().count() < ascii_tail.chars().count(),
+            "the CJK tail holds fewer characters at the same width: \
+             {cjk_tail:?} / {ascii_tail:?}"
+        );
+        assert!(
+            cjk_tail.starts_with('…'),
+            "the CJK tail is cut, not dropped: {cjk_tail:?}"
+        );
+    }
+
+    /// A shown line outranks the workspace in the border: where the whole
+    /// place fits it is drawn whole, one column short of that it keeps `⑂`
+    /// alone, and where even that does not fit the border drops the label
+    /// rather than falling back to a shortened path.
+    #[test]
+    fn a_shown_line_keeps_its_forms_in_the_border_and_comes_before_the_workspace() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/w".into(),
+        );
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            lines: vec![LineView {
+                id: "main".into(),
+                parent: None,
+                purpose: String::new(),
+                state: LineState::Main,
+                cut: None,
+            }],
+            ..ViewSnapshot::default()
+        })));
+        let border = |app: &mut App, cols: u16| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width: {row:?}"
+            );
+            row
+        };
+        // `/w · ⑂ b-7c` is 11 cells and `⑂ b-7c` is 6, so the border's nine
+        // fixed cells put the whole place at 20 columns and `⑂` alone at 15:
+        // one column short of the line's own width drops it.
+        let row = border(&mut app, 20);
+        assert!(row.contains("/w · ⑂ b-7c"), "{row:?}");
+        let row = border(&mut app, 19);
+        assert!(
+            row.contains("⑂ b-7c") && !row.contains("/w"),
+            "a column short, the line keeps itself and the path gives way: {row:?}"
+        );
+        let row = border(&mut app, 15);
+        assert!(
+            row.contains("⑂ b-7c") && !row.contains("/w"),
+            "the `⑂` form survives to its own width: {row:?}"
+        );
+        let row = border(&mut app, 14);
+        assert!(
+            !row.contains('⑂'),
+            "below the line's own form the border drops it: {row:?}"
+        );
     }
 
     #[test]
@@ -7983,6 +9118,160 @@ mod tests {
         assert!(row(&mut app).starts_with("on"));
     }
 
+    /// The prompt rows show each text's origin, and Enter and `r` reach the
+    /// editor and the reset without a new slash command.
+    #[test]
+    fn settings_prompt_rows_show_origin_and_edit_or_reset() {
+        use crate::ui::render::panel::strip_escapes;
+
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        app.apply(Update::PromptSettings {
+            result: Ok(PromptSetting {
+                revision: "r1".into(),
+                document: serde_json::json!({"summary": "S"}),
+            }),
+            field: None,
+            request: None,
+        });
+        app.run_command("settings", "");
+        let live = strip_escapes(&app.frame((100, 40)).live.join("\n"));
+        for row in ["Base prompt", "Compaction prompt", "Skills instructions"] {
+            assert!(live.contains(row), "{row} is missing: {live}");
+        }
+        assert!(live.contains("custom"), "{live}");
+        for _ in 0..8 {
+            app.handle_input(key(KeyCode::Down));
+        }
+        assert!(matches!(
+            app.handle_input(key(KeyCode::Enter)),
+            Outcome::EditPrompt {
+                field: PromptField::Base,
+                ..
+            }
+        ));
+        app.handle_input(key(KeyCode::Down));
+        app.handle_input(key(KeyCode::Char('r')));
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ResetPromptSetting {
+                field: PromptField::Summary,
+                ..
+            })
+        ));
+    }
+
+    /// A read reply never settles a prompt write; only the write's own reply
+    /// may remove its draft.
+    #[test]
+    fn a_read_or_unrelated_reply_leaves_a_pending_prompt_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent)),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let draft = editor::Draft::open_text(home.path(), "base", "md", "draft").unwrap();
+        let path = draft.path().to_path_buf();
+        app.pending_prompt = Some(PendingPrompt {
+            request: 7,
+            field: PromptField::Base,
+            draft: Some(draft),
+        });
+        app.apply(Update::PromptSettings {
+            result: Ok(PromptSetting {
+                revision: "r2".into(),
+                document: serde_json::json!({}),
+            }),
+            field: None,
+            request: None,
+        });
+        assert!(app.pending_prompt.is_some(), "a read settled the write");
+        assert!(path.exists(), "a read removed the draft");
+        app.apply(Update::PromptSettings {
+            result: Ok(PromptSetting {
+                revision: "r3".into(),
+                document: serde_json::json!({}),
+            }),
+            field: Some(PromptField::Base),
+            request: Some(6),
+        });
+        assert!(app.pending_prompt.is_some(), "another write settled it");
+        assert!(path.exists(), "another write removed the draft");
+    }
+
+    /// A reset occupies the slot, so an edit cannot start until its reply.
+    #[test]
+    fn a_reset_is_serialized_with_a_later_edit() {
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.prompt_setting = Some(PromptSetting {
+            revision: "r1".into(),
+            document: serde_json::json!({"summary": "S"}),
+        });
+        let _ = app.apply_effect(Effect::ResetPrompt(PromptField::Summary));
+        assert!(
+            app.pending_prompt.is_some(),
+            "reset did not occupy the slot"
+        );
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ResetPromptSetting {
+                field: PromptField::Summary,
+                ..
+            })
+        ));
+        assert!(matches!(
+            app.apply_effect(Effect::EditPrompt(PromptField::Summary)),
+            Outcome::Continue
+        ));
+    }
+
+    /// The skills warning is visible while the row is selected, before Enter
+    /// opens the editor.
+    #[test]
+    fn settings_skills_row_shows_the_warning_before_enter() {
+        use crate::ui::render::panel::strip_escapes;
+
+        let mut drawn = Drawn::new((100, 40), None, true);
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        drawn.app.apply(Update::PromptSettings {
+            result: Ok(PromptSetting {
+                revision: "r1".into(),
+                document: serde_json::json!({}),
+            }),
+            field: None,
+            request: None,
+        });
+        drawn.app.run_command("settings", "");
+        for _ in 0..10 {
+            drawn.app.handle_input(key(KeyCode::Down));
+        }
+        let live = strip_escapes(&drawn.app.frame((100, 40)).live.join("\n"));
+        assert!(live.contains("skill tool and list stay"), "{live}");
+    }
+
     /// A read that fails shows that the source is unavailable rather than a
     /// value the client invented.
     #[test]
@@ -8017,9 +9306,9 @@ mod tests {
     fn process_isolation_select_and_save() {
         use crate::model::session::ExecutionSnapshot;
         for (command, steps, via_permissions) in [
-            ("settings", 10, false),
+            ("settings", 12, false),
             ("permissions", 4, false),
-            ("settings", 8, true),
+            ("settings", 11, true),
         ] {
             let home = tempfile::tempdir().unwrap();
             let theme = test_theme();
@@ -8161,7 +9450,7 @@ mod tests {
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
         app.apply(snapshot("main"));
         app.draft_line(4, "try RwLock");
-        assert!(app.place_label().contains("new line from main"));
+        assert!(app.place_label(80).contains("new line from main"));
         app.handle_input(key(KeyCode::Char('!')));
         app.handle_input(key(KeyCode::Enter));
         match sent.borrow().last() {
@@ -8227,6 +9516,7 @@ mod tests {
         app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: SwitchKind::Forked,
+            cwd: None,
         });
         assert_eq!(app.composer.text(), "try RwLock");
     }
@@ -8315,6 +9605,7 @@ mod tests {
         let row = |kind, text: &str, tool: Option<&str>| {
             std::sync::Arc::new(ViewRow {
                 failure: None,
+                reportable: false,
                 row_id: text.into(),
                 kind,
                 text: text.into(),
@@ -8327,6 +9618,7 @@ mod tests {
                 tool_name: tool.map(Into::into),
                 tool_input: tool.map(|_| serde_json::json!({"path": "cache.rs"})),
                 batch: tool.map(|_| "q1".into()),
+                parent_call_id: None,
                 pending: tool.is_some(),
                 parked: false,
                 result_text: None,
@@ -8703,6 +9995,7 @@ mod tests {
                 .map(|(id, text)| {
                     std::sync::Arc::new(ViewRow {
                         failure: None,
+                        reportable: false,
                         row_id: (*id).into(),
                         kind: RowKind::AssistantMessage,
                         text: (*text).into(),
@@ -8715,6 +10008,7 @@ mod tests {
                         tool_name: None,
                         tool_input: None,
                         batch: None,
+                        parent_call_id: None,
                         pending: false,
                         parked: false,
                         result_text: None,
@@ -8975,6 +10269,87 @@ mod tests {
     }
 
     #[test]
+    fn an_unread_reply_points_to_its_line_in_both_tui_modes() {
+        use crate::ui::render::panel::strip_escapes;
+
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let mut snapshot = ViewSnapshot {
+                session_id: "s1".into(),
+                history_complete: true,
+                focus: "main".into(),
+                lines: vec![
+                    LineView {
+                        id: "main".into(),
+                        parent: None,
+                        purpose: String::new(),
+                        state: LineState::Main,
+                        cut: None,
+                    },
+                    LineView {
+                        id: "b-7c".into(),
+                        parent: Some("main".into()),
+                        purpose: "parser race".into(),
+                        state: LineState::Waiting,
+                        cut: Some(crate::model::view::LineCut {
+                            sequence: 1,
+                            messages: 1,
+                        }),
+                    },
+                ],
+                ..ViewSnapshot::default()
+            };
+            drawn
+                .app
+                .apply(Update::Snapshot(Box::new(snapshot.clone())));
+            drawn.app.composer.set_draft("keep typing");
+            snapshot.unread_lines.insert("b-7c".into());
+            drawn
+                .app
+                .apply(Update::Snapshot(Box::new(snapshot.clone())));
+            let frame = drawn.app.frame((80, 24));
+            assert!(frame.live.join("\n").contains("Unread (1) · /lines"));
+            assert_eq!(drawn.app.composer.text(), "keep typing");
+            let narrow = drawn.app.frame((24, 24)).live.join("\n");
+            assert!(narrow.contains("/lines (1)"), "{narrow}");
+            let compact = drawn.app.frame((16, 24)).live.join("\n");
+            assert!(compact.contains("/lines"), "{compact}");
+            assert!(!compact.contains("/lines (1)"), "{compact}");
+
+            drawn.app.run_command("lines", "");
+            let frame = drawn.app.frame((80, 24));
+            let rows = frame
+                .overlay
+                .as_ref()
+                .map_or(&frame.live, |panel| &panel.rows);
+            let lines = strip_escapes(&rows.join("\n"));
+            assert!(lines.contains("* parser race"), "{lines}");
+            assert!(lines.contains("Unread · after message 1"), "{lines}");
+            let Some(Prompt::Lines(panel)) = &mut drawn.app.prompt else {
+                panic!("/lines opens the line list");
+            };
+            assert!(matches!(
+                panel.handle_key(KeyEvent::new(KeyCode::Enter, Modifiers::NONE)),
+                Effect::FocusLine(line) if line == "b-7c"
+            ));
+
+            drawn.app.prompt = None;
+            snapshot.focus = "b-7c".into();
+            snapshot.unread_lines.clear();
+            drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+            assert!(
+                !drawn
+                    .app
+                    .frame((80, 24))
+                    .live
+                    .join("\n")
+                    .contains("Unread (1) · /lines")
+            );
+        }
+    }
+
+    #[test]
     fn switching_lines_draws_each_transcript_under_its_boundary() {
         let mut drawn = Drawn::new((80, 40), None, true);
         drawn.show(&[("user-1", "main one")], "main", true);
@@ -9072,6 +10447,87 @@ mod tests {
         assert_eq!(drawn.app.busy_reason(), Some(ExitReason::AgentRunning));
     }
 
+    /// What the main loop writes for a queued notification, not the bytes a
+    /// form is built from: a permission request that appears while the
+    /// terminal sits behind a multiplexer reaches the write the loop performs
+    /// in the shape that one carries, with the bare `BEL` after it that still
+    /// rings where the sequence itself is dropped.
+    #[test]
+    fn a_notification_reaches_the_terminal_through_the_write_path_it_takes() {
+        use crate::model::view::ApprovalView;
+        use crate::ui::notify::{Event as Notification, Multiplexer, Terminal as NotifyTerminal};
+
+        let approval = |request: &str| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                approvals: vec![ApprovalView {
+                    member: None,
+                    request_id: request.into(),
+                    branch_id: "main".into(),
+                    reason: "shell command".into(),
+                    tool_name: "exec".into(),
+                    tool_input: serde_json::Value::Null,
+                    always: None,
+                }],
+                ..ViewSnapshot::default()
+            }))
+        };
+        let terminal = |multiplexer, term_program: &str, term: &str| NotifyTerminal {
+            multiplexer,
+            term_program: term_program.into(),
+            term: term.into(),
+            ..NotifyTerminal::default()
+        };
+        let mut drawn = Drawn::new((80, 24), None, true);
+        drawn.app.notify = true;
+        let cases = [
+            (
+                terminal(Multiplexer::Tmux, "iTerm.app", "tmux-256color"),
+                "\x1bPtmux;\x1b\x1b]9;DIM: Permission needed: exec\x07\x1b\\\x07",
+                "tmux: the wrapped form and a bare BEL after it",
+            ),
+            (
+                terminal(Multiplexer::Screen, "iTerm.app", "screen-256color"),
+                "\x1b]9;DIM: Permission needed: exec\x07\x07",
+                "screen with a BEL-terminated form: the form as it is, then a BEL",
+            ),
+            (
+                terminal(Multiplexer::Screen, "", "xterm-kitty"),
+                "\x07",
+                "screen with kitty's ST-terminated form: the bell alone",
+            ),
+            (
+                terminal(Multiplexer::None, "iTerm.app", "xterm-256color"),
+                "\x1b]9;DIM: Permission needed: exec\x07",
+                "no multiplexer: the form alone",
+            ),
+        ];
+        for (index, (terminal, expected, what)) in cases.into_iter().enumerate() {
+            drawn.app.apply(approval(&format!("approval-{index}")));
+            assert_eq!(
+                drawn.app.notifications,
+                vec![Notification::Permission("exec".into())],
+                "{what}"
+            );
+            let mut written = String::new();
+            write_notifications(&mut drawn.app.notifications, &terminal, |bytes| {
+                written.push_str(std::str::from_utf8(bytes).expect("the form is text"));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(written, expected, "{what}");
+            assert_eq!(
+                drawn.app.notifications,
+                Vec::<Notification>::new(),
+                "{what}: sent once"
+            );
+            write_notifications(&mut drawn.app.notifications, &terminal, |bytes| {
+                panic!("nothing is owed after the write: {bytes:?}")
+            })
+            .unwrap();
+        }
+    }
+
     #[test]
     fn the_window_topic_stays_mains_message_while_a_line_is_shown() {
         let mut drawn = Drawn::new((80, 40), None, true);
@@ -9079,6 +10535,7 @@ mod tests {
             session_id: "s1".into(),
             rows: vec![std::sync::Arc::new(ViewRow {
                 failure: None,
+                reportable: false,
                 row_id: "r1".into(),
                 kind: RowKind::UserMessage,
                 text: "line work".into(),
@@ -9091,6 +10548,7 @@ mod tests {
                 tool_name: None,
                 tool_input: None,
                 batch: None,
+                parent_call_id: None,
                 pending: false,
                 parked: false,
                 result_text: None,
@@ -9205,6 +10663,7 @@ mod tests {
             .map(|n| {
                 std::sync::Arc::new(ViewRow {
                     failure: None,
+                    reportable: false,
                     row_id: format!("u{n}"),
                     kind: RowKind::UserMessage,
                     text: format!("ask {n}"),
@@ -9217,6 +10676,7 @@ mod tests {
                     tool_name: None,
                     tool_input: None,
                     batch: None,
+                    parent_call_id: None,
                     pending: false,
                     parked: false,
                     result_text: None,
@@ -9245,6 +10705,7 @@ mod tests {
     fn message(pending: bool) -> std::sync::Arc<ViewRow> {
         std::sync::Arc::new(ViewRow {
             failure: None,
+            reportable: false,
             display: None,
             row_id: "u1".into(),
             kind: RowKind::UserMessage,
@@ -9257,6 +10718,7 @@ mod tests {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending,
             parked: false,
             result_text: None,
@@ -9274,6 +10736,7 @@ mod tests {
     fn stopped() -> std::sync::Arc<ViewRow> {
         std::sync::Arc::new(ViewRow {
             failure: None,
+            reportable: false,
             display: None,
             row_id: "stopped-1".into(),
             kind: RowKind::Status,
@@ -9286,6 +10749,7 @@ mod tests {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,
@@ -9874,6 +11338,7 @@ mod tests {
                 drawn.app.apply(Update::Switched {
                     session_id: "forked".into(),
                     kind: SwitchKind::Forked,
+                    cwd: None,
                 });
             }
             assert!(drawn.app.composer.text().contains("look [Image #7]"));
@@ -9971,6 +11436,7 @@ mod tests {
         drawn.app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: crate::model::session::SwitchKind::Resumed,
+            cwd: None,
         });
         drawn.show(&[("m2", "second session work")], "main", true);
         let committed = |app: &App| format!("{:?}", app.history);
@@ -10006,6 +11472,7 @@ mod tests {
         drawn.app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: crate::model::session::SwitchKind::Resumed,
+            cwd: None,
         });
         drawn.app.apply(snapshot("s2", "main", true));
         drawn.draw();
@@ -10597,6 +12064,33 @@ mod tests {
         assert_eq!(app.composer.text(), "second");
     }
 
+    /// A withdrawn message returns as the operator's own words: a block the
+    /// runtime appended after them stays out of the draft, and a later
+    /// operator block that merely opens a `<dim-` name comes back.
+    #[test]
+    fn a_withdrawal_restores_the_operators_blocks_not_the_appended_context() {
+        let (mut app, _sent, _home) = session_with_queue(true, &[]);
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![
+                dim_agent_types::ContentBlock::Text {
+                    text: "Why does the parser stall?".into(),
+                },
+                dim_agent_types::ContentBlock::Text {
+                    text: "<dim-hooks kind=\"prompt-submit\">read src/parser.rs</dim-hooks>".into(),
+                },
+                dim_agent_types::ContentBlock::Text {
+                    text:
+                        "<dim-typed-by-the-operator>a second paragraph</dim-typed-by-the-operator>"
+                            .into(),
+                },
+            ],
+        }));
+        assert_eq!(
+            app.composer.text(),
+            "Why does the parser stall?\n<dim-typed-by-the-operator>a second paragraph</dim-typed-by-the-operator>"
+        );
+    }
+
     /// Enter on an empty draft steers the oldest queued message, as Ctrl+S does.
     #[test]
     fn enter_on_an_empty_draft_steers_like_ctrl_s() {
@@ -10883,6 +12377,219 @@ mod tests {
             Some(&["option 0".to_owned()][..]),
             "the question came back with its selection"
         );
+    }
+
+    fn open_test_report(app: &mut App) -> u64 {
+        app.apply(Update::Reportable {
+            error: crate::report::Captured::observed(
+                "s1",
+                "main",
+                crate::report::Operation::SessionRead,
+                Some("session_closed"),
+                "Could not read conversation state".into(),
+            ),
+            show_error: true,
+        });
+        press(app, KeyCode::Char('/'));
+        typed(app, "report");
+        press(app, KeyCode::Enter);
+        match &app.prompt {
+            Some(Prompt::Report(report)) => report.id,
+            _ => panic!("expected report panel"),
+        }
+    }
+
+    fn prepared_report(report_id: &str, plan_id: &str) -> crate::report::Prepared {
+        serde_json::from_value(serde_json::json!({
+            "reportId": report_id,
+            "plan": {
+                "planId": plan_id, "generation": {"kind": "local"},
+                "evidence": {"unavailable": "no_reference"}, "instructionsStatus": "none"
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn report_stays_open_on_snapshot_and_restores_the_pending_answer_on_close() {
+        use crate::report::{Action, Reply, Request};
+
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = asked();
+            app.fullscreen = fullscreen;
+            press(&mut app, KeyCode::Char(' '));
+            let answer = selection(&app).expect("selected answer");
+            let panel = open_test_report(&mut app);
+            let mut snapshot = app.snapshot.clone().unwrap();
+            snapshot.history_complete = true;
+            app.apply(Update::Snapshot(Box::new(snapshot)));
+            assert!(matches!(app.prompt, Some(Prompt::Report(_))));
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Prepared(Some("s1".into()), prepared_report("r1", "p1")),
+            });
+            press(&mut app, KeyCode::Esc);
+            assert_eq!(selection(&app), Some(answer));
+            assert!(matches!(
+                sent.borrow().last(),
+                Some(Command::ErrorReport(Request { action: Action::Cancel { draft, generation: false }, .. }))
+                    if draft.report_id == "r1"
+            ));
+        }
+    }
+
+    #[test]
+    fn report_replans_after_a_failed_generate_and_preserves_options_after_expiry() {
+        use crate::report::{Action, Reply, Request};
+
+        let (mut app, sent, _home) = asked();
+        let panel = open_test_report(&mut app);
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Prepared(Some("s1".into()), prepared_report("r1", "p1")),
+        });
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Plan(prepared_report("r1", "p2").plan),
+        });
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        typed(&mut app, "omit timeline");
+        press(&mut app, KeyCode::Enter);
+        let mut plan = prepared_report("r1", "p3").plan;
+        plan.evidence.unavailable = Some(crate::report::EvidenceUnavailable::Omitted);
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Plan(plan),
+        });
+        let Some(Prompt::Report(report)) = &app.prompt else {
+            panic!("expected report panel");
+        };
+        assert!(
+            report
+                .render(90, 20, &app.palette)
+                .join("\n")
+                .contains(t("Evidence · Timeline omitted"))
+        );
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ErrorReport(Request { action: Action::Generate(draft), .. }))
+                if draft.plan_id == "p3"
+        ));
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Failed {
+                message: "Generation cancelled".into(),
+                draft_missing: false,
+            },
+        });
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ErrorReport(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
+                if draft.report_id == "r1" && instructions == "omit timeline"
+        ));
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Failed {
+                message: "Report not found".into(),
+                draft_missing: true,
+            },
+        });
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ErrorReport(Request { action: Action::Prepare(error), .. }))
+                if error.session == "s1" && error.message == "Could not read conversation state"
+        ));
+        app.apply(Update::ReportReply {
+            panel,
+            reply: Reply::Prepared(None, prepared_report("r2", "p4")),
+        });
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::ErrorReport(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
+                if draft.report_id == "r2" && draft.session.is_none() && instructions == "omit timeline"
+        ));
+    }
+
+    #[test]
+    fn report_saves_only_bounded_zip_bytes_after_disconnect() {
+        use crate::report::{Archive, GeneratedReport, Reply, Sharing};
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        let valid = b"PK\x03\x04fixture".to_vec();
+        let mut oversized = valid.clone();
+        oversized.resize(64 * 1024 + 1, 0);
+        for (bytes, should_save) in [
+            (b"invalid".to_vec(), false),
+            (oversized, false),
+            (valid, true),
+        ] {
+            let (mut app, _sent, home) = asked();
+            app.cwd_key = home.path().display().to_string();
+            let panel = open_test_report(&mut app);
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Generated(GeneratedReport {
+                    title: "Test report".into(),
+                    archive: Archive {
+                        base64: STANDARD.encode(&bytes),
+                    },
+                    sharing: Sharing {
+                        github_issue_url: "https://github.com/another/repo/issues/new".into(),
+                        discord_url: String::new(),
+                        description: String::new(),
+                    },
+                }),
+            });
+            app.apply(Update::Failed("Disconnected".into()));
+            press(&mut app, KeyCode::Enter);
+            let Some(Prompt::Report(report)) = &app.prompt else {
+                panic!("expected report panel");
+            };
+            assert_eq!(report.saved_path().is_some(), should_save);
+            if let Some(path) = report.saved_path() {
+                assert_eq!(path.parent(), Some(home.path()));
+                assert!(
+                    path.file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with("dim-report-")
+                );
+                assert_eq!(
+                    path.extension().and_then(std::ffi::OsStr::to_str),
+                    Some("zip")
+                );
+                assert_eq!(std::fs::read(path).unwrap(), bytes);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(
+                        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                        0o600
+                    );
+                }
+                press(&mut app, KeyCode::Down);
+                press(&mut app, KeyCode::Enter);
+                let Some(Prompt::Report(report)) = &app.prompt else {
+                    panic!("expected report panel");
+                };
+                assert!(
+                    report
+                        .render(90, 20, &app.palette)
+                        .join("\n")
+                        .contains(t("Could not open the share destination"))
+                );
+            } else {
+                assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+            }
+        }
     }
 
     /// A question answered elsewhere while its panel is open is not

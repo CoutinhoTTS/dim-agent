@@ -23,11 +23,13 @@ pub mod permission_rules;
 mod pipe_client;
 pub mod plugin_files;
 pub mod plugin_manager;
+pub mod prompt_settings;
 pub mod prompt_suggestion_settings;
 pub mod protocol;
 pub mod provider;
 pub mod runtime_manager;
 pub mod session_grants;
+pub mod session_language;
 pub mod session_typescript;
 pub mod settings;
 pub mod settings_methods;
@@ -110,6 +112,14 @@ pub struct ServerConfig {
     /// a plugin's data directory. The product sets it through a product
     /// home; a host without one names it here.
     pub plugin_files: Option<PathBuf>,
+    /// Whether the `plugin` management tool is offered to the Sessions this
+    /// process serves. `true` by default. `false` leaves the `PluginTools`
+    /// Session part unregistered, so no Session, a collaboration member
+    /// included, can name the tool; the process's plugins still load and the
+    /// `plugin.*` management methods stay registered. The scenario
+    /// evaluation serves with `false`, so the registered tools, not a
+    /// Session's mount list, are the ceiling a run's Sessions can declare.
+    pub plugin_tools: bool,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -136,6 +146,7 @@ impl Default for ServerConfig {
             plugin_defaults: None,
             plugin_configs: BTreeMap::new(),
             plugin_files: None,
+            plugin_tools: true,
         }
     }
 }
@@ -435,6 +446,19 @@ impl dim_agent_capabilities::host::CredentialVariables for CredentialVariableNam
 
 /// Builds the process tree, opens admission once required host rows are Active
 /// and the runtimes have released their rows, and returns the listener addresses.
+/// The `localId` data face: the daemon's peer id, readable by a leaf.
+struct LocalIdDispatch(rutis_bridge::PeerId);
+
+impl rutis_bridge::session::HostDispatch for LocalIdDispatch {
+    fn invoke(&self, _: &str, _: rutis_bridge::session::Value) -> rutis_bridge::session::Reply {
+        Ok(serde_json::json!({ "id": self.0.to_string() }).into())
+    }
+
+    fn methods(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({ "get": "sync" }))
+    }
+}
+
 pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Result<RunningServer> {
     if config.managed_provider.is_some() && config.product_home.is_none() {
         return Err(ServerError::Configuration(
@@ -643,13 +667,21 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         control: handle.clone(),
         armed: true,
     };
-    root.provide(rutis_bridge::LocalId(
-        rutis_bridge::PeerId::new("dim-daemon").expect("a peer id"),
-    ))
+    let peer = rutis_bridge::PeerId::new("dim-daemon").expect("a peer id");
+    root.provide(rutis_bridge::LocalId(peer.clone()))
+        .map_err(|error| ServerError::Runtime(error.into()))?;
+    root.provide_at(
+        rutis_bridge::session::host_key("localId"),
+        std::sync::Arc::new(LocalIdDispatch(peer)),
+    )
     .map_err(|error| ServerError::Runtime(error.into()))?;
     let mut builtins = Modules::new();
     dim_agent_capabilities::register_names(&mut builder);
     register_names(builder.catalog_mut());
+    // Share the foreign-part names after every typed name exists: a later
+    // typed registration overwrites a shared key (managementMethods).
+    crate::session_typescript::share_names(builder.catalog_mut());
+    register_faces(&mut builder);
     dim_agent_runtime::names::register::<dim_agent_capabilities::methods::ReservedMethods>(
         builder.catalog_mut(),
         None,
@@ -831,10 +863,22 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         dim_agent_runtime::names::register::<
             dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost,
         >(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::prompt_sources::BasePromptSettingsHost,
+        >(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::skills::SkillsInstructionsSettingsHost,
+        >(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost,
+        >(builder.catalog_mut(), None);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(
                 prompt_suggestion_settings::PromptSuggestionSettingsPlugin::new(names)?,
             ))
+        })?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(prompt_settings::PromptSettingsPlugin::new(names)?))
         })?);
         rows.push(register_part(
             &mut builtins,
@@ -938,6 +982,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         .transpose()?;
     if let Some(state) = &plugins {
         let state = state.clone();
+        let plugin_tools = config.plugin_tools;
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
@@ -945,6 +990,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 Ok(Box::new(plugin_manager::PluginManagerPlugin::new(
                     names,
                     state.clone(),
+                    plugin_tools,
                 )?))
             },
         )?);
@@ -1293,6 +1339,9 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<mcp::Publication>(catalog, None);
     register::<hooks_settings::HooksService>(catalog, None);
     register::<methods::ManagementMethods>(catalog, None);
+    catalog.register_shared(dim_agent_runtime::names::name_of::<
+        methods::ManagementMethods,
+    >());
     register::<dim_agent_capabilities::methods::Callers>(catalog, None);
     register::<runtime_manager::RuntimeService>(catalog, None);
     register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
@@ -1307,6 +1356,106 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
         "ocrHelper",
     ] {
         catalog.register_shared(name);
+    }
+}
+
+/// The reasons for the product profile's internal names (#1300).
+pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
+    for (name, reason) in [
+        ("agentConfig", "legacy-no-consumer"),
+        ("basePromptSettingsHost", "owner-api"),
+        ("eventSubscriptions", "legacy-no-consumer"),
+        ("promptSourcesBranch", "hot-path"),
+        ("scheduleJobs", "owner-api"),
+        ("sessionLanguage", "legacy-no-consumer"),
+        ("skillsInstructionsSettingsHost", "owner-api"),
+        ("summaryPromptSettingsHost", "owner-api"),
+        ("wakeups", "owner-api"),
+        ("agentDirectory", "owner-api"),
+        ("agentIndex", "owner-api"),
+        ("agentLoop", "hot-path"),
+        ("approval", "object"),
+        ("auxiliaryModelHost", "owner-api"),
+        ("backgroundExec", "object"),
+        ("branchLine", "hot-path"),
+        ("branchOpening", "hot-path"),
+        ("callers", "owner-api"),
+        ("collaboration", "host-resource"),
+        ("collaborationConfig", "legacy-no-consumer"),
+        ("collaborationDirectory", "legacy-no-consumer"),
+        ("collaborationSession", "legacy-no-consumer"),
+        ("commandRulesHost", "hot-path"),
+        ("compactionStrategyHost", "hot-path"),
+        ("configurationPublisher", "hot-path"),
+        ("configureControl", "hot-path"),
+        ("connectionHub", "control"),
+        ("contextModelHost", "hot-path"),
+        ("contextPreparation", "hot-path"),
+        ("contextUsage", "hot-path"),
+        ("credentialVariablesHost", "legacy-no-consumer"),
+        ("executionSettingsHost", "legacy-no-consumer"),
+        ("faultReporter", "hot-path"),
+        ("fileReads", "hot-path"),
+        ("fileStorage", "object"),
+        ("grokOAuthService", "secret"),
+        ("historyRenderer", "hot-path"),
+        ("hooksService", "host-resource"),
+        ("hostPlatform", "object"),
+        ("initialPromptConfiguration", "hot-path"),
+        ("inputQueue", "object"),
+        ("listenAddresses", "legacy-no-consumer"),
+        ("loader", "owner-api"),
+        ("loopState", "hot-path"),
+        ("managedProviders", "secret"),
+        ("mcpAuth", "secret"),
+        ("mcpService", "host-resource"),
+        ("mcpSession", "object"),
+        ("mentionIndex", "host-resource"),
+        ("modalityConnectionHost", "legacy-no-consumer"),
+        ("modelHost", "owner-api"),
+        ("modelProvider", "hot-path"),
+        ("modelSelectionHost", "legacy-no-consumer"),
+        ("openAICodexOAuthService", "secret"),
+        ("permission", "object"),
+        ("pluginFileTransactions", "host-resource"),
+        ("prepareContextHost", "hot-path"),
+        ("prepareModelHost", "hot-path"),
+        ("prompt", "hot-path"),
+        ("promptHost", "hot-path"),
+        ("promptRegistry", "hot-path"),
+        ("promptSuggestionSettingsHost", "legacy-no-consumer"),
+        ("providerConnectionResolver", "host-resource"),
+        ("providerService", "secret"),
+        ("publication", "host-resource"),
+        ("reservedMethods", "legacy-no-consumer"),
+        ("selectableModelsHost", "legacy-no-consumer"),
+        ("serverControl", "control"),
+        ("sessionClientsHost", "legacy-no-consumer"),
+        ("sessionFilesHost", "owner-api"),
+        ("sessionLoader", "control"),
+        ("sessionSkills", "host-resource"),
+        ("sessionStore", "owner-api"),
+        ("settingsService", "owner-api"),
+        ("skillsBranch", "host-resource"),
+        ("skillsCatalog", "host-resource"),
+        ("skillsConfig", "legacy-no-consumer"),
+        ("sqliteStorage", "object"),
+        ("submitChecks", "hot-path"),
+        ("timelineFactory", "control"),
+        ("timelineStore", "object"),
+        ("timelineTree", "owner-api"),
+        ("timelineTreeControl", "owner-api"),
+        ("toolBinding", "hot-path"),
+        ("toolExecutor", "hot-path"),
+        ("toolHost", "object"),
+        ("toolSourcesView", "owner-api"),
+        ("toolchainSourceHost", "legacy-no-consumer"),
+        ("uiExtensions", "control"),
+        ("uiHost", "control"),
+        ("wait", "object"),
+        ("worktreeAssociations", "legacy-no-consumer"),
+    ] {
+        builder.internal_name(name, reason);
     }
 }
 

@@ -110,6 +110,8 @@ scrollback 在 live 交互区以确认框替换输入框，不提交到历史；
 
 `after message N` 是切点时父线历史中的用户消息数，包括它继承的部分。
 
+这个标签的工作区部分先于线让步。左侧状态很宽时，它先整体缩短（截掉路径前段，再放弃分支，再只保留截断的路径），而不是直接消失；只有连这些都放不下时边框才丢掉它。显示线时仍是原来那三档：完整标签、只剩 `⑂`、不画，所以路径信息永远不会挤掉线的信息。标签写的是 Session 实际工作的目录，不是进程的启动目录；attach 到别的目录的 Session（显式 `--cwd`、`/resume` 到另一个 worktree）时它连同那个目录的分支一起跟过去。还没有 Session 的 Home 写回启动工作区。文件提及、粘贴路径和拖入的文件仍以本地 `--cwd` 为基准（[CLI 附件输入](../../design/cli-attachment-input.md)），所以跨工作区 resume 之后，标签写的目录可能与它们不同；不同时 `@` 面板会在标题里写出该基准。
+
 ### 4.6 `/timeline`：跳到某条消息
 
 Timeline 的点就是它的用户消息。Tab 从最新一条起逐条走；`/timeline` 把它们一次列出，与桌面端的消息导航条一样：每行是这条消息和它回答的第一段文字。
@@ -213,6 +215,25 @@ applied 的输入可以跨过一次 stop 继续待消费，正是下一个 turn 
 
 fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 
+### 分支未读回答
+
+输入框底栏提示有未读回答的分支数。用 `/lines` 查看标记为「未读取」的分支，面板打开时选中第一条未读分支。按 Enter 打开对应正文并清除这条分支的提示。新回答到达时，输入焦点留在原处。
+
+```text
++--------------------------------------------+
+| >                                          |
++------------------------ 未读取 (1) · /lines+
+
+/lines
+  main
+  * parser race       未读取 · 等待中
+  Enter 打开所选分支
+```
+
+Session worker 通过实时 `session.event` 中非空白的 assistant 正文判断新回答。已显示的分支和已打开的侧面板视为已读。提示按分支计数，历史加载和重复事件不会重新点亮提示。回答及用户已读位置只保存在当前 attachment 内。新 attachment 从空标记开始，旧回答仍可作为历史查看。
+
+两种 TUI 模式都复用输入框底栏。空间不足时优先显示提醒，按可用宽度依次缩成 `/lines (N)`、`/lines`、`*`。全屏模式仍优先保留左侧状态。
+
 ## 7. 客户端数据
 
 | # | 需求 | 归属 | 说明 |
@@ -221,6 +242,7 @@ fork 是别的 Session，归 `/resume`。按键保持 #427 §14 的定义。
 | R2 | 用户消息行的切点（`ViewRow.cut`）、模型是否已消费（`ViewRow.pending`）与标记行的线（`ViewRow.line`） | CLI projection | 来自客户端已有的序号与输入状态 |
 | R3 | `session.branch_create` 与 `session.fork` 调用 | CLI session host | 已有方法；从过期 attachment 发出的请求在本地拒绝 |
 | R4 | 后续、可选：显示 fork 的来源（源上的 `↗ forked`，fork 里的 `forked from S`） | App Server，需格式决定 | `session/forked` 不带数据，fork 设计也不加来源列 |
+| R5 | CLI 快照里的未读分支 ID | CLI session worker | 从现有实时回答及客户端已读位置派生。位置属于当前 attachment。 |
 
 ## 8. 不做的事
 

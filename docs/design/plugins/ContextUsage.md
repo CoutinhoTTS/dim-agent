@@ -7,6 +7,8 @@ Decision: [ADR 023](../../adr/023-context-usage.md)。Issue: [#1320](https://git
 
 ## 1. 决定与边界
 
+`contextUsage` 为 internal(hot-path)：接口使用本地请求引用和计数器，不跨语言传递；外部统计沿用 `session.context.usage`。
+
 ContextUsage 是现有上下文功能内的独立 branch Capability，维护有效上下文的数字。生产者继续写原事实，不调用 Usage 更新、确认、删除或清理统计。Timeline/Store 不做 token 计算。
 
 保留现有 session.context.usage 及错误合同，由 ContextPreparation.usage 委托本 owner。read 固定源截止和当前 tools 身份，等待该目标完成后返回；已就绪读不查历史消息、不重复消息计数、不保存；当前动态工具身份首次出现时按§3取得固定贡献。无配置直接 NotConfigured，不先渲染正文；可组合计数不支持返回 Model/Unsupported，不退回完整历史重建。
@@ -99,7 +101,7 @@ current.at 是这份累计值对应的来源位置；source_through 是本份结
 
 新写私有统计使用context-usage/v5；读取v4原有数值及v1–v3累计数字。v5允许旧统计未保存的message_count、压缩消息条数和控制缓存字段缺失或为null，并增加可选legacy_result。缺失消息条数不使用数值证据的请求快捷校验；请求沿已有实际请求校验，不把未知条数填0，不为建立无法证明的provider关联读取旧请求。v4没有这些缺失语义，缺字段仍按损坏处理。
 
-这是私有派生统计的显式版本决定，native v40、公开事件和Query API不变。Store将扩展data视为所属owner的数据；现有epoch/源位置索引字段不变。不把不兼容结构继续标成v4。旧统计原字节保留；未知schema、算法不兼容和实际读取的坏引用报错，不猜测、不重算掩盖。
+这是私有派生统计的显式版本决定，native v41、公开事件和Query API不变。Store将扩展data视为所属owner的数据；现有epoch/源位置索引字段不变。不把不兼容结构继续标成v4。旧统计原字节保留；未知schema、算法不兼容和实际读取的坏引用报错，不猜测、不重算掩盖。
 
 v1–v3恢复从最新结果的state.root.summary取得ordinary、固定贡献、压缩、基准、last_entry和growth。source_through、branches与可见截止必须合法，算法须匹配。恢复时补取配置的实际控制字段和tools声明存在性，只读取未完成源后缀；无新来源时0旧消息计数、0数字补写。未来需要升级前切点的累计值时，先按ID读取legacy_result及所需数字节点，整段已累计范围直接采用它的summary，只读取落在切点上的节点；不回放消息，不把旧节点改写为新事件。
 

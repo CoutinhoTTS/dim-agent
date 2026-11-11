@@ -13,6 +13,7 @@ pub use catalog::{
 pub use install::selection_path;
 pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
+use crate::host::HostFuture;
 use crate::skill_settings::SkillInstallation;
 use dim_agent_runtime::{AgentBuilder, PartRegistry, PartScope};
 use rutis::{Ctx, Error};
@@ -21,6 +22,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use tokio_util::sync::CancellationToken;
 
 /// The parts the Skills plugin registers.
 const PARTS: [&str; 2] = ["Skills", "SkillsBranch"];
@@ -32,6 +34,14 @@ pub struct SkillsConfig {
     /// The how-to-use text in place of [`INSTRUCTIONS`].
     pub instructions: Option<Arc<str>>,
 }
+
+/// The host's user override of [`INSTRUCTIONS`]. `None` keeps the factory
+/// configuration or the built-in text.
+pub trait SkillsInstructionsSettings: Send + Sync + 'static {
+    fn instructions(&self, cancel: CancellationToken) -> HostFuture<'_, Option<Arc<str>>>;
+}
+
+pub struct SkillsInstructionsSettingsHost(pub Arc<dyn SkillsInstructionsSettings>);
 
 /// Requires the Session and branch parts in the profile and adds the
 /// per-content extension. The Skills plugin (`SkillsCatalogPlugin`, or a

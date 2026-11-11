@@ -7,6 +7,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Model startup](design/model-startup.md): temporary model, effort and multi-protocol connections with branch/member/compaction inheritance
 - [Model failures](design/model-failures.md)（[中文](zh/design/model-failures.md)）: the failure kind, the fact on the terminal event, who words the line, and retry (#1197)
 - [模型请求重试与任务续接方案](design/research/model-retry-recovery.md)（中文，#1210）：请求重试的可见性、独立恢复能力的边界及所有者合同需求
+- [服务面：跨语言形状的策略、盘点与第一批改造](design/service-faces.md)（中文，Draft）：#1289 的标记与检查、#1300 的当前 118 个名字 face 盘点、#1292 的第一批数据面
 - [插件远程化：可行性与落地路径](design/research/remote-plugins.md)（中文，研究稿）：rutis 链路能跨什么、HostPlatform/exec/基础工具/存储各自能不能远程化、推荐拓扑与分阶段
 - [Watch：任务观察与 side branch](design/research/side-eval.md)（中文，设计提案）：Watch 与 Pursuit 的用户边界、分支切点、订阅与 prompt 的组合、管理与关注、采样开销
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
@@ -71,6 +72,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
+- [Shared error reports](design/plugins/Report.md) ([#1319](https://github.com/arcships/dim/issues/1319))
 - [Read-only member conversations in the CLI](design/member-conversation.md) (#300, #333, #324, #263)
 - [Subagent model policy](design/subagent-model-policy.md) (#263)
 - [Subagent tool approval and permission inheritance](design/subagent-tool-approval.md): requesting-branch policy, leader decision tools, user review, cancellation and recovery (#19, #29, #257)
@@ -94,9 +96,11 @@ This index is navigation. Delivery status lives in issues, not here.
 - [F5 HostPlatform process isolation boundary](design/host-platform-isolation.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
+- [Child tool batches across clients](design/appserver/child-tool-batches.md) (#1326): v4 child events, v3 visibility, TUI/CLI/web grouping and the Code Mode session gate
 - [Management methods](design/appserver/management-methods.md)
 - [Provider management for Desktop and CLI](design/appserver/provider-management.md) (#329)（[中文](zh/design/appserver/provider-management.md)）
 - [Settings service](design/appserver/settings-service.md)（[中文](zh/design/appserver/settings-service.md)）
+- [Prompt overrides](design/appserver/prompt-overrides.md) (#1314): the `prompts` Settings source, three owner ports and the client entry
 - [MCP OAuth](design/appserver/mcp-oauth.md)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [MCP Apps host contract](design/appserver/mcp-apps.md) (#451): the document a tool declares, a view's tool call and its admission, what a client renders
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
@@ -115,5 +119,6 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
 - [Timeline export](design/appserver/timeline-export.md) (ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
+- [Container image release](release/docker-image.md) (Draft): the proposed ghcr.io image for the Linux executable, its volumes, clients, build from original release archives and security boundary
 - [Tool origin read](design/tool-origin-read.md) — point lookup for tool arguments outside a transcript window.
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

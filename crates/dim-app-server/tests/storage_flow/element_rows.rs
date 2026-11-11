@@ -358,6 +358,7 @@ async fn large_prompt_arrays_seek_paired_elements_and_preserve_trace_search_and_
         first.trace = Some(TimelineTrace {
             event_id: first.event.id.clone(),
             original: EventDraft {
+                parent_call_id: None,
                 id: None,
                 tags: None,
                 kind: kind("before", changes("before")),
@@ -365,6 +366,7 @@ async fn large_prompt_arrays_seek_paired_elements_and_preserve_trace_search_and_
             steps: vec![TraceStep {
                 handler: "replace-prompt".into(),
                 result: Some(EventDraft {
+                    parent_call_id: None,
                     id: None,
                     tags: None,
                     kind: first.event.kind.clone(),
@@ -409,7 +411,11 @@ async fn large_prompt_arrays_seek_paired_elements_and_preserve_trace_search_and_
         );
         assert!(connection.query_row("SELECT max(length(CAST(body AS BLOB))) FROM timeline_events WHERE session_id='rows'",[],|row|row.get::<_,i64>(0)).unwrap()<4096);
         drop(connection);
-        store.fork_session("rows", "copy", size + 2).await.unwrap();
+        let config = store.session_config_text("rows").await.unwrap().unwrap();
+        store
+            .fork_session("rows", "copy", size + 2, &config)
+            .await
+            .unwrap();
         let copied = store
             .read(&key("copy", "main"), size + 1..=size + 2)
             .await

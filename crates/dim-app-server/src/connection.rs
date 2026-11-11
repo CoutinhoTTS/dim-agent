@@ -758,10 +758,10 @@ impl Connection {
         if let Some(branch) = branch {
             match (self.protocol_version(), branch) {
                 (1, None) => {}
-                (2 | 3, Some(id)) if !id.is_empty() => {}
+                (2..=4, Some(id)) if !id.is_empty() => {}
                 _ => {
                     return Err(RpcError::invalid(
-                        "branchId is required in v2/v3 and absent in v1",
+                        "branchId is required in v2-v4 and absent in v1",
                     ));
                 }
             }
@@ -1770,11 +1770,19 @@ impl Connection {
         if let Some(tools) = params.tools {
             config.tools = Some(tools);
         }
+        if self.protocol_version() < 4
+            && !config.excluded_tools.iter().any(|name| name == "codemode")
+        {
+            config.excluded_tools.push("codemode".into());
+        }
         if let Some(policy) = params.permission_policy {
             config.permission_policy = policy;
         }
         if let Some(interactive) = params.interactive {
             config.interactive = interactive;
+        }
+        if let Some(language) = params.language {
+            config.language = Some(language);
         }
         let origin = match params.origin {
             None | Some(SessionOrigin::Client) => SessionOrigin::Client,

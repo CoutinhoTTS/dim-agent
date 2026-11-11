@@ -110,6 +110,8 @@ While a line is shown, the composer's bottom border names its path from `main`, 
 
 `after message N` counts the user messages in the parent's history, its inherited ones included, at the cut.
 
+The workspace half of that label gives way before the line does. Beside a wide left status it shortens as a whole first — the path's front is cut, then the branch is dropped, then the path alone is cut — instead of disappearing, and only a border with no room for any of those forms drops it. A shown line keeps the three forms it has: the whole place, `⑂` alone, then nothing, so line information is never displaced by path information. The label names the workspace the Session works in rather than the directory the process was started in, and it follows a Session attached elsewhere — an explicit `--cwd`, a `/resume` into another worktree — together with that workspace's branch. Home, which has no Session yet, names the launch workspace again. File mentions, pasted paths and dropped files keep the local `--cwd` base instead ([CLI attachment input](cli-attachment-input.md)), so after a cross-workspace resume the label can name a different directory than they do; when it does, the `@` picker names that base in its title.
+
 ### 4.6 `/timeline`: jumping to a message
 
 The Timeline's points are its user messages. Tab walks them one at a time from the newest; `/timeline` lists them all, as the desktop client's message rail does: each row is the message and the first text of its answer.
@@ -213,6 +215,25 @@ Unchanged from #427 §14: a switch writes a `⑂ name · id` boundary and the sh
 
 Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines them.
 
+### Unread replies
+
+The composer's bottom border shows how many other lines have unread reply text. `/lines` marks those lines `Unread` and selects the first one when the list opens. Enter on a line opens its transcript and acknowledges that line's current reply. The prompt keeps its focus when a new reply arrives.
+
+```text
++--------------------------------------------+
+| >                                          |
++------------------------ Unread (1) · /lines+
+
+/lines
+  main
+  * parser race       Unread · waiting
+  Enter shows the selected line
+```
+
+The Session worker derives the indicator from nonblank assistant text in live `session.event` records. Text in the shown transcript or open side panel is already seen. The badge counts lines and stays until each is opened. History pages and repeated events leave the indicator alone. The worker keeps reply and acknowledgment positions for the current attachment. A fresh attachment starts without unread marks and presents existing replies as history. The position used here concerns what the user saw in that line's transcript.
+
+The notification shares the existing bottom border in both TUI modes. Narrow widths favor the notification over the directory label. It shortens to `/lines (N)`, then `/lines`, then `*` as the room decreases. The existing left status in fullscreen keeps priority.
+
 ## 7. Client data
 
 | # | Need | Owner | Notes |
@@ -221,6 +242,7 @@ Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines
 | R2 | A user message row's cut (`ViewRow.cut`), whether the model has consumed it (`ViewRow.pending`), and a marker row's line (`ViewRow.line`) | CLI projection | From sequences and input state the client already has |
 | R3 | `session.branch_create` and `session.fork` calls | CLI session host | Existing methods; a request made from a stale attachment is refused locally |
 | R4 | Later, optional: show a fork's origin (`↗ forked` on the source, `forked from S` in the fork) | App Server, needs a format decision | `session/forked` carries no data and the fork design adds no provenance column |
+| R5 | Unread line IDs in the CLI snapshot | CLI session worker | Derived from existing live assistant text and client acknowledgment positions. Both positions are local to the attachment. |
 
 ## 8. Not in scope
 

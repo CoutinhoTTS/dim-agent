@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) async fn canonical_cwd(cwd: &str) -> Result<std::path::PathBuf, RpcError> {
@@ -195,6 +195,10 @@ pub const UI_HOST_METHODS: [&str; 6] = [
 /// Management methods available to authenticated loopback Web clients.
 /// Replies contain account metadata and credential presence, never credentials.
 pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
+    "report.prepare",
+    "report.plan",
+    "report.generate",
+    "report.cancel",
     "ui.extensions.list",
     "provider.management",
     "provider.create",
@@ -560,6 +564,12 @@ pub struct Create {
     /// `acp` from an editor (#557). Any other value is refused at the boundary.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub origin: Option<SessionOrigin>,
+    /// The operator's reply language for this Session. Absent means none was
+    /// selected and the base rule stands; clients send it only when the
+    /// daemon's `hello.features` names `session.language`, because older
+    /// daemons reject unknown fields.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub language: Option<dim_agent_runtime::ReplyLanguage>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

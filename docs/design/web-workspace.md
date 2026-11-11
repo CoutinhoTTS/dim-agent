@@ -2,7 +2,7 @@
 
 Status: Accepted. Related: [RemoteGateway](plugins/RemoteGateway.md) (the target design), [overview §6.3 multiple nodes](overview.md#63-multiple-nodes), [App Server README](../../crates/dim-app-server/README.md).
 
-The Web workspace is a browser frontend for the App Server, started by `dimcode web` or toggled from `/web` in the TUI. It replaces the TypeScript `dim web` host (Bun server, RCP v2) with the existing App Server protocol v3. Phase 1 ships a **local web entry**: a loopback-only subset of RemoteGateway that does not wait for its prerequisites (PluginManager #3, rutis call-scoped requests #5, extended `pluginFiles`, Settings business sources). When RemoteGateway lands it absorbs this entry; the browser side does not change because it speaks the same Session methods either way.
+The Web workspace is a browser frontend for the App Server, started by `dimcode web` or toggled from `/web` in the TUI. It replaces the TypeScript `dim web` host (Bun server, RCP v2) with the existing App Server protocol v4. Phase 1 ships a **local web entry**: a loopback-only subset of RemoteGateway that does not wait for its prerequisites (PluginManager #3, rutis call-scoped requests #5, extended `pluginFiles`, Settings business sources). When RemoteGateway lands it absorbs this entry; the browser side does not change because it speaks the same Session methods either way.
 
 ## 1. Structure
 
@@ -25,7 +25,7 @@ flowchart LR
 | `Connection` change | `connection.rs` | A connection accepted by WebEntry carries `entry: Web`; Rpc serves it Session methods (including the execution Session methods, decision E3 of RemoteGateway) and the explicit local settings allowlist (§4.3), never daemon or Web-entry controls |
 | `dimcode web` | `crates/dim-cli` | Holder client: calls `web.open` over the local socket and keeps the connection; no HTTP stack in the CLI |
 | TUI `/web` | `crates/dim-cli` | Calls `web.toggle`; the daemon owns the on/off state, so the TUI stays open |
-| Frontend | `web/` at the repository root | Vue 3 + Vite app ported from the TypeScript `packages/cli-web`, with its transport rewritten for protocol v3 |
+| Frontend | `web/` at the repository root | Vue 3 + Vite app ported from the TypeScript `packages/cli-web`, with its transport rewritten for protocol v4 |
 
 ## 2. Local web entry
 
@@ -47,7 +47,7 @@ It is open while either reason exists and closes only when both are gone. The sw
 | `web.disable` | `{}` | `{enabled, open, address?, connections}`; used by `dimcode web --off`; it clears the switch but does not disconnect holders |
 | `web.status` | `{}` | `{enabled, open, address?, connections}` |
 
-All are management methods (local transport only, protocol v3). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; the TUI switch does not need a holder. When the last reason disappears the listener stops, every token is dropped and web connections detach. Nothing is persisted, so after a daemon restart the entry is off; `dimcode web` opens it again or `/web` enables it. `web.open`/`web.toggle` fail with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
+All are management methods (local transport only, protocol v4). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; the TUI switch does not need a holder. When the last reason disappears the listener stops, every token is dropped and web connections detach. Nothing is persisted, so after a daemon restart the entry is off; `dimcode web` opens it again or `/web` enables it. `web.open`/`web.toggle` fail with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
 
 ### 2.2 Authentication
 
@@ -102,9 +102,10 @@ For development against the repository checkout, and for a build that must carry
 | Item | Rule |
 | --- | --- |
 | Version | `hello` v3 with `clientKind: "web"`; v1/v2 → `protocol_version` |
-| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3 and read-only discovery methods below. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
+| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3 and the management methods below. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
 | Model list | The read-only management methods `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Managed Provider discovery follows §4.2. Switching uses the Session method `session.model.update` |
-| UI directory | UiExtensions contributes `ui.extensions.list`, which is explicitly allowlisted and advertised in `hello.features` while available. Connection forwards `ui.extensions.changed` over the reliable control channel; clients refetch the directory on this notice. No other contributed management method becomes reachable |
+| UI directory | UiExtensions contributes `ui.extensions.list`, which is explicitly allowlisted and advertised in `hello.features` while available. Connection forwards `ui.extensions.changed` over the reliable control channel; clients refetch the directory on this notice |
+| Error-only reports | Report contributes `report.prepare`, `report.plan`, `report.generate` and `report.cancel`. The authenticated local Web entry explicitly admits these four methods and advertises them in `hello.features` while available. They take no Session or branch ID and use no Session data. [Report contract](plugins/Report.md#4-report-methods) |
 
 Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` only in protected profiles). Execution Session methods become reachable from the web entry; this is the same widening RemoteGateway records as E3, limited here to loopback connections authenticated by the local user's token.
 
@@ -326,7 +327,7 @@ paired-device boundary of [RemoteGateway](plugins/RemoteGateway.md).
 The reference is the TypeScript repository's `packages/cli-web`, especially its
 `features/settings` components and `docs/packages/cli-web/settings-layout.md`.
 Reuse its layout, labels and interaction patterns with the current Web tokens;
-replace its `web.*` management bridge with the existing protocol v3 owners, not
+replace its `web.*` management bridge with the existing protocol v4 owners, not
 a second settings store or a compatibility implementation of the old protocol.
 
 #### Navigation and layout
@@ -346,6 +347,14 @@ Save actions follow all fields they submit, including model preferences. Provide
 list and add-dialog searches are independent; the custom-provider form can return
 to the picker, confirming before discarding a changed draft. Dialog close buttons
 remain square at the top right.
+
+The add dialog puts custom creation next to the Provider search. The connection
+form keeps connection fields and the enable toggle together. Test connection
+reports the number of models found. Only the probe result for the current draft
+seeds a new Provider; manually adding a model belongs to the Models tab. After
+the owner accepts a connection save, the dialog closes and the provider list
+shows the saved Provider and a confirmation. A rejected write keeps the draft
+and shows the owner's error in the form.
 
 Loading and failure states, including retry actions, remain inside the active
 dialog rather than behind it. Error banners wrap long server messages without
@@ -396,6 +405,36 @@ Settings owner. Do not expose a generic configuration-file or JSON editor.
 | Models | Existing `provider.models.*` and `provider.preferences.update`: search, enable/disable, create, edit, reset and delete where declared; expose supported limits, endpoint, reasoning and service-tier preferences without inventing defaults |
 | Other OAuth providers | Follow the returned account namespace and declared login methods; reuse the existing Codex/Grok account owners rather than treating their credentials as static API keys |
 | Chat integration | After a successful account, Provider or model mutation, reload authoritative discovery and reconcile the picker; preserve existing Session model-selection semantics |
+
+Both Dim sign-in surfaces fetch the signed-in Provider's model list with
+`provider.refresh` after browser or device authorization completes. Once the
+refresh succeeds, the chat picker reads the updated catalog. A refresh error
+leaves the user signed in and shows the reason in Settings. The account card
+offers `Refresh model list` for the signed-in Dim account. Provider details
+offer the same action next to the tabs when the owner advertises `refresh`.
+This includes disabled Providers with a saved connection that supports listing.
+The refresh error's Retry button in Provider details fetches the models again.
+
+```text
++-- Account ---------------------------------------+
+| Dim account        [Refresh model list] [Sign out] |
+| Model list refresh failed                          |
++----------------------------------------------------+
+
++-- Provider --------------------------------------+
+| [Connection] [Models]         [Refresh model list] |
+| Model list refresh failed                   [Retry] |
++----------------------------------------------------+
+
++-- Custom provider -------------------------------+
+| Provider name                                     |
+| API URL                                           |
+| API protocol               Authentication         |
+| Credential                                        |
+| [ ] Enable provider                               |
+|          [Cancel] [Test connection] [Save provider]|
++---------------------------------------------------+
+```
 
 Provider writes use the snapshot's expected version and the owner's field-operation
 contract ([Provider management](appserver/provider-management.md)); a conflict
@@ -816,7 +855,7 @@ must justify a responsibility beyond translating an already typed owner reply.
 | §1 Capability and App Server boundary | WebEntry is App Server process code, not a Capability; Transport, Connection and Rpc gain only the `entry: Web` record and its method filter |
 | §4.1, §4.9 Timeline writes | WebEntry writes no Timeline event; web calls reach Session owners exactly like local calls |
 | §4.3 Before callbacks | No check at a Session entry; only the HTTP upgrade is authenticated |
-| §4.7 Public events and services | The browser uses protocol v3 Session methods and notifications, and the explicit typed settings methods of existing owners |
+| §4.7 Public events and services | The browser uses protocol v4 Session methods and notifications, and the explicit typed settings methods of existing owners |
 | ADR 002 D1 Scope | Process-scoped: one entry per daemon |
 | ADR 002 D4 Configuration | No configuration is persisted in phase 1; the port is a `web.open` parameter |
 | ADR 002 D5 Language-neutral contracts | The HTTP surface and `web.*` methods are given in neutral form above |

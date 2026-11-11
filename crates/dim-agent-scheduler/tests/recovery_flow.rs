@@ -87,6 +87,7 @@ async fn connect(server: &RunningServer) -> Client {
         profile: None,
         client_kind: "cli",
         client_name: "scheduler-recovery-test",
+        protocol_version: 4,
     };
     Client::connect(&config).await.unwrap()
 }
@@ -188,7 +189,8 @@ async fn restart_settles_active_runs_without_launching_again() {
         .typed(
             "schedule.save",
             json!({"job": {"name": "nightly", "schedule": {"at": "2030-01-01T00:00:00Z"},
-                "prompt": "Summarize the day.", "cwd": home.path()}}),
+                "prompt": "Summarize the day.",
+                "target": {"kind": "launch", "cwd": home.path()}}}),
         )
         .await
         .unwrap();

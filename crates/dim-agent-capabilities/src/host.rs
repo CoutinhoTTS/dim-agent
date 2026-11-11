@@ -783,7 +783,7 @@ pub trait ModelDriver: Send + Sync + 'static {
 }
 pub struct ModelHost(pub Arc<dyn ModelDriver>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionContext {
     pub turn_id: String,
     pub request_id: String,

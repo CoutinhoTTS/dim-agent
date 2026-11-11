@@ -303,6 +303,7 @@ async fn legacy_session_catalog_classifies_new_imports_and_keeps_children_inert(
         profile: None,
         client_kind: "cli",
         client_name: "migration-test",
+        protocol_version: 4,
     })
     .await
     .unwrap();
@@ -988,6 +989,12 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
              CREATE INDEX timeline_events_by_end ON timeline_events(session_id, branch_id, last_sequence, sequence);
              CREATE INDEX timeline_events_by_id ON timeline_events(session_id, event_id) WHERE event_id IS NOT NULL;
              CREATE INDEX timeline_tool_use_starts ON timeline_events(session_id, json_extract(body, '$.record.event.data.request_id'), json_extract(body, '$.record.event.data.call_id')) WHERE branch_id = 'main' AND kind = 'step/tool-use-start';
+             DROP TABLE session_owners;
+             CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)));
+             CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id);
+             DROP TABLE session_owners;
+             CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)));
+             CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id);
              DROP TABLE session_output_owners;
              DROP TABLE session_grants;
              DROP TABLE session_worktrees;
@@ -1080,6 +1087,7 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         profile: None,
         client_kind: "cli",
         client_name: "migration-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&connection).await.unwrap();
     let listed: Value = client.typed("session.summaries", json!({})).await.unwrap();
@@ -1542,6 +1550,7 @@ async fn migration_writes_supported_provider_settings_accounts_and_schedule_as_n
         profile: None,
         client_kind: "cli",
         client_name: "migration-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     let listed: Value = client.typed("provider.list", json!({})).await.unwrap();
@@ -2640,6 +2649,7 @@ async fn migration_continuation_preserves_tool_pairs_revert_and_retry_boundaries
             profile: None,
             client_kind: "cli",
             client_name: "migration-test",
+            protocol_version: 4,
         };
         let mut client = Client::connect(&config).await.unwrap();
         client
@@ -2802,6 +2812,7 @@ async fn migration_configuration_is_consumed_by_unchanged_web_and_the_native_sch
         profile: None,
         client_kind: "cli",
         client_name: "migration-test",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     let jobs = tokio::time::timeout(std::time::Duration::from_secs(15), async {

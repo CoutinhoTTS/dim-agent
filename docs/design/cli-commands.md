@@ -57,14 +57,14 @@ order, not alphabetically or by recent use. The menu draws no category column:
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
-/tools /tui /theme /language /keys /exit
+/tools /tui /theme /language /keys /report /exit
 ```
 
 `/fast` is listed only when the model advertises service tiers.
 Search relevance takes priority; equally ranked matches keep this order.
 The order is independent of the interface language. Opening `/` selects `/new`;
 `/exit` is last in the unfiltered command list.
-Exit requires its exact name or alias before dispatch: choosing an
+Report and exit require their exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
 Menu selection can still complete rather than dispatch an exact name: commands
@@ -215,10 +215,13 @@ Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
 text draft replaces their attachments. Esc interrupt instead withdraws all held
 messages before stopping, restoring their operator content to the draft, oldest
-first, so they cannot start a new run automatically. Appended runtime text blocks
-(after the first block, starting with `<dim-`) are not restored; references such
-as `$skill: name` stay so resubmission loads fresh context. Adjacent operator text
-blocks are separated by newlines. Images and stored paste/file links are kept.
+first, so they cannot start a new run automatically. A text block after the first
+that opens one of the runtime's own markers is context a capability appended
+rather than the operator's words, by the same rule the title and the catalog
+preview read (Hooks A.6.2, Skills §9), so it is not restored; a later operator
+block that only looks like one is. References such as `$skill: name` stay so
+resubmission loads fresh context. Adjacent operator text blocks are separated by
+newlines. Images and stored paste/file links are kept.
 Steering always uses the owner's full held input.
 
 ### Queue strip
@@ -431,7 +434,10 @@ account. A signed-out account says `Sign in`, and opening it starts its only
 flow; a signed-in one shows its state and offers `Sign out`. A row whose
 namespace is `account` opens the Dim account's `/login` panel instead, with its
 identity, plan and usage. A Provider without a descriptor keeps the connection
-form, and opening it starts nothing.
+form, and opening it starts nothing. With a saved connection and no pending
+edits, `Edit models` opens the Provider's [model management panel](#the-models-area)
+(`Models · <name>`), including when disabled. Ctrl+R in that management panel
+fetches the catalog when the Provider offers `refresh`.
 
 ```text
 /connect
@@ -461,6 +467,26 @@ form, and opening it starts nothing.
 Authorization URL rows have no side borders, including wrapped continuation
 rows, so native terminal selection does not copy dialog borders into the URL.
 The other rows keep their borders; Enter on the URL still opens the full link.
+
+After Dim account sign-in, the terminal UI and line client await
+`provider.refresh` for that account's Provider. The terminal UI opens
+`/models` once the refresh succeeds. On a refresh error it shows the signed-in
+account and the reason in the account panel, with focus on `Refresh model list`.
+Enter on that row refreshes the same Provider and shows the outcome in the
+panel. `Open models` reads the stored catalog. The line client reports a
+refresh error on stderr and gives the `dimcode models PROVIDER --refresh`
+retry command. The sign-in still succeeds.
+
+```text
++-- DimAgent OAuth -----------------------------------+
+|   Signed-in account                                |
+|   Open models                                      |
+| > Refresh model list                               |
+|   View plan                                        |
+|   Sign out                                         |
+|   Error: Model list refresh failed: Relay timeout  |
++---------------------- Up/Down move, Enter activate -+
+```
 
 `dimcode login [PROVIDER]` starts the same flow in the line client and prints
 the URL or the code the daemon returns; without a PROVIDER it lists the
@@ -647,6 +673,48 @@ does not weaken enforcement. The existing backend and execution source are reuse
 A model permitted to write the settings source can change the next process's boundary, just as
 a user can through this control; that write creates no grant and changes no running process
 ([ADR 011 D2](../adr/011-execution-settings.md)). File access is not OS isolation for shell code.
+
+## Prompt overrides
+
+`/settings` lists the three policy texts under `Prompts`: `Base prompt`, `Compaction prompt` and
+`Skills instructions`. A row shows `built-in`, `custom` or `Not available`, and it is read from
+the daemon's `prompts` Settings source when the panel opens. Enter opens the current text in
+`$VISUAL`, `$EDITOR` or the platform default; `r` on a custom row removes the override after
+keeping the old text in a draft file. An empty draft writes nothing. A save replaces one field
+and preserves the others, and applies to new Sessions.
+
+```text
++------------------------------------------+
+| Settings                                 |
+|   Interface                              |
+|   ...                                    |
+|   Prompts                                |
+| > Base prompt                built-in >  |
+|   Compaction prompt          custom >    |
+|   Skills instructions        built-in >  |
+|   Permissions                            |
+|   ...                                    |
+| up/down move · Enter edit · r reset      |
++------------------------------------------+
+```
+
+The headless surface is `dimcode prompt`:
+
+| Command | What it does |
+| --- | --- |
+| `dimcode prompt` | List the `prompts` source and each text's origin: `base`, `summary`, `skills`. |
+| `dimcode prompt show NAME` | Print one override; a built-in text is named on stderr and the command exits nonzero. |
+| `dimcode prompt edit NAME` | Open the override (empty for a built-in) in the external editor; an empty draft writes nothing and is not a reset. |
+| `dimcode prompt set NAME PATH` | Write one override from `PATH`, or from stdin for `-`; empty or whitespace-only text is refused. |
+| `dimcode prompt reset NAME` | Remove one override. |
+
+`NAME` is `base`, `summary` or `skills`. `skills` is a mixed text, and both surfaces warn that
+its override replaces the marker and call shape while the `skill` tool and `dim/skills/list`
+stay. Both surfaces use `settings.read` and `settings.update`
+with `source: "prompts"` and `scope: "user"`: every write reads the revision and the document
+first, changes one field and writes the whole document back, so a concurrent change is reported
+rather than overwritten. `edit` needs a terminal; a failed write keeps the draft and names it.
+The command menu is unchanged: the entry lives inside `/settings`, not as a new slash command.
 
 ## Management surfaces
 
@@ -899,10 +967,13 @@ Scheduler (#815): the `/scheduled` panel, `/schedule` its alias in both modes, a
 scheduled list|enable ID|disable ID|edit ID|set ID PATH|add PATH|remove ID|run ID|history ID`
 over `schedule.list`, `schedule.save`, `schedule.delete`, `schedule.set_enabled`,
 `schedule.run_now` and `schedule.history` ([Scheduler §A.3](plugins/Scheduler.md#a3-management-methods)).
-Every job is an entry: its name is the label, and its schedule, next window and last delivery are
-its detail. A job whose schedule the owner cannot use is marked invalid and its detail carries the
-owner's message; a job the scheduler holds while it is disabled says it has no next window. The
-owner reports no grouping, so the jobs share one heading, `jobs`.
+Every job is an entry: its name is the label, and its schedule, next window, last delivery, target
+and disabled reason are its detail. The target line says where the job delivers — `Delivers to
+Session {session} branch {branch} ({mode}).` for a session target, or `Launches a new Session in
+{cwd}.` for a launch target. A job whose schedule the owner cannot use is marked invalid and its
+detail carries the owner's message; a job the scheduler holds while it is disabled says it has no
+next window, and a job the owner disabled because its target was gone adds `Disabled: {code} at
+{instant}.`. The owner reports no grouping, so the jobs share one heading, `jobs`.
 
 A job's document is the record the owner wrote; the client changes only the fields `schedule.save` takes — `name`, `schedule`, `prompt` and `target` — and carries the id on the Save action and the job's revision as the revision the draft was read at. `schedule.save` is a patch merged over the stored job, so an edit writes only the members the draft changed: the adapter reads the job again, refuses a draft whose revision is no longer the job's, and sends the changed members with the id and the revision. A draft that changes no editable member writes nothing, and a member the draft deletes cannot be cleared because the patch has no null: the write is refused before it is sent and names the member. The exception is `target`, which an update keeps when the draft omits it, so an edit cannot retarget a job. A stale revision is `schedule_conflict`, the typed conflict: nothing is written, the jobs are read again, and the next edit opens the current record. `created_by`, `enabled_at` and `disabled_reason` are the owner's to derive and are never sent; enabling and pausing are `schedule.set_enabled`, not a save. A new entry starts from the owner's create shape — a name, an example `every` schedule, a prompt and a target — and writes with `schedule.save` without a revision. `inspect` is `history`: the job's recent deliveries, newest first, with the state the owner recorded.
 
@@ -911,23 +982,27 @@ A job's document is the record the owner wrote; the client changes only the fiel
 │ >                                                                                                                    │
 │                                                                                                                      │
 │   jobs                                                                                                               │
-│ › nightly-build   enabled                                                                                            │
-│   release         disabled  invalid                                                                                  │
+│ › nightly-build   disabled                                                                                           │
+│   release         enabled  invalid                                                                                   │
 │                                                                                                                      │
 │   every 60 minutes                                                                                                   │
-│   Next run 2026-11-02T09:00:00.000Z.                                                                                 │
-│   Last run completed at 2026-11-01T09:00:12.000Z.                                                                    │
+│   No next run.                                                                                                       │
+│   Last run delivered at 2026-11-01T09:00:12.000Z.                                                                    │
+│   Delivers to Session session-1 branch main (queue).                                                                 │
+│   Disabled: session_closed at 2026-11-01T10:00:00.000Z.                                                              │
 ╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T run · Tab inspect · Esc close ─╯
 ```
 
-Ctrl+T runs the selected job now and reports what the owner answered — `launching`, or the reason
-the run was skipped — and Tab shows the job's history in place of the list:
+Ctrl+T runs the selected job now and reports the delivery the owner recorded for the manual
+window — `delivering`, or `missed` with its reason, for a session target; `launching`, or `skipped`
+with its reason, for a launch target — and Tab shows the job's history in place of the list:
 
 ```text
 ╭─ Recent runs of nightly-build ─────────────────────────────╮
-│ 2026-11-01T09:00:12.000Z  completed                        │
-│ 2026-11-01T08:00:05.000Z  skipped (overlap)                │
-│ 2026-10-31T09:00:03.000Z  completed                        │
+│ 2026-11-01T09:00:12.000Z  delivered                        │
+│ 2026-11-01T08:00:05.000Z  missed                           │
+│ (previous_delivery_unsettled)                              │
+│ 2026-10-31T09:00:03.000Z  delivered                        │
 ╰───────────────────────────────────── ↑↓ scroll · Esc back ─╯
 ```
 
@@ -1371,15 +1446,15 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode hooks edit` | Open the user's hook document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `hooks.save` with the revision `hooks.catalog` reported; an interactive edit needs a terminal. |
 | `dimcode hooks set PATH` | Write the user's hook document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
 | `/hooks` | Open the Hooks panel of the Session's workspace ([management surfaces](#management-surfaces)): a source per entry, the project's toggle and the user document's edit. |
-| `dimcode scheduled list` | List the jobs the Scheduler holds over `schedule.list` ([Scheduler](plugins/Scheduler.md#a3-management-methods)): each job's id, name, schedule, state, next window and last delivery, then the jobs whose schedule the owner cannot use. |
+| `dimcode scheduled list` | List the jobs the Scheduler holds over `schedule.list` ([Scheduler](plugins/Scheduler.md#a3-management-methods)): each job's id, name, schedule, state, next window, last delivery and target, then the jobs whose schedule the owner cannot use. |
 | `dimcode scheduled enable\|disable ID` | Enable or pause one job over `schedule.set_enabled`, then report the jobs again. |
 | `dimcode scheduled edit ID` | Open one job's document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `schedule.save` with the revision the listing reported; an interactive edit needs a terminal. |
 | `dimcode scheduled set ID PATH` | Write one job's document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
 | `dimcode scheduled add PATH` | Create a job from `PATH`, or from stdin for `-`, over `schedule.save` without a revision: the document states a target, and the owner derives the id, `created_by` and `enabled_at`. |
 | `dimcode scheduled remove ID` | Delete one job over `schedule.delete` without a prompt: the id on the command line is the intent. |
-| `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the window. |
-| `dimcode scheduled history ID` | Print one job's recent deliveries over `schedule.history`, newest first, with each delivery's state and time. |
-| `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last delivery, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; a new job states its target. |
+| `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report the delivery it records for the manual window, or why the manual window was skipped. |
+| `dimcode scheduled history ID` | Print one job's recent deliveries over `schedule.history`, newest first, each with its time and its state with the owner's detail. |
+| `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window, last delivery, target and disabled reason, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; a new job states its target. |
 | `dimcode workflow list` | List the definitions over `workflow.list` ([Workflow](plugins/Workflow.md#a3-management-methods)): each definition's name, source, state and description, then the issues of the invalid ones. |
 | `dimcode workflow enable\|disable NAME` | Enable or disable the project definition of that name over `settings.read` and `settings.update`, then report the definitions again. |
 | `dimcode workflow edit NAME` | Open the user definition's document in `$VISUAL`, `$EDITOR` or the platform default, and save it over `workflow.save` with the revision the user document was read at; a project name names the file to edit instead. |
@@ -1411,6 +1486,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |
 | `/connect` | List the Providers `provider.management` reports; a described account opens its sign-in or sign-out step, and any other Provider opens the connection form. |
+| `/report` | Open the latest error that offered reporting in this TUI. Save the local report ZIP, see its path, or open a share destination after saving. [Report contract](plugins/Report.md#2-client-interaction). |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
@@ -1485,40 +1561,49 @@ The daemon is detached and its stderr is the append-only `daemon.log`, so a
 per-launch note is the only channel that does not parse history or depend on a
 pipe the client may close. Before spawning, the CLI removes
 `<native home>/dimcode.sqlite.startup`, where the native home is the daemon's
-own home, `<home>/rust`. When the spawned daemon exits before the client
-connects, the CLI reads that note (at most 16 KiB, and only a regular
-file; on Unix it must also be owned by the current user and offer no group or
-other permissions). On Unix that mode is the note's protection, since the
-daemon writes it 0600; on Windows the client checks only the regular file, its
-size and the header, and the private home's inherited ACL is the boundary. It
-requires the `dimcode-startup-failure v1 pid=<child pid>` header, removes
-control characters other than newline and tab from the body, and returns it as
-the command's error followed by `Details: <native home>/daemon.log`. The
-storage gate writes the note on a diagnosed incompatibility and names the
-store, its marker, the daemon's supported format, whether the store is newer,
-mismatched, unrecognized or too old, and the recovery paths ([native storage format §
-startup incompatibility](appserver/native-storage-format.md#启动不兼容诊断)).
-Without a matching note the embedded server reports the existing
+own home, `<home>/rust`; it leaves it in place when it is a progress note from
+another live process, and waits for that process instead of spawning. When the
+spawned daemon exits before the client connects, the CLI reads that note (at
+most 16 KiB, and only a regular file; on Unix it must also be owned by the
+current user and offer no group or other permissions). On Unix that mode is the
+note's protection, since the daemon writes it 0600; on Windows the client checks
+only the regular file, its size and the header, and the private home's inherited
+ACL is the boundary. It requires the
+`dimcode-startup-failure v1 pid=<child pid>` header, removes control characters
+other than newline and tab from the body, and returns it as the command's error
+followed by `Details: <native home>/daemon.log`. The storage gate writes the
+note on a diagnosed incompatibility and names the store, its marker, the
+daemon's supported format, whether the store is newer, mismatched, unrecognized
+or too old, and the recovery paths; it writes the same kind when another process
+owns the store, naming that process and, when the process reports an upgrade,
+its pid and the formats ([native storage format § startup
+incompatibility](appserver/native-storage-format.md#启动不兼容诊断)). Without a
+matching note the embedded server reports the existing
 `App Server exited (<status>); see ...`, and a `--server` binary reports that
 the flag must name a standalone `dim-app-server` binary. The failed launch
 removes the note after reading; a successful connection removes any note. The
 CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
 the store, and exits 1.
 
-While a store format upgrade runs, the daemon writes the same note as a
-progress kind, `dimcode-startup-progress v1 pid=<pid>` with
+While a store format upgrade runs, the daemon writes the same note as a progress
+kind, `dimcode-startup-progress v1 pid=<pid>` with
 `store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
-after each upgrade step; a fresh store or one at the current format writes
-none. Both startup waits read it: the spawn wait counts only its child's pid,
-the start-lock wait any pid, and each new counter moves the wait's bound
-forward by the bound itself (10 s for the spawn, one verified shutdown plus
-one startup plus a margin for the lock). A store format upgrade is the long
-phase that reports progress and moves the bound; every other phase of
-startup is bounded by the client's fixed value. The first such
-note prints, once on stderr in every mode, `Upgrading the local store from
-format v<from> to v<to>; this can take a while on a large store.`; stdout and
-JSON output stay unchanged. A client that only knows the failure kind ignores
-the progress kind and falls back to the generic messages above.
+after each upgrade step; a fresh store or one at the current format writes none.
+All three startup waits read it: the wait before spawning and the start-lock
+wait count any pid, the spawn wait only its child's pid, and each new counter
+moves the wait's bound forward by the bound itself (10 s for the wait before
+spawning and the spawn wait, one verified shutdown plus one startup plus a
+margin for the lock). A store format upgrade is the long phase that reports
+progress and moves the bound; every other phase of startup is bounded by the
+client's fixed value. Before it spawns, a client waits while the note names a
+live pid other than its own: the store is owned, and it has no socket until the
+upgrade finishes. Progress moves that bound, the client retries the socket, and
+it connects once the daemon serves; a note whose pid is gone, or that names the
+client itself, is stale, and the client starts its own daemon. The first such
+note a client reads prints, once on stderr in every mode,
+`Upgrading the local store from format v<from> to v<to>; this can take a while on a large store.`;
+stdout and JSON output stay unchanged. A client that only knows the failure kind
+ignores the progress kind and falls back to the generic messages above.
 Development documentation continues to use `./dev` and its isolated home; the
 terminal note itself names a compatible build or `--home PATH`.
 

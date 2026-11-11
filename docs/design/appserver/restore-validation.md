@@ -28,4 +28,4 @@ A read failure returns an error and omits the terminal `end` record. The existin
 
 Reuse storage, property-query, request-content and export flows. Prove that a directory can load without decoding unrelated malformed history, that selecting required damaged content fails, that a failed export lacks `end`, and that failed output files are removed. Keep directory-cycle and unsupported-format failures, atomic transaction rollback, fork and crash recovery tests.
 
-There is no change to public Timeline APIs, native format v40, event encodings or assembly. Remove tests whose only requirement was a whole-history startup audit or validation-cache invalidation. Resource acceptance compares cold-process restore, owner reads and first usage separately on the same disposable long-session fixture.
+There is no change to public Timeline APIs, native format v41, event encodings or assembly. Remove tests whose only requirement was a whole-history startup audit or validation-cache invalidation. Resource acceptance compares cold-process restore, owner reads and first usage separately on the same disposable long-session fixture.

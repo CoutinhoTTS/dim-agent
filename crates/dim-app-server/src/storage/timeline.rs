@@ -15,8 +15,8 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
-    AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
-    StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
+    AgentError, BoxFuture, BranchRecord, PublishCallback, ReplyLanguage, Result, SessionConfig,
+    StoredBranch, StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, EventKind, ModelRequest, RecoverySnapshot, SessionForkedData,
@@ -1069,6 +1069,38 @@ impl SessionStore {
             })
             .await
     }
+    /// Writes the Session's reply language into its config record as one JSON
+    /// member; the rest of the record is unchanged. A missing Session is
+    /// `Closed`.
+    pub async fn set_session_language(
+        &self,
+        session_id: &str,
+        language: Option<ReplyLanguage>,
+    ) -> Result<()> {
+        let session = session_id.to_owned();
+        self.timeline
+            .db
+            .run(move |connection| {
+                let changed = match language {
+                    Some(language) => connection.execute(
+                        "UPDATE agent_sessions SET config = json_set(config, '$.language', ?2) \
+                         WHERE session_id = ?1",
+                        params![&session, language.code()],
+                    ),
+                    None => connection.execute(
+                        "UPDATE agent_sessions SET config = json_remove(config, '$.language') \
+                         WHERE session_id = ?1",
+                        params![&session],
+                    ),
+                }
+                .map_err(error)?;
+                if changed != 1 {
+                    return Err(AgentError::Closed(session));
+                }
+                Ok(())
+            })
+            .await
+    }
     pub async fn grants(&self, session_id: &str) -> Result<Vec<SessionGrant>> {
         let id = session_id.to_owned();
         self.timeline
@@ -1210,10 +1242,22 @@ impl SessionStore {
     }
     /// The prepare step of `session.fork`; the ownership lock keeps this copy
     /// and a delete's output removal apart. [`SqliteTimelineStore::fork_session`]
-    /// copies the rows.
-    pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
+    /// copies the rows and writes `config`, the source record's text the
+    /// caller read, into the fork's record unchanged.
+    pub async fn fork_session(
+        &self,
+        source: &str,
+        fork: &str,
+        at: u64,
+        config: &str,
+    ) -> Result<()> {
         let _ownership = self.ownership.lock().await;
-        self.timeline.fork_session(source, fork, at).await
+        self.timeline.fork_session(source, fork, at, config).await
+    }
+    /// The source record's configuration text, for a caller that copies it
+    /// into another record: parsing and re-serializing would change bytes.
+    pub async fn session_config_text(&self, session_id: &str) -> Result<Option<String>> {
+        self.timeline.session_config_text(session_id).await
     }
     pub async fn create_owned_session(
         &self,
@@ -1688,7 +1732,7 @@ fn write_batch(
                     &batch.key,
                     sequence,
                     kind,
-                    record.event.kind.context_flags(),
+                    record.event.context_flags(),
                     &row,
                 )?;
                 super::text::event(
@@ -1723,7 +1767,7 @@ fn write_batch(
                     &batch.key,
                     sequence,
                     kind,
-                    record.event.kind.context_flags(),
+                    record.event.context_flags(),
                     &Row::Event {
                         record: Box::new(wire),
                     },
@@ -2069,16 +2113,40 @@ impl SqliteTimelineStore {
     /// ends with the fork's session row: only that last transaction makes the
     /// fork visible, and the writer's commits and publications run between
     /// the others.
-    pub async fn fork_session(&self, source: &str, fork: &str, at: u64) -> Result<()> {
+    pub async fn fork_session(
+        &self,
+        source: &str,
+        fork: &str,
+        at: u64,
+        config: &str,
+    ) -> Result<()> {
         let (references, arrays) = fork_references(&self.db, source, at).await?;
         let content: Vec<String> = content_closure(&self.db, source, references)
             .await?
             .into_iter()
             .collect();
-        let (source, fork) = (source.to_owned(), fork.to_owned());
+        let (source, fork, config) = (source.to_owned(), fork.to_owned(), config.to_owned());
         self.db
             .run_copy(move |connection| {
-                copy_fork(connection, &source, &fork, at, &content, &arrays)
+                copy_fork(connection, &source, &fork, at, &content, &arrays, &config)
+            })
+            .await
+    }
+
+    /// The source record's configuration text, so a caller can copy it into
+    /// another record without re-serializing the bytes.
+    pub async fn session_config_text(&self, session_id: &str) -> Result<Option<String>> {
+        let session = session_id.to_owned();
+        self.db
+            .run_read(move |connection| {
+                connection
+                    .query_row(
+                        "SELECT config FROM agent_sessions WHERE session_id=?1",
+                        [&session],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(error)
             })
             .await
     }
@@ -2136,8 +2204,9 @@ fn copy_fork(
     at: u64,
     content: &[String],
     arrays: &BTreeMap<String, u64>,
+    config: &str,
 ) -> Result<()> {
-    let copied = copy_fork_rows(connection, source, fork, at, content, arrays);
+    let copied = copy_fork_rows(connection, source, fork, at, content, arrays, config);
     if copied.is_err()
         && let Err(cleanup) = drop_session(connection, fork)
     {
@@ -2153,6 +2222,7 @@ fn copy_fork_rows(
     at: u64,
     content: &[String],
     arrays: &BTreeMap<String, u64>,
+    config: &str,
 ) -> Result<()> {
     let cut = sql_sequence(at)?;
     // Intermediate chunks need no sync of their own: the final transaction
@@ -2160,18 +2230,8 @@ fn copy_fork_rows(
     connection
         .pragma_update(None, "synchronous", "NORMAL")
         .map_err(error)?;
-    let mut config = None;
     let mut branches = Vec::new();
     chunk(connection, |tx| {
-        let stored: Option<String> = tx
-            .query_row(
-                "SELECT config FROM agent_sessions WHERE session_id=?1",
-                [source],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(error)?;
-        config = Some(stored.ok_or_else(|| AgentError::Closed(source.to_owned()))?);
         branches = tx
             .prepare("SELECT branch_id, info FROM timeline_branches WHERE session_id=?1")
             .map_err(error)?
@@ -2290,7 +2350,6 @@ fn copy_fork_rows(
         })?;
         after = end;
     }
-    let config = config.expect("the source config was read");
     connection
         .pragma_update(None, "synchronous", "FULL")
         .map_err(error)?;
@@ -2343,6 +2402,7 @@ fn copy_fork_rows(
                     sequence: at + 1,
                     create_at: dim_agent_runtime::core::unix_millis(),
                     tags: None,
+                    parent_call_id: None,
                     kind: EventKind::SessionForked(SessionForkedData {}),
                 }),
                 trace: None,
@@ -2359,7 +2419,7 @@ fn copy_fork_rows(
                 &key,
                 at + 1,
                 forked.event.kind.key(),
-                forked.event.kind.context_flags(),
+                forked.event.context_flags(),
                 &Row::Event {
                     record: Box::new(wire),
                 },
@@ -3104,6 +3164,7 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
                 sequence,
                 create_at: dim_agent_runtime::core::unix_millis(),
                 tags: None,
+                parent_call_id: None,
                 kind: EventKind::InputMessage(InputMessageData::text("saved", None)),
             }),
             trace: None,
@@ -3227,6 +3288,7 @@ async fn release_flow_preserves_history_and_tolerates_a_stopped_writer() {
             sequence,
             create_at: dim_agent_runtime::core::unix_millis(),
             tags: None,
+            parent_call_id: None,
             kind: EventKind::InputMessage(dim_agent_types::InputMessageData::text("saved", None)),
         }),
         trace: None,

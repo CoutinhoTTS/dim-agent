@@ -187,6 +187,23 @@ impl ToolBinding {
             .ok_or_else(|| format!("Unknown tool: {name}"))
     }
 
+    /// Every declaration the request pinned, sorted by name, from the
+    /// request's snapshot only.
+    pub fn definitions(&self, request_id: &str) -> Result<Vec<ToolDefinition>, String> {
+        let state = self.state.lock().unwrap();
+        let snapshot = state
+            .snapshots
+            .get(request_id)
+            .ok_or_else(|| format!("request {request_id} has no active tool binding"))?;
+        let mut definitions = snapshot
+            .tools
+            .values()
+            .map(|tool| tool.definition.clone())
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(definitions)
+    }
+
     /// Moves a request's snapshot to its budget recovery request.
     pub fn transfer(&self, from: &str, to: &str) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();

@@ -63,6 +63,9 @@ pub struct ViewRow {
     /// The model request a tool call came from: the calls of one request are
     /// drawn as one group.
     pub batch: Option<String>,
+    /// The outer `codemode` call a child call belongs to; absent for a
+    /// top-level call.
+    pub parent_call_id: Option<String>,
     /// Work this row stands for that has not settled yet: a tool call
     /// without its result, or a user message the model has not consumed.
     pub pending: bool,
@@ -87,6 +90,7 @@ pub struct ViewRow {
     pub compaction: Option<CompactionView>,
     /// A model failure's details, shown when the row is expanded.
     pub failure: Option<FailureDetail>,
+    pub reportable: bool,
 }
 
 /// A model failure as its error row's details print it.
@@ -393,6 +397,7 @@ pub struct ViewSnapshot {
     pub ended: Option<(u64, TurnEnd)>,
     /// `main` followed by this Session's lines, as the lines panel lists them.
     pub lines: Vec<LineView>,
+    pub unread_lines: std::collections::BTreeSet<String>,
     pub focus: String,
     /// The line opened beside the shown one, while its panel is open.
     pub side: Option<SideLine>,

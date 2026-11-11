@@ -39,6 +39,7 @@ pub async fn client(server: &RunningServer) -> Client {
         profile: None,
         client_kind: "other",
         client_name: "SessionTitle flow",
+        protocol_version: 4,
     })
     .await
     .unwrap()

@@ -539,7 +539,7 @@ async fn the_latest_turn_window_carries_the_prompt_and_folds_like_forward_paging
     let directory = new_directory("small");
     let model = Arc::new(StreamingModel::default());
     let (server, _) = serve_streaming(&directory, model.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     assert!(
         client
             .features
@@ -602,7 +602,7 @@ async fn a_latest_turn_waiting_for_dispatch_survives_the_line_ending() {
     let directory = new_directory("ended");
     let model = Arc::new(StreamingModel::default());
     let (server, batch) = serve_streaming(&directory, model.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client
         .rpc("session.create", create(json!(["branch"])))
         .await;
@@ -631,7 +631,7 @@ async fn a_latest_turn_waiting_for_dispatch_survives_the_line_ending() {
         .await
         .expect("the streaming turn reaches the dispatch gate");
     let timeline = batch.timeline.lock().unwrap().clone().unwrap();
-    let mut reader = Client::new_version(&server, false, 3).await;
+    let mut reader = Client::new_version(&server, false, 4).await;
     let params = json!({"sessionId":id,"branchId":branch,"latestTurn":true});
     let waiting = reader.send("session.history", params.clone()).await;
     let future = reader
@@ -746,7 +746,7 @@ async fn the_latest_turn_window_bounds_a_large_turn_and_continues_with_before() 
     let directory = new_directory("large");
     let model = Arc::new(StreamingModel::default());
     let (server, _) = serve_streaming(&directory, model.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
@@ -817,7 +817,7 @@ async fn the_latest_turn_window_returns_a_batch_above_the_target_and_rejects_a_f
     let directory = new_directory("bytes");
     let model = Arc::new(StreamingModel::default());
     let (server, _) = serve_streaming(&directory, model.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
@@ -880,7 +880,7 @@ async fn the_latest_turn_window_measures_the_three_issue_sizes() {
     let directory = new_directory("measure");
     let model = Arc::new(StreamingModel::default());
     let (server, _) = serve_streaming(&directory, model.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let mut table = Vec::new();
     for chunks in [1_946, 3_112, 6_852] {
         let created = client.rpc("session.create", create(json!([]))).await;
@@ -921,7 +921,7 @@ async fn a_branch_without_a_turn_returns_its_newest_events() {
     let directory = new_directory("noturn");
     let model = Arc::new(StreamingModel::default());
     let (server, _) = serve_streaming(&directory, model.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
@@ -963,7 +963,7 @@ async fn the_latest_turn_window_rejects_a_through_inside_a_batch() {
     let directory = new_directory("batch");
     let model = Arc::new(StreamingModel::default());
     let (server, batch) = serve_streaming(&directory, model.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client.rpc("session.create", create(json!([]))).await;
     assert_ok(&created);
     let id = created["result"]["sessionId"].as_str().unwrap().to_owned();

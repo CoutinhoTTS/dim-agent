@@ -210,7 +210,7 @@ fn kind(line: &Value) -> String {
 fn backup(database: &Path, path: &Path) {
     rusqlite::Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .unwrap()
-        .backup(rusqlite::MAIN_DB, path, None)
+        .backup(rusqlite::MAIN_DB, path, rusqlite::backup::NO_PROGRESS)
         .unwrap();
 }
 /// A copy of `database` changed by `sql`.
@@ -291,6 +291,20 @@ fn without_v26_columns(database: &Path) {
         .unwrap();
 }
 
+fn without_v38_protocol(database: &Path) {
+    rusqlite::Connection::open(database)
+        .unwrap()
+        .execute_batch(
+            "PRAGMA foreign_keys=OFF;
+             CREATE TEMP TABLE session_owners_rows AS SELECT * FROM session_owners;
+             DROP TABLE session_owners;
+             CREATE TABLE session_owners(session_id TEXT PRIMARY KEY REFERENCES agent_sessions(session_id), agent_id TEXT NOT NULL REFERENCES agents(agent_id), protocol_version INTEGER NOT NULL CHECK(protocol_version IN (1, 2, 3)));
+             INSERT INTO session_owners SELECT * FROM session_owners_rows;
+             DROP TABLE session_owners_rows;
+             CREATE INDEX session_owners_by_agent ON session_owners(agent_id, protocol_version, session_id);",
+        )
+        .unwrap();
+}
 fn marker(database: &Path) -> i64 {
     rusqlite::Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .unwrap()
@@ -483,6 +497,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (37, "", false),
             (38, "", false),
             (39, "", false),
+            (40, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -540,11 +555,11 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
                 CREATE INDEX timeline_events_inputs ON timeline_events(session_id, branch_id, kind, json_extract(body,'$.record.event.data.input_id'), sequence);
                 CREATE INDEX timeline_events_users ON timeline_events(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence);"
             } else {""};
+            let identities = if version < 40 {
+                "DROP TABLE timeline_output_ids; DROP INDEX timeline_events_turns; DROP INDEX timeline_events_scopes; DROP INDEX timeline_events_source_positions;"
+            } else { "" };
             changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees} {submission} {members} {text}
-                DROP TABLE timeline_output_ids;
-                DROP INDEX timeline_events_turns;
-                DROP INDEX timeline_events_scopes;
-                DROP INDEX timeline_events_source_positions;
+                {identities}
                 DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
@@ -563,6 +578,9 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             }
             if version < 27 {
                 without_v26_columns(&older);
+            }
+            if version < 41 {
+                without_v38_protocol(&older);
             }
             let bytes = std::fs::read(&older).unwrap();
             let read = exported(&older, &session).await;

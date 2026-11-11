@@ -365,7 +365,7 @@ fn project(
                 decision: data.decision,
             }))
         }
-        _ if version == 1 => (branch_id == "main")
+        _ if version == 1 => (branch_id == "main" && event.parent_call_id.is_none())
             .then(|| dim_agent_types::v1::SharedEvent::new(event))
             .flatten()
             .map(|event| {

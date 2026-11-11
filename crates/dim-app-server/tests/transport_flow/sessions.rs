@@ -278,7 +278,7 @@ async fn serve_with(setup: Setup) -> Served {
     }
     let server = serve(builder, config).await.unwrap();
     let agent = server.agent().unwrap();
-    let client = Client::new_version(&server, false, 3).await;
+    let client = Client::new_version(&server, false, 4).await;
     Served {
         server,
         agent,

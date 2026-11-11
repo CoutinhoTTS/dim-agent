@@ -19,6 +19,8 @@ pub(super) struct BranchHistory {
     goal_stale: bool,
     earlier: bool,
     pub running: Option<bool>,
+    pub latest_reply: u64,
+    pub seen_reply: u64,
 }
 
 pub(super) struct HistoryRequest {
@@ -94,6 +96,7 @@ impl Worker {
             .task_history
             .get_mut(branch_id)
             .expect("discovered line");
+        history.seen_reply = history.latest_reply;
         if !self.lines.contains_key(branch_id)
             && (history.window.through.is_some() || history.done || history.error.is_some())
         {
@@ -159,15 +162,31 @@ impl Worker {
     pub(super) fn task_event(&mut self, branch_id: &str, event: Event) {
         self.discover_branch(branch_id);
         self.discover_task_branches(&event);
+        let shown = branch_id == self.focus || self.side.as_deref() == Some(branch_id);
+        let applied = self.cursors.get(branch_id).copied().unwrap_or(0);
         let history = self
             .task_history
             .get_mut(branch_id)
             .expect("discovered branch");
+        let mut unread_changed = false;
+        if branch_id != "main"
+            && event.sequence > applied.max(history.latest_reply)
+            && matches!(&event.content, EventContent::Text(data) if !data.delta.trim().is_empty())
+        {
+            unread_changed = !shown && history.latest_reply == history.seen_reply;
+            history.latest_reply = event.sequence;
+            if shown {
+                history.seen_reply = event.sequence;
+            }
+        }
         if history.done {
             history.goal_stale |= crate::goal::changed(&event.content);
             self.apply(branch_id, event);
         } else {
             history.live.push(event);
+            if unread_changed {
+                self.changed();
+            }
         }
     }
 
@@ -433,6 +452,12 @@ impl Worker {
             self.changed();
             return Ok(());
         }
+        let code = result
+            .as_ref()
+            .err()
+            .and_then(|error| error.data.as_ref())
+            .and_then(|data| data["appError"].as_str())
+            .map(str::to_owned);
         let history = self
             .task_history
             .get_mut(&request.branch_id)
@@ -445,7 +470,15 @@ impl Worker {
         match result {
             Err(error) => {
                 history.error = Some(error.clone());
-                if request.branch_id == "main" && !history.done {
+                let fatal = request.branch_id == "main" && !history.done;
+                let report = crate::report::Captured::observed(
+                    &request.session_id,
+                    &request.branch_id,
+                    crate::report::Operation::SessionRead,
+                    code.as_deref(),
+                    format!("Could not read conversation state: {error}"),
+                );
+                if !self.reportable(report, true) && fatal {
                     return Err(format!("Main branch history: {error}").into());
                 }
             }

@@ -31,6 +31,9 @@ struct OpenThought {
     index: usize,
     /// The request's `step/thinking` deltas so far.
     written: String,
+    /// When the block's first durable `step/thinking` arrived; the block's
+    /// start. `None` while only progress shows it.
+    started_at: Option<u64>,
 }
 
 #[derive(Default)]
@@ -48,8 +51,6 @@ pub struct Projection {
     rows: Vec<Arc<ViewRow>>,
     /// The assistant row each model request streams into.
     assistant_rows: HashMap<String, usize>,
-    /// When each running model request started, to time its reasoning.
-    request_starts: HashMap<String, u64>,
     /// The reasoning row each model request streams into while it is open.
     thinking_rows: HashMap<String, OpenThought>,
     thinking_characters: HashMap<String, u64>,
@@ -188,6 +189,35 @@ impl Projection {
                 self.questions
                     .asked(branch_id, &event.id, &data.request_id, &data.calls);
                 if self.owns(branch_id) {
+                    if let Some(parent) = &event.parent_call_id {
+                        if !self
+                            .tool_rows
+                            .contains_key(&(data.request_id.clone(), parent.clone()))
+                        {
+                            return;
+                        }
+                        for call in &data.calls {
+                            if self
+                                .tool_rows
+                                .contains_key(&(data.request_id.clone(), call.id.clone()))
+                            {
+                                continue;
+                            }
+                            let row_id = serde_json::to_string(&(&data.request_id, &call.id))
+                                .expect("tool identity is JSON");
+                            let index = self.push(row_id, RowKind::ToolCall, String::new());
+                            let row = self.row(index);
+                            row.call_id = Some(call.id.clone());
+                            row.tool_lookup_done = true;
+                            row.tool_name = Some(call.name.clone());
+                            row.tool_input = Some(Value::Object(call.input.clone()));
+                            row.batch = Some(data.request_id.clone());
+                            row.parent_call_id = Some(parent.clone());
+                            row.pending = true;
+                            self.tool_rows
+                                .insert((data.request_id.clone(), call.id.clone()), index);
+                        }
+                    }
                     for call in data
                         .calls
                         .iter()
@@ -402,10 +432,7 @@ impl Projection {
                 let index = self.push(format!("agent-{sequence}"), RowKind::Status, text);
                 self.row(index).tone = tone;
             }
-            EventContent::ModelStart(data) => {
-                self.request_starts
-                    .insert(data.request_id.clone(), event.create_at);
-            }
+            EventContent::ModelStart(_) => {}
             EventContent::Thinking(data) => {
                 *self
                     .thinking_characters
@@ -413,27 +440,23 @@ impl Projection {
                     .or_default() += data.delta.chars().count() as u64;
                 self.showed.insert(data.request_id.clone());
                 let index = self.open_thinking(&data.request_id);
-                let elapsed = self
-                    .request_starts
-                    .get(&data.request_id)
-                    .map(|start| event.create_at.saturating_sub(*start));
                 let thought = self
                     .thinking_rows
                     .get_mut(&data.request_id)
                     .expect("opened above");
                 let first = thought.written.is_empty();
+                thought.started_at.get_or_insert(event.create_at);
                 thought.written.push_str(&data.delta);
                 let text = thought.written.clone();
                 let row = self.row(index);
                 row.text = text;
-                row.elapsed_ms = elapsed;
                 if first {
                     row.row_id = format!("thinking-{}", event.id);
                 }
             }
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
-                self.close_thinking(&data.request_id);
+                self.close_thinking(&data.request_id, event.create_at);
                 let index = match self.assistant_rows.get(&data.request_id) {
                     Some(index) => *index,
                     None => {
@@ -451,9 +474,8 @@ impl Projection {
             }
             EventContent::ToolUse(data) => {
                 self.showed.insert(data.request_id.clone());
-                self.close_thinking(&data.request_id);
+                self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
-                self.request_starts.remove(&data.request_id);
                 let row_id = serde_json::to_string(&(&data.request_id, &data.call.id))
                     .expect("tool identity is JSON");
                 let index = self.push(row_id, RowKind::ToolCall, String::new());
@@ -467,12 +489,20 @@ impl Projection {
                 self.tool_rows
                     .insert((data.request_id.clone(), data.call.id.clone()), index);
             }
+            EventContent::ToolUseStart(data) => {
+                self.close_thinking(&data.request_id, event.create_at);
+            }
             EventContent::ToolCompleted(data) => {
-                self.complete_tool(&data.request_id, &data.call_id, &data.result);
+                self.complete_tool(&data.request_id, &data.call_id, &data.result, true);
             }
             EventContent::ToolResult(data) => {
                 for result in &data.results {
-                    self.complete_tool(&data.request_id, &result.call_id, &result.result);
+                    self.complete_tool(
+                        &data.request_id,
+                        &result.call_id,
+                        &result.result,
+                        event.parent_call_id.is_none(),
+                    );
                 }
             }
             EventContent::CompactionStart(_) => {
@@ -510,9 +540,8 @@ impl Projection {
             EventContent::ModelEnd(data) => {
                 self.thinking_characters.remove(&data.request_id);
                 let incomplete = self.showed.remove(&data.request_id);
-                self.close_thinking(&data.request_id);
+                self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
-                self.request_starts.remove(&data.request_id);
                 self.retry = None;
                 if let ModelOutputOutcome::Failed {
                     error,
@@ -543,9 +572,8 @@ impl Projection {
             EventContent::TurnEnd(data) => {
                 let open: Vec<String> = self.thinking_rows.keys().cloned().collect();
                 for request_id in open {
-                    self.close_thinking(&request_id);
+                    self.close_thinking(&request_id, event.create_at);
                 }
-                self.request_starts.clear();
                 self.turn_end(sequence, &data.outcome);
             }
             EventContent::InputConsumed(data) => {
@@ -564,7 +592,6 @@ impl Projection {
             | EventContent::InputWithdraw(_)
             | EventContent::TurnStart(_)
             | EventContent::ModelUsage(_)
-            | EventContent::ToolUseStart(_)
             | EventContent::ToolStart(_)
             | EventContent::Other => {}
         }
@@ -1397,6 +1424,7 @@ impl Projection {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,
@@ -1408,8 +1436,24 @@ impl Projection {
             line: None,
             compaction: None,
             failure: None,
+            reportable: false,
         }));
         self.rows.len() - 1
+    }
+
+    pub fn mark_reportable_error(&mut self, previous_rows: usize) -> bool {
+        if previous_rows >= self.rows.len() {
+            return false;
+        }
+        let Some(row) = self
+            .rows
+            .last_mut()
+            .filter(|row| row.kind == RowKind::Error)
+        else {
+            return false;
+        };
+        Arc::make_mut(row).reportable = true;
+        true
     }
 
     fn push_error(&mut self, text: String, failure: Option<FailureDetail>) {
@@ -1440,6 +1484,13 @@ impl Projection {
             return;
         }
         let index = self.open_thinking(request_id);
+        if let Some(started_at) = progress.thinking_started_at {
+            self.thinking_rows
+                .get_mut(request_id)
+                .expect("opened above")
+                .started_at
+                .get_or_insert(started_at);
+        }
         let thought = &self.thinking_rows[request_id];
         if self
             .thinking_characters
@@ -1470,18 +1521,23 @@ impl Projection {
             OpenThought {
                 index,
                 written: String::new(),
+                started_at: None,
             },
         );
         index
     }
 
     /// A thought settles when the request moves on, as the Timeline holds
-    /// it: progress that was never written (an interrupted thought) goes.
-    fn close_thinking(&mut self, request_id: &str) {
+    /// it: progress that was never written (an interrupted thought) goes, and
+    /// its duration spans its first event to `closed_at`.
+    fn close_thinking(&mut self, request_id: &str, closed_at: u64) {
         if let Some(thought) = self.thinking_rows.remove(request_id) {
             let row = self.row(thought.index);
             row.streaming = false;
             row.text = thought.written;
+            row.elapsed_ms = thought
+                .started_at
+                .map(|start| closed_at.saturating_sub(start));
         }
     }
 
@@ -1504,7 +1560,13 @@ impl Projection {
         self.row(index).compaction = Some(view);
     }
 
-    fn complete_tool(&mut self, request_id: &str, call_id: &str, result: &ToolResult) {
+    fn complete_tool(
+        &mut self,
+        request_id: &str,
+        call_id: &str,
+        result: &ToolResult,
+        create_if_missing: bool,
+    ) {
         let index = self
             .tool_rows
             .remove(&(request_id.to_owned(), call_id.to_owned()))
@@ -1514,15 +1576,21 @@ impl Projection {
                         && row.batch.as_deref() == Some(request_id)
                 })
             })
-            .unwrap_or_else(|| {
+            .or_else(|| {
+                if !create_if_missing {
+                    return None;
+                }
                 let row_id =
                     serde_json::to_string(&(request_id, call_id)).expect("tool identity is JSON");
                 let index = self.push(row_id, RowKind::ToolCall, String::new());
                 let row = self.row(index);
                 row.call_id = Some(call_id.into());
                 row.batch = Some(request_id.into());
-                index
+                Some(index)
             });
+        let Some(index) = index else {
+            return;
+        };
         let row = self.row(index);
         row.pending = false;
         row.parked = false;
@@ -1935,12 +2003,73 @@ mod tests {
         projection.progress(&progress("Look at the\nparser", 0));
         let rows = projection.snapshot().rows;
         assert_eq!(rows[0].text, "Look at the\nparser first");
-        assert_eq!(rows[0].elapsed_ms, Some(3000));
+        assert_eq!(
+            rows[0].elapsed_ms, None,
+            "an open thought claims no duration"
+        );
 
         apply(&mut projection, &[step(6, "text", "Done.")]);
         let rows = projection.snapshot().rows;
         assert!(!rows[0].streaming);
+        assert_eq!(rows[0].elapsed_ms, Some(1000), "the span of the block");
         assert_eq!(rows[1].kind, RowKind::StreamingAssistant);
+    }
+
+    #[test]
+    fn progress_start_times_a_thought_before_its_first_written_event() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                serde_json::json!({ "id": "in-1", "sequence": 1, "create_at": 1000, "type": "input", "name": "message", "data": {} }),
+                model_start(2),
+            ],
+        );
+        let open: Progress = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0,
+            "thinking": "weigh", "thinkingOffset": 0,
+            "thinkingStartedAt": 4000,
+        }))
+        .unwrap();
+        projection.progress(&open);
+        assert_eq!(projection.snapshot().rows[0].text, "weigh");
+
+        apply(&mut projection, &[step(5, "thinking", "weigh")]);
+        apply(&mut projection, &[step(6, "text", "Done.")]);
+        assert_eq!(
+            projection.snapshot().rows[0].elapsed_ms,
+            Some(2000),
+            "the producer start, not the first written event, times the block"
+        );
+    }
+
+    #[test]
+    fn a_tool_start_settles_a_thought_before_its_arguments_arrive() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                serde_json::json!({ "id": "in-1", "sequence": 1, "create_at": 1000, "type": "input", "name": "message", "data": {} }),
+                model_start(2),
+            ],
+        );
+        apply(&mut projection, &[step(5, "thinking", "weigh")]);
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "id": "tool-start-1", "sequence": 6, "create_at": 6000,
+                "type": "step", "name": "tool-use-start",
+                "data": { "turn_id": "t1", "request_id": "r1", "call_id": "call", "name": "echo" },
+            })],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(!rows[0].streaming);
+        assert_eq!(
+            rows[0].elapsed_ms,
+            Some(1000),
+            "the thought ends when the call starts, not when its arguments finish"
+        );
     }
 
     #[test]

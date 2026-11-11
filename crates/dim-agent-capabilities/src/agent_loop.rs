@@ -890,6 +890,7 @@ impl AgentLoop {
                     "data.status",
                     "data.call_event_id",
                     "data.reason",
+                    "parent_call_id",
                 ]
                 .map(String::from)
                 .to_vec(),
@@ -914,14 +915,23 @@ impl AgentLoop {
                             status,
                             dispatch,
                             reason,
+                            parent_call_id,
                         ],
-                    ) = <[_; 8]>::try_from(row.values)
+                    ) = <[_; 9]>::try_from(row.values)
                     else {
                         return Err(AgentError::fault(
                             "Loop",
                             "a request control event has no kind or identity",
                         ));
                     };
+                    if matches!(
+                        parent_call_id,
+                        QueryValue::Value {
+                            value: serde_json::Value::String(_)
+                        }
+                    ) {
+                        continue;
+                    }
                     if kind == "stop/interrupt" {
                         let QueryValue::Value {
                             value: serde_json::Value::String(reason),
@@ -1223,6 +1233,9 @@ impl AgentLoop {
         result_cancel
     }
     fn on_event(self: &Arc<Self>, event: Arc<AgentEvent>) -> Result<()> {
+        if event.parent_call_id.is_some() {
+            return Ok(());
+        }
         let mut slot = self.turn.lock().unwrap();
         match &event.kind {
             EventKind::InputApplied(data) => {

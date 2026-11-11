@@ -235,6 +235,7 @@ mod tests {
     fn row(id: &str, kind: RowKind, text: &str) -> Arc<ViewRow> {
         Arc::new(ViewRow {
             failure: None,
+            reportable: false,
             row_id: id.into(),
             kind,
             text: text.into(),
@@ -247,6 +248,7 @@ mod tests {
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,
