@@ -717,10 +717,12 @@ Select a model
   Manual: no models · add a model with provider.models.create
   Edit models                Manual  manual
   Subagent models: Agent choice
-Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 ```
 
 `dimcode models PROVIDER remove MODEL` 不经面板的确认直接移除；`dimcode models PROVIDER inspect MODEL` 打印详情显示的那些行。
+
+Enter 同时写入新 Session 在此文件夹读取的默认值（[Provider 管理 §4](appserver/provider-management.md#4-客户端集成)）。
 
 ### Workflow 领域
 
