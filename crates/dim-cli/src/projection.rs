@@ -1785,6 +1785,8 @@ fn text_of(blocks: &[ContentBlock]) -> String {
 /// The operator's own words of a message: its text blocks, without the runtime
 /// context a capability appended after them
 /// (`crates/dim-agent-types/src/markup.rs`). The first block is always theirs.
+/// A later block that opens any of the vocabulary's names is not theirs; only
+/// `dim-hooks` and `dim-skill` have a row of their own.
 pub(crate) fn user_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
