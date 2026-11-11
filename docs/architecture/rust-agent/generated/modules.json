@@ -4638,6 +4638,17 @@
       ]
     },
     {
+      "id": "dim_cli::session_host::compaction",
+      "crate": "dim_cli",
+      "parent": "dim_cli::session_host",
+      "file": "crates/dim-cli/src/session_host/compaction.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches"
+      ]
+    },
+    {
       "id": "dim_cli::session_host::inventory",
       "crate": "dim_cli",
       "parent": "dim_cli::session_host",
@@ -7424,6 +7435,8 @@
       "references": [
         "path Attached",
         "path Configuration",
+        "path DisplayNotice",
+        "path DisplayPage",
         "path Event",
         "path EventContent::Input",
         "path EventContent::InputConsumed",
@@ -7435,6 +7448,7 @@
         "path EventContent::ToolResult",
         "path EventContent::ToolUse",
         "path EventContent::TurnEnd",
+        "path EventNotice",
         "path History",
         "path HistoryWindow",
         "path PendingDelegations",
@@ -7445,8 +7459,11 @@
         "path TurnRead",
         "use dim_client::wire::Attached",
         "use dim_client::wire::Configuration",
+        "use dim_client::wire::DisplayNotice",
+        "use dim_client::wire::DisplayPage",
         "use dim_client::wire::Event",
         "use dim_client::wire::EventContent",
+        "use dim_client::wire::EventNotice",
         "use dim_client::wire::History",
         "use dim_client::wire::HistoryWindow",
         "use dim_client::wire::PendingDelegations",
@@ -21852,6 +21869,13 @@
     },
     {
       "from": "dim_agent_types::model",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ContextCompactionData"
+      ]
+    },
+    {
+      "from": "dim_agent_types::model",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId"
@@ -25613,7 +25637,7 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_types::model",
       "references": [
-        "path dim_agent_types::CompactionDetailChunk",
+        "path dim_agent_types::CompactionDetail",
         "path dim_agent_types::CompactionSummary"
       ]
     },
@@ -28719,7 +28743,6 @@
       "to": "dim_agent_types::model",
       "references": [
         "path crate::provider::ModelPreferences",
-        "path dim_agent_types::CompactionDetailChunk",
         "path dim_agent_types::ModelCapabilitySnapshot",
         "path dim_agent_types::ModelPreferences"
       ]
@@ -36431,6 +36454,7 @@
         "path TaskOutputState",
         "path TaskTarget",
         "path ViewSnapshot",
+        "path crate::model::view::CompactionTarget",
         "use crate::model::view::MemberConversationState",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
@@ -36919,6 +36943,7 @@
         "path UserInput",
         "path dim_agent_types::CollaborationDeliveredData",
         "path dim_agent_types::CollaborationRequestData",
+        "path dim_agent_types::ContextCompactionData",
         "path dim_agent_types::ExecStartedData",
         "path dim_agent_types::InputBlock::Raw",
         "path dim_agent_types::ProviderPresentation",
@@ -37013,6 +37038,8 @@
       "references": [
         "path ApprovalView",
         "path CompactionDetail",
+        "path CompactionDetailState",
+        "path CompactionDetailState::Unloaded",
         "path CompactionPart",
         "path CompactionPart::AppendedMessages",
         "path CompactionPart::Digest",
@@ -37076,6 +37103,7 @@
         "path crate::model::view::INTERRUPT_REASON",
         "use crate::model::view::ApprovalView",
         "use crate::model::view::CompactionDetail",
+        "use crate::model::view::CompactionDetailState",
         "use crate::model::view::CompactionPart",
         "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState",
@@ -37762,12 +37790,15 @@
       "to": "dim_client::wire",
       "references": [
         "path Attached",
-        "path Event",
+        "path DisplayNotice",
+        "path EventNotice",
         "path History",
         "path Progress",
         "path crate::wire::Configuration",
+        "path crate::wire::DisplayPage",
         "use crate::wire::Attached",
-        "use crate::wire::Event",
+        "use crate::wire::DisplayNotice",
+        "use crate::wire::EventNotice",
         "use crate::wire::Progress",
         "use dim_client::wire::History"
       ]
@@ -37810,8 +37841,10 @@
       "from": "dim_cli::session::window",
       "to": "dim_client::wire",
       "references": [
+        "path DisplayPage",
         "path HistoryWindow",
-        "use crate::wire::HistoryWindow"
+        "use crate::wire::HistoryWindow",
+        "use dim_client::wire::DisplayPage"
       ]
     },
     {
@@ -38064,6 +38097,7 @@
         "path Command::CloseSessions",
         "path Command::CloseSide",
         "path Command::Compact",
+        "path Command::CompactionDetails",
         "path Command::Configure",
         "path Command::Earlier",
         "path Command::EndLine",
@@ -38372,6 +38406,14 @@
     },
     {
       "from": "dim_cli::session_host",
+      "to": "dim_cli::session_host::compaction",
+      "references": [
+        "mod compaction",
+        "path compaction::CompactionReads"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host",
       "to": "dim_cli::session_host::inventory",
       "references": [
         "mod inventory"
@@ -38493,21 +38535,77 @@
       "references": [
         "path Attached",
         "path Configuration",
+        "path DisplayNotice",
         "path Event",
         "path EventContent::Configuration",
         "path EventContent::ExecEnded",
         "path EventContent::ModelUsage",
         "path EventContent::PermissionChanged",
         "path EventContent::TurnEnd",
+        "path EventNotice",
         "path Progress",
         "path dim_client::wire::BranchDirectory",
         "path dim_client::wire::BranchEntry",
         "path dim_client::wire::MethodTable",
         "use crate::wire::Attached",
         "use crate::wire::Configuration",
+        "use crate::wire::DisplayNotice",
         "use crate::wire::Event",
         "use crate::wire::EventContent",
+        "use crate::wire::EventNotice",
         "use crate::wire::Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::compaction",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ContextCompactionData",
+        "use dim_agent_types::ContextCompactionData",
+        "use dim_agent_types::ContextCompactionResult"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::compaction",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path CompactionDetail",
+        "use dim_agent_types::CompactionDetail"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::compaction",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path CompactionDetailState",
+        "path CompactionDetailState::Failed",
+        "path CompactionDetailState::Loaded",
+        "path CompactionDetailState::Loading",
+        "path CompactionDetailState::Unloaded",
+        "path CompactionTarget",
+        "use crate::model::view::CompactionDetailState",
+        "use crate::model::view::CompactionTarget"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::compaction",
+      "to": "dim_cli::projection",
+      "references": [
+        "path Projection"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::compaction",
+      "to": "dim_cli::session_host",
+      "references": [
+        "path Worker"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::compaction",
+      "to": "dim_client",
+      "references": [
+        "path client::RpcError"
       ]
     },
     {
@@ -38640,6 +38738,7 @@
         "path EventContent::Configuration",
         "path Progress",
         "path crate::wire::TurnRead",
+        "path dim_client::wire::DisplayPage",
         "path dim_client::wire::MethodTable"
       ]
     },
@@ -38882,7 +38981,8 @@
         "path EventContent::BranchCreate",
         "path EventContent::BranchCreateFailed",
         "path EventContent::BranchStart",
-        "path crate::wire::TurnRead"
+        "path crate::wire::TurnRead",
+        "path dim_client::wire::DisplayPage"
       ]
     },
     {
@@ -43999,6 +44099,7 @@
         "path WorkflowInventory::Loading",
         "path WorkflowInventory::Ready",
         "path WorkflowView",
+        "path crate::model::view::CompactionTarget",
         "use crate::model::view::MemberConversationState",
         "use crate::model::view::MemberTarget",
         "use crate::model::view::RowKind",
@@ -45025,6 +45126,8 @@
         "path RowTone::Danger",
         "path RowTone::Warning",
         "path ViewRow",
+        "path crate::model::view::CompactionDetail",
+        "path crate::model::view::CompactionTarget",
         "path crate::model::view::FailureDetail",
         "path crate::model::view::INTERRUPT_REASON",
         "use crate::model::view::CompactionPartSize",
@@ -45625,6 +45728,7 @@
         "path Command::CloseSessions",
         "path Command::CloseSide",
         "path Command::Compact",
+        "path Command::CompactionDetails",
         "path Command::Configure",
         "path Command::Earlier",
         "path Command::EndLine",
@@ -45827,6 +45931,8 @@
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
+        "path crate::model::view::CompactionDetailState::Failed",
+        "path crate::model::view::CompactionTarget",
         "path crate::model::view::TaskView",
         "use crate::model::view::CompactionState",
         "use crate::model::view::LineState",
@@ -46817,10 +46923,13 @@
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default",
+        "path crate::model::view::MemberConversationState::Live",
+        "path crate::model::view::MemberTarget::Session",
         "path crate::model::view::QueuedInput",
         "path crate::model::view::RowTone::Danger",
         "path crate::model::view::TaskFinish",
         "path crate::model::view::TaskKind::Command",
+        "path crate::model::view::TaskKind::Member",
         "path crate::model::view::TaskView",
         "path crate::model::view::TurnEnd::Completed"
       ]
@@ -46973,6 +47082,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::tasks_panel",
+      "references": [
+        "path TasksPanel::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::terminal::input",
       "references": [
         "path InputEvent::Key",
@@ -47064,6 +47180,7 @@
         "path Prompt::Report",
         "path Prompt::Runtime",
         "path Prompt::Sessions",
+        "path Prompt::Tasks",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
         "path TASK_FADE",
@@ -52103,6 +52220,18 @@
     },
     {
       "module": "dim_cli::ui::transcript::blocks",
+      "path": "CompactionDetailState::Failed"
+    },
+    {
+      "module": "dim_cli::ui::transcript::blocks",
+      "path": "CompactionDetailState::Loading"
+    },
+    {
+      "module": "dim_cli::ui::transcript::blocks",
+      "path": "CompactionDetailState::Unloaded"
+    },
+    {
+      "module": "dim_cli::ui::transcript::blocks",
       "path": "char::is_whitespace"
     },
     {
@@ -52248,6 +52377,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "ColorMode::TrueColor"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "CompactionDetailState::Loaded"
     },
     {
       "module": "dim_cli::ui::tui::tests",

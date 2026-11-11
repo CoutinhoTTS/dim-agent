@@ -35,6 +35,85 @@ fn event_on(wire: &mut Wire, branch: &str, sequence: u64, name: &str, data: Valu
 }
 
 #[test]
+fn tui_display_details_use_one_typed_reply_and_retry_after_collapse() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.history.display", "session.history.detail"]);
+            let attach = wire.read("session.attach");
+            assert_eq!(attach["params"]["display"], true);
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history.display");
+            assert_eq!(history["params"]["latestTurn"], true);
+            assert_eq!(history["params"]["limit"], 256);
+            let reading = hold_initial_usage(wire);
+            wire.reply(&reading, usage(40000.));
+            wire.reply(&history, json!({"items":[{
+                "id":"compact-7","sequence":7,"create_at":1,"type":"display","name":"compaction",
+                "data":{"strategy":"summary"}
+            }],"through":8,"nextAfter":8,"nextBefore":1,"done":true}));
+            let submit = loop {
+                let request = wire.read_any();
+                if request["method"] == "session.context.usage" {
+                    wire.reply(&request, usage(40000.));
+                } else {
+                    assert_eq!(request["method"], "session.submit", "collapsed details cannot read body");
+                    break request;
+                }
+            };
+            assert_eq!(submit["params"]["text"], "collapsed fence");
+            wire.reply(&submit, json!({"event":{}}));
+            let data = json!({"through":6,"status":"completed","retain_from":"compact-7","strategy":"summary",
+                "replacement":[{"role":"user","content":"Details arrived: 中文🙂"},{"role":"user","content":"x".repeat(1_100_000)}],
+                "replacement_parts":{"strategy":1,"digest":0},
+                "diagnostics":{"reason":"auto","trigger":"threshold","estimatedInputTokens":300.0,
+                    "entriesReplaced":3,"modelCallCount":1,"durationMs":10,"strategy":{"kind":"summary"}}});
+            let first = wire.read("session.history.detail");
+            assert_eq!(first["params"], json!({"sessionId":"session","branchId":"main","eventId":"compact-7","sequence":7}));
+            let responsive = wire.read("session.submit");
+            assert_eq!(responsive["params"]["text"], "detail still pending");
+            wire.reply(&responsive, json!({"event":{}}));
+            wire.reply(&first, json!({"eventId":"compact-7","sequence":7,"data":data}));
+            let retry = wire.read("session.history.detail");
+            assert!(retry["params"].get("offset").is_none(), "detail is a single typed read");
+            wire.send(json!({"jsonrpc":"2.0","id":retry["id"],"error":{"code":-32000,"message":"Export the Timeline to read this large detail","data":{"appError":"detail_too_large"}}}));
+            let cancelled = wire.read("session.history.detail");
+            assert!(cancelled["params"].get("offset").is_none());
+            let fence = wire.read("session.submit");
+            assert_eq!(fence["params"]["text"], "collapsed pending fence");
+            wire.reply(&fence, json!({"event":{}}));
+            wire.reply(&cancelled, json!({"eventId":"compact-7","sequence":7,"data":data}));
+            wire.quiet(Duration::from_millis(100));
+            wire.event(9, "text", json!({"turn_id":"turn","request_id":"request","delta":"cancelled details settled"}));
+            assert!(wire.trailing_request().is_none());
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("Context compacted");
+        terminal.write(b"collapsed fence\r");
+        terminal.write(b"/tools\r/tools\r");
+        terminal.until("Loading");
+        terminal.write(b"detail still pending\r");
+        terminal.until("Details arrived");
+        terminal.write(b"/tools\r/tools\r/tools\r");
+        terminal.until("Details unavailable");
+        terminal.write(b"/tools\r/tools\r/tools\r");
+        terminal.until("Loading");
+        terminal.write(b"/tools\rcollapsed pending fence\r");
+        terminal.until("cancelled details settled");
+        terminal.write(b"/exit\r");
+        terminal.until("Bye!");
+        assert!(terminal.wait().success());
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn tui_displays_history_and_handles_input_while_context_usage_is_pending() {
     for fullscreen in [false, true] {
         let home = Home::new();

@@ -2214,24 +2214,30 @@ fn acp_stdio_correlates_the_consumed_input_and_deduplicates_unicode_progress() {
 
 #[test]
 fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
-    let home = Home::new();
-    let cwd = fs::canonicalize(&home.0).unwrap();
-    let daemon = home.daemon(move |wire| {
-        wire.hello(METHODS);
+    for display in [false, true] {
+        let home = Home::new();
+        let cwd = fs::canonicalize(&home.0).unwrap();
+        let daemon = home.daemon(move |wire| {
+        let mut methods = METHODS.to_vec();
+        if display { methods.extend(["session.history.display", "session.history.detail"]); }
+        wire.hello(&methods);
+        let method = if display { "session.history.display" } else { "session.history" };
+        let field = if display { "items" } else { "events" };
         let list = wire.read("session.list");
         wire.reply(
             &list,
             json!([{"sessionId":"saved","cwd":cwd,"title":"Saved title","titleRevision":2}]),
         );
         let attach = wire.read("session.attach");
+        assert_eq!(attach["params"].get("display"), display.then_some(&json!(true)));
         wire.reply(&attach, json!({}));
-        let first = wire.read("session.history");
+        let first = wire.read(method);
         assert!(first["params"].get("through").is_none());
         wire.reply(
             &first,
-            json!({"events":[],"through":8,"nextBefore":4,"nextAfter":8,"done":false}),
+            json!({(field):if display { vec![event(7,"compact-7","display","compaction",json!({"strategy":"summary"}))] } else { vec![] },"through":8,"nextBefore":4,"nextAfter":8,"done":false}),
         );
-        let second = wire.read("session.history");
+        let second = wire.read(method);
         assert_eq!(second["params"]["through"], 8);
         assert_eq!(second["params"]["before"], 4);
         let text = event(
@@ -2245,49 +2251,53 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
             "session.event",
             json!({"sessionId":"saved","branchId":"main","event":text}),
         );
+        if display {
+            wire.notice("session.display", json!({"sessionId":"saved","branchId":"main","item":event(9,"compact-9","display","compaction",json!({"strategy":"summary"}))}));
+        }
         wire.reply(
             &second,
-            json!({"events":[text],"through":8,"nextBefore":1,"nextAfter":3,"done":true}),
+            json!({(field):[text],"through":8,"nextBefore":1,"nextAfter":3,"done":true}),
         );
         detached_eof(wire);
     });
-    let mut peer = Peer::start(&home);
-    peer.initialize();
-    peer.send(
-        2,
-        "session/new",
-        json!({"cwd":home.0,"mcpServers":[],"additionalDirectories":[home.0]}),
-    );
-    assert_eq!(
-        peer.response(2)["error"]["data"]["code"],
-        "unsupported_additional_directories"
-    );
-    peer.send(
+        let mut peer = Peer::start(&home);
+        peer.initialize();
+        peer.send(
+            2,
+            "session/new",
+            json!({"cwd":home.0,"mcpServers":[],"additionalDirectories":[home.0]}),
+        );
+        assert_eq!(
+            peer.response(2)["error"]["data"]["code"],
+            "unsupported_additional_directories"
+        );
+        peer.send(
         3,
         "session/load",
         json!({"sessionId":"saved","cwd":home.0,"mcpServers":[{"type":"http","name":"client","url":"http://127.0.0.1:9/mcp","headers":[]}]}),
     );
-    peer.send(
+        peer.send(
         4,
         "session/resume",
         json!({"sessionId":"saved","cwd":home.0,"mcpServers":[{"name":"client","command":"unused-client-mcp","args":[],"env":[]}]}),
     );
-    assert!(peer.response(3).get("error").is_none());
-    assert!(peer.response(4).get("error").is_none());
-    assert_eq!(
-        peer.updates.len(),
-        2,
-        "live copy of replayed fact must be suppressed"
-    );
-    assert_eq!(
-        peer.updates[0]["params"]["update"]["content"]["text"],
-        "saved answer"
-    );
-    assert_eq!(peer.updates[1]["params"]["update"]["title"], "Saved title");
-    peer.send(5, "session/prompt", json!({"sessionId":"saved","prompt":[{"type":"audio","data":"AA==","mimeType":"audio/wav"}]}));
-    assert!(peer.response(5).get("error").is_some());
-    peer.close();
-    daemon.join().unwrap();
+        assert!(peer.response(3).get("error").is_none());
+        assert!(peer.response(4).get("error").is_none());
+        assert_eq!(
+            peer.updates.len(),
+            2,
+            "live copy of replayed fact must be suppressed"
+        );
+        assert_eq!(
+            peer.updates[0]["params"]["update"]["content"]["text"],
+            "saved answer"
+        );
+        assert_eq!(peer.updates[1]["params"]["update"]["title"], "Saved title");
+        peer.send(5, "session/prompt", json!({"sessionId":"saved","prompt":[{"type":"audio","data":"AA==","mimeType":"audio/wav"}]}));
+        assert!(peer.response(5).get("error").is_some());
+        peer.close();
+        daemon.join().unwrap();
+    }
 }
 
 #[test]

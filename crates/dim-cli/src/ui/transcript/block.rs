@@ -49,7 +49,9 @@ pub enum Block {
     /// summary sits behind the disclosure.
     Compaction {
         state: CompactionState,
-        text: String,
+        text: std::sync::Arc<str>,
+        detail: Option<crate::model::view::CompactionDetail>,
+        target: Option<crate::model::view::CompactionTarget>,
         insufficient: Vec<CompactionPartSize>,
         expanded: bool,
     },
@@ -121,6 +123,8 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
             Some(compaction) => Block::Compaction {
                 state: compaction.state,
                 text: compaction.text.clone(),
+                detail: compaction.detail.clone(),
+                target: None,
                 insufficient: compaction.insufficient.clone(),
                 expanded: detail == Detail::Expanded,
             },
@@ -763,7 +767,7 @@ mod tests {
                 completed.compaction = Some(CompactionView {
                     detail: None,
                     state: CompactionState::Completed,
-                    text: content,
+                    text: content.into(),
                     insufficient: Vec::new(),
                 });
                 let rendered = compaction_rows(&shared(&[completed]), Detail::Expanded);

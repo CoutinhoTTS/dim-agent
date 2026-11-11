@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn display_windows_and_live_compaction_keep_the_body_for_chunked_detail() {
+async fn display_windows_and_live_compaction_use_one_typed_detail_with_a_frame_budget() {
     use dim_agent_types::{ContextCompactionData, InputMode};
     let directory = new_directory("display");
     let model = Arc::new(StreamingModel::default());
@@ -106,67 +106,43 @@ async fn display_windows_and_live_compaction_keep_the_body_for_chunked_detail() 
         assert_eq!(display["result"][field], full["result"][field], "{field}");
     }
     drop(legacy);
-    let mut offset = 0;
-    let mut text = String::new();
-    let mut total = None;
-    let mut chunks = 0;
     let detail_started = std::time::Instant::now();
-    let mut detail_bytes = 0;
-    loop {
-        let reply = reader.rpc("session.history.detail",json!({"sessionId":id,"branchId":"main","eventId":event.id,"sequence":event.sequence,"offset":offset})).await;
-        assert_ok(&reply);
-        detail_bytes += serde_json::to_vec(&reply).unwrap().len();
-        let part = &reply["result"];
-        assert_eq!(part["eventId"], event.id);
-        assert_eq!(part["sequence"], event.sequence);
-        assert_eq!(part["offset"], offset);
-        let size = part["totalBytes"].as_u64().unwrap();
-        assert!(total.is_none_or(|previous| previous == size));
-        total = Some(size);
-        let chunk = part["text"].as_str().unwrap();
-        assert!(chunk.len() <= 1024 * 1024 && !chunk.is_empty());
-        text.push_str(chunk);
-        chunks += 1;
-        let Some(next) = part.get("nextOffset").and_then(Value::as_u64) else {
-            break;
-        };
-        assert_eq!(next, text.len() as u64);
-        offset = next;
-    }
-    assert_eq!(chunks, 3);
-    assert_eq!(text.len() as u64, total.unwrap());
+    let reply = reader
+        .rpc(
+            "session.history.detail",
+            json!({"sessionId":id,"branchId":"main","eventId":event.id,"sequence":event.sequence}),
+        )
+        .await;
+    assert_ok(&reply);
+    let detail: dim_agent_types::CompactionDetail =
+        serde_json::from_value(reply["result"].clone()).unwrap();
+    assert_eq!(detail.event_id, event.id);
+    assert_eq!(detail.sequence, event.sequence);
+    assert_eq!(serde_json::to_value(&detail.data).unwrap(), expected);
+    let detail_bytes = serde_json::to_vec(&reply).unwrap().len();
     eprintln!(
-        "compaction display: summary={summary_bytes}B, detail={detail_bytes}B/{chunks}requests/{}ms, JSON={}B",
-        detail_started.elapsed().as_millis(),
-        text.len()
+        "compaction display: summary={summary_bytes}B, detail={detail_bytes}B/1request/{}ms",
+        detail_started.elapsed().as_millis()
     );
-    assert!(
-        serde_json::from_str::<Value>(&text).unwrap() == expected,
-        "detail must preserve the complete compaction data"
-    );
-    for (event_id, sequence, offset, error) in [
-        (
-            event.id.as_str(),
-            event.sequence,
-            (text.find('中').unwrap() + 1) as u64,
-            "invalid_params",
-        ),
-        (
-            event.id.as_str(),
-            event.sequence,
-            text.len() as u64,
-            "invalid_params",
-        ),
-        ("absent", event.sequence, 0, "detail_not_found"),
-        (input.id.as_str(), input.sequence, 0, "detail_not_found"),
+    for (event_id, sequence, error) in [
+        ("absent", event.sequence, "detail_not_found"),
+        (input.id.as_str(), input.sequence, "detail_not_found"),
+        (event.id.as_str(), event.sequence + 100, "invalid_params"),
     ] {
-        let reply=reader.rpc("session.history.detail",json!({"sessionId":id,"branchId":"main","eventId":event_id,"sequence":sequence,"offset":offset})).await;
+        let reply = reader
+            .rpc(
+                "session.history.detail",
+                json!({"sessionId":id,"branchId":"main","eventId":event_id,"sequence":sequence}),
+            )
+            .await;
         if error == "invalid_params" {
             assert_eq!(reply["error"]["code"], -32602, "{reply}");
         } else {
             assert_eq!(error_name(&reply), error, "{reply}");
         }
     }
+    let offset = reader.rpc("session.history.detail",json!({"sessionId":id,"branchId":"main","eventId":event.id,"sequence":event.sequence,"offset":0})).await;
+    assert_eq!(offset["error"]["code"], -32602);
     assert_ok(&reader.rpc("session.attach", json!({"sessionId":id})).await);
     let next = timeline
         .append(
@@ -188,6 +164,26 @@ async fn display_windows_and_live_compaction_keep_the_body_for_chunked_detail() 
         reverted["params"]["event"]["data"] == expected,
         "replacement attachment must restore full events"
     );
+    assert_ok(
+        &reader
+            .rpc("session.attach", json!({"sessionId":id,"display":true}))
+            .await,
+    );
+    let mut oversized = expected.clone();
+    oversized["replacement"][0]["content"] = json!("x".repeat(17 * 1024 * 1024));
+    let oversized = timeline
+        .append(EventKind::ContextCompaction(serde_json::from_value(oversized).unwrap()).into())
+        .unwrap();
+    assert_ok(
+        &reader
+            .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+            .await,
+    );
+    let rejected=reader.rpc("session.history.detail",json!({"sessionId":id,"branchId":"main","eventId":oversized.id,"sequence":oversized.sequence})).await;
+    assert_eq!(error_name(&rejected), "detail_too_large", "{rejected}");
+    let summary=reader.rpc("session.history.display",json!({"sessionId":id,"branchId":"main","through":oversized.sequence,"latestTurn":true,"limit":1})).await;
+    assert_ok(&summary);
+    assert!(serde_json::to_vec(&summary).unwrap().len() < 1024);
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(directory).unwrap();

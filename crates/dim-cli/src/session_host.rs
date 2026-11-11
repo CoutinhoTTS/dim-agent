@@ -33,13 +33,14 @@ use crate::model::view::{
 };
 use crate::projection::Projection;
 use crate::wire::{
-    Attached, CatalogModel, Configuration, Created, Event, EventContent, Progress,
-    ProviderCatalogSnapshot,
+    Attached, CatalogModel, Configuration, Created, DisplayNotice, Event, EventContent,
+    EventNotice, Progress, ProviderCatalogSnapshot,
 };
 use crate::{
     configure, mcp, permission, session_create_from_options, session_create_params, update,
 };
 
+mod compaction;
 mod inventory;
 mod member;
 mod report;
@@ -275,6 +276,7 @@ struct Worker {
     task_stops: Option<StopBatch>,
     workflow: WorkflowReads,
     members: Members,
+    compaction: compaction::CompactionReads,
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
@@ -420,6 +422,7 @@ async fn run(
         worker.poll_task_stops().await;
         worker.poll_workflow().await;
         worker.poll_context().await;
+        worker.poll_compaction().await;
         let workflow_poll = worker
             .workflow
             .next_at
@@ -500,14 +503,6 @@ struct WebToggled {
     open: bool,
     #[serde(default)]
     url: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct EventNotice {
-    session_id: String,
-    branch_id: String,
-    event: Event,
 }
 
 #[derive(Deserialize)]
@@ -664,6 +659,7 @@ impl Worker {
             task_stops: None,
             workflow: WorkflowReads::default(),
             members: Members::default(),
+            compaction: Default::default(),
             output: None,
             output_request: None,
             catalog_request: None,
@@ -819,11 +815,14 @@ impl Worker {
                 .await?;
             self.ui_id = None;
         }
-        let attached: Attached = match self
+        let mut params = json!({"sessionId": session_id});
+        if self
             .client
-            .typed("session.attach", json!({"sessionId": session_id}))
-            .await
+            .supports(&["session.history.display", "session.history.detail"])
         {
+            params["display"] = json!(true);
+        }
+        let attached: Attached = match self.client.typed("session.attach", params).await {
             Ok(attached) => attached,
             Err(error)
                 if kind != SwitchKind::New
@@ -1976,6 +1975,14 @@ impl Worker {
                     self.watch_task_output(target);
                 }
             }
+            Command::CompactionDetails {
+                projection_id,
+                targets,
+            } => {
+                if projection_id == self.projection_id {
+                    self.compaction_targets(targets);
+                }
+            }
             Command::WatchMember {
                 projection_id,
                 member_id,
@@ -2296,8 +2303,12 @@ impl Worker {
                     });
                 }
             }
-            "session.event" => {
-                let notice: EventNotice = serde_json::from_value(params)?;
+            "session.event" | "session.display" => {
+                let notice: EventNotice = if method == "session.display" {
+                    serde_json::from_value::<DisplayNotice>(params)?.into()
+                } else {
+                    serde_json::from_value(params)?
+                };
                 if notice.session_id == self.session_id {
                     // Live only: history pages arrive as `session.history`
                     // replies applied by `apply`, so they spend no read.
@@ -3886,6 +3897,10 @@ impl Worker {
         id: u64,
         result: Result<serde_json::Value, client::RpcError>,
     ) -> crate::Result<()> {
+        if self.owns_compaction(id) {
+            self.compaction_reply(result);
+            return Ok(());
+        }
         if self
             .context_request
             .as_ref()
@@ -4203,7 +4218,12 @@ impl Worker {
         {
             self.send(Update::Permissions(Ok(data.policy.clone())));
         }
-        if branch_id == "main" && matches!(event.content, EventContent::Compaction(_)) {
+        if branch_id == "main"
+            && matches!(
+                event.content,
+                EventContent::Compaction(_) | EventContent::CompactionSummary(_)
+            )
+        {
             self.context_stale = true;
         }
         if branch_id == "main"

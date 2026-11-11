@@ -1063,22 +1063,12 @@ pub struct CompactionSummary {
     pub insufficient_space: Option<InsufficientSpace>,
 }
 
-/// A contiguous UTF-8 fragment of one completed compaction's JSON data.
+/// One completed compaction's complete detail response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CompactionDetailChunk {
+pub struct CompactionDetail {
     pub event_id: String,
     #[serde(with = "crate::safe_integer")]
     pub sequence: u64,
-    #[serde(with = "crate::safe_integer")]
-    pub offset: u64,
-    #[serde(with = "crate::safe_integer")]
-    pub total_bytes: u64,
-    pub text: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::optional_safe_integer"
-    )]
-    pub next_offset: Option<u64>,
+    pub data: ContextCompactionData,
 }

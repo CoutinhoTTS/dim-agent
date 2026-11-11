@@ -360,40 +360,22 @@ impl Connection {
         else {
             unreachable!("compaction data is present")
         };
-        let offset = params.offset.unwrap_or(0);
-        let start = usize::try_from(offset)
-            .map_err(|_| RpcError::invalid("Detail offset is out of range"))?;
-        let mut chunk = DetailBytes {
-            offset: start,
-            total: 0,
-            bytes: Vec::new(),
+        let detail = dim_agent_types::CompactionDetail {
+            event_id: params.event_id,
+            sequence: params.sequence,
+            data: serde_json::from_value(value)
+                .map_err(|error| RpcError::wire(-32603, error.to_string()))?,
         };
-        serde_json::to_writer(&mut chunk, &value)
+        let encoded = serde_json::value::to_raw_value(&detail)
             .map_err(|error| RpcError::wire(-32603, error.to_string()))?;
-        if start >= chunk.total {
-            return Err(RpcError::invalid(
-                "Detail offset must be inside the JSON at a UTF-8 boundary",
+        if encoded.get().len() > REPLY_FRAME_BYTES {
+            return Err(RpcError::app(
+                -32000,
+                "detail_too_large",
+                "The compaction exceeds the display budget; export the Timeline to read the complete fact",
             ));
         }
-        if let Err(error) = std::str::from_utf8(&chunk.bytes) {
-            if error.error_len().is_some() {
-                return Err(RpcError::invalid(
-                    "Detail offset must be at a UTF-8 boundary",
-                ));
-            }
-            chunk.bytes.truncate(error.valid_up_to());
-        }
-        let end = start + chunk.bytes.len();
-        Ok(Reply::HistoryDetail(
-            dim_agent_types::CompactionDetailChunk {
-                event_id: params.event_id,
-                sequence: params.sequence,
-                offset,
-                total_bytes: chunk.total as u64,
-                text: String::from_utf8(chunk.bytes).expect("the chunk has valid UTF-8"),
-                next_offset: (end < chunk.total).then_some(end as u64),
-            },
-        ))
+        Ok(Reply::HistoryDetail(encoded))
     }
 
     /// The branch's live keyed blocks at `through` (keyed-blocks §2.2): the
@@ -858,29 +840,6 @@ async fn turn_window(
 enum HistoryRead<'a> {
     Open(&'a Session, u32),
     Ended(&'a TreeCommands, u32),
-}
-
-struct DetailBytes {
-    offset: usize,
-    total: usize,
-    bytes: Vec<u8>,
-}
-
-impl std::io::Write for DetailBytes {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let start = self.offset.saturating_sub(self.total).min(bytes.len());
-        let keep = (1024 * 1024 - self.bytes.len()).min(bytes.len() - start);
-        self.bytes.extend_from_slice(&bytes[start..start + keep]);
-        self.total = self
-            .total
-            .checked_add(bytes.len())
-            .ok_or_else(|| std::io::Error::other("Detail size is out of range"))?;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 impl HistoryRead<'_> {

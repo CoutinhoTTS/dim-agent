@@ -18,6 +18,32 @@ pub struct Event {
     pub parent_call_id: Option<String>,
     pub content: EventContent,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventNotice {
+    pub session_id: String,
+    pub branch_id: String,
+    pub event: Event,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayNotice {
+    pub session_id: String,
+    pub branch_id: String,
+    pub item: Event,
+}
+
+impl From<DisplayNotice> for EventNotice {
+    fn from(notice: DisplayNotice) -> Self {
+        Self {
+            session_id: notice.session_id,
+            branch_id: notice.branch_id,
+            event: notice.item,
+        }
+    }
+}
 #[derive(Clone, Deserialize)]
 pub struct Configuration {
     pub provider_id: String,

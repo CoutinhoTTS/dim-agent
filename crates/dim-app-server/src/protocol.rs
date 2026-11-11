@@ -750,8 +750,6 @@ pub struct HistoryDetail {
     pub event_id: String,
     #[serde(deserialize_with = "cursor")]
     pub sequence: u64,
-    #[serde(default, deserialize_with = "optional_cursor")]
-    pub offset: Option<u64>,
 }
 /// `session.keys`: the live keyed blocks of one branch segment at a fixed
 /// position (keyed-blocks §2.1).
@@ -1301,7 +1299,7 @@ pub enum Reply {
     InputLookup(InputLookupResult),
     History(crate::tree_protocol::HistoryResult),
     HistoryDisplay(crate::tree_protocol::DisplayResult),
-    HistoryDetail(dim_agent_types::CompactionDetailChunk),
+    HistoryDetail(Box<serde_json::value::RawValue>),
     Branches(crate::tree_protocol::BranchesResult),
     BranchGet(crate::tree_protocol::BranchDirectoryView),
     Keys(crate::tree_protocol::KeysResult),

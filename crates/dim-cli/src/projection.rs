@@ -18,8 +18,8 @@ use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, CompactionDetail, CompactionPart, CompactionPartSize, CompactionState,
-    CompactionView, FailureDetail, LineCut, LineState, LineView, MemberCard,
+    ApprovalView, CompactionDetail, CompactionDetailState, CompactionPart, CompactionPartSize,
+    CompactionState, CompactionView, FailureDetail, LineCut, LineState, LineView, MemberCard,
     MemberConversationState, MemberTarget, QueuedInput, RetryView, RowKind, RowTone, TaskFinish,
     TaskKind, TaskOutcome, TaskTarget, TaskView, TurnEnd, ViewRow, ViewSnapshot, WorkflowView,
 };
@@ -536,7 +536,7 @@ impl Projection {
                 self.row(index).compaction = Some(CompactionView {
                     detail: None,
                     state: CompactionState::Running,
-                    text: String::new(),
+                    text: String::new().into(),
                     insufficient: Vec::new(),
                 });
                 self.compaction_rows.insert(sequence, index);
@@ -553,8 +553,9 @@ impl Projection {
                         detail: Some(CompactionDetail {
                             event_id: event.id.clone(),
                             sequence,
+                            state: CompactionDetailState::Unloaded,
                         }),
-                        text: String::new(),
+                        text: String::new().into(),
                         insufficient: compaction_sizes(data.insufficient_space.as_ref()),
                     },
                 );
@@ -1586,6 +1587,32 @@ impl Projection {
         self.row(index).compaction = Some(view);
     }
 
+    pub fn compaction_detail(
+        &mut self,
+        event_id: &str,
+        sequence: u64,
+        state: CompactionDetailState,
+        data: Option<&dim_agent_types::ContextCompactionData>,
+    ) -> bool {
+        let Some(index) = self.rows.iter().position(|row| {
+            row.compaction
+                .as_ref()
+                .and_then(|view| view.detail.as_ref())
+                .is_some_and(|detail| detail.event_id == event_id && detail.sequence == sequence)
+        }) else {
+            return false;
+        };
+        let view = self.row(index).compaction.as_mut().expect("compaction row");
+        if let Some(data) = data {
+            let loaded = compaction_view(&data.outcome);
+            view.text = loaded.text;
+        } else {
+            view.text = "".into();
+        }
+        view.detail.as_mut().expect("detail identity").state = state;
+        true
+    }
+
     fn complete_tool(
         &mut self,
         request_id: &str,
@@ -1657,7 +1684,7 @@ fn compaction_view(outcome: &ContextCompactionResult) -> CompactionView {
     CompactionView {
         detail: None,
         state,
-        text,
+        text: text.into(),
         insufficient,
     }
 }
@@ -2812,7 +2839,7 @@ mod tests {
             Some(CompactionView {
                 detail: None,
                 state: CompactionState::Running,
-                text: String::new(),
+                text: String::new().into(),
                 insufficient: Vec::new(),
             })
         );
@@ -2834,6 +2861,7 @@ mod tests {
             view.detail,
             Some(CompactionDetail {
                 event_id: "event-4".into(),
+                state: CompactionDetailState::Unloaded,
                 sequence: 4
             })
         );
@@ -2911,7 +2939,7 @@ mod tests {
             .map(|row| {
                 let compaction = row.compaction.as_ref().expect("a compaction row");
                 assert_eq!(compaction.state, CompactionState::Completed);
-                compaction.text.as_str()
+                compaction.text.as_ref()
             })
             .collect();
         assert_eq!(summaries, [summary, summary]);
@@ -2958,7 +2986,7 @@ mod tests {
             .iter()
             .map(|row| {
                 let compaction = row.compaction.as_ref().expect("a compaction row");
-                (compaction.state, compaction.text.as_str())
+                (compaction.state, compaction.text.as_ref())
             })
             .collect();
         assert_eq!(
