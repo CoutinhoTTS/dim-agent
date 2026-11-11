@@ -664,7 +664,40 @@ async fn growth_checks_seek_numeric_boundaries_across_larger_restored_histories(
         timeline
             .append_batch_registered(drafts, |_| Ok(()))
             .unwrap();
-        let through = 2 + 2 * (size / 3) as u64;
+        dim_agent_runtime::core::close_timeline(&timeline)
+            .await
+            .unwrap();
+        let mut profile = builder_with_context(
+            Arc::new(EchoModel),
+            HistoryRenderer::default(),
+            Context {
+                threshold: Some(100.),
+                window: 1_000_000.,
+                ..Context::default()
+            },
+        );
+        profile.timeline_store(store.clone());
+        let cell = Arc::new(std::sync::OnceLock::new());
+        let capture = cell.clone();
+        profile.require_feature(Feature::new("test.raw-timeline").branch(
+            "test.raw-timeline",
+            move |names| {
+                Ok(Box::new(super::manual_compaction::RawTimeline::new(
+                    names,
+                    capture.clone(),
+                )?))
+            },
+        ));
+        let agent = MinimalHost::start(&profile).await.unwrap();
+        let session = agent.restore_session("growth".into()).await.unwrap();
+        session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        let timeline = cell.get().unwrap();
+        let through = timeline.sequence();
         let start = timeline
             .append(
                 EventKind::ContextCompactionStart(ContextCompactionStartData {
@@ -692,27 +725,6 @@ async fn growth_checks_seek_numeric_boundaries_across_larger_restored_histories(
                 })
                 .into(),
             )
-            .unwrap();
-        dim_agent_runtime::core::close_timeline(&timeline)
-            .await
-            .unwrap();
-        let mut profile = builder_with_context(
-            Arc::new(EchoModel),
-            HistoryRenderer::default(),
-            Context {
-                threshold: Some(100.),
-                window: 1_000_000.,
-                ..Context::default()
-            },
-        );
-        profile.timeline_store(store.clone());
-        let agent = MinimalHost::start(&profile).await.unwrap();
-        let session = agent.restore_session("growth".into()).await.unwrap();
-        session
-            .service::<ContextPreparation>("main")
-            .unwrap()
-            .usage(CancellationToken::new())
-            .await
             .unwrap();
         agent.close().await.unwrap();
         drop(session);
@@ -3398,4 +3410,347 @@ async fn usage_reuses_counted_messages_and_current_registry_tools_without_extra_
         "reload does not recount settled messages"
     );
     agent.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn usage_upgrades_saved_numbers_or_initializes_once_without_historical_result_backfill() {
+    use dim_agent_capabilities::{context_preparation::ContextPreparation, prompt::Prompt};
+    use serde_json::{Value, json};
+    let source = Arc::new(MemoryTimelineStore::default());
+    let counter = Arc::new(ObservedCounter::default());
+    let mut profile = builder_with_usage_resolver(counter.clone());
+    profile.timeline_store(source.clone());
+    let agent = MinimalHost::start(&profile).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    let id = session.id().to_owned();
+    session
+        .service::<Prompt>("main")
+        .unwrap()
+        .configure_loaded(
+            Some(ModelSelection {
+                provider_id: "test".into(),
+                model_id: "test".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            }),
+            vec![],
+        )
+        .await
+        .unwrap();
+    for text in ["first saved input", "second saved input"] {
+        session
+            .submit(text.into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+    }
+    let expected = session
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    agent.close().await.unwrap();
+    let key = TimelineKey {
+        session_id: id.clone(),
+        branch_id: "main".into(),
+    };
+    let original = source
+        .read(&key, 1..=source.head(&key).await.unwrap())
+        .await
+        .unwrap();
+    let points: Vec<Value> = original
+        .iter()
+        .filter_map(|record| match &record.event.kind {
+            EventKind::Extension(data) if data.key() == "context-usage/recovered" => {
+                Some(data.data().clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let initial_history = project_history(
+        &original
+            .iter()
+            .map(|record| record.event.clone())
+            .collect::<Vec<_>>(),
+        "main",
+    )
+    .unwrap();
+    let fixed = expected.estimated_input_tokens
+        - initial_history
+            .iter()
+            .map(|entry| serde_json::to_vec(&entry.message).unwrap().len() as f64)
+            .sum::<f64>();
+    let latest = points.last().unwrap();
+    let mut previous = json!({"ordinary":{"serialized_bytes":0,"images":0},"growth":0});
+    let mut entries = Vec::new();
+    for point in &points {
+        let mut totals = point["current"]["totals"].clone();
+        if totals.is_null() {
+            continue;
+        }
+        totals.as_object_mut().unwrap().remove("message_count");
+        if let Some(ready) = totals
+            .pointer_mut("/configuration/counter")
+            .and_then(Value::as_object_mut)
+        {
+            ready.remove("control_identity");
+            ready.remove("configured_tools");
+        }
+        let mut delta = totals.clone();
+        for field in ["serialized_bytes", "images"] {
+            delta["ordinary"][field] = (totals["ordinary"][field].as_u64().unwrap()
+                - previous["ordinary"][field].as_u64().unwrap())
+            .into();
+        }
+        delta["growth"] = (totals["growth"].as_f64().unwrap_or(0.)
+            - previous["growth"].as_f64().unwrap_or(0.))
+        .into();
+        entries.push(json!({"at":point["current"]["at"],"summary":delta}));
+        previous = totals;
+    }
+    for schema in [
+        None,
+        Some("context-usage/v1"),
+        Some("context-usage/v2"),
+        Some("context-usage/v3"),
+        Some("context-usage/v4"),
+    ] {
+        let store = Arc::new(CountContextReads::default());
+        store
+            .create_session(&id, &SessionConfig::default())
+            .await
+            .unwrap();
+        let copied: Vec<_> = original
+            .iter()
+            .cloned()
+            .map(|mut record| {
+                if let EventKind::Extension(data) = &record.event.kind
+                    && data.domain() == "context-usage"
+                {
+                    let mut event = record.event.as_ref().clone();
+                    event.kind = if schema == Some("context-usage/v4") {
+                        let mut saved = data.data().clone();
+                        if data.key() == "context-usage/recovered" {
+                            saved["schema"] = "context-usage/v4".into();
+                        }
+                        EventKind::Extension(
+                            ExtensionEvent::new(data.domain(), data.name(), saved).unwrap(),
+                        )
+                    } else {
+                        EventKind::Extension(
+                            ExtensionEvent::new("fixture", "omitted-cache", json!({})).unwrap(),
+                        )
+                    };
+                    record.event = Arc::new(event);
+                }
+                record
+            })
+            .collect();
+        store
+            .append(key.clone(), copied, Box::new(|result| result.unwrap()))
+            .unwrap();
+        if let Some(schema) = schema {
+            let timeline =
+                Timeline::restore(Ctx::root().unwrap(), key.clone(), vec![], store.clone())
+                    .await
+                    .unwrap();
+            let mut saved = latest.clone();
+            saved["schema"] = schema.into();
+            saved["source_through"] = timeline.sequence().into();
+            if schema != "context-usage/v4" {
+                let mut entries = entries.clone();
+                let mut previous = previous.clone();
+                if schema != "context-usage/v3" {
+                    for summary in entries
+                        .iter_mut()
+                        .map(|entry| &mut entry["summary"])
+                        .chain(std::iter::once(&mut previous))
+                    {
+                        summary.as_object_mut().unwrap().remove("growth");
+                        summary.as_object_mut().unwrap().remove("last_entry");
+                    }
+                }
+                let node = timeline
+                    .append(
+                        EventKind::Extension(
+                            ExtensionEvent::new(
+                                "context-usage",
+                                "node",
+                                json!({"kind":"leaf","entries":entries}),
+                            )
+                            .unwrap(),
+                        )
+                        .into(),
+                    )
+                    .unwrap();
+                saved["state"] = json!({"branches":latest["branches"],"initialized":latest["initialized"],
+                    "root":{"id":node.id,"first":entries[0]["at"],"last":entries.last().unwrap()["at"],
+                    "height":0,"summary":previous}});
+                for field in ["epoch", "branches", "initialized", "current"] {
+                    saved.as_object_mut().unwrap().remove(field);
+                }
+            }
+            timeline
+                .append(
+                    EventKind::Extension(
+                        ExtensionEvent::new("context-usage", "recovered", saved).unwrap(),
+                    )
+                    .into(),
+                )
+                .unwrap();
+            dim_agent_runtime::core::close_timeline(&timeline)
+                .await
+                .unwrap();
+        }
+        counter.messages.store(0, Ordering::SeqCst);
+        let before = store.head(&key).await.unwrap();
+        let mut profile = builder_with_usage_resolver(counter.clone());
+        profile.timeline_store(store.clone());
+        let agent = MinimalHost::start(&profile).await.unwrap();
+        let session = agent.restore_session(id.clone()).await.unwrap();
+        let value = session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            value.estimated_input_tokens, expected.estimated_input_tokens,
+            "{schema:?}"
+        );
+        assert_eq!(
+            counter.messages.load(Ordering::SeqCst),
+            if schema.is_none() {
+                initial_history.len()
+            } else {
+                0
+            },
+            "{schema:?}"
+        );
+        let added = store
+            .memory
+            .read(&key, before + 1..=store.head(&key).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            added
+                .iter()
+                .filter(|record| matches!(&record.event.kind,
+            EventKind::Extension(data) if data.key()=="context-usage/recovered"))
+                .count(),
+            usize::from(schema.is_none()),
+            "only a missing aggregate writes an initial result: {schema:?}"
+        );
+        agent.close().await.unwrap();
+        counter.messages.store(0, Ordering::SeqCst);
+        store.context_pages.lock().unwrap().clear();
+        let agent = MinimalHost::start(&profile).await.unwrap();
+        let session = agent.restore_session(id.clone()).await.unwrap();
+        let value = session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            value.estimated_input_tokens,
+            expected.estimated_input_tokens
+        );
+        assert_eq!(
+            counter.messages.load(Ordering::SeqCst),
+            0,
+            "reload recounted messages: {schema:?}"
+        );
+        assert!(
+            store.context_pages.lock().unwrap().is_empty(),
+            "reload projected history: {schema:?}"
+        );
+        session
+            .submit("new input".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let value = session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(value.estimated_input_tokens > expected.estimated_input_tokens);
+        agent.close().await.unwrap();
+        let agent = MinimalHost::start(&profile).await.unwrap();
+        let session = agent.restore_session(id.clone()).await.unwrap();
+        let reloaded = session
+            .service::<ContextPreparation>("main")
+            .unwrap()
+            .usage(CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            reloaded.estimated_input_tokens, value.estimated_input_tokens,
+            "v5 after new input: {schema:?}"
+        );
+        let cuts = chain_events(&session, "main", ..)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::InputMessage(_)))
+            .skip(1)
+            .map(|event| event.id.clone())
+            .collect::<Vec<_>>();
+        agent.close().await.unwrap();
+        for cut in cuts {
+            let timeline =
+                Timeline::restore(Ctx::root().unwrap(), key.clone(), vec![], store.clone())
+                    .await
+                    .unwrap();
+            timeline.append(EventKind::ContextCompaction(ContextCompactionData {
+                turn_id: None, request_id: None, command: None, start: None,
+                through: timeline.sequence(),
+                outcome: ContextCompactionResult::Completed {
+                    retain_from: cut, replacement: vec![summary_message("replacement")],
+                    strategy: "fixture".into(),
+                    diagnostics: serde_json::from_value(json!({
+                        "reason":"auto","trigger":"threshold","estimatedInputTokens":1,
+                        "entriesReplaced":1,"modelCallCount":1,"durationMs":1,"strategy":{"kind":"fixture"}
+                    })).unwrap(),
+                    context_baseline: vec![], replacement_parts: None, pinned_inputs: None, digest_entries: None,
+                },
+            }).into()).unwrap();
+            dim_agent_runtime::core::close_timeline(&timeline)
+                .await
+                .unwrap();
+            let agent = MinimalHost::start(&profile).await.unwrap();
+            let session = agent.restore_session(id.clone()).await.unwrap();
+            let usage = session
+                .service::<ContextPreparation>("main")
+                .unwrap()
+                .usage(CancellationToken::new())
+                .await
+                .unwrap();
+            let context = HistoryRenderer::default()
+                .context_in(&session, "main", usage.through)
+                .await
+                .unwrap();
+            let messages = dim_agent_capabilities::history::context_messages(
+                &context,
+                &project_context_history(&context).unwrap(),
+            );
+            assert_eq!(
+                usage.estimated_input_tokens,
+                fixed
+                    + messages
+                        .iter()
+                        .map(|message| serde_json::to_vec(message).unwrap().len() as f64)
+                        .sum::<f64>(),
+                "compaction after upgrade must match the actual context: {schema:?}"
+            );
+            agent.close().await.unwrap();
+        }
+    }
 }

@@ -272,43 +272,11 @@ scopes (§3.3), so it is not a usable trigger until the harness reports it.
 A cold attach that is already inside the budget at 1k, 5k and 10k does not justify a read-path change
 whose only effect is to remove one decode.
 
-## 7. Candidate: validation's decoded events to the opening read
+## 7. Withdrawn candidate: reuse validation output
 
-Adopt this candidate only after the follow-up's product `attach_cost` with one MCP server and one skill
-at 5k and 10k still exceeds the §5 budget and the storage restore is still the largest step. Do not
-implement it before that measurement. The change is to stop decoding the same committed events twice
-on a cold open.
-
-- **Input.** The full validation pass already decodes every `StoredEvent` of every branch with its
-  batch end, then drops them. Keep the decoded events and batch ends of the branch that is about to
-  open, in the store, until that branch's first committed-history read.
-- **Output.** The branch opening's first read of `1..=h` is served from that copy. Later reads, reads
-  past `h`, and every other branch read from the store as today. The returned `StoredEvent` values,
-  their `Arc<AgentEvent>` identities and batch ends are the same a store read returns.
-- **Errors.** The same errors as the read it replaces: a range that ends inside an atomic batch still
-  fails with `InvalidInput`; a storage failure that validation would report fails the restore before a
-  copy exists; a read the copy does not cover falls back to `read_page`. A failed validation keeps no
-  copy.
-- **Bound.** The copy is one branch's history and is dropped when that branch's opening ends: no read
-  holds a whole branch ([ADR 021 D6](../adr/021-reads-follow-the-state-owner.md)).
-  A Session with several branches must not retain all of them at once; if the store cannot bound it to
-  the branch being opened (or, at most, `main`), do not adopt the change.
-- **Contract.** The cache is inside the SQLite store's read path; `TimelineStore`'s signatures and the
-  attach reply do not change. If the runtime's rule that validation's cache is released when validation
-  ends ([timeline-storage §4](../../architecture/rust-agent/timeline-storage.md#4-读取)) must be
-  widened, that is one sentence raised to the runtime owner, not a new public contract.
-- **What does not change.** Full validation and its checks, the attach reply and pinned sequence, the
-  live subscription, approval replay, leases, idle unload, the history window, events, storage format,
-  protocol and services.
-- **Verification.** A flow test on a disposable store that fails the opening's store read after
-  `branches`; the Session still restores and attaches, which shows the read was served from the
-  validation copy. The existing corruption and restore flows keep their results.
-
-This candidate removes 38.2 ms from the instrumented 97.6 ms first restore at 5k (39% of that restore)
-and 54.1 ms from 128.5 ms at 6.9k (42%). Its share of the attach total (82.7 ms at 5k product) is not
-derived here because the attach-scope split is not measured; if the opening read were the same 38.2 ms,
-it would be about half, but that is not measured. It does not help a re-acquisition, where #601 already
-skips validation and there is no copy to reuse.
+This candidate is withdrawn. There is no admission validation pass or decoded opening copy to reuse.
+Cold and warm restore follow the [restore read boundary](restore-validation.md). The profiling scenarios and
+historical measurements above remain evidence about the versions measured, not requirements for a startup scan.
 
 ## 8. Requirements raised to mechanism owners
 

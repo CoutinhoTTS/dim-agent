@@ -5,7 +5,7 @@ use super::{
     SqliteStorage,
     codec::{CONTENT_BUDGET, Reader},
     sqlite::error,
-    timeline::{read_directory, read_range, validate_session},
+    timeline::{read_directory, read_range},
 };
 use dim_agent_runtime::{BranchRecord, Result, TimelineKey, TimelineTrace};
 use dim_agent_types::AgentEvent;
@@ -44,8 +44,8 @@ enum Line<'a> {
 }
 
 /// Writes `session`'s whole Timeline in the database at `path` to `out`,
-/// without changing the database. Nothing is written when the database,
-/// its format or the Session's Timeline is rejected.
+/// without changing the database. A failed read leaves an incomplete stream
+/// without its terminal record.
 pub async fn export_timeline(path: PathBuf, session: &str, out: &mut impl Write) -> Result<()> {
     let (db, format) = SqliteStorage::open_read_only(path)?;
     let written = write(&db, format, session, out).await;
@@ -77,11 +77,8 @@ async fn write(
             db.path.display()
         )));
     }
-    // Export rebuilds every request body in the preflight and checks its
-    // hash, so a damaged body is refused before the first line is written.
     let mut reader = Reader::new(CONTENT_BUDGET);
-    let directory = read_directory(db, session).await?;
-    let branches = validate_session(db, session, &directory, &mut reader, format).await?;
+    let branches = read_directory(db, session).await?;
     line(
         out,
         &Line::Header {

@@ -481,11 +481,23 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::context_usage::legacy",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::context_usage",
+      "file": "crates/dim-agent-capabilities/src/context_usage/legacy.rs",
+      "unexpandedMacros": [
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::context_usage::numeric",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::context_usage",
       "file": "crates/dim-agent-capabilities/src/context_usage/numeric.rs",
       "unexpandedMacros": [
+        "matches",
         "unreachable",
         "vec"
       ]
@@ -10251,6 +10263,13 @@
     },
     {
       "from": "dim_agent_capabilities::context_usage",
+      "to": "dim_agent_capabilities::context_usage::legacy",
+      "references": [
+        "mod legacy"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage",
       "to": "dim_agent_capabilities::context_usage::numeric",
       "references": [
         "mod numeric",
@@ -10436,6 +10455,67 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::context_usage::legacy",
+      "to": "dim_agent_capabilities::context_usage",
+      "references": [
+        "path Key",
+        "path Recovered",
+        "path State",
+        "path fault",
+        "path super::SCHEMA",
+        "use super::Key",
+        "use super::Recovered",
+        "use super::State",
+        "use super::fault"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::legacy",
+      "to": "dim_agent_capabilities::context_usage::numeric",
+      "references": [
+        "path NumericResult",
+        "path Summary",
+        "path Summary::default",
+        "use super::NumericResult",
+        "use super::Summary"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::legacy",
+      "to": "dim_agent_capabilities::history",
+      "references": [
+        "path crate::history::chain_by_id"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::legacy",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::legacy",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::legacy",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryOutput::Rows",
+        "path QuerySelect::Fields",
+        "path QueryValue::Value",
+        "use dim_agent_runtime::QueryOutput",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QueryValue"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::context_usage::numeric",
       "to": "dim_agent_capabilities::context_usage",
       "references": [
@@ -10458,6 +10538,13 @@
         "use super::add",
         "use super::fault",
         "use super::request"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::numeric",
+      "to": "dim_agent_capabilities::context_usage::legacy",
+      "references": [
+        "path super::legacy::prefix"
       ]
     },
     {
@@ -10555,6 +10642,13 @@
     },
     {
       "from": "dim_agent_capabilities::context_usage::sources",
+      "to": "dim_agent_capabilities::context_usage::legacy",
+      "references": [
+        "path legacy::restore"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::context_usage::sources",
       "to": "dim_agent_capabilities::context_usage::numeric",
       "references": [
         "path Entry",
@@ -10570,6 +10664,8 @@
       "to": "dim_agent_capabilities::history",
       "references": [
         "path chain_by_id",
+        "path crate::history::FoldRead::timeline",
+        "path crate::history::project_batch",
         "path render_input",
         "path tool_result_message",
         "use crate::history::chain_by_id",
@@ -10617,8 +10713,10 @@
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
         "path QueryFilter::And",
+        "path QueryOutput::Exists",
         "path QueryOutput::Rows",
         "path QueryPick::Last",
+        "path QuerySelect::Exists",
         "path QuerySelect::Fields",
         "path QueryValue",
         "path QueryValue::Elements",
@@ -30908,10 +31006,8 @@
       "references": [
         "path read_directory",
         "path read_range",
-        "path validate_session",
         "use super::timeline::read_directory",
-        "use super::timeline::read_range",
-        "use super::timeline::validate_session"
+        "use super::timeline::read_range"
       ]
     },
     {
@@ -31738,7 +31834,6 @@
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
         "path EventKind::BranchCreate",
-        "path EventKind::ContextCompaction",
         "path EventKind::InputMessage",
         "path EventKind::SessionForked",
         "path EventKind::Text",
@@ -31747,7 +31842,6 @@
         "path dim_agent_types::InputMessageData::text",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateAt",
-        "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::SessionForkedData"
       ]
@@ -31791,8 +31885,7 @@
       "to": "dim_app_server::storage::arrays",
       "references": [
         "path super::arrays::Reference",
-        "path super::arrays::check",
-        "path super::arrays::check_elements"
+        "path super::arrays::check"
       ]
     },
     {
@@ -31814,7 +31907,6 @@
         "path ListReferences",
         "path Previous",
         "path Reader",
-        "path Reader::for_validation",
         "path Reader::new",
         "path Reader::without_request_bodies",
         "path RequestBodies",
@@ -31858,7 +31950,6 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::identities",
       "references": [
-        "path super::identities::check_page",
         "path super::identities::insert",
         "path super::identities::row"
       ]
@@ -31898,7 +31989,6 @@
         "path SqliteStorage",
         "path SqliteStorage::open",
         "path error",
-        "path super::sqlite::FORMAT",
         "use super::SqliteStorage",
         "use super::sqlite::error"
       ]

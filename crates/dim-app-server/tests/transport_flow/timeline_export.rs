@@ -438,8 +438,6 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o444)).unwrap();
         assert_eq!(exported(&readonly, &session).await, stopped);
 
-        // A damaged request body fails the export before its first line: the
-        // preflight rebuilds and hash-checks every body.
         let damaged = directory.join("copies/damaged.sqlite");
         std::fs::copy(&database, &damaged).unwrap();
         let connection = rusqlite::Connection::open(&damaged).unwrap();
@@ -454,11 +452,13 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
                 > 0
         );
         drop(connection);
-        assert!(
-            rejected(&damaged, &session)
-                .await
-                .contains("request content hash mismatch")
-        );
+        let failed = export(&damaged, &session).await;
+        assert_eq!(failed.status.code(), Some(1));
+        assert!(String::from_utf8(failed.stderr).unwrap().contains("request content hash mismatch"));
+        let partial: Vec<Value> = String::from_utf8(failed.stdout).unwrap().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(partial[0]["kind"], "header");
+        assert!(partial.iter().all(|line| line["kind"] != "end"));
 
         for (version, dropped, end_index) in [
             (13, "DROP TABLE session_file_owners; DROP TABLE session_files; DROP TABLE session_metadata;", true),
@@ -482,6 +482,7 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             (36, "", false),
             (37, "", false),
             (38, "", false),
+            (39, "", false),
         ] {
             let older = directory.join(format!("copies/v{version}.sqlite"));
             let catalog = if version < 23 {
@@ -540,10 +541,14 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
                 CREATE INDEX timeline_events_users ON timeline_events(session_id, branch_id, kind, json_type(body,'$.record.event.data.user'), sequence);"
             } else {""};
             changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees} {submission} {members} {text}
+                DROP TABLE timeline_output_ids;
+                DROP INDEX timeline_events_turns;
+                DROP INDEX timeline_events_scopes;
+                DROP INDEX timeline_events_source_positions;
                 DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));
                 INSERT INTO agent_store_format VALUES ({version});"));
-            without_array_references(&older);
+            if version < 39 { without_array_references(&older); }
             if version < 31 {
                 without_switch_columns(&older);
             } else if version == 31 {

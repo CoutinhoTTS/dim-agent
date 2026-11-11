@@ -107,3 +107,9 @@ Usage 每个真正改变累计值或基准的来源保存一份数字；同源�
 验收使用上述实际流程逐事件登记写入；统计 SQL statement、候选访问、VM_STEP、FULLSCAN_STEP、SORT、AUTOINDEX、解码字节、计数调用、WAL。额外增加已结束聊天历史只用于检验扫描独立性，不用“重复1000次”推导产品收益。空队列、同值提示、空输出失败、重复 provider 数字必须各有流程证据。
 
 删减：取消统一 source_through/逐事件完整结果；取消队列恢复结果；Prompt 不保存 turns/tasks/configuration_event；Usage 不再同时写 boundary 和完整结果、不保存请求正文或逐源树节点。唯一保留的无数值变化保存是有明确重载用途的合并处理位置缓存，其字段和触发条件由 Usage 独占。
+
+## 6. Native restore and initial statistics
+
+Native branches reads only configuration and branch metadata; no full-history admission scan or validation cache remains. Export reads and decodes its output once and omits end on failure; see [restore boundary](appserver/restore-validation.md).
+
+Usage reuses v1–v3 saved aggregates and v4 numeric results; v5 explicitly preserves unavailable legacy message counts instead of recounting history to fill auxiliary metadata. No legacy-prefix backfill occurs at upgrade. If no statistics ever existed, initialize one current total with the existing paged projection. Missing pre-initialization numbers are calculated only for an actual compaction that needs them, never for normal resume; see [Usage §6](plugins/ContextUsage.md#6-恢复切点和查询范围).

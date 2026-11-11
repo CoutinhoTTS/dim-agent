@@ -9,11 +9,12 @@ use dim_agent_runtime::{
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU64, sync::Arc};
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Summary {
     pub ordinary: Contribution,
-    pub message_count: u64,
+    #[serde(default)]
+    pub message_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<Configuration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,6 +27,21 @@ pub(super) struct Summary {
     pub last_entry: Option<LastEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub growth: Option<f64>,
+}
+
+impl Default for Summary {
+    fn default() -> Self {
+        Self {
+            ordinary: Contribution::default(),
+            message_count: Some(0),
+            configuration: None,
+            compression: None,
+            calibration: None,
+            local: None,
+            last_entry: None,
+            growth: None,
+        }
+    }
 }
 
 impl Summary {
@@ -45,8 +61,12 @@ impl Summary {
         self.ordinary = add(self.ordinary, next.ordinary)?;
         self.message_count = self
             .message_count
-            .checked_add(next.message_count)
-            .ok_or_else(|| fault("message count overflow"))?;
+            .zip(next.message_count)
+            .map(|(left, right)| {
+                left.checked_add(right)
+                    .ok_or_else(|| fault("message count overflow"))
+            })
+            .transpose()?;
         if next.configuration.is_some() {
             self.configuration.clone_from(&next.configuration);
             self.calibration = None;
@@ -85,15 +105,25 @@ pub(super) struct Numeric {
     timeline: Arc<Timeline>,
     through: u64,
     epoch: String,
+    legacy_result: Option<String>,
+    initialized: Key,
     pending: Vec<NumericResult>,
 }
 
 impl Numeric {
-    pub fn new(timeline: Arc<Timeline>, through: u64, epoch: String) -> Self {
+    pub fn new(
+        timeline: Arc<Timeline>,
+        through: u64,
+        epoch: String,
+        legacy_result: Option<String>,
+        initialized: Key,
+    ) -> Self {
         Self {
             timeline,
             through,
             epoch,
+            legacy_result,
+            initialized,
             pending: Vec::new(),
         }
     }
@@ -104,6 +134,15 @@ impl Numeric {
 
     pub async fn validate_current(&self, current: Option<&NumericResult>) -> Result<()> {
         if let Some(current) = current {
+            if self.legacy_result.is_none()
+                && (current.totals.message_count.is_none()
+                    || current.totals.compression.as_ref().is_some_and(|value| {
+                        value.removed_messages.is_none() || value.replacement_messages.is_none()
+                    })
+                    || matches!(&current.totals.configuration, Some(Configuration::Ready { counter }) if counter.control_identity.is_none() || counter.configured_tools.is_none()))
+            {
+                return Err(fault("missing native numeric counting metadata"));
+            }
             if current.totals.last_entry.as_ref().is_some_and(|entry| {
                 entry.at > current.at || entry.id.as_ref().is_some_and(String::is_empty)
             }) || current
@@ -151,10 +190,10 @@ impl Numeric {
         current: Option<&NumericResult>,
         end: Key,
         inclusive: bool,
-    ) -> Result<Summary> {
+    ) -> Result<Option<Summary>> {
         let before = |at| at < end || (inclusive && at == end);
         if let Some(current) = current.filter(|current| before(current.at)) {
-            return Ok(current.totals.clone());
+            return Ok(Some(current.totals.clone()));
         }
         if let Some(reference) = self
             .pending
@@ -162,7 +201,7 @@ impl Numeric {
             .rev()
             .find(|reference| before(reference.at))
         {
-            return Ok(reference.totals.clone());
+            return Ok(Some(reference.totals.clone()));
         }
         for branch in (0..=end.branch).rev() {
             let mut query = request(
@@ -219,10 +258,18 @@ impl Numeric {
                 else {
                     return Err(fault("missing numeric summary"));
                 };
-                return serde_json::from_value(value).map_err(|error| fault(error.to_string()));
+                return serde_json::from_value(value)
+                    .map(Some)
+                    .map_err(|error| fault(error.to_string()));
             }
         }
-        Ok(Summary::default())
+        match &self.legacy_result {
+            Some(id) => super::legacy::prefix(&self.timeline, self.through, id, end, inclusive)
+                .await
+                .map(Some),
+            None if before(self.initialized) => Ok(Some(Summary::default())),
+            None => Ok(None),
+        }
     }
 
     pub async fn growth(
@@ -234,12 +281,16 @@ impl Numeric {
         if after >= through {
             return Ok(Some(0.));
         }
-        let before = self.prefix(current, after, true).await?;
-        let end = self.prefix(current, through, true).await?;
+        let Some(before) = self.prefix(current, after, true).await? else {
+            return Ok(None);
+        };
+        let Some(end) = self.prefix(current, through, true).await? else {
+            return Ok(None);
+        };
         let value = |summary: Summary| {
             summary
                 .growth
-                .or_else(|| (summary.message_count == 0).then_some(0.))
+                .or_else(|| (summary.message_count == Some(0)).then_some(0.))
         };
         Ok(value(end)
             .zip(value(before))

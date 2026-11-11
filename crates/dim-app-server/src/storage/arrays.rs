@@ -143,15 +143,6 @@ pub(super) fn check(connection: &Connection, session: &str, array: &Reference) -
     Ok(())
 }
 
-pub(super) fn check_elements(connection: &Connection, session: &str) -> Result<()> {
-    let damaged: Option<String> = connection.prepare_cached("SELECT a.array_id FROM timeline_array_elements a LEFT JOIN timeline_content c ON c.session_id=a.session_id AND c.hash=a.content_ref WHERE a.session_id=?1 GROUP BY a.array_id HAVING max(a.array_length) IS NULL OR min(a.element_index)<>0 OR count(*)<>max(a.array_length) OR max(a.element_index)<>max(a.array_length)-1 OR sum(c.hash IS NULL)>0 LIMIT 1").map_err(error)?
-        .query_row([session],|row|row.get(0)).optional().map_err(error)?;
-    if let Some(id) = damaged {
-        return Err(error(format!("incomplete array {id}")));
-    }
-    Ok(())
-}
-
 pub(super) fn backfill(connection: &Connection) -> Result<()> {
     let mut statement = connection.prepare("SELECT session_id,branch_id,sequence,body FROM timeline_events ORDER BY session_id,branch_id,sequence").map_err(error)?;
     let mut rows = statement.query([]).map_err(error)?;

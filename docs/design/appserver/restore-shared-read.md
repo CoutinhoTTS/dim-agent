@@ -1,5 +1,8 @@
 # Restore-scoped shared history read
 
+> Current restoration has no whole-history validation pass. All validation-pass rows and timings below
+> describe the historical implementation; the [restore read boundary](restore-validation.md) is authoritative.
+
 Status: Implemented in [#235](https://github.com/arcships/dim/pull/235); §17 (TimelineTree's restore facts,
 [#239](https://github.com/arcships/dim/issues/239)) extends it. Phase 3 of
 [#193](https://github.com/arcships/dim/issues/193). Phase 1, a bounded content cache shared across the pages of a read,

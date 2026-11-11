@@ -301,10 +301,7 @@ async fn v38_array_upgrade_is_atomic_reuses_versions_and_rejects_missing_locator
         store.query(&scope, &q, Some(&page())).await.is_err(),
         "a selected missing locator must fail instead of returning no element"
     );
-    assert!(
-        store.branches("rows").await.is_err(),
-        "opening checks locator continuity without rebuilding old contents"
-    );
+    store.branches("rows").await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }

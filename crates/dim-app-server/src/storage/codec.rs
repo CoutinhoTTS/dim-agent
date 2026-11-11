@@ -532,12 +532,12 @@ enum Content {
     System(Arc<SystemPrompt>),
     Element(Arc<arrays::Element>),
 }
-/// Bytes of content bodies one read or validation pass keeps decoded. Each
+/// Bytes of content bodies one read keeps decoded. Each
 /// request repeats the content of the one before, so the budget must hold
 /// one request's distinct content, or every request evicts what the next
 /// one needs; 64 MiB is many times a 1M-token context.
 pub(super) const CONTENT_BUDGET: usize = 64 << 20;
-/// Decoded request content of one read or validation pass, by reference. A
+/// Decoded request content of one read, by reference. A
 /// miss that would take the bodies past the budget first drops every entry,
 /// which also drops content no later request references, such as content a
 /// compaction replaced; a body larger than the budget is not kept.
@@ -667,7 +667,7 @@ pub(super) enum RequestBodies {
     /// these records or use only their other fields (§7.5).
     Unused,
 }
-/// The decoding state of one read call or validation pass, carried across
+/// The decoding state of one read call, carried across
 /// its connection holds: what it does with request bodies, the content cache, the
 /// last event request rebuilt from a list with its node addresses (§7.1 of
 /// the request storage design), and, when a hold ran out of node loads, the
@@ -681,7 +681,6 @@ pub(super) struct Reader {
     /// The requests of the record being decoded rebuilt so far.
     rebuilt: Vec<ResolvedDraft>,
     array_walk: Option<ArrayWalk>,
-    validation: bool,
     /// Node loads in the current hold.
     hold: usize,
     #[cfg(feature = "testing")]
@@ -700,11 +699,6 @@ impl Reader {
     pub(super) fn without_request_bodies(budget: usize) -> Self {
         Self::with_request_bodies(budget, RequestBodies::Unused)
     }
-    pub(super) fn for_validation(budget: usize) -> Self {
-        let mut reader = Self::without_request_bodies(budget);
-        reader.validation = true;
-        reader
-    }
     fn with_request_bodies(budget: usize, request_bodies: RequestBodies) -> Self {
         Self {
             request_bodies,
@@ -714,7 +708,6 @@ impl Reader {
             walk: None,
             rebuilt: vec![],
             array_walk: None,
-            validation: false,
             hold: 0,
             #[cfg(feature = "testing")]
             loads: NodeLoads::default(),
@@ -1202,15 +1195,10 @@ impl Reader {
                 if event["data"].get("changes").is_some() {
                     return Err(error("array reference also has inline changes"));
                 }
-                if self.validation {
-                    arrays::check(connection, session, array)?;
-                    Some(Value::Array(Vec::new()))
-                } else {
-                    let Some(value) = self.array(connection, session, array)? else {
-                        return Ok(Err(wire));
-                    };
-                    Some(value)
-                }
+                let Some(value) = self.array(connection, session, array)? else {
+                    return Ok(Err(wire));
+                };
+                Some(value)
             } else {
                 None
             };

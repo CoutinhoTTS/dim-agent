@@ -544,7 +544,7 @@ async fn merged_output_ids_seek_their_locator_inside_a_physical_row() {
 }
 
 #[tokio::test]
-async fn v40_output_identity_upgrade_is_atomic_and_recovery_rejects_missing_locators() {
+async fn v40_output_identity_upgrade_is_atomic_and_directory_reads_do_not_audit_locators() {
     for invalid_identity in [false, true] {
         let database = Database::new();
         let db = SqliteStorage::open(database.0.clone()).unwrap();
@@ -676,9 +676,18 @@ async fn v40_output_identity_upgrade_is_atomic_and_recovery_rejects_missing_loca
         drop(connection);
         let db = SqliteStorage::open(database.0.clone()).unwrap();
         let store = SqliteTimelineStore::new(db.clone());
+        store.branches("upgrade-output").await.unwrap();
+        let mut exported = Vec::new();
+        dim_app_server::storage::export_timeline(
+            database.0.clone(),
+            "upgrade-output",
+            &mut exported,
+        )
+        .await
+        .unwrap();
         assert!(
-            store.branches("upgrade-output").await.is_err(),
-            "normal recovery rejects a locator missing from a committed output row"
+            String::from_utf8(exported).unwrap().contains("event-3"),
+            "export reads source facts rather than auditing locators"
         );
         store.close().await.unwrap();
         db.close().await.unwrap();

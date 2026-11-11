@@ -28,15 +28,16 @@ ContextUsage 是现有上下文功能内的独立 branch Capability，维护有�
 
 数字结果的完整字段：
 
-- 顶层：`schema=context-usage/v4`、`source_through`、`epoch`、`branches`、`initialized`、`current`。
-- `initialized={branch,sequence}`：本 epoch 已初始化范围的起点，branch 是 branches 中的序号。
+- 顶层：`schema=context-usage/v5`、`source_through`、`epoch`、`branches`、`initialized`、`current`。
+- `initialized={branch,sequence}`：本epoch首次建立当前累计值的来源截止，branch是branches中的序号。缺少旧统计时不因此补写更早位置。
+- 可选 `legacy_result`：被复用的v1–v3统计事件ID；只读引用，不复制或改写它的节点。仅在真实统计变更后的正常结果中保存，不为升级单独写一份。
 - `current={at:{branch,sequence},totals}`：at 是累计值对应的来源位置；不另存重复的 boundary_sequence。
 - `totals.configuration`：Ready 时保存 event_id、request_identity、control_identity、configured_tools、algorithm、fixed 和 limits(window/output/threshold)；不支持/不可用有明确状态。
-- `totals.ordinary={serialized_bytes,images}`、`message_count`、`last_entry={id,at}`、`local`、`growth`：普通消息累计贡献、条数、最后条目、本地估算及压缩策略用的累计增长数字。
+- `totals.ordinary={serialized_bytes,images}`、`message_count`、`last_entry={id,at}`、`local`、`growth`：普通消息累计贡献、条数、最后条目、本地估算及压缩策略用的累计增长数字。message_count为整数或null；null仅表示旧统计未保存条数，不表示0。
 - `totals.compression`：event_id、cut、removed、replacement、removed_messages、replacement_messages，或缺省。
 - `totals.calibration`：request_id、request_at、anchor_at、configuration、compression、request_identity、local、prompt_tokens，或缺省。
 
-不保存 root、节点、逐消息正文、所有请求、Weak引用、started/settled数组。当前用量是固定贡献+ordinary−removed+本次replacement/基线。每次压缩替换上一份 replacement，而不是累加历次摘要。
+不新写root或数字节点，不复制逐消息正文、所有请求、Weak引用、started/settled数组。兼容读取可以按legacy_result访问已存在的旧节点。当前用量是固定贡献+ordinary−removed+本次replacement/基线。每次压缩替换上一份 replacement，而不是累加历次摘要。
 
 current.at 是这份累计值对应的来源位置；source_through 是本份结果已处理到的位置。无效果来源只提高处理位置，不产生新 current。两者不能互相替代，否则压缩可能漏掉已经计入的消息。
 
@@ -90,11 +91,25 @@ current.at 是这份累计值对应的来源位置；source_through 是本份结
 
 压缩切点：按 retain_from 的逻辑ID取得来源位置；在同一 epoch 的 numeric 结果中按 `data.current.at.branch = 切点分支序号 AND data.current.at.sequence < 切点` 倒序取最近累计值，再按其数字扣除。采用已有 Field 排序语法；必须由[源位置索引](../appserver/timeline-state-read-indexes.md)执行，不用事件提交位置代替源位置，不用 LIMIT1 掩盖历史筛选。单分支2次逻辑query（ID位置+数字边界）；祖先切点按固定chain各段定位，最多R次范围探测，R是分支链长度。边界之前无普通消息时累计值为0，不能因此遍历旧来源。
 
-本 epoch 初始化保留前缀的累计值为0，切点不允许回到已经替换/未初始化范围。数字结果 source_through 可能小于自身提交位置，查询同时核对事件在固定可见范围；数值索引不是绕过祖先 cutoff 的权限。
+切点不能回到已被替换的范围。初始化之前的数字不能假设为0；缺少统计的首次初始化按§6.2处理。数字结果 source_through 可能小于自身提交位置，查询同时核对事件在固定可见范围；数值索引不是绕过祖先 cutoff 的权限。
 
 输出结算状态按 request 的已有 request_id 索引取得最后 start/end/旧 flush边界。正常重载没有打开输出时不读取任何旧输出内容；资源 owner 补出的终态属于新的真实内容源。已有 numeric 之前的输出不重计。
 
-known旧context-usage/v1–v3使用一次明确初始化，未知schema/算法不兼容/引用损坏报错，不过滤未知结果后拿旧版本。初始化只读取最后有效压缩后的保留上下文，逐来源计算数字边界，不构建常驻消息数组，不声称零遍历；完成后正常重载必须使用v4数字。无配置先返回业务错误。fork优先复用祖先可见数字和边界；不可见/无兼容数字时只在新分支首次初始化，不能把父分支未来统计当作切点内结果。
+### 6.1 统计版本与旧数据
+
+新写私有统计使用context-usage/v5；读取v4原有数值及v1–v3累计数字。v5允许旧统计未保存的message_count、压缩消息条数和控制缓存字段缺失或为null，并增加可选legacy_result。缺失消息条数不使用数值证据的请求快捷校验；请求沿已有实际请求校验，不把未知条数填0，不为建立无法证明的provider关联读取旧请求。v4没有这些缺失语义，缺字段仍按损坏处理。
+
+这是私有派生统计的显式版本决定，native v40、公开事件和Query API不变。Store将扩展data视为所属owner的数据；现有epoch/源位置索引字段不变。不把不兼容结构继续标成v4。旧统计原字节保留；未知schema、算法不兼容和实际读取的坏引用报错，不猜测、不重算掩盖。
+
+v1–v3恢复从最新结果的state.root.summary取得ordinary、固定贡献、压缩、基准、last_entry和growth。source_through、branches与可见截止必须合法，算法须匹配。恢复时补取配置的实际控制字段和tools声明存在性，只读取未完成源后缀；无新来源时0旧消息计数、0数字补写。未来需要升级前切点的累计值时，先按ID读取legacy_result及所需数字节点，整段已累计范围直接采用它的summary，只读取落在切点上的节点；不回放消息，不把旧节点改写为新事件。
+
+### 6.2 确实没有统计
+
+生产旧库可能从未保存ContextUsage统计。这与已有v1–v3数字不同：首次使用已有上下文分页读取和project_batch，一次处理256条选中事实，消费本页消息后释放，跨页只留投影所需状态与累计数字。已经压缩掉的消息不计数；不按每条来源再次点查正文或重建输出。未配置或无可用计数器时不读正文。
+
+初始化只保存截止位置的一份当前累计值，不补建每个旧来源的数字事件。正常重载只读这份结果。初始累计之前没有数字的位置不能被当成0：只有真正完成的后续压缩需要这种切点时，才在该次压缩的准备前缀上按既有投影计算需要移除的贡献，并合并已有removed；结果随本次压缩统计保存，不提前为所有可能切点建记录。压缩增长优化遇到未保存的旧位置返回“不适用”，不因此触发加载时遍历。该计算归Usage，不新增其他producer字段或更新调用。
+
+fork优先复用祖先可见数字和边界；不可见或没有兼容数字时才按6.2初始化。不能使用父分支切点之后的统计。
 
 ## 7. provider 基准与异常
 

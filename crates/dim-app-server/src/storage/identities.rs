@@ -99,39 +99,3 @@ pub fn initialize_session_output_id_index(connection: &Connection, session: &str
     }
     Ok(())
 }
-
-pub(super) fn check_page(
-    connection: &Connection,
-    session: &str,
-    branch: &str,
-    first: u64,
-    last: u64,
-    expected: &std::collections::BTreeSet<(u64, u64, String)>,
-) -> Result<()> {
-    let mut statement = connection.prepare("SELECT physical_sequence,logical_sequence,event_id FROM timeline_output_ids WHERE session_id=?1 AND branch_id=?2 AND physical_sequence BETWEEN ?3 AND ?4 ORDER BY physical_sequence,logical_sequence,event_id").map_err(error)?;
-    let found = statement
-        .query_map(
-            params![
-                session,
-                branch,
-                i64::try_from(first).map_err(error)?,
-                i64::try_from(last).map_err(error)?
-            ],
-            |row| {
-                Ok((
-                    super::timeline::read_sequence(row, 0)?,
-                    super::timeline::read_sequence(row, 1)?,
-                    row.get(2)?,
-                ))
-            },
-        )
-        .map_err(error)?
-        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()
-        .map_err(error)?;
-    if &found != expected {
-        return Err(error(
-            "output identity index does not match its stored page",
-        ));
-    }
-    Ok(())
-}

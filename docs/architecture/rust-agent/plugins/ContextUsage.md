@@ -19,14 +19,16 @@ contributions and request calibration under [ContextUsage](../../../design/plugi
 Consumes configured, consumed-input, output-end, tool-result, completed-compaction
 and provider-usage sources. Handlers notify its own task; it reads source identities
 in pages of 128 and consumes each necessary body immediately. Each source that
-changes numeric state saves one `context-usage/recovered` v4 result containing its
+changes numeric state saves one `context-usage/recovered` v5 result containing its
 cumulative contribution. It writes no numeric tree nodes or request-base facts.
 A `context-usage/covered` v1 extends a saved result only for an already checked
 no-effect source tail at a fixed read or turn-end handoff.
 
 Recovery reads the latest numeric result, matching covered position and counter
-controls, then only the unfinished source suffix. Old v1-v3 numeric caches have an
-explicit retained-source initialization; unknown schemas or algorithms fail.
+controls, then only the unfinished source suffix. Old v1-v3 aggregates are read directly; old prefix numbers are read by their
+existing node identities only when requested. v4 numbers remain readable. Unknown
+schemas or algorithms fail. An absent statistic is initialized in one paged
+projection and saves one current result, without historical prefix backfill.
 Current reads use the in-memory totals. Earlier compression cuts seek cumulative
 numbers using epoch, branch ordinal and source sequence, without old messages.
 

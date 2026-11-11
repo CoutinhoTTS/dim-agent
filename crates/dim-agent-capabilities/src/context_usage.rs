@@ -27,6 +27,7 @@ use std::{
 use tokio::sync::{Notify, watch};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+mod legacy;
 mod numeric;
 mod sources;
 use numeric::{Entry, Numeric, NumericResult, Summary};
@@ -110,7 +111,7 @@ impl UsageEvidence {
 }
 
 const RESULT: &str = "context-usage/recovered";
-const SCHEMA: &str = "context-usage/v4";
+const SCHEMA: &str = "context-usage/v5";
 const COVERED: &str = "context-usage/covered";
 const SOURCES: &[&str] = &[
     "context/configured",
@@ -141,8 +142,10 @@ struct Limits {
 struct CounterConfiguration {
     event_id: String,
     request_identity: String,
-    control_identity: String,
-    configured_tools: bool,
+    #[serde(default)]
+    control_identity: Option<String>,
+    #[serde(default)]
+    configured_tools: Option<bool>,
     algorithm: String,
     fixed: Contribution,
     limits: Limits,
@@ -169,8 +172,10 @@ struct Compression {
     cut: Key,
     removed: Contribution,
     replacement: Contribution,
-    removed_messages: u64,
-    replacement_messages: u64,
+    #[serde(default)]
+    removed_messages: Option<u64>,
+    #[serde(default)]
+    replacement_messages: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -193,6 +198,8 @@ struct State {
     epoch: String,
     branches: Vec<String>,
     initialized: Key,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy_result: Option<String>,
     current: Option<NumericResult>,
 }
 
@@ -632,11 +639,16 @@ impl ContextUsage {
             self.timeline.clone(),
             self.timeline.sequence(),
             state.epoch.clone(),
+            state.legacy_result.clone(),
+            state.initialized,
         );
         let summary = numeric
             .prefix(state.current.as_ref(), state.at(through), true)
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
+        let Some(summary) = summary else {
+            return Ok(None);
+        };
         let Some(Configuration::Ready { counter }) = &summary.configuration else {
             return Ok(None);
         };
@@ -648,23 +660,27 @@ impl ContextUsage {
         }) {
             return Ok(None);
         }
-        let active_count = summary
+        let Some(active_count) = summary
             .message_count
-            .checked_sub(
-                summary
-                    .compression
-                    .as_ref()
-                    .map_or(0, |compression| compression.removed_messages),
-            )
+            .and_then(|count| {
+                count.checked_sub(
+                    summary
+                        .compression
+                        .as_ref()
+                        .map_or(Some(0), |compression| compression.removed_messages)?,
+                )
+            })
             .and_then(|count| {
                 count.checked_add(
                     summary
                         .compression
                         .as_ref()
-                        .map_or(0, |compression| compression.replacement_messages),
+                        .map_or(Some(0), |compression| compression.replacement_messages)?,
                 )
             })
-            .ok_or_else(|| HostError::failed("Invalid numeric message count"))?;
+        else {
+            return Ok(None);
+        };
         if active_count != request_value.messages.len() as u64 {
             return Ok(None);
         }
@@ -675,7 +691,7 @@ impl ContextUsage {
         } else {
             let actual_control = control_identity(request_value, &counter.algorithm)
                 .map_err(|error| HostError::failed(error.to_string()))?;
-            if actual_control != counter.control_identity {
+            if counter.control_identity.as_deref() != Some(actual_control.as_str()) {
                 return Ok(None);
             }
             let model = view
@@ -753,6 +769,8 @@ impl ContextUsage {
                 },
                 algorithm: counter.algorithm.clone(),
                 current: state.current.clone(),
+                legacy_result: state.legacy_result.clone(),
+                initialized: state.initialized,
             },
         }))
     }
@@ -780,6 +798,8 @@ impl ContextUsage {
             self.timeline.clone(),
             self.timeline.sequence(),
             evidence.base.epoch.clone(),
+            evidence.base.legacy_result.clone(),
+            evidence.base.initialized,
         )
         .growth(
             evidence.base.current.as_ref(),
@@ -814,13 +834,16 @@ impl ContextUsage {
             self.timeline.clone(),
             self.timeline.sequence(),
             state.epoch.clone(),
+            state.legacy_result.clone(),
+            state.initialized,
         );
         let summary = numeric
             .prefix(state.current.as_ref(), end, true)
             .await
-            .map_err(ContextOpError::Read)?;
+            .map_err(ContextOpError::Read)?
+            .ok_or_else(|| ContextOpError::Read(fault("missing initialized usage total")))?;
         if let Some(Configuration::Ready { counter }) = &summary.configuration
-            && !counter.configured_tools
+            && counter.configured_tools != Some(true)
         {
             let model = view
                 .model
@@ -855,6 +878,18 @@ impl ContextUsage {
         model: &dyn ContextModel,
         through: u64,
     ) -> Result<DynamicFixed> {
+        if configuration.configured_tools.is_none()
+            && self
+                .configured_tools(&configuration.event_id, through)
+                .await?
+        {
+            return Ok(DynamicFixed {
+                configuration: configuration.event_id.clone(),
+                versions: String::new(),
+                identity: configuration.request_identity.clone(),
+                fixed: configuration.fixed,
+            });
+        }
         let sources = self.registry.sources();
         let versions = fingerprint(
             &sources

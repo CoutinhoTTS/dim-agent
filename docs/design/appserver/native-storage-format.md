@@ -427,7 +427,7 @@ ProjectionCheckpoint = {
 
 ### 读取校验
 
-读取时先解析 `Row` 和运行时事件，再按 `(session_id, hash)` 查请求引用的内容、复核 hash 与 kind，并重建 `Arc<ModelRequest>`；同一次读取中，内容行在加载时复核一次，此后复用解码结果，被缓存上限清出后重新加载并复核。`ListReferences` 从 `list` 向首个节点遍历：每个节点须是 `kind=node`、hash 匹配、正文可解析为 `{parent,message}`，遍历恰好经过 `length` 个节点，最后一个的 `parent` 为 `null`，其余都有父节点。同一次读取保留上一个由列表重建的事件请求及其各消息的节点地址，遍历遇到与它同位置的同一节点即停止，其余前缀取自该请求；共用节点已在重建该请求时复核。遍历每加载至多 256 个节点释放一次连接，下一次持有从中断处继续。随后校验序号、行 kind、批次、before 的 `event_id`、分支关系和所有 completed 事实的 through 边界。可选 snapshot state 不参与 Session 恢复校验。坏行保留原字节并归属该 Session；缺失或损坏的节点以 "missing request content"、"request content hash mismatch" 或 "request list length mismatch" 明确失败，不得通过默认值把损坏请求还原为空请求或部分请求。不使用请求正文的读取（历史分页、摘要、上下文投影、协作）不还原这两类记录中的请求，也不加载或校验其内容行，只校验记录种类与引用形状相符（[请求增量存储 §7.5](request-delta-storage.md#75-reads-that-do-not-use-request-bodies)）；因此损坏的节点不会让这些读取失败；导出与每个使用请求的读取仍会失败。恢复校验同样不加载请求正文：它按记录引用的 hash 校验内容行存在，并对每个 `node` 行只读出 `parent` 字段、校验父节点存在（只读 hash 与 parent，不读正文），引用或父节点缺失时以 "missing request content" 拒绝恢复；内容行存在但正文损坏时恢复通过，由加载它的读取失败。导出在写第一行前保留完整校验：重建并复核每个请求正文的 hash，正文损坏时以 "request content hash mismatch" 拒绝且不写出任何行（[恢复校验复用](restore-validation.md)）。
+读取事件时解析所选 `Row` 和运行时事件。需要请求正文的读取按 `(session_id, hash)` 加载其引用内容，复核 hash、kind、列表长度和父节点，再重建 `Arc<ModelRequest>`；同一次读取按既有预算复用解码结果。列表每加载至多256个节点释放一次连接。缺失或损坏内容明确报错并保留原字节，不把损坏请求填为空请求。历史分页、摘要、上下文投影等不使用请求正文的读取不加载请求内容，见[请求增量存储§7.5](request-delta-storage.md#75-reads-that-do-not-use-request-bodies)。Session恢复只读取配置和分支目录，不解码全部事件、不全查内容引用或派生索引、不维护校验缓存，见[恢复读取边界](restore-validation.md)。导出在它原本的事件遍历中加载所需正文，不预扫描；错误返回且不输出终止记录，CLI删除失败文件，stdout可留下不完整流。
 
 ## 格式版本
 
@@ -873,7 +873,7 @@ ProjectionCheckpoint = {
 | `timeline_events_context` | `(session_id, branch_id, sequence) WHERE context_render = 1 OR context_state = 1` | 只取渲染器或 checkpoint 折叠消费的行（v32；v31 的两个部分索引各取其一） |
 | `timeline_events_positions` | `(session_id, branch_id, kind, sequence) WHERE kind IN ('turn/start', 'context/compaction-start', 'context/compaction')` | 策略定位：轮次开始与压缩边界（v31） |
 
-正向页的 `after` 与 `through` 须为批次边界。事件查询的起点是事件序号，落在合并行内部时从覆盖它的物理行开始读、再按序号过滤，且页按事件数截断、不与原子批次对齐（[插件契约 §5.4](../plugin-contract.md#54-the-event-query)），见 [读取边界](../context-read-and-compaction.md#4-读取边界)。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，恢复校验按 64 条物理行分段，每段结束释放读连接；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
+正向页的 `after` 与 `through` 须为批次边界。事件查询的起点是事件序号，落在合并行内部时从覆盖它的物理行开始读、再按序号过滤，且页按事件数截断、不与原子批次对齐（[插件契约 §5.4](../plugin-contract.md#54-the-event-query)），见 [读取边界](../context-read-and-compaction.md#4-读取边界)。区间查询先按主键定位起点之前或等于起点的最后一条物理行，以其 `sequence` 为下界、区间终点为上界，按 `sequence` 读取；没有前驱行时以下界起点读取，并以 `last_sequence >= 起点` 排除不相交的前驱行。合并行覆盖页起点时完整解码，再按内部 sequence 过滤；反向页须纳入 `sequence < before <= last_sequence` 的跨界行，并停在原子批次边界。正向读取按 256 个逻辑序号分段，每段结束释放读连接；恢复不扫描历史；请求列表的遍历每加载至多 256 个节点也释放一次，下一次持有从中断处继续。单条物理行完整解码，允许超过通常页大小。流程测试用 `EXPLAIN QUERY PLAN` 核对正向读取主键的上下界；`timeline_acceptance paged-reads` 测量长历史读/恢复与并发提交延迟；`restore_cost` 在一次性库上经 mock 模型轮次增长 Session，按历史规模测量恢复耗时，并拆分目录校验、事件读取与 `branch/resume` 写入，同时报告每条事件的存储字节数（`cargo run --release --locked -p dim-app-server --example restore_cost -- [plain|tools|product] [1001,3001,10001] [7]`；`product` 使用产品上下文窗口与摘要压缩）；`single-append` 与 `single-partial` 测量单个请求的冷读与重开后第一次写入（`-- [single-append|single-partial] [2000,20000] [7] [chain|last]`）。`timeline_acceptance crashes` 与 `powerloss` 的中断批次含一个请求，恢复后校验行可读、序号连续、每个列表的节点俱在，并核对重启后写入与未中断写入的行逐字节一致。反向历史接口仍为独立协议草案。
 
 `session_owners.session_id` 与 `agents.agent_id` 两个 ID 列的 SQL 可空缺口见表结构。永久关闭字段与旧记录回填尚未设计。
 
@@ -1167,7 +1167,7 @@ v39 到 v40 在原准入事务内建表、回填并检查，再更新 marker；�
 
 普通写入、输出合并、Session 创建/复制/删除都在事实原事务内更新对应结构。fork 内部切点按逻辑序号裁剪，不能照抄父行全部 locator。升级、写入失败和复制失败均不得遗留半套索引。
 
-完整性校验沿物理页核对输出和 locator 的双向对应，覆盖漏项、多项、错误物理行、类型和逻辑位置；不能每条输出另扫一遍索引或事实。原内容/引用校验继续执行，普通 query 不代替准入校验。新增成员按其原校验合同检查。
+升级和写入在事实事务内维护输出与locator对应；格式升级失败回滚。普通恢复不全查locator，所选数据沿实际读取边界解码；未读取的索引损坏不阻止目录恢复或真实事件导出。
 
 验收覆盖旧格式逐级升级、回滚、旧程序拒读、合并输出命中/未命中、批次内部 through、祖先切点、fork/复制/删除及成员终态乱序；性能与写入量按执行设计计入同一份累计结果。无证据前不承诺恢复耗时或写入收益。
 
@@ -1273,7 +1273,7 @@ array_id 是原数组 JSON 序列化的内容哈希，使用 array 内容域。�
 
 完整事件读取按原顺序还原数组；Fields 的数字下标路径只取选中节点。新编码下的 Any、Fields、Count、关联和完整 Events 保持原事件行语义，不新增数组元素行。不能让 inline JSON 路径把引用标记看作公共值或缺失字段。
 
-节点的序列化、哈希、共享与损坏错误沿用内容存储的验证边界。首开对 Session 的 locator 元数据检查一次数量、下标连续性和内容引用存在性；每个 wire 引用按主键核对下标 0 的长度，不因同一数组被多次引用而反复扫描它。所选正文在读取时解码和验哈希；导出完整重建。查询游标只含公开位置与元素身份，不含内容哈希。FTS 在写入时消费移出数组前的公开数据；升级保留已有倒排项，复制时使用原数组内容，不索引引用标记。
+节点的序列化、哈希、共享与损坏错误沿用内容存储的验证边界。读取某个数组引用时按主键核对下标0的长度；不在Session首开扫描所有数组的locator。所选正文在读取时解码和验哈希；导出完整重建。查询游标只含公开位置与元素身份，不含内容哈希。FTS 在写入时消费移出数组前的公开数据；升级保留已有倒排项，复制时使用原数组内容，不索引引用标记。
 
 已知下标的 Fields 先以事件 ID 定位数组引用，再按 locator 主键逐个取本次字段所需元素。相同事件 wire 在本 query 内复用，不展开未选元素。Count/Exists 仍统计或判断事件，不被重新解释为数组长度；不增加元素分页、分组或排序执行器。
 
@@ -1325,3 +1325,7 @@ CREATE INDEX timeline_events_source_positions ON timeline_events(
 原input成员的presence分组在v40同时登记handover缺失和存在两种互斥值；缺失组编码与旧根保持不变，存在组使用独立的input-handover/v1描述及presence=true分组，复用相同表/节点；这样可回填新组而不改写旧普通输入根。每个输入只进入一组，不复制为第三个全集；consumed/deleted按原input_id移除其所属组。Store matcher分别识别Not(Present(data.handover))与Present(data.handover)。
 
 v39→v40事务内建立表达式索引并从handover输入与其终态回填存在组，保留已有普通组与旧cutoff根。所有新结构成功、格式校验通过后才写v40 marker；失败回滚。正常写入/导入/复制在原事实事务中维护，删除沿Session原事务。不得为这些字段增加plugin SQL接口或替代业务原事实。
+
+### ContextUsage private numeric version
+
+ContextUsage v5 changes only its private extension data: optional legacy_result and explicit unknown legacy counting metadata. Existing v4 and v1–v3 results are interpreted by ContextUsage. Native v40 stays unchanged: SQL schema, event envelope, content encodings and the indexed epoch/current.at properties are unchanged; no native migration or Store-side token calculation is added. The owner rejects an unsupported numeric schema explicitly. See [ContextUsage §6](../plugins/ContextUsage.md#61-统计版本与旧数据).
