@@ -35844,6 +35844,9 @@
         "path TaskKind::Command",
         "path TaskKind::Member",
         "path TaskKind::Workflow",
+        "path TaskOutcome::Completed",
+        "path TaskOutcome::Failed",
+        "path TaskOutcome::Stopped",
         "path TaskTarget",
         "path TaskView",
         "path TurnEnd",
@@ -35873,6 +35876,7 @@
         "use crate::model::view::RowTone",
         "use crate::model::view::TaskFinish",
         "use crate::model::view::TaskKind",
+        "use crate::model::view::TaskOutcome",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::TaskView",
         "use crate::model::view::TurnEnd",
@@ -35986,7 +35990,10 @@
       "to": "dim_cli::model::view",
       "references": [
         "path CompactionState",
-        "path RowKind::Error"
+        "path RowKind::Error",
+        "path TaskOutcome::Completed",
+        "path TaskOutcome::Failed",
+        "path TaskOutcome::Stopped"
       ]
     },
     {
@@ -40524,6 +40531,17 @@
     },
     {
       "from": "dim_cli::ui::notify",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path TaskOutcome",
+        "path TaskOutcome::Completed",
+        "path TaskOutcome::Failed",
+        "path TaskOutcome::Stopped",
+        "use crate::model::view::TaskOutcome"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::notify",
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
@@ -42747,6 +42765,7 @@
         "path TaskKind::Command",
         "path TaskKind::Member",
         "path TaskKind::Workflow",
+        "path TaskOutcome::Failed",
         "path TaskOutputState",
         "path TaskOutputState::Finished",
         "path TaskOutputState::Live",
@@ -42766,6 +42785,7 @@
         "use crate::model::view::MemberTarget",
         "use crate::model::view::RowKind",
         "use crate::model::view::TaskKind",
+        "use crate::model::view::TaskOutcome",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::TaskView",
@@ -44584,14 +44604,19 @@
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path SideLine",
+        "path TaskFinish::failed",
+        "path TaskOutcome",
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
+        "path crate::model::view::TaskView",
         "use crate::model::view::CompactionState",
         "use crate::model::view::LineState",
         "use crate::model::view::LineView",
         "use crate::model::view::RowKind",
         "use crate::model::view::SideLine",
+        "use crate::model::view::TaskFinish",
+        "use crate::model::view::TaskOutcome",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
@@ -45566,11 +45591,19 @@
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path SideLine",
+        "path TaskOutcome",
+        "path TaskOutcome::Completed",
+        "path TaskOutcome::Failed",
+        "path TaskOutcome::Stopped",
+        "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
         "path ViewSnapshot::default",
         "path crate::model::view::QueuedInput",
         "path crate::model::view::RowTone::Danger",
+        "path crate::model::view::TaskFinish",
+        "path crate::model::view::TaskKind::Command",
+        "path crate::model::view::TaskView",
         "path crate::model::view::TurnEnd::Completed"
       ]
     },
@@ -45815,13 +45848,16 @@
         "path Prompt::Sessions",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
+        "path TASK_FADE",
         "path WebOpened",
         "path banner",
         "path chunk",
         "path live_panel_rows",
         "path overlay_panel_rows",
         "path queue_strip",
+        "path shown_tasks",
         "path side_reply",
+        "path task_line",
         "path web_panel",
         "path write_notifications"
       ]
@@ -50769,6 +50805,10 @@
     {
       "module": "dim_cli::ui::transcript::stream::tests",
       "path": "Screen::new"
+    },
+    {
+      "module": "dim_cli::ui::tui",
+      "path": "Event::BackgroundFinished"
     },
     {
       "module": "dim_cli::ui::tui",
