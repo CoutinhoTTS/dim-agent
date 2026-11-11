@@ -293,6 +293,9 @@ impl ProviderService {
             let base = preferences::catalog_defaults(&base, &snapshot, source.api_format);
             let config = preferences::configure(&preferences, &snapshot, source.api_format, &base)
                 .map_err(failure)?;
+            // Recompute against the declaration: a model that does not declare
+            // summaries keeps whatever its own configuration set.
+            let config = preferences::declared_summary(&config, &snapshot, source.api_format);
             ModelSelection {
                 provider_id: source.id.clone(),
                 model_id,
@@ -323,6 +326,9 @@ impl ProviderService {
                 &current.config.clone().unwrap_or_default(),
             )
             .map_err(failure)?;
+            // Recompute against the declaration: a model that does not declare
+            // summaries keeps whatever its own configuration set.
+            let config = preferences::declared_summary(&config, snapshot, protocol);
             ModelSelection {
                 provider_id: current.provider_id.clone(),
                 model_id: current.model_id.clone(),
@@ -387,6 +393,16 @@ impl ProviderService {
                     .expect("Provider adopts configuration"),
             )
             .map_err(failure)?;
+            // Recompute against the declaration: a model that does not declare
+            // summaries keeps whatever its own configuration set.
+            let config = preferences::declared_summary(
+                &config,
+                selected
+                    .capability_snapshot
+                    .as_ref()
+                    .expect("Provider adopts capabilities"),
+                protocol,
+            );
             ModelSelection {
                 config: Some(config),
                 ..selected

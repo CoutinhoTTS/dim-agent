@@ -3036,6 +3036,15 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::provider::preferences::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider::preferences",
+      "file": "crates/dim-app-server/src/provider/preferences.rs",
+      "unexpandedMacros": [
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::remote",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -28175,6 +28184,7 @@
         "path preferences",
         "path preferences::catalog_defaults",
         "path preferences::configure",
+        "path preferences::declared_summary",
         "path preferences::restore_reasoning",
         "path preferences::restore_service_tier"
       ]
@@ -28741,7 +28751,49 @@
         "path ModelProtocol::XaiResponses",
         "path ProviderOptions",
         "path ProviderReasoningConfig::default",
+        "path SummaryStyle::Detailed",
         "use dim_agent_capabilities::host::ModelProtocol"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences",
+      "to": "dim_app_server::provider::preferences::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelCapabilities",
+        "path ModelCapabilities::with_limits",
+        "path ModelCapabilitySnapshot",
+        "path ModelConfig",
+        "path ModelProtocol::OpenaiChat",
+        "path ModelProtocol::OpenaiResponses",
+        "path ModelReasoning",
+        "path OpenAiProviderOptions",
+        "path ProviderOptions",
+        "path ProviderReasoningConfig",
+        "path SummaryStyle",
+        "path SummaryStyle::Auto",
+        "path SummaryStyle::Concise",
+        "path SummaryStyle::Detailed"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::preferences::tests",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path declared_summary"
       ]
     },
     {
@@ -28959,7 +29011,8 @@
       "references": [
         "path preferences",
         "path preferences::catalog_defaults",
-        "path preferences::configure"
+        "path preferences::configure",
+        "path preferences::declared_summary"
       ]
     },
     {
