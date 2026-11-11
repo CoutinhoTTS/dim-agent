@@ -6933,6 +6933,7 @@
       "unexpandedMacros": [
         "format",
         "json",
+        "write",
         "writeln"
       ]
     },
@@ -36841,7 +36842,6 @@
         "path Command::Configure",
         "path Command::Earlier",
         "path Command::EndLine",
-        "path Command::ErrorReport",
         "path Command::Export",
         "path Command::FindRepository",
         "path Command::FocusLine",
@@ -36872,6 +36872,7 @@
         "path Command::Recording",
         "path Command::RefreshAccountModels",
         "path Command::Rename",
+        "path Command::Report",
         "path Command::ResetIsolation",
         "path Command::ResetPromptSetting",
         "path Command::Resume",
@@ -37443,19 +37444,21 @@
         "path Action::Prepare",
         "path Captured",
         "path Draft",
-        "path Prepared",
         "path Reply",
         "path Reply::Failed",
         "path Reply::Plan",
         "path Reply::Prepared",
         "path Request",
+        "path Target",
+        "path Target::Error",
+        "path Target::Session",
         "path session_admission_failed",
         "use crate::report::Action",
         "use crate::report::Captured",
         "use crate::report::Draft",
-        "use crate::report::Prepared",
         "use crate::report::Reply",
         "use crate::report::Request",
+        "use crate::report::Target",
         "use crate::report::session_admission_failed"
       ]
     },
@@ -37504,6 +37507,8 @@
       "references": [
         "path Action::Prepare",
         "path Request",
+        "path Target::Error",
+        "path Target::Session",
         "use crate::report::Operation"
       ]
     },
@@ -42079,9 +42084,7 @@
         "path Action::Generate",
         "path Action::Plan",
         "path Action::Prepare",
-        "path Captured",
         "path Draft",
-        "path EvidenceUnavailable::FailureUnavailable",
         "path EvidenceUnavailable::NoReference",
         "path EvidenceUnavailable::Omitted",
         "path EvidenceUnavailable::ReadFailed",
@@ -42093,13 +42096,16 @@
         "path Reply::Generated",
         "path Reply::Plan",
         "path Reply::Prepared",
+        "path Target",
+        "path Target::Error",
+        "path Target::Session",
         "use crate::report::Action",
-        "use crate::report::Captured",
         "use crate::report::Draft",
         "use crate::report::EvidenceUnavailable",
         "use crate::report::GeneratedReport",
         "use crate::report::Plan",
-        "use crate::report::Reply"
+        "use crate::report::Reply",
+        "use crate::report::Target"
       ]
     },
     {
@@ -44384,7 +44390,6 @@
         "path Command::Configure",
         "path Command::Earlier",
         "path Command::EndLine",
-        "path Command::ErrorReport",
         "path Command::Export",
         "path Command::FindRepository",
         "path Command::FocusLine",
@@ -44414,6 +44419,7 @@
         "path Command::Recording",
         "path Command::RefreshAccountModels",
         "path Command::Rename",
+        "path Command::Report",
         "path Command::ResetIsolation",
         "path Command::ResetPromptSetting",
         "path Command::Resume",
@@ -44616,7 +44622,9 @@
         "path crate::report::Draft",
         "path crate::report::HINT",
         "path crate::report::Reply::Prepared",
-        "path crate::report::Request"
+        "path crate::report::Request",
+        "path crate::report::Target::Error",
+        "path crate::report::Target::Session"
       ]
     },
     {
@@ -45577,9 +45585,7 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::report",
       "references": [
-        "path crate::report::Captured::observed",
         "path crate::report::EvidenceUnavailable::Omitted",
-        "path crate::report::Operation::SessionRead",
         "path crate::report::Prepared"
       ]
     },
@@ -49112,6 +49118,7 @@
       "references": [
         "path ErrorReference",
         "path Snapshot",
+        "path Snapshot::capture_session",
         "use crate::evidence::ErrorReference",
         "use crate::evidence::Snapshot"
       ]
@@ -49155,10 +49162,20 @@
     },
     {
       "from": "dim_report::evidence",
+      "to": "dim_agent_runtime::branch",
+      "references": [
+        "path Branch",
+        "use dim_agent_runtime::Branch"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
       "to": "dim_agent_runtime::error",
       "references": [
-        "path dim_agent_runtime::AgentError::InvalidInput",
-        "path dim_agent_runtime::AgentError::UnknownBranch"
+        "path AgentError",
+        "path AgentError::InvalidInput",
+        "path AgentError::UnknownBranch",
+        "use dim_agent_runtime::AgentError"
       ]
     },
     {
@@ -49173,6 +49190,7 @@
       "from": "dim_report::evidence",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
+        "path QueryEvent",
         "path QueryFilter::In",
         "path QueryOperand::Field",
         "path QueryOutput::Events",
@@ -49180,6 +49198,7 @@
         "path QuerySelect::Events",
         "path QuerySpec",
         "path TimelineQuery",
+        "use dim_agent_runtime::QueryEvent",
         "use dim_agent_runtime::QueryFilter",
         "use dim_agent_runtime::QueryOperand",
         "use dim_agent_runtime::QueryOutput",
@@ -49211,6 +49230,9 @@
         "path EventKind::BranchResume",
         "path EventKind::BranchStart",
         "path EventKind::ModelOutputEnd",
+        "path EventKind::ModelStart",
+        "path EventKind::ToolCompleted",
+        "path EventKind::ToolStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
         "path ModelOutputOutcome::Cancelled",
@@ -49267,6 +49289,8 @@
         "path Missing::ReadFailed",
         "path Snapshot",
         "path TimelineEvidence",
+        "path TimelineEvidence::Failure",
+        "path TimelineEvidence::Recent",
         "use crate::evidence::CapturedError",
         "use crate::evidence::Missing",
         "use crate::evidence::Snapshot",
@@ -50844,6 +50868,10 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
+      "path": "Captured::observed"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
       "path": "ColorMode::TrueColor"
     },
     {
@@ -50885,6 +50913,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "OauthEvent::Url"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Operation::SessionRead"
     },
     {
       "module": "dim_cli::ui::tui::tests",

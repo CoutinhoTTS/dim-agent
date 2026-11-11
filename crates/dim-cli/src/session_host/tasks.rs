@@ -470,8 +470,6 @@ impl Worker {
                 history.error = Some(error.clone());
                 let fatal = request.branch_id == "main" && !history.done;
                 let report = crate::report::Captured::observed(
-                    &request.session_id,
-                    &request.branch_id,
                     crate::report::Operation::SessionRead,
                     code.as_deref(),
                     format!("Could not read conversation state: {error}"),
