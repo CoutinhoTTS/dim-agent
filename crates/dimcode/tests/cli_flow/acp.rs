@@ -2235,7 +2235,11 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
         assert!(first["params"].get("through").is_none());
         wire.reply(
             &first,
-            json!({(field):if display { vec![event(7,"compact-7","display","compaction",json!({"strategy":"summary"}))] } else { vec![] },"through":8,"nextBefore":4,"nextAfter":8,"done":false}),
+            json!({(field):if display { vec![
+                event(6,"compact-6","context","compaction-start",json!({"through":5,"trigger":"manual","strategy":"summary"})),
+                event(7,"compact-7","display","compaction",json!({"start":6,"strategy":"summary"})),
+                event(8,"compact-8","display","compaction",json!({"strategy":"summary"}))
+            ] } else { vec![] },"through":8,"nextBefore":4,"nextAfter":8,"done":false}),
         );
         let second = wire.read(method);
         assert_eq!(second["params"]["through"], 8);
@@ -2252,7 +2256,12 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
             json!({"sessionId":"saved","branchId":"main","event":text}),
         );
         if display {
-            wire.notice("session.display", json!({"sessionId":"saved","branchId":"main","item":event(9,"compact-9","display","compaction",json!({"strategy":"summary"}))}));
+            wire.notice("session.event", json!({"sessionId":"saved","branchId":"main","event":event(6,"compact-6","context","compaction-start",json!({"through":5,"trigger":"manual","strategy":"summary"}))}));
+            wire.notice("session.display", json!({"sessionId":"saved","branchId":"main","item":event(7,"compact-7","display","compaction",json!({"start":6,"strategy":"summary"}))}));
+            wire.notice("session.event", json!({"sessionId":"saved","branchId":"main","event":event(9,"compact-9","context","compaction-start",json!({"through":8,"trigger":"manual","strategy":"summary"}))}));
+            for _ in 0..2 {
+                wire.notice("session.display", json!({"sessionId":"saved","branchId":"main","item":event(10,"compact-10","display","compaction",json!({"start":9,"strategy":"summary"}))}));
+            }
         }
         wire.reply(
             &second,
@@ -2283,18 +2292,58 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
     );
         assert!(peer.response(3).get("error").is_none());
         assert!(peer.response(4).get("error").is_none());
+        peer.send(5, "session/prompt", json!({"sessionId":"saved","prompt":[{"type":"audio","data":"AA==","mimeType":"audio/wav"}]}));
+        assert!(peer.response(5).get("error").is_some());
         assert_eq!(
             peer.updates.len(),
-            2,
+            if display { 7 } else { 2 },
             "live copy of replayed fact must be suppressed"
         );
         assert_eq!(
             peer.updates[0]["params"]["update"]["content"]["text"],
             "saved answer"
         );
-        assert_eq!(peer.updates[1]["params"]["update"]["title"], "Saved title");
-        peer.send(5, "session/prompt", json!({"sessionId":"saved","prompt":[{"type":"audio","data":"AA==","mimeType":"audio/wav"}]}));
-        assert!(peer.response(5).get("error").is_some());
+        assert!(
+            peer.updates
+                .iter()
+                .any(|update| update["params"]["update"]["title"] == "Saved title")
+        );
+        if display {
+            let activities: Vec<_> = peer
+                .updates
+                .iter()
+                .map(|update| &update["params"]["update"])
+                .filter(|update| {
+                    update["_meta"]["lody"]["activity"]["kind"] == "context_compaction"
+                })
+                .collect();
+            assert_eq!(
+                activities.len(),
+                5,
+                "replay/live duplicates do not repeat activities: {activities:?}"
+            );
+            for start in [6, 9] {
+                let id = json!(["compaction", start]).to_string();
+                let pair: Vec<_> = activities
+                    .iter()
+                    .filter(|update| update["toolCallId"] == id)
+                    .collect();
+                assert_eq!(pair.len(), 2, "{pair:?}");
+                assert_eq!(pair[0]["status"], "in_progress");
+                assert_eq!(pair[1]["status"], "completed");
+                assert_eq!(pair[1]["_meta"]["lody"]["activity"]["automatic"], false);
+                assert!(
+                    pair[1].get("rawOutput").is_none(),
+                    "summary has no full diagnostics"
+                );
+            }
+            assert!(
+                activities
+                    .iter()
+                    .any(|update| update["toolCallId"] == r#"["compaction",8]"#
+                        && update["status"] == "completed")
+            );
+        }
         peer.close();
         daemon.join().unwrap();
     }

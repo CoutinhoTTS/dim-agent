@@ -7659,6 +7659,7 @@
         "path Event",
         "path EventContent::Compaction",
         "path EventContent::CompactionStart",
+        "path EventContent::CompactionSummary",
         "path EventContent::ExecEnded",
         "path EventContent::ExecStarted",
         "path EventContent::Input",
