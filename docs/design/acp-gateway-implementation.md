@@ -382,6 +382,8 @@ cancel 到达 submit reply 之前时保留 cancel 标志，等拿到 input id �
 
 共享 [wire.rs](../../crates/dim-client/src/wire.rs) 定义产品事件、progress 和固定头历史页边界，CLI 与 Gateway 直接消费同一类型。保留 input/consumed、turn/start、model/usage 等关联事实，不用 UI running 状态补猜，也不在投影层重复 parse 已知数据。
 
+协商显示模式后，完成压缩仅投影开始/完成状态及已知的 automatic 标记，不发送 `usedTokensBefore`、`usedTokensAfter`、`durationMs` 或 `rawOutput`。ACP 不为补诊断自动读取 `session.history.detail`，避免每次完成都加载 replacement。未完成结果仍按原完整事实透传已有原因和诊断；旧服务器完整事件模式也保留原诊断投影。
+
 ## 8. Lody 方法和能力逐项决策
 
 ### 8.1 合同来源与协商

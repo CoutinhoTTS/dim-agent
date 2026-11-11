@@ -957,6 +957,13 @@ impl Projection {
     }
 
     pub fn pending_exec(&mut self, branch: &str, task: &dim_agent_types::PendingExec) {
+        if self
+            .tasks
+            .iter()
+            .any(|known| known.branch_id == branch && known.id == task.event_id)
+        {
+            return;
+        }
         let target = TaskTarget {
             branch_id: branch.into(),
             task_id: task.task_id.clone(),

@@ -1,6 +1,7 @@
 use super::*;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
+    context_methods::ContextMethodsPlugin,
     context_model::window_facts,
     host::{
         CompactionStrategy, CompactionStrategyHost, ContextModel, ContextModelHost,
@@ -129,6 +130,11 @@ async fn launch_codemode_with_model(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
+        )
+        .require_feature(
+            Feature::new("ContextMethods").session("ContextMethods", |names| {
+                Ok(Box::new(ContextMethodsPlugin::new(names)?))
+            }),
         );
     defaults::tool_host(&mut builder, Arc::new(MockTools));
     dim_app_server::collaboration::install(&mut builder);
@@ -231,14 +237,19 @@ async fn a_product_style_app_server_runs_codemode_and_writes_child_facts() {
         .expect("the child echo batch");
     assert_eq!(child["data"]["calls"][0]["name"], "echo");
     let mut request = model.0.lock().unwrap().as_ref().unwrap().as_ref().clone();
-    let usage = loaded
-        .service::<dim_agent_capabilities::context_preparation::ContextPreparation>("main")
-        .unwrap()
-        .usage(CancellationToken::new())
-        .await
-        .unwrap();
+    let usage = client
+        .rpc(
+            "session.context.usage",
+            json!({"sessionId":session,"branchId":"main"}),
+        )
+        .await;
+    assert_ok(&usage);
     let context = dim_agent_capabilities::history::HistoryRenderer::default()
-        .context_in(&loaded, "main", usage.through)
+        .context_in(
+            &loaded,
+            "main",
+            usage["result"]["through"].as_u64().unwrap(),
+        )
         .await
         .unwrap();
     request.messages = dim_agent_capabilities::history::context_messages(
@@ -247,7 +258,8 @@ async fn a_product_style_app_server_runs_codemode_and_writes_child_facts() {
     );
     let expected = window_facts(1_000_000, 64., &request).count_tokens(&request);
     assert_eq!(
-        usage.estimated_input_tokens, expected,
+        usage["result"]["estimatedInputTokens"].as_f64().unwrap(),
+        expected,
         "numeric usage matches the actual model request, excluding child execution facts"
     );
     server.shutdown();
