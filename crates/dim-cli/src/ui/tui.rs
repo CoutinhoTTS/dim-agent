@@ -8247,10 +8247,14 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         };
-        let launch = root.path().join("A");
+        // Long enough that the narrow title's tail cannot hold it whole under
+        // any platform's temp root, and short enough that the wide title
+        // still names the whole path.
+        const LONG: &str = "a-checkout-longer-than-the-narrow-titles-tail-can-hold";
+        let launch = root.path().join(LONG).join("A");
         let other = root.path().join("B");
         for (path, branch) in [(&launch, "launch-line"), (&other, "session-line")] {
-            std::fs::create_dir(path).unwrap();
+            std::fs::create_dir_all(path).unwrap();
             git(path, &["init", "-q", "-b", branch]);
             git(
                 path,
@@ -8389,11 +8393,31 @@ mod tests {
             "the picker names the base, not the border's workspace: {title:?}"
         );
         // Too narrow for the whole path, the title keeps its tail, as the
-        // border's does, so the checkout it ends in is still readable.
-        let (narrow, _) = picker(&mut app, 80);
+        // border's does, so the checkout it ends in is still readable. The
+        // title leaves 54 path cells at 80 columns, and the fixture's path
+        // outgrows them under any platform's temp root.
+        const NARROW: u16 = 80;
+        use std::path::MAIN_SEPARATOR;
+        let (narrow, _) = picker(&mut app, NARROW);
+        let named = narrow
+            .split("Files · ")
+            .nth(1)
+            .unwrap_or_default()
+            .split("esc close")
+            .next()
+            .unwrap_or_default()
+            .trim_end();
         assert!(
-            narrow.contains("Files · …") && narrow.contains("/A"),
-            "a narrow title keeps the path's tail: {narrow:?}"
+            named.starts_with('…'),
+            "a narrow title cuts the path's front: {narrow:?}"
+        );
+        assert!(
+            named.ends_with(&format!("{MAIN_SEPARATOR}A")),
+            "a narrow title keeps the checkout it ends in: {narrow:?}"
+        );
+        assert!(
+            !narrow.contains(LONG),
+            "a narrow title keeps the tail, not the whole path: {narrow:?}"
         );
 
         // `/new` goes Home: the Session is gone and the launch workspace is
