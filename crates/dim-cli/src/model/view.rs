@@ -90,6 +90,10 @@ pub struct ViewRow {
     /// A line-opened marker: the line it opened, which a pick enters
     /// (timeline UI §4.4).
     pub line: Option<String>,
+    /// The user message row this row belongs to: a hook's context is part of
+    /// its message's group, so whatever settles the message settles it
+    /// (timeline UI §4.8).
+    pub parent_row: Option<String>,
     /// A compaction row's state and detail.
     pub compaction: Option<CompactionView>,
     /// A model failure's details, shown when the row is expanded.

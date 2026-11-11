@@ -670,7 +670,9 @@ impl Projection {
     ///
     /// The row carries the operator's words. Context a capability appended
     /// after them is not theirs, so each `dim-hooks` block becomes its own row
-    /// right after this one (`crates/dim-agent-types/src/markup.rs`).
+    /// right after this one (`crates/dim-agent-types/src/markup.rs`). Each
+    /// names this row as its parent, so whatever settles the message settles
+    /// them and they never commit it on their own.
     fn push_user(&mut self, input_id: &str, sequence: u64, submitted: u64, user: &UserInput) {
         let text = user_text(&user.content);
         let kind = if ShellRun::parse(&text).is_some() {
@@ -679,6 +681,7 @@ impl Projection {
             RowKind::UserMessage
         };
         let index = self.push(format!("user-{sequence}"), kind, text);
+        let row_id = self.rows[index].row_id.clone();
         let row = self.row(index);
         row.cut = Some(submitted.saturating_sub(1));
         row.display = user_display(&user.content);
@@ -687,7 +690,8 @@ impl Projection {
             self.input_rows.insert(input_id.to_owned(), index);
         }
         for (at, body) in hook_contexts(&user.content).into_iter().enumerate() {
-            self.push(format!("hook-{sequence}-{at}"), RowKind::HookContext, body);
+            let hook = self.push(format!("hook-{sequence}-{at}"), RowKind::HookContext, body);
+            self.row(hook).parent_row = Some(row_id.clone());
         }
     }
 
@@ -1461,6 +1465,7 @@ impl Projection {
             member: None,
             cut: None,
             line: None,
+            parent_row: None,
             compaction: None,
             failure: None,
             reportable: false,

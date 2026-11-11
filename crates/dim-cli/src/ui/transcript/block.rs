@@ -220,6 +220,7 @@ mod tests {
             member: None,
             cut: None,
             line: None,
+            parent_row: None,
             compaction: None,
         }
     }
