@@ -2710,6 +2710,16 @@ impl App {
                     self.shell_done(running, result);
                 }
             }
+            Update::ModelDefault { folder, model } => {
+                let notice = match folder {
+                    Some(folder) => tf(
+                        "Default for new sessions in {folder}: {model}",
+                        &[("folder", &crate::ui::tilde(&folder)), ("model", &model)],
+                    ),
+                    None => tf("Default for new sessions: {model}", &[("model", &model)]),
+                };
+                self.notices.push(notice);
+            }
             Update::Notice(text) => {
                 self.notices.push(t(&text).to_owned());
             }
@@ -3884,12 +3894,14 @@ impl App {
                 provider_id,
                 model_id,
                 reasoning_effort,
+                label,
             } => {
                 self.prompt = None;
                 self.host.send(Command::SelectModel {
                     provider_id,
                     model_id,
                     reasoning_effort,
+                    label,
                 });
             }
             Effect::SetEffort { model, value } => {

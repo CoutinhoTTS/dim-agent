@@ -347,9 +347,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "終了",
 
         // composer/palette.rs
-        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選択 · ←/→ 推論強度 · Ctrl+X 保存消去 · Esc 消去/閉じる"
+        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 選択して既定に設定 · ←/→ 推論強度 · Ctrl+X 保存消去 · Esc 消去/閉じる"
         }
+        "Default for new sessions in {folder}: {model}" => {
+            "新規セッションの {folder} での既定モデル：{model}"
+        }
+        "Default for new sessions: {model}" => "新規セッションの既定モデル：{model}",
         "Enter select · Esc clear/close" => "Enter 選択 · Esc 消去/閉じる",
         "esc close" => "esc 閉じる",
         "Suggestions" => "候補",

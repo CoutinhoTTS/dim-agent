@@ -9,7 +9,7 @@
 //!   Other provider / model    low
 //!   Edit models
 //!   Subagent models: Agent choice
-//! Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+//! Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 //!
 //! Subagent models
 //!   Agent choice (default)
@@ -24,8 +24,9 @@
 //! read after the catalog changed included — keeps the choices whose model is
 //! still listed and still advertises that effort, and drops the others; Ctrl+X
 //! drops the highlighted row's choice with its saved preferences. Enter adopts
-//! the model; a cycled effort is saved as its `reasoningEffort` and sent with
-//! the model's other saved preferences. A model with no advertised effort
+//! the model and writes it as the default the next Session in the launch
+//! workspace reads; a cycled effort is saved as its `reasoningEffort` and sent
+//! with the model's other saved preferences. A model with no advertised effort
 //! ignores the arrows. Typing in the filter keeps ←/→ for the cursor.
 //!
 //! Choosing a policy writes only `collaboration.set_model_policy`; the leader's
@@ -44,7 +45,7 @@ use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use dim_agent_types::ModelId;
 
-const HINT: &str = "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close";
+const HINT: &str = "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close";
 const POLICY_HINT: &str = "Enter select · Esc back";
 const EDIT_MODELS: &str = "__edit_models__";
 const SUBAGENT_MODELS: &str = "__subagent_models__";
@@ -375,6 +376,14 @@ impl ModelsPanel {
                     provider_id: provider.to_owned(),
                     model_id: model.to_owned(),
                     reasoning_effort: self.chosen.get(&id).cloned(),
+                    // `Event::Pick` is built only from the selected row, so
+                    // the arm's row is the one the operator picked.
+                    label: self
+                        .list
+                        .selected_item()
+                        .expect("a pick names the selected row")
+                        .label
+                        .clone(),
                 },
                 None => Effect::None,
             },
@@ -430,7 +439,7 @@ fn list(view: View) -> ListPanel {
     let models = |title, hint| {
         ListPanel::new(
             title,
-            hint,
+            t(hint),
             "Loading models...",
             "No models available. Connect a provider first.",
             "No matching models.",
@@ -441,7 +450,7 @@ fn list(view: View) -> ListPanel {
         View::Models => models("Select a model", HINT),
         View::Fixed => models("Fixed subagent model", POLICY_HINT),
         View::Policy => {
-            ListPanel::new("Subagent models", POLICY_HINT, "", "", "", false).without_filter()
+            ListPanel::new("Subagent models", t(POLICY_HINT), "", "", "", false).without_filter()
         }
     }
 }
@@ -769,6 +778,7 @@ mod tests {
                 ref provider_id,
                 ref model_id,
                 ref reasoning_effort,
+                ..
             } if provider_id == "dim" && model_id == "flash" && reasoning_effort.as_deref() == Some("high")
         ));
     }

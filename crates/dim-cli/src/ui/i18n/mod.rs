@@ -116,6 +116,9 @@ mod tests {
                 "Prompt suggestion",
                 "Prompt suggestion: {error}",
                 "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume.",
+                "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close",
+                "Default for new sessions in {folder}: {model}",
+                "Default for new sessions: {model}",
             ] {
                 assert_ne!(t(key), key, "{code} lacks {key:?}");
             }
@@ -124,6 +127,21 @@ mod tests {
                     .contains("fixture-error"),
                 "{code} drops the error"
             );
+            for (key, args) in [
+                (
+                    "Default for new sessions in {folder}: {model}",
+                    vec![("folder", "fixture-folder"), ("model", "fixture-model")],
+                ),
+                (
+                    "Default for new sessions: {model}",
+                    vec![("model", "fixture-model")],
+                ),
+            ] {
+                let text = tf(key, &args);
+                for (_, value) in args {
+                    assert!(text.contains(value), "{code} drops {value} from {key:?}");
+                }
+            }
         }
         set(previous);
     }
