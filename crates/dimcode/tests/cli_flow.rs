@@ -9788,6 +9788,72 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
     daemon.join().unwrap();
 }
 
+/// A terminal that answers the startup probe's `OSC 7501` query keeps the
+/// record of the run itself, so the interface sends only the record: the
+/// title stops carrying a mark and the progress bar (OSC 9;4) is not drawn.
+#[test]
+fn tui_yields_the_title_and_the_bar_to_a_terminal_that_keeps_the_record() {
+    let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
+    let home = Home::new();
+    let (running, wait_running) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let submit = wire.read("session.submit");
+        assert_eq!(submit["params"]["text"], "inspect");
+        wire.reply(&submit, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-1","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"inspect"}]},"mode":"queue"}}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"ap-1","sequence":10,"create_at":1,"type":"input","name":"applied","data":{"input_id":"in-1","mode":"queue"}}}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":true}));
+        wait_running.recv_timeout(PATIENCE).unwrap();
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+        wire.no_context();
+        wire.hold();
+    });
+    let mut command = home.command();
+    command
+        .env("TERM_PROGRAM", "ghostty")
+        .env("TERM", "xterm-ghostty");
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("\x1b]11;?\x07\x1b]7501;?\x1b\\");
+    terminal
+        .raw(b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question\x1b\\");
+    terminal.raw(b"\x1b[?1;2c");
+    terminal.until(&report("state=idle:app=dim"));
+    terminal.until("test / model");
+    let records = terminal.transcript.len();
+    terminal.write(b"inspect\r");
+    terminal.until(&report("state=working:app=dim"));
+    terminal.until("\x1b]0;DIM | inspect\x07");
+    running.send(()).unwrap();
+    terminal.until(&report("state=done:app=dim"));
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+    let after = &terminal.transcript[records..];
+    assert!(
+        !after.contains("\x1b]0;◐")
+            && !after.contains("\x1b]0;◓")
+            && !after.contains("\x1b]0;● DIM"),
+        "a terminal that keeps the record must get no mark in the title: {after}"
+    );
+    assert!(
+        !after.contains("\x1b]9;4;"),
+        "a terminal that keeps the record must get no bar: {after}"
+    );
+    assert!(after.contains("\x1b]7501;state=working"), "{after}");
+}
+
 /// The composer's status corner shows the main branch's context use against
 /// its window once attached, and reads it again when a run on main ends, in
 /// both interface modes.

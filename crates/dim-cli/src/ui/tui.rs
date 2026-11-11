@@ -218,6 +218,20 @@ pub fn print_web_panel(opened: &WebOpened) {
     }
 }
 
+/// Writes each notification the run queued since the last frame (`ui::notify`)
+/// through `write`, in the order they came, and empties the queue. `write` is
+/// the terminal's write; an error ends the interface as that one does.
+fn write_notifications(
+    notifications: &mut Vec<crate::ui::notify::Event>,
+    terminal: &crate::ui::notify::Terminal,
+    mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    for event in std::mem::take(notifications) {
+        write(&crate::ui::notify::sequence(terminal, &event))?;
+    }
+    Ok(())
+}
+
 fn run_terminal(
     host: Box<dyn SessionPort>,
     surroundings: Env,
@@ -251,9 +265,12 @@ fn run_terminal(
     let background = terminal
         .background_report()
         .and_then(detect::parse_background_report);
+    // A terminal that answered the program status query keeps the record of
+    // the run, so the title and the bar leave the job to it.
+    let program_status = terminal.program_status();
     let env = detect::env_from_process();
-    let mut progress = ProgressBar::from_env(&env);
-    let mut title = WindowTitle::new(crate::ui::title::apple_terminal(), Instant::now());
+    let mut progress = ProgressBar::from_env(&env, program_status);
+    let mut title = WindowTitle::from_env(program_status, Instant::now());
     let (default_id, detected) = Theme::detect(&env, true, background.as_deref());
     let saved = crate::ui::theme_panel::saved_theme_id(&surroundings.home);
     let theme = match &saved {
@@ -326,15 +343,14 @@ fn run_terminal(
                 return code;
             }
         }
-        for event in std::mem::take(&mut app.notifications) {
-            if terminal
-                .write(&crate::ui::notify::sequence(&notify_terminal, &event))
-                .is_err()
-            {
-                let code = terminal.lost();
-                app.host.shutdown();
-                return code;
-            }
+        if write_notifications(&mut app.notifications, &notify_terminal, |bytes| {
+            terminal.write(bytes)
+        })
+        .is_err()
+        {
+            let code = terminal.lost();
+            app.host.shutdown();
+            return code;
         }
         let program_status = app.program_status();
         if let Some(report) = status.report(program_status.clone())
@@ -9699,6 +9715,87 @@ mod tests {
             ..ViewSnapshot::default()
         })));
         assert_eq!(drawn.app.busy_reason(), Some(ExitReason::AgentRunning));
+    }
+
+    /// What the main loop writes for a queued notification, not the bytes a
+    /// form is built from: a permission request that appears while the
+    /// terminal sits behind a multiplexer reaches the write the loop performs
+    /// in the shape that one carries, with the bare `BEL` after it that still
+    /// rings where the sequence itself is dropped.
+    #[test]
+    fn a_notification_reaches_the_terminal_through_the_write_path_it_takes() {
+        use crate::model::view::ApprovalView;
+        use crate::ui::notify::{Event as Notification, Multiplexer, Terminal as NotifyTerminal};
+
+        let approval = |request: &str| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                approvals: vec![ApprovalView {
+                    member: None,
+                    request_id: request.into(),
+                    branch_id: "main".into(),
+                    reason: "shell command".into(),
+                    tool_name: "exec".into(),
+                    tool_input: serde_json::Value::Null,
+                    always: None,
+                }],
+                ..ViewSnapshot::default()
+            }))
+        };
+        let terminal = |multiplexer, term_program: &str, term: &str| NotifyTerminal {
+            multiplexer,
+            term_program: term_program.into(),
+            term: term.into(),
+            ..NotifyTerminal::default()
+        };
+        let mut drawn = Drawn::new((80, 24), None, true);
+        drawn.app.notify = true;
+        let cases = [
+            (
+                terminal(Multiplexer::Tmux, "iTerm.app", "tmux-256color"),
+                "\x1bPtmux;\x1b\x1b]9;DIM: Permission needed: exec\x07\x1b\\\x07",
+                "tmux: the wrapped form and a bare BEL after it",
+            ),
+            (
+                terminal(Multiplexer::Screen, "iTerm.app", "screen-256color"),
+                "\x1b]9;DIM: Permission needed: exec\x07\x07",
+                "screen with a BEL-terminated form: the form as it is, then a BEL",
+            ),
+            (
+                terminal(Multiplexer::Screen, "", "xterm-kitty"),
+                "\x07",
+                "screen with kitty's ST-terminated form: the bell alone",
+            ),
+            (
+                terminal(Multiplexer::None, "iTerm.app", "xterm-256color"),
+                "\x1b]9;DIM: Permission needed: exec\x07",
+                "no multiplexer: the form alone",
+            ),
+        ];
+        for (index, (terminal, expected, what)) in cases.into_iter().enumerate() {
+            drawn.app.apply(approval(&format!("approval-{index}")));
+            assert_eq!(
+                drawn.app.notifications,
+                vec![Notification::Permission("exec".into())],
+                "{what}"
+            );
+            let mut written = String::new();
+            write_notifications(&mut drawn.app.notifications, &terminal, |bytes| {
+                written.push_str(std::str::from_utf8(bytes).expect("the form is text"));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(written, expected, "{what}");
+            assert_eq!(
+                drawn.app.notifications,
+                Vec::<Notification>::new(),
+                "{what}: sent once"
+            );
+            write_notifications(&mut drawn.app.notifications, &terminal, |bytes| {
+                panic!("nothing is owed after the write: {bytes:?}")
+            })
+            .unwrap();
+        }
     }
 
     #[test]

@@ -5500,6 +5500,7 @@
       "parent": "dim_cli::ui::notify",
       "file": "crates/dim-cli/src/ui/notify.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -6146,6 +6147,7 @@
       "parent": "dim_cli::ui::title",
       "file": "crates/dim-cli/src/ui/title.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -40500,8 +40502,14 @@
       "to": "dim_cli::ui::notify",
       "references": [
         "path Event::Complete",
+        "path Event::Question",
+        "path Multiplexer",
+        "path Multiplexer::Screen",
+        "path Multiplexer::Tmux",
+        "path Multiplexer::of",
         "path Terminal",
-        "path Terminal::default"
+        "path Terminal::default",
+        "path sequence"
       ]
     },
     {
@@ -40940,6 +40948,14 @@
         "use crate::ui::theme::Appearance",
         "use crate::ui::theme::ColorMode",
         "use crate::ui::theme::palette::terminal_palette"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::progress",
+      "to": "dim_cli::ui::notify",
+      "references": [
+        "path Terminal::of",
+        "use crate::ui::notify::Terminal"
       ]
     },
     {
@@ -42940,8 +42956,8 @@
         "path KeyboardProtocol::Legacy",
         "path KeyboardProtocol::ModifyOtherKeys",
         "path keyboard::FENCE_QUERY",
-        "path keyboard::PROBE_QUERY",
         "path keyboard::da1_reply_len",
+        "path keyboard::probe_query",
         "path keyboard::scan_probe",
         "use keyboard::KeyboardProtocol"
       ]
@@ -43058,6 +43074,13 @@
         "path InputEvent::Mouse",
         "path KeyCode",
         "path coalesce_paste"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::terminal::keyboard",
+      "to": "dim_cli::ui::status",
+      "references": [
+        "path crate::ui::status::reports"
       ]
     },
     {
@@ -43620,6 +43643,11 @@
       "from": "dim_cli::ui::title::tests",
       "to": "dim_cli::ui::status",
       "references": [
+        "path Status::Done",
+        "path Status::Error",
+        "path Status::Idle",
+        "path Status::Permission",
+        "path Status::Question",
         "path Status::Working"
       ]
     },
@@ -44744,6 +44772,7 @@
       "references": [
         "path crate::ui::notify::Event",
         "path crate::ui::notify::NOTIFY_KEY",
+        "path crate::ui::notify::Terminal",
         "path crate::ui::notify::Terminal::from_env",
         "path crate::ui::notify::sequence"
       ]
@@ -45178,8 +45207,7 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::ui::title",
       "references": [
-        "path WindowTitle::new",
-        "path crate::ui::title::apple_terminal",
+        "path WindowTitle::from_env",
         "path crate::ui::title::topic",
         "use crate::ui::title::WindowTitle"
       ]
@@ -45746,7 +45774,8 @@
         "path overlay_panel_rows",
         "path queue_strip",
         "path side_reply",
-        "path web_panel"
+        "path web_panel",
+        "path write_notifications"
       ]
     },
     {
@@ -50774,6 +50803,22 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "ModelFailureKind::ServerError"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Multiplexer::None"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Multiplexer::Screen"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Multiplexer::Tmux"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "NotifyTerminal::default"
     },
     {
       "module": "dim_cli::ui::tui::tests",
