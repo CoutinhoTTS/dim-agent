@@ -7647,6 +7647,15 @@
     },
     {
       "from": "dim_acp::projection",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path markup::runtime_context",
+        "path markup::runtime_element",
+        "use dim_agent_types::markup"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
       "to": "dim_agent_types::model",
       "references": [
         "use dim_agent_types::CompactionTrigger"
@@ -21843,7 +21852,8 @@
       "to": "dim_agent_types::markup",
       "references": [
         "use super::escaped",
-        "use super::runtime_context"
+        "use super::runtime_context",
+        "use super::runtime_element"
       ]
     },
     {
@@ -34282,13 +34292,6 @@
     },
     {
       "from": "dim_cli::display",
-      "to": "dim_agent_types::content",
-      "references": [
-        "path ContentBlock::Text"
-      ]
-    },
-    {
-      "from": "dim_cli::display",
       "to": "dim_agent_types::events",
       "references": [
         "path ModelOutputOutcome::Failed",
@@ -34308,8 +34311,10 @@
       "from": "dim_cli::display",
       "to": "dim_cli::projection",
       "references": [
+        "path crate::projection::context_lines",
         "path crate::projection::failure_phrase",
-        "path crate::projection::retry_seconds"
+        "path crate::projection::retry_seconds",
+        "path crate::projection::user_text"
       ]
     },
     {
@@ -34380,6 +34385,14 @@
     },
     {
       "from": "dim_cli::export",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path markup::runtime_element",
+        "use dim_agent_types::markup"
+      ]
+    },
+    {
+      "from": "dim_cli::export",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -34403,6 +34416,13 @@
         "path client",
         "path client::server",
         "use crate::client"
+      ]
+    },
+    {
+      "from": "dim_cli::export",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::hook_contexts"
       ]
     },
     {
@@ -36984,6 +37004,15 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path markup::runtime_context",
+        "path markup::runtime_element",
+        "use dim_agent_types::markup"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_agent_types::member_approval",
       "references": [
         "path dim_agent_types::MemberApprovalDescriptor"
@@ -37078,6 +37107,7 @@
         "path RowKind::AssistantMessage",
         "path RowKind::Compaction",
         "path RowKind::Error",
+        "path RowKind::HookContext",
         "path RowKind::Shell",
         "path RowKind::Status",
         "path RowKind::StreamingAssistant",
@@ -45119,6 +45149,7 @@
         "path RowKind::AssistantMessage",
         "path RowKind::Compaction",
         "path RowKind::Error",
+        "path RowKind::HookContext",
         "path RowKind::Other",
         "path RowKind::Shell",
         "path RowKind::Status",
@@ -45299,6 +45330,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_cli::projection",
+      "references": [
+        "path crate::projection::hook_context_label"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::report",
       "references": [
         "path crate::report::HINT"
@@ -45410,6 +45448,7 @@
         "path Block::Compaction",
         "path Block::Error",
         "path Block::Failure",
+        "path Block::HookContext",
         "path Block::Line",
         "path Block::LoadMore",
         "path Block::Note",
@@ -45924,6 +45963,7 @@
         "path LineView",
         "path RowKind::AssistantMessage",
         "path RowKind::Compaction",
+        "path RowKind::HookContext",
         "path RowKind::StreamingAssistant",
         "path RowKind::Thinking",
         "path RowKind::ToolCall",
@@ -46623,6 +46663,7 @@
         "path Block::Compaction",
         "path Block::Error",
         "path Block::Failure",
+        "path Block::HookContext",
         "path Block::Line",
         "path Block::LoadMore",
         "path Block::Note",
@@ -46913,6 +46954,7 @@
         "path LineState::Working",
         "path RowKind::AssistantMessage",
         "path RowKind::Error",
+        "path RowKind::HookContext",
         "path RowKind::Status",
         "path RowKind::Thinking",
         "path RowKind::ToolCall",

@@ -36,6 +36,12 @@ pub enum Block {
     /// A shell-mode run: recorded (`!`) from the transcript, private (`!!`)
     /// from the terminal alone.
     Shell(ShellRun),
+    /// Context a hook injected after the operator's words: one muted row, and
+    /// its body when the detail setting is expanded.
+    HookContext {
+        body: String,
+        expanded: bool,
+    },
     Assistant(String),
     /// A settled thought: one summary row, or the whole text when expanded.
     Thinking {
@@ -112,6 +118,10 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
             },
             Block::Shell,
         ),
+        RowKind::HookContext => Block::HookContext {
+            body: row.text.clone(),
+            expanded: detail == Detail::Expanded,
+        },
         RowKind::AssistantMessage => Block::Assistant(row.text.clone()),
         RowKind::Thinking => Block::Thinking {
             text: row.text.clone(),
@@ -214,6 +224,7 @@ mod tests {
             member: None,
             cut: None,
             line: None,
+            parent_row: None,
             compaction: None,
         }
     }

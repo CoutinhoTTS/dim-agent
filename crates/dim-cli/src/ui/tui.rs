@@ -4378,6 +4378,7 @@ impl App {
                         *text = "".into();
                     }
                 }
+                Block::HookContext { expanded, .. } => *expanded = detail == Detail::Expanded,
                 Block::Error { expanded, .. } => *expanded = detail != Detail::Collapsed,
                 _ => {}
             }
@@ -5790,6 +5791,11 @@ impl App {
         let mut settled_assistant: Vec<TextBlock> = Vec::new();
         let mut settled: Vec<(usize, String)> = Vec::new();
         let mut pending_messages: Vec<(usize, String)> = Vec::new();
+        // The hook rows that ride in the tail after the message they belong
+        // to, as `(row, id, parent id)`.
+        let mut tail_hooks: Vec<(usize, String, String)> = Vec::new();
+        // The messages this pass put in the tail, which their hook rows follow.
+        let mut tail_messages: HashSet<String> = HashSet::new();
         let mut held = false;
         for (index, row) in snapshot.rows.iter().enumerate() {
             if index < floor || held {
@@ -5827,7 +5833,24 @@ impl App {
                 }
                 RowKind::UserMessage if row.pending && !self.fullscreen => {
                     live_items.push(LiveItem::Row(index));
+                    tail_messages.insert(row.row_id.clone());
                     pending_messages.push((index, row.row_id.clone()));
+                }
+                // A hook's context belongs to its message's group: while the
+                // message waits in the tail, so does its context, directly
+                // after it. It is never a settlement barrier of its own.
+                RowKind::HookContext
+                    if row
+                        .parent_row
+                        .as_deref()
+                        .is_some_and(|parent| tail_messages.contains(parent)) =>
+                {
+                    live_items.push(LiveItem::Row(index));
+                    tail_hooks.push((
+                        index,
+                        row.row_id.clone(),
+                        row.parent_row.clone().expect("a hook row names its parent"),
+                    ));
                 }
                 RowKind::AssistantMessage => match self.revealed.get(&row.row_id) {
                     Some(&(_, shown)) if shown < text.len() => {
@@ -5853,15 +5876,24 @@ impl App {
         // The live tail is drawn after everything committed, so it can hold
         // only the newest rows. A pending message with a settled row after it
         // is committed in Timeline order instead, in its final colour: a
-        // committed row cannot take the hint back (timeline UI §4.8).
-        let mut forced: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        // committed row cannot take the hint back (timeline UI §4.8). Its
+        // hook rows commit with it, in content order, and never without it.
+        let mut forced: HashSet<usize> = HashSet::new();
+        let mut forced_rows: HashSet<String> = HashSet::new();
         if let Some(last) = settled.last().map(|(index, _)| *index) {
             for (index, id) in pending_messages.iter().filter(|(index, _)| *index < last) {
-                live_items.retain(|item| !matches!(item, LiveItem::Row(at) if at == index));
                 settled.push((*index, id.clone()));
                 forced.insert(*index);
+                forced_rows.insert(id.clone());
+            }
+            for (index, id, parent) in &tail_hooks {
+                if forced_rows.contains(parent) {
+                    settled.push((*index, id.clone()));
+                    forced.insert(*index);
+                }
             }
         }
+        live_items.retain(|item| !matches!(item, LiveItem::Row(at) if forced.contains(at)));
         settled.sort_by_key(|(index, _)| *index);
         let settled_ids: Vec<String> = settled.into_iter().map(|(_, id)| id).collect();
 
@@ -6326,9 +6358,11 @@ impl App {
                     *text = "".into();
                 }
             }
-            Some(Block::Thinking { expanded, .. } | Block::Error { expanded, .. }) => {
-                *expanded = !*expanded
-            }
+            Some(
+                Block::Thinking { expanded, .. }
+                | Block::HookContext { expanded, .. }
+                | Block::Error { expanded, .. },
+            ) => *expanded = !*expanded,
             _ => return false,
         }
         self.mark_rewritten(id);
@@ -10565,6 +10599,7 @@ mod tests {
                 member: None,
                 cut: None,
                 line: None,
+                parent_row: None,
                 compaction: None,
             })
         };
@@ -10955,6 +10990,7 @@ mod tests {
                         member: None,
                         cut: None,
                         line: None,
+                        parent_row: None,
                         compaction: None,
                     })
                 })
@@ -11526,6 +11562,7 @@ mod tests {
                 member: None,
                 cut: None,
                 line: None,
+                parent_row: None,
                 compaction: None,
             })],
             focus: "b-7c".into(),
@@ -11654,6 +11691,7 @@ mod tests {
                     member: None,
                     cut: Some(n as u64),
                     line: None,
+                    parent_row: None,
                     compaction: None,
                 })
             })
@@ -11696,6 +11734,7 @@ mod tests {
             member: None,
             cut: None,
             line: None,
+            parent_row: None,
             compaction: None,
         })
     }
@@ -11727,8 +11766,22 @@ mod tests {
             member: None,
             cut: None,
             line: None,
+            parent_row: None,
             compaction: None,
         })
+    }
+
+    /// The `dim-hooks` row a message carrying hook context appends after
+    /// itself, naming `u1` as its parent.
+    fn hook() -> std::sync::Arc<ViewRow> {
+        let mut row = (*message(false)).clone();
+        row.row_id = "hook-1".into();
+        row.kind = RowKind::HookContext;
+        row.text = "read src/parser.rs".into();
+        row.pending = false;
+        row.cut = None;
+        row.parent_row = Some("u1".into());
+        std::sync::Arc::new(row)
     }
 
     fn show(drawn: &mut Drawn, rows: Vec<std::sync::Arc<ViewRow>>) {
@@ -11885,27 +11938,70 @@ mod tests {
     #[test]
     fn a_message_waits_in_the_live_tail_until_the_model_consumes_it() {
         let mut drawn = attached();
-        show(&mut drawn, vec![message(true)]);
+        show(&mut drawn, vec![message(true), hook()]);
+        let text = drawn.transcript();
+        assert!(text.contains("find the leak"), "a pending message is drawn");
         assert!(
-            drawn.transcript().contains("find the leak"),
-            "a pending message is drawn"
+            text.find("find the leak") < text.find("Hook context · 1 line"),
+            "its hook's context follows it in the tail: {text}"
         );
         assert!(
             !drawn
                 .app
                 .history
                 .iter()
-                .any(|block| matches!(block, Block::User { .. })),
-            "scrollback prints a message only once it has settled"
+                .any(|block| matches!(block, Block::User { .. } | Block::HookContext { .. })),
+            "neither the message nor its hook context is committed while unread"
         );
-        show(&mut drawn, vec![message(false)]);
+        show(&mut drawn, vec![message(false), hook()]);
+        let user = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { text, .. } if text == "find the leak"))
+            .expect("a consumed message settles into scrollback");
+        let hook = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::HookContext { .. }))
+            .expect("its hook context commits with it");
         assert!(
-            drawn
-                .app
-                .history
-                .iter()
-                .any(|block| matches!(block, Block::User { text, .. } if text == "find the leak")),
-            "a consumed message settles into scrollback"
+            user < hook,
+            "the message commits first and its hook row right after it"
+        );
+    }
+
+    #[test]
+    fn scrollback_settles_a_message_and_its_hook_context_together() {
+        let mut drawn = attached();
+        show(&mut drawn, vec![message(true), hook(), stopped()]);
+        let user = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { .. }))
+            .expect("the message is committed");
+        let hook = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::HookContext { .. }))
+            .expect("its hook context is committed with it");
+        let stop = drawn
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::Status { text, .. } if text == "stopped"))
+            .expect("the stop is committed");
+        assert!(
+            user < hook && hook < stop,
+            "a later settled row commits the message, then its hook row, then itself"
+        );
+        let text = drawn.transcript();
+        assert!(
+            text.find("find the leak") < text.find("Hook context · 1 line"),
+            "{text}"
         );
     }
 
