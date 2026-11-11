@@ -122,7 +122,7 @@ export class Projection {
             key: `user-${event.sequence}`,
             text: content.text,
             skills: content.skills,
-            hooks: content.hooks,
+            ...(content.hooks === undefined ? {} : { hooks: content.hooks }),
             at: event.createAt,
             sequence: event.sequence,
             cut: Math.max(0, event.sequence - 1),
