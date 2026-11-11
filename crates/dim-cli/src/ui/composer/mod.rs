@@ -120,6 +120,9 @@ pub struct Composer {
     accepts_images: bool,
     /// The files `@` searches, once the working directory is known.
     mentions: Option<mentions::Mentions>,
+    /// Whether the picker names its root in the title, for a screen that
+    /// shows no other directory the files come from.
+    names_root: bool,
     picker: mentions::Picker,
 }
 
@@ -139,6 +142,7 @@ impl Composer {
             skills: Vec::new(),
             accepts_images: true,
             mentions: None,
+            names_root: false,
             picker: mentions::Picker::default(),
         }
     }
@@ -148,6 +152,13 @@ impl Composer {
         if self.mentions.as_ref().is_none_or(|m| m.root() != root) {
             self.mentions = Some(mentions::Mentions::new(root));
         }
+    }
+
+    /// Whether the picker's title names the directory it lists. A screen
+    /// whose border already names that directory leaves it off; one whose
+    /// border names another workspace says which files the draft reads.
+    pub fn name_root(&mut self, named: bool) {
+        self.names_root = named;
     }
 
     /// Whether the current model takes image input: an image file the
@@ -498,6 +509,12 @@ impl Composer {
         self.mention_open() && self.mentions.as_mut().is_some_and(|m| m.changed())
     }
 
+    /// Whether the `@` index is still being walked. It is false before the
+    /// first draft starts a walk and after the walk has finished one.
+    pub fn mention_searching(&self) -> bool {
+        self.mentions.as_ref().is_some_and(|m| m.searching())
+    }
+
     fn mention_candidates(&mut self, query: &str) -> Vec<mentions::Candidate> {
         self.picker.follow(query);
         self.mentions
@@ -576,11 +593,17 @@ impl Composer {
     pub fn mention_panel(&mut self, width: usize, p: &Palette) -> Option<Vec<String>> {
         let trigger = self.mention()?;
         let candidates = self.mention_candidates(&trigger.query);
-        let searching = self.mentions.as_ref().is_some_and(|m| m.searching());
+        let searching = self.mention_searching();
+        let root = self
+            .mentions
+            .as_ref()
+            .filter(|_| self.names_root)
+            .map(|m| crate::ui::tilde(&m.root().to_string_lossy()));
         Some(mentions::render(
             &self.picker,
             &candidates,
             searching,
+            root.as_deref(),
             width,
             p,
         ))
@@ -1897,8 +1920,7 @@ mod tests {
                 .into_iter()
                 .map(|candidate| candidate.text)
                 .collect();
-            let searching = c.mentions.as_ref().is_some_and(|m| m.searching());
-            if !searching || started.elapsed() > std::time::Duration::from_secs(10) {
+            if !c.mention_searching() || started.elapsed() > std::time::Duration::from_secs(10) {
                 return found;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
