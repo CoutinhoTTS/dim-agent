@@ -2151,20 +2151,22 @@ impl App {
                         tone: Tone::Warning,
                     });
                 }
-                self.report_error = Some(error);
+                if self.session_id.is_empty()
+                    && matches!(error.operation, crate::report::Operation::SessionRead)
+                {
+                    self.report_error = Some(error);
+                }
             }
             Update::ReportReply { panel, reply } => {
                 if let Some(Prompt::Report(report)) = &mut self.prompt
                     && report.id == panel
                 {
                     if let Some(action) = report.reply(reply) {
-                        self.host.send(Command::ErrorReport(crate::report::Request {
-                            panel,
-                            action,
-                        }));
+                        self.host
+                            .send(Command::Report(crate::report::Request { panel, action }));
                     }
                 } else if let crate::report::Reply::Prepared(session, prepared) = reply {
-                    self.host.send(Command::ErrorReport(crate::report::Request {
+                    self.host.send(Command::Report(crate::report::Request {
                         panel,
                         action: crate::report::Action::Cancel {
                             draft: crate::report::Draft {
@@ -2794,10 +2796,8 @@ impl App {
                 }
             };
             if let Some(action) = action {
-                self.host.send(Command::ErrorReport(crate::report::Request {
-                    panel,
-                    action,
-                }));
+                self.host
+                    .send(Command::Report(crate::report::Request { panel, action }));
             }
             return Outcome::Continue;
         }
@@ -4597,19 +4597,26 @@ impl App {
             "report" => {
                 if !args.trim().is_empty() {
                     self.set_notice(t("Usage: /report"));
-                } else if let Some(error) = self.report_error.clone() {
-                    self.report_sequence += 1;
-                    let panel = self.report_sequence;
-                    self.open_prompt(Prompt::Report(Box::new(report_panel::Panel::new(
-                        panel, &error,
-                    ))));
-                    self.host.send(Command::ErrorReport(crate::report::Request {
-                        panel,
-                        action: crate::report::Action::Prepare(error),
-                    }));
-                } else {
-                    self.set_notice(t("No reportable error in this interface."));
+                    return Outcome::Continue;
                 }
+                let target = if !self.session_id.is_empty() {
+                    crate::report::Target::Session(self.session_id.clone())
+                } else if let Some(error) = self.report_error.clone() {
+                    crate::report::Target::Error(error)
+                } else {
+                    self.set_notice(t("No session to report."));
+                    return Outcome::Continue;
+                };
+                self.report_sequence += 1;
+                let panel = self.report_sequence;
+                self.open_prompt(Prompt::Report(Box::new(report_panel::Panel::new(
+                    panel,
+                    target.clone(),
+                ))));
+                self.host.send(Command::Report(crate::report::Request {
+                    panel,
+                    action: crate::report::Action::Prepare(target),
+                }));
                 Outcome::Continue
             }
             "exit" => Outcome::Exit(0),
@@ -5797,6 +5804,7 @@ impl App {
     }
 
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
+        self.report_error = None;
         let first = self.session_id.is_empty();
         // Home's first message started this Session: nothing shown to clear.
         if first
@@ -11647,16 +11655,6 @@ mod tests {
     }
 
     fn open_test_report(app: &mut App) -> u64 {
-        app.apply(Update::Reportable {
-            error: crate::report::Captured::observed(
-                "s1",
-                "main",
-                crate::report::Operation::SessionRead,
-                Some("session_closed"),
-                "Could not read conversation state".into(),
-            ),
-            show_error: true,
-        });
         press(app, KeyCode::Char('/'));
         typed(app, "report");
         press(app, KeyCode::Enter);
@@ -11671,10 +11669,82 @@ mod tests {
             "reportId": report_id,
             "plan": {
                 "planId": plan_id, "generation": {"kind": "local"},
-                "evidence": {"unavailable": "no_reference"}, "instructionsStatus": "none"
+                "evidence": {"timeline":{"recent":[],"truncated":false}}, "instructionsStatus": "none"
             }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn report_targets_the_shown_session_during_a_run_and_keeps_the_home_fallback() {
+        use crate::report::{Action, Captured, Operation, Reply, Request, Target};
+
+        for fullscreen in [false, true] {
+            let (mut app, sent, _home) = asked();
+            app.fullscreen = fullscreen;
+            app.apply(Update::Switched {
+                session_id: String::new(),
+                kind: SwitchKind::Resumed,
+            });
+            app.run_command("report", "");
+            assert_eq!(
+                app.notice.as_ref().map(|(text, _)| text.as_str()),
+                Some(t("No session to report."))
+            );
+            app.apply(Update::Reportable {
+                error: Captured::observed(
+                    Operation::SessionRead,
+                    Some("session_closed"),
+                    "Could not read conversation state".into(),
+                ),
+                show_error: true,
+            });
+            open_test_report(&mut app);
+            assert!(matches!(
+                sent.borrow().last(),
+                Some(Command::Report(Request {
+                    action: Action::Prepare(Target::Error(_)),
+                    ..
+                }))
+            ));
+            press(&mut app, KeyCode::Esc);
+
+            app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+            });
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s2".into(),
+                running: true,
+                ..ViewSnapshot::default()
+            })));
+            assert!(app.running());
+            let panel = open_test_report(&mut app);
+            assert!(
+                matches!(sent.borrow().last(), Some(Command::Report(Request { action: Action::Prepare(Target::Session(session)), .. })) if session == "s2")
+            );
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Prepared(Some("s2".into()), prepared_report("r2", "p1")),
+            });
+            let Some(Prompt::Report(report)) = &app.prompt else {
+                panic!("expected report panel")
+            };
+            let screen = report.render(90, 20, &app.palette).join("\n");
+            assert!(screen.contains(t("Report this session")));
+            assert!(screen.contains(t("Evidence · No recent session activity")));
+            press(&mut app, KeyCode::Esc);
+
+            app.apply(Update::Switched {
+                session_id: String::new(),
+                kind: SwitchKind::Resumed,
+            });
+            app.run_command("report", "");
+            assert_eq!(
+                app.notice.as_ref().map(|(text, _)| text.as_str()),
+                Some(t("No session to report."))
+            );
+        }
     }
 
     #[test]
@@ -11684,6 +11754,7 @@ mod tests {
         for fullscreen in [false, true] {
             let (mut app, sent, _home) = asked();
             app.fullscreen = fullscreen;
+            app.session_id = "s1".into();
             press(&mut app, KeyCode::Char(' '));
             let answer = selection(&app).expect("selected answer");
             let panel = open_test_report(&mut app);
@@ -11699,7 +11770,7 @@ mod tests {
             assert_eq!(selection(&app), Some(answer));
             assert!(matches!(
                 sent.borrow().last(),
-                Some(Command::ErrorReport(Request { action: Action::Cancel { draft, generation: false }, .. }))
+                Some(Command::Report(Request { action: Action::Cancel { draft, generation: false }, .. }))
                     if draft.report_id == "r1"
             ));
         }
@@ -11707,9 +11778,10 @@ mod tests {
 
     #[test]
     fn report_replans_after_a_failed_generate_and_preserves_options_after_expiry() {
-        use crate::report::{Action, Reply, Request};
+        use crate::report::{Action, Reply, Request, Target};
 
         let (mut app, sent, _home) = asked();
+        app.session_id = "s1".into();
         let panel = open_test_report(&mut app);
         app.apply(Update::ReportReply {
             panel,
@@ -11726,6 +11798,7 @@ mod tests {
         typed(&mut app, "omit timeline");
         press(&mut app, KeyCode::Enter);
         let mut plan = prepared_report("r1", "p3").plan;
+        plan.evidence.timeline = None;
         plan.evidence.unavailable = Some(crate::report::EvidenceUnavailable::Omitted);
         app.apply(Update::ReportReply {
             panel,
@@ -11744,7 +11817,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::ErrorReport(Request { action: Action::Generate(draft), .. }))
+            Some(Command::Report(Request { action: Action::Generate(draft), .. }))
                 if draft.plan_id == "p3"
         ));
         app.apply(Update::ReportReply {
@@ -11757,7 +11830,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::ErrorReport(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
+            Some(Command::Report(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
                 if draft.report_id == "r1" && instructions == "omit timeline"
         ));
         app.apply(Update::ReportReply {
@@ -11767,20 +11840,24 @@ mod tests {
                 draft_missing: true,
             },
         });
+        app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: SwitchKind::Resumed,
+        });
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::ErrorReport(Request { action: Action::Prepare(error), .. }))
-                if error.session == "s1" && error.message == "Could not read conversation state"
+            Some(Command::Report(Request { action: Action::Prepare(Target::Session(session)), .. }))
+                if session == "s1"
         ));
         app.apply(Update::ReportReply {
             panel,
-            reply: Reply::Prepared(None, prepared_report("r2", "p4")),
+            reply: Reply::Prepared(Some("s1".into()), prepared_report("r2", "p4")),
         });
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::ErrorReport(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
-                if draft.report_id == "r2" && draft.session.is_none() && instructions == "omit timeline"
+            Some(Command::Report(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
+                if draft.report_id == "r2" && draft.session.as_deref() == Some("s1") && instructions == "omit timeline"
         ));
     }
 
@@ -11798,6 +11875,7 @@ mod tests {
             (valid, true),
         ] {
             let (mut app, _sent, home) = asked();
+            app.session_id = "s1".into();
             app.cwd_key = home.path().display().to_string();
             let panel = open_test_report(&mut app);
             app.apply(Update::ReportReply {

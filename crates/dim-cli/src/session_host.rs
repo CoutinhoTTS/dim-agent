@@ -834,8 +834,6 @@ impl Worker {
                 });
                 self.reportable(
                     crate::report::Captured::observed(
-                        &session_id,
-                        "main",
                         crate::report::Operation::SessionRead,
                         dim_client::app_error(&error),
                         error.to_string(),
@@ -1157,8 +1155,6 @@ impl Worker {
                 if let Err(error) = opened
                     && !self.reportable(
                         crate::report::Captured::observed(
-                            &session_id,
-                            &parent,
                             crate::report::Operation::BranchCreate,
                             dim_client::app_error(&error),
                             error.to_string(),
@@ -1197,8 +1193,6 @@ impl Worker {
                     Err(error) => {
                         if !self.reportable(
                             crate::report::Captured::observed(
-                                &session_id,
-                                "main",
                                 crate::report::Operation::SessionFork,
                                 dim_client::app_error(&error),
                                 error.to_string(),
@@ -1416,7 +1410,7 @@ impl Worker {
                 }
             }
             Command::Compact => self.compact().await,
-            Command::ErrorReport(request) => self.report_request(request).await,
+            Command::Report(request) => self.report_request(request).await,
             Command::Export(format) => {
                 let extension = match format {
                     crate::export::Format::Markdown => "md",
@@ -4132,7 +4126,7 @@ impl Worker {
         let captured = if self.report_available()
             && (branch_id == self.focus || self.side.as_deref() == Some(branch_id))
         {
-            crate::report::Captured::event(&self.session_id, branch_id, &event)
+            crate::report::Captured::event(&event)
         } else {
             None
         };
