@@ -4240,7 +4240,9 @@ impl App {
         for block in &mut self.history {
             match block {
                 Block::ToolGroup(group) => group.detail = detail,
-                Block::Compaction { expanded, .. } => *expanded = detail == Detail::Expanded,
+                Block::Compaction { expanded, .. } | Block::HookContext { expanded, .. } => {
+                    *expanded = detail == Detail::Expanded
+                }
                 Block::Error { expanded, .. } => *expanded = detail != Detail::Collapsed,
                 _ => {}
             }
@@ -6163,6 +6165,7 @@ impl App {
             Some(
                 Block::Thinking { expanded, .. }
                 | Block::Compaction { expanded, .. }
+                | Block::HookContext { expanded, .. }
                 | Block::Error { expanded, .. },
             ) => *expanded = !*expanded,
             _ => return false,
