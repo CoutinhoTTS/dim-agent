@@ -1636,7 +1636,9 @@ async fn a_model_that_declares_no_summary_sends_the_baseline_body() {
 /// store a product daemon later opens, and `session.model.update` starts from
 /// that stored configuration. The profile's model file can put a style in the
 /// generic `reasoning.summary` field, so the rule sees a style it did not write:
-/// it keeps a `concise`, and drops a `detailed` beside `none`.
+/// it keeps a `concise`, and re-derives a `detailed` that has no effort to follow.
+/// Both shapes of that are pinned: an update that moves the effort to `none`, and
+/// a configuration carrying no effort at all on a model that declares none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stored_generic_summary_keeps_its_style_and_follows_the_effort() {
     tokio::time::timeout(Duration::from_secs(180), async {
@@ -1653,33 +1655,60 @@ async fn a_stored_generic_summary_keeps_its_style_and_follows_the_effort() {
             provider,
             "openai-responses",
             &format!("{base}/v1"),
-            vec![summarising(
-                "summarised",
-                Some("medium"),
-                &["low", "medium", "high"],
-            )],
+            vec![
+                summarising("summarised", Some("medium"), &["low", "medium", "high"]),
+                summarising("silent", None, &[]),
+            ],
         )
         .await;
         server.child.kill().await.unwrap();
 
-        for (style, effort, expected) in [
-            ("concise", "high", Some("concise")),
-            ("detailed", "none", None),
+        // The profile's own configuration: an effort beside the style, or — for
+        // `silent` — no effort at all, so the stored configuration carries only
+        // the style. `sent` is the summary the profile's own first turn carries,
+        // which it passes through untouched; `expected` is what the product
+        // daemon's rule keeps once it finalizes the configuration again.
+        for (model, style, effort, update, sent, expected) in [
+            (
+                "summarised",
+                "concise",
+                "low",
+                Some(json!({"reasoningEffort":"high"})),
+                Some("concise"),
+                Some("concise"),
+            ),
+            (
+                "summarised",
+                "detailed",
+                "low",
+                Some(json!({"reasoningEffort":"none"})),
+                Some("detailed"),
+                None,
+            ),
+            (
+                "silent",
+                "detailed",
+                "",
+                Some(json!({"reasoningEffort":{"action":"clear"}})),
+                Some("detailed"),
+                None,
+            ),
         ] {
-            // The profile names the same provider and model and puts `style` in
-            // the generic field, beside an effort the update then moves.
-            let configuration = directory.join(format!("{style}.json"));
+            let configuration = directory.join(format!("{model}-{style}.json"));
+            let mut reasoning = json!({"summary":style});
+            if !effort.is_empty() {
+                reasoning["effort"] = json!(effort);
+            }
             std::fs::write(
                 &configuration,
                 serde_json::to_vec(&json!({
-                    "defaultModel":{"providerId":provider,"modelId":"summarised"},
+                    "defaultModel":{"providerId":provider,"modelId":model},
                     "providers":[{"id":provider,"kind":"openai-responses",
                         "baseUrl":format!("{base}/v1"),
                         "models":[{
-                            "id":"summarised","contextWindow":32_000,
+                            "id":model,"contextWindow":32_000,
                             "maxOutputTokens":4_096,
-                            "config":{"maxTokens":4096,
-                                "reasoning":{"effort":"low","summary":style}}
+                            "config":{"maxTokens":4096,"reasoning":reasoning}
                         }]}]
                 }))
                 .unwrap(),
@@ -1691,7 +1720,7 @@ async fn a_stored_generic_summary_keeps_its_style_and_follows_the_effort() {
                 .rpc(
                     "session.create",
                     json!({"cwd":directory,"tools":[],
-                        "model":{"provider":provider,"modelId":"summarised"}}),
+                        "model":{"provider":provider,"modelId":model}}),
                 )
                 .await;
             assert_ok(&created);
@@ -1699,13 +1728,13 @@ async fn a_stored_generic_summary_keeps_its_style_and_follows_the_effort() {
             turn(&mut profile, &session_id, "hello").await;
             assert_eq!(
                 sent_summary(&capture).as_deref(),
-                Some(style),
-                "the profile carried the style"
+                sent,
+                "{model} {style}: the summary the first turn carries"
             );
             configured.child.kill().await.unwrap();
 
-            // The product daemon reopens the store and moves the effort, so the
-            // stored configuration is the base the rule sees.
+            // The product daemon reopens the store and finalizes the stored
+            // configuration again, so the rule sees what the profile wrote.
             let mut server = launch_product(&directory).await;
             let mut client = connect(&server).await;
             assert_ok(
@@ -1713,7 +1742,7 @@ async fn a_stored_generic_summary_keeps_its_style_and_follows_the_effort() {
                     .rpc(
                         "session.model.update",
                         json!({"sessionId":session_id,"branchId":"main",
-                            "modelPreferences":{"reasoningEffort":effort}}),
+                            "modelPreferences":update}),
                     )
                     .await,
             );
@@ -1727,13 +1756,13 @@ async fn a_stored_generic_summary_keeps_its_style_and_follows_the_effort() {
             assert_eq!(
                 provider.or(generic),
                 expected,
-                "{style} {effort}: the style the body carries: {stored}"
+                "{model} {style}: the style the body carries: {stored}"
             );
             if expected.is_some() {
                 // A kept style stays in the field it was configured in.
-                assert_eq!(generic, Some(style), "{style} {effort}: {stored}");
+                assert_eq!(generic, Some(style), "{model} {style}: {stored}");
             } else {
-                assert_eq!(generic, None, "{style} {effort}: {stored}");
+                assert_eq!(generic, None, "{model} {style}: {stored}");
             }
             server.child.kill().await.unwrap();
         }
