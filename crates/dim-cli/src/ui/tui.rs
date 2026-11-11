@@ -6727,8 +6727,10 @@ fn shown_tasks(
 
 /// The line of tasks running apart from the turn: `◐ 2 · cargo build 1m12s ·
 /// cargo test 34s` while both run, with `✓`, `✗` or `⊘` in place of the
-/// elapsed time's lead once one ends. A single row, cut to `width` cells;
-/// `None` when there is nothing to show.
+/// elapsed time's lead once one ends. Without a running task the count has
+/// nothing to say, so the row starts at the first entry's mark:
+/// `✓ cargo build 1m12s`. A single row, cut to `width` cells; `None` when
+/// there is nothing to show.
 fn task_line(
     tasks: Vec<(&crate::model::view::TaskView, Option<u64>)>,
     now: u64,
@@ -6740,9 +6742,9 @@ fn task_line(
         return None;
     }
     let running = tasks.iter().filter(|(_, end)| end.is_none()).count();
-    let head = format!("\u{25d0} {running}");
-    let mut row = head.clone();
-    let mut room = width.saturating_sub(display_width(&head));
+    let head = (running > 0).then(|| format!("\u{25d0} {running}"));
+    let mut row = head.clone().unwrap_or_default();
+    let mut room = width.saturating_sub(display_width(&row));
     for (shown, (task, end)) in tasks.iter().enumerate() {
         let started = task.started_at / 1000;
         let at = end.unwrap_or(now).max(started);
@@ -6753,15 +6755,20 @@ fn task_line(
             .finished
             .as_ref()
             .map_or("", |finish| finish.outcome.mark());
-        let entry = format!(" · {mark}{label} {elapsed}");
+        let lead = if shown == 0 && head.is_none() {
+            ""
+        } else {
+            " · "
+        };
+        let entry = format!("{lead}{mark}{label} {elapsed}");
         let fits = display_width(&entry) <= room;
         if !fits {
             if shown == 0 {
                 // The first entry still names what runs, shortened to fit.
                 let tail = format!(" {elapsed}");
-                let lead = 3 + display_width(mark) + tail.len();
-                let label = truncate_cells(&label, room.saturating_sub(lead).max(1));
-                row.push_str(&format!(" · {mark}{label}{tail}"));
+                let fixed = display_width(lead) + display_width(mark) + tail.len();
+                let label = truncate_cells(&label, room.saturating_sub(fixed).max(1));
+                row.push_str(&format!("{lead}{mark}{label}{tail}"));
             } else {
                 row.push_str(&truncate_cells(" · …", room.max(1)));
             }
@@ -8472,13 +8479,13 @@ mod tests {
         failed.started_at = (now - 72) * 1000;
         let plain =
             strip_escapes(&task_line(shown_tasks(&[failed], now), now, 60, p).expect("a line"));
-        assert!(plain.starts_with("◐ 0 · ✗ cargo build 1m12s"), "{plain}");
+        assert!(plain.starts_with("✗ cargo build 1m12s"), "{plain}");
 
         let mut stopped = ended_now(background_task("t4", "cargo test"), TaskOutcome::Stopped);
         stopped.started_at = (now - 12) * 1000;
         let plain =
             strip_escapes(&task_line(shown_tasks(&[stopped], now), now, 60, p).expect("a line"));
-        assert_eq!(plain, "◐ 0 · ⊘ cargo test 12s", "{plain}");
+        assert_eq!(plain, "⊘ cargo test 12s", "{plain}");
 
         // Five seconds after the end the ended task leaves; nothing else runs.
         let later = now + TASK_FADE;
@@ -8487,6 +8494,77 @@ mod tests {
             "an ended task fades out"
         );
         assert!(task_line(Vec::new(), later, 60, p).is_none());
+    }
+
+    /// With nothing running the count has nothing to say, so the row starts
+    /// at the first entry's mark and carries no leading separator; a narrow
+    /// row still names that task.
+    #[test]
+    fn a_row_of_ended_tasks_starts_at_the_first_mark_without_a_count() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+        let p = &test_theme().palette;
+        let now = 1_000;
+        let ended_now = |task, outcome| {
+            let mut task = finished(task, outcome);
+            task.finished.as_mut().expect("a finish").at = now * 1000;
+            task
+        };
+        let mut first = ended_now(
+            background_task("t1", "cargo build --all-targets --locked"),
+            TaskOutcome::Completed,
+        );
+        first.started_at = (now - 72) * 1000;
+        let mut second = ended_now(
+            background_task("t2", "cargo test --workspace --locked"),
+            TaskOutcome::Stopped,
+        );
+        second.started_at = (now - 34) * 1000;
+
+        let tasks = [first.clone(), second.clone()];
+        let plain =
+            strip_escapes(&task_line(shown_tasks(&tasks, now), now, 100, p).expect("a line"));
+        assert_eq!(
+            plain,
+            "✓ cargo build --all-targets --locked 1m12s · ⊘ cargo test --workspace --locked 34s",
+            "{plain}"
+        );
+
+        for width in [20, 30, 40, 100] {
+            let line = strip_escapes(
+                &task_line(shown_tasks(&[first.clone()], now), now, width, p).expect("a line"),
+            );
+            assert!(!line.starts_with(" ·"), "{width}: {line:?}");
+            assert!(line.starts_with("✓ "), "{width}: {line:?}");
+            assert!(visible_width(&line) <= width, "{width}: {line:?}");
+            assert!(line.contains("cargo"), "{width}: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_narrow_task_line_cuts_labels_and_still_names_the_first_task() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+        let p = &test_theme().palette;
+        let now = 100;
+        let mut first = background_task("t1", "cargo build --all-targets --locked");
+        first.started_at = 0;
+        let mut second = background_task("t2", "cargo test --workspace --locked");
+        second.started_at = 0;
+        for width in [20, 30, 40, 120] {
+            let line = task_line(
+                shown_tasks(&[first.clone(), second.clone()], now),
+                now,
+                width,
+                p,
+            )
+            .expect("a line");
+            assert!(
+                visible_width(&line) <= width,
+                "{width}: too wide: {:?}",
+                strip_escapes(&line)
+            );
+            let plain = strip_escapes(&line);
+            assert!(plain.contains("cargo"), "{width}: {plain:?}");
+        }
     }
 
     #[test]
