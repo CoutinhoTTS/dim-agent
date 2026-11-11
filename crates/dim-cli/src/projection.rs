@@ -473,7 +473,10 @@ impl Projection {
                 let row = self.row(index);
                 row.text = text;
                 if first {
-                    row.row_id = format!("thinking-{}", event.id);
+                    row.provisional_id = Some(std::mem::replace(
+                        &mut row.row_id,
+                        format!("thinking-{}", event.id),
+                    ));
                 }
             }
             EventContent::Text(data) => {
@@ -1434,6 +1437,7 @@ impl Projection {
     fn push(&mut self, row_id: String, kind: RowKind, text: String) -> usize {
         self.rows.push(Arc::new(ViewRow {
             row_id,
+            provisional_id: None,
             kind,
             text,
             display: None,

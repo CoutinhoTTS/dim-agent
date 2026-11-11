@@ -117,6 +117,7 @@ enum Placement {
     Continue,
     Thought {
         id: String,
+        stream: ThoughtStream,
         finished: bool,
     },
 }
@@ -964,13 +965,14 @@ impl ModelLabel {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct ThoughtStream {
     written: usize,
     block: Option<usize>,
 }
 
 struct ThoughtFrame {
+    stream: ThoughtStream,
     commit: String,
     source: Block,
     tail: Vec<String>,
@@ -5018,8 +5020,11 @@ impl App {
                     self.stream_block = Some(self.dropped + self.history.len() - 1);
                 }
                 Placement::Continue => self.rewrite_stream_block(source),
-                Placement::Thought { id, finished } => {
-                    let stream = self.thoughts.get_mut(&id).expect("planned thought");
+                Placement::Thought {
+                    id,
+                    mut stream,
+                    finished,
+                } => {
                     if let Some(index) = stream.block.and_then(|id| id.checked_sub(self.dropped)) {
                         self.history[index] = source;
                     } else {
@@ -5028,6 +5033,8 @@ impl App {
                     }
                     if finished {
                         self.thoughts.remove(&id);
+                    } else {
+                        self.thoughts.insert(id, stream);
                     }
                 }
             }
@@ -5670,24 +5677,10 @@ impl App {
             if row.kind != RowKind::Thinking || row.text.trim().is_empty() {
                 continue;
             }
-            if !self.thoughts.contains_key(&row.row_id) && expanded {
-                let text = crate::sanitize::safe(&row.text).replace("**", "");
-                let previous = self.thoughts.iter().find_map(|(id, stream)| {
-                    if snapshot.rows.iter().any(|row| row.row_id == *id) {
-                        return None;
-                    }
-                    let block = stream.block?.checked_sub(self.dropped)?;
-                    match self.history.get(block)? {
-                        Block::Thinking { text: prefix, .. } if text.starts_with(prefix) => {
-                            Some(id.clone())
-                        }
-                        _ => None,
-                    }
-                });
-                if let Some(previous) = previous {
-                    let stream = self.thoughts.remove(&previous).expect("found thought");
-                    self.thoughts.insert(row.row_id.clone(), stream);
-                }
+            if let Some(previous) = &row.provisional_id
+                && let Some(stream) = self.thoughts.remove(previous)
+            {
+                self.thoughts.insert(row.row_id.clone(), stream);
             }
             if !(row.streaming && expanded) && !self.thoughts.contains_key(&row.row_id) {
                 continue;
@@ -5732,6 +5725,7 @@ impl App {
             frames.insert(
                 row.row_id.clone(),
                 ThoughtFrame {
+                    stream: *stream,
                     commit,
                     source,
                     tail: rows.into_iter().skip(stable).collect(),
@@ -5898,6 +5892,7 @@ impl App {
                         thought.source.clone(),
                         Placement::Thought {
                             id: snapshot.rows[index].row_id.clone(),
+                            stream: thought.stream,
                             finished: true,
                         },
                     )),
@@ -6014,11 +6009,12 @@ impl App {
                                 thought.source.clone(),
                                 Placement::Thought {
                                     id: row.row_id.clone(),
+                                    stream: thought.stream,
                                     finished: false,
                                 },
                             ));
                         }
-                        if self.thoughts[&row.row_id].written > 0 {
+                        if thought.stream.written > 0 {
                             tail.extend(thought.tail.iter().map(|r| format!("{pad}{r}")));
                             continue;
                         }
@@ -10565,6 +10561,7 @@ mod tests {
                 failure: None,
                 reportable: false,
                 row_id: text.into(),
+                provisional_id: None,
                 kind,
                 text: text.into(),
                 display: None,
@@ -10955,6 +10952,7 @@ mod tests {
                         failure: None,
                         reportable: false,
                         row_id: (*id).into(),
+                        provisional_id: None,
                         kind: RowKind::AssistantMessage,
                         text: (*text).into(),
                         display: None,
@@ -11526,6 +11524,7 @@ mod tests {
                 failure: None,
                 reportable: false,
                 row_id: "r1".into(),
+                provisional_id: None,
                 kind: RowKind::UserMessage,
                 text: "line work".into(),
                 display: None,
@@ -11654,6 +11653,7 @@ mod tests {
                     failure: None,
                     reportable: false,
                     row_id: format!("u{n}"),
+                    provisional_id: None,
                     kind: RowKind::UserMessage,
                     text: format!("ask {n}"),
                     display: None,
@@ -11697,6 +11697,7 @@ mod tests {
             reportable: false,
             display: None,
             row_id: "u1".into(),
+            provisional_id: None,
             kind: RowKind::UserMessage,
             text: "find the leak".into(),
             streaming: false,
@@ -11728,6 +11729,7 @@ mod tests {
             reportable: false,
             display: None,
             row_id: "stopped-1".into(),
+            provisional_id: None,
             kind: RowKind::Status,
             text: "stopped".into(),
             streaming: false,
@@ -11790,6 +11792,7 @@ mod tests {
                         "thinking-event"
                     }
                     .into();
+                    thought.provisional_id = (end >= 10).then(|| "progress".into());
                     thought.text = paragraphs[..end].join(separator);
                     show(&mut drawn, vec![std::sync::Arc::new(thought.clone())]);
                     if end == 20 {
@@ -11822,7 +11825,6 @@ mod tests {
                 drawn.draw();
                 assert_eq!(drawn.transcript(), before);
                 let anchor = drawn.anchor();
-                thought.row_id = "thinking-finished".into();
                 thought.streaming = false;
                 thought.elapsed_ms = Some(2700);
                 show(&mut drawn, vec![std::sync::Arc::new(thought)]);
@@ -11838,6 +11840,90 @@ mod tests {
                 assert_eq!(transcript.matches("◆ Thought").count(), 2, "{transcript}");
                 assert!(drawn.transcript().contains("Step45:"));
                 assert_eq!(drawn.anchor(), anchor);
+            }
+        }
+    }
+
+    #[test]
+    fn thinking_preserves_history_when_its_identity_changes_while_collapsed() {
+        use crate::projection::Projection;
+        use serde_json::json;
+
+        for finish_while_collapsed in [false, true] {
+            let mut drawn = Drawn::new((72, 20), Some(0), false);
+            drawn.app.thinking_detail = Detail::Expanded;
+            let mut projection = Projection::default();
+            let text = (1..=30)
+                .map(|n| format!("Step{n:02}: inspect the lock before waiting."))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            projection.progress(
+                &serde_json::from_value(json!({
+                    "sessionId": "s1", "branchId": "main", "requestId": "r1",
+                    "text": "", "textOffset": 0, "thinking": text, "thinkingOffset": 0,
+                }))
+                .unwrap(),
+            );
+            show(&mut drawn, projection.snapshot().rows);
+            assert!(
+                drawn
+                    .emu
+                    .scrollback
+                    .iter()
+                    .any(|row| row.contains("Step01:"))
+            );
+
+            let toggle = |drawn: &mut Drawn| {
+                drawn.app.open_settings(Setting::ThinkingDetails);
+                press(&mut drawn.app, KeyCode::Char(' '));
+                press(&mut drawn.app, KeyCode::Esc);
+                assert!(drawn.app.take_reflow_request());
+                let rows = drawn.app.reflow_history(drawn.size.0 as usize);
+                let frame = drawn.app.frame(drawn.size);
+                let wanted = drawn.screen.wanted_for(drawn.size, frame.live.len());
+                drawn.emu = crate::ui::render::testterm::Emu::new(72, 20);
+                let mut bytes = drawn.screen.rewrite(drawn.size, &rows, wanted);
+                bytes.extend(drawn.screen.render(&frame, drawn.size));
+                drawn.emu.feed(&bytes);
+            };
+            toggle(&mut drawn);
+            projection.apply(
+                "main",
+                &serde_json::from_value(json!({
+                    "id": "thought-event", "sequence": 1, "create_at": 1000,
+                    "type": "step", "name": "thinking",
+                    "data": {"turn_id": "t1", "request_id": "r1",
+                        "delta": format!("{text}\n\nStep31: saved after collapsing.")},
+                }))
+                .unwrap(),
+            );
+            show(&mut drawn, projection.snapshot().rows);
+            let finish: crate::wire::Event = serde_json::from_value(json!({
+                "sequence": 2, "create_at": 4500, "type": "step", "name": "text",
+                "data": {"turn_id": "t1", "request_id": "r1", "delta": "Answer."},
+            }))
+            .unwrap();
+            if finish_while_collapsed {
+                projection.apply("main", &finish);
+                show(&mut drawn, projection.snapshot().rows);
+            }
+            toggle(&mut drawn);
+            let assert_body = |drawn: &Drawn| {
+                let transcript = drawn.transcript();
+                for n in 1..=31 {
+                    assert_eq!(
+                        transcript.matches(&format!("Step{n:02}:")).count(),
+                        1,
+                        "finish_while_collapsed={finish_while_collapsed}: {transcript}"
+                    );
+                }
+            };
+            assert_body(&drawn);
+            if !finish_while_collapsed {
+                projection.apply("main", &finish);
+                show(&mut drawn, projection.snapshot().rows);
+                assert_body(&drawn);
+                assert!(drawn.transcript().contains("Thought for 3.5s"));
             }
         }
     }

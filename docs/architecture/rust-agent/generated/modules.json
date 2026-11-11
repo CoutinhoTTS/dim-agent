@@ -45283,6 +45283,8 @@
         "path live_thinking",
         "path render_block",
         "path render_shell",
+        "path streamed_thinking",
+        "path thinking_prefix",
         "path width_of",
         "use crate::ui::transcript::blocks::SHELL_PREVIEW_LINES",
         "use crate::ui::transcript::blocks::THINKING_ROWS",
@@ -45292,6 +45294,8 @@
         "use crate::ui::transcript::blocks::render_block",
         "use crate::ui::transcript::blocks::render_shell",
         "use crate::ui::transcript::blocks::settled_thinking",
+        "use crate::ui::transcript::blocks::streamed_thinking",
+        "use crate::ui::transcript::blocks::thinking_prefix",
         "use crate::ui::transcript::blocks::width_of"
       ]
     },

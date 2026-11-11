@@ -48,6 +48,8 @@ pub enum RowTone {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewRow {
     pub row_id: String,
+    /// The progress-only thinking ID replaced by the first durable event.
+    pub provisional_id: Option<String>,
     pub kind: RowKind,
     /// Presentation of an image message; `text` remains editable text only.
     pub display: Option<String>,
