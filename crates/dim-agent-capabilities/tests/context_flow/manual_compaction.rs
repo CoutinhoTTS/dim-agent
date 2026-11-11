@@ -719,6 +719,7 @@ async fn a_checkpointed_step_renders_its_context_once() {
     })
     .await
     .expect("the compaction step saves its snapshot");
+    session.idle("main").await.unwrap();
     let events = chain_events(&session, "main", ..).await.unwrap();
     let anchor = events
         .iter()

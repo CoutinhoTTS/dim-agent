@@ -10593,6 +10593,7 @@
         "path EventKind::ContextPrepare",
         "path EventKind::Extension",
         "path EventKind::ModelCall",
+        "path EventKind::ModelUsage",
         "path ExtensionEvent::new"
       ]
     },

@@ -3754,3 +3754,180 @@ async fn usage_upgrades_saved_numbers_or_initializes_once_without_historical_res
         }
     }
 }
+
+#[tokio::test]
+async fn child_tool_results_do_not_change_usage_live_after_reload_or_compaction() {
+    use dim_agent_capabilities::{context_preparation::ContextPreparation, prompt::Prompt};
+    let store = Arc::new(MemoryTimelineStore::default());
+    let counter = Arc::new(ObservedCounter::default());
+    let mut profile = builder_with_usage_resolver(counter.clone());
+    profile.timeline_store(store.clone());
+    let cell = Arc::new(std::sync::OnceLock::new());
+    let capture = cell.clone();
+    profile.require_feature(Feature::new("test.raw-timeline").branch(
+        "test.raw-timeline",
+        move |names| {
+            Ok(Box::new(super::manual_compaction::RawTimeline::new(
+                names,
+                capture.clone(),
+            )?))
+        },
+    ));
+    let agent = MinimalHost::start(&profile).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .service::<Prompt>("main")
+        .unwrap()
+        .configure_loaded(
+            Some(ModelSelection {
+                provider_id: "test".into(),
+                model_id: "test".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            }),
+            vec![],
+        )
+        .await
+        .unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let preparation = session.service::<ContextPreparation>("main").unwrap();
+    let before = preparation.usage(CancellationToken::new()).await.unwrap();
+    let counts = counter.messages.load(Ordering::SeqCst);
+    let timeline = cell.get().unwrap();
+    let call = timeline
+        .append(
+            EventDraft::new(EventKind::ToolCall(ToolCallData {
+                turn_id: "child-turn".into(),
+                request_id: "child-request".into(),
+                calls: vec![ToolCall {
+                    id: "child".into(),
+                    name: "echo".into(),
+                    input: JsonObject::new(),
+                }],
+            }))
+            .with_parent_call_id("outer"),
+        )
+        .unwrap();
+    let mut result = ToolResult::text("hidden child body".repeat(4096));
+    result.context_messages = Some(vec![Message::text(Role::User, "hidden child context")]);
+    timeline
+        .append(
+            EventDraft::new(EventKind::ToolResult(ToolResultData {
+                turn_id: "child-turn".into(),
+                request_id: "child-request".into(),
+                call_event_id: Some(call.id.clone()),
+                results: vec![ToolCallResult {
+                    call_id: "child".into(),
+                    result,
+                }],
+            }))
+            .with_parent_call_id("outer"),
+        )
+        .unwrap();
+    let live = preparation.usage(CancellationToken::new()).await.unwrap();
+    assert_eq!(live.estimated_input_tokens, before.estimated_input_tokens);
+    assert_eq!(
+        counter.messages.load(Ordering::SeqCst),
+        counts,
+        "child content and contextMessages are never counted"
+    );
+    let id = session.id().to_owned();
+    agent.close().await.unwrap();
+    let agent = MinimalHost::start(&profile).await.unwrap();
+    let session = agent.restore_session(id.clone()).await.unwrap();
+    let restored = session
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.estimated_input_tokens,
+        before.estimated_input_tokens
+    );
+    assert_eq!(
+        counter.messages.load(Ordering::SeqCst),
+        counts,
+        "reload reuses the correct saved total"
+    );
+    session
+        .submit("second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    session
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    let cut = chain_events(&session, "main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::InputMessage(_)))
+        .nth(1)
+        .unwrap()
+        .id
+        .clone();
+    agent.close().await.unwrap();
+    let timeline = Timeline::restore(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: id.clone(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store,
+    )
+    .await
+    .unwrap();
+    timeline.append(EventKind::ContextCompaction(ContextCompactionData {
+        turn_id: None, request_id: None, command: None, start: None, through: timeline.sequence(),
+        outcome: ContextCompactionResult::Completed {
+            retain_from: cut, replacement: vec![summary_message("short")], strategy: "fixture".into(),
+            diagnostics: serde_json::from_value(serde_json::json!({
+                "reason":"auto","trigger":"threshold","estimatedInputTokens":1,
+                "entriesReplaced":1,"modelCallCount":1,"durationMs":1,"strategy":{"kind":"fixture"}
+            })).unwrap(),
+            context_baseline: vec![], replacement_parts: None, pinned_inputs: None, digest_entries: None,
+        },
+    }).into()).unwrap();
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+    let agent = MinimalHost::start(&profile).await.unwrap();
+    let session = agent.restore_session(id).await.unwrap();
+    let usage = session
+        .service::<ContextPreparation>("main")
+        .unwrap()
+        .usage(CancellationToken::new())
+        .await
+        .unwrap();
+    let context = HistoryRenderer::default()
+        .context_in(&session, "main", usage.through)
+        .await
+        .unwrap();
+    let messages = dim_agent_capabilities::history::context_messages(
+        &context,
+        &project_context_history(&context).unwrap(),
+    );
+    assert_eq!(
+        usage.estimated_input_tokens,
+        counter.fixed_value.lock().unwrap().0 as f64
+            + messages
+                .iter()
+                .map(|message| serde_json::to_vec(message).unwrap().len() as f64)
+                .sum::<f64>(),
+        "compaction subtracts only actual context contributions"
+    );
+    agent.close().await.unwrap();
+}

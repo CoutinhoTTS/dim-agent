@@ -299,10 +299,10 @@ struct DynamicFixed {
 #[derive(Default)]
 struct Association {
     prepared: Option<PreparedSource>,
-    call: Option<CallSource>,
+    call: Option<Arc<CallSource>>,
+    measurements: std::collections::BTreeMap<u64, Arc<CallSource>>,
 }
 
-#[derive(Clone)]
 struct RequestCalibration {
     configuration: String,
     compression: Option<String>,
@@ -320,7 +320,6 @@ struct PreparedSource {
     calibration: RequestCalibration,
 }
 
-#[derive(Clone)]
 struct CallSource {
     request_id: String,
     source: TimelinePosition,
@@ -533,7 +532,7 @@ impl ContextUsage {
                 }) else {
                     return;
                 };
-                association.call = Some(CallSource {
+                association.call = Some(Arc::new(CallSource {
                     request_id: data.request_id.clone(),
                     source: TimelinePosition {
                         branch_id: self.timeline.branch_id(),
@@ -544,7 +543,14 @@ impl ContextUsage {
                         sequence: event.sequence,
                     },
                     calibration: prepared.calibration,
-                });
+                }));
+            }
+            EventKind::ModelUsage(data) => {
+                if let Some(call) = association.call.clone()
+                    && call.request_id == data.request_id
+                {
+                    association.measurements.insert(event.sequence, call);
+                }
             }
             EventKind::ContextConfigured(_)
             | EventKind::ContextCompaction(ContextCompactionData {
@@ -569,6 +575,10 @@ impl ContextUsage {
         let source_through = source.through;
         if through > self.timeline.sequence() && through <= self.timeline.committed() {
             tokio::select! {result=self.publication(through)=>result.map_err(|error|HostError::failed(error.to_string()))?,_=cancel.cancelled()=>return Err(HostError::Cancelled("Usage proof cancelled".into()))}
+        }
+        tokio::select! {
+            result = self.delivery(through) => result.map_err(|error| HostError::failed(error.to_string()))?,
+            _ = cancel.cancelled() => return Err(HostError::Cancelled("Usage proof cancelled".into())),
         }
         if through > source_through {
             let changed = self
@@ -598,6 +608,22 @@ impl ContextUsage {
                                     .into_iter()
                                     .map(Into::into)
                                     .collect(),
+                                },
+                                QueryFilter::Or {
+                                    conditions: vec![
+                                        QueryFilter::In {
+                                            value: QueryOperand::Field {
+                                                path: "context.render".into(),
+                                            },
+                                            values: vec![true.into()],
+                                        },
+                                        QueryFilter::In {
+                                            value: QueryOperand::Field {
+                                                path: "kind".into(),
+                                            },
+                                            values: vec!["context/configured".into()],
+                                        },
+                                    ],
                                 },
                                 QueryFilter::Not {
                                     condition: Box::new(QueryFilter::In {
@@ -988,6 +1014,24 @@ impl ContextUsage {
                 _ = cancel.cancelled() => return Err(ContextOpError::Model(HostError::Cancelled("Usage read cancelled".into()))),
                 _ = self.cancel.cancelled() => return Err(ContextOpError::Read(AgentError::Closed("ContextUsage".into()))),
                 _ = self.branch.closing() => return Err(ContextOpError::Read(AgentError::Closed("ContextUsage".into()))),
+            }
+        }
+    }
+
+    async fn delivery(&self, sequence: u64) -> Result<()> {
+        let mut delivered = self.dispatcher.watch();
+        loop {
+            let progress = delivered.borrow_and_update().clone();
+            if let Some(error) = progress.failure {
+                return Err(error);
+            }
+            if progress.sequence >= sequence {
+                return Ok(());
+            }
+            tokio::select! {
+                changed = delivered.changed() => changed.map_err(|_| fault("usage delivery closed"))?,
+                _ = self.cancel.cancelled() => return Err(AgentError::Closed("ContextUsage".into())),
+                _ = self.branch.closing() => return Err(AgentError::Closed("ContextUsage".into())),
             }
         }
     }

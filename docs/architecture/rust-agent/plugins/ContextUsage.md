@@ -17,7 +17,9 @@ contributions and request calibration under [ContextUsage](../../../design/plugi
 ## Events and lifetime
 
 Consumes configured, consumed-input, output-end, tool-result, completed-compaction
-and provider-usage sources. Handlers notify its own task; it reads source identities
+and provider-usage sources. Contribution reads require `context.render`; configuration
+and provider measurements remain separate controls. Child execution facts are excluded
+before their bodies are selected. Handlers notify its own task; it reads source identities
 in pages of 128 and consumes each necessary body immediately. Each source that
 changes numeric state saves one `context-usage/recovered` v5 result containing its
 cumulative contribution. It writes no numeric tree nodes or request-base facts.
@@ -37,6 +39,8 @@ binding or extra Timeline event is required. New messages are counted once and
 fixed controls are reused. Settled-output projection is shared with history.
 Provider calibration uses one Weak reference to the actual numerically verified
 request and one current-call slot, invalidated by incompatible controls or content.
+Delivered measurements retain only their numeric basis and source positions until
+the numeric task consumes them; it waits for delivery before reading that basis.
 It never reloads old request bodies to establish calibration. ContextPreparation
 reuses the estimate for the same final request and counter; transformed requests
 receive the ordinary final full-request check.

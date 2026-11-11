@@ -72,6 +72,11 @@ impl ContextUsage {
     pub(super) async fn run(&self) -> Result<()> {
         let initial = self.timeline.sequence();
         let mut machine = self.restore(initial).await?;
+        self.association
+            .lock()
+            .unwrap()
+            .measurements
+            .retain(|sequence, _| *sequence > initial);
         self.publish(&machine, initial);
         let mut covered = initial;
         loop {
@@ -733,6 +738,27 @@ impl ContextUsage {
             SOURCES,
             &["id", "kind", "position"],
         );
+        sources.query.filter = Some(QueryFilter::And {
+            conditions: vec![
+                sources.query.filter.take().expect("usage source kinds"),
+                QueryFilter::Or {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "context.render".into(),
+                            },
+                            values: vec![true.into()],
+                        },
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: vec!["context/configured".into(), "model/usage".into()],
+                        },
+                    ],
+                },
+            ],
+        });
         sources.from = Some(TimelinePosition {
             branch_id: self.timeline.branch_id(),
             sequence: machine.source_through + 1,
@@ -1052,6 +1078,13 @@ impl ContextUsage {
         .expect("provider usage properties");
         let request_id: String = decode(request_id)?;
         let usage: Usage = decode(prompt)?;
+        self.delivery(at.sequence).await?;
+        let candidate = self
+            .association
+            .lock()
+            .unwrap()
+            .measurements
+            .remove(&at.sequence);
         let Some(prompt_tokens) = measured_prompt(&usage) else {
             return Ok(());
         };
@@ -1080,13 +1113,6 @@ impl ContextUsage {
                 )
                 .await;
         }
-        let candidate = self
-            .association
-            .lock()
-            .unwrap()
-            .call
-            .clone()
-            .filter(|call| call.request_id == request_id);
         let Some(candidate) = candidate else {
             return Ok(());
         };

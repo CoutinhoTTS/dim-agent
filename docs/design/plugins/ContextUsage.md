@@ -28,6 +28,8 @@ ContextUsage 是现有上下文功能内的独立 branch Capability，维护有�
 
 算法标识沿用 `dim/window-facts/v1`。贡献是两个整数 `{serialized_bytes,images}`，计数为字节/4+图片×1600；消息序列化边界严格复用现有 ContextCounter。Text 消息计完整 Message；parts 分项，Image 只计图片；ToolResult Blocks 只计实际 content blocks，不计 structuredContent 或额外包装。未 consumed 的输入不计入。
 
+来源查询先限定六类源，再要求 `context.render=true`；`context/configured`、`model/usage` 是独立控制源，保留处理。带 `parent_call_id` 的子执行事实不进入上下文，不读取其正文、不计算贡献、不保存数字结果。
+
 数字结果的完整字段：
 
 - 顶层：`schema=context-usage/v5`、`source_through`、`epoch`、`branches`、`initialized`、`current`。
@@ -115,7 +117,7 @@ fork优先复用祖先可见数字和边界；不可见或没有兼容数字时�
 
 ## 7. provider 基准与异常
 
-实时关联最多保留一个准备槽和一个最近调用槽。预算/校验通过数字读取验证实际请求的配置、压缩、消息数和覆盖位置，保存该次验证的 Arc<ModelRequest> 的 Weak、原 prepare 身份和已经算出的 local。call 与这个已验证对象相同且请求/配置/提示身份未变才形成候选；不能只和最初 prepare 对象比较，因为正常准备流程也会生成新的不可变请求。弱引用不保留正文；不持久化地址，不用失效地址比较，不建请求表。覆盖期间配置/压缩/动态工具改变，候选作废。图片或请求专有增补不能证明可校准时使用本地估算，不读取历史 request.messages 补证。
+建立准备关联前等待 Dispatcher 已交付到该请求覆盖位置，避免更早的配置通知清掉新关联。实时关联保留一个准备槽和一个最近调用槽。Dispatcher 收到匹配的 model/usage 时，为该事实位置暂存请求身份、来源位置及已验证的数字校准基准；不保留请求正文。数字任务处理该事实前等待 Dispatcher 已交付到该位置，消费后立即删除暂存项。后续调用或配置变化不能抹掉已经收到的测量依据；重载不恢复这些实时暂存项。预算/校验通过数字读取验证实际请求的配置、压缩、消息数和覆盖位置，保存该次验证的 Arc<ModelRequest> 的 Weak、原 prepare 身份和已经算出的 local。call 与这个已验证对象相同且请求/配置/提示身份未变才形成候选；不能只和最初 prepare 对象比较，因为正常准备流程也会生成新的不可变请求。弱引用不保留正文；不持久化地址，不用失效地址比较，不建请求表。覆盖期间配置/压缩/动态工具改变，候选作废。图片或请求专有增补不能证明可校准时使用本地估算，不读取历史 request.messages 补证。
 
 统计覆盖该源位置后，候选只保留配置/压缩身份、覆盖位置本地总量及request_id。有效model/usage要求prompt_tokens有限且>0，且不少于cache_read+cache_write之和。当前估算为实测输入+覆盖后本地增量，缓存量不再重复相加。相同request后续usage替换旧测量；旧候选不覆盖更晚基准。相同身份与数值不写新numeric。已建立基准存numeric；未建立候选在重载作废，旧活任务不重启。
 
