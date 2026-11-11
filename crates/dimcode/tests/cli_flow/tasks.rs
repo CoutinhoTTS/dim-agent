@@ -1093,7 +1093,7 @@ fn tui_task_end_restored_by_history_is_not_notified_but_a_live_one_is() {
                 "exec",
                 "ended",
                 json!({"task_id":"live","status":"cancelled",
-                   "result":{"content":"Command stopped by user.","isError":true}}),
+                   "result":{"content":"Command cancelled by user.","isError":true}}),
             ),
         );
         wire.hold();

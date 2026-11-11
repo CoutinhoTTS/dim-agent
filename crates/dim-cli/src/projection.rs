@@ -3236,7 +3236,7 @@ mod tests {
                 "stopped",
                 "cancelled",
                 serde_json::json!({
-                    "content": "Command stopped by user.",
+                    "content": "Command cancelled by user.",
                     "isError": true,
                     "structuredContent": {"signal": "SIGTERM"},
                 }),
