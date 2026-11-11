@@ -167,19 +167,74 @@ $ dimcode plugin install https://github.com/team/plugins.git \
 
 ## 7. 面向人和 Agent 的作者入口
 
-复用[插件编写指南](../typescript-plugin-authoring.md)和现有 [plugin-authoring skill](../../runtime/plugins/plugin-authoring/skills/plugin-authoring/SKILL.md)，不再维护一套平行教程。指南拥有解释和公开契约链接，skill 提供任务步骤、必要检查和失败后的定位路径。
+必须同时交付人类文档、编写 skill、调试 skill 和工具参考。复用[插件编写指南](../typescript-plugin-authoring.md)和现有 [plugin-authoring 包](../../runtime/plugins/plugin-authoring/dim-plugin.json)，其中的 [plugin-authoring skill](../../runtime/plugins/plugin-authoring/skills/plugin-authoring/SKILL.md)负责编写，新增独立的 `plugin-debugging` skill 负责诊断与验证。两者是同一个纯内容包中的两个 skill，不增加可执行插件或 runtime 依赖；Node/Python 不可用时仍能读取排障说明。
 
-| 作者阶段 | 人类文档 | Agent skill |
+指南拥有解释和公开契约链接，工具参考拥有操作说明，两个 skill 分别提供任务步骤并引用它们。四项资料按同一宿主版本交付并共同验收。
+
+### 7.1 编写 skill：plugin-authoring
+
+**触发**：创建插件、给插件增加工具/设置/内容、修改公开能力、准备可分发包或迁移到受支持的宿主版本。只询问已有插件为何失败时使用调试 skill。
+
+**输入**：用户要实现的行为、目标宿主版本、插件目录或待创建位置，以及实际需要的公开服务。信息可以从当前宿主和包中读取时先读取，不能猜测 SDK 版本或私有接口。
+
+**执行步骤**：
+
+1. 核对宿主能力与匹配版本的资料，选择已有服务和最小包形式；区分 TypeScript、Python 和纯内容包实际支持的依赖方式。
+2. 按 manifest、scope 和生命周期契约编写入口、内容和依赖锁文件；业务配置和服务使用规则引用其所有者，不复制另一套接口定义。
+3. 使用隔离 home 安装；读取安装与加载结果，调用一个真实公开功能，修改入口后验证重载。不以“文件已生成”或“包已安装”作为可用的证明。
+4. 检查包可脱离 Dim checkout 运行；按任务范围准备版本、发布内容和 topic，发布动作遵守用户授权。
+5. 交付插件文件、兼容要求、安装/使用方式和实际验证结果。遇到加载或行为故障时转入调试流程，不反复更换依赖版本碰运气。
+
+### 7.2 调试 skill：plugin-debugging
+
+**触发**：插件安装失败、Pending/Failed、runtime 获取或连接失败、工具/内容没有出现、配置不生效、重载后仍执行旧代码，以及插件行为不符合其公开契约。
+
+**输入与输出**：读取准确的宿主/插件版本、安装 ID 与名称、来源/commit、当前 Session 和失败动作。输出最小复现、首个失败阶段、可核对的证据、原因或尚缺证据、修复动作及复验结果；没有足够证据时明确说明，不能把症状当成根因。
+
+**执行步骤**：
+
+1. 先读取工具帮助、实际插件状态和 runtime 状态，保留原始错误及关联身份；从安装、依赖、解释器、连接、加载、内容注册和实际调用中定位首个失败阶段。
+2. 在隔离 home 以相同来源和版本复现；先执行只读诊断，修复按当前任务授权范围进行，不以删除产品 home、全局安装依赖或重置用户设置作为排障步骤。
+3. 按下表取证，只读取相关日志片段和公开状态；隐藏凭据及无关会话内容。日志定位使用实际宿主给出的路径，不能硬编码用户产品 home。
+4. 做最小修复，再运行同一公开复现流程。重载与重启遵循实际能力：只重载入口模块的限制、`restartRequired` 和共享 runtime 的影响都要说明，不无限重试 reload。
+5. 复验安装状态、公开功能及必要的关闭/重载行为；未解决时保留可复现材料和明确缺口，不报告成功。
+
+| 观察到的故障 | 先核对的证据 | 不能据此直接下的结论 |
 | --- | --- | --- |
-| 判断能力 | 包、服务、scope、生命周期和信任边界 | 读取宿主版本及已有公开服务，选最小实现，避免重复机制 |
-| 编写 | 包目录、manifest、兼容声明、入口和私有依赖 | 使用匹配宿主的参考资料及同一个最小示例，不硬编码漂移的 SDK 版本 |
-| 本地验证 | 在隔离 home 安装、调用一个真实功能、修改后重载 | 走相同公开流程，区分安装/运行时/加载失败，不触碰产品 home |
-| 发布 | 发布可独立安装内容，选择 tag，添加 topic，检查目录详情 | 检查文件齐全及无源码 checkout 依赖；发布动作遵守用户授权 |
-| 维护 | 兼容升级、显式更新、禁用/移除与业务数据保留 | 核对已有来源和版本，只更新任务要求的内容 |
+| 安装或依赖准备失败 | 实际来源、manifest/锁文件和安装错误 | 不能把网络失败都归为插件不存在 |
+| `pending` | `waitingFor`、runtime 获取/连接状态、缺失服务 | 不能默认下载 runtime，也不能假定包代码有错 |
+| `failed` 或内容缺失 | loader 错误、`refused`/跳过内容信息、相关日志 | 不能把一个内容种类的拒绝当成整个包都未安装 |
+| `running` 但工具不可见 | 当前 Session 的实际工具声明、注册结果和下一次模型请求 | 不能用进程运行状态证明功能已经暴露 |
+| 修改后仍是旧行为 | 实际加载来源、入口与导入模块、重载回复和 `restartRequired` | 不能把入口重载等同于递归刷新模块缓存 |
+| runtime `down` 或反复退出 | runtime 的退出/握手原因和宿主日志 | 不能通过更换来源掩盖启动或插件错误 |
 
-指南和 skill 引用同一份可运行示例；示例随相同宿主版本验证，不各自复制实现。随产品交付的 skill 必须带齐必要参考文件，或链接到不可变且匹配宿主版本的公开文档；不得假设用户机器存在 Dim 仓库。没有匹配资料时明确指出缺口，不能用未发布 API 生成貌似可运行的插件。
+### 7.3 配套工具参考
 
-类型脚本、纯内容包、Python runtime 和 UI 资源的能力分别按其实际 owner 契约教学；支持一种 runtime 不等于支持所有语言包管理器。本文的新分发步骤只有在对应公开入口可用后才能进入产品 skill 的执行步骤。作者文档和 skill 的交付应与分发能力一同验收。
+工具参考同时供人类文档和两个 skill 使用，并随匹配版本交付。每项必须说明：用途与前置条件、实际可用的调用入口、参数与最小例子、关键结果字段、只读或写入的副作用、取消/超时与重试规则、常见错误和下一步，以及生效时机与授权边界。区分 Agent 工具、CLI 命令和管理 RPC；名字相似不代表三种入口都存在。
+
+| 操作 | 必须说明的入口与用途 | 契约来源 |
+| --- | --- | --- |
+| 查帮助与宿主能力 | Agent `plugin` 工具的 `help [command]`、CLI 帮助及管理能力声明；先确认当前版本可用参数 | [PluginManager §6](plugins/PluginManager.md#6-interfaces-summary)、[管理入口](appserver/management-methods.md) |
+| 查插件状态 | Agent `plugin` 的 `list`、CLI `plugin list`、RPC `plugin.list`；解释安装 ID/名称、选中来源、状态、`waitingFor` 和内容拒绝 | [PluginManager 接口](plugins/PluginManager.md#a1-methods-managementmethods-namespace-plugin) |
+| 安装与选择 | `install`、`enable`、`disable`；区分本地原位目录、Git 获取、是否启用、同名替换、`restartRequired` 及隔离 home | [PluginManager 流程](plugins/PluginManager.md#3-flows) |
+| 修改后验证与维护 | `reload`、`update`、`remove`；说明入口缓存、`restartRequired`、ID/名称区别、在途调用影响和业务数据保留 | [PluginManager 时序](plugins/PluginManager.md#4-timing-and-conflicts) |
+| 查看/修改业务配置 | Agent `plugin` 的 `config`/`config … set …` 与 Settings 管理入口；说明 revision、schema、user-only 和 write-only 字段 | [PluginManager §6](plugins/PluginManager.md#6-interfaces-summary)、[Settings](appserver/settings-service.md) |
+| 检查/准备 runtime | CLI `runtime list/install/config` 与 RPC `runtime.list/install/configure/watch`；说明获取状态与连接状态，不假定存在同名 Agent 工具 | [RuntimeManager 接口](plugins/RuntimeManager.md#5-interfaces) |
+| 读取诊断证据 | 宿主已有文件读取/命令执行能力、插件 stderr 和实际宿主日志；限制读取范围并保留错误上下文 | [插件诊断与生命周期](../typescript-plugin-authoring.md#plugin-shape-and-lifetime)、宿主实际工具声明 |
+| 编辑与复现 | 宿主已声明的文件编辑、命令执行和插件公开工具；以隔离 home 运行最小复现，不绕过工具授权 | [插件编写指南](../typescript-plugin-authoring.md)、[ADR 003](../adr/003-approval-scope.md) |
+| 搜索与预览分发来源 | 第 6 节提出的目录/详情操作；只有 owner 交付后才列为可执行步骤 | [目录与安装要求](#r1-pluginmanager) |
+
+参考中至少包含 Agent 调用 `plugin` 的 `command` 参数示例、对应 CLI 示例和真实返回值解释。诸如 `plugin.logs`、`plugin.debug`、`plugin.validate` 的独立入口不能凭需要虚构；已有日志/状态/安装校验能解决的问题直接复用。确实缺少可获得的诊断证据时，按 R4 向证据所有者提出通用读取要求，不新增绕过公开服务的调试后门。
+
+例如，Agent 向 `plugin` 传入 `{"command":"list"}` 读取当前宿主状态，传入 `{"command":"help reload"}` 查询重载说明。CLI 的状态读取入口是 `dimcode --home <isolated-home> plugin list`。Agent 工具绑定当前 Session 的宿主，不接受 CLI 的 `--home` 参数；隔离验证必须在隔离宿主的 Session 使用该工具，或使用明确指定隔离 home 的 CLI，不能认为开过一个临时 CLI 就改变了当前 Agent 的宿主。调用成功仍须检查实际状态、内容拒绝和操作回复中的 `restartRequired`。
+
+### 7.4 文档、skill 与工具的一致性交付
+
+人类文档必须包含编写教程、按故障阶段组织的调试指南和工具参考入口。两个 skill 分别给出触发条件、输入、步骤、工具选择、错误分支与完成标准；skill 是 Agent 的操作说明，不承担新的工具实现或授权。
+
+指南和两个 skill 引用同一份可运行示例；示例随相同宿主版本验证，不各自复制实现。随产品交付的 skill 必须带齐必要参考文件，或链接到不可变且匹配宿主版本的公开文档；不得假设用户机器存在 Dim 仓库。离线排障所需的状态解释、工具用法和日志定位说明须随包可读，不能全部依赖在线链接。没有匹配资料时明确指出缺口，不能用未发布 API 生成貌似可运行的插件。
+
+TypeScript、纯内容包、Python runtime 和 UI 资源的能力分别按其实际 owner 契约教学；支持一种 runtime 不等于支持所有语言包管理器。本文的新分发步骤只有在对应公开入口可用后才能进入产品 skill 的执行步骤。编写 skill、调试 skill、工具说明和人类文档是分发能力的共同验收项。
 
 ## 8. Requirements raised to mechanism owners
 
@@ -213,7 +268,7 @@ $ dimcode plugin install https://github.com/team/plugins.git \
 
 - **受阻功能与合同**：现有[管理入口](appserver/management-methods.md)和[作者指南](../typescript-plugin-authoring.md)不能展示或指导尚未定义的目录安装。
 - **已有机制为何不足**：客户端自有目录/安装器会产生第二份状态；复制教程会使 SDK 版本和接口示例分叉。
-- **所需通用能力**：客户端复用 R1 的数据接口；按第 7 节共同交付指南、skill、示例与版本匹配参考。浏览器管理授权不由本设计扩大。
+- **所需通用能力**：客户端复用 R1 的数据接口；按第 7 节共同交付编写指南、调试指南、`plugin-authoring` 与 `plugin-debugging` 两个 skill、工具参考和共用示例。工具帮助/结果由工具 owner 维护；缺少的通用诊断证据由对应 owner 提供公开读取，不建第二套调试服务。浏览器管理授权不由本设计扩大。
 - **顺序、批次、中断、重载**：界面只呈现 owner 状态；工具结果通过现有路径进入模型；无新 Timeline 事件。
 - **归属与 issue**：CLI/客户端接线 [#1173](https://github.com/arcships/dim/issues/1173)，作者资料 [#1410](https://github.com/arcships/dim/issues/1410)。
 
@@ -247,7 +302,10 @@ $ dimcode plugin install https://github.com/team/plugins.git \
 | 安装完成但 runtime/服务等待或加载失败 | 显示 Pending/失败原因，不能报告 Active；保留恢复所需来源 |
 | 显式更新、目录变更、禁用与移除 | 来源选择可追溯，旧包准备失败不切换，插件设置和运行记录保留 |
 | 新旧记录格式与旧二进制回退 | 按明确格式决定读取或拒绝，绝不丢失子目录而安装仓库根 |
-| 干净环境按指南及 skill 创建同一示例 | 两条路径都能安装、调用、重载；不依赖作者 checkout 或未发布 API |
+| 干净环境按指南及编写 skill 创建同一示例 | 两条路径都能安装、调用、重载；不依赖作者 checkout 或未发布 API |
+| 使用调试 skill 定位 manifest/依赖错误、Pending、内容拒绝和重载未生效 | 能用公开工具与相关日志定位失败阶段、给出证据，最小修复后复验同一流程，不重置产品数据 |
+| Node/Python 不可用且无网络 | 两个纯内容 skill 仍可读取，必要工具说明和排障参考在本地可用 |
+| 按工具参考执行最小调用 | Agent/CLI/RPC 入口、参数和返回字段与当前宿主一致；写入、取消和授权边界明确，不引用虚构工具 |
 | 基础发行包与 Workflow 安装后功能 | 基础包仍无 Workflow；显式安装后既有 `workflow.*` 和工具可用 |
 
 ## 10. Rule check
