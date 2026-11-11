@@ -9444,7 +9444,10 @@ mod tests {
         app.apply(snapshot(vec![background_task("t1", "cargo build")]));
         assert!(app.notifications.is_empty());
 
-        let ended = vec![finished(background_task("t1", "cargo build"), TaskOutcome::Failed)];
+        let ended = vec![finished(
+            background_task("t1", "cargo build"),
+            TaskOutcome::Failed,
+        )];
         app.apply(snapshot(ended.clone()));
         assert_eq!(
             app.notifications,
@@ -9507,7 +9510,10 @@ mod tests {
         );
 
         app.apply(snapshot(vec![
-            replayed(background_task("t1", "already done"), TaskOutcome::Completed),
+            replayed(
+                background_task("t1", "already done"),
+                TaskOutcome::Completed,
+            ),
             finished(background_task("t2", "live now"), TaskOutcome::Stopped),
         ]));
         assert_eq!(
@@ -11297,7 +11303,9 @@ mod tests {
         };
         let task = background_task("t1", "cargo build");
         drawn.app.apply(snapshot(vec![task.clone()]));
-        drawn.app.apply(snapshot(vec![finished(task, TaskOutcome::Completed)]));
+        drawn
+            .app
+            .apply(snapshot(vec![finished(task, TaskOutcome::Completed)]));
         let mut written = String::new();
         write_notifications(
             &mut drawn.app.notifications,

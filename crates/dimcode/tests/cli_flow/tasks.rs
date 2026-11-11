@@ -1078,10 +1078,24 @@ fn tui_task_end_restored_by_history_is_not_notified_but_a_live_one_is() {
         // The live stream's own end, in the shape the command owner writes
         // for a user stop: `Cancelled` with `isError` set.
         let started_at = now_ms();
-        event(wire, "main", command("live", 9, started_at - 12_000, "live build"));
-        event(wire, "main", fact("live-end", 10, started_at, "exec", "ended",
-            json!({"task_id":"live","status":"cancelled",
-                   "result":{"content":"Command stopped by user.","isError":true}})));
+        event(
+            wire,
+            "main",
+            command("live", 9, started_at - 12_000, "live build"),
+        );
+        event(
+            wire,
+            "main",
+            fact(
+                "live-end",
+                10,
+                started_at,
+                "exec",
+                "ended",
+                json!({"task_id":"live","status":"cancelled",
+                   "result":{"content":"Command stopped by user.","isError":true}}),
+            ),
+        );
         wire.hold();
     });
     let mut command = home.command();

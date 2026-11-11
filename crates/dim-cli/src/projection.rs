@@ -3265,10 +3265,7 @@ mod tests {
                 .expect("a finished task");
             assert_eq!(finish.outcome, outcome, "{task}: {finish:?}");
             assert_eq!(finish.at, 2000, "{task}: the end's own time");
-            assert!(
-                !finish.replayed,
-                "{task}: the live stream carried the end"
-            );
+            assert!(!finish.replayed, "{task}: the live stream carried the end");
         }
     }
 
