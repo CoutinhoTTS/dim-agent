@@ -192,6 +192,8 @@ An applied input can stay pending across a stop, which is the state the next tur
 
 A row the interface commits itself, outside the transcript rows — a notice, a `!!` run, the failure line, the boundary of a resume — is not part of that ordering, and can stand above a pending message.
 
+A user message's row carries the operator's words. Context the runtime appended after them for the model is not theirs, and a client may draw it as a row of its own directly under the message: the CLI draws a hook's context that way, one muted `Hook context · N lines` row per `dim-hooks` block, its body behind the detail setting. Such a row is not a message: it takes no part in this ordering, carries no cut, and is not counted by the message rail, `/timeline` or the earlier-history page. It never wears the user colour or bar.
+
 The pending style is the terminal UI's: Web's v1 `session.event` filters `input/consumed` ([event-driven flows](../architecture/rust-agent/event-driven-flows.md)), so a Web message still reads as sent.
 
 The row is keyed by input id from the `input/message` that wrote it to the `input/consumed` that settles it, so a reattached client that folds the same events draws the state it reached, not the state at the time of the write.
