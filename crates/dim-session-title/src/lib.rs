@@ -308,7 +308,7 @@ impl Owner {
             };
             let request = |through, filter, select, pick| TimelineQuery {
                 scope: TimelineQueryScope::Branch, from: None, through, include_publishing: false,
-                query: QuerySpec { rows: None, filter: Some(filter), select, group_by: vec![], pick, order_by: vec![] },
+                query: QuerySpec { filter: Some(filter), select, group_by: vec![], pick, order_by: vec![] },
                 page: Some(QueryPage { limit: NonZeroU64::MIN, after: None }),
             };
             let first = self.tree.query("main".into(), request(None, QueryFilter::And {

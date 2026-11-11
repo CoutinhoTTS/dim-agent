@@ -1133,7 +1133,6 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
                 through: Some(session.sequence("main").unwrap()),
                 include_publishing: false,
                 query: dim_agent_runtime::QuerySpec {
-                    rows: None,
                     filter: Some(dim_agent_runtime::QueryFilter::And {
                         conditions: vec![
                             dim_agent_runtime::QueryFilter::In {

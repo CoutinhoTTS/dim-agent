@@ -15,7 +15,6 @@ fn query(request_id: &str, through: u64, kinds: &[&str]) -> TimelineQuery {
         through: Some(through),
         include_publishing: false,
         query: QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::And {
                 conditions: vec![
                     field("kind", kinds.iter().map(|kind| (*kind).into()).collect()),

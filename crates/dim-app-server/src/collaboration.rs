@@ -1307,7 +1307,6 @@ impl CollaborationSession {
             from: None,
             through: None,
             query: QuerySpec {
-                rows: None,
                 filter: Some(QueryFilter::And {
                     conditions: vec![
                         QueryFilter::In {
@@ -2703,7 +2702,6 @@ async fn read_page(
                 }),
                 through: Some(next),
                 query: QuerySpec {
-                    rows: None,
                     filter: (!kinds.is_empty()).then(|| QueryFilter::In {
                         value: QueryOperand::Field {
                             path: "kind".into(),
@@ -2745,7 +2743,6 @@ async fn read_events(
                 from: None,
                 through: None,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {
@@ -2794,7 +2791,6 @@ async fn read_tool_use_starts(
         from: None,
         through: Some(through),
         query: QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::And {
                 conditions: vec![
                     QueryFilter::In {
@@ -3508,7 +3504,6 @@ async fn restore(
                 through: Some(through),
                 include_publishing: true,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::Or {
                         conditions: vec![
                             QueryFilter::In {

@@ -951,7 +951,6 @@ impl Owner {
                 through: Some(through),
                 include_publishing: true,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::In {
                         value: QueryOperand::Field {
                             path: "kind".into(),
@@ -1024,7 +1023,6 @@ impl Owner {
             through: Some(through),
             include_publishing,
             query: QuerySpec {
-                rows: None,
                 filter: Some(live_inputs(key_block(key))),
                 select: QuerySelect::Fields {
                     fields: vec!["data.blocks".into()],
@@ -1484,7 +1482,6 @@ impl Owner {
                 through: Some(self.timeline.committed()),
                 include_publishing: true,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {
@@ -1529,7 +1526,6 @@ impl Owner {
                 through: Some(self.timeline.committed()),
                 include_publishing: true,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {
@@ -1839,7 +1835,6 @@ impl Owner {
             through: Some(through),
             include_publishing: false,
             query: QuerySpec {
-                rows: None,
                 filter: Some(QueryFilter::And {
                     conditions: vec![
                         QueryFilter::In {

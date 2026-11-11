@@ -542,7 +542,6 @@ impl AgentLoop {
             through: Some(through),
             include_publishing: true,
             query: QuerySpec {
-                rows: None,
                 filter: Some(QueryFilter::And {
                     conditions: vec![
                         equal("kind", "input/applied".into()),

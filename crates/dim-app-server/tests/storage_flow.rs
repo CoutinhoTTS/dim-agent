@@ -3,8 +3,8 @@ mod recall;
 #[path = "storage_flow/state_indexes.rs"]
 mod state_indexes;
 
-#[path = "storage_flow/element_rows.rs"]
-mod element_rows;
+#[path = "storage_flow/array_reads.rs"]
+mod array_reads;
 #[path = "storage_flow/member_queries.rs"]
 mod member_queries;
 #[path = "storage_flow/property_queries.rs"]

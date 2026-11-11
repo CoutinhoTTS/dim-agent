@@ -19,7 +19,6 @@ pub(crate) fn chain_by_id(id: &str, through: u64, select: QuerySelect) -> Timeli
         from: None,
         through: Some(through),
         query: QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::In {
                 value: QueryOperand::Field { path: "id".into() },
                 values: vec![id.into()],
@@ -49,7 +48,6 @@ fn context_read(
         through: Some(through),
         include_publishing,
         query: QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::Or {
                 conditions: ["context.render", "context.state"]
                     .map(|path| QueryFilter::In {
@@ -142,7 +140,6 @@ impl<'a> FoldRead<'a> {
                     through: Some(self.through),
                     include_publishing: self.tail,
                     query: QuerySpec {
-                        rows: None,
                         filter: Some(QueryFilter::In {
                             value: QueryOperand::Field { path: "id".into() },
                             values: vec![id.clone().into()],
@@ -1382,7 +1379,6 @@ impl ContextReads<'_> {
                 through: Some(through),
                 include_publishing: false,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {
@@ -1432,7 +1428,6 @@ impl ContextReads<'_> {
                 through: Some(through),
                 include_publishing: false,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::And {
                         conditions: vec![
                             QueryFilter::In {

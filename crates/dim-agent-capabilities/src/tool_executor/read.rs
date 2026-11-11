@@ -63,7 +63,6 @@ impl DynPlugin for ToolMethodsPlugin {
                             through: p.through,
                             include_publishing: false,
                             query: QuerySpec {
-                                rows: None,
                                 filter: Some(QueryFilter::And {
                                     conditions: vec![
                                         field("kind", "step/tool-use".into()),

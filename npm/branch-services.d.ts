@@ -64,8 +64,6 @@ export type TimelineQueryScope =
   | /** The queried branch alone. */ "branch"
   | /** The branch chain: each ancestor up to its cut, root first, then the queried branch. */ "chain"
 
-export type QueryRows = { kind: "elements"; field: string }
-
 export type QueryOperand =
   | { kind: "field"; path: string }
   | { kind: "outer"; path: string }
@@ -109,7 +107,6 @@ export interface QueryOrder {
 }
 
 export interface QuerySpec {
-  rows?: QueryRows | null
   filter?: QueryFilter | null
   select: QuerySelect
   group_by?: string[]

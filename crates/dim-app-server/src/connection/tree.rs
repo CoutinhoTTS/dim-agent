@@ -313,7 +313,6 @@ impl Connection {
             through: Some(params.sequence),
             include_publishing: false,
             query: QuerySpec {
-                rows: None,
                 filter: Some(QueryFilter::And {
                     conditions: vec![
                         completed_compaction(),
@@ -663,7 +662,6 @@ async fn turn_window(
         through: Some(through),
         include_publishing: false,
         query: QuerySpec {
-            rows: None,
             filter: Some(filter),
             select: QuerySelect::Fields {
                 fields: vec!["position.sequence".into()],
@@ -923,7 +921,6 @@ async fn scan_keys(
                 through: Some(through),
                 include_publishing: false,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::In {
                         value: QueryOperand::Field {
                             path: "kind".into(),
@@ -968,7 +965,6 @@ async fn scan_keys(
                     through: Some(through),
                     include_publishing: false,
                     query: QuerySpec {
-                        rows: None,
                         filter: Some(QueryFilter::And {
                             conditions: vec![
                                 QueryFilter::In {
@@ -1221,7 +1217,6 @@ async fn window_items(
                 through: Some(end),
                 include_publishing: false,
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(filter),
                     select: QuerySelect::Events,
                     group_by: vec![],
@@ -1256,7 +1251,6 @@ async fn window_items(
                     through: Some(end),
                     include_publishing: false,
                     query: QuerySpec {
-                        rows: None,
                         filter: Some(completed_compaction()),
                         select: QuerySelect::Fields {
                             fields: [

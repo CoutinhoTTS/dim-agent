@@ -90,7 +90,6 @@ fn pending(family: usize) -> QuerySpec {
         });
     }
     QuerySpec {
-        rows: None,
         filter: Some(QueryFilter::And { conditions }),
         select: QuerySelect::Fields {
             fields: vec!["id".into(), "position.sequence".into()],

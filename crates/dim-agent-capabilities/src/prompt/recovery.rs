@@ -69,7 +69,6 @@ fn request(
         through: Some(through),
         include_publishing: false,
         query: QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::In {
                 value: QueryOperand::Field {
                     path: "kind".into(),

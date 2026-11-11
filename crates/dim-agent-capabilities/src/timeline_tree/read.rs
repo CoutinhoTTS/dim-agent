@@ -39,7 +39,6 @@ impl TreeCommands {
                         through: Some(anchor),
                         include_publishing: false,
                         query: QuerySpec {
-                            rows: None,
                             filter: None,
                             select: QuerySelect::Fields {
                                 fields: vec!["data.prompt".into()],
@@ -74,7 +73,6 @@ impl TreeCommands {
                         through: Some(cut),
                         include_publishing: false,
                         query: QuerySpec {
-                            rows: None,
                             filter: Some(QueryFilter::And {
                                 conditions: vec![
                                     QueryFilter::In {
@@ -140,7 +138,6 @@ impl TreeCommands {
                         through: Some(at),
                         include_publishing: false,
                         query: QuerySpec {
-                            rows: None,
                             filter: None,
                             select: QuerySelect::Fields {
                                 fields: vec!["data".into()],

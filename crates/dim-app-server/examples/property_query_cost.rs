@@ -145,7 +145,6 @@ async fn main() {
             }],
         };
         let mut query = QuerySpec {
-            rows: None,
             filter: None,
             select: QuerySelect::Count,
             group_by: vec![],

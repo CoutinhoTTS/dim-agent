@@ -28,7 +28,6 @@ pub(super) async fn read(
         through: p.through,
         include_publishing: false,
         query: QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::And {
                 conditions: vec![
                     QueryFilter::In {

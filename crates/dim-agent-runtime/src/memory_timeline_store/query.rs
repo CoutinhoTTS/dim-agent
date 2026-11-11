@@ -1,13 +1,12 @@
 use super::MemorySession;
 use crate::{
     AgentError, QueryComparison, QueryCursor, QueryEvent, QueryFilter, QueryOperand, QueryOrderKey,
-    QueryOutput, QueryPage, QueryPick, QueryResult, QueryRow, QueryRows, QuerySelect, QuerySpec,
-    QueryValue, Result, TimelineQueryDirection, TimelineReadScope, event_property,
+    QueryOutput, QueryPage, QueryPick, QueryResult, QueryRow, QuerySelect, QuerySpec, QueryValue,
+    Result, TimelineQueryDirection, TimelineReadScope, event_property,
 };
 use dim_agent_types::{AgentEvent, TimelinePosition};
 use serde_json::{Number, Value};
 use std::{
-    borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, BinaryHeap},
     sync::Arc,
@@ -18,41 +17,15 @@ struct Record<'a> {
     event: &'a Arc<AgentEvent>,
     branch: &'a str,
     ordinal: usize,
-    element: Option<(&'a str, usize)>,
 }
 
 impl Record<'_> {
-    fn event_path<'a>(&self, path: &'a str) -> Cow<'a, str> {
-        if let Some(suffix) = path.strip_prefix("element.value") {
-            let (field, index) = self.element.expect("validated element row property");
-            Cow::Owned(format!("{field}[{index}]{suffix}"))
-        } else {
-            Cow::Borrowed(path)
-        }
-    }
-
     fn field(&self, path: &str) -> Result<QueryValue> {
-        if path == "element.index" {
-            return Ok(QueryValue::Value {
-                value: self.element.expect("validated element row").1.into(),
-            });
-        }
-        event_property(self.event, self.branch, &self.event_path(path))
+        event_property(self.event, self.branch, path)
     }
 
-    fn present(&self, path: &str) -> Result<bool> {
-        if path == "element.index" {
-            return Ok(true);
-        }
-        crate::event_property_present(self.event, &self.event_path(path))
-    }
-
-    fn position(&self) -> (usize, u64, usize) {
-        (
-            self.ordinal,
-            self.event.sequence,
-            self.element.map_or(0, |(_, index)| index),
-        )
+    fn position(&self) -> (usize, u64) {
+        (self.ordinal, self.event.sequence)
     }
 }
 
@@ -65,7 +38,6 @@ impl<'a> Source<'a> {
     fn records(
         &self,
         after: Option<(usize, u64, bool)>,
-        inclusive: bool,
     ) -> impl DoubleEndedIterator<Item = Record<'a>> + use<'a> {
         let session = self.session;
         self.scope
@@ -79,19 +51,9 @@ impl<'a> Source<'a> {
                 if let Some((at, sequence, descending)) = after {
                     match ordinal.cmp(&at) {
                         Ordering::Equal if descending => {
-                            high = high.min(if inclusive {
-                                sequence
-                            } else {
-                                sequence.saturating_sub(1)
-                            })
+                            high = high.min(sequence.saturating_sub(1))
                         }
-                        Ordering::Equal => {
-                            low = low.max(if inclusive {
-                                sequence
-                            } else {
-                                sequence.saturating_add(1)
-                            })
-                        }
+                        Ordering::Equal => low = low.max(sequence.saturating_add(1)),
                         Ordering::Less if !descending => high = 0,
                         Ordering::Greater if descending => high = 0,
                         _ => (),
@@ -115,7 +77,6 @@ impl<'a> Source<'a> {
                         event,
                         branch: &segment.branch_id,
                         ordinal,
-                        element: None,
                     })
             })
     }
@@ -205,7 +166,7 @@ impl<'a> Evaluation<'a> {
                     return Ok(());
                 }
                 let mut groups: BTreeMap<Vec<Scalar>, (String, Vec<bool>)> = BTreeMap::new();
-                for record in self.source.records(None, false) {
+                for record in self.source.records(None) {
                     if record.event.kind.key() != "step/text" {
                         continue;
                     }
@@ -278,7 +239,7 @@ impl<'a> Evaluation<'a> {
                     }
                 }
                 let mut keys = BTreeSet::new();
-                for record in self.source.records(None, false) {
+                for record in self.source.records(None) {
                     let mut accepted = true;
                     for condition in &remaining {
                         if !self.matches(condition, record, None, None)? {
@@ -360,10 +321,11 @@ impl<'a> Evaluation<'a> {
                 })
             }
             QueryFilter::Present { value } => match value {
-                QueryOperand::Field { path } => record.present(path)?,
-                QueryOperand::Outer { path } => {
-                    outer.expect("validated correlated operand").present(path)?
-                }
+                QueryOperand::Field { path } => crate::event_property_present(record.event, path)?,
+                QueryOperand::Outer { path } => crate::event_property_present(
+                    outer.expect("validated correlated operand").event,
+                    path,
+                )?,
                 _ => !matches!(operand(value)?, QueryValue::Missing),
             },
             QueryFilter::Prefix { value, prefix } => {
@@ -438,7 +400,7 @@ impl<'a> Evaluation<'a> {
                         .collect::<Result<Vec<_>>>()?;
                     join_key(values).is_some_and(|key| index.keys.contains(&key))
                 } else {
-                    for inner in self.source.records(None, false) {
+                    for inner in self.source.records(None) {
                         if self.matches(condition, inner, Some(record), None)? {
                             return Ok(true);
                         }
@@ -447,9 +409,7 @@ impl<'a> Evaluation<'a> {
                 }
             }
             QueryFilter::Any { field, condition } => {
-                let field = record.event_path(field);
-                let Some(length) = crate::event_property::array_length(record.event, &field)?
-                else {
+                let Some(length) = crate::event_property::array_length(record.event, field)? else {
                     return Ok(false);
                 };
                 let mut paths = BTreeMap::new();
@@ -459,7 +419,7 @@ impl<'a> Evaluation<'a> {
                     .map(|(path, value)| {
                         Ok((
                             path,
-                            crate::event_property::elements(record.event, &field, path, value)?,
+                            crate::event_property::elements(record.event, field, path, value)?,
                         ))
                     })
                     .collect::<Result<BTreeMap<_, _>>>()?;
@@ -615,12 +575,6 @@ fn order_keys(query: &QuerySpec, candidate: &Candidate<'_>) -> Result<Vec<SortKe
                     value: Scalar::number(candidate.record.event.sequence.into()),
                     descending,
                 });
-                if let Some((_, index)) = candidate.record.element {
-                    keys.push(SortKey {
-                        value: Scalar::number(index.into()),
-                        descending,
-                    });
-                }
             }
         }
     }
@@ -638,12 +592,6 @@ fn order_keys(query: &QuerySpec, candidate: &Candidate<'_>) -> Result<Vec<SortKe
             value: Scalar::number(candidate.record.event.sequence.into()),
             descending: false,
         });
-        if let Some((_, index)) = candidate.record.element {
-            keys.push(SortKey {
-                value: Scalar::number(index.into()),
-                descending: false,
-            });
-        }
     }
     Ok(keys)
 }
@@ -695,9 +643,6 @@ pub(super) fn execute<'a>(
         directions.push(order.direction == TimelineQueryDirection::Descending);
         if order.key == QueryOrderKey::Position {
             directions.push(order.direction == TimelineQueryDirection::Descending);
-            if query.rows.is_some() {
-                directions.push(order.direction == TimelineQueryDirection::Descending);
-            }
         }
     }
     directions.extend(std::iter::repeat_n(
@@ -705,7 +650,7 @@ pub(super) fn execute<'a>(
         if matches!(query.select, QuerySelect::Count) {
             query.group_by.len()
         } else {
-            2 + usize::from(query.rows.is_some())
+            2
         },
     ));
     let after = page
@@ -774,102 +719,59 @@ pub(super) fn execute<'a>(
     } else {
         None
     };
-    let descending = (ordered && position_order == Some(TimelineQueryDirection::Descending))
-        || (single_pick && query.pick == Some(QueryPick::Last));
-    let records: Box<dyn Iterator<Item = Record<'a>>> = if descending {
-        Box::new(
-            evaluation
-                .source
-                .records(position_after, query.rows.is_some())
-                .rev(),
-        )
+    let records: Box<dyn Iterator<Item = Record<'a>>> = if (ordered
+        && position_order == Some(TimelineQueryDirection::Descending))
+        || (single_pick && query.pick == Some(QueryPick::Last))
+    {
+        Box::new(evaluation.source.records(position_after).rev())
     } else {
-        Box::new(
-            evaluation
-                .source
-                .records(position_after, query.rows.is_some()),
-        )
+        Box::new(evaluation.source.records(position_after))
     };
-    let (event_conditions, element_conditions) = if query.rows.is_some() {
-        query
-            .filter
-            .as_ref()
-            .map(QueryFilter::row_conditions)
-            .unwrap_or_default()
-    } else {
-        (Vec::new(), query.filter.iter().collect())
-    };
-    'events: for event in records {
-        for condition in &event_conditions {
-            if !evaluation.matches(condition, event, None, None)? {
-                continue 'events;
-            }
+    for record in records {
+        if let Some(filter) = &query.filter
+            && !evaluation.matches(filter, record, None, None)?
+        {
+            continue;
         }
-        let length = match &query.rows {
-            Some(QueryRows::Elements { field }) => {
-                crate::event_property::row_array_length(event.event, field)?.unwrap_or(0)
+        if let QuerySelect::Characters { field } = &query.select {
+            if let QueryValue::Value {
+                value: Value::String(text),
+            } = record.field(field)?
+            {
+                count += text.chars().count() as u64;
             }
-            None => 1,
-        };
-        'elements: for offset in 0..length {
-            let record = Record {
-                element: query.rows.as_ref().map(|QueryRows::Elements { field }| {
-                    (
-                        field.as_str(),
-                        if descending {
-                            length - offset - 1
-                        } else {
-                            offset
-                        },
-                    )
-                }),
-                ..event
-            };
-            for condition in &element_conditions {
-                if !evaluation.matches(condition, record, None, None)? {
-                    continue 'elements;
-                }
+            continue;
+        }
+        count += 1;
+        if matches!(query.select, QuerySelect::Exists) {
+            return Ok(QueryResult {
+                result: QueryOutput::Exists { exists: true },
+                next: None,
+            });
+        }
+        if grouped {
+            let group = query
+                .group_by
+                .iter()
+                .map(|field| Scalar::from_value(record.field(field)?))
+                .collect::<Result<Vec<_>>>()?;
+            let entry = groups.entry(group).or_insert((record, 0));
+            entry.1 += 1;
+            if query.pick == Some(QueryPick::Last) && record.position() > entry.0.position() {
+                entry.0 = record;
             }
-            if let QuerySelect::Characters { field } = &query.select {
-                if let QueryValue::Value {
-                    value: Value::String(text),
-                } = record.field(field)?
-                {
-                    count += text.chars().count() as u64;
-                }
-                continue;
+            if single_pick {
+                break;
             }
-            count += 1;
-            if matches!(query.select, QuerySelect::Exists) {
-                return Ok(QueryResult {
-                    result: QueryOutput::Exists { exists: true },
-                    next: None,
-                });
-            }
-            if grouped {
-                let group = query
-                    .group_by
-                    .iter()
-                    .map(|field| Scalar::from_value(record.field(field)?))
-                    .collect::<Result<Vec<_>>>()?;
-                let entry = groups.entry(group).or_insert((record, 0));
-                entry.1 += 1;
-                if query.pick == Some(QueryPick::Last) && record.position() > entry.0.position() {
-                    entry.0 = record;
-                }
-                if single_pick {
-                    break 'events;
-                }
-            } else if !matches!(query.select, QuerySelect::Count) {
-                let full = push(Candidate {
-                    record,
-                    group: Vec::new(),
-                    count: 1,
-                    order: Vec::new(),
-                })?;
-                if full && ordered {
-                    break 'events;
-                }
+        } else if !matches!(query.select, QuerySelect::Count) {
+            let full = push(Candidate {
+                record,
+                group: Vec::new(),
+                count: 1,
+                order: Vec::new(),
+            })?;
+            if full && ordered {
+                break;
             }
         }
     }

@@ -544,7 +544,6 @@ async fn v37_text_upgrade_removes_opaque_documents_without_losing_query_candidat
 
 fn fields(names: &[&str]) -> QuerySpec {
     QuerySpec {
-        rows: None,
         filter: None,
         select: QuerySelect::Fields {
             fields: names.iter().map(|name| (*name).into()).collect(),
@@ -950,23 +949,6 @@ async fn property_queries_clip_merged_records_and_keep_the_same_tail_after_commi
     }];
     parity(&store, &memory, &scope, &query).await;
     let first = store.query(&scope, &query, Some(&page(1))).await.unwrap();
-    let mut elements = query.clone();
-    elements.rows = Some(dim_agent_runtime::QueryRows::Elements {
-        field: "tags".into(),
-    });
-    elements.select = QuerySelect::Fields {
-        fields: vec![
-            "id".into(),
-            "data.delta".into(),
-            "element.index".into(),
-            "element.value".into(),
-        ],
-    };
-    parity(&store, &memory, &scope, &elements).await;
-    let element_first = store
-        .query(&scope, &elements, Some(&page(2)))
-        .await
-        .unwrap();
     append(
         &store,
         key("properties", "main"),
@@ -987,31 +969,12 @@ async fn property_queries_clip_merged_records_and_keep_the_same_tail_after_commi
         ..page(2)
     };
     let expected = store.query(&scope, &query, Some(&continued)).await.unwrap();
-    let element_continued = QueryPage {
-        after: element_first.next,
-        ..page(2)
-    };
-    let element_expected = store
-        .query(&scope, &elements, Some(&element_continued))
-        .await
-        .unwrap();
     scope.segments[0].stored_through = 4;
     scope.segments[0].tail.clear();
     assert_eq!(
         serde_json::to_value(store.query(&scope, &query, Some(&continued)).await.unwrap()).unwrap(),
         serde_json::to_value(expected).unwrap()
     );
-    assert_eq!(
-        serde_json::to_value(
-            store
-                .query(&scope, &elements, Some(&element_continued))
-                .await
-                .unwrap()
-        )
-        .unwrap(),
-        serde_json::to_value(element_expected).unwrap()
-    );
-    parity(&store, &memory, &scope, &elements).await;
     query.select = QuerySelect::Events;
     parity(&store, &memory, &scope, &query).await;
     store.close().await.unwrap();
@@ -1073,16 +1036,6 @@ async fn property_queries_load_only_selected_request_components_and_filter_bodie
     );
     query = fields(&["data.request.messages[].role"]);
     parity(&store, &memory, &scope, &query).await;
-    let mut elements = fields(&[
-        "id",
-        "element.index",
-        "element.value.role",
-        "element.value.content",
-    ]);
-    elements.rows = Some(dim_agent_runtime::QueryRows::Elements {
-        field: "data.request.messages".into(),
-    });
-    parity(&store, &memory, &scope, &elements).await;
     query = fields(&[
         "data.request.messages[0].role",
         "data.request.messages[1].role",
@@ -1486,7 +1439,6 @@ async fn text_candidates_survive_output_merging_reopen_fork_and_session_deletion
         .await
         .unwrap();
     let query = QuerySpec {
-        rows: None,
         filter: Some(QueryFilter::And {
             conditions: vec![
                 eq("kind", json!("step/text")),

@@ -36,7 +36,6 @@ fn newest_chain(
         from: None,
         through: Some(through),
         query: QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::And { conditions }),
             select,
             group_by: vec![],
@@ -63,7 +62,6 @@ fn rising_chain(
         from,
         through: Some(through),
         query: QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::In {
                 value: QueryOperand::Field {
                     path: "kind".into(),
@@ -945,7 +943,6 @@ impl ContextPolicy {
                 from: None,
                 through: Some(through),
                 query: QuerySpec {
-                    rows: None,
                     filter: Some(QueryFilter::In {
                         value: QueryOperand::Field { path: "id".into() },
                         values: consumed,
@@ -1016,7 +1013,6 @@ impl ContextPolicy {
                         }),
                         through: Some(through),
                         query: QuerySpec {
-                            rows: None,
                             filter: Some(QueryFilter::And {
                                 conditions: vec![
                                     QueryFilter::In {

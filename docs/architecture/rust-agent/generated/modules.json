@@ -3470,18 +3470,6 @@
       ]
     },
     {
-      "id": "dim_app_server::storage::query::arrays",
-      "crate": "dim_app_server",
-      "parent": "dim_app_server::storage::query",
-      "file": "crates/dim-app-server/src/storage/query/arrays.rs",
-      "unexpandedMacros": [
-        "format",
-        "matches",
-        "params",
-        "unreachable"
-      ]
-    },
-    {
       "id": "dim_app_server::storage::sqlite",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -14267,6 +14255,7 @@
       "to": "dim_agent_runtime::error",
       "references": [
         "path AgentError",
+        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path Result",
         "path error"
@@ -19903,7 +19892,6 @@
       "from": "dim_agent_runtime::event_property",
       "to": "dim_agent_runtime::error",
       "references": [
-        "path AgentError::InvalidInput",
         "path AgentError::fault",
         "path Result",
         "use crate::AgentError",
@@ -20073,7 +20061,6 @@
       "references": [
         "path crate::event_property::array_length",
         "path crate::event_property::elements",
-        "path crate::event_property::row_array_length",
         "path crate::event_property_present",
         "path event_property",
         "use crate::event_property"
@@ -20115,7 +20102,6 @@
         "path QueryFilter::Prefix",
         "path QueryFilter::Present",
         "path QueryFilter::TextCandidate",
-        "path QueryFilter::row_conditions",
         "path QueryOperand",
         "path QueryOperand::Element",
         "path QueryOperand::Field",
@@ -20132,7 +20118,6 @@
         "path QueryPick::Last",
         "path QueryResult",
         "path QueryRow",
-        "path QueryRows::Elements",
         "path QuerySelect::Characters",
         "path QuerySelect::Count",
         "path QuerySelect::Events",
@@ -20152,7 +20137,6 @@
         "use crate::QueryPick",
         "use crate::QueryResult",
         "use crate::QueryRow",
-        "use crate::QueryRows",
         "use crate::QuerySelect",
         "use crate::QuerySpec",
         "use crate::QueryValue"
@@ -31837,7 +31821,6 @@
       "from": "dim_app_server::storage::query",
       "to": "dim_agent_runtime::error",
       "references": [
-        "path AgentError",
         "path AgentError::Cancelled",
         "path AgentError::InvalidInput",
         "path Result",
@@ -31887,7 +31870,6 @@
         "path QueryFilter::Prefix",
         "path QueryFilter::Present",
         "path QueryFilter::TextCandidate",
-        "path QueryFilter::row_conditions",
         "path QueryOperand",
         "path QueryOperand::Element",
         "path QueryOperand::Field",
@@ -31905,7 +31887,6 @@
         "path QueryPick::Last",
         "path QueryResult",
         "path QueryRow",
-        "path QueryRows::Elements",
         "path QuerySelect::Characters",
         "path QuerySelect::Count",
         "path QuerySelect::Events",
@@ -31927,7 +31908,6 @@
         "use dim_agent_runtime::QueryPick",
         "use dim_agent_runtime::QueryResult",
         "use dim_agent_runtime::QueryRow",
-        "use dim_agent_runtime::QueryRows",
         "use dim_agent_runtime::QuerySelect",
         "use dim_agent_runtime::QuerySpec",
         "use dim_agent_runtime::QueryValue"
@@ -31969,14 +31949,6 @@
     },
     {
       "from": "dim_app_server::storage::query",
-      "to": "dim_app_server::storage::query::arrays",
-      "references": [
-        "mod arrays",
-        "path arrays::expand"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path error",
@@ -31990,73 +31962,6 @@
         "path super::text::candidates",
         "path super::text::indexed",
         "path super::text::trigrams"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query::arrays",
-      "to": "dim_agent_runtime::error",
-      "references": [
-        "path Result"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query::arrays",
-      "to": "dim_agent_runtime::timeline_query",
-      "references": [
-        "path TimelineQueryDirection::Descending"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query::arrays",
-      "to": "dim_agent_runtime::timeline_query::properties",
-      "references": [
-        "path QueryPage",
-        "path QueryPick::First",
-        "path QueryPick::Last",
-        "path QuerySpec",
-        "path QueryValue::Value"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query::arrays",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path TimelineReadScope"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query::arrays",
-      "to": "dim_app_server::storage::arrays",
-      "references": [
-        "path crate::storage::arrays::Reference"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query::arrays",
-      "to": "dim_app_server::storage::codec",
-      "references": [
-        "path Reader"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query::arrays",
-      "to": "dim_app_server::storage::query",
-      "references": [
-        "path Compiler",
-        "path Statistics",
-        "path Temporary",
-        "path after",
-        "path before_element_value",
-        "path cancelled",
-        "path equality_values",
-        "path record_statement"
-      ]
-    },
-    {
-      "from": "dim_app_server::storage::query::arrays",
-      "to": "dim_app_server::storage::sqlite",
-      "references": [
-        "path error"
       ]
     },
     {

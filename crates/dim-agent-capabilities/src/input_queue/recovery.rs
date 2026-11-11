@@ -21,7 +21,6 @@ fn query(through: u64, kinds: &[&str], fields: &[&str]) -> TimelineQuery {
         through: Some(through),
         include_publishing: false,
         query: QuerySpec {
-            rows: None,
             filter: Some(field(
                 "kind",
                 kinds.iter().map(|kind| json!(kind)).collect(),

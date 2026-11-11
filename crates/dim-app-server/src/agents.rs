@@ -450,7 +450,6 @@ fn history_page_query(branch: &str, from: u64, through: u64, limit: usize) -> Ti
         }),
         through: Some(through),
         query: QuerySpec {
-            rows: None,
             filter: None,
             select: QuerySelect::Events,
             group_by: vec![],
@@ -1084,7 +1083,6 @@ impl AgentIndex {
             through: Some(through),
             include_publishing: false,
             query: QuerySpec {
-                rows: None,
                 filter: Some(QueryFilter::In {
                     value: QueryOperand::Field {
                         path: "kind".into(),
@@ -1195,7 +1193,6 @@ impl AgentIndex {
             through: Some(through),
             include_publishing: false,
             query: QuerySpec {
-                rows: None,
                 filter: Some(QueryFilter::And {
                     conditions: vec![
                         QueryFilter::In {

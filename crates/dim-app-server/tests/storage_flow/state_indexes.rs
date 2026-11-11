@@ -76,7 +76,6 @@ async fn restore_field_reads_seek_the_complete_control_and_numeric_keys() {
         };
         let mut queries = Vec::new();
         let base = |conditions| QuerySpec {
-            rows: None,
             filter: Some(QueryFilter::And { conditions }),
             select: QuerySelect::Fields {
                 fields: vec!["position.sequence".into()],
@@ -250,7 +249,6 @@ fn output_end(turn: &str, request: &str) -> EventKind {
 
 fn field_rows(filter: QueryFilter) -> QuerySpec {
     QuerySpec {
-        rows: None,
         filter: Some(filter),
         select: QuerySelect::Fields {
             fields: vec!["id".into(), "kind".into()],
