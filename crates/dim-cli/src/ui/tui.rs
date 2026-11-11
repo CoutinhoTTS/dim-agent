@@ -4,7 +4,7 @@
 //! diff (2.3). The terminal layer (2.2) guarantees the exit contract.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::management::{self, editor};
@@ -5834,7 +5834,10 @@ impl App {
     fn show_workspace(&mut self, cwd: Option<&str>) {
         let cwd = cwd.unwrap_or(&self.cwd_key);
         self.workspace = crate::ui::tilde(cwd);
-        self.composer.name_root(cwd != self.cwd_key);
+        // Paths compare by component, so `A/` is `A`; not canonicalized: I/O
+        // per switch, and a resolved symlink is a display question.
+        self.composer
+            .name_root(Path::new(cwd) != Path::new(&self.cwd_key));
         self.git_head = git_head(cwd);
         self.branch = self.git_head.as_deref().and_then(git_branch);
     }
@@ -8418,6 +8421,31 @@ mod tests {
         assert!(
             !narrow.contains(LONG),
             "a narrow title keeps the tail, not the whole path: {narrow:?}"
+        );
+
+        // The daemon may spell the same directory another way. A trailing
+        // separator changes nothing, so the picker stays plain: the border
+        // already names that base.
+        let spelled = format!("{}{MAIN_SEPARATOR}", launch.to_string_lossy());
+        app.apply(Update::Switched {
+            session_id: "s-a".into(),
+            kind: SwitchKind::Resumed,
+            cwd: Some(spelled),
+        });
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&launch_workspace) && row.contains("(launch-line)"),
+            "the border names that base and its branch: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "the picker keeps the launch workspace's files"
+        );
+        assert!(
+            !title.contains(&launch_workspace),
+            "the same directory in another spelling is not another base: {title:?}"
         );
 
         // `/new` goes Home: the Session is gone and the launch workspace is
