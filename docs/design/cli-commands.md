@@ -213,6 +213,11 @@ Enter steers it and `x` deletes it through the existing withdrawal operation.
 Only held messages can change; `notHeld` is a notice, not a failed run. Esc
 closes the panel without interrupting. Committed events refresh the panel,
 and changing attachment or shown line closes it.
+Once a queued message's steer, delete or recall request succeeds, further queue
+actions for that input do nothing while its committed events catch up with the
+client projection. Actions on inputs the projection no longer holds also do
+nothing. A failed request leaves the held input available for retry.
+With an empty draft and no held messages, Enter does nothing.
 
 The panel advertises steer and delete only when the selected message is held.
 An applied-only strip offers `/queue` to view the messages, not held-only edit
