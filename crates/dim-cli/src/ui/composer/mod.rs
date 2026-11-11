@@ -173,8 +173,9 @@ impl Composer {
         self.area.set_cursor(text.len());
     }
 
-    /// Appends withdrawn operator content, excluding appended runtime blocks.
-    /// Adjacent text blocks are separated by newlines; images stay atomic.
+    /// Appends withdrawn operator content, excluding appended runtime blocks
+    /// (`dim_agent_types::markup::runtime_context`). Adjacent text blocks are
+    /// separated by newlines; images stay atomic.
     pub fn restore(&mut self, input: dim_agent_types::UserInput) {
         self.shell = None;
         self.area.set_cursor(self.area.text().len());
@@ -185,7 +186,7 @@ impl Composer {
         for (index, block) in input.content.into_iter().enumerate() {
             match block {
                 dim_agent_types::ContentBlock::Text { text } => {
-                    if index > 0 && text.starts_with("<dim-") {
+                    if dim_agent_types::markup::runtime_context(index, &text) {
                         continue;
                     }
                     if previous_text {

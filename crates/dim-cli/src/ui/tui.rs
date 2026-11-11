@@ -11331,6 +11331,33 @@ mod tests {
         assert_eq!(app.composer.text(), "second");
     }
 
+    /// A withdrawn message returns as the operator's own words: a block the
+    /// runtime appended after them stays out of the draft, and a later
+    /// operator block that merely opens a `<dim-` name comes back.
+    #[test]
+    fn a_withdrawal_restores_the_operators_blocks_not_the_appended_context() {
+        let (mut app, _sent, _home) = session_with_queue(true, &[]);
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![
+                dim_agent_types::ContentBlock::Text {
+                    text: "Why does the parser stall?".into(),
+                },
+                dim_agent_types::ContentBlock::Text {
+                    text: "<dim-hooks kind=\"prompt-submit\">read src/parser.rs</dim-hooks>".into(),
+                },
+                dim_agent_types::ContentBlock::Text {
+                    text:
+                        "<dim-typed-by-the-operator>a second paragraph</dim-typed-by-the-operator>"
+                            .into(),
+                },
+            ],
+        }));
+        assert_eq!(
+            app.composer.text(),
+            "Why does the parser stall?\n<dim-typed-by-the-operator>a second paragraph</dim-typed-by-the-operator>"
+        );
+    }
+
     /// Enter on an empty draft steers the oldest queued message, as Ctrl+S does.
     #[test]
     fn enter_on_an_empty_draft_steers_like_ctrl_s() {

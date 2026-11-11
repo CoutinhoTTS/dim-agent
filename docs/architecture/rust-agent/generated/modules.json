@@ -2054,6 +2054,7 @@
       "parent": "dim_agent_types::markup",
       "file": "crates/dim-agent-types/src/markup.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -12237,6 +12238,7 @@
       "references": [
         "path MethodCall",
         "path RpcError::app",
+        "path RpcError::from",
         "path RpcError::interrupted",
         "path SessionMethods",
         "path params",
@@ -12388,6 +12390,13 @@
       "to": "dim_agent_types::input",
       "references": [
         "path input"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path markup::runtime_context"
       ]
     },
     {
@@ -20894,7 +20903,8 @@
       "from": "dim_agent_types::markup::tests",
       "to": "dim_agent_types::markup",
       "references": [
-        "use super::escaped"
+        "use super::escaped",
+        "use super::runtime_context"
       ]
     },
     {
@@ -30150,6 +30160,14 @@
     },
     {
       "from": "dim_app_server::storage::catalog",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path runtime_context",
+        "use dim_agent_types::markup::runtime_context"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
@@ -38154,6 +38172,13 @@
       "to": "dim_agent_types::events",
       "references": [
         "path dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path dim_agent_types::markup::runtime_context"
       ]
     },
     {
@@ -49388,6 +49413,14 @@
     },
     {
       "from": "dim_session_title",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path runtime_context",
+        "use dim_agent_types::markup::runtime_context"
+      ]
+    },
+    {
+      "from": "dim_session_title",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
@@ -49659,6 +49692,10 @@
     {
       "module": "dim_agent_types::finite_number",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_agent_types::markup",
+      "path": "char::is_whitespace"
     },
     {
       "module": "dim_agent_types::model",
