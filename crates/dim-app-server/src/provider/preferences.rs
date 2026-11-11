@@ -110,7 +110,7 @@ fn declared_service_tier(snapshot: &ModelCapabilitySnapshot) -> Option<String> {
 /// otherwise final.
 ///
 /// The summary is derived, not stored: it follows the reasoning effort the
-/// configuration actually sends, so every call site recomputes it after the
+/// configuration actually sends, so [`configure`] recomputes it after the
 /// preferences are applied instead of writing it once into the base. A base
 /// written once would survive an update to effort `none` and reach the wire as
 /// `{"effort":"none","summary":"detailed"}`, and it would go stale when the
@@ -142,7 +142,7 @@ fn declared_service_tier(snapshot: &ModelCapabilitySnapshot) -> Option<String> {
 ///
 /// Only the OpenAI Responses body has a place for a summary style. Every other
 /// protocol rejects the field, so nothing is applied or cleared there.
-pub(super) fn declared_summary(
+fn declared_summary(
     config: &ModelConfig,
     snapshot: &ModelCapabilitySnapshot,
     protocol: ModelProtocol,
@@ -185,6 +185,9 @@ pub(super) fn declared_summary(
 
 /// Applies preferences to a copy of `base`, validating them against the
 /// model's declared capabilities.
+///
+/// The result also carries the model's declared reasoning summary, derived from
+/// the effort it sends; see [`declared_summary`].
 pub(super) fn configure(
     preferences: &ModelPreferences,
     snapshot: &ModelCapabilitySnapshot,
@@ -220,7 +223,7 @@ pub(super) fn configure(
             _ => return Err("Service tier is not supported by this protocol"),
         }
     }
-    Ok(config)
+    Ok(declared_summary(&config, snapshot, protocol))
 }
 
 fn restore<T: Clone>(current: &mut Option<T>, declared: Option<&T>) {

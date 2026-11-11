@@ -2142,9 +2142,6 @@ impl ProviderService {
             let base = preferences::catalog_defaults(&model.config, &snapshot, protocol);
             let config = preferences::configure(&preferences, &snapshot, protocol, &base)
                 .map_err(failure)?;
-            // The summary follows the effort this configuration finally sends,
-            // so it is applied last, against the model's own declaration.
-            let config = preferences::declared_summary(&config, &snapshot, protocol);
             return Ok(ModelSelection {
                 provider_id: id.clone(),
                 model_id: model.id.clone(),
@@ -2251,8 +2248,6 @@ impl ProviderService {
         }
         let config = preferences::configure(&update.values(), &snapshot, protocol, &base)
             .map_err(failure)?;
-        // Recompute rather than carry: the update may have moved the effort.
-        let config = preferences::declared_summary(&config, &snapshot, protocol);
         let unchanged = current
             .config
             .as_ref()
