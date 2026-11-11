@@ -26,7 +26,7 @@ The error-only entry uses `managementMethods` on the local App Server connection
 
 In both TUI modes, `/report` opens a report for the current Session, including while a turn is running. It needs no captured error. Users can report an unsatisfactory answer or a repeating turn without waiting for a failure or stopping the turn. The dialog keeps the Session selected when it opened, including when preparing again after expiry. Returning to the composer and running `/report` again selects the Session shown at that time.
 
-Both modes show `Run /report to create a report.` below reportable errors. On Home, the command can report a conversation-open failure from that view through the process entry. It uses only the observed error fields. Leaving a Session clears its eligibility as an error source for Home. With neither a Session nor a conversation-open failure to report, the command shows `No session to report.` Desktop and Web error actions remain bound to the selected error. A failure of the report flow stays inside the dialog.
+Both modes show `Run /report to create a report.` below reportable errors. When a Session is shown, the hint points to the Session report and its recent activity excerpt (§3). On Home, the command can report a conversation-open failure from that view through the process entry. Leaving a Session clears its eligibility as an error source for Home. With neither a Session nor a conversation-open failure to report, the command shows `No session to report.` Desktop and Web error actions remain bound to the selected error. A failure of the report flow stays inside the dialog.
 
 ```text
 > /report
@@ -83,6 +83,8 @@ Register the Session namespace in `sessionMethods` and discover it via `session.
 | `plan` | `{reportId, generation, redact, instructions?}`, with generation `{kind: "local"}` or `{kind: "model", model: {providerId, modelId}}` | `{planId, generation, evidence, instructionsStatus}`. A model plan includes `material`, `maxOutputTokens` and `estimatedCost` as `{amount, currency}` or `null` for unknown. A successful replacement invalidates the previous plan. |
 | `generate` | `{reportId, planId}` | `{title, body, files: {"report.md", "diagnostics.json"}, archive: {filename, base64}, sharing: {githubIssueUrl, discordUrl, description}}` |
 | `cancel` | `{reportId, target: "generation", planId}` or `{reportId, target: "report"}` | `{cancelled: boolean}`. Generation cancellation affects only the named in-flight plan and keeps the evidence available for a new plan. An inactive plan returns `{cancelled: false}`. Report cancellation drops the draft. |
+
+The TUI omits `error` for a Session report and sends the `observed` variant to the process entry for a conversation-open failure. Clients with an error-bound action, such as the Desktop and Web action in §2, can use the `timeline` variant to attach a known failure position in an admitted Session.
 
 The local plan uses `generation: {kind: "local"}`. The `evidence` object includes the filtered sources and a Timeline availability reason when the excerpt is absent. Options recognizes comma- or newline-separated `omit` and `keep` directives for `timeline`, `error codes`, and `correlation ids`. The reply reports `instructionsStatus` as `none`, `applied`, `partially_applied`, or `unsupported`. It does not echo the entered text. Redaction always removes correlation IDs, so `keep correlation ids` is unsupported while redaction is on.
 

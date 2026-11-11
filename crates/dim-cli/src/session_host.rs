@@ -831,6 +831,7 @@ impl Worker {
                 self.send(Update::Switched {
                     session_id: String::new(),
                     kind,
+                    cwd: None,
                 });
                 self.reportable(
                     crate::report::Captured::observed(
@@ -895,7 +896,11 @@ impl Worker {
                 .map_err(|error| format!("permission: unavailable ({error})"));
             self.send(Update::Permissions(policy));
         }
-        self.send(Update::Switched { session_id, kind });
+        self.send(Update::Switched {
+            session_id,
+            kind,
+            cwd: self.session_cwd.clone(),
+        });
         self.refresh_skills().await;
         self.context_stale = true;
         self.publish();
@@ -1309,6 +1314,7 @@ impl Worker {
                     self.send(Update::Switched {
                         session_id: String::new(),
                         kind: SwitchKind::New,
+                        cwd: None,
                     });
                 }
             }

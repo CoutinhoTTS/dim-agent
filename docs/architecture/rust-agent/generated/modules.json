@@ -38222,6 +38222,13 @@
     },
     {
       "from": "dim_cli::ui::composer",
+      "to": "dim_cli::ui",
+      "references": [
+        "path crate::ui::tilde"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
       "to": "dim_cli::ui::commands",
       "references": [
         "path crate::ui::commands::COMMANDS",
@@ -38423,20 +38430,25 @@
         "path Row",
         "path footer",
         "path panel_row",
+        "path title_room",
         "use crate::ui::rows::Columns",
         "use crate::ui::rows::Kind",
         "use crate::ui::rows::Row",
         "use crate::ui::rows::footer",
         "use crate::ui::rows::panel_row",
-        "use crate::ui::rows::title"
+        "use crate::ui::rows::title",
+        "use crate::ui::rows::title_room"
       ]
     },
     {
       "from": "dim_cli::ui::composer::mentions",
       "to": "dim_cli::ui::text",
       "references": [
+        "path display_width",
         "path truncate_cells",
-        "use crate::ui::text::truncate_cells"
+        "use crate::ui::text::display_width",
+        "use crate::ui::text::truncate_cells",
+        "use crate::ui::text::truncate_cells_start"
       ]
     },
     {
@@ -45160,10 +45172,12 @@
         "path STATUS_MARK",
         "path display_width",
         "path truncate_cells",
+        "path truncate_cells_start",
         "use crate::ui::text::RUNNING_MARK",
         "use crate::ui::text::STATUS_MARK",
         "use crate::ui::text::display_width",
-        "use crate::ui::text::truncate_cells"
+        "use crate::ui::text::truncate_cells",
+        "use crate::ui::text::truncate_cells_start"
       ]
     },
     {
@@ -45500,6 +45514,7 @@
         "path SessionPort",
         "path SuggestionSetting",
         "path SwitchKind::Forked",
+        "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
         "path Update::EffortChoices",
@@ -45765,7 +45780,8 @@
         "path live_thinking",
         "path render_block",
         "path render_shell",
-        "path settled_thinking"
+        "path settled_thinking",
+        "path width_of"
       ]
     },
     {

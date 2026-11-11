@@ -5633,6 +5633,11 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
+        // `/workspace` deliberately differs from the `--cwd project` this
+        // flow launched with: `@` completes local paths against the selected
+        // `--cwd`, never against the directory a daemon reports, so the
+        // reported workspace is not readable here and the picker still
+        // offers the project's files.
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));

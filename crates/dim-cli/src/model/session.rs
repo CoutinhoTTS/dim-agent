@@ -1188,6 +1188,11 @@ pub enum Update {
     Switched {
         session_id: String,
         kind: SwitchKind,
+        /// The workspace the Session works in, as the daemon reported it
+        /// when the Session was attached: a resumed Session may live outside
+        /// the directory this client was started in. `None` for Home, and for
+        /// a daemon older than the attach record.
+        cwd: Option<String>,
     },
     /// The Session's Skills as the palette lists them: enabled and not
     /// shadowed. An empty list when the daemon has no catalog.
