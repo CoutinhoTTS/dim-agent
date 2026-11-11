@@ -5688,7 +5688,7 @@ impl App {
             if row.streaming && !expanded {
                 continue;
             }
-            let stream = self.thoughts.entry(row.row_id.clone()).or_default();
+            let mut stream = *self.thoughts.entry(row.row_id.clone()).or_default();
             let text = crate::sanitize::safe(&row.text).replace("**", "");
             let source_text = if row.streaming {
                 thinking_prefix(&text, width)
@@ -5725,7 +5725,7 @@ impl App {
             frames.insert(
                 row.row_id.clone(),
                 ThoughtFrame {
-                    stream: *stream,
+                    stream,
                     commit,
                     source,
                     tail: rows.into_iter().skip(stable).collect(),
@@ -6546,6 +6546,7 @@ impl App {
             if let Some(frame) = frames.get(id) {
                 if let Some(index) = stream.block.and_then(|id| id.checked_sub(self.dropped)) {
                     self.history[index] = frame.source.clone();
+                    stream.written = frame.stream.written;
                 } else {
                     stream.written = 0;
                 }
@@ -6556,12 +6557,9 @@ impl App {
         let mut chunks = Vec::new();
         let mut rows = 0;
         for (index, source) in self.history.iter().enumerate().rev() {
-            if self.thinking_detail != Detail::Expanded
-                && self
-                    .thoughts
-                    .values()
-                    .any(|stream| stream.block == Some(self.dropped + index))
-            {
+            if self.thoughts.iter().any(|(id, stream)| {
+                stream.block == Some(self.dropped + index) && !frames.contains_key(id)
+            }) {
                 continue;
             }
             if matches!(source, Block::Thinking { text, .. } if text.is_empty()) {
@@ -11925,6 +11923,150 @@ mod tests {
                 assert_body(&drawn);
                 assert!(drawn.transcript().contains("Thought for 3.5s"));
             }
+        }
+    }
+
+    #[test]
+    fn thinking_commits_settlement_when_collapsed_before_the_completion_frame() {
+        use crate::projection::Projection;
+        use serde_json::json;
+
+        for draw_completion in [false, true] {
+            let mut drawn = Drawn::new((72, 20), Some(0), false);
+            drawn.app.thinking_detail = Detail::Expanded;
+            let mut projection = Projection::default();
+            let text = (1..=20)
+                .map(|n| format!("Step{n:02}: inspect the lock before waiting."))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            projection.apply(
+                "main",
+                &serde_json::from_value(json!({
+                    "id": "thought", "sequence": 1, "create_at": 1000,
+                    "type": "step", "name": "thinking",
+                    "data": {"turn_id": "t1", "request_id": "r1", "delta": text},
+                }))
+                .unwrap(),
+            );
+            show(&mut drawn, projection.snapshot().rows);
+            projection.apply(
+                "main",
+                &serde_json::from_value(json!({
+                    "sequence": 2, "create_at": 2500, "type": "step", "name": "text",
+                    "data": {"turn_id": "t1", "request_id": "r1", "delta": "Answer."},
+                }))
+                .unwrap(),
+            );
+            let mut snapshot = projection.snapshot();
+            snapshot.session_id = "s1".into();
+            snapshot.focus = "main".into();
+            snapshot.history_complete = true;
+            drawn.app.apply(Update::Snapshot(Box::new(snapshot)));
+            if draw_completion {
+                drawn.draw();
+            }
+            drawn.app.open_settings(Setting::ThinkingDetails);
+            press(&mut drawn.app, KeyCode::Char(' '));
+            press(&mut drawn.app, KeyCode::Esc);
+            assert!(drawn.app.take_reflow_request());
+            let rows = drawn.app.reflow_history(72);
+            let frame = drawn.app.frame(drawn.size);
+            let wanted = drawn.screen.wanted_for(drawn.size, frame.live.len());
+            drawn.emu = crate::ui::render::testterm::Emu::new(72, 20);
+            let mut bytes = drawn.screen.rewrite(drawn.size, &rows, wanted);
+            bytes.extend(drawn.screen.render(&frame, drawn.size));
+            drawn.emu.feed(&bytes);
+            for _ in 0..2 {
+                let transcript = drawn.transcript();
+                assert_eq!(
+                    transcript.matches("Thought for 1.5s").count(),
+                    1,
+                    "draw_completion={draw_completion}: {transcript}"
+                );
+                drawn.draw();
+            }
+        }
+    }
+
+    #[test]
+    fn thinking_commits_opening_rows_after_an_earlier_answer_finishes_revealing() {
+        use crate::projection::Projection;
+        use serde_json::json;
+
+        for finish_while_held in [false, true] {
+            let mut drawn = Drawn::new((72, 20), Some(0), false);
+            drawn.app.thinking_detail = Detail::Expanded;
+            let mut projection = Projection::default();
+            let answer = format!(
+                "AnswerFirst: {} AnswerLast.",
+                "waiting for output. ".repeat(80)
+            );
+            projection.apply(
+                "main",
+                &serde_json::from_value(json!({
+                    "sequence": 1, "create_at": 1, "type": "step", "name": "text",
+                    "data": {"turn_id": "t0", "request_id": "r0", "delta": answer},
+                }))
+                .unwrap(),
+            );
+            show(&mut drawn, projection.snapshot().rows);
+            projection.apply(
+                "main",
+                &serde_json::from_value(json!({
+                    "sequence": 2, "create_at": 2, "type": "step", "name": "model-output-end",
+                    "data": {"turn_id": "t0", "request_id": "r0", "status": "completed",
+                        "finish_reason": "end_turn"},
+                }))
+                .unwrap(),
+            );
+            let text = (1..=20)
+                .map(|n| format!("Step{n:02}: inspect the lock before waiting."))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            projection.apply(
+                "main",
+                &serde_json::from_value(json!({
+                    "id": "thought", "sequence": 3, "create_at": 1000,
+                    "type": "step", "name": "thinking",
+                    "data": {"turn_id": "t1", "request_id": "r1", "delta": text},
+                }))
+                .unwrap(),
+            );
+            show(&mut drawn, projection.snapshot().rows);
+            drawn.draw();
+            let finish: crate::wire::Event = serde_json::from_value(json!({
+                "sequence": 4, "create_at": 2500, "type": "step", "name": "text",
+                "data": {"turn_id": "t1", "request_id": "r1", "delta": "AnswerNext."},
+            }))
+            .unwrap();
+            if finish_while_held {
+                projection.apply("main", &finish);
+                show(&mut drawn, projection.snapshot().rows);
+            }
+            assert!(!drawn.transcript().contains("Step01:"));
+            let (pace, shown) = drawn.app.revealed.get_mut("assistant-r0").unwrap();
+            *shown = pace.advance(Instant::now() + Duration::from_secs(1), answer.len(), true);
+            drawn.draw();
+            let assert_body = |drawn: &Drawn| {
+                let transcript = drawn.transcript();
+                for n in 1..=20 {
+                    assert_eq!(
+                        transcript.matches(&format!("Step{n:02}:")).count(),
+                        1,
+                        "finish_while_held={finish_while_held}: {transcript}"
+                    );
+                }
+                assert!(
+                    transcript.find("AnswerLast.").unwrap() < transcript.find("Step01:").unwrap()
+                );
+            };
+            assert_body(&drawn);
+            if !finish_while_held {
+                projection.apply("main", &finish);
+                show(&mut drawn, projection.snapshot().rows);
+            }
+            assert_body(&drawn);
+            assert_eq!(drawn.transcript().matches("Thought for 1.5s").count(), 1);
         }
     }
 
