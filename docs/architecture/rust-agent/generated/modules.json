@@ -1563,6 +1563,7 @@
       "parent": "dim_agent_runtime",
       "file": "crates/dim-agent-runtime/src/assembly.rs",
       "unexpandedMacros": [
+        "assert",
         "format",
         "json",
         "matches",
@@ -2053,6 +2054,7 @@
       "parent": "dim_agent_types::markup",
       "file": "crates/dim-agent-types/src/markup.rs",
       "unexpandedMacros": [
+        "assert",
         "assert_eq"
       ]
     },
@@ -12236,6 +12238,7 @@
       "references": [
         "path MethodCall",
         "path RpcError::app",
+        "path RpcError::from",
         "path RpcError::interrupted",
         "path SessionMethods",
         "path params",
@@ -12387,6 +12390,13 @@
       "to": "dim_agent_types::input",
       "references": [
         "path input"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path markup::runtime_context"
       ]
     },
     {
@@ -18275,6 +18285,7 @@
         "path assembly",
         "path build_session",
         "path check_scope",
+        "path crate::Faces",
         "path crate::assembly::with_copies",
         "path group",
         "path required",
@@ -19199,6 +19210,7 @@
         "path BRANCH_GROUP",
         "path SESSION_GROUP",
         "path TimelineFactory",
+        "path crate::Faces",
         "path group"
       ]
     },
@@ -20891,7 +20903,8 @@
       "from": "dim_agent_types::markup::tests",
       "to": "dim_agent_types::markup",
       "references": [
-        "use super::escaped"
+        "use super::escaped",
+        "use super::runtime_context"
       ]
     },
     {
@@ -21194,6 +21207,7 @@
         "path AgentBuilder",
         "path Modules::new",
         "path StartupProgress::new",
+        "path dim_agent_runtime::AgentBuilder",
         "path register_part",
         "path wait_active",
         "use dim_agent_runtime::AgentBuilder",
@@ -21230,6 +21244,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path dim_agent_runtime::Names::copy",
+        "path dim_agent_runtime::names::name_of",
         "path dim_agent_runtime::names::register"
       ]
     },
@@ -21562,6 +21577,7 @@
       "to": "dim_app_server::session_typescript",
       "references": [
         "mod session_typescript",
+        "path crate::session_typescript::share_names",
         "path session_typescript::Parts::new",
         "path session_typescript::SessionTypeScriptConfig"
       ]
@@ -30144,6 +30160,14 @@
     },
     {
       "from": "dim_app_server::storage::catalog",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path runtime_context",
+        "use dim_agent_types::markup::runtime_context"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::catalog",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
@@ -35819,6 +35843,9 @@
         "path TaskKind::Command",
         "path TaskKind::Member",
         "path TaskKind::Workflow",
+        "path TaskOutcome::Completed",
+        "path TaskOutcome::Failed",
+        "path TaskOutcome::Stopped",
         "path TaskTarget",
         "path TaskView",
         "path TurnEnd",
@@ -35848,6 +35875,7 @@
         "use crate::model::view::RowTone",
         "use crate::model::view::TaskFinish",
         "use crate::model::view::TaskKind",
+        "use crate::model::view::TaskOutcome",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::TaskView",
         "use crate::model::view::TurnEnd",
@@ -35961,7 +35989,10 @@
       "to": "dim_cli::model::view",
       "references": [
         "path CompactionState",
-        "path RowKind::Error"
+        "path RowKind::Error",
+        "path TaskOutcome::Completed",
+        "path TaskOutcome::Failed",
+        "path TaskOutcome::Stopped"
       ]
     },
     {
@@ -38152,6 +38183,13 @@
     },
     {
       "from": "dim_cli::ui::composer",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path dim_agent_types::markup::runtime_context"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
       "to": "dim_cli::attachments",
       "references": [
         "path MAX_IMAGES",
@@ -38182,6 +38220,13 @@
         "path DraftPart::Paste",
         "path DraftPart::Text",
         "use crate::model::session::DraftPart"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
+      "to": "dim_cli::ui",
+      "references": [
+        "path crate::ui::tilde"
       ]
     },
     {
@@ -38387,20 +38432,25 @@
         "path Row",
         "path footer",
         "path panel_row",
+        "path title_room",
         "use crate::ui::rows::Columns",
         "use crate::ui::rows::Kind",
         "use crate::ui::rows::Row",
         "use crate::ui::rows::footer",
         "use crate::ui::rows::panel_row",
-        "use crate::ui::rows::title"
+        "use crate::ui::rows::title",
+        "use crate::ui::rows::title_room"
       ]
     },
     {
       "from": "dim_cli::ui::composer::mentions",
       "to": "dim_cli::ui::text",
       "references": [
+        "path display_width",
         "path truncate_cells",
-        "use crate::ui::text::truncate_cells"
+        "use crate::ui::text::display_width",
+        "use crate::ui::text::truncate_cells",
+        "use crate::ui::text::truncate_cells_start"
       ]
     },
     {
@@ -40472,6 +40522,17 @@
         "path crate::ui::theme::palette::terminal_palette",
         "use crate::ui::theme::Appearance",
         "use crate::ui::theme::ColorMode"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::notify",
+      "to": "dim_cli::model::view",
+      "references": [
+        "path TaskOutcome",
+        "path TaskOutcome::Completed",
+        "path TaskOutcome::Failed",
+        "path TaskOutcome::Stopped",
+        "use crate::model::view::TaskOutcome"
       ]
     },
     {
@@ -42698,6 +42759,7 @@
         "path TaskKind::Command",
         "path TaskKind::Member",
         "path TaskKind::Workflow",
+        "path TaskOutcome::Failed",
         "path TaskOutputState",
         "path TaskOutputState::Finished",
         "path TaskOutputState::Live",
@@ -42717,6 +42779,7 @@
         "use crate::model::view::MemberTarget",
         "use crate::model::view::RowKind",
         "use crate::model::view::TaskKind",
+        "use crate::model::view::TaskOutcome",
         "use crate::model::view::TaskOutputState",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::TaskView",
@@ -44535,6 +44598,8 @@
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path SideLine",
+        "path TaskFinish::failed",
+        "path TaskOutcome",
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
@@ -44544,6 +44609,8 @@
         "use crate::model::view::LineView",
         "use crate::model::view::RowKind",
         "use crate::model::view::SideLine",
+        "use crate::model::view::TaskFinish",
+        "use crate::model::view::TaskOutcome",
         "use crate::model::view::TaskTarget",
         "use crate::model::view::ViewRow",
         "use crate::model::view::ViewSnapshot"
@@ -45122,10 +45189,12 @@
         "path STATUS_MARK",
         "path display_width",
         "path truncate_cells",
+        "path truncate_cells_start",
         "use crate::ui::text::RUNNING_MARK",
         "use crate::ui::text::STATUS_MARK",
         "use crate::ui::text::display_width",
-        "use crate::ui::text::truncate_cells"
+        "use crate::ui::text::truncate_cells",
+        "use crate::ui::text::truncate_cells_start"
       ]
     },
     {
@@ -45462,6 +45531,7 @@
         "path SessionPort",
         "path SuggestionSetting",
         "path SwitchKind::Forked",
+        "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
         "path Update::EffortChoices",
@@ -45513,6 +45583,10 @@
         "path RowKind::ToolCall",
         "path RowKind::UserMessage",
         "path SideLine",
+        "path TaskOutcome",
+        "path TaskOutcome::Completed",
+        "path TaskOutcome::Failed",
+        "path TaskOutcome::Stopped",
         "path TaskTarget",
         "path ViewRow",
         "path ViewSnapshot",
@@ -45733,7 +45807,8 @@
         "path live_thinking",
         "path render_block",
         "path render_shell",
-        "path settled_thinking"
+        "path settled_thinking",
+        "path width_of"
       ]
     },
     {
@@ -49391,6 +49466,14 @@
     },
     {
       "from": "dim_session_title",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path runtime_context",
+        "use dim_agent_types::markup::runtime_context"
+      ]
+    },
+    {
+      "from": "dim_session_title",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
@@ -49662,6 +49745,10 @@
     {
       "module": "dim_agent_types::finite_number",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_agent_types::markup",
+      "path": "char::is_whitespace"
     },
     {
       "module": "dim_agent_types::model",

@@ -4,7 +4,7 @@
 //! diff (2.3). The terminal layer (2.2) guarantees the exit contract.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::management::{self, editor};
@@ -53,7 +53,9 @@ use crate::ui::tasks_panel::TasksPanel;
 use crate::ui::terminal::{
     InputEvent, KeyCode, KeyEvent, Modifiers, Terminal, TerminalError, Wait,
 };
-use crate::ui::text::{RUNNING_MARK, STATUS_MARK, display_width, truncate_cells};
+use crate::ui::text::{
+    RUNNING_MARK, STATUS_MARK, display_width, truncate_cells, truncate_cells_start,
+};
 use crate::ui::theme::ansi::{Paint, fg, paint};
 use crate::ui::theme::{Palette, Theme, detect};
 use crate::ui::theme_panel::ThemePanel;
@@ -962,6 +964,12 @@ struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
     cwd_key: String,
+    /// The workspace shown in the composer's label, with the home written
+    /// `~`: the workspace the attached Session reports, or [`Self::cwd_key`]
+    /// at Home. Never read from the process's directory, which a frame would
+    /// otherwise see change under it. Display form only: a caller that needs
+    /// a path uses [`Self::git_head`] or the Session's cwd.
+    workspace: String,
     home: PathBuf,
     /// How tool groups are drawn by default (`/tools`, which redraws every
     /// committed group too).
@@ -1382,13 +1390,15 @@ impl App {
         let mouse = crate::ui::config::read(&home, MOUSE_KEY).is_none_or(|v| v != "off");
         let notify = crate::ui::config::read(&home, crate::ui::notify::NOTIFY_KEY)
             .is_none_or(|v| v != false);
+        // The `@` index, pasted paths and dropped files all resolve against
+        // the local `--cwd` (cli-attachment-input), which an attach does not
+        // change; the border's workspace label is the Session's and does.
         let mut composer = Composer::new(past);
         composer.set_root(PathBuf::from(&cwd_key));
-        let git_head = git_head(&cwd_key);
-        let branch = git_head.as_deref().and_then(git_branch);
-        Self {
+        let mut app = Self {
             host,
             composer,
+            workspace: String::new(),
             cwd_key,
             tool_detail: saved_tool_detail(&home),
             thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
@@ -1463,8 +1473,8 @@ impl App {
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
-            branch,
-            git_head,
+            branch: None,
+            git_head: None,
             git_checked: Instant::now(),
             shell: None,
             clipboard: None,
@@ -1488,7 +1498,9 @@ impl App {
             prompt_draft: None,
             pending_prompt: None,
             next_prompt_request: 0,
-        }
+        };
+        app.show_workspace(None);
+        app
     }
 
     /// The wheel over an overlay: moves the picker's or the palette's
@@ -2126,10 +2138,15 @@ impl App {
                     &[("count", &count.to_string())],
                 ));
             }
-            Update::Switched { session_id, kind } => {
+            Update::Switched {
+                session_id,
+                kind,
+                cwd,
+            } => {
                 if !session_id.is_empty() {
                     self.unsent = None;
                 }
+                self.show_workspace(cwd.as_deref());
                 self.switch_session(session_id, kind)
             }
             Update::Skills(entries) => {
@@ -3366,7 +3383,14 @@ impl App {
         self.set_notice(t("Stopping"));
     }
 
-    fn place_label(&self) -> String {
+    /// The composer's bottom-right label in at most `cells`: the workspace
+    /// and its branch, or the shown line's place. A shown line outranks the
+    /// workspace, which then keeps its whole form beside it: the whole
+    /// place, then `⑂` alone, and only then the whole place again for
+    /// [`border_line`] to drop. That last form is deliberately wider than
+    /// `cells`, so a shown line is never displaced by a shortened path;
+    /// [`workspace_label`] never returns one, so the form only appears here.
+    fn place_label(&self, cells: usize) -> String {
         if let Some(draft) = &self.line_draft {
             let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
             return tf(
@@ -3374,16 +3398,26 @@ impl App {
                 &[("id", &line_name(lines, &draft.parent))],
             );
         }
-        let workspace = workspace_label(self.branch.as_deref());
-        match &self.snapshot {
-            Some(snapshot) if !snapshot.focus.is_empty() && snapshot.focus != "main" => {
-                format!(
-                    "{workspace} · ⑂ {}",
-                    line_path(&snapshot.lines, &snapshot.focus)
-                )
-            }
-            _ => workspace,
+        let branch = self.branch.as_deref();
+        let Some(snapshot) = self
+            .snapshot
+            .as_ref()
+            .filter(|s| !s.focus.is_empty() && s.focus != "main")
+        else {
+            return workspace_label(&self.workspace, branch, cells);
+        };
+        // A shown line outranks the workspace, which keeps its whole form
+        // beside it: the whole place, then `⑂` alone, then the whole place
+        // for the border to drop.
+        let line = format!("⑂ {}", line_path(&snapshot.lines, &snapshot.focus));
+        let whole = format!("{} · {line}", whole_workspace(&self.workspace, branch));
+        if width_of(&whole) <= cells {
+            return whole;
         }
+        if width_of(&line) <= cells {
+            return line;
+        }
+        whole
     }
 
     /// Opens the drafted line with `text` as its opening input.
@@ -5359,7 +5393,13 @@ impl App {
             );
             composer_box[last] = format!(
                 "{margin}{}",
-                border_line(("╰", "╯"), docked.as_deref(), Some(&place), outer, &edge)
+                border_line(
+                    ("╰", "╯"),
+                    docked.as_deref(),
+                    place.as_deref(),
+                    outer,
+                    &edge
+                )
             );
         } else {
             let outer = cols.saturating_sub(2 + MARGIN).max(4);
@@ -5368,7 +5408,7 @@ impl App {
             let last = composer_box.len() - 1;
             composer_box[last] = format!(
                 "{margin}{}",
-                border_line(("╰", "╯"), None, Some(&place), outer, &edge)
+                border_line(("╰", "╯"), None, place.as_deref(), outer, &edge)
             );
         }
         let replaced = !command_entry
@@ -5877,6 +5917,28 @@ impl App {
             self.stream_block = None;
             self.jump = Some(Jump::Bottom);
         }
+    }
+
+    /// Points the composer's label and its Git source at the workspace the
+    /// daemon reported for the Session being shown, or back at the launch
+    /// workspace for `None` (Home, or a daemon older than the attach record).
+    /// The branch is read once here, without waiting for the next poll.
+    ///
+    /// The `@` mention root does not move: interactive local file paths keep
+    /// the CLI's selected `--cwd` as their base, whichever Session is
+    /// attached (cli-attachment-input), and the reported workspace may be a
+    /// directory this client cannot see. When the border names a directory
+    /// other than that base, the file picker's title names the base, so the
+    /// screen still says which files a mention reads.
+    fn show_workspace(&mut self, cwd: Option<&str>) {
+        let cwd = cwd.unwrap_or(&self.cwd_key);
+        self.workspace = crate::ui::tilde(cwd);
+        // Paths compare by component, so `A/` is `A`; not canonicalized: I/O
+        // per switch, and a resolved symlink is a display question.
+        self.composer
+            .name_root(Path::new(cwd) != Path::new(&self.cwd_key));
+        self.git_head = git_head(cwd);
+        self.branch = self.git_head.as_deref().and_then(git_branch);
     }
 
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
@@ -6449,33 +6511,37 @@ impl App {
         (!parts.is_empty()).then(|| parts.join("  "))
     }
 
-    fn composer_place(&self, status: Option<&str>, outer: usize) -> String {
-        let place = fg(
-            &fit_place(self.place_label(), status, outer),
-            &self.palette.muted,
-        );
+    /// The composer's bottom-right label, built to fit the cells the border
+    /// will allow it beside `status`; `None` when nothing fits. The place and
+    /// the unread badge share that one budget, so neither can drift from what
+    /// [`border_line`] draws.
+    fn composer_place(&self, status: Option<&str>, outer: usize) -> Option<String> {
+        let cells = outer.saturating_sub(6 + status.map_or(0, |label| width_of(label) + 3));
+        if cells == 0 {
+            return None;
+        }
+        let place = fg(&self.place_label(cells), &self.palette.muted);
         let count = self
             .snapshot
             .as_ref()
             .map_or(0, |view| view.unread_lines.len());
         if count == 0 {
-            return place;
+            return Some(place);
         }
-        let room = outer.saturating_sub(6 + status.map_or(0, |label| width_of(label) + 3));
         let full = format!("{} ({count}) · /lines", t("Unread"));
         let compact = format!("/lines ({count})");
         let Some(label) = [full.as_str(), compact.as_str(), "/lines", "*"]
             .into_iter()
-            .find(|label| width_of(label) <= room)
+            .find(|label| width_of(label) <= cells)
         else {
-            return place;
+            return Some(place);
         };
         let width = width_of(label);
         let label = fg(label, &self.palette.highlight);
-        if width + 2 + width_of(&place) <= room && width_of(&place) != 0 {
-            format!("{label}  {place}")
+        if width + 2 + width_of(&place) <= cells && width_of(&place) != 0 {
+            Some(format!("{label}  {place}"))
         } else {
-            label
+            Some(label)
         }
     }
 
@@ -7019,17 +7085,41 @@ fn labeled_rows(pairs: &[(&str, &str)], body_width: usize) -> Vec<String> {
     rows
 }
 
-fn fit_place(place: String, status: Option<&str>, outer: usize) -> String {
-    let room = outer.saturating_sub(2);
-    let fits =
-        |label: &str| status.map_or(0, |status| width_of(status) + 3) + width_of(label) + 3 < room;
-    if fits(&place) {
-        return place;
+/// The workspace and its branch, whole: `~/src/app (main)`.
+fn whole_workspace(workspace: &str, branch: Option<&str>) -> String {
+    match branch {
+        Some(branch) => format!("{workspace} ({branch})"),
+        None => workspace.to_owned(),
     }
-    match place.split_once(" · ⑂ ") {
-        Some((_, line)) if fits(&format!("⑂ {line}")) => format!("⑂ {line}"),
-        _ => place,
+}
+
+/// The narrowest path tail worth putting a branch beside: below it
+/// `…o (rex-team/T-4440f2)` names neither the checkout nor the line, so the
+/// path alone says more.
+const MIN_TAIL: usize = 8;
+
+/// The workspace label in at most `cells` columns, degrading in place
+/// rather than being dropped whole by the border: the whole label, the whole
+/// label with the path's front cut once its tail is at least [`MIN_TAIL`],
+/// the path alone when the branch gives way, then the path alone with its
+/// front cut. No form exceeds `cells`, so the caller sizes the border by
+/// measuring the result.
+fn workspace_label(workspace: &str, branch: Option<&str>, cells: usize) -> String {
+    let whole = whole_workspace(workspace, branch);
+    if width_of(&whole) <= cells {
+        return whole;
     }
+    if let Some(branch) = branch {
+        let suffix = format!(" ({branch})");
+        let tail = truncate_cells_start(workspace, cells.saturating_sub(width_of(&suffix)));
+        if width_of(&tail) >= MIN_TAIL {
+            return format!("{tail}{suffix}");
+        }
+    }
+    if width_of(workspace) <= cells {
+        return workspace.to_owned();
+    }
+    truncate_cells_start(workspace, cells)
 }
 
 /// `main ▸ parser race ▸ the guard · after message 4`: the lines from `main` down to
@@ -7066,19 +7156,6 @@ fn line_name(lines: &[LineView], line: &str) -> String {
             truncate_cells(&crate::sanitize::safe(first), NAME_COLUMNS)
         }
         _ => short_id(line).to_owned(),
-    }
-}
-
-/// The working directory, `~` for the home, and the git branch: what the
-/// prompt box writes in its bottom border.
-fn workspace_label(branch: Option<&str>) -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let cwd = crate::ui::tilde(&cwd);
-    match branch {
-        Some(branch) => format!("{cwd} ({branch})"),
-        None => cwd,
     }
 }
 
@@ -7190,7 +7267,8 @@ fn boxed(
 /// One border row `outer` columns wide between `corners`: a styled label
 /// after `─ ` on the left, another before ` ─` on the right, as the prompt
 /// box carries them. A label that does not fit is left out, the right one
-/// first.
+/// first; a caller that can say the same thing shorter composes it that way
+/// before calling, as the composer does for its workspace label.
 fn border_line(
     corners: (&str, &str),
     left: Option<&str>,
@@ -8076,12 +8154,12 @@ mod tests {
             );
             app.fullscreen = fullscreen;
             let frame = app.frame((160, 30));
-            let cwd = crate::ui::tilde(&std::env::current_dir().unwrap().display().to_string());
+            let cwd = crate::ui::tilde(&root.path().to_string_lossy());
             let row = frame
                 .live
                 .iter()
                 .find(|row| row.contains(&cwd))
-                .expect("the composer shows the working directory without Git");
+                .expect("the composer names the workspace it was given, not the process's");
             assert!(
                 !row.contains(&format!("{cwd} (")),
                 "a workspace without Git must show only its path: {row}"
@@ -8215,6 +8293,657 @@ mod tests {
             }
             std::fs::write(&head, saved).unwrap();
         }
+    }
+
+    /// The reported flow: in fullscreen, a linked worktree, a running turn.
+    /// The label must survive 80 columns by degrading, and the border must
+    /// keep its width whatever form it takes.
+    #[test]
+    fn a_running_turn_in_a_worktree_keeps_the_workspace_label_at_eighty_columns() {
+        use crate::ui::render::panel::visible_width;
+
+        i18n::set(i18n::Locale::En);
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let workspace = "~/Projects/repo/dim.worktrees/T-4440f2";
+        let branch = "rex-team/T-4440f2";
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            "/tmp/T-4440f2".into(),
+        );
+        app.workspace = workspace.to_owned();
+        app.branch = Some(branch.to_owned());
+        app.fullscreen = true;
+        // A running turn: the run status, the elapsed clock and the
+        // interrupt hint, which is the dock the reported screenshot shows.
+        app.snapshot = Some(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            main_running: true,
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        });
+        app.run_started = Some(Instant::now());
+        let border = |app: &mut App, cols| {
+            let size = (cols, 30);
+            let frame = app.frame(size);
+            let row = frame
+                .live
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            let mut screen = FullScreen::new(size, true);
+            let bytes = screen.render(&frame, size, &app.palette, app);
+            let mut emu = crate::ui::render::testterm::Emu::new(cols as usize, 30);
+            emu.feed(&bytes);
+            let painted = emu
+                .rows_text()
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            (row, painted)
+        };
+        for cols in [80u16, 100, 120, 160] {
+            let (row, painted) = border(&mut app, cols);
+            // The frame is the margin plus `outer`, two cells short of the
+            // terminal; the label must not change that.
+            for text in [&row, &painted] {
+                assert_eq!(
+                    visible_width(text),
+                    usize::from(cols) - 2,
+                    "{cols}: the border must keep its width: {text:?}"
+                );
+            }
+        }
+        // At 80 columns the dock leaves too few cells for the whole label:
+        // the tail of the path and the branch survive.
+        let (row, _) = border(&mut app, 80);
+        assert!(
+            row.contains(&format!("orktrees/T-4440f2 ({branch})")),
+            "80: the path's tail and the branch must survive: {row:?}"
+        );
+        assert!(
+            !row.contains(workspace),
+            "80: the whole path must not fit beside this dock: {row:?}"
+        );
+        // The Chinese dock is narrower than the English one, so it keeps a
+        // longer tail at the same width.
+        i18n::set(i18n::Locale::ZhCn);
+        let (zh, _) = border(&mut app, 80);
+        i18n::set(i18n::Locale::En);
+        let (en, _) = border(&mut app, 80);
+        assert!(
+            visible_width(&zh) == visible_width(&en),
+            "both docks must fill the same border: {zh:?} / {en:?}"
+        );
+        assert!(
+            zh.contains("dim.worktrees") && !en.contains("dim.worktrees"),
+            "the narrower dock keeps more of the path: {zh:?} / {en:?}"
+        );
+        // A branch too long beside any usable tail gives way to the path.
+        app.branch = Some("rex-team/T-4440f2-and-a-much-longer-name".into());
+        let (row, _) = border(&mut app, 80);
+        assert!(
+            row.contains("worktrees/T-4440f2") && !row.contains("(rex-team"),
+            "80: the branch gives way when its tail is too short: {row:?}"
+        );
+    }
+
+    /// A launch with an explicit workspace names that workspace, not the
+    /// process's directory, and the unread badge measures against the same
+    /// budget as the place so it cannot push the label out of the border.
+    #[test]
+    fn the_label_names_the_sessions_workspace_and_the_badge_shares_its_budget() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let root = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().to_path_buf(),
+            "/tmp/the-launch-directory".into(),
+        );
+        app.workspace = "~/Projects/repo/dim.worktrees/T-4440f2".into();
+        app.branch = Some("rex-team/T-4440f2".into());
+        app.fullscreen = false;
+        let bottom = |app: &mut App, cols| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            rows.iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let row = bottom(&mut app, 160);
+        assert!(
+            row.contains("~/Projects/repo/dim.worktrees/T-4440f2 (rex-team/T-4440f2)"),
+            "the label follows the Session's workspace: {row:?}"
+        );
+        assert!(
+            !row.contains("the-launch-directory"),
+            "the process's directory must not reach the border: {row:?}"
+        );
+
+        let mut snapshot = app.snapshot.clone().unwrap_or_default();
+        snapshot.unread_lines.insert("b-7c".into());
+        app.snapshot = Some(snapshot);
+        for cols in [160u16, 80, 40, 24] {
+            let row = bottom(&mut app, cols);
+            let width = visible_width(&row);
+            assert_eq!(width, usize::from(cols) - 2, "{cols}: {row:?}");
+            assert!(
+                row.contains("╰") && row.contains("╯"),
+                "{cols}: the border stays closed: {row:?}"
+            );
+        }
+        // The place survives beside the badge where the room allows both.
+        let row = bottom(&mut app, 160);
+        assert!(row.contains("Unread (1)"), "{row:?}");
+        assert!(
+            row.contains("T-4440f2"),
+            "the place keeps its tail: {row:?}"
+        );
+    }
+
+    /// The reported flow: launched in workspace A, the client attaches a
+    /// Session that lives in workspace B (an explicit `--cwd`, a `/resume`
+    /// into another worktree). The border must name B, its branch included,
+    /// and going Home must put A back. `@` file completion is not the
+    /// Session's: interactive local paths keep the selected `--cwd` as their
+    /// base, so it offers A's files throughout, and that is asserted here so
+    /// the border cannot quietly take the mention root with it.
+    #[test]
+    fn a_session_attached_elsewhere_moves_the_border_but_not_the_mention_base() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let root = tempfile::tempdir().unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        // Long enough that the narrow title's tail cannot hold it whole under
+        // any platform's temp root, and short enough that the wide title
+        // still names the whole path.
+        const LONG: &str = "a-checkout-longer-than-the-narrow-titles-tail-can-hold";
+        let launch = root.path().join(LONG).join("A");
+        let other = root.path().join("B");
+        for (path, branch) in [(&launch, "launch-line"), (&other, "session-line")] {
+            std::fs::create_dir_all(path).unwrap();
+            git(path, &["init", "-q", "-b", branch]);
+            git(
+                path,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "Initial",
+                ],
+            );
+        }
+        let launch_workspace = crate::ui::tilde(&launch.to_string_lossy());
+        let session_workspace = crate::ui::tilde(&other.to_string_lossy());
+        // Each workspace holds a file of its own, so an `@` candidate names
+        // the workspace it was found in.
+        std::fs::write(launch.join("launch-note.txt"), "").unwrap();
+        std::fs::write(other.join("session-note.txt"), "").unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            launch.to_string_lossy().into_owned(),
+        );
+        let border = |app: &mut App, cols: u16| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width: {row:?}"
+            );
+            row
+        };
+        // The `@` picker for `@note`: the panel's title row and the file
+        // names it offers, read from one frame once the walk reports that it
+        // has finished.
+        let picker = |app: &mut App, cols: u16| -> (String, Vec<String>) {
+            let names = ["launch-note.txt", "session-note.txt"];
+            typed(app, "@note");
+            let started = Instant::now();
+            let rows = loop {
+                let frame = app.frame((cols, 30));
+                let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+                if !app.composer.mention_searching() {
+                    break rows;
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "the `@` walk did not finish"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            app.composer.clear();
+            // The title row is where the panel writes its heading: the row
+            // carrying the `Files` title, whatever its box draws above it.
+            let title = rows
+                .iter()
+                .find(|row| row.contains("Files"))
+                .cloned()
+                .expect("the picker draws its title");
+            let offered = names
+                .iter()
+                .filter(|name| rows.iter().any(|row| row.contains(*name)))
+                .map(|name| (*name).to_owned())
+                .collect();
+            (title, offered)
+        };
+
+        // Launched in A: Home names A and its branch, and `@` offers A's
+        // files, the base pasted and dropped paths also use. The picker's
+        // title says nothing extra while the border names that base too.
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{launch_workspace} (launch-line)")),
+            "Home names the launch workspace: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "Home offers the launch workspace's files"
+        );
+        assert!(
+            title.contains("Files") && !title.contains(&launch_workspace),
+            "Home's border already names the base: {title:?}"
+        );
+
+        // A Session in B is attached, as `/resume` into a sibling worktree
+        // does: the daemon reports B and the border moves with it.
+        app.apply(Update::Switched {
+            session_id: "s-b".into(),
+            kind: SwitchKind::Resumed,
+            cwd: Some(other.to_string_lossy().into_owned()),
+        });
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s-b".into(),
+            focus: "main".into(),
+            ..ViewSnapshot::default()
+        })));
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{session_workspace} (session-line)")),
+            "the border names the Session's workspace and its branch: {row:?}"
+        );
+        assert!(
+            !row.contains(&launch_workspace),
+            "the launch workspace must not stand in for it: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "the mention picker keeps the local `--cwd` while the border names the Session's workspace"
+        );
+        assert!(
+            title.contains(&format!("Files · {launch_workspace}")),
+            "the picker names the base the border no longer does: {title:?}"
+        );
+        assert!(
+            !title.contains(&session_workspace),
+            "the picker names the base, not the border's workspace: {title:?}"
+        );
+        // Too narrow for the whole path, the title keeps its tail, as the
+        // border's does, so the checkout it ends in is still readable. The
+        // title leaves 54 path cells at 80 columns, and the fixture's path
+        // outgrows them under any platform's temp root.
+        const NARROW: u16 = 80;
+        use std::path::MAIN_SEPARATOR;
+        let (narrow, _) = picker(&mut app, NARROW);
+        let named = narrow
+            .split("Files · ")
+            .nth(1)
+            .unwrap_or_default()
+            .split("esc close")
+            .next()
+            .unwrap_or_default()
+            .trim_end();
+        assert!(
+            named.starts_with('…'),
+            "a narrow title cuts the path's front: {narrow:?}"
+        );
+        assert!(
+            named.ends_with(&format!("{MAIN_SEPARATOR}A")),
+            "a narrow title keeps the checkout it ends in: {narrow:?}"
+        );
+        assert!(
+            !narrow.contains(LONG),
+            "a narrow title keeps the tail, not the whole path: {narrow:?}"
+        );
+
+        // The daemon may spell the same directory another way. A trailing
+        // separator changes nothing, so the picker stays plain: the border
+        // already names that base.
+        let spelled = format!("{}{MAIN_SEPARATOR}", launch.to_string_lossy());
+        app.apply(Update::Switched {
+            session_id: "s-a".into(),
+            kind: SwitchKind::Resumed,
+            cwd: Some(spelled),
+        });
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&launch_workspace) && row.contains("(launch-line)"),
+            "the border names that base and its branch: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "the picker keeps the launch workspace's files"
+        );
+        assert!(
+            !title.contains(&launch_workspace),
+            "the same directory in another spelling is not another base: {title:?}"
+        );
+
+        // `/new` goes Home: the Session is gone and the launch workspace is
+        // what the next Session will work in.
+        app.apply(Update::Switched {
+            session_id: String::new(),
+            kind: SwitchKind::New,
+            cwd: None,
+        });
+        let row = border(&mut app, 160);
+        assert!(
+            row.contains(&format!("{launch_workspace} (launch-line)")),
+            "Home moves the border back to the launch workspace: {row:?}"
+        );
+        let (title, offered) = picker(&mut app, 160);
+        assert_eq!(
+            offered,
+            ["launch-note.txt"],
+            "Home keeps the mention picker on the launch workspace"
+        );
+        assert!(
+            !title.contains(&launch_workspace),
+            "Home's border names the base again, so the picker drops it: {title:?}"
+        );
+    }
+
+    /// The workspace label steps down through four forms in the border
+    /// instead of vanishing, and the border keeps its width through all of
+    /// them: the whole label, the whole label with the path's front cut while
+    /// its tail is still worth reading, the path alone, then the path alone
+    /// cut. Each workspace is attached the way `/resume` attaches one, so the
+    /// path and the branch are the daemon's answer rather than a field a test
+    /// filled in. The border gives a right label `cols - 9` cells: the margin,
+    /// the two border cells, and the `─ ` and ` ─` around it.
+    #[test]
+    fn the_workspace_label_steps_down_in_four_forms_in_the_border() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        /// The cells the border keeps for itself around a right label.
+        const BORDER: usize = 9;
+        /// The narrowest path tail worth putting a branch beside.
+        const TAIL: usize = 8;
+
+        let root = tempfile::tempdir().unwrap();
+        let repository = |name: &str, branch: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            let git = |args: &[&str]| {
+                let output = std::process::Command::new("git")
+                    .current_dir(&path)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "git {args:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            };
+            git(&["init", "-q", "-b", branch]);
+            git(&[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "Initial",
+            ]);
+            crate::ui::tilde(&path.to_string_lossy())
+        };
+
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            root.path().join("home"),
+            root.path().join("launch").to_string_lossy().into_owned(),
+        );
+        // The row the border draws the workspace in: the label sits between
+        // the `─ ` and ` ─` the border keeps around it.
+        let label_row = |app: &mut App, cells: usize| {
+            let cols = (cells + BORDER) as u16;
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width whatever the label: {row:?}"
+            );
+            row
+        };
+        let label = |app: &mut App, cells: usize| {
+            let row = label_row(app, cells);
+            let label = row
+                .split("─ ")
+                .nth(1)
+                .and_then(|rest| rest.split(" ─").next())
+                .unwrap_or_default()
+                .to_owned();
+            assert!(
+                visible_width(&label) <= cells,
+                "{cells}: the label stays inside its cells: {label:?}"
+            );
+            label
+        };
+        let attach = |app: &mut App, id: &str, cwd: &str| {
+            app.apply(Update::Switched {
+                session_id: id.into(),
+                kind: SwitchKind::Resumed,
+                cwd: Some(cwd.into()),
+            });
+        };
+
+        // A branch wider than the path, so the path-alone rung is reachable:
+        // it takes over once the tail beside the branch would be too short.
+        let path = root.path().join("checkout").to_string_lossy().into_owned();
+        let branch = format!("team/{}", "x".repeat(width_of(&crate::ui::tilde(&path))));
+        let path = repository("checkout", &branch);
+        let suffix = format!(" ({branch})");
+        let whole = format!("{path}{suffix}");
+        assert!(
+            width_of(&suffix) + TAIL > width_of(&path),
+            "this repository shows the path-alone rung"
+        );
+        attach(&mut app, "s-a", &path);
+
+        // The whole label, at the last column that holds it.
+        assert_eq!(label(&mut app, width_of(&whole)), whole);
+        // One column short: the path's front is cut and the branch stays.
+        let cut = label(&mut app, width_of(&whole) - 1);
+        assert!(cut.ends_with(&suffix), "the branch stays: {cut:?}");
+        assert!(cut.starts_with('…'), "the cut is marked: {cut:?}");
+        // A tail of exactly eight cells is still worth reading beside it.
+        let tail = label(&mut app, width_of(&suffix) + TAIL);
+        assert!(
+            tail.ends_with(&suffix),
+            "an eight-cell tail keeps it: {tail:?}"
+        );
+        // Seven is not: the branch gives way, and the path is all there is.
+        let without = label(&mut app, width_of(&suffix) + TAIL - 1);
+        assert!(
+            !without.contains(&branch),
+            "the branch gives way: {without:?}"
+        );
+        // The path alone, whole at its own width, then cut from the front.
+        assert_eq!(
+            label(&mut app, width_of(&path)),
+            path,
+            "the whole path stays when the branch gives way"
+        );
+        let cut = label(&mut app, width_of(&path) - 1);
+        assert!(
+            cut.starts_with('…') && cut != path,
+            "the path is cut: {cut:?}"
+        );
+        // No form fits: with a cell left the label is the cut mark alone,
+        // and only a border with no cells at all drops it.
+        assert_eq!(label(&mut app, 1), "\u{2026}");
+        assert!(label(&mut app, 0).is_empty());
+
+        // The budget is in cells, not characters: a CJK path spends two cells
+        // on a character, so the same columns hold fewer of them.
+        let ascii = repository("ascii", "main");
+        let cjk = repository("项目", "main");
+        assert!(
+            width_of(&cjk) > cjk.chars().count(),
+            "{cjk:?} must spend two cells on a character"
+        );
+        let tail_of = |app: &mut App, path: &str| {
+            attach(app, "s-b", path);
+            let tail = label(app, width_of(" (main)") + TAIL);
+            assert!(tail.ends_with(" (main)"), "{tail:?}");
+            tail
+        };
+        let ascii_tail = tail_of(&mut app, &ascii);
+        let cjk_tail = tail_of(&mut app, &cjk);
+        assert_eq!(
+            width_of(&ascii_tail),
+            width_of(&cjk_tail),
+            "both tails spend the same cells: {ascii_tail:?} / {cjk_tail:?}"
+        );
+        assert!(
+            cjk_tail.chars().count() < ascii_tail.chars().count(),
+            "the CJK tail holds fewer characters at the same width: \
+             {cjk_tail:?} / {ascii_tail:?}"
+        );
+        assert!(
+            cjk_tail.starts_with('…'),
+            "the CJK tail is cut, not dropped: {cjk_tail:?}"
+        );
+    }
+
+    /// A shown line outranks the workspace in the border: where the whole
+    /// place fits it is drawn whole, one column short of that it keeps `⑂`
+    /// alone, and where even that does not fit the border drops the label
+    /// rather than falling back to a shortened path.
+    #[test]
+    fn a_shown_line_keeps_its_forms_in_the_border_and_comes_before_the_workspace() {
+        use crate::ui::render::panel::{strip_escapes, visible_width};
+
+        let home = tempfile::tempdir().unwrap();
+        let theme = test_theme();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/w".into(),
+        );
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            lines: vec![LineView {
+                id: "main".into(),
+                parent: None,
+                purpose: String::new(),
+                state: LineState::Main,
+                cut: None,
+            }],
+            ..ViewSnapshot::default()
+        })));
+        let border = |app: &mut App, cols: u16| {
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
+            let row = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(
+                visible_width(&row),
+                usize::from(cols) - 2,
+                "{cols}: the border keeps its width: {row:?}"
+            );
+            row
+        };
+        // `/w · ⑂ b-7c` is 11 cells and `⑂ b-7c` is 6, so the border's nine
+        // fixed cells put the whole place at 20 columns and `⑂` alone at 15:
+        // one column short of the line's own width drops it.
+        let row = border(&mut app, 20);
+        assert!(row.contains("/w · ⑂ b-7c"), "{row:?}");
+        let row = border(&mut app, 19);
+        assert!(
+            row.contains("⑂ b-7c") && !row.contains("/w"),
+            "a column short, the line keeps itself and the path gives way: {row:?}"
+        );
+        let row = border(&mut app, 15);
+        assert!(
+            row.contains("⑂ b-7c") && !row.contains("/w"),
+            "the `⑂` form survives to its own width: {row:?}"
+        );
+        let row = border(&mut app, 14);
+        assert!(
+            !row.contains('⑂'),
+            "below the line's own form the border drops it: {row:?}"
+        );
     }
 
     #[test]
@@ -8836,6 +9565,7 @@ mod tests {
         app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: SwitchKind::Resumed,
+            cwd: None,
         });
         app.apply(snapshot(
             "s2",
@@ -8853,6 +9583,7 @@ mod tests {
         app.apply(Update::Switched {
             session_id: "s1".into(),
             kind: SwitchKind::Resumed,
+            cwd: None,
         });
         app.apply(snapshot("s1", vec![ended.clone()]));
         assert!(
@@ -9477,7 +10208,7 @@ mod tests {
         let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
         app.apply(snapshot("main"));
         app.draft_line(4, "try RwLock");
-        assert!(app.place_label().contains("new line from main"));
+        assert!(app.place_label(80).contains("new line from main"));
         app.handle_input(key(KeyCode::Char('!')));
         app.handle_input(key(KeyCode::Enter));
         match sent.borrow().last() {
@@ -9543,6 +10274,7 @@ mod tests {
         app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: SwitchKind::Forked,
+            cwd: None,
         });
         assert_eq!(app.composer.text(), "try RwLock");
     }
@@ -11393,6 +12125,7 @@ mod tests {
                 drawn.app.apply(Update::Switched {
                     session_id: "forked".into(),
                     kind: SwitchKind::Forked,
+                    cwd: None,
                 });
             }
             assert!(drawn.app.composer.text().contains("look [Image #7]"));
@@ -11490,6 +12223,7 @@ mod tests {
         drawn.app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: crate::model::session::SwitchKind::Resumed,
+            cwd: None,
         });
         drawn.show(&[("m2", "second session work")], "main", true);
         let committed = |app: &App| format!("{:?}", app.history);
@@ -11525,6 +12259,7 @@ mod tests {
         drawn.app.apply(Update::Switched {
             session_id: "s2".into(),
             kind: crate::model::session::SwitchKind::Resumed,
+            cwd: None,
         });
         drawn.app.apply(snapshot("s2", "main", true));
         drawn.draw();
@@ -12114,6 +12849,33 @@ mod tests {
             }],
         }));
         assert_eq!(app.composer.text(), "second");
+    }
+
+    /// A withdrawn message returns as the operator's own words: a block the
+    /// runtime appended after them stays out of the draft, and a later
+    /// operator block that merely opens a `<dim-` name comes back.
+    #[test]
+    fn a_withdrawal_restores_the_operators_blocks_not_the_appended_context() {
+        let (mut app, _sent, _home) = session_with_queue(true, &[]);
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![
+                dim_agent_types::ContentBlock::Text {
+                    text: "Why does the parser stall?".into(),
+                },
+                dim_agent_types::ContentBlock::Text {
+                    text: "<dim-hooks kind=\"prompt-submit\">read src/parser.rs</dim-hooks>".into(),
+                },
+                dim_agent_types::ContentBlock::Text {
+                    text:
+                        "<dim-typed-by-the-operator>a second paragraph</dim-typed-by-the-operator>"
+                            .into(),
+                },
+            ],
+        }));
+        assert_eq!(
+            app.composer.text(),
+            "Why does the parser stall?\n<dim-typed-by-the-operator>a second paragraph</dim-typed-by-the-operator>"
+        );
     }
 
     /// Enter on an empty draft steers the oldest queued message, as Ctrl+S does.
