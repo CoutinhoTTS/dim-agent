@@ -48,21 +48,23 @@ pub(crate) fn uncertain(code: &str) -> bool {
     is_reloading(code) || matches!(code, "publication_unknown" | "ambiguous")
 }
 
-/// Applies the flow tests' seam to one write's reply: it consumes the armed
-/// flag once, right after the call, and turns the reply into a transport
-/// failure — the write reached the target and its answer was lost (A.5,
-/// A.6). Feature `testing` only.
+/// Applies the flow tests' seam to one write's reply (A.5, A.6): it spends the
+/// armed flag on the next reply, whatever that reply is, so the seam cannot
+/// leak into a later write; and it turns only an accepting reply into the
+/// transport failure of a write that reached the target whose answer was
+/// lost. Every other reply passes through as it came, so the seam never masks
+/// a refusal the target gave. Feature `testing` only.
 fn lose_input_reply(
     shared: &Shared,
     reply: Result<Result<Value, String>, String>,
 ) -> Result<Result<Value, String>, String> {
     #[cfg(feature = "testing")]
     {
-        if shared
+        let armed = shared
             .holds
             .as_ref()
-            .is_some_and(|holds| holds.take_lost_input_reply())
-        {
+            .is_some_and(|holds| holds.take_lost_input_reply());
+        if armed && matches!(&reply, Ok(Ok(_))) {
             return Err("input reply lost".to_owned());
         }
     }

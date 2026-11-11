@@ -320,6 +320,41 @@ async fn a_past_window_is_missed_and_a_gone_target_fails_and_disables() {
     server.join().await.unwrap();
 }
 
+/// The lost-reply seam spends its one-shot flag on the next reply but rewrites
+/// only an accepting one: a refusal the target gave reaches the match as it
+/// came, so the delivery settles `failed` on it instead of taking a lookup
+/// (A.5, A.6).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lost_reply_seam_passes_a_refusal_through() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let job = save_session_job(
+        &mut client,
+        "refused",
+        "no-such-session",
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    support::holds(home.path()).lose_next_input_reply();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &job, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "failed", "{run}");
+    assert_eq!(run["detail"], "session_closed", "{run}");
+    assert!(
+        run["attempts"].is_null(),
+        "a refusal takes no lookup: {run}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lookup_settles_a_delivering_delivery_at_any_attempt() {
     let home = home();
