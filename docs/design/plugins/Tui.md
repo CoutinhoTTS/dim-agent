@@ -196,15 +196,25 @@ work running apart from the turn is named without opening `/tasks`:
  ╰─────────────────────────────────────────────────────╯
 ```
 
-The count leads the row, then each task's label and elapsed time. A label longer
-than the row is cut to fit one line; when the row cannot hold every task, the
-remaining ones read `· …`. A task that ends keeps its place for five seconds
-with `✓` (or `✗` when it failed) before leaving the row, so its completion is not
-lost under the eye. The row draws only while a task runs or one is still fading,
-so an idle Session keeps the space, and it reads the same `ViewSnapshot.tasks`
-the panel does: it adds no state, read or event. `Enter` on an empty composer
-opens `/tasks` while the row shows; the row itself selects and stops nothing,
-which the panel already does.
+The count of running tasks leads the row, then each task's label and elapsed
+time. A label longer than the row is cut to fit one line; when the row cannot
+hold every task, the remaining ones read `· …`. A task that ends keeps its place
+for five seconds with `✓`, `⊘` when it was stopped or `✗` when it failed, before
+leaving the row, so its completion is not lost under the eye. With no task
+running the count has nothing to say, so the row starts at the first entry's
+mark and carries no leading separator:
+
+```text
+ ✓ cargo build 1m12s
+```
+
+The row draws only while a task runs or one is still fading, so an idle Session
+keeps the space, and it reads the same `ViewSnapshot.tasks` the panel does. It
+adds interface-local fields of its own — the second the fade last drew, and
+whether the row was drawn then — but no Session state, read or event. `Enter` on
+an empty composer opens `/tasks` while the row shows, after the shell-run guard
+and the steer of a held message; the row itself selects and stops nothing, which
+the panel already does (`cli-commands.md` owns the key map).
 
 ```text
 +-- Background tasks -------------------------------------------+

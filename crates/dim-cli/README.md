@@ -990,10 +990,12 @@ Fullscreen takes the alternate screen, keeps the transcript itself and scrolls i
 ```
 
 The row above the composer names the tasks running apart from the turn, in both
-modes: `◐ <count> · <label> <elapsed>` for each, cut to one line, with `✓` or
-`✗` where a task that just ended keeps its place for five seconds. It reads the
-same Session task list `/tasks` shows and draws nothing while none runs. `Enter`
-on an empty composer opens `/tasks` while it shows.
+modes: `◐ <count> · <label> <elapsed>` for each, cut to one line, with `✓`, `⊘`
+for a stop or `✗` for a failure where a task that just ended keeps its place for
+five seconds. With nothing running the count is dropped, so the row starts at
+the first mark: `✓ cargo build 1m12s`. It reads the same Session task list
+`/tasks` shows and draws nothing while none runs. `Enter` on an empty composer
+opens `/tasks` while it shows, once no held message is left to steer.
 
 | Fullscreen input | Effect |
 | --- | --- |
