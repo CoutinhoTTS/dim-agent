@@ -8820,7 +8820,7 @@ fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
 #[test]
 fn tui_rapid_queue_controls_settle_each_held_input_once() {
     for fullscreen in [false, true] {
-        for shortcut in ["enter", "ctrl-s", "panel", "delete", "recall"] {
+        for shortcut in ["enter", "ctrl-s", "panel", "delete", "recall", "not-held"] {
             let steering = !matches!(shortcut, "delete" | "recall");
             let home = Home::new();
             let daemon = home.daemon(move |wire| {
@@ -8845,7 +8845,12 @@ fn tui_rapid_queue_controls_settle_each_held_input_once() {
                 assert_eq!(control["params"]["inputId"], "queued");
                 if steering {
                     assert_eq!(control["params"]["steer"], json!({"content":[{"type":"text","text":"steer once"}]}));
-                    wire.reply(&control, json!({"status":"deleted","sequence":12,"steer":{"inputId":"replacement","sequence":11}}));
+                    let reply = if shortcut == "not-held" {
+                        json!({"status":"notHeld"})
+                    } else {
+                        json!({"status":"deleted","sequence":12,"steer":{"inputId":"replacement","sequence":11}})
+                    };
+                    wire.reply(&control, reply);
                 } else {
                     assert!(control["params"].get("steer").is_none());
                     wire.reply(&control, json!({"status":"deleted","sequence":12}));
@@ -8907,6 +8912,7 @@ fn tui_rapid_queue_controls_settle_each_held_input_once() {
                 terminal.write(b"\x1b");
                 terminal.until("/queue manage");
             }
+            terminal.until_anywhere("already left the queue");
             if shortcut == "recall" {
                 terminal.until_row(if fullscreen { "│" } else { "›" }, "steer once");
                 terminal.write(b"\r");
@@ -8914,11 +8920,15 @@ fn tui_rapid_queue_controls_settle_each_held_input_once() {
                 terminal.write(b"steer once\r");
             }
             terminal.until("queue controls settled");
-            assert!(
-                !strip_ansi(&terminal.transcript).contains("already left the queue"),
-                "{shortcut}, fullscreen={fullscreen}: {}",
-                terminal.transcript
-            );
+            if !fullscreen {
+                assert_eq!(
+                    strip_ansi(&terminal.transcript)
+                        .matches("already left the queue")
+                        .count(),
+                    1,
+                    "{shortcut}: suppressed controls report only once"
+                );
+            }
             home.kill(&terminal);
             terminal.wait();
             daemon.join().unwrap();

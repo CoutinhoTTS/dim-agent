@@ -255,7 +255,7 @@ struct Worker {
     /// The Session `/new` left: still attached until the next one is entered.
     parked: String,
     projection: Projection,
-    retired_inputs: std::collections::HashSet<String>,
+    retired_inputs: std::collections::HashMap<String, bool>,
     question_responses: Vec<(u64, String, crate::question::Call)>,
     approval_details: std::collections::BTreeMap<u64, MemberDetailRead>,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
@@ -2043,7 +2043,10 @@ impl Worker {
                 self.report_failure(result);
             }
             Command::InputControl { input_id, action } => {
-                if self.retired_inputs.contains(&input_id) {
+                if let Some(notified) = self.retired_inputs.get_mut(&input_id) {
+                    if !std::mem::replace(notified, true) {
+                        self.send(Update::Notice(QUEUE_LEFT.into()));
+                    }
                     return Ok(());
                 }
                 let Some(user) = self.shown().held_input(&input_id).cloned() else {
@@ -2065,8 +2068,9 @@ impl Worker {
                     .client
                     .typed::<Withdrawn>("session.input.withdraw", params)
                     .await;
-                if result.is_ok() {
-                    self.retired_inputs.insert(input_id);
+                if let Ok(withdrawn) = &result {
+                    self.retired_inputs
+                        .insert(input_id, withdrawn.status == "notHeld");
                 }
                 match result {
                     Ok(withdrawn) if withdrawn.status == "notHeld" => {
@@ -4321,7 +4325,7 @@ impl Worker {
 
     fn publish(&mut self) {
         self.publish_at = None;
-        self.retired_inputs.retain(|id| {
+        self.retired_inputs.retain(|id, _| {
             self.projection.held_input(id).is_some()
                 || self
                     .lines
