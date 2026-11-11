@@ -273,6 +273,9 @@ pub struct TaskFinish {
     pub at: u64,
     pub status: &'static str,
     pub failed: bool,
+    /// Whether a read of recorded events produced this finish rather than the
+    /// live event stream: a replayed end is history, not news.
+    pub replayed: bool,
     pub text: String,
     pub exit_code: Option<i64>,
 }

@@ -4119,7 +4119,18 @@ impl Worker {
         Ok(())
     }
 
+    /// Applies an event the live stream carried: a task it ends is news.
     fn apply(&mut self, branch_id: &str, event: Event) {
+        self.fold(branch_id, event, false);
+    }
+
+    /// Applies an event a read of recorded history replayed: a task it ends
+    /// had already ended, so it is history (`Projection::replay`).
+    fn replay(&mut self, branch_id: &str, event: Event) {
+        self.fold(branch_id, event, true);
+    }
+
+    fn fold(&mut self, branch_id: &str, event: Event, replayed: bool) {
         if branch_id == "main"
             && event.sequence > self.model_through
             && let EventContent::Configuration(configuration) = &event.content
@@ -4145,7 +4156,10 @@ impl Worker {
         {
             line.cursor = event.sequence;
             let previous_rows = line.projection.rows().len();
-            line.projection.apply(branch_id, &event);
+            match replayed {
+                true => line.projection.replay(branch_id, &event),
+                false => line.projection.apply(branch_id, &event),
+            }
             inline_shown = inline_report && line.projection.mark_reportable_error(previous_rows);
         }
         let cursor = self.cursors.entry(branch_id.to_owned()).or_default();
@@ -4171,7 +4185,10 @@ impl Worker {
             });
         }
         let previous_rows = self.projection.rows().len();
-        self.projection.apply(branch_id, &event);
+        match replayed {
+            true => self.projection.replay(branch_id, &event),
+            false => self.projection.apply(branch_id, &event),
+        }
         if let Some(error) = captured
             && (!inline_report
                 || self.projection.mark_reportable_error(previous_rows)

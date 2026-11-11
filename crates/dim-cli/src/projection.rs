@@ -183,7 +183,18 @@ impl Projection {
         }
     }
 
+    /// Applies an event the live stream carried.
     pub fn apply(&mut self, branch_id: &str, event: &Event) {
+        self.fold(branch_id, event, false);
+    }
+
+    /// Applies an event a read replayed from recorded history: a task it ends
+    /// had already ended before this interface attached.
+    pub fn replay(&mut self, branch_id: &str, event: &Event) {
+        self.fold(branch_id, event, true);
+    }
+
+    fn fold(&mut self, branch_id: &str, event: &Event, replayed: bool) {
         match &event.content {
             EventContent::ToolCall(data) => {
                 self.questions
@@ -351,8 +362,8 @@ impl Projection {
                             ExecStatus::Failed => "Failed",
                             ExecStatus::Cancelled => "Cancelled",
                         },
-                        failed: data.status == ExecStatus::Failed
-                            || data.result.is_error == Some(true),
+                        failed: data.status == ExecStatus::Failed,
+                        replayed,
                         text: result_text(&data.result),
                         exit_code: data
                             .result
@@ -385,7 +396,7 @@ impl Projection {
                 self.delegation_started(branch_id, data, &event.id, event.create_at)
             }
             EventContent::CollaborationDelivered(data) => {
-                self.delegation_delivered(branch_id, data, event.create_at)
+                self.delegation_delivered(branch_id, data, event.create_at, replayed)
             }
             EventContent::CollaborationResult(data) => {
                 let (status, failed, text) = match &data.outcome {
@@ -401,6 +412,7 @@ impl Projection {
                     at: event.create_at,
                     status,
                     failed,
+                    replayed,
                     text,
                     exit_code: None,
                 };
@@ -868,6 +880,7 @@ impl Projection {
         branch_id: &str,
         data: &dim_agent_types::CollaborationDeliveredData,
         started_at: u64,
+        replayed: bool,
     ) {
         let starting = |task: &TaskView| {
             task.branch_id == branch_id
@@ -892,6 +905,7 @@ impl Projection {
                     at: started_at,
                     status: "Failed",
                     failed: true,
+                    replayed,
                     text: serde_json::to_value(error)
                         .expect("typed delivery error serializes")
                         .as_str()
@@ -1191,7 +1205,8 @@ impl Projection {
         })
     }
 
-    /// Adopts a stored run of this Session from `branch_id`.
+    /// Adopts a stored run of this Session from `branch_id`. Every caller
+    /// reads the run's own record, so a run that already ended is history.
     pub fn set_workflow(&mut self, branch_id: &str, run: WorkflowRun) {
         let finished = (!run.state.unfinished()).then(|| {
             let (status, failed) = match run.state {
@@ -1205,6 +1220,7 @@ impl Projection {
                 at: run.ended_at.unwrap_or(run.created_at),
                 status,
                 failed,
+                replayed: true,
                 text: String::new(),
                 exit_code: None,
             }
@@ -3153,8 +3169,9 @@ mod tests {
 
     /// Every end the command owner writes arrives as `exec/ended` with a
     /// status: a timeout, a kill and a non-zero exit are `failed`, and a stop
-    /// is `cancelled`. The row and the terminal read that status, so each of
-    /// the three failures marks the task failed and a stop does not.
+    /// is `cancelled`. The status is authoritative, so a stop stays stopped
+    /// even though `ExecProcess::finish_background` marks its result as an
+    /// error, which is the payload the owner writes.
     #[test]
     fn a_timed_out_killed_or_non_zero_exit_task_finishes_failed() {
         let started = |task: &str| {
@@ -3200,9 +3217,15 @@ mod tests {
                 true,
             ),
             (
+                "done",
+                "completed",
+                serde_json::json!({"content": "Command finished."}),
+                false,
+            ),
+            (
                 "stopped",
                 "cancelled",
-                serde_json::json!({"content": "Command cancelled by user."}),
+                serde_json::json!({"content": "Command stopped by user."}),
                 false,
             ),
         ] {
@@ -3228,6 +3251,10 @@ mod tests {
                 .expect("a finished task");
             assert_eq!(finish.failed, failed, "{task}: {finish:?}");
             assert_eq!(finish.at, 2000, "{task}: the end's own time");
+            assert!(
+                !finish.replayed,
+                "{task}: the live stream carried the end"
+            );
         }
     }
 

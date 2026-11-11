@@ -1100,10 +1100,9 @@ struct App {
     /// The permission or question request last notified: a prompt that
     /// stays open notifies once.
     notified_request: Option<String>,
-    /// Background tasks already reported as ended, by task id. `None` until
-    /// the Session's first snapshot, whose ended tasks are history: a
-    /// reconnect that finds tasks already finished reports none of them.
-    notified_tasks: Option<HashSet<String>>,
+    /// Background tasks already reported as ended, by task id: a task the
+    /// live stream ended is reported once.
+    notified_tasks: HashSet<String>,
     /// The session's runs as the terminal's program status follows them.
     runs: Runs,
     /// The draft set aside while Ctrl+O/Ctrl+P has the palette open; it
@@ -1459,7 +1458,7 @@ impl App {
             notifications: Vec::new(),
             revealed: std::collections::HashMap::new(),
             notified_request: None,
-            notified_tasks: None,
+            notified_tasks: HashSet::new(),
             runs: Runs::default(),
             palette_stash: None,
             command_entry: false,
@@ -3979,11 +3978,9 @@ impl App {
         }
     }
 
-    /// Reports each background task that ended since the last snapshot, once
-    /// per task: a redraw or a reconnect that shows an ended task again does
-    /// not report it again. The Session's first snapshot is the baseline, so
-    /// tasks that had already ended when the interface attached are history,
-    /// not news.
+    /// Reports each background task the live stream ended, once per task: a
+    /// redraw or a return to the Session does not report it again, and a
+    /// finish a read replayed is history, not news.
     fn queue_background_notifications(&mut self) {
         use crate::ui::notify::Event;
         let Some(snapshot) = &self.snapshot else {
@@ -3994,22 +3991,21 @@ impl App {
             .iter()
             .filter_map(|task| {
                 let finish = task.finished.as_ref()?;
-                Some((task.id.clone(), task.label.clone(), finish.failed))
+                (!finish.replayed).then(|| {
+                    (
+                        task.id.clone(),
+                        crate::sanitize::safe(&task.label),
+                        finish.failed,
+                    )
+                })
             })
             .collect();
-        let Some(seen) = &mut self.notified_tasks else {
-            self.notified_tasks = Some(ended.iter().map(|(id, _, _)| id.clone()).collect());
-            return;
-        };
         for (id, label, failed) in ended {
-            if !seen.insert(id) {
+            if !self.notified_tasks.insert(id) {
                 continue;
             }
             if self.notify {
-                self.notifications.push(Event::BackgroundFinished {
-                    label: crate::sanitize::safe(&label),
-                    failed,
-                });
+                self.notifications.push(Event::BackgroundFinished { label, failed });
             }
         }
     }
@@ -5911,9 +5907,9 @@ impl App {
         }
         self.snapshot = None;
         self.runs = Runs::default();
-        // Another Session's ended tasks are its history: its first snapshot
-        // is this interface's baseline, as this Session's was.
-        self.notified_tasks = None;
+        // Another Session's tasks are its own: this interface has reported
+        // none of them.
+        self.notified_tasks.clear();
         self.window_floor = 0;
         self.history_floor = 0;
         self.load_more = false;
@@ -8396,6 +8392,7 @@ mod tests {
         }
     }
 
+    /// A task the live stream ended.
     fn finished(
         mut task: crate::model::view::TaskView,
         failed: bool,
@@ -8404,9 +8401,23 @@ mod tests {
             at: 1,
             status: if failed { "Failed" } else { "Completed" },
             failed,
+            replayed: false,
             text: String::new(),
             exit_code: None,
         });
+        task
+    }
+
+    /// A task whose end a read of recorded history applied, as the attach
+    /// read and every history page do.
+    fn replayed(
+        mut task: crate::model::view::TaskView,
+        failed: bool,
+    ) -> crate::model::view::TaskView {
+        task = finished(task, failed);
+        if let Some(finish) = &mut task.finished {
+            finish.replayed = true;
+        }
         task
     }
 
@@ -8419,6 +8430,7 @@ mod tests {
             at: at_ms,
             status: "Completed",
             failed: false,
+            replayed: false,
             text: String::new(),
             exit_code: None,
         });
@@ -8657,33 +8669,64 @@ mod tests {
             false,
         )]));
         assert!(quiet.notifications.is_empty(), "the switch is respected");
+    }
 
-        let mut attached = build(true);
-        attached.apply(snapshot(vec![finished(
-            background_task("t9", "already done"),
+    /// A finish a read applied is history: the attach read and every task
+    /// history page replay the ends a Session already recorded, and none of
+    /// them is news. Only an end the live stream carries after attach is,
+    /// whatever snapshot happens to show it first.
+    #[test]
+    fn a_replayed_end_is_history_and_a_live_one_is_news() {
+        use crate::ui::notify::Event;
+        let theme = test_theme();
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        let snapshot = |tasks: Vec<crate::model::view::TaskView>| {
+            Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                tasks,
+                ..ViewSnapshot::default()
+            }))
+        };
+
+        // The session host publishes an empty or loading snapshot before the
+        // delayed history reply lands.
+        app.apply(snapshot(Vec::new()));
+        assert!(app.notifications.is_empty());
+
+        app.apply(snapshot(vec![replayed(
+            background_task("t1", "already done"),
             false,
         )]));
         assert!(
-            attached.notifications.is_empty(),
-            "the first snapshot is the baseline: {:?}",
-            attached.notifications
+            app.notifications.is_empty(),
+            "a restored end is history: {:?}",
+            app.notifications
         );
-        attached.apply(snapshot(vec![
-            finished(background_task("t9", "already done"), false),
-            finished(background_task("t10", "later"), false),
+
+        app.apply(snapshot(vec![
+            replayed(background_task("t1", "already done"), false),
+            finished(background_task("t2", "live now"), true),
         ]));
         assert_eq!(
-            attached.notifications,
+            app.notifications,
             vec![Event::BackgroundFinished {
-                label: "later".into(),
-                failed: false,
-            }]
+                label: "live now".into(),
+                failed: true,
+            }],
+            "an end the live stream carried is one notification"
         );
     }
 
-    /// Switching away from a Session and back starts a new baseline: its
-    /// already-ended tasks are that Session's history again, so a return
-    /// raises nothing, while a task that ends after the return still does.
+    /// Switching away from a Session and back re-reads its history: those
+    /// ends are replayed and raise nothing, while a task that ends after the
+    /// return still does.
     #[test]
     fn returning_to_a_session_reports_none_of_its_ended_tasks_again() {
         use crate::model::session::SwitchKind;
@@ -8704,10 +8747,13 @@ mod tests {
                 ..ViewSnapshot::default()
             }))
         };
-        let ended = finished(background_task("t1", "cargo build"), false);
+        let ended = replayed(background_task("t1", "cargo build"), false);
 
         app.apply(snapshot("s1", vec![background_task("t1", "cargo build")]));
-        app.apply(snapshot("s1", vec![ended.clone()]));
+        app.apply(snapshot(
+            "s1",
+            vec![finished(background_task("t1", "cargo build"), false)],
+        ));
         assert_eq!(
             app.notifications,
             vec![Event::BackgroundFinished {
@@ -8723,7 +8769,7 @@ mod tests {
         });
         app.apply(snapshot(
             "s2",
-            vec![finished(background_task("u1", "cargo test"), false)],
+            vec![replayed(background_task("u1", "cargo test"), false)],
         ));
         assert!(
             app.notifications.is_empty(),
@@ -8735,17 +8781,17 @@ mod tests {
             session_id: "s1".into(),
             kind: SwitchKind::Resumed,
         });
-        app.apply(snapshot("s1", vec![ended]));
+        app.apply(snapshot("s1", vec![ended.clone()]));
         assert!(
             app.notifications.is_empty(),
-            "coming back re-baselines instead of replaying: {:?}",
+            "coming back replays its ends instead of reporting them: {:?}",
             app.notifications
         );
 
         app.apply(snapshot(
             "s1",
             vec![
-                finished(background_task("t1", "cargo build"), false),
+                ended,
                 finished(background_task("t2", "cargo run"), true),
             ],
         ));

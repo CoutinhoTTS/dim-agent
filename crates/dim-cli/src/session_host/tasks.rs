@@ -489,7 +489,7 @@ impl Worker {
                     history.earlier = false;
                     let mut older = Projection::for_branch(&request.branch_id);
                     for event in events {
-                        older.apply(&request.branch_id, &event);
+                        older.replay(&request.branch_id, &event);
                     }
                     if let Some(projection) =
                         transcript_mut(&mut self.projection, &mut self.lines, &request.branch_id)
@@ -498,7 +498,7 @@ impl Worker {
                     }
                 } else {
                     for event in events {
-                        self.apply(&request.branch_id, event);
+                        self.replay(&request.branch_id, event);
                     }
                     self.task_history_queue.push_back(request.branch_id.clone());
                 }
