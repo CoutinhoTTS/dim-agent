@@ -225,6 +225,17 @@ starts from the Session's stored configuration, and a store written under a
 Reading only the provider option would overwrite a configured `concise` with
 `detailed`.
 
+A configured `detailed` in either field is re-derived rather than kept. A stored
+value cannot say whether a user or an earlier derivation wrote it, so a stored
+`detailed` and the derived one are indistinguishable and both follow the effort
+the finalized configuration sends: beside `none`, and when the configuration
+carries no effort at all, it sends no summary. A model that declares a default
+effort supplies one, so `detailed` survives there; the case that loses it is a
+model whose declaration offers no effort, or a stored configuration left without
+one. This is a behaviour change for a stored model-configuration profile that
+asks for `detailed` explicitly, and it is the only style that changes: `auto` and
+`concise` stay as configured.
+
 `interleaved` is not applied. The wire field that would carry it,
 `interleavedThinking`, is rejected before a request leaves, on every protocol,
 and no vendor adapter reads it; the Anthropic control it stands for is
