@@ -176,6 +176,46 @@ keeps the model's own default. A missing `defaultEnabled` is not read as off.
 `none` needs that declaration or an advertised native `none`. Unsupported values
 fail without adoption; no value is guessed from a model name.
 
+Which `metadata.reasoning` declarations configure a request, and which only
+describe the model, follows one rule: a declaration configures a request when a
+field in the typed configuration carries it, the request builder sends that
+field for some protocol after validation, and the vendor adapter that receives
+it changes the bytes it writes. The applied set is the declared effort, the
+declared service tier and the declared reasoning summary.
+
+| Declaration | Effect | Why |
+| --- | --- | --- |
+| `effort`, `effortOptions` | configures | the effort mapping, validated against the advertised options |
+| `defaultEnabled`, `off`, `supported` | configures | they select or deny the effort control and send nothing themselves |
+| `serviceTier` | configures | the tier mapping, validated against the advertised options |
+| `summaries` | configures | the summary style, on the one protocol that carries it |
+| `mode`, `level`, `levelOptions`, `verbosity`, `verbosityOptions`, `budget` | not applied | no field exists on any request path; the first five would need their own control dispatch |
+| `visibility`, `continuation`, `notes` | describes | no reader; they are upstream prose |
+| `interleaved` | describes | not expressible on any dim protocol path |
+
+A summary is sent only where the protocol carries one (the OpenAI Responses
+body), and only beside a reasoning effort other than `none`. It follows the
+effort the adopted configuration finally sends, so it is recomputed whenever a
+configuration is finalized rather than stored once: an update to `none` sends
+none, and clearing the effort back to the declared default brings it back with
+the effort. Without an effort the declaration adds nothing, because a summary
+alone would put the adapter into reasoning mode and change the system role,
+temperature and top-p along with it.
+
+The rule needs no record of where a value came from, because `detailed` is the
+only style it ever writes. A model that does not declare `summaries`, and a
+protocol that cannot carry one, are left entirely alone, so a style set in the
+model's own configuration survives on them. On a model that does declare
+`summaries`, a `detailed` style cannot be told apart from the derived one, so it
+follows the effort: beside `none` it is dropped, because that request
+contradicts itself. Every other style survives any effort.
+
+`interleaved` is not applied. The wire field that would carry it,
+`interleavedThinking`, is rejected before a request leaves, on every protocol,
+and no vendor adapter reads it; the Anthropic control it stands for is
+`thinking.type: "between_tools"`, which dim's thinking type cannot spell.
+Wiring that control and retiring the dead request field are separate work.
+
 The adopted configuration's output allowance is not a preference: Provider derives
 `maxTokens` from the model's declared pair as `max(1, min(declared maxOutputTokens,
 131,072, contextWindow / 2))`, so the input budget that compaction uses is at least
