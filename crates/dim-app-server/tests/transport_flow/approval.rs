@@ -1,4 +1,6 @@
 use super::*;
+use dim_agent_capabilities::approval::{AdmitCall, Approval};
+use dim_agent_capabilities::permission::{CommandRulesHost, ReadCommandRules};
 use dim_agent_capabilities::tool_executor::ToolExecutor;
 use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::{Dispatcher, Session, Timeline};
@@ -26,6 +28,13 @@ struct Probe {
     deny_on_policy_change: StdMutex<Option<String>>,
     cancel_gate: StdMutex<Option<std::sync::mpsc::Receiver<()>>>,
     cancel_entered: Notify,
+    command_rules: StdMutex<Vec<dim_agent_types::CommandRule>>,
+}
+impl ReadCommandRules for Probe {
+    fn rules(&self, _: CancellationToken) -> HostFuture<'_, Vec<dim_agent_types::CommandRule>> {
+        let rules = self.command_rules.lock().unwrap().clone();
+        Box::pin(async move { Ok(rules) })
+    }
 }
 struct ProbePlugin(
     Arc<Probe>,
@@ -174,7 +183,18 @@ async fn setup_store(
     let calls = Arc::new(AtomicUsize::new(0));
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(store);
-    defaults::install(&mut builder);
+    builder
+        .session_value(Arc::new(dim_agent_capabilities::host::PromptHost(
+            Arc::new(dim_agent_capabilities::host::EmptyPromptHost),
+        )))
+        .session_value(Arc::new(
+            dim_agent_capabilities::prompt::InitialPromptConfiguration::fixed(None),
+        ))
+        .session_value(Arc::new(CommandRulesHost(probe.clone())));
+    defaults::install_with_prompt_capability(
+        &mut builder,
+        dim_agent_capabilities::model_provider::ModelProviderPlugin::new,
+    );
     defaults::mock_model_hosts(&mut builder);
     probe.tools.install(
         &mut builder,
@@ -748,60 +768,114 @@ async fn v2_clients_receive_no_approval_resolved_on_both_transports() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_admission_waits_for_its_terminal_to_be_stored() {
-    let dir =
-        std::env::temp_dir().join(format!("dim-approval-publication-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("db.sqlite");
-    let db = dim_app_server::storage::SqliteStorage::open(path.clone()).unwrap();
-    let store = dim_app_server::storage::SqliteTimelineStore::new(db);
-    let probe = Arc::new(Probe::default());
-    let (server, session, mut client, calls) = setup_store(false, probe.clone(), 3, store).await;
-    request_v2(&mut client, &session).await;
-    let (release, gate) = std::sync::mpsc::channel();
-    *probe.cancel_gate.lock().unwrap() = Some(gate);
-    let permission = session
-        .service::<dim_agent_capabilities::permission::Permission>("main")
-        .unwrap();
-    permission
-        .update(
-            0,
-            serde_json::from_value(json!({"preset":"full-access"})).unwrap(),
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), probe.cancel_entered.notified())
-        .await
-        .unwrap();
-    let lock = rusqlite::Connection::open(&path).unwrap();
-    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
-    release.send(()).unwrap();
-    let timeline = probe.timeline.lock().unwrap().clone().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !timeline.has_pending() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the terminal must be queued while its storage commit is blocked");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), async {
-            while calls.load(Ordering::SeqCst) == 0 {
+    for deny_during_publication in [false, true] {
+        let dir =
+            std::env::temp_dir().join(format!("dim-approval-publication-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("db.sqlite");
+        let db = dim_app_server::storage::SqliteStorage::open(path.clone()).unwrap();
+        let store = dim_app_server::storage::SqliteTimelineStore::new(db);
+        let probe = Arc::new(Probe::default());
+        let (server, session, mut client, _) = setup_store(false, probe.clone(), 3, store).await;
+        let approval = session.service::<Approval>("main").unwrap();
+        let admission = tokio::spawn(async move {
+            approval
+                .admit(
+                    AdmitCall {
+                        source: dim_agent_types::BranchSource::Tool {
+                            turn_id: "turn".into(),
+                            request_id: "request".into(),
+                            call_id: "call".into(),
+                        },
+                        call: dim_agent_types::ApprovalCallData {
+                            name: "exec".into(),
+                            input: serde_json::from_value(json!({"command":"git push"})).unwrap(),
+                        },
+                    },
+                    Some("execute_process"),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        let request = client.notice("approval.request").await;
+        let (release, gate) = std::sync::mpsc::channel();
+        *probe.cancel_gate.lock().unwrap() = Some(gate);
+        let permission = session
+            .service::<dim_agent_capabilities::permission::Permission>("main")
+            .unwrap();
+        permission
+            .update(
+                0,
+                serde_json::from_value(json!({"preset":"full-access"})).unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), probe.cancel_entered.notified())
+            .await
+            .unwrap();
+        let lock = rusqlite::Connection::open(&path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        release.send(()).unwrap();
+        let timeline = probe.timeline.lock().unwrap().clone().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !timeline.has_pending() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .is_err(),
-        "the tool cannot start before its terminal is durable"
-    );
-    lock.execute_batch("ROLLBACK").unwrap();
-    session.idle("main").await.unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-    client.notice("approval.cancelled").await;
-    session.close().await.unwrap();
-    server.shutdown();
-    server.join().await.unwrap();
-    drop(lock);
-    std::fs::remove_dir_all(dir).unwrap();
+        .expect("the terminal must be queued while its storage commit is blocked");
+        if deny_during_publication {
+            *probe.command_rules.lock().unwrap() = serde_json::from_value(json!([
+                {"command":"git push", "match":"exact", "decision":"deny"}
+            ]))
+            .unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while !admission.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_err(),
+            "the tool cannot start before its terminal is durable"
+        );
+        lock.execute_batch("ROLLBACK").unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), admission)
+            .await
+            .unwrap()
+            .unwrap();
+        if deny_during_publication {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "Command denied by command rule `git push` (exact)"
+            );
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(
+            client.notice("approval.cancelled").await["params"]["requestId"],
+            request["params"]["requestId"]
+        );
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ApprovalCancelled(_)))
+                .count(),
+            1
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::ApprovalRespond(_)))
+        );
+        session.close().await.unwrap();
+        server.shutdown();
+        server.join().await.unwrap();
+        drop(lock);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[tokio::test]

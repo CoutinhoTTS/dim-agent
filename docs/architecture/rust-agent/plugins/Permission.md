@@ -337,9 +337,10 @@ unanswered request, not necessarily the tool execution. For an allowed call its 
 is `Approval no longer required by the permission policy`; for a refusal it is the
 current denial reason. It does not fabricate an `approval/respond` or a user decision.
 Automatic admission waits for its terminal's durable publication, not merely append
-acceptance, before the call starts; cancellation or storage failure prevents the start. Cancellation,
-manual responses and automatic settlement compete for the same pending request; only
-one can remove it. Automatic settlement waits for earlier committed facts to be
+acceptance, then rechecks policy and command rules before the call starts. A decision
+other than Allow, cancellation or storage failure prevents the start without another
+approval terminal. Cancellation, manual responses and automatic settlement compete for
+the same pending request; only one can remove it. Automatic settlement waits for earlier committed facts to be
 dispatched and checks that boundary again while registering its terminal under the
 Timeline commit lock. If another fact arrived during the asynchronous policy read,
 it waits and rechecks rather than overtaking that fact. An earlier committed manual

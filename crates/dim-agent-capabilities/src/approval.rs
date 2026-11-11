@@ -249,6 +249,12 @@ impl Approval {
                             }
                         }
                     }
+                    if result.is_ok()
+                        && let Decision::Deny { reason } | Decision::Ask { reason } =
+                            self.permission.decide(&checked, risk, &cancel).await?
+                    {
+                        return Err(HostError::failed(reason));
+                    }
                     if cancel.is_cancelled() {
                         return Err(HostError::Cancelled(CANCELLED.into()));
                     }
