@@ -837,8 +837,6 @@ impl Worker {
                 });
                 self.reportable(
                     crate::report::Captured::observed(
-                        &session_id,
-                        "main",
                         crate::report::Operation::SessionRead,
                         dim_client::app_error(&error),
                         error.to_string(),
@@ -1164,8 +1162,6 @@ impl Worker {
                 if let Err(error) = opened
                     && !self.reportable(
                         crate::report::Captured::observed(
-                            &session_id,
-                            &parent,
                             crate::report::Operation::BranchCreate,
                             dim_client::app_error(&error),
                             error.to_string(),
@@ -1204,8 +1200,6 @@ impl Worker {
                     Err(error) => {
                         if !self.reportable(
                             crate::report::Captured::observed(
-                                &session_id,
-                                "main",
                                 crate::report::Operation::SessionFork,
                                 dim_client::app_error(&error),
                                 error.to_string(),
@@ -1402,7 +1396,7 @@ impl Worker {
                 }
             }
             Command::Compact => self.compact().await,
-            Command::ErrorReport(request) => self.report_request(request).await,
+            Command::Report(request) => self.report_request(request).await,
             Command::Export(format) => {
                 let extension = match format {
                     crate::export::Format::Markdown => "md",
@@ -4155,7 +4149,18 @@ impl Worker {
         Ok(())
     }
 
+    /// Applies an event the live stream carried: a task it ends is news.
     fn apply(&mut self, branch_id: &str, event: Event) {
+        self.fold(branch_id, event, false);
+    }
+
+    /// Applies an event a read of recorded history replayed: a task it ends
+    /// had already ended, so it is history (`Projection::replay`).
+    fn replay(&mut self, branch_id: &str, event: Event) {
+        self.fold(branch_id, event, true);
+    }
+
+    fn fold(&mut self, branch_id: &str, event: Event, replayed: bool) {
         if branch_id == "main"
             && event.sequence > self.model_through
             && let EventContent::Configuration(configuration) = &event.content
@@ -4168,7 +4173,7 @@ impl Worker {
         let captured = if self.report_available()
             && (branch_id == self.focus || self.side.as_deref() == Some(branch_id))
         {
-            crate::report::Captured::event(&self.session_id, branch_id, &event)
+            crate::report::Captured::event(&event)
         } else {
             None
         };
@@ -4181,7 +4186,10 @@ impl Worker {
         {
             line.cursor = event.sequence;
             let previous_rows = line.projection.rows().len();
-            line.projection.apply(branch_id, &event);
+            match replayed {
+                true => line.projection.replay(branch_id, &event),
+                false => line.projection.apply(branch_id, &event),
+            }
             inline_shown = inline_report && line.projection.mark_reportable_error(previous_rows);
         }
         let cursor = self.cursors.entry(branch_id.to_owned()).or_default();
@@ -4207,7 +4215,10 @@ impl Worker {
             });
         }
         let previous_rows = self.projection.rows().len();
-        self.projection.apply(branch_id, &event);
+        match replayed {
+            true => self.projection.replay(branch_id, &event),
+            false => self.projection.apply(branch_id, &event),
+        }
         if let Some(error) = captured
             && (!inline_report
                 || self.projection.mark_reportable_error(previous_rows)
