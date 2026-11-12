@@ -4421,7 +4421,7 @@ impl App {
                         *text = "".into();
                     }
                 }
-                Block::HookContext { expanded, .. } => *expanded = detail == Detail::Expanded,
+                Block::Hook { expanded, .. } => *expanded = detail == Detail::Expanded,
                 Block::Error { expanded, .. } => *expanded = detail != Detail::Collapsed,
                 _ => {}
             }
@@ -6403,7 +6403,7 @@ impl App {
             }
             Some(
                 Block::Thinking { expanded, .. }
-                | Block::HookContext { expanded, .. }
+                | Block::Hook { expanded, .. }
                 | Block::Error { expanded, .. },
             ) => *expanded = !*expanded,
             _ => return false,
@@ -12150,7 +12150,7 @@ mod tests {
                 .app
                 .history
                 .iter()
-                .any(|block| matches!(block, Block::User { .. } | Block::HookContext { .. })),
+                .any(|block| matches!(block, Block::User { .. } | Block::Hook { .. })),
             "neither the message nor its hook context is committed while unread"
         );
         show(&mut drawn, vec![message(false), hook()]);
@@ -12164,7 +12164,7 @@ mod tests {
             .app
             .history
             .iter()
-            .position(|block| matches!(block, Block::HookContext { .. }))
+            .position(|block| matches!(block, Block::Hook { .. }))
             .expect("its hook context commits with it");
         assert!(
             user < hook,
@@ -12186,7 +12186,7 @@ mod tests {
             .app
             .history
             .iter()
-            .position(|block| matches!(block, Block::HookContext { .. }))
+            .position(|block| matches!(block, Block::Hook { .. }))
             .expect("its hook context is committed with it");
         let stop = drawn
             .app
