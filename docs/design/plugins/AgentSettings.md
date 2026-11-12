@@ -33,9 +33,6 @@ AgentSettings exposes one `settings` tool. In v1 the tool lists and reads user s
       "name": {
         "type": "string",
         "description": "A setting name returned by list."
-      },
-      "value": {
-        "description": "The new value for set. list shows the required type."
       }
     },
     "required": ["op"],
@@ -63,18 +60,17 @@ The tool has no `source`, `session`, revision, path or document parameter. The s
       "writable": false
     },
     {
-      "name": "model.effort",
-      "description": "Reasoning effort for this session.",
-      "type": "string",
-      "allowed": ["low", "medium", "high"],
-      "value": "high",
-      "writable": true
+      "name": "execution.network",
+      "description": "Allow network access for new processes. Only meaningful when the sandbox is on.",
+      "type": "boolean",
+      "value": false,
+      "writable": false
     }
   ]
 }
 ```
 
-Every setting carries a description and type. `allowed` is present when the value is an enum. `writable` states whether `set` can change it.
+Every setting carries a description and type. `allowed` is present when the value is an enum. In v1 every setting has `writable: false`; no write operation is exposed.
 
 ### get
 
@@ -97,7 +93,7 @@ Every setting carries a description and type. `allowed` is present when the valu
 | Error | Meaning |
 | --- | --- |
 | `unknown` | No setting has this name; call `list` |
-| `invalid` | The value has the wrong type or is outside `allowed` |
+| `invalid` | The read arguments are malformed, the operation is unsupported, or `get` has no `name` |
 | `denied` | Permission or approval refused the call |
 
 A refused read changes nothing. The result states the reason; the model does not infer success from its own text.
@@ -125,8 +121,8 @@ writable
 
 - Permission sees one tool name: `settings`.
 - `op=list` and `op=get` are normally allowed.
-- A future `set` op needs approval; v1 has no `set`.
-- The tool carries no security level. The setting module's `writable` and the real handler decide whether the change is possible; Permission decides whether this call is allowed.
+- A future write design must define its risk and approval behavior; v1 has no `set`.
+- The tool carries the `session` risk. Permission decides whether the read is allowed; `writable: false` grants no write authority.
 - A denied call returns `denied`.
 
 ## 6. Boundaries
@@ -134,10 +130,8 @@ writable
 - No arbitrary Settings document, JSON Pointer or file path.
 - No second Settings store.
 - No plugin reload; structural configuration is not this path.
-- No Timeline event for a settings write; `SettingsChanged` is for listeners.
-- The tool result is not the state. Awareness of the new value comes from an [EnvironmentSettings](EnvironmentSettings.md) snapshot.
-- A concurrent write yields a readable conflict; the tool does not overwrite.
-- A cancelled call leaves the previous value.
+- The tool result is a read at the time of the call. Automatic awareness comes from an [EnvironmentSettings](EnvironmentSettings.md) snapshot.
+- The tool writes no setting, including when a call is denied or cancelled.
 
 ## 7. Requirements raised to mechanism owners
 
@@ -147,25 +141,24 @@ None to the runtime or rutis.
 
 | Rule | How this design complies |
 | --- | --- |
-| §1 Parts bounded; Capability | The setting module owns the value; `SettingsTool` is the Capability in the Session. |
-| §4 rule 1 Command events | The setting module writes its own state; the tool does not write another module's state. |
+| §1 Parts bounded; Capability | The setting module owns the value; `SettingsTool` is a normal Session part, not a Capability: it only provides a read tool. |
+| §4 rule 1 Command events | The tool reads the setting module's state and performs no write. |
 | §4 rule 2 Handover | No handover. |
 | §4 rule 3 Before callbacks | No wait in an event handler; the tool call is its own task. |
 | §4 rule 4 Core carries no business meaning | No core branch; the dispatcher and setting modules own the behavior. |
-| §4 rule 5 Batch | A settings write is one CAS write; no Timeline batch. |
+| §4 rule 5 Batch | No write or Timeline batch. |
 | §4 rule 6 Context from consumed events | The tool result enters as a tool result; the state snapshot enters separately. |
-| §4 rule 7 Public services | The setting module's typed action; one tool registered with `toolRegistry`. |
+| §4 rule 7 Public services | The setting module's read port; one tool registered with `toolRegistry`. |
 | §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. |
 | §4 rule 9 Timeline holds decision facts | Configuration does not enter the Timeline. |
-| §4 rule 10 Adopted inputs | The snapshot is an input; the tool result is separate. |
-| ADR 002 D1 | The setting module owns the write; the tool is a Session entry. |
+| ADR 002 D1 | The setting module owns the value; the tool is a Session entry. |
 | ADR 002 D2 | No adapter plugin; one tool and a dispatcher, not a second store. |
 | ADR 002 D3 | The tool depends on the setting module's action; no core depends on the tool. |
 | ADR 002 D4 | Business configuration stays with its module; no loader row. |
 | ADR 002 D5 | The tool input/result and the setting action are data; Rust is a binding. |
-| ADR 003 / ADR 009 | The write is an agent action admitted by Approval and Permission; no configuration-time bypass. |
+| ADR 003 / ADR 009 | The read is an agent action admitted by Approval and Permission with the `session` risk. |
 
-## 8. Verification
+## 9. Verification
 
 | Scenario | Expected |
 | --- | --- |
@@ -176,8 +169,7 @@ None to the runtime or rutis.
 | Secret | Never in schema, result, log or snapshot |
 | Two tools declared | Rejected; the design allows exactly one `settings` tool |
 
-## 9. Open decisions
+## 10. Open decisions
 
-1. The first setting to expose and its description.
-2. The approval wording for `set`.
-3. Whether `list` should be cached in the prompt or always called.
+1. Which settings beyond execution to expose.
+2. The write contract, risk and approval behavior if a writable setting is introduced.

@@ -18,7 +18,7 @@ The goal is awareness of the user's environment and choices, not a new permissio
 | --- | --- | --- | --- |
 | Attached connections | App Server connection and UI registries | `<dim-state>` snapshot | [EnvironmentClients](plugins/EnvironmentClients.md) |
 | Execution sandbox and network | Execution settings module | `<dim-state>` snapshot | [EnvironmentSettings](plugins/EnvironmentSettings.md) |
-| Per-session model, effort, fast mode | Their setting modules | `<dim-state>` snapshot when provided | [EnvironmentSettings](plugins/EnvironmentSettings.md) |
+| Per-session model, effort, fast mode | Adopted configuration | Existing configuration; no duplicate snapshot | [Prompt](plugins/Prompt.md) |
 | Settings tool | One `settings` tool registered by the setting owner (v1 `ExecutionSettingsPlugin`) | tool call and tool result | [AgentSettings](plugins/AgentSettings.md) |
 | Viewed branch | Client report | deferred | [ClientView](plugins/ClientView.md) |
 | Permission preset | Permission | not delivered | Branch-specific; outside this design |
@@ -34,7 +34,8 @@ Environment facts are snapshots, not Prompt sources.
 - The body is compared with the last appended body; an unchanged body appends nothing.
 - No `PromptRegistry`, `LoadPrompt`, version, keyed state or compaction replay.
 - A snapshot is normal history. Compaction may remove it; it is not replayed.
-- No Timeline event for presence or settings.
+- The shared `dim-state` guide entry belongs to `PromptGuide`; snapshot writers reuse it as defined by [Prompt](plugins/Prompt.md#4-the-built-in-entries-and-their-writers). The marker alone does not imply a key or replay.
+- The snapshot is an existing `input/message` event with an Append-mode Raw block. Presence and settings remain with their owners; no new event type is added.
 
 ### Presence
 
@@ -44,12 +45,12 @@ Environment facts are snapshots, not Prompt sources.
 
 Every open branch wakes on `SettingsChanged`, reads the current value and appends the snapshot when the body differs. There is no origin routing and no `turn/start` refresh. An `Append` input does not drive a turn, so an idle Session gets a new history input but no turn.
 
-The settings tool is separate from the snapshot. Its result is a tool result; the new value reaches context through the snapshot.
+The settings tool is separate from the snapshot. Its result is an on-demand read; automatic awareness reaches context through the snapshot.
 
 ## 4. Placement
 
 - Presence: one branch part, registered by `ConnectionPlugin`.
-- Settings snapshot: one branch part, registered by `SettingsPlugin`.
+- Settings snapshot: one branch part, registered by `ExecutionSettingsPlugin`.
 - Settings tool: one Session part, registered by the process plugin that owns the first setting. In v1 that is `ExecutionSettingsPlugin`.
 - No new process plugin.
 - No Session prompt-source part for either fact.
@@ -71,18 +72,18 @@ The full contract is [AgentSettings](plugins/AgentSettings.md).
 ## 6. Noise
 
 - A change is not automatically a block. It becomes one only when the body differs.
-- Presence lists connections, not people; a TUI and its line connection may both appear.
+- Presence lists connections, not people; a TUI leaf and its own protocol connection are one entry. Distinct connections remain separate even with the same label.
 - Settings state the effective value, not the document, revision or author.
 - A setting changed and changed back produces two snapshots; the old snapshot stays until compaction.
 - No timestamps, ids, device names or departure history.
-- An idle Session does not wake for another Session's settings change.
+- A settings change can append to idle branches; Append does not start a turn.
 
 ## 7. Privacy and trust
 
 - Presence exposes a channel and an optional claimed label. A claimed label is not an identity and grants nothing.
 - A label is escaped and bounded.
 - No token, device id, client id, entry name or secret enters a snapshot, a tool result or a log.
-- A settings `set` is an agent action admitted by Permission; the snapshot does not grant authority.
+- The read-only settings tool is an agent action admitted by Permission; the snapshot does not grant authority.
 - The model is told that a snapshot is state, not a request.
 
 ## 8. Non-interactive Sessions
@@ -93,17 +94,16 @@ A Session can outlive every client. The presence snapshot says no connection is 
 
 | Rule | How this design complies |
 | --- | --- |
-| §1 Parts bounded | Connection and setting values stay with their producers; branch parts only append snapshots. |
-| §4 rule 1 Command events | The design changes no state; the settings tool writes through its setting module. |
+| §1 Parts bounded | Connection and setting values stay with their producers. The branch parts write snapshot input facts through their Timeline and are Capabilities; the read-only Session tool is a normal part. |
+| §4 rule 1 Command events | The design changes no connection or setting; the settings tool only reads. |
 | §4 rule 2 Handover | No handover. |
 | §4 rule 3 Before callbacks | Branch parts append in their own tasks; event handlers only wake them. |
 | §4 rule 4 Core carries no business meaning | Bodies are module projections; no core branch. |
-| §4 rule 5 Batch | A snapshot is one input; a settings write is one CAS write. |
+| §4 rule 5 Batch | A snapshot is one input; the settings tool performs no write. |
 | §4 rule 6 Context from consumed events | Snapshots are inputs; tool results are tool results; no second path. |
 | §4 rule 7 Public services | `SessionClientsHost` and the setting modules' read ports are public. |
 | §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. |
-| §4 rule 9 Timeline holds decision facts | Presence and settings are not Timeline facts. |
-| §4 rule 10 Adopted inputs | The model reads the appended input directly. |
+| §4 rule 9 Timeline holds decision facts | Only the delivered snapshot is an input fact; the live connection and settings stores remain outside the Timeline. |
 | ADR 002 D1 | Each fact stays with its producer; parts are placed in Session or branch. |
 | ADR 002 D2 | No adapter plugin; one projection per fact, one tool. |
 | ADR 002 D3 | Parts depend on public ports; no core depends on them. |

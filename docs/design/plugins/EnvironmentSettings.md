@@ -8,13 +8,14 @@ This document owns the settings snapshot contract. The settings tool is [AgentSe
 
 ## 1. Decisions
 
-- Context injection is `input/append` of a snapshot. It is not a read and not a Prompt source.
+- Context injection is an `input/message` event with an Append-mode Raw block and no key. It is not a read and not a Prompt source.
 - No `PromptRegistry` registration, no `LoadPrompt`, no version, no keyed state, no compaction replay, no `ConfigureControl`.
 - One snapshot at branch open, and one snapshot per observed change.
 - A snapshot is a normal history input. Compaction may remove it; it is not replayed. This is accepted for a one-time hint.
 - The snapshot does not expose source, session, revision, timestamps or visibility metadata. It states the effective value.
 - Settings values and validation stay with each setting module. This capability only projects them.
 - Secret and `writeOnly` fields never enter a snapshot.
+- The shared `dim-state` guide entry is registered by `PromptGuide` ([Prompt](Prompt.md#4-the-built-in-entries-and-their-writers)); this part does not register a second entry.
 
 ## 2. Which settings
 
@@ -25,12 +26,12 @@ First set:
 | Setting | Snapshot |
 | --- | --- |
 | Execution `sandbox` / `network` | Yes |
-| Per-session model, reasoning effort, fast mode | Yes when the setting module provides a body |
 | A plugin's business setting | Yes when the setting module provides a body and no secret |
 
 Not included by default:
 
 - credentials, tokens, `writeOnly` fields;
+- model, reasoning effort and fast mode, which already travel in adopted configuration;
 - permission presets, approval rules, session grants;
 - hooks, MCP server configuration, plugin enablement;
 - model log and other diagnostics;
@@ -56,7 +57,7 @@ The body is a `<dim-state>` input:
 
 Rules:
 
-- The body states the effective value, not the revision, author or document.
+- The body states the configured switches used for new process preparation, not the revision, author or document. It does not certify sandbox backend availability; an unavailable backend is reported by process execution as `isolation_unavailable` ([ADR 010](../../adr/010-sandbox-opt-in.md)).
 - `network` is stated only when the sandbox is on.
 - The body is stable for an unchanged value; a no-op write appends nothing.
 - A non-model field in the same Settings document does not produce a snapshot.
@@ -74,13 +75,14 @@ The Settings service emits:
 ```text
 SettingsChanged {
   source,
+  scope,
   revision
 }
 ```
 
-Every open branch wakes, reads the current value and appends the snapshot when the body differs. There is no origin routing and no turn-boundary refresh. An `Append` input does not drive a turn, so an idle Session gets a new history input but no turn.
+Every open branch listening to that source wakes, reads the current value and appends the snapshot when the body differs. The execution source is user-scoped; its host reads that user-scope value. There is no origin routing and no turn-boundary refresh. An `Append` input does not drive a turn, so an idle Session gets a new history input but no turn.
 
-No Timeline event is written.
+The snapshot uses the existing `input/message` event; no settings event type is added to the Timeline.
 
 ## 5. Errors and absence
 
@@ -101,6 +103,7 @@ A read failure is not a value. The design does not append `unknown` or a fabrica
 | --- | --- |
 | The setting module's read port | Read the effective values for the body |
 | The branch's input path | Append the snapshot |
+| `BranchLifecycle` | Wait for publication before appending; stop when the branch closes |
 | Process bus (`SettingsChanged`) | Wake on a committed write |
 
 No `PromptRegistry`, no `ConfigureControl`, no prompt source, no version.
@@ -113,7 +116,7 @@ None to the runtime or rutis.
 
 | Rule | How this design complies |
 | --- | --- |
-| §1 Parts bounded; Capability | The setting value stays with its module; `SettingsSnapshotBranch` is the Capability, and there is no process part. |
+| §1 Parts bounded; Capability | The setting value stays with its module; `SettingsSnapshotBranch` is a Capability because it writes snapshot input facts through its branch Timeline. No new process part is added. |
 | §4 rule 1 Command events | The design changes no setting. The settings tool is [AgentSettings](AgentSettings.md). |
 | §4 rule 2 Handover | No handover. |
 | §4 rule 3 Before callbacks | The branch part appends in its own task; the event handler only marks work and returns. |
@@ -122,8 +125,7 @@ None to the runtime or rutis.
 | §4 rule 6 Context from consumed events | The snapshot is an input; no second context path. |
 | §4 rule 7 Public services | The setting module's read port is the only source. |
 | §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. |
-| §4 rule 9 Timeline holds decision facts | Settings stay in their source; the snapshot is an input, not a Timeline fact. |
-| §4 rule 10 Adopted inputs | The model reads the appended input directly. |
+| §4 rule 9 Timeline holds decision facts | Settings stay in their source; only the delivered snapshot is an input fact. |
 | ADR 002 D1 | The value belongs to the setting module; the branch part only appends. |
 | ADR 002 D2 | No adapter plugin; the capability projects its own fact. |
 | ADR 002 D3 | The branch part depends on the setting module's public port; no core depends on the capability. |
