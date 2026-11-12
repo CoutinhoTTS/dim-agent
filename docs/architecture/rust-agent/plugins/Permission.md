@@ -340,8 +340,11 @@ Automatic admission waits for its terminal's durable publication, not merely app
 acceptance, then rechecks policy and command rules before the call starts. A decision
 other than Allow, cancellation or storage failure prevents the start without another
 approval terminal. Cancellation, manual responses and automatic settlement compete for
-the same pending request; only one can remove it. Automatic settlement waits for earlier committed facts to be
-dispatched and checks that boundary again while registering its terminal under the
+the same pending request; only one can remove it. A failed or closing Timeline can
+reject the terminal after registration; admission fails, and no replacement terminal
+can be guaranteed on that Timeline.
+Automatic settlement waits for earlier committed facts to be dispatched and checks
+that boundary again while registering its terminal under the
 Timeline commit lock. If another fact arrived during the asynchronous policy read,
 it waits and rechecks rather than overtaking that fact. An earlier committed manual
 response therefore wins, including a refusal not yet consumed when policy changed.
@@ -363,12 +366,16 @@ attach for pending requests; `approval/cancelled` → `approval.cancelled`;
 (protocol v3 only: the v1 and v2 notification sets are frozen,
 [#278](https://github.com/arcships/dim/issues/278)).
 `approval/respond` is the command, so every committed response is projected.
-Approval accepts the first one it consumes in sequence order: the first
-`approval.resolved` per `requestId` carries the accepted decision, a later one
-was answered `Unknown`, and an `approval.cancelled` after an accepted allow means
-the call did not start. Without an accepted response, cancellation may instead mean
-that the new policy no longer requires a question. The decision is the user's answer,
-not the tool's outcome. A client
+Approval consumes responses in sequence order and accepts one only while the request
+is pending. Responses consumed after another response or cancellation are answered
+`Unknown`. In particular, an `approval.resolved` after an `approval.cancelled` for
+the same `requestId` is a losing response, even if it is the first resolved notice.
+Clients retire the question on its first terminal notice and must not treat a later
+resolved notice as an accepted answer. The decision is the user's submitted answer,
+not confirmation that Approval accepted it or that the call started.
+An `approval.cancelled` after an accepted allow means the call did not start.
+Without an accepted response, cancellation may instead mean that the new policy no
+longer requires a question. A client
 that attaches after a response is committed but before Approval consumes it is
 replayed the request without that response; its own `approval.respond` then
 fails with `invalid_params`, which ends the prompt.

@@ -3,10 +3,11 @@
 //! `approval/respond`. Interrupts arrive through the caller's cancellation
 //! token; branch close and reload settle what remains.
 //!
-//! Every path that ends a request removes it under the Approval lock and
-//! writes `approval/cancelled` after releasing it, while [`Approval::replay`]
-//! reads under the same lock: the end of a replayed request always follows
-//! the replay, and a removed request is not replayed.
+//! Pending requests are replayed under the lock that removes them, so an end
+//! notification follows any replay that included the request. Requests end through
+//! a consumed `approval/respond` or an `approval/cancelled` terminal; automatic
+//! policy settlement registers removal with its terminal. A removed request is
+//! not replayed.
 use crate::{
     host::HostError,
     permission::{Decision, Permission, PermissionState},
@@ -82,7 +83,7 @@ impl Approval {
     /// `Ok` means the call may start. `cancel` is the caller's batch token;
     /// the last cancellation check before the start happens here. The
     /// admission decision asks Permission's advisors with the call's source
-    /// (Hooks A.6.1); the recheck after an answer is a plain decision.
+    /// (Hooks A.6.1); subsequent rechecks are plain decisions without advisors.
     pub async fn admit(
         &self,
         call: AdmitCall,

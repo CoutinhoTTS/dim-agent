@@ -10,8 +10,7 @@
 //! The admission decision also asks the advisors registered with it (Hooks
 //! A.6.1): a branch part registers one with [`Permission::register_advice`]
 //! while it runs, and the advice is folded with Permission's own decision.
-//! [`Permission::decide`] stays the plain decision, for the admission's
-//! recheck after an answer.
+//! [`Permission::decide`] evaluates current policy without asking advisors.
 use crate::{
     file_access::FileAccessFacts,
     host::{HostError, HostFuture},

@@ -1497,7 +1497,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Read and write the goal of the shown line, in the line client and both terminal UI modes ([goal](#goal)). |
-| `/permissions` | Open the Permissions panel: the three presets with what each one allows, directions to Settings for process isolation, and the Command rules row that lists, adds and removes the user's command rules ([permission controls](#permission-controls)). |
+| `/permissions` | Open the Permissions panel: Permission mode groups the three presets with effective radio markers; Related settings groups the Command rules and Process isolation submenu links. Only the focused entry's Hint explains its scope and consequences ([permission controls](#permission-controls)). |
 | `/approvals`, `/approval` | Compatibility aliases for `/permissions`; preset arguments remain supported. |
 
 `dimcode hooks` writes only the user's hook document, and only through the edit kind: `dimcode hooks
@@ -2442,11 +2442,12 @@ processes and is independent of the permission mode.
 
 `↑↓`/`Tab` move between entries and `Esc` closes. The footer says `Enter use mode` for an
 inactive preset, `Enter keep mode` for the effective preset, or `Enter open` for a submenu.
-Merely opening or navigating the panel writes nothing; `Enter` applies the focused preset
-through the versioned update, preserving the tool lists. The existing remembered preference
-for later Sessions is unchanged (see [Startup selection](#startup-selection)); on Home the
-marker reflects that preference until a Session exists. No combined permissive shortcut
-appears in an approval prompt.
+Merely opening or navigating the panel writes nothing. With a Session, `Enter` on a preset reads
+the current policy; only if the focused preset differs does it write a versioned update,
+preserving the tool lists. Keeping the already-effective preset writes no policy update.
+A successful selection still saves the preference for later Sessions, even when no policy update
+was needed (see [Startup selection](#startup-selection)); on Home the marker reflects that
+preference until a Session exists. No combined permissive shortcut appears in an approval prompt.
 
 At the line prompt the no-argument command prints the effective preset and numbered command rules
 when supported. The printed rules and revision are kept for `remove`.
@@ -2470,7 +2471,7 @@ Command rules (user scope, every Session):
 | Form | Calls | Conflict |
 | --- | --- | --- |
 | `/permissions` | `session.permission.get` on `main`; `permission.rules`; existing execution settings read | none |
-| Preset selection in the panel | `get`, then `update` preserving the tool lists | Re-read before any retry; never replace the tool lists |
+| Preset selection in the panel (with a Session) | `get`; only if the preset differs, `update` preserving the tool lists | Re-read before any retry; if the requested preset is now effective, write nothing; never replace the tool lists |
 | `/permissions PRESET` | `get`; for `full-access` a `[y/N]` confirmation where Enter, any other answer, EOF and Ctrl+C mean No; then `update` with the read version and otherwise unchanged policy | `permission_conflict`: read again, print the current policy, write nothing; the user decides again |
 | `/permissions allow\|deny exact\|prefix COMMAND` | `permission.rules`; unless the same rule exists, `set_rules(revision, rules + rule)`, then print the new list | read again and retry, at most 3 attempts: adding does not depend on the other rules |
 | `/permissions remove N` | `set_rules(listing revision, listing without rule N)`, then print the new list | `permission_rules_conflict`: read again, print the current list, remove nothing |

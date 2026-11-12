@@ -3,7 +3,7 @@ use dim_agent_capabilities::approval::{AdmitCall, Approval};
 use dim_agent_capabilities::permission::{CommandRulesHost, ReadCommandRules};
 use dim_agent_capabilities::tool_executor::ToolExecutor;
 use dim_agent_runtime::testing::{branch_events, chain_events};
-use dim_agent_runtime::{Dispatcher, Session, Timeline};
+use dim_agent_runtime::{Dispatcher, Session, Timeline, TimelineKey, TimelineStore};
 use dim_agent_types::{
     ApprovalDecision, ContentBlock, EventKind, InputMode, InterruptScope, StopInterruptData,
     TurnOutcome,
@@ -611,8 +611,8 @@ async fn another_client_learns_each_committed_response_on_both_transports() {
 #[tokio::test]
 async fn a_policy_change_ends_pending_questions_for_every_attached_client() {
     for ws in [false, true] {
-        let (server, session, mut owner, calls) =
-            setup_version(ws, Arc::new(Probe::default()), 3).await;
+        let probe = Arc::new(Probe::default());
+        let (server, session, mut owner, calls) = setup_version(ws, probe.clone(), 3).await;
         let mut observer = Client::new_version(&server, !ws, 3).await;
         assert_ok(
             &observer
@@ -649,6 +649,37 @@ async fn a_policy_change_ends_pending_questions_for_every_attached_client() {
                     .all(|notice| notice["method"] != "approval.resolved")
             );
         }
+        let rejected = owner
+            .rpc(
+                "approval.respond",
+                json!({"sessionId":session.id(),"branchId":"main","requestId":request_id,"decision":"deny"}),
+            )
+            .await;
+        assert_eq!(rejected["error"]["code"], -32602);
+        let timeline = probe.timeline.lock().unwrap().clone().unwrap();
+        timeline
+            .append(
+                EventKind::ApprovalRespond(dim_agent_types::ApprovalRespondData {
+                    approval_id: request_id.as_str().unwrap().into(),
+                    decision: ApprovalDecision::Deny,
+                })
+                .into(),
+            )
+            .unwrap();
+        for client in [&mut owner, &mut observer] {
+            let losing = client.notice("approval.resolved").await;
+            assert_eq!(losing["params"]["requestId"], request_id);
+            assert_eq!(losing["params"]["decision"], "deny");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            session
+                .service::<Approval>("main")
+                .unwrap()
+                .respond(request_id.as_str().unwrap(), ApprovalDecision::Allow)
+                .await,
+            Err(dim_agent_capabilities::approval::ApprovalRespondError::Unknown)
+        );
         let mut attached = Client::new_version(&server, ws, 3).await;
         assert_ok(
             &attached
@@ -768,15 +799,16 @@ async fn v2_clients_receive_no_approval_resolved_on_both_transports() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_admission_waits_for_its_terminal_to_be_stored() {
-    for deny_during_publication in [false, true] {
+    for (deny_during_publication, close_store) in [(false, false), (true, false), (false, true)] {
         let dir =
             std::env::temp_dir().join(format!("dim-approval-publication-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("db.sqlite");
         let db = dim_app_server::storage::SqliteStorage::open(path.clone()).unwrap();
-        let store = dim_app_server::storage::SqliteTimelineStore::new(db);
+        let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
         let probe = Arc::new(Probe::default());
-        let (server, session, mut client, _) = setup_store(false, probe.clone(), 3, store).await;
+        let (server, session, mut client, _) =
+            setup_store(false, probe.clone(), 3, store.clone()).await;
         let approval = session.service::<Approval>("main").unwrap();
         let admission = tokio::spawn(async move {
             approval
@@ -813,6 +845,55 @@ async fn automatic_admission_waits_for_its_terminal_to_be_stored() {
         tokio::time::timeout(Duration::from_secs(5), probe.cancel_entered.notified())
             .await
             .unwrap();
+        if close_store {
+            store.close().await.unwrap();
+            release.send(()).unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(5), admission)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("Timeline storage is closed"),
+                "{error}"
+            );
+            let timeline = probe.timeline.lock().unwrap().clone().unwrap();
+            assert!(timeline.failure().is_some());
+            assert!(
+                timeline
+                    .append(
+                        EventKind::ApprovalCancelled(dim_agent_types::ApprovalCancelledData {
+                            approval_id: request["params"]["requestId"].as_str().unwrap().into(),
+                            reason: error.to_string(),
+                        })
+                        .into()
+                    )
+                    .is_err(),
+                "a failed Timeline cannot record a replacement terminal"
+            );
+            let key = TimelineKey {
+                session_id: session.id().into(),
+                branch_id: "main".into(),
+            };
+            let head = store.head(&key).await.unwrap();
+            let events = store.read(&key, 1..=head).await.unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|record| matches!(record.event.kind, EventKind::ApprovalRequest(_)))
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|record| matches!(record.event.kind, EventKind::ApprovalCancelled(_)))
+            );
+            assert!(session.close().await.is_err());
+            server.shutdown();
+            let _ = server.join().await;
+            db.close().await.unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+            continue;
+        }
         let lock = rusqlite::Connection::open(&path).unwrap();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
         release.send(()).unwrap();
@@ -874,6 +955,8 @@ async fn automatic_admission_waits_for_its_terminal_to_be_stored() {
         server.shutdown();
         server.join().await.unwrap();
         drop(lock);
+        store.close().await.unwrap();
+        db.close().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
