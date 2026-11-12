@@ -2912,7 +2912,7 @@ impl App {
                     p.handle_key(key, self.snapshot.as_ref().expect("attached queue"))
                 }
                 Prompt::Export(p) => match p.handle_key(key) {
-                    ListEvent::Pick(format) => Effect::Export(if format == "markdown" {
+                    ListEvent::Pick { id: format, .. } => Effect::Export(if format == "markdown" {
                         crate::export::Format::Markdown
                     } else {
                         crate::export::Format::Json

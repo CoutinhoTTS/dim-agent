@@ -74,7 +74,7 @@ impl ApprovalsPanel {
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
         match self.list.handle_key(key) {
             Event::Close => Effect::Close,
-            Event::Pick(id) => match id.as_str() {
+            Event::Pick { id, .. } => match id.as_str() {
                 "rules" => Effect::OpenArea {
                     area: Area::Permissions,
                     note: None,

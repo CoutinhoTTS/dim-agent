@@ -337,7 +337,7 @@ impl ModelsPanel {
                 self.open(View::Policy, Some(FIXED));
                 Effect::None
             }
-            (View::Models, Event::Pick(id)) if id.starts_with(EDIT_MODELS) => {
+            (View::Models, Event::Pick { id, .. }) if id.starts_with(EDIT_MODELS) => {
                 match id
                     .strip_prefix(EDIT_MODELS)
                     .and_then(|rest| rest.strip_prefix("::"))
@@ -351,19 +351,19 @@ impl ModelsPanel {
                     None => Effect::None,
                 }
             }
-            (View::Models, Event::Pick(id)) if id == SUBAGENT_MODELS => {
+            (View::Models, Event::Pick { id, .. }) if id == SUBAGENT_MODELS => {
                 self.open(View::Policy, None);
                 Effect::None
             }
-            (View::Policy, Event::Pick(id)) if id == FIXED => {
+            (View::Policy, Event::Pick { id, .. }) if id == FIXED => {
                 self.open(View::Fixed, None);
                 Effect::None
             }
-            (View::Policy, Event::Pick(id)) if id == INHERIT => {
+            (View::Policy, Event::Pick { id, .. }) if id == INHERIT => {
                 self.choose(SubagentModelPolicy::Inherit)
             }
-            (View::Policy, Event::Pick(_)) => self.choose(SubagentModelPolicy::Agent),
-            (view, Event::Pick(id)) => match id.split_once("::") {
+            (View::Policy, Event::Pick { .. }) => self.choose(SubagentModelPolicy::Agent),
+            (view, Event::Pick { id, label }) => match id.split_once("::") {
                 Some((provider, model)) if view == View::Fixed => {
                     self.choose(SubagentModelPolicy::Fixed {
                         model: ModelId {
@@ -376,14 +376,7 @@ impl ModelsPanel {
                     provider_id: provider.to_owned(),
                     model_id: model.to_owned(),
                     reasoning_effort: self.chosen.get(&id).cloned(),
-                    // `Event::Pick` is built only from the selected row, so
-                    // the arm's row is the one the operator picked.
-                    label: self
-                        .list
-                        .selected_item()
-                        .expect("a pick names the selected row")
-                        .label
-                        .clone(),
+                    label,
                 },
                 None => Effect::None,
             },
@@ -806,6 +799,17 @@ mod tests {
         assert_eq!(panel.handle_key(key_of(KeyCode::Left)), Effect::None);
         assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
         assert!(drawn(&panel).contains("> f"));
+    }
+
+    /// Enter carries the row's drawn text to the confirmation, so the notice
+    /// names the model the way the row does rather than by its ids.
+    #[test]
+    fn enter_carries_the_rows_label() {
+        let mut panel = panel();
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel { ref label, .. } if label == "Dim OAuth / flash"
+        ));
     }
 
     /// A re-read replaces the list while the picker is open; the effort the
