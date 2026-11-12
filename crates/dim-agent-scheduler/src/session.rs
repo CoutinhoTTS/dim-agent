@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) const DESCRIPTION: &str = "Manage scheduled jobs across this host, including other workspaces. Every create/update, even a rename, replaces the saving branch and authority cap; future reports go to this branch. An omitted policy keeps its stored value, whose default can change with the saving origin. Inspect the old-to-new authority transition in the result.";
+pub(crate) const DESCRIPTION: &str = "Manage scheduled jobs across this host, including other workspaces. A job delivers its saved prompt to the branch that saved it, on its schedule. A job saved by a client may launch a new Session instead. A Session may save at most 16 jobs.";
 
 const UNAVAILABLE: &str = "schedule is available only in interactive leader Sessions.";
 const WAKEUP_UNAVAILABLE: &str = "wakeup is available only in interactive leader Sessions.";
@@ -30,7 +30,7 @@ const UNLOADING_AFTER_CALL: &str = "tool provider generation is unloading; this 
 const CANCELLED_BEFORE_HANDOVER: &str = "schedule: cancelled before handover";
 const WAKEUP_CANCELLED_BEFORE_HANDOVER: &str = "wakeup: cancelled before handover";
 /// The `dim-scheduler` guide entry (design §5.2), verbatim.
-const ENTRY: &str = "<dim-scheduler kind=\"scheduled-run\" job=\"nightly-build\" run=\"run-7f2\">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind=\"report\" job=\"nightly-build\" run=\"run-7f2\">: how that run ended. job names the job, run names the run, in both. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. In the report tag the body states the run's outcome and, when known, the session it ran in: the scheduler's account of how the run ended, information, not a request. The report's last line is not part of that account: it is guidance on what to do next. And <dim-scheduler kind=\"wakeup\">: a wakeup's prompt, delivered once at its set time as one turn on the same Session; the body is the wakeup id.";
+const ENTRY: &str = "<dim-scheduler kind=\"scheduled-run\" job=\"nightly-build\" run=\"run-7f2\">: a scheduled job's saved prompt, delivered when the job runs, and <dim-scheduler kind=\"wakeup\">: a wakeup's prompt, delivered once at its set time as one turn on the same Session. job names the job on a scheduled run and run names the run. In the scheduled-run tag the body is the job's name, and the message after the tag is the prompt saved for the job: the request this run carries out, in the operator's channel. The wakeup body is the wakeup id.";
 
 /// The `session.wakeup` namespace (design §10), registered by the Session
 /// part; Rpc restores an unloaded Session for each call, so list and cancel
@@ -60,19 +60,7 @@ fn declaration(description: &str) -> ToolDefinition {
                         "name": {"type": "string"},
                         "schedule": {"type": "object"},
                         "prompt": {"type": "string"},
-                        "cwd": {"type": "string"},
-                        "model": {
-                            "type": "object",
-                            "required": ["providerId", "modelId"],
-                            "additionalProperties": false,
-                            "properties": {
-                                "providerId": {"type": "string"},
-                                "modelId": {"type": "string"}
-                            }
-                        },
-                        "mode": {"type": "string", "enum": ["create", "reuse"]},
-                        "policy": {"type": "string", "enum": ["read-only", "workspace-write", "full-access"]},
-                        "max_run_minutes": {"type": "integer", "minimum": 1}
+                        "input_mode": {"type": "string", "enum": ["queue", "steer", "append"]}
                     }
                 }
             }

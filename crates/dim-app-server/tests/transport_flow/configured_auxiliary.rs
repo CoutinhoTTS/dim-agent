@@ -117,6 +117,7 @@ async fn launch_configured_with(
         &mut builder,
         ModelProviderPlugin::process,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: directory.join("outputs"),
         },
         BranchToolConfig::default(),

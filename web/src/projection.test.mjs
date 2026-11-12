@@ -51,6 +51,43 @@ test("a user message carries the cut a child line opens at", () => {
   assert.equal(projection.rows[1].failed, true)
 })
 
+test("a thought settles with the span of its block, not the time to its first event", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  projection.apply(event(2, { kind: "thinking", requestId: "r1", delta: "weigh" }))
+  assert.equal(projection.rows[0].kind, "thinking")
+  assert.equal(projection.rows[0].streaming, true)
+  assert.equal(projection.rows[0].elapsedMs, undefined)
+
+  projection.apply(event(5, { kind: "text", requestId: "r1", delta: "answer" }))
+  const thought = projection.rows[0]
+  assert.equal(thought.streaming, false)
+  assert.equal(thought.elapsedMs, 3)
+})
+
+test("a thought opened only by progress settles from its producer start", () => {
+  const projection = new Projection()
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1_002 })
+  assert.equal(projection.rows[0].kind, "thinking")
+  assert.equal(projection.rows[0].text, "weigh")
+  assert.equal(projection.rows[0].elapsedMs, undefined)
+
+  projection.apply(event(5, { kind: "model-end", requestId: "r1" }))
+  assert.equal(projection.rows[0].streaming, false)
+  assert.equal(projection.rows[0].elapsedMs, 3)
+})
+
+test("a tool start settles a thought before its arguments arrive", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "thinking", requestId: "r1", delta: "weigh" }))
+  projection.apply(event(3, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "echo" }))
+  assert.equal(projection.rows[0].streaming, false)
+  assert.equal(projection.rows[0].elapsedMs, 1)
+
+  projection.apply(event(50, { kind: "tool-use", requestId: "r1", callId: "call", name: "echo", input: {} }))
+  assert.equal(projection.rows[0].elapsedMs, 1, "the completed call does not move the settled span")
+})
+
 test("branch messages, ends and the last turn end become rows", () => {
   const projection = new Projection()
   projection.apply(event(1, {
@@ -95,6 +132,21 @@ test("a user row carries the Skills its message loaded", () => {
     key: "user-5",
     text: "check the build",
     skills: ["checkin"],
+    at: 1_005,
+    sequence: 5,
+    cut: 4,
+  }])
+})
+
+test("a hook-bearing user row carries the number of hook contexts", () => {
+  const projection = new Projection()
+  projection.apply(event(5, { kind: "input", text: "check the build", skills: ["checkin"], hooks: 2, blocks: [] }))
+  assert.deepEqual(projection.rows, [{
+    kind: "user",
+    key: "user-5",
+    text: "check the build",
+    skills: ["checkin"],
+    hooks: 2,
     at: 1_005,
     sequence: 5,
     cut: 4,

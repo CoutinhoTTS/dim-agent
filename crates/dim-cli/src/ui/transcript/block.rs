@@ -36,6 +36,12 @@ pub enum Block {
     /// A shell-mode run: recorded (`!`) from the transcript, private (`!!`)
     /// from the terminal alone.
     Shell(ShellRun),
+    /// Context a hook injected after the operator's words: one muted row, and
+    /// its body when the detail setting is expanded.
+    HookContext {
+        body: String,
+        expanded: bool,
+    },
     Assistant(String),
     /// A settled thought: one summary row, or the whole text when expanded.
     Thinking {
@@ -49,7 +55,9 @@ pub enum Block {
     /// summary sits behind the disclosure.
     Compaction {
         state: CompactionState,
-        text: String,
+        text: std::sync::Arc<str>,
+        detail: Option<crate::model::view::CompactionDetail>,
+        target: Option<crate::model::view::CompactionTarget>,
         insufficient: Vec<CompactionPartSize>,
         expanded: bool,
     },
@@ -58,6 +66,7 @@ pub enum Block {
     Error {
         text: String,
         details: Option<crate::model::view::FailureDetail>,
+        reportable: bool,
         expanded: bool,
     },
     Status {
@@ -109,6 +118,10 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
             },
             Block::Shell,
         ),
+        RowKind::HookContext => Block::HookContext {
+            body: row.text.clone(),
+            expanded: detail == Detail::Expanded,
+        },
         RowKind::AssistantMessage => Block::Assistant(row.text.clone()),
         RowKind::Thinking => Block::Thinking {
             text: row.text.clone(),
@@ -120,6 +133,8 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
             Some(compaction) => Block::Compaction {
                 state: compaction.state,
                 text: compaction.text.clone(),
+                detail: compaction.detail.clone(),
+                target: None,
                 insufficient: compaction.insufficient.clone(),
                 expanded: detail == Detail::Expanded,
             },
@@ -131,6 +146,7 @@ pub fn project_row(rows: &[Arc<ViewRow>], index: usize, detail: Detail) -> Block
         RowKind::Error => Block::Error {
             text: row.text.clone(),
             details: row.failure.clone(),
+            reportable: row.reportable,
             expanded: detail != Detail::Collapsed,
         },
         RowKind::StreamingAssistant | RowKind::Status | RowKind::Other => Block::Status {
@@ -185,6 +201,7 @@ mod tests {
     fn row(kind: RowKind, text: &str) -> ViewRow {
         ViewRow {
             failure: None,
+            reportable: false,
             row_id: "r".into(),
             kind,
             text: text.into(),
@@ -192,9 +209,12 @@ mod tests {
             streaming: false,
             elapsed_ms: None,
             tone: None,
+            call_id: None,
+            tool_lookup_done: false,
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,
@@ -204,6 +224,7 @@ mod tests {
             member: None,
             cut: None,
             line: None,
+            parent_row: None,
             compaction: None,
         }
     }
@@ -712,6 +733,7 @@ mod tests {
         ] {
             let mut completed = row(RowKind::Compaction, "");
             completed.compaction = Some(CompactionView {
+                detail: None,
                 state: CompactionState::Completed,
                 text: text.into(),
                 insufficient: Vec::new(),
@@ -754,8 +776,9 @@ mod tests {
                 };
                 let mut completed = row(RowKind::Compaction, "");
                 completed.compaction = Some(CompactionView {
+                    detail: None,
                     state: CompactionState::Completed,
-                    text: content,
+                    text: content.into(),
                     insufficient: Vec::new(),
                 });
                 let rendered = compaction_rows(&shared(&[completed]), Detail::Expanded);
@@ -790,5 +813,24 @@ mod tests {
                 out
             })
             .collect()
+    }
+    #[test]
+    fn a_program_groups_its_child_calls_without_drawing_the_code() {
+        let mut program = call(
+            "codemode",
+            json!({"code": "const value = await tools.call(\"read\", {path: \"a.rs\"}); return value;"}),
+            Some("ok"),
+        );
+        program.call_id = Some("c1".into());
+        program.tool_lookup_done = true;
+        let mut child = call("read", json!({"path": "a.rs"}), Some("line"));
+        child.call_id = Some("c2".into());
+        child.parent_call_id = Some("c1".into());
+        let rows = [program, child];
+        let collapsed = drawn(&rows, Detail::Collapsed, 80);
+        assert_eq!(collapsed, ["✓ Ran code · 1 tool call ▸"]);
+        let expanded = drawn(&rows, Detail::Expanded, 80).join("\n");
+        assert!(expanded.contains("a.rs"), "{expanded}");
+        assert!(!expanded.contains("tools.call"), "{expanded}");
     }
 }

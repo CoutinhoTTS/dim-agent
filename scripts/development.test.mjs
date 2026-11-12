@@ -25,31 +25,30 @@ test('compiled Rust targets forward arguments, failures and reject missing or am
   }
 });
 
-test('compiled workspace targets overlap in pairs and finish the queue after a failure', (t) => {
+test('two compiled workspace targets overlap and finish the queue after a failure', (t) => {
   const temporary = mkdtempSync(path.join(os.tmpdir(), 'dim parallel artifacts '));
   t.after(() => rmSync(temporary, { recursive: true, force: true }));
   const artifacts = path.join(temporary, 'artifacts.jsonl');
-  const records = ['first', 'second', 'third'].map(name => {
+  const initial = ['first', 'second'];
+  const records = [...initial, 'queued'].map(name => {
     const directory = path.join(temporary, name);
     mkdirSync(directory);
     return { reason: 'compiler-artifact', profile: { test: true }, target: { name }, manifest_path: path.join(directory, 'Cargo.toml'), executable: process.execPath };
   });
   writeFileSync(artifacts, records.map(record => JSON.stringify(record)).join('\n'));
   const fixture = `
-    const assert = require('node:assert/strict');
     const fs = require('node:fs');
     const path = require('node:path');
     const name = path.basename(process.cwd());
     const root = path.dirname(process.cwd());
     fs.writeFileSync('started', '');
-    if (name === 'third') {
-      assert(fs.existsSync(path.join(root, 'first/done')) || fs.existsSync(path.join(root, 'second/done')));
+    const initial = ${JSON.stringify(initial)};
+    if (name === 'queued') {
       fs.writeFileSync('done', '');
     } else {
-      const other = name === 'first' ? 'second' : 'first';
       const until = Date.now() + 5000;
       const timer = setInterval(() => {
-        if (fs.existsSync(path.join(root, other, 'started'))) {
+        if (initial.every(target => fs.existsSync(path.join(root, target, 'started')))) {
           clearInterval(timer);
           fs.writeFileSync('done', '');
           process.exitCode = name === 'first' ? 7 : 0;
@@ -62,6 +61,7 @@ test('compiled workspace targets overlap in pairs and finish the queue after a f
   `;
   const result = spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, '--workspace', '--eval', fixture], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(result.status, 7, result.stderr);
+  assert.match(result.stderr, /\[test\] END .*\n\[test\] START queued /);
   for (const record of records) {
     assert(existsSync(path.join(path.dirname(record.manifest_path), 'done')), result.stdout);
     assert.match(result.stderr, new RegExp(`START ${record.target.name}`));
@@ -278,11 +278,11 @@ test('a run stages the default plugins and updates them only when needed', { ski
   }
   assert.equal(existsSync(path.join(checkout.staged, 'plugins/workflow')), false);
   assert.deepEqual(checkout.installs().map(installName).sort(), ['goal', 'session-title']);
-  assert.match(first.stderr, /Updated 2 default plugins \(npm ci: goal, session-title\)\./);
+  assert.match(first.stderr, /Updated 2 plugins \(npm ci: goal, session-title\)\./);
   const second = checkout.run();
   assert.equal(second.status, 0, second.stderr);
   assert.equal(checkout.installs().length, 2);
-  assert.match(second.stderr, /Updated 2 default plugins \(npm ci: none\)\./);
+  assert.match(second.stderr, /Updated 2 plugins \(npm ci: none\)\./);
   writeFileSync(path.join(checkout.repo, 'runtime/plugins/goal/index.ts'), "export const name = 'goal edited';\n");
   const edited = checkout.run();
   assert.equal(edited.status, 0, edited.stderr);
@@ -293,7 +293,7 @@ test('a run stages the default plugins and updates them only when needed', { ski
   assert.equal(locked.status, 0, locked.stderr);
   assert.equal(checkout.installs().length, 3);
   assert.equal(installName(checkout.installs().at(-1)), 'goal');
-  assert.match(locked.stderr, /Updated 2 default plugins \(npm ci: goal\)\./);
+  assert.match(locked.stderr, /Updated 2 plugins \(npm ci: goal\)\./);
 });
 
 test('a developer-selected default plugin file is used without staging', { skip: process.platform === 'win32' }, (t) => {

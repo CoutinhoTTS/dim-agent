@@ -9,7 +9,7 @@ use dim_agent_capabilities::{
     history::{context_messages, project_context_history},
     summary_strategy::{
         LengthSentence, ProductSummaryStrategyConfig, ProductSummaryStrategyPlugin,
-        SummaryReasoning, TargetRule,
+        SummaryPromptSettings, SummaryPromptSettingsHost, SummaryReasoning, TargetRule,
     },
 };
 use dim_agent_runtime::testing::chain_events;
@@ -42,7 +42,10 @@ fn reply_usage() -> Usage {
 /// The messages a preparation at the head would start from.
 async fn projected(session: &dim_agent_runtime::Session, branch: &str) -> Vec<Message> {
     let through = session.sequence(branch).unwrap();
-    let context = read_context_in(session, branch, through).await.unwrap();
+    let context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .context_in(session, branch, through)
+        .await
+        .unwrap();
     let history = project_context_history(&context).unwrap();
     context_messages(&context, &history)
         .into_iter()
@@ -219,6 +222,124 @@ fn cjk(count: usize) -> String {
     "压缩上下文".chars().cycle().take(count).collect()
 }
 
+#[test]
+fn product_contributions_preserve_the_complete_request_counting_contract() {
+    let mut request = ModelRequest::new("fixture", "model", Vec::new());
+    let model = dim_agent_capabilities::context_model::window_facts(4_000, 100., &request);
+    let counter = model.contribution_counter().unwrap();
+    assert_eq!(counter.algorithm(), "dim/window-facts/v1");
+    assert_eq!(
+        counter.fixed(None, None),
+        ContextContribution {
+            serialized_bytes: 8,
+            images: 0,
+        }
+    );
+    assert_eq!(model.count_tokens(&request), 2.);
+    assert_eq!(
+        Context::default()
+            .contribution_counter()
+            .unwrap()
+            .algorithm(),
+        "test/message-array/v1"
+    );
+
+    let tool = serde_json::from_value::<ToolDefinition>(serde_json::json!({
+        "name": "read",
+        "description": "Read 中\n\"text\"",
+        "inputSchema": {"type": "object"},
+        "source": "builtin"
+    }))
+    .unwrap();
+    request.system = Some(Arc::new(SystemPrompt::Text("system 中\n\"".into())));
+    request.tools = Some(Arc::new(vec![tool]));
+    let image = ImageSource {
+        source_type: ImageSourceType::Base64,
+        media_type: "image/png".into(),
+        data: Some("payload".repeat(10_000)),
+        url: None,
+    };
+    let plain = Message::text(Role::User, "中\n\"x");
+    assert_eq!(
+        counter.message(&plain),
+        ContextContribution {
+            serialized_bytes: r#"{"role":"user","content":"中\n\"x"}"#.len() as u64,
+            images: 0,
+        }
+    );
+    let parts: Vec<MessagePart> = serde_json::from_value(serde_json::json!([
+        {"type":"text", "text":"line\n中"},
+        {"type":"thinking", "thinking":"thought"},
+        {"type":"tool_use", "id":"call", "name":"read", "input":{"path":"中"}},
+        {"type":"tool_result", "tool_use_id":"call", "content":"中\n\"x",
+         "structuredContent":{"counted":"text-content branch"}, "is_error":true}
+    ]))
+    .unwrap();
+    let ordinary_bytes = parts
+        .iter()
+        .map(|part| serde_json::to_vec(part).unwrap().len() as u64)
+        .sum::<u64>();
+    let mut multipart = parts;
+    multipart.push(MessagePart::Image {
+        source: image.clone(),
+    });
+    multipart.push(MessagePart::ToolResult {
+        tool_use_id: "not-counted-for-blocks".repeat(100),
+        content: ToolContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "中\n\"x".into(),
+            },
+            ContentBlock::Image { source: image },
+        ]),
+        structured_content: Some(
+            serde_json::from_value(serde_json::json!({
+                "notCounted": "large".repeat(1_000)
+            }))
+            .unwrap(),
+        ),
+        is_error: Some(true),
+    });
+    let multipart = Message {
+        role: Role::ToolResult,
+        content: MessageContent::Parts(multipart),
+    };
+    let expected = ContextContribution {
+        serialized_bytes: ordinary_bytes + r#"{"type":"text","text":"中\n\"x"}"#.len() as u64,
+        images: 2,
+    };
+    assert_eq!(counter.message(&multipart), expected);
+    let mut total = counter.fixed(
+        request.system.as_deref(),
+        request.tools.as_deref().map(Vec::as_slice),
+    );
+    assert_eq!(
+        total.serialized_bytes,
+        serde_json::to_vec(&request.system).unwrap().len() as u64
+            + serde_json::to_vec(&request.tools).unwrap().len() as u64
+    );
+    for message in [&plain, &multipart] {
+        let contribution = counter.message(message);
+        total.serialized_bytes += contribution.serialized_bytes;
+        total.images += contribution.images;
+    }
+    request.messages = vec![Arc::new(plain), Arc::new(multipart)];
+    assert_eq!(counter.estimate(total), model.count_tokens(&request));
+    assert_eq!(
+        counter.estimate(total),
+        total.serialized_bytes as f64 / 4. + 3_200.
+    );
+    let stored = serde_json::to_value(total).unwrap();
+    assert_eq!(
+        stored,
+        serde_json::json!({"serialized_bytes":total.serialized_bytes,"images":2})
+    );
+    assert_eq!(
+        serde_json::from_value::<ContextContribution>(stored).unwrap(),
+        total
+    );
+    assert_eq!(counter.fixed(None, Some(&[])).serialized_bytes, 6);
+}
+
 /// A Session on the product window facts and summary strategy, whose model
 /// host is `driver`.
 async fn product_session(
@@ -245,6 +366,7 @@ async fn product_session_with(
         None,
         Arc::new(Local),
         None,
+        None,
     )
     .await
 }
@@ -260,8 +382,17 @@ async fn product_session_on(
     stored_config: Option<ModelConfig>,
     connection: Arc<dyn ResolveModelConnection>,
     reasoning: Option<serde_json::Value>,
+    settings: Option<Arc<dyn SummaryPromptSettings>>,
 ) -> (MinimalHost, dim_agent_runtime::Session) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    if let Some(settings) = settings {
+        dim_agent_runtime::names::register::<SummaryPromptSettingsHost>(
+            builder.catalog_mut(),
+            None,
+        );
+        let host: Arc<dyn SummaryPromptSettings> = settings;
+        builder.process_value(Arc::new(SummaryPromptSettingsHost(host)));
+    }
     builder
         .session_value(Arc::new(ToolHost(tools)))
         .session_value(Arc::new(HistoryRenderer::default()))
@@ -438,6 +569,54 @@ async fn every_summary_request_uses_the_configured_prompt_and_fits_the_window() 
         assert!(
             tokens <= (WINDOW - output) as f64,
             "summary request of {tokens} tokens exceeds the input budget"
+        );
+    }
+    agent.close().await.unwrap();
+}
+
+/// A host summary-prompt override fixed at construction.
+struct FixedSummary(&'static str);
+impl SummaryPromptSettings for FixedSummary {
+    fn system_prompt(&self, _: CancellationToken) -> HostFuture<'_, Option<Arc<str>>> {
+        Box::pin(async move { Ok(Some(self.0.into())) })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_override_supplies_the_summary_prompt() {
+    let prompt = "CUSTOM-SUMMARY: summarize the transcript.";
+    let recorder = Arc::new(Recorder {
+        prefix: prompt.into(),
+        ..Default::default()
+    });
+    let (agent, session) = product_session_on(
+        WINDOW,
+        Arc::new(MockTools),
+        recorder.clone(),
+        OUTPUT,
+        ProductSummaryStrategyConfig::default(),
+        SessionConfig::default(),
+        None,
+        Arc::new(Local),
+        None,
+        Some(Arc::new(FixedSummary(prompt))),
+    )
+    .await;
+    session
+        .submit(cjk(1_500), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    compact_now(&session).await;
+    let requests = recorder.requests.lock().unwrap().clone();
+    assert!(!requests.is_empty(), "the compaction summarized");
+    for request in &requests {
+        let Some(SystemPrompt::Text(system)) = request.system.as_deref() else {
+            panic!("a summarizer request has no system prompt")
+        };
+        assert_eq!(
+            system, prompt,
+            "a summarizer request does not carry the host's text"
         );
     }
     agent.close().await.unwrap();
@@ -1092,6 +1271,7 @@ async fn summary_reasoning_maps_off_and_falls_back_to_inherit() {
             None,
             Arc::new(Compatible),
             Some(declared),
+            None,
         )
         .await;
         for text in [cjk(3_000), cjk(1_800)] {
@@ -1159,6 +1339,7 @@ async fn startup_summaries_keep_selection_and_strategy_reasoning_without_narrowi
                 "supported": true,
                 "off": {"kind": "thinking_type", "value": "disabled"}
             })),
+            None,
         )
         .await;
         let adopted = session
@@ -1323,6 +1504,7 @@ async fn the_previous_digest_never_reaches_the_summarizer() {
         None,
         Arc::new(Local),
         None,
+        None,
     )
     .await;
     // The first turn declares an effect; the second is the one a manual step
@@ -1416,6 +1598,7 @@ async fn an_output_limit_at_or_above_the_window_still_leaves_an_input_budget() {
             None,
             Arc::new(Local),
             None,
+            None,
         )
         .await;
         session
@@ -1483,6 +1666,7 @@ async fn a_stored_allowance_from_before_the_rule_is_repaired_at_the_request() {
         SessionConfig::default(),
         Some(stored.clone()),
         Arc::new(Local),
+        None,
         None,
     )
     .await;

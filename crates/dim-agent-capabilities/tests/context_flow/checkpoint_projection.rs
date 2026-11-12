@@ -18,6 +18,7 @@ fn fixed(events: Vec<EventKind>) -> ContextHistory {
                 sequence: index as u64 + 1,
                 create_at: index as u64,
                 tags: None,
+                parent_call_id: None,
                 kind,
             })
         })
@@ -253,7 +254,10 @@ async fn a_streamed_context_from_a_snapshot_matches_the_full_render() {
         )
         .unwrap();
     let through = timeline.sequence();
-    let context = replay_context(&timeline, through).await.unwrap();
+    let context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .replay_context(&timeline, through)
+        .await
+        .unwrap();
     let renderer = HistoryRenderer::default();
     let snapshot = renderer.snapshot(&context, &cut.id, &consumed).unwrap();
     timeline.save_snapshot(snapshot).await.unwrap();
@@ -357,8 +361,14 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         )
         .unwrap();
     let through = timeline.sequence();
-    let checkpoint =
-        projection_checkpoint(&replay_context(&timeline, through).await.unwrap(), &cut.id).unwrap();
+    let checkpoint = projection_checkpoint(
+        &dim_agent_capabilities::history::HistoryRenderer::default()
+            .replay_context(&timeline, through)
+            .await
+            .unwrap(),
+        &cut.id,
+    )
+    .unwrap();
     let fact = timeline
         .append(completed(&cut.id, "authoritative", through, vec![]).into())
         .unwrap();
@@ -419,7 +429,10 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         .save_snapshot(
             renderer
                 .snapshot(
-                    &replay_context(&timeline, through).await.unwrap(),
+                    &dim_agent_capabilities::history::HistoryRenderer::default()
+                        .replay_context(&timeline, through)
+                        .await
+                        .unwrap(),
                     &cut.id,
                     &fact,
                 )
@@ -437,7 +450,10 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
         (renderer.render)(&accelerated).unwrap(),
         (renderer.render)(&replay).unwrap()
     );
-    let full = replay_context(&timeline, fact.sequence).await.unwrap();
+    let full = dim_agent_capabilities::history::HistoryRenderer::default()
+        .replay_context(&timeline, fact.sequence)
+        .await
+        .unwrap();
     assert!(full.checkpoint.is_none());
     assert_eq!(full.events, replay.events);
     assert_eq!(full.positions, replay.positions);
@@ -445,7 +461,10 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     let renderer = HistoryRenderer::default();
     let saved = renderer
         .snapshot(
-            &replay_context(&timeline, through).await.unwrap(),
+            &dim_agent_capabilities::history::HistoryRenderer::default()
+                .replay_context(&timeline, through)
+                .await
+                .unwrap(),
             &cut.id,
             &fact,
         )
@@ -504,7 +523,10 @@ async fn incompatible_snapshot_is_rejected_before_custom_renderer_decoding() {
     fallback(
         renderer
             .snapshot(
-                &replay_context(&timeline, through).await.unwrap(),
+                &dim_agent_capabilities::history::HistoryRenderer::default()
+                    .replay_context(&timeline, through)
+                    .await
+                    .unwrap(),
                 &cut.id,
                 &consumed,
             )
@@ -580,13 +602,19 @@ async fn a_checkpoint_whose_render_fails_falls_back_to_full_replay() {
         .unwrap();
     let saved = HistoryRenderer::default()
         .snapshot(
-            &replay_context(&timeline, through).await.unwrap(),
+            &dim_agent_capabilities::history::HistoryRenderer::default()
+                .replay_context(&timeline, through)
+                .await
+                .unwrap(),
             &cut.id,
             &fact,
         )
         .unwrap();
     timeline.save_snapshot(saved).await.unwrap();
-    let full = replay_context(&timeline, fact.sequence).await.unwrap();
+    let full = dim_agent_capabilities::history::HistoryRenderer::default()
+        .replay_context(&timeline, fact.sequence)
+        .await
+        .unwrap();
     let (accelerated, _) = HistoryRenderer::default()
         .rendered_context(&timeline, fact.sequence)
         .await
@@ -652,6 +680,7 @@ fn resume(context: &ContextHistory, cut: &str) -> ContextHistory {
             sequence: through + 1,
             create_at: 0,
             tags: None,
+            parent_call_id: None,
             kind: completed(cut, "summary", through, Vec::new()),
         }));
         resumed.positions.push(TimelinePosition {

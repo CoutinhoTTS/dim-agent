@@ -1,25 +1,34 @@
 //! Typed wire contracts matching agent-v4 at commit 8565538d5ff70a63bbf10cb9ad9198107244bac0.
 
+mod activity;
 mod checkpoint;
 mod content;
 mod events;
+mod goal;
 pub mod grant;
+mod input;
+pub mod markup;
 mod member_approval;
 mod model;
 mod permission;
 mod profile;
 mod prompt;
+mod question;
 mod tool;
 pub mod v1;
 
+pub use activity::*;
 pub use checkpoint::*;
 pub use content::*;
 pub use events::*;
+pub use goal::*;
+pub use input::*;
 pub use member_approval::*;
 pub use model::*;
 pub use permission::*;
 pub use profile::*;
 pub use prompt::*;
+pub use question::*;
 pub use tool::*;
 
 /// Open JSON object fields at external extension boundaries.

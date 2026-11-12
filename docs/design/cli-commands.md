@@ -43,7 +43,7 @@ for that group only. A member's summary row still opens its conversation.
 only expanded shows a compaction's summary body. Thinking details controls both streaming and completed thoughts,
 including the line side panel. Changing either setting updates its retained
 history and live content without changing the other setting. Scrollback already
-written to the terminal remains append-only; fullscreen redraws retained history.
+written to the terminal remains append-only; fullscreen redraws retained history. A hook context's body follows the same rule: collapsed and summary keep it closed, only expanded opens it, and a click on the row toggles that row alone.
 
 ## Command menu
 
@@ -53,18 +53,18 @@ order, not alphabetically or by recent use. The menu draws no category column:
 ```text
 /new /resume /models /compact /usage
 /effort /fast /agent /permissions /settings
-/branch /fork /lines /timeline /queue /export /goal
+/branch /fork /lines /timeline /queue /export /earlier /goal
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
-/tools /tui /theme /language /keys /exit
+/tools /tui /theme /language /keys /report /exit
 ```
 
 `/fast` is listed only when the model advertises service tiers.
 Search relevance takes priority; equally ranked matches keep this order.
 The order is independent of the interface language. Opening `/` selects `/new`;
 `/exit` is last in the unfiltered command list.
-Exit requires its exact name or alias before dispatch: choosing an
+Report and exit require their exact name or alias before dispatch: choosing an
 incomplete match fills the command name and keeps the composer open. Exact typed
 commands, including hidden commands, retain their own dispatch behavior.
 Menu selection can still complete rather than dispatch an exact name: commands
@@ -170,8 +170,10 @@ v0.166.0). `Enter` submits when no run is in progress.
 
 ```text
 key                 run idle                     run in progress
-Enter               submit                       queue the draft; empty draft:
-                                                 steer the oldest queued message
+Enter               submit; no draft:            queue the draft; empty draft:
+                    /tasks while the task       steer the oldest queued message;
+                    line shows                  nothing queued: /tasks while the
+                                                task line shows
 Tab                 pick an earlier message      pick an earlier message
                     (fullscreen)                 (fullscreen)
 Shift+Left          —                            empty draft: recall the newest held
@@ -183,6 +185,12 @@ Ctrl+S              —                            draft not empty: steer the dr
 Up / Down           input history                input history
 Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
 ```
+
+Enter on an empty composer opens `/tasks` only after the earlier branches have
+had their say: the shell-run guard in either mode, then the steer of the oldest
+queued message, and only with nothing held. The task line must show, as it does
+while a task runs or an ended one still fades; with nothing in the background
+the key submits nothing and opens nothing.
 
 - A queued message runs after the current run ends, one message per run. A
   steered message joins the current run at its next turn boundary.
@@ -199,20 +207,38 @@ Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
 
 `/queue` requires an attached Session and opens the shown line's unconsumed
 messages in both terminal modes. Applied-but-unconsumed messages are labelled
-`Incorporating`; unapplied messages are labelled `Held`. Up/Down selects a row,
+`Incorporating` while running and `Unread · waiting for your next message` while
+idle; unapplied messages are labelled `Held`. Up/Down selects a row,
 Enter steers it and `x` deletes it through the existing withdrawal operation.
 Only held messages can change; `notHeld` is a notice, not a failed run. Esc
 closes the panel without interrupting. Committed events refresh the panel,
 and changing attachment or shown line closes it.
+Once a queued message's steer, delete or recall request succeeds, further queue
+actions for that input issue no RPC while its committed events catch up with the
+client projection. The first suppressed action reports that the message has
+already left the queue, unless the acknowledgement already reported `notHeld`;
+later repeats add no notice. Tracking ends when the input leaves the projection
+or the attachment is reset. Actions on inputs the projection no longer holds do
+nothing. A failed request leaves the held input available for retry.
+With an empty draft and no held messages, Enter retains the task-line shortcut
+defined in [Run keys and queue](#run-keys-and-queue).
+
+The panel advertises steer and delete only when the selected message is held.
+An applied-only strip offers `/queue` to view the messages, not held-only edit
+or steer shortcuts. While idle it explains that the next message will carry the
+unread input; it neither discards the input nor starts a run automatically.
 
 Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
 text draft replaces their attachments. Esc interrupt instead withdraws all held
 messages before stopping, restoring their operator content to the draft, oldest
-first, so they cannot start a new run automatically. Appended runtime text blocks
-(after the first block, starting with `<dim-`) are not restored; references such
-as `$skill: name` stay so resubmission loads fresh context. Adjacent operator text
-blocks are separated by newlines. Images and stored paste/file links are kept.
+first, so they cannot start a new run automatically. A text block after the first
+that opens one of the runtime's own markers is context a capability appended
+rather than the operator's words, by the same rule the title and the catalog
+preview read (Hooks A.6.2, Skills §9), so it is not restored; a later operator
+block that only looks like one is. References such as `$skill: name` stay so
+resubmission loads fresh context. Adjacent operator text blocks are separated by
+newlines. Images and stored paste/file links are kept.
 Steering always uses the owner's full held input.
 
 ### Queue strip
@@ -222,7 +248,9 @@ messages in transcript order, then held messages oldest first. Each strip row
 names its state. During a run, `Shift+Left` on an empty draft recalls the newest
 held message subject to the attachment rule above. `Ctrl+S` steers the draft,
 or the oldest held message when the draft is empty; empty Enter does the same.
-Up/Down remain input history outside the panel.
+With nothing held, the empty-composer Enter opens `/tasks` while the task line
+shows, as the [run keys](#run-keys-and-queue) state. Up/Down remain input
+history outside the panel.
 
 ```text
 ┌─ Queue (2) ──────────────────────────────────────────────┐
@@ -233,6 +261,16 @@ Up/Down remain input history outside the panel.
 ```
 
 A queued message the strip does not show adds its count to the hint. The strip shows at most five messages and keeps the height it reached while the queue drains.
+
+After a stop, an applied-only queue remains visible without held-input actions:
+
+```text
+  stopped
+┌─ Queue (1) ──────────────────────────────────────────────┐
+│ › Unread · fix the failing test                          │
+│ /queue view · waiting for your next message              │
+└──────────────────────────────────────────────────────────┘
+```
 
 ## Usage report
 
@@ -314,22 +352,15 @@ active, the count from the first continuation, and the line works toward it.
 a goal an evaluator judges keeps its judge through `/goal edit`, which writes only the objective.
 A `/pursue` form is Pursuit's later option (§10) and is not part of this contract.
 
-**Reading the goal.** The client folds the goal from the branch events it already reads, by Goal
-A.3's rule: the newest live `goal:state` record is the goal; on a history written before the record,
-the latest live `goal:objective` block is the objective and the latest live `goal:status` block is
-the status, `clear` retires both, `edit` keeps the judge, and an input the InputQueue deleted leaves
-the fold. It adds no query method and asks Goal no question. `/goal` with no arguments prints usage
-before that fold. Before it picks between `set` and `edit` the client reads the line up to its
-published head. After a write, it folds the events that write produced before printing: the line
-prompt reads them again, and the terminal UI waits for them among the line's live events. The
-report is released at the `sequence` the method returned, for every daemon: a daemon built from main
-answers with the same sequence and publishes the old keys, and the command must not stay parked
-waiting for a record such a daemon never writes. The state shown and the method chosen come from the
-events, never from a guess taken from the reply. The
-fold starts over at the line's own opening — its
-`branch/start`, or the `session/forked` a fork writes after the facts it copied — so a new line has
-no goal and a forked Session's `main` never shows the copied one (Goal §2, A11). A v3 client
-receives that opening, so a fork reads the same here as it does in Goal.
+**Reading the goal.** The client reads `session.goal.get` for the shown branch
+([Goal A.3](plugins/Goal.md#a3-reading-the-goal)). `/goal` without arguments prints
+usage and that state. Before choosing `set` or `edit`, it reads the current state;
+after a write, it reads again before reporting the result. Goal interprets its
+records, legacy keys, deletion and branch-opening rules. The client neither
+replays history to make this decision nor infers an absent goal from a transcript
+window. A failed state read reports an error and admits no guessed write; a
+successful state read remains usable if the transcript failed. A daemon without
+the read method reports that limitation instead of falling back to full history.
 
 **When Goal is not loaded.** The Session lists the methods it serves (`session.methods`). When
 `session.goal.set` is not among them, `/goal` prints `Goal is not available on this daemon.` and makes
@@ -422,7 +453,10 @@ account. A signed-out account says `Sign in`, and opening it starts its only
 flow; a signed-in one shows its state and offers `Sign out`. A row whose
 namespace is `account` opens the Dim account's `/login` panel instead, with its
 identity, plan and usage. A Provider without a descriptor keeps the connection
-form, and opening it starts nothing.
+form, and opening it starts nothing. With a saved connection and no pending
+edits, `Edit models` opens the Provider's [model management panel](#the-models-area)
+(`Models · <name>`), including when disabled. Ctrl+R in that management panel
+fetches the catalog when the Provider offers `refresh`.
 
 ```text
 /connect
@@ -452,6 +486,26 @@ form, and opening it starts nothing.
 Authorization URL rows have no side borders, including wrapped continuation
 rows, so native terminal selection does not copy dialog borders into the URL.
 The other rows keep their borders; Enter on the URL still opens the full link.
+
+After Dim account sign-in, the terminal UI and line client await
+`provider.refresh` for that account's Provider. The terminal UI opens
+`/models` once the refresh succeeds. On a refresh error it shows the signed-in
+account and the reason in the account panel, with focus on `Refresh model list`.
+Enter on that row refreshes the same Provider and shows the outcome in the
+panel. `Open models` reads the stored catalog. The line client reports a
+refresh error on stderr and gives the `dimcode models PROVIDER --refresh`
+retry command. The sign-in still succeeds.
+
+```text
++-- DimAgent OAuth -----------------------------------+
+|   Signed-in account                                |
+|   Open models                                      |
+| > Refresh model list                               |
+|   View plan                                        |
+|   Sign out                                         |
+|   Error: Model list refresh failed: Relay timeout  |
++---------------------- Up/Down move, Enter activate -+
+```
 
 `dimcode login [PROVIDER]` starts the same flow in the line client and prints
 the URL or the code the daemon returns; without a PROVIDER it lists the
@@ -639,6 +693,48 @@ A model permitted to write the settings source can change the next process's bou
 a user can through this control; that write creates no grant and changes no running process
 ([ADR 011 D2](../adr/011-execution-settings.md)). File access is not OS isolation for shell code.
 
+## Prompt overrides
+
+`/settings` lists the three policy texts under `Prompts`: `Base prompt`, `Compaction prompt` and
+`Skills instructions`. A row shows `built-in`, `custom` or `Not available`, and it is read from
+the daemon's `prompts` Settings source when the panel opens. Enter opens the current text in
+`$VISUAL`, `$EDITOR` or the platform default; `r` on a custom row removes the override after
+keeping the old text in a draft file. An empty draft writes nothing. A save replaces one field
+and preserves the others, and applies to new Sessions.
+
+```text
++------------------------------------------+
+| Settings                                 |
+|   Interface                              |
+|   ...                                    |
+|   Prompts                                |
+| > Base prompt                built-in >  |
+|   Compaction prompt          custom >    |
+|   Skills instructions        built-in >  |
+|   Permissions                            |
+|   ...                                    |
+| up/down move · Enter edit · r reset      |
++------------------------------------------+
+```
+
+The headless surface is `dimcode prompt`:
+
+| Command | What it does |
+| --- | --- |
+| `dimcode prompt` | List the `prompts` source and each text's origin: `base`, `summary`, `skills`. |
+| `dimcode prompt show NAME` | Print one override; a built-in text is named on stderr and the command exits nonzero. |
+| `dimcode prompt edit NAME` | Open the override (empty for a built-in) in the external editor; an empty draft writes nothing and is not a reset. |
+| `dimcode prompt set NAME PATH` | Write one override from `PATH`, or from stdin for `-`; empty or whitespace-only text is refused. |
+| `dimcode prompt reset NAME` | Remove one override. |
+
+`NAME` is `base`, `summary` or `skills`. `skills` is a mixed text, and both surfaces warn that
+its override replaces the marker and call shape while the `skill` tool and `dim/skills/list`
+stay. Both surfaces use `settings.read` and `settings.update`
+with `source: "prompts"` and `scope: "user"`: every write reads the revision and the document
+first, changes one field and writes the whole document back, so a concurrent change is reported
+rather than overwritten. `edit` needs a terminal; a failed write keeps the draft and names it.
+The command menu is unchanged: the entry lives inside `/settings`, not as a new slash command.
+
 ## Management surfaces
 
 A management area is one owner's management methods. The App Server serves each area through its
@@ -755,7 +851,7 @@ stays visible at any width, the remove confirmation included.
   `dimcode <area> remove ID` removes without a prompt, because the id typed on the command line
   is the intent, as `dimcode logout PROVIDER` signs out without one.
 - run sends the area's named operation for the selected entry. A run whose answer changes what the
-  area lists — the Scheduler's run now joins the job's history and its last outcome — reads the
+  area lists — the Scheduler's run now joins the job's history and its last delivery — reads the
   area again and shows the answer as the message; a run the owner skipped says why. A run whose
   answer changes nothing the area lists shows the answer as a detail, as inspect does, and does
   not read the area again: MCP's test is the tools a temporary connection found. Whether the owner
@@ -890,49 +986,42 @@ Scheduler (#815): the `/scheduled` panel, `/schedule` its alias in both modes, a
 scheduled list|enable ID|disable ID|edit ID|set ID PATH|add PATH|remove ID|run ID|history ID`
 over `schedule.list`, `schedule.save`, `schedule.delete`, `schedule.set_enabled`,
 `schedule.run_now` and `schedule.history` ([Scheduler §A.3](plugins/Scheduler.md#a3-management-methods)).
-Every job is an entry: its name is the label, and its schedule, next window and last outcome are
-its detail. A job whose schedule the owner cannot use is marked invalid and its detail carries the
-owner's message; a job the scheduler holds while it is disabled says it has no next window. The
-owner reports no grouping, so the jobs share one heading, `jobs`.
+Every job is an entry: its name is the label, and its schedule, next window, last delivery, target
+and disabled reason are its detail. The target line says where the job delivers — `Delivers to
+Session {session} branch {branch} ({mode}).` for a session target, or `Launches a new Session in
+{cwd}.` for a launch target. A job whose schedule the owner cannot use is marked invalid and its
+detail carries the owner's message; a job the scheduler holds while it is disabled says it has no
+next window, and a job the owner disabled because its target was gone adds `Disabled: {code} at
+{instant}.`. The owner reports no grouping, so the jobs share one heading, `jobs`.
 
-A job's document is the record the owner wrote; the client changes only the fields `schedule.save`
-takes — `name`, `schedule`, `prompt`, `cwd`, `model`, `mode`, `policy`, `max_run_minutes`,
-`enabled`, `session_id` and `agent_id` — and carries the id on the Save action and the job's
-revision as the revision the draft was read at. `schedule.save` is a patch merged over the stored
-job, so an edit writes only the members the draft changed: the adapter reads the job again,
-refuses a draft whose revision is no longer the job's, and sends the changed members with the id
-and the revision. A draft that changes no editable member writes nothing, and a member the draft
-deletes cannot be cleared because the patch has no null: the write is refused before it is sent
-and names the member. The exception is a `session_id` whose `mode` becomes `create`, which the
-owner clears itself. A stale revision is `schedule_conflict`, the
-typed conflict: nothing is written, the jobs are read again, and the next edit opens the current
-record. `created_by`, `policy_cap` and `enabled_at` are the owner's to derive and are never sent.
-A new entry starts from the owner's create shape — a name, an example `every` schedule, a prompt
-and the Session's workspace — and writes with `schedule.save` without a revision. `inspect` is
-`history`: the job's recent runs, newest first, with the state the owner recorded.
+A job's document is the record the owner wrote; the client changes only the fields `schedule.save` takes — `name`, `schedule`, `prompt` and `target` — and carries the id on the Save action and the job's revision as the revision the draft was read at. `schedule.save` is a patch merged over the stored job, so an edit writes only the members the draft changed: the adapter reads the job again, refuses a draft whose revision is no longer the job's, and sends the changed members with the id and the revision. A draft that changes no editable member writes nothing, and a member the draft deletes cannot be cleared because the patch has no null: the write is refused before it is sent and names the member. The exception is `target`, which an update keeps when the draft omits it, so an edit cannot retarget a job. A stale revision is `schedule_conflict`, the typed conflict: nothing is written, the jobs are read again, and the next edit opens the current record. `created_by`, `enabled_at` and `disabled_reason` are the owner's to derive and are never sent; enabling and pausing are `schedule.set_enabled`, not a save. A new entry starts from the owner's create shape — a name, an example `every` schedule, a prompt and a target — and writes with `schedule.save` without a revision. `inspect` is `history`: the job's recent deliveries, newest first, with the state the owner recorded.
 
 ```text
 ╭─ Scheduler ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ >                                                                                                                    │
 │                                                                                                                      │
 │   jobs                                                                                                               │
-│ › nightly-build   enabled                                                                                            │
-│   release         disabled  invalid                                                                                  │
+│ › nightly-build   disabled                                                                                           │
+│   release         enabled  invalid                                                                                   │
 │                                                                                                                      │
 │   every 60 minutes                                                                                                   │
-│   Next run 2026-11-02T09:00:00.000Z.                                                                                 │
-│   Last run completed at 2026-11-01T09:00:12.000Z.                                                                    │
+│   No next run.                                                                                                       │
+│   Last run delivered at 2026-11-01T09:00:12.000Z.                                                                    │
+│   Delivers to Session session-1 branch main (queue).                                                                 │
+│   Disabled: session_closed at 2026-11-01T10:00:00.000Z.                                                              │
 ╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T run · Tab inspect · Esc close ─╯
 ```
 
-Ctrl+T runs the selected job now and reports what the owner answered — `launching`, or the reason
-the run was skipped — and Tab shows the job's history in place of the list:
+Ctrl+T runs the selected job now and reports the delivery the owner recorded for the manual
+window — `delivering`, or `missed` with its reason, for a session target; `launching`, or `skipped`
+with its reason, for a launch target — and Tab shows the job's history in place of the list:
 
 ```text
 ╭─ Recent runs of nightly-build ─────────────────────────────╮
-│ 2026-11-01T09:00:12.000Z  completed                        │
-│ 2026-11-01T08:00:05.000Z  skipped (overlap)                │
-│ 2026-10-31T09:00:03.000Z  completed                        │
+│ 2026-11-01T09:00:12.000Z  delivered                        │
+│ 2026-11-01T08:00:05.000Z  missed                           │
+│ (previous_delivery_unsettled)                              │
+│ 2026-10-31T09:00:03.000Z  delivered                        │
 ╰───────────────────────────────────── ↑↓ scroll · Esc back ─╯
 ```
 
@@ -1260,24 +1349,11 @@ owner reports the list and its Settings revision with `permission.rules`, and re
 list at that revision with `permission.set_rules`; a stale revision is
 `permission_rules_conflict`.
 
-The row is appended after the three presets, so the existing rows keep their positions. It opens
-this area's panel, and Esc there returns to the Permissions panel.
+The row is in the Permissions panel's Related settings group, after the three presets (see
+[permission controls](#permission-controls)). It opens this area's panel, and Esc there returns
+to Permissions with Command rules still focused.
 
 ```text
-╭─ Permissions ─────────────────────────────────────────────────╮
-│ >                                                             │
-│   Read only            reads only; writes and commands are    │
-│                        refused                                │
-│   Workspace write      writes inside the workspace; asks      │
-│                        outside it                             │
-│   Full access          no path limits; tools run without      │
-│                        asking                                 │
-│   Command rules                                             › │
-│   Process isolation                                Settings › │
-│                                                               │
-│   The preset fixes the path boundary.                         │
-╰──── ↑↓/Tab move · Enter apply · Esc close ────────────────────╯
-
 ╭─ Command rules ───────────────────────────────────────────────╮
 │ >                                                             │
 │   user                                                        │
@@ -1376,15 +1452,15 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode hooks edit` | Open the user's hook document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `hooks.save` with the revision `hooks.catalog` reported; an interactive edit needs a terminal. |
 | `dimcode hooks set PATH` | Write the user's hook document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
 | `/hooks` | Open the Hooks panel of the Session's workspace ([management surfaces](#management-surfaces)): a source per entry, the project's toggle and the user document's edit. |
-| `dimcode scheduled list` | List the jobs the Scheduler holds over `schedule.list` ([Scheduler](plugins/Scheduler.md#a3-management-methods)): each job's id, name, schedule, state, next window and last outcome, then the jobs whose schedule the owner cannot use. |
+| `dimcode scheduled list` | List the jobs the Scheduler holds over `schedule.list` ([Scheduler](plugins/Scheduler.md#a3-management-methods)): each job's id, name, schedule, state, next window, last delivery and target, then the jobs whose schedule the owner cannot use. |
 | `dimcode scheduled enable\|disable ID` | Enable or pause one job over `schedule.set_enabled`, then report the jobs again. |
 | `dimcode scheduled edit ID` | Open one job's document in `$VISUAL`, `$EDITOR` or the platform default, and write it over `schedule.save` with the revision the listing reported; an interactive edit needs a terminal. |
 | `dimcode scheduled set ID PATH` | Write one job's document from `PATH`, or from stdin for `-`, with the revision read immediately before the write; unchanged text writes nothing. |
-| `dimcode scheduled add PATH` | Create a job from `PATH`, or from stdin for `-`, over `schedule.save` without a revision: the owner derives the id, `created_by` and `policy_cap`. |
+| `dimcode scheduled add PATH` | Create a job from `PATH`, or from stdin for `-`, over `schedule.save` without a revision: the document states a target, and the owner derives the id, `created_by` and `enabled_at`. |
 | `dimcode scheduled remove ID` | Delete one job over `schedule.delete` without a prompt: the id on the command line is the intent. |
-| `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report what the owner returned, or why it skipped the run. |
-| `dimcode scheduled history ID` | Print one job's recent runs over `schedule.history`, newest first, with each run's state and time. |
-| `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window and last outcome, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; only a new job's default `cwd` comes from the Session. |
+| `dimcode scheduled run ID` | Run one job now over `schedule.run_now` and report the delivery it records for the manual window, or why the manual window was skipped. |
+| `dimcode scheduled history ID` | Print one job's recent deliveries over `schedule.history`, newest first, each with its time and its state with the owner's detail. |
+| `/scheduled`, `/schedule` | Open the Scheduler panel ([management surfaces](#management-surfaces)): a job per entry with its schedule, next window, last delivery, target and disabled reason, and the toggle, edit, add, remove, run and inspect kinds; the Scheduler's verb for inspect is history. Jobs are the host's, not the Session's or workspace's; a new job states its target. |
 | `dimcode workflow list` | List the definitions over `workflow.list` ([Workflow](plugins/Workflow.md#a3-management-methods)): each definition's name, source, state and description, then the issues of the invalid ones. |
 | `dimcode workflow enable\|disable NAME` | Enable or disable the project definition of that name over `settings.read` and `settings.update`, then report the definitions again. |
 | `dimcode workflow edit NAME` | Open the user definition's document in `$VISUAL`, `$EDITOR` or the platform default, and save it over `workflow.save` with the revision the user document was read at; a project name names the file to edit instead. |
@@ -1416,11 +1492,12 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `dimcode account PROVIDER` | Print the described account's non-secret state. |
 | `dimcode logout PROVIDER` | Sign the described account out. |
 | `/connect` | List the Providers `provider.management` reports; a described account opens its sign-in or sign-out step, and any other Provider opens the connection form. |
+| `/report` | Report the current Session, including during a turn or when no error occurred. Save the local report ZIP, see its path, or open a share destination after saving. [Report contract](plugins/Report.md#2-client-interaction). |
 | `/exit` | Detach and exit from the idle interactive prompt. |
 | `!command` / `!!command` | Call the Session's existing `shell.run` in record/private mode, including during a model turn. |
 | `--permission read-only\|workspace-write\|full-access` | Select the preset of a new or resumed Session for `dimcode`, `tui`, `exec` and `exec resume` ([permission controls](#permission-controls)). |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | Read and write the goal of the shown line, in the line client and both terminal UI modes ([goal](#goal)). |
-| `/permissions` | Open the Permissions panel: the three presets with what each one allows, directions to Settings for process isolation, and the Command rules row that lists, adds and removes the user's command rules ([permission controls](#permission-controls)). |
+| `/permissions` | Open the Permissions panel: Permission mode groups the three presets with effective radio markers; Related settings groups the Command rules and Process isolation submenu links. Only the focused entry's Hint explains its scope and consequences ([permission controls](#permission-controls)). |
 | `/approvals`, `/approval` | Compatibility aliases for `/permissions`; preset arguments remain supported. |
 
 `dimcode hooks` writes only the user's hook document, and only through the edit kind: `dimcode hooks
@@ -1490,40 +1567,49 @@ The daemon is detached and its stderr is the append-only `daemon.log`, so a
 per-launch note is the only channel that does not parse history or depend on a
 pipe the client may close. Before spawning, the CLI removes
 `<native home>/dimcode.sqlite.startup`, where the native home is the daemon's
-own home, `<home>/rust`. When the spawned daemon exits before the client
-connects, the CLI reads that note (at most 16 KiB, and only a regular
-file; on Unix it must also be owned by the current user and offer no group or
-other permissions). On Unix that mode is the note's protection, since the
-daemon writes it 0600; on Windows the client checks only the regular file, its
-size and the header, and the private home's inherited ACL is the boundary. It
-requires the `dimcode-startup-failure v1 pid=<child pid>` header, removes
-control characters other than newline and tab from the body, and returns it as
-the command's error followed by `Details: <native home>/daemon.log`. The
-storage gate writes the note on a diagnosed incompatibility and names the
-store, its marker, the daemon's supported format, whether the store is newer,
-mismatched, unrecognized or too old, and the recovery paths ([native storage format §
-startup incompatibility](appserver/native-storage-format.md#启动不兼容诊断)).
-Without a matching note the embedded server reports the existing
+own home, `<home>/rust`; it leaves it in place when it is a progress note from
+another live process, and waits for that process instead of spawning. When the
+spawned daemon exits before the client connects, the CLI reads that note (at
+most 16 KiB, and only a regular file; on Unix it must also be owned by the
+current user and offer no group or other permissions). On Unix that mode is the
+note's protection, since the daemon writes it 0600; on Windows the client checks
+only the regular file, its size and the header, and the private home's inherited
+ACL is the boundary. It requires the
+`dimcode-startup-failure v1 pid=<child pid>` header, removes control characters
+other than newline and tab from the body, and returns it as the command's error
+followed by `Details: <native home>/daemon.log`. The storage gate writes the
+note on a diagnosed incompatibility and names the store, its marker, the
+daemon's supported format, whether the store is newer, mismatched, unrecognized
+or too old, and the recovery paths; it writes the same kind when another process
+owns the store, naming that process and, when the process reports an upgrade,
+its pid and the formats ([native storage format § startup
+incompatibility](appserver/native-storage-format.md#启动不兼容诊断)). Without a
+matching note the embedded server reports the existing
 `App Server exited (<status>); see ...`, and a `--server` binary reports that
 the flag must name a standalone `dim-app-server` binary. The failed launch
 removes the note after reading; a successful connection removes any note. The
 CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
 the store, and exits 1.
 
-While a store format upgrade runs, the daemon writes the same note as a
-progress kind, `dimcode-startup-progress v1 pid=<pid>` with
+While a store format upgrade runs, the daemon writes the same note as a progress
+kind, `dimcode-startup-progress v1 pid=<pid>` with
 `store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
-after each upgrade step; a fresh store or one at the current format writes
-none. Both startup waits read it: the spawn wait counts only its child's pid,
-the start-lock wait any pid, and each new counter moves the wait's bound
-forward by the bound itself (10 s for the spawn, one verified shutdown plus
-one startup plus a margin for the lock). A store format upgrade is the long
-phase that reports progress and moves the bound; every other phase of
-startup is bounded by the client's fixed value. The first such
-note prints, once on stderr in every mode, `Upgrading the local store from
-format v<from> to v<to>; this can take a while on a large store.`; stdout and
-JSON output stay unchanged. A client that only knows the failure kind ignores
-the progress kind and falls back to the generic messages above.
+after each upgrade step; a fresh store or one at the current format writes none.
+All three startup waits read it: the wait before spawning and the start-lock
+wait count any pid, the spawn wait only its child's pid, and each new counter
+moves the wait's bound forward by the bound itself (10 s for the wait before
+spawning and the spawn wait, one verified shutdown plus one startup plus a
+margin for the lock). A store format upgrade is the long phase that reports
+progress and moves the bound; every other phase of startup is bounded by the
+client's fixed value. Before it spawns, a client waits while the note names a
+live pid other than its own: the store is owned, and it has no socket until the
+upgrade finishes. Progress moves that bound, the client retries the socket, and
+it connects once the daemon serves; a note whose pid is gone, or that names the
+client itself, is stale, and the client starts its own daemon. The first such
+note a client reads prints, once on stderr in every mode,
+`Upgrading the local store from format v<from> to v<to>; this can take a while on a large store.`;
+stdout and JSON output stay unchanged. A client that only knows the failure kind
+ignores the progress kind and falls back to the generic messages above.
 Development documentation continues to use `./dev` and its isolated home; the
 terminal note itself names a compatible build or `--home PATH`.
 
@@ -1851,6 +1937,10 @@ as conflicts; retry does not replay them over later user changes.
 
 P1 shell prefixes apply only to interactive input. Their execution, recording,
 progress, cancellation and lifetime follow [ShellInput](plugins/ShellInput.md).
+At Home, the first `!` or `!!` command creates and attaches the Session using
+the same launch settings and selected model as the first ordinary message,
+then calls `shell.run` without starting a model turn. A creation failure settles
+the command as failed and leaves Home available for configuration and retry.
 The CLI generates `runId` before sending the request and never retries a run.
 The command after the prefix is passed verbatim; an empty command prints usage.
 While a command is pending, a second shell line reports that the caller already
@@ -2112,19 +2202,9 @@ remain `session.grants.add/remove` ([ADR 012](../adr/012-session-grants.md)).
 | Path scope | Fixed by the preset and Session grants | [file access facts](../adr/014-file-access-facts.md) |
 | Process isolation | Off / Sandboxed · No network / Sandboxed · Network allowed | `execution` settings, not Permission |
 
-```text
-/permissions
-  > Read only        reads only; writes and commands are refused
-    Workspace write  writes inside the workspace; asks outside it
-    Full access      no path limits; tools run without asking
-    Command rules    >
-    Process isolation  Settings >
-  The preset fixes the path boundary.
-```
-
-`↑↓` moves, `Enter` applies the highlighted preset, `Esc` closes. There is no second policy
-control: a preset answers both what may run and what is asked first, so a client never presents
-file scope or process isolation as a permission dimension
+The [Permissions panel](#permissions) groups the Session's preset separately from user-wide
+settings. There is no second policy control: a preset answers both what may run and what is
+asked first, so a client never presents file scope or process isolation as a permission dimension
 ([ADR 018](../adr/018-permission-is-the-preset.md)).
 
 The presets decide by risk, after `disallowedTools` and deny rules, with the existing file checks
@@ -2134,7 +2214,7 @@ taking precedence:
 | --- | --- |
 | `read-only` | Reads of the workspace, system roots, Session-owned files and granted paths run, and other reads ask; Session tools run; file writes, commands, network and unclassified tools are denied |
 | `workspace-write` | Those reads run and other reads ask; workspace file writes and Session tools run; writes to system roots or Session-owned files are denied; other outside writes without a matching write grant, commands, network and unclassified tools ask |
-| `full-access` | Every tool call runs without asking |
+| `full-access` | Skips preset approval; explicit denials and process isolation remain in force |
 
 A deny rule applies under every preset. An allow rule only turns a question into a run for a
 simple command; it never lifts a denial. The product and configured daemon profiles create
@@ -2319,10 +2399,11 @@ approves nor cancels work by that fact alone.
 same preset picker as compatibility aliases. The control applies to `main`; selecting a preset
 uses the current policy and version, preserving the tool lists. A failed save neither changes remembered choices nor falls back to another preset.
 
-The Process isolation row links to the Settings control; Esc returns to this panel.
+The Process isolation row links to the Settings control; Esc returns to this panel with that row focused.
 The Command rules row opens the management panel
 of [The command rules area](#the-command-rules-area), where the rules are listed, added and
-removed; Esc there returns to this panel.
+removed; Esc there returns to this panel with Command rules focused. Both TUI modes preserve
+focus on return, including when Permissions was opened from Settings.
 
 Arguments after `/permissions` in the terminal UI open that panel instead of being ignored, and
 it opens holding one line that says where arguments work — the line prompt and `dimcode
@@ -2330,26 +2411,47 @@ permissions` — which stands above the panel's answers until the user's first k
 long the opening read takes; the compact grammar belongs to the line prompt.
 
 ```text
-Permissions (main branch)
-> Read only        reads only; writes and commands are refused
-  Workspace write  writes inside the workspace; asks outside it
-  Full access      no path limits; tools run without asking
-  Command rules                             >
-  Process isolation                 Settings >
-
-The preset fixes the path boundary.
-
-↑↓/Tab move · Enter apply · Esc close
+╭─ Permissions ──────────────────────────────────────────────────────────╮
+│ Permission mode                                                        │
+│   ( ) Read only                                                        │
+│   (*) Workspace write                                                  │
+│   ( ) Full access                                                      │
+│ Related settings                                                       │
+│   Command rules  ›                                                     │
+│   Process isolation  ›                                                 │
+│                                                                        │
+│ Hint: Current session; remembered for new sessions. Workspace writes    │
+│       allowed; commands, network and ungranted outside access usually   │
+│       ask.                                                             │
+╰──── ↑↓/Tab move · Enter keep mode · Esc close ──────────────────────────╯
 ```
 
-Each row states what its preset allows and what it asks, so the choice needs no second menu.
-Merely opening the panel writes nothing; `Enter` writes the preset through the versioned update,
-and the tool lists are preserved. The notes state that the preset fixes the path boundary and
-point to Settings for process isolation.
+The two group headings are not selectable. Their titles use bold accent text, aligned two
+columns to the left of the choices, without scope captions. The panel title remains in
+the border and explanations remain below the choices. Color and indentation distinguish
+headings from selectable content without adding rows on short terminals.
+`(*)` marks the effective preset, independently of
+the focused row; other presets use `( )`. Focus uses the existing selection highlight.
+Related settings use `›`, not radio markers. Live policy updates change the effective marker
+without moving focus. Only the focused entry's explanation appears in Hint. For presets,
+it states that the choice applies to the current Session and is remembered for new Sessions;
+the startup behavior remains defined by [Startup selection](#startup-selection). Read only denies
+writes and commands while external reads may
+ask; Workspace write permits workspace writes and usually asks for commands, network and
+ungranted outside access; Full access skips preset approval and reevaluates pending calls on
+the target branch, while explicit denials and isolation remain. Command rules are user-wide;
+allow rules only skip asks, never denials. Process isolation's Hint identifies its user-wide
+scope; it opens Settings, affects new
+processes and is independent of the permission mode.
 
-Choosing Full access explains that explicit denies remain and process
-isolation is unchanged; it does not claim every call will run. No combined permissive shortcut
-appears in an approval prompt.
+`↑↓`/`Tab` move between entries and `Esc` closes. The footer says `Enter use mode` for an
+inactive preset, `Enter keep mode` for the effective preset, or `Enter open` for a submenu.
+Merely opening or navigating the panel writes nothing. With a Session, `Enter` on a preset reads
+the current policy; only if the focused preset differs does it write a versioned update,
+preserving the tool lists. Keeping the already-effective preset writes no policy update.
+A successful selection still saves the preference for later Sessions, even when no policy update
+was needed (see [Startup selection](#startup-selection)); on Home the marker reflects that
+preference until a Session exists. No combined permissive shortcut appears in an approval prompt.
 
 At the line prompt the no-argument command prints the effective preset and numbered command rules
 when supported. The printed rules and revision are kept for `remove`.
@@ -2373,7 +2475,7 @@ Command rules (user scope, every Session):
 | Form | Calls | Conflict |
 | --- | --- | --- |
 | `/permissions` | `session.permission.get` on `main`; `permission.rules`; existing execution settings read | none |
-| Preset selection in the panel | `get`, then `update` preserving the tool lists | Re-read before any retry; never replace the tool lists |
+| Preset selection in the panel (with a Session) | `get`; only if the preset differs, `update` preserving the tool lists | Re-read before any retry; if the requested preset is now effective, write nothing; never replace the tool lists |
 | `/permissions PRESET` | `get`; for `full-access` a `[y/N]` confirmation where Enter, any other answer, EOF and Ctrl+C mean No; then `update` with the read version and otherwise unchanged policy | `permission_conflict`: read again, print the current policy, write nothing; the user decides again |
 | `/permissions allow\|deny exact\|prefix COMMAND` | `permission.rules`; unless the same rule exists, `set_rules(revision, rules + rule)`, then print the new list | read again and retry, at most 3 attempts: adding does not depend on the other rules |
 | `/permissions remove N` | `set_rules(listing revision, listing without rule N)`, then print the new list | `permission_rules_conflict`: read again, print the current list, remove nothing |
@@ -2730,3 +2832,21 @@ with its `branchId`, a duplicate live event, every reply in the table above, res
 the prompt before or during the reply, Ctrl+C and EOF before and after the turn settles, a reply
 drained after Ctrl+C, and `exec` exiting 3 for questions on `main`, on a child branch and after
 the turn settled, while a result read before its call asks nothing.
+
+
+### Loading earlier conversation
+
+`/earlier` reads the next bounded older window for the shown branch, retaining its original
+cutoff and advancing its backward cursor. Fullscreen PageUp at the loaded top runs the same
+action. TUI prepends projected rows; line mode prints a labelled older segment. Neither changes
+live event/state cutoffs or resubmits an input. Opening uses the separate read-stop
+and whole-page retention budgets in the [client window contract](clients.md#opening-a-conversation-with-a-bounded-window);
+additional older rows are retained only when the user explicitly loads them. Raw pages are released
+after projection. Export remains a complete fixed-prefix read.
+
+```text
+[earlier content not loaded]  <- /earlier, or PageUp at the loaded top
+older requested rows
+initial window
+live output
+```

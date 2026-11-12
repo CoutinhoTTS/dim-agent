@@ -122,6 +122,7 @@ These are Collaboration's message modes and words (`append`, `steer`), with the 
 - **Knowing when to read.** A read is on demand, so a line also needs to know its parent moved. The keyed `<dim-branch-parent>` block (§4, §7.1.1) states the parent's head and the line's cursor; the line decides which pages to read from it. The block never carries content, and reading it is not reading the parent.
 - **No caps.** There is no limit on the number of lines, messages or steers. A message loop ends through the prompt rules (§12), through a line ending itself, or through the user (interrupt or end). Why this is safe, and who would own limits, is in §6.1.
 - **Idle notice.** When a tool line's turn ends, BranchLine on that line writes one steer to `main` (`<dim-branch-idle>`, §12.1), unless one of the following holds:
+  - the line was created with `idleNotice: none`;
   - the turn already sent `main` a steer message;
   - the turn called `end`;
   - the line has a driving input pending.
@@ -180,7 +181,7 @@ Every line answers "which line am I, and which lines are mine" with blocks under
   - that it works in parallel from here on;
   - that messages above addressed to the parent, such as the roster, belong to the parent.
 
-  A tool line's identity also carries its purpose (the `create` prompt) and the line protocol. On a host line, the creator's prompt stays the opening input's `user` content, after the block.
+  A tool line's identity also carries its purpose (the `create` prompt) and the line protocol. For `idleNotice: none`, TimelineTree includes `idle-notice="none"` on that opening identity. BranchLine reads it from the line's own opening input when running or restoring the line. A missing attribute selects `steer`, including histories written before the option existed. The setting controls only automatic idle notices. On a host line, the creator's prompt stays the opening input's `user` content, after the block.
 - **On `main`: the roster.** BranchLine on `main` writes a keyed Append from `main`'s own facts:
   - `branch/create` with a tool source;
   - `branch/create-failed`;
@@ -364,12 +365,12 @@ The tool takes one action-based input, which replaces `{prompt, at?}`. Its risk 
 
 | Action | Input | Who | Effect | Result text |
 | --- | --- | --- | --- | --- |
-| `create` | `prompt`, `at?` | `main` | Opens a tool line cut at `at` (default: before this request's model start, as today) | `Line created: C` |
+| `create` | `prompt`, `at?`, `idleNotice?` (`steer` \| `none`) | `main` | Opens a tool line cut at `at` (default: before this request's model start). The idle notice defaults to `steer`. | `Line created: C` |
 | `message` | `to`, `content`, `mode?` (`append` \| `steer`) | `main` → its open tool line; tool line → its parent | One `input/message` on `to` | `Sent to C.` |
 | `read` | `branch`, `after?`, `limit?` (1–200) | `main` on its tool lines; a line on the line it was cut from | One page from the store, from the caller's cursor when `after` is absent (§6) | The page as JSON: items, `nextCursor`, `done` |
 | `end` | `content` | A tool line, on itself | A final message (steer) to the parent, then `TreeCommands.end(C, source)`, where `source` is this call | `Line C is ending; your final message was sent to P.` |
 
-The input schema is `{action, prompt?, at?, to?, content?, mode?, branch?, after?, limit?}`, with `action` required and `additionalProperties: false`.
+The input schema is `{action, prompt?, at?, idleNotice?, to?, content?, mode?, branch?, after?, limit?}`, with `action` required and `additionalProperties: false`. `idleNotice` is valid only for `create`.
 
 Refusals come back as error results (code in `structuredContent`) and write nothing:
 
@@ -383,6 +384,15 @@ Refusals come back as error results (code in `structuredContent`) and write noth
 | `read` with an `after` past the target's head | `after A is past line T's head H; a read starts at or below H` | none: an error result with no code |
 
 These refusals are the tool's own rules. `TreeCommands.end` itself checks only the target (§10). An `end` whose line already committed its own `branch/end` takes the `branch_ended` row and writes no second final message: the first call's message is the line's last word.
+
+### Activity page execution
+
+The `read` limit counts raw events and includes the complete final atomic batch. TimelineTree resolves
+that endpoint from batch metadata before any display read. BranchTool then requests only input/text,
+tool-start names, tool-call identities/names, result identities/error flags/effects and turn outcomes
+inside that range. Model requests, tool inputs and result content do not belong to this activity view.
+The cursor is the raw endpoint even when no event in the range produces a display item. Hidden events
+still break adjacent-text merging. No event cache or additional storage format is introduced.
 
 ## 12. Prompts
 
@@ -485,7 +495,7 @@ The coordination text for `main` is judged with [§12.3](#123-evaluation-scenari
 - `x`, then `y`, ends the selected line, refused on `main`.
 - Questions and approvals carry the line's label, so two lines asking for the same thing are told apart (`(branch NAME)` on a question, `Permission on branch NAME` on an approval).
 - A message between `main` and a line reads as sent on the sender (its `branch` tool call) and as received on the receiver (`◂ from C`).
-- Switching the shown line starts another transcript under a boundary row (`line C`), as a session switch does, because terminal scrollback is append-only. Discovery retains task inventory and branch-history state, not a full transcript for every line. The first open, through `/lines` or a side view, retains that line's transcript and reads its history from `after:0` through the [existing task-history queue](background-task-list.md#2-discover-and-fold-tasks), including when discovery previously failed. An initial read already in progress from `after:0` can serve that open. Later opens reuse the retained transcript, which continues folding live events even while another line is shown.
+- Switching the shown line starts another transcript under a boundary row (`line C`), as a session switch does, because terminal scrollback is append-only. Discovery retains task inventory and branch-history state, not a full transcript for every line. The first open, through `/lines` or a side view, retains that line's [bounded transcript window](clients.md#opening-a-conversation-with-a-bounded-window), including when discovery previously failed. Owner-state reads recover actionable work outside the window. Selecting a line separately requests its display details below. Later opens reuse the retained transcript, which continues folding live events even while another line is shown.
 
 The panel is separate from the tasks panel, which lists background commands, members and Workflow runs: its `x` stops a task, and an end is permanent, so the two do not share keys.
 
@@ -516,6 +526,19 @@ Session methods under the same admission rules as `session.history`) answers one
 line, `endEvent`. `main` comes first and the rest follow in `branchId` order. The reply is not paged: it grows with
 the number of lines, which a Session bounds by its own use, not with history. `TimelineTree` owns the answer
 (`directory()`); `branches()` lists the lines that have not ended (open and ending), for the callers that hold a live line.
+
+The directory read performs no history I/O. Its display fields are null or absent.
+`session.branch.get {sessionId, branchId}` (v3, separately listed in
+`hello.features`) reads one line's directory record and display fields:
+`purpose` (the trimmed first prompt line, null for main), `cutMessages` (the
+number of user inputs in the inherited prefix at its branch point, excluding
+inputs deleted by that cutoff; null for main), and `end` (the existing
+`BranchEndData`, null without an available end fact). It reads point facts and
+counts the fixed inherited prefix through TimelineTree. A read failure is
+reported on this detail call and does not prevent directory listing; an unknown
+branch is an error. This read writes no facts and does not reopen an ended line. An ended line inherited by a Session fork can
+have no own history; its fixed directory end identity remains even when the
+`end` detail is unavailable.
 
 Three rules about `head` decide what a client may do with it:
 
@@ -551,7 +574,7 @@ Three rules about `head` decide what a client may do with it:
 New public content:
 
 - two events;
-- two RPC methods;
+- three RPC methods: `session.branch_end`, `session.branches` and `session.branch.get`;
 - two TreeCommands methods: `end(id, source)` and `page(id, after, limit)`;
 - `TimelineInfo.source`, read by BranchLine and by Goal;
 - the `branch` tool's new input.

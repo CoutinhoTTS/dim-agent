@@ -39,7 +39,7 @@
 | 事件 | 一行一事件：分支、sequence、事件 ID、kind、正文、before 轨迹、原子批次终点 |
 | 请求内容 | `context/prepare`、`model/call` 的 `request.messages` 存为 Session 内容表中按内容寻址的列表节点，每个节点是一条消息和前一条消息节点的地址，相邻请求共用相同前缀的节点；`tools`、`system` 按内容哈希存入，每种内容一份；事件正文只保存最后一个节点的地址、列表长度与 `tools`、`system` 的编号 |
 | 模型输出 | 同一分支同一请求连续的 `step/thinking` 或 `step/text` 合并为一个输出行：行内按顺序保存各事件的 ID、sequence、`create_at`、`tags`、`delta`，共享 `turn_id`、`request_id`。追加条件与 1 秒/4 KB 阈值以[物理编码](../../design/appserver/native-storage-format.md#持久化-json-类型)为准；合并不改变逻辑事件与批次 |
-| 读取 | 还原为原事件；一次读取（`read_segments`、`read_page`）的各页共用一个解码内容缓存，相同内容只解码一次，共享引用。缓存按内容正文计不超过 64 MiB，将超出时先清空，调用结束即释放。恢复校验不加载请求正文，因此不使用该缓存；导出在写第一行前仍重建并复核每个请求正文的 hash |
+| 读取 | 还原为原事件；一次读取（`read_segments`、`read_page`）的各页共用一个解码内容缓存，相同内容只解码一次，共享引用。缓存按内容正文计不超过 64 MiB，将超出时先清空，调用结束即释放。恢复只读取目录；导出在实际事件遍历中读取并复核所需请求正文 |
 
 `ModelRequest` 的 `messages` 元素、`tools`、`system` 在内存中以 `Arc` 持有，序列化结果不变。
 
@@ -75,15 +75,19 @@
 
 | API | 语义 |
 | --- | --- |
-| `Timeline::query(query).await` | 一次有界事件读取：范围、种类、上下文标志、事件 id、一条谓词、顺序、界与分页；界为已提交时加上本分支已写入、尚未发布的事实。回复带上所用截点 `through`（[插件契约 §5.4](../../design/plugin-contract.md#54-事件查询)、[ADR 020](../../adr/020-timeline-read-convergence.md) D3） |
+| `Timeline::query(query).await` | 固定分支范围上的属性条件、关联、分组、选择和游标分页；返回字段、计算值或明确请求的完整事件。存储一次接收完整分支链及不重叠尾部。见[插件契约 §5.4](../../design/plugin-contract.md#54-the-event-query) |
 | `Timeline::checkpoint(through, interpreter, decode).await` | 选取 sequence 不大于 `through`、解释器相同的最近恢复快照，校验锚点事实并把 `resume` 解析成链上位置 |
 | `Timeline::batch_end(sequence).await` | 该序号是否结束一个原子批次；批次结构属于存储，不是事件内容（[ADR 020](../../adr/020-timeline-read-convergence.md) D4） |
-| `Timeline::segments(through).await` | 祖先链各段与本分支的截点，root first |
+| `Timeline::segments(through)` | 祖先链各段与本分支的截点，root first |
 | `Timeline::save_snapshot(snapshot).await` | 写一份恢复快照 |
 
-上下文投影的折叠在投影的所有者（`dim-agent-capabilities` 的 `history`）：`read_context` 先取 `Timeline::checkpoint` 选出的快照，再从 `resume` 起用事件查询分页折叠携带上下文标志的事实，没有可用快照时从祖先链起点折叠，快照不可用（状态渲染失败，或按 id 找不到 resume 事件）时回退为完整事实重放；`replay_context` 是同一折叠而不选快照。
+上下文投影的折叠在投影的所有者（`dim-agent-capabilities` 的 `history`）：`HistoryRenderer::context` 先取 `Timeline::checkpoint` 选出的快照，再从 `resume` 起用事件查询分页折叠携带上下文标志的事实，没有可用快照时从祖先链起点折叠，快照不可用（状态渲染失败，或按 id 找不到 resume 事件）时回退为完整事实重放；`HistoryRenderer::replay_context` 是同一折叠而不选快照。默认请求路径使用 `rendered_stream`，消费页面后释放事件，只保留本次投影与请求所需内容。
 
-`through` 不得超过已写入位置（`Timeline::bound` 检查）。事件查询的页可以落在原子批次内部，需要批次边界的地方由 `batch_end` 判断。区间在热窗口内时直接取自内存；否则已发布部分读取 `TimelineStore`，其后尚未发布的部分取自热窗口（热窗口保留全部未分发事件，未发布事件一定在其中）。`Branch` 与 `Session` 只有一个转发的 `query`，以已发布位置为上限（它们不接受已提交界）；事件查询由服务自己按各段截点或请求所给的界设界。
+`through` 不得超过调用方允许的可见位置。属性查询的结果页可以落在原子批次内部，需要批次边界的地方由 `batch_end` 判断。Timeline 在锁内固定分支链、上界和内存尾部引用，随后在锁外执行存储查询。已落盘区间和尾部不重叠；尾部在读取期间落盘也不会重复参与计算。`Branch` 与 `Session` 转发属性查询，只允许已发布范围。内部消费者显式选择尚未发布的提交，后续页仍固定同一个上界。
+
+SQLite 的属性查询先按物理索引缩小候选，再展开合并行上的逻辑位置，最后执行关联、分组和分页。事件 ID 直接取索引列；只参与前缀判断的正文在物化前计算为布尔值，不把正文带入中间表。输入、请求关联使用 v36 的等值索引；逻辑关联仍按完整固定范围校验。
+
+v36 的文本候选索引由写事务维护：`timeline_text` 记录属性与事件位置，contentless `timeline_text_fts` 仅保存 trigram 倒排项，`timeline_text_tails` 保存每个文本流最多 199 个字符的重叠。迁移和 fork 从物理行重建派生索引；删除元数据时触发器同步删除 postings。查询由 FTS 命中驱动物理位置选择，正文验证属于消费者。未索引属性、短词和非 ASCII 词保留候选；这些查询仍可能扫描元数据。格式与维护规则见[存储格式 v36](../../design/appserver/native-storage-format.md#v36-property-text-candidates)。
 
 ### 有界读取与恢复扫描
 
@@ -91,18 +95,18 @@
 
 | 路径 | 读取边界 | 资源与校验 |
 | --- | --- | --- |
-| `read_context(through)` | 最近有效快照的 `resume` 起的祖先链和本分支后缀；没有快照时是完整前缀 | 分页读取，页按事件计数、不与原子批次对齐，每页释放读连接；不扫描快照恢复位置之前的请求正文 |
+| `HistoryRenderer::context(through)` | 最近有效快照的 `resume` 起的祖先链和本分支后缀；没有快照时是完整前缀 | 分页读取，页按事件计数、不与原子批次对齐，每页释放读连接；不扫描快照恢复位置之前的请求正文 |
 | `trace(sequence)` | 命中事件的物理行 | 合并行完整解码后按逻辑序号过滤；trace 只返回指定事件的轨迹 |
 | 分段读取 | 固定水位，按键 seek；内部读段可切开原子批次，`TimelineStore::read/read_segments` 的最终区间终点须为批次边界 | 每段结束释放读连接；合并行完整解码后截取，不在锁内解码无限历史 |
-| 恢复 | 固定 Session 目录和所有分支头，逐页校验事件、引用（只校验引用的内容行存在，不加载正文）、每个 `node` 行的父引用（只读 `parent` 字段，校验父节点存在）、祖先截点及 completed 事实的 through 边界；可选快照 state 不参与恢复校验 | 每页结束释放读连接；不加载正文，因此不需要解码内容缓存；跨页保留事件 ID 和目录校验信息；进程内首次恢复全量校验，之后目录与所有分支头不变时复用上次结果，记录只在存储的进程内存，校验失败或目录变化回退全量（[恢复校验复用](../../design/appserver/restore-validation.md)）；校验内容与不变量不变 |
+| 恢复 | 读取Session配置和分支目录，检查目录关系；不遍历历史事件或内容做准入校验 | 无校验缓存或释放时刷新；实际owner读取所需对象，错误由该读取返回，见[恢复读取边界](../../design/appserver/restore-validation.md) |
 
-存储服务的所有业务读取（历史、目录、校验、设置、Provider 与 Session 文件）走四个只读连接，按调用轮换；读取在语句开始时的最后提交上运行，不进入写连接的互斥锁。目录扫描这类长读只占其中一个连接。
+存储服务的所有业务读取（历史、目录、校验、设置、Provider 与 Session 文件）走四个只读连接，优先复用第一个空闲连接；全部繁忙时轮换选择一个等待。连续读取复用同一连接的 SQLite 页缓存，不为每个读取片段轮换并重复填满四份缓存。读取在语句开始时的最后提交上运行，不进入写连接的互斥锁。目录扫描这类长读只占其中一个连接。
 
 fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 个逻辑序号、内容每 1024 个哈希），每块之间让写入轮取得写锁。fork 先以只读连接分段解析源事件引用并求出内容闭包，最后才在插入 `agent_sessions` 的事务中发布整个 fork；删除先在一个事务中移除使 Session 可见的行，再分块删除事件、快照与内容。两者都不改变持久化格式，见[存储格式](../../design/appserver/native-storage-format.md#sqlite-运行参数与空间回收)。
 
 协作的 Session 查询分页以批次边界作为 `after` 和固定水位；页长是目标值，末批超出时完整返回。内部读段可切开批次，但不把内部段尾作为业务游标。反向 `session.history` 仍为独立协议草案。
 
-已装载实例采用发布水位，未装载记录采用已提交 head。公开的 `query` 以请求的界为上限，业务分页调用方必须传有界区间。当前范围读取每段 256 个逻辑序号，恢复校验每段 64 条物理行；查询索引及跨行规则见[存储格式](../../design/appserver/native-storage-format.md#分页查询)。
+已装载实例采用发布水位，未装载记录采用已提交 head。公开的 `query` 以请求的界为上限，业务分页调用方必须传有界区间。当前范围读取每段256个逻辑序号；恢复不为校验扫描历史；查询索引及跨行规则见[存储格式](../../design/appserver/native-storage-format.md#分页查询)。
 
 序列化、引用解析、hash 校验与类型转换集中在存储边界，能力只消费已验证类型。外部协议仍展开为原事件。序列化优化须测量正文复制、编码次数及耗时；不为优化增加业务状态。
 
@@ -123,7 +127,7 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 | `state` | 投影在 `resume` 之前的状态：`retain_from` 锚点、prompt 条目与 revision、已投递的上下文基线、已提交但未采用的输入、最新 `context/configured`、未闭合的输出与工具 |
 
 - 写入：ContextPolicy 在 completed 事实被采用后构建快照，`Timeline::save_snapshot` 等锚点发布后才写缓存；构建或保存失败只记录告警，不回滚事实、不重做模型工作。
-- 读取：`Timeline::checkpoint` 按解释器选候选，校验锚点 ID、sequence、completed 种类、游标，并按 `resume.event_id` 定位后校验 resume 位于固定祖先链和 source through 之内（按 ID 查不到时用记录的位置）；锚点事件是单个事件，按该 sequence 读一条事件查询（本分支热窗口中已有的取同一条），不从锚点读到截点，锚点位于原子批次内部时也一样；解码失败、摘要不符、越界或孤立快照一律忽略并回退完整事实重放。默认解释器有两个读取入口：`HistoryRenderer::rendered_context` 返回上下文与其渲染，校验检查点的那次渲染就是调用方使用的渲染，没有检查点时也在这里渲染一次；`HistoryRenderer::context` 只返回上下文，有检查点时渲染一次用于校验并丢弃结果，没有检查点时不渲染。两者的检查点渲染失败——或按 id 找不到 resume 事件、折叠为空——都回退完整重放（`rendered_context` 渲染该重放，`context` 不渲染）；读取必需事实的错误不被吞掉，`history::read_context` 与 ContextPolicy 的预算校验走 `context`。
+- 读取：`Timeline::checkpoint` 按解释器选候选，校验锚点 ID、sequence、completed 种类、游标，并按 `resume.event_id` 定位后校验 resume 位于固定祖先链和 source through 之内（按 ID 查不到时用记录的位置）；锚点事件是单个事件，按该 sequence 读一条事件查询（本分支热窗口中已有的取同一条），不从锚点读到截点，锚点位于原子批次内部时也一样；解码失败、摘要不符、越界或孤立快照一律忽略并回退完整事实重放。默认解释器有两个读取入口：`HistoryRenderer::rendered_context` 返回上下文与其渲染，校验检查点的那次渲染就是调用方使用的渲染，没有检查点时也在这里渲染一次；`HistoryRenderer::context` 只返回上下文，有检查点时渲染一次用于校验并丢弃结果，没有检查点时不渲染。两者的检查点渲染失败——或按 id 找不到 resume 事件、折叠为空——都回退完整重放（`rendered_context` 渲染该重放，`context` 不渲染）；读取必需事实的错误不被吞掉。事件查看使用 `context`；预算校验只查询最新 usage、它对应的模型调用及必要边界，匹配 provider 基线时才读取那一次旧请求。
 - 投影从 `state` 开始重放 `resume` 起的事件，并丢弃游标及其之前的条目。编码与摘要规则见[存储格式](../../design/appserver/native-storage-format.md#可丢弃恢复快照)。
 
 ### 使用方
@@ -131,17 +135,19 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 | 使用方 | 读取 |
 | --- | --- |
 | Dispatcher | 热窗口；事件分发完即移出窗口 |
-| Loop 构建 `context/prepare` | `HistoryRenderer::rendered_context`（带快照加速）：配置、prompt revision 与历史投影，以及校验检查点的那次渲染 |
-| ContextPreparation | `HistoryRenderer::rendered_context(through)`：配置、prompt revision 与历史投影 |
-| ContextPolicy | `HistoryRenderer::context(committed())` 做预算校验，并用一次事件查询读 `through+1` 之后本分支已写入的压缩与预算事件（同一准备重试时写下的事实，含尚未发布的）；在压缩完成后写恢复快照 |
-| ModelProvider | 不读取；执行事件中的请求 |
-| Prompt 与配置发布 | `history::read_context` |
-| 能力重载重建 | 事件查询（`Dispatcher::consume` 给出截点） |
-| TimelineTree 建分支 | `history::read_context(at)` 校验截点并得到子分支的祖先链 |
-| 协作读取 | 取得并持有对端 Session，通过其 query 选择所消费的事件种类 |
-| App Server 历史、导出 | 已装载的线走 `Branch::query`；本进程未装载或已结束的线走 `TimelineStore` 的页读取 |
+| Loop 构建 `context/prepare` | `HistoryRenderer::rendered_stream`：逐页投影本次配置、提示词和消息；手动压缩保留操作内的上下文与投影 |
+| ContextPreparation | `rendered_stream(through)` 构造本次请求，不跨调用缓存完整请求 |
+| ContextPolicy | 读取本次准备后的压缩与预算控制字段，内容上界仍为原 `through`；usage 基线只比较最新有效调用，不展开历次调用 |
+| ModelProvider | 属性查询未完成模型操作和调用标识，恢复时结算，不重放请求 |
+| Prompt 与配置发布 | `PromptSnapshot::read` 查询最新配置和提示词状态字段 |
+| ToolBinding | 最新配置的 `data.settings`，不重建上下文 |
+| 能力重载重建 | 各所有者固定已提交截点后读取必要字段，`Dispatcher::consume` 在该截点之后接续实时事实；Goal 的旧事件收集尚未删除 |
+| TimelineTree 建分支 | 查询边界控制字段校验截点，祖先段由 Timeline 提供 |
+| 协作读取 | 取得并持有对端 Session，通过其 query 选择必要字段或正文 |
+| App Server 历史、导出 | acquire Session；活动分支走 `Branch::query`，结束分支经 `TreeCommands` 在固定 head 上读存储 |
 
-- 每个模型步骤两次上下文历史读取，有有效快照时每次不超过最近一次压缩之后的历史；ContextPolicy 另读一次同准备的尾段，稳态下为空。
+请求中的事件页面只在操作内持有。没有有效检查点时，完整上下文投影仍需要读取其有效前缀，属性查询不会自动消除这项业务工作。
+
 - Dispatcher handler 内不等待冷读取；需要历史的工作在能力自有任务中读取，完成后再提交事件。
 - 热窗口只保存未发布和未分发的事件；进程内不保留已分发的事件；返回给调用方的 `Arc<AgentEvent>` 由调用方决定持有时长。分支打开期间没有额外的解码副本：恢复和打开时的读取与其它读取一样走事件查询、存储读取或热窗口（[ADR 021](../../adr/021-reads-follow-the-state-owner.md) D6）。
 
@@ -150,7 +156,7 @@ fork 与 Session 删除在复制连接上分块提交（事件与快照每 256 �
 | 场景 | 约定 |
 | --- | --- |
 | 建分支 | 分支目录与 `branch/create` 在同一事务中提交；子 Timeline 以祖先链描述构造 |
-| 恢复 | 按[存储格式](../../design/appserver/native-storage-format.md)校验物理格式与提交边界后（进程内首次恢复全量校验；之后目录与所有分支头不变时复用上次结果，记录只在存储的进程内存，校验失败或目录变化回退全量；[恢复校验复用](../../design/appserver/restore-validation.md)），Timeline 以存储中最后的 sequence 为发布水位构造；能力按 `context` 或 `local` 重建，与其它读取一样走事件查询与存储读取；TimelineTree 的恢复事实（分支记录的创建失败）同样按查询读取，子分支的创建检查只分页读到它的第一个排队输入 |
+| 恢复 | 从已解析的分支目录取得提交head，Timeline以其为发布水位构造；能力按既有query重建当前状态和未完成工作，不执行全历史准入扫描 |
 | Timeline close | 关闭前提交的事件全部发布后，才完成关闭 |
 | Session close | 各分支关闭并结算其写入、Session scope 清理完成后释放该次加载的存储准入状态；存储仍接收写入时，释放排在已接收批次之后，完成后才从 Agent 移除 Session。只清理故障与 writer memo，不删除持久数据；恢复初始化失败且生产者停止后也执行此释放 |
 

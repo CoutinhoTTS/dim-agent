@@ -12,9 +12,7 @@ use dim_agent_capabilities::{
     skills::SkillsBranch,
     workspace_tools::background::{BackgroundExec, TaskError},
 };
-use dim_agent_runtime::{
-    AgentError, Names, Session, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
-};
+use dim_agent_runtime::{AgentError, Names, Session, TimelineQueryDirection, TimelineQueryScope};
 use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
 mod mcp;
 mod subscription;
@@ -638,7 +636,10 @@ impl Connection {
                 call,
                 Call::InputLookup(_)
                     | Call::History(_)
+                    | Call::HistoryDisplay(_)
+                    | Call::HistoryDetail(_)
                     | Call::Branches(_)
+                    | Call::BranchGet(_)
                     | Call::Keys(_)
                     | Call::Summaries(_)
                     | Call::Catalog(_)
@@ -679,7 +680,8 @@ impl Connection {
                 (Some(&p.session_id), Some(&p.branch_id))
             }
             Call::InputLookup(p) => (Some(&p.session_id), Some(&p.branch_id)),
-            Call::History(p) => (Some(&p.session_id), Some(&p.branch_id)),
+            Call::History(p) | Call::HistoryDisplay(p) => (Some(&p.session_id), Some(&p.branch_id)),
+            Call::HistoryDetail(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Keys(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Stop(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Idle(p) => (Some(&p.session_id), Some(&p.branch_id)),
@@ -711,6 +713,12 @@ impl Connection {
                 (Some(&p.session_id), None)
             }
             Call::Branches(p) => (Some(&p.session_id), None),
+            Call::BranchGet(p) => {
+                if p.branch_id.is_empty() {
+                    return Err(RpcError::invalid("branchId must not be empty"));
+                }
+                (Some(&p.session_id), None)
+            }
             Call::BranchCreate(p) => {
                 if self.protocol_version() < 2 {
                     return Err(RpcError::app(
@@ -750,10 +758,10 @@ impl Connection {
         if let Some(branch) = branch {
             match (self.protocol_version(), branch) {
                 (1, None) => {}
-                (2 | 3, Some(id)) if !id.is_empty() => {}
+                (2..=4, Some(id)) if !id.is_empty() => {}
                 _ => {
                     return Err(RpcError::invalid(
-                        "branchId is required in v2/v3 and absent in v1",
+                        "branchId is required in v2-v4 and absent in v1",
                     ));
                 }
             }
@@ -853,8 +861,10 @@ impl Connection {
         let session_id = match &call {
             Call::Submit(p) => Some(&p.session_id),
             Call::InputLookup(p) => Some(&p.session_id),
-            Call::History(p) => Some(&p.session_id),
+            Call::History(p) | Call::HistoryDisplay(p) => Some(&p.session_id),
+            Call::HistoryDetail(p) => Some(&p.session_id),
             Call::Branches(p) => Some(&p.session_id),
+            Call::BranchGet(p) => Some(&p.session_id),
             Call::Keys(p) => Some(&p.session_id),
             Call::Stop(p) => Some(&p.session_id),
             Call::Idle(p) => Some(&p.session_id),
@@ -1141,8 +1151,16 @@ impl Connection {
             }
             Call::Submit(params) => self.submit(rpc, params).await,
             Call::InputLookup(params) => self.input_lookup(rpc, params).await,
-            Call::History(params) => self.history(rpc, params).await,
+            Call::History(params) => self.history(rpc, params, false).await,
+            Call::HistoryDisplay(params) => self.history(rpc, params, true).await,
+            Call::HistoryDetail(params) => tokio::select! {
+                biased;
+                _ = self.closed.cancelled() => return None,
+                _ = rpc.unloading.cancelled() => Err(RpcError::reloading()),
+                result = self.history_detail(rpc, params) => result,
+            },
             Call::Branches(params) => self.branches(rpc, params).await,
+            Call::BranchGet(params) => self.branch_get(rpc, params).await,
             Call::Keys(params) => self.keys(rpc, params).await,
             Call::Stop(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
@@ -1752,11 +1770,19 @@ impl Connection {
         if let Some(tools) = params.tools {
             config.tools = Some(tools);
         }
+        if self.protocol_version() < 4
+            && !config.excluded_tools.iter().any(|name| name == "codemode")
+        {
+            config.excluded_tools.push("codemode".into());
+        }
         if let Some(policy) = params.permission_policy {
             config.permission_policy = policy;
         }
         if let Some(interactive) = params.interactive {
             config.interactive = interactive;
+        }
+        if let Some(language) = params.language {
+            config.language = Some(language);
         }
         let origin = match params.origin {
             None | Some(SessionOrigin::Client) => SessionOrigin::Client,

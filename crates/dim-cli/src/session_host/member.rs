@@ -17,6 +17,10 @@ enum Pending {
     Attach(u64),
     History(u64),
     Detach(u64),
+    Turn(u64),
+    Methods(u64),
+    Goal(u64),
+    Tool(u64, String, String),
 }
 
 struct Observation {
@@ -29,8 +33,12 @@ struct Observation {
     attached: bool,
     closing: bool,
     pending: Option<Pending>,
-    after: u64,
-    through: Option<u64>,
+    window: dim_client::window::Window,
+    model_through: u64,
+    earlier: bool,
+    goal_available: bool,
+    tool_available: bool,
+    goal_stale: bool,
     cursor: u64,
     live: Vec<Notice>,
 }
@@ -38,19 +46,31 @@ struct Observation {
 impl Observation {
     fn apply(&mut self, notice: Notice) {
         match notice {
-            Notice::Event(event) if event.sequence > self.cursor => {
-                self.cursor = event.sequence;
-                if let EventContent::Configuration(configuration) = &event.content {
-                    self.model = Some(format!(
-                        "{} / {}",
-                        configuration.provider_id, configuration.model_id
-                    ));
-                }
-                self.projection.apply("main", &event);
-            }
-            Notice::Event(_) => {}
+            Notice::Event(event) => self.event(event, false),
             Notice::Progress(progress) => self.projection.progress(&progress),
             Notice::State(running) => self.projection.set_running(running),
+        }
+    }
+
+    /// Folds one event of the member's Session; `replayed` says a read of its
+    /// recorded history carried it, as every page of the conversation does.
+    fn event(&mut self, event: Event, replayed: bool) {
+        if let EventContent::Configuration(configuration) = &event.content
+            && event.sequence > self.model_through
+        {
+            self.model_through = event.sequence;
+            self.model = Some(format!(
+                "{} / {}",
+                configuration.provider_id, configuration.model_id
+            ));
+        }
+        if event.sequence > self.cursor {
+            self.cursor = event.sequence;
+            self.goal_stale |= crate::goal::changed(&event.content);
+            match replayed {
+                true => self.projection.replay("main", &event),
+                false => self.projection.apply("main", &event),
+            }
         }
     }
 }
@@ -59,7 +79,7 @@ impl Observation {
 pub(super) struct Members {
     observations: HashMap<String, Observation>,
     /// The detail's member: the attachment it was opened on and its Session.
-    selected: Option<(u64, String)>,
+    pub(super) selected: Option<(u64, String)>,
     /// Observations waiting for the history-page slot, oldest first.
     pages: VecDeque<String>,
     /// Members whose read failed or whose Session closed: an unfinished card
@@ -82,7 +102,7 @@ impl Members {
         self.observations.iter().find_map(|(id, observation)| {
             matches!(
                 observation.pending,
-                Some(Pending::Attach(at) | Pending::History(at) | Pending::Detach(at)) if at == request_id
+                Some(Pending::Attach(at) | Pending::History(at) | Pending::Detach(at) | Pending::Turn(at) | Pending::Methods(at) | Pending::Goal(at) | Pending::Tool(at, _, _)) if at == request_id
             )
             .then(|| id.clone())
         })
@@ -97,6 +117,16 @@ struct AgentSummary {
 }
 
 impl Worker {
+    pub(super) fn member_projection(&mut self, session_id: &str) -> Option<&mut Projection> {
+        self.members
+            .observations
+            .get_mut(session_id)
+            .filter(|observation| {
+                !observation.closing && observation.projection_id == self.projection_id
+            })
+            .map(|observation| &mut observation.projection)
+    }
+
     pub(super) fn watch_member(&mut self, member_id: Option<String>) {
         let selected = member_id.map(|id| (self.projection_id, id));
         if selected == self.members.selected {
@@ -149,6 +179,8 @@ impl Worker {
         for (id, observation) in &mut self.members.observations {
             if !needed.contains(id) || observation.projection_id != self.projection_id {
                 observation.closing = true;
+                observation.window = Default::default();
+                observation.live.clear();
             }
         }
         for id in needed {
@@ -163,8 +195,12 @@ impl Worker {
                         attached: false,
                         closing: false,
                         pending: None,
-                        after: 0,
-                        through: None,
+                        window: Default::default(),
+                        model_through: 0,
+                        earlier: false,
+                        goal_available: false,
+                        tool_available: false,
+                        goal_stale: false,
                         cursor: 0,
                         live: Vec::new(),
                     },
@@ -178,6 +214,15 @@ impl Worker {
             if observation.pending.is_some() {
                 continue;
             }
+            let missing = (self
+                .members
+                .selected
+                .as_ref()
+                .is_some_and(|(_, selected)| selected == &id)
+                && observation.state == MemberConversationState::Live
+                && observation.tool_available)
+                .then(|| observation.projection.missing_tool())
+                .flatten();
             let method = if observation.closing && !observation.attached {
                 self.members.observations.remove(&id);
                 continue;
@@ -185,19 +230,57 @@ impl Worker {
                 "session.detach"
             } else if !observation.attached {
                 "session.attach"
+            } else if observation.state == MemberConversationState::Live
+                && observation.goal_available
+                && observation.goal_stale
+            {
+                "session.goal.get"
+            } else if missing.is_some() {
+                "session.tool.get"
             } else {
                 continue;
             };
-            let request = self.client.send(method, json!({"sessionId":id})).await?;
+            let mut params = json!({"sessionId":id});
+            if method == "session.attach"
+                && self
+                    .client
+                    .supports(&["session.history.display", "session.history.detail"])
+            {
+                params["display"] = json!(true);
+            }
+            if method == "session.goal.get" {
+                params["branchId"] = json!("main");
+            }
+            if method == "session.tool.get" {
+                let (request, call) = missing.as_ref().unwrap();
+                params["branchId"] = json!("main");
+                params["requestId"] = json!(request);
+                params["callId"] = json!(call);
+                self.members
+                    .observations
+                    .get_mut(&id)
+                    .unwrap()
+                    .projection
+                    .tool_lookup(request, call, None);
+            }
+            let request = self.client.send(method, params).await?;
             self.members
                 .observations
                 .get_mut(&id)
                 .expect("admitted observation")
                 .pending = Some(if method == "session.attach" {
                 Pending::Attach(request)
-            } else {
+            } else if method == "session.detach" {
                 Pending::Detach(request)
+            } else if method == "session.tool.get" {
+                let (origin, call) = missing.unwrap();
+                Pending::Tool(request, origin, call)
+            } else {
+                Pending::Goal(request)
             });
+            if method == "session.goal.get" {
+                self.members.observations.get_mut(&id).unwrap().goal_stale = false;
+            }
         }
         if self
             .members
@@ -213,18 +296,27 @@ impl Worker {
             };
             if observation.closing
                 || observation.pending.is_some()
-                || observation.state != MemberConversationState::Loading
+                || (observation.state != MemberConversationState::Loading && !observation.earlier)
             {
                 continue;
             }
-            let mut params = json!({
-                "sessionId":id,"branchId":"main",
-                "after":observation.after,"limit":HISTORY_PAGE,
-            });
-            if let Some(through) = observation.through {
-                params["through"] = json!(through);
+            if !self.client.supports(&["session.history.latestTurn"]) {
+                self.fail_member(
+                    &id,
+                    "This daemon cannot read a bounded transcript window".into(),
+                );
+                continue;
             }
-            let request = self.client.send("session.history", params).await?;
+            let params = observation.window.params(&id, "main");
+            let method = if self
+                .client
+                .supports(&["session.history.display", "session.history.detail"])
+            {
+                "session.history.display"
+            } else {
+                "session.history"
+            };
+            let request = self.client.send(method, params).await?;
             self.members
                 .observations
                 .get_mut(&id)
@@ -254,7 +346,7 @@ impl Worker {
         Ok(())
     }
 
-    pub(super) fn member_reply(
+    pub(super) async fn member_reply(
         &mut self,
         request_id: u64,
         result: Result<serde_json::Value, client::RpcError>,
@@ -279,6 +371,8 @@ impl Worker {
             .members
             .request(request_id)
             .expect("matched member request");
+        let mut next = None;
+        let mut ready = false;
         let observation = self
             .members
             .observations
@@ -287,10 +381,21 @@ impl Worker {
         let pending = observation.pending.take().expect("matched member request");
         match pending {
             Pending::Attach(_) => match result {
-                Ok(_) => {
+                Ok(value) => {
+                    let attached: Attached = match serde_json::from_value(value) {
+                        Ok(attached) => attached,
+                        Err(error) => {
+                            self.fail_member(&id, error.to_string());
+                            return;
+                        }
+                    };
+                    observation.model_through = attached.sequence;
+                    observation.model = attached
+                        .model
+                        .map(|model| format!("{} / {}", model.provider_id, model.model_id));
                     observation.attached = true;
                     if !observation.closing {
-                        self.members.pages.push_back(id);
+                        self.members.pages.push_back(id.clone());
                     }
                 }
                 Err(error) if !observation.closing => self.fail_member(&id, error.to_string()),
@@ -302,24 +407,131 @@ impl Worker {
                     self.send(Update::Notice(format!("Member {id} detach: {error}")));
                 }
             }
-            Pending::History(_) if observation.closing => {}
+            Pending::History(_)
+            | Pending::Turn(_)
+            | Pending::Methods(_)
+            | Pending::Goal(_)
+            | Pending::Tool(..)
+                if observation.closing => {}
+            Pending::Turn(_) => {
+                let read = result.map_err(|error| error.to_string()).and_then(|value| {
+                    serde_json::from_value::<crate::wire::TurnRead>(value)
+                        .map_err(|error| error.to_string())
+                });
+                match read {
+                    Ok(turn) if turn.branch_id == "main" && turn.through == observation.cursor => {
+                        observation
+                            .projection
+                            .set_running(turn.turn.is_some_and(|turn| !turn.ended));
+                        if let Some(output) = turn.output {
+                            observation.projection.active_output(&output);
+                        }
+                        next = Some("session.methods");
+                    }
+                    Ok(_) => self.fail_member(&id, "Member state cutoff changed".into()),
+                    Err(error) => self.fail_member(&id, error),
+                }
+            }
+            Pending::Methods(_) => {
+                let read = result.map_err(|error| error.to_string()).and_then(|value| {
+                    serde_json::from_value::<dim_client::wire::MethodTable>(value)
+                        .map_err(|error| error.to_string())
+                });
+                match read {
+                    Ok(table) => {
+                        observation.tool_available = table
+                            .methods
+                            .iter()
+                            .any(|method| method.name == "session.tool.get");
+                        observation.goal_available = table
+                            .methods
+                            .iter()
+                            .any(|method| method.name == "session.goal.get");
+                        observation.goal_stale = false;
+                        if observation.goal_available {
+                            next = Some("session.goal.get");
+                        } else {
+                            ready = true;
+                        }
+                    }
+                    Err(error) => self.fail_member(&id, error),
+                }
+            }
+            Pending::Goal(_) => {
+                let read = result.map_err(|error| error.to_string()).and_then(|value| {
+                    serde_json::from_value::<dim_agent_types::GoalRead>(value)
+                        .map_err(|error| error.to_string())
+                });
+                match read {
+                    Ok(read) => {
+                        observation.projection.goal = read.goal;
+                        ready = true;
+                    }
+                    Err(error) if observation.state == MemberConversationState::Live => {
+                        self.send(Update::Notice(format!("Member {id} goal: {error}")))
+                    }
+                    Err(error) => self.fail_member(&id, error),
+                }
+            }
+            Pending::Tool(_, request, call) => {
+                let read = result.map_err(|error| error.to_string()).and_then(|value| {
+                    serde_json::from_value::<dim_agent_types::ToolRead>(value)
+                        .map_err(|error| error.to_string())
+                });
+                match read {
+                    Ok(read)
+                        if read.branch_id == "main"
+                            && read.call.as_ref().is_none_or(|origin| {
+                                origin.request_id == request && origin.call.id == call
+                            }) =>
+                    {
+                        observation
+                            .projection
+                            .tool_lookup(&request, &call, read.call);
+                        self.member_changed(&id);
+                    }
+                    Ok(_) => {
+                        self.send(Update::Notice(format!("Member {id} tool identity changed")))
+                    }
+                    Err(error) => self.send(Update::Notice(format!("Member {id} tool: {error}"))),
+                }
+            }
             Pending::History(_) => {
                 let page = result.map_err(|error| error.to_string()).and_then(|value| {
-                    History::decode(value, observation.after, observation.through)
+                    let page = if self
+                        .client
+                        .supports(&["session.history.display", "session.history.detail"])
+                    {
+                        serde_json::from_value::<dim_client::wire::DisplayPage>(value)
+                            .map(Into::into)
+                    } else {
+                        serde_json::from_value(value)
+                    }
+                    .map_err(|error| format!("Invalid history page: {error}"))?;
+                    observation
+                        .window
+                        .push(page)
+                        .map_err(|error| error.to_string())
                 });
                 match page {
                     Err(error) => self.fail_member(&id, error),
-                    Ok(page) => {
-                        observation.after = page.next_after;
-                        observation.through = Some(page.through);
-                        for event in page.events {
-                            observation.apply(Notice::Event(event));
-                        }
-                        observation.cursor = page.next_after;
-                        if page.done {
-                            observation.state = MemberConversationState::Live;
-                            for notice in std::mem::take(&mut observation.live) {
-                                observation.apply(notice);
+                    Ok(done) => {
+                        if done {
+                            if observation.earlier {
+                                let mut older = Projection::default();
+                                for event in observation.window.take() {
+                                    older.replay("main", &event);
+                                }
+                                observation.projection.prepend(older);
+                                observation.earlier = false;
+                            } else {
+                                for event in observation.window.take() {
+                                    observation.event(event, true);
+                                }
+                                observation.cursor =
+                                    observation.window.through.expect("window cutoff");
+                                observation.projection.trim(300);
+                                next = Some("session.turn.get");
                             }
                         } else {
                             self.members.pages.push_back(id.clone());
@@ -329,6 +541,56 @@ impl Worker {
                 }
             }
         }
+        if let Some(method) = next {
+            let mut params = json!({"sessionId":id});
+            if method != "session.methods" {
+                params["branchId"] = json!("main");
+            }
+            if method == "session.turn.get" {
+                params["through"] = json!(self.members.observations[&id].cursor);
+            }
+            match self.client.send(method, params).await {
+                Ok(request) => {
+                    self.members.observations.get_mut(&id).unwrap().pending = Some(match method {
+                        "session.turn.get" => Pending::Turn(request),
+                        "session.methods" => Pending::Methods(request),
+                        "session.goal.get" => Pending::Goal(request),
+                        _ => unreachable!(),
+                    })
+                }
+                Err(error) => self.fail_member(&id, error.to_string()),
+            }
+        }
+        if ready {
+            let observation = self.members.observations.get_mut(&id).unwrap();
+            observation.state = MemberConversationState::Live;
+            for notice in std::mem::take(&mut observation.live) {
+                observation.apply(notice);
+            }
+            self.member_changed(&id);
+        }
+    }
+
+    pub(super) fn earlier_member(&mut self) -> bool {
+        let Some((_, id)) = &self.members.selected else {
+            return false;
+        };
+        let Some(observation) = self.members.observations.get_mut(id) else {
+            return true;
+        };
+        if observation.pending.is_some()
+            || observation.earlier
+            || observation.state != MemberConversationState::Live
+        {
+            return true;
+        }
+        if observation.window.before.is_none() {
+            self.send(Update::Notice("Beginning of conversation".into()));
+            return true;
+        }
+        observation.earlier = true;
+        self.members.pages.push_back(id.clone());
+        true
     }
 
     pub(super) fn member_notice(&mut self, session_id: &str, notice: Notice) {

@@ -4,7 +4,8 @@
 //! tool call and the answer is its `ToolResult`, which ToolExecutor commits in
 //! the batch's `step/tool-result`, so Questions writes no events.
 //!
-//! One Session part provides both entries and keeps, in memory, the waiters of
+//! `session.question.pending` reads unresolved question batches at a fixed cutoff.
+//! One Session part provides these entries and keeps, in memory, the waiters of
 //! the Session's running `ask_user` calls keyed by `(branchId, requestId,
 //! callId)`: call ids come from model output and may repeat in later model
 //! requests, and `requestId`, the `request_id` of the call's `step/tool-call`,
@@ -16,6 +17,7 @@
 use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params},
+    timeline_tree::TreeCommands,
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, Names, SessionConfig};
@@ -35,6 +37,9 @@ const TOOL: &str = "ask_user";
 /// The `sessionMethods` namespace Questions provides.
 const NAMESPACE: &str = "session.question";
 const RESPOND: &str = "session.question.respond";
+const PENDING: &str = "session.question.pending";
+
+mod pending;
 
 const MAX_QUESTIONS: usize = 4;
 const OPTIONS: std::ops::RangeInclusive<usize> = 2..=6;
@@ -437,6 +442,7 @@ pub struct QuestionsPlugin {
     config: Key<SessionConfig>,
     tools: Key<ToolRegistry>,
     methods: Key<SessionMethods>,
+    tree: Key<TreeCommands>,
 }
 impl QuestionsPlugin {
     pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
@@ -444,6 +450,7 @@ impl QuestionsPlugin {
             config: names.key()?,
             tools: names.key()?,
             methods: names.key()?,
+            tree: names.key()?,
         })
     }
 }
@@ -456,6 +463,7 @@ impl DynPlugin for QuestionsPlugin {
             self.config.erase(),
             self.tools.erase(),
             self.methods.erase(),
+            self.tree.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -463,6 +471,7 @@ impl DynPlugin for QuestionsPlugin {
             let config = ctx.require_at(&self.config)?;
             let tools = ctx.require_at(&self.tools)?;
             let methods = ctx.require_at(&self.methods)?;
+            let tree = ctx.require_at(&self.tree)?;
             let questions = Arc::new(Questions {
                 config,
                 waiters: Mutex::default(),
@@ -484,11 +493,25 @@ impl DynPlugin for QuestionsPlugin {
             methods.register(
                 ctx,
                 NAMESPACE,
-                vec![MethodDecl::new(RESPOND, true, Interruption::Report)],
-                Arc::new(move |call, _, _| {
-                    let MethodCall { params: value, .. } = call;
-                    let result = questions.respond(value);
-                    Box::pin(async move { result })
+                vec![
+                    MethodDecl::new(RESPOND, true, Interruption::Report),
+                    MethodDecl::new(PENDING, false, Interruption::Report),
+                ],
+                Arc::new(move |call, cancel, _| {
+                    let MethodCall {
+                        method,
+                        params: value,
+                        ..
+                    } = call;
+                    let questions = questions.clone();
+                    let tree = tree.clone();
+                    Box::pin(async move {
+                        match method.as_str() {
+                            RESPOND => questions.respond(value),
+                            PENDING => pending::read(&tree, value, &cancel).await,
+                            _ => Err(RpcError::unknown_method()),
+                        }
+                    })
                 }),
             )?;
             Ok(Effect::Done)

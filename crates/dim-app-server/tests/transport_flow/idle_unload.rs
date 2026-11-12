@@ -569,7 +569,7 @@ async fn an_attached_client_holds_its_session_until_it_detaches_or_disconnects()
     assert_ok(&client.rpc("session.detach", attach.clone()).await);
 
     let session = agent.get_session(&id).unwrap();
-    let mut other = Client::new_version(&server, false, 3).await;
+    let mut other = Client::new_version(&server, false, 4).await;
     assert_ok(&other.rpc("session.attach", attach.clone()).await);
     passes(&sessions, &agent).await;
     assert!(!session.is_unloading());
@@ -752,7 +752,7 @@ fn stored_heads(store: &Store, id: &str) -> std::collections::BTreeMap<String, u
 /// or anything else; the Session stays in `session.summaries`; and the restore
 /// adds only a `branch/resume` to each branch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
+async fn an_unload_writes_nothing_and_the_restore_only_records_housekeeping() {
     let store = Store::new();
     let loads = Loads::default();
     let Served {
@@ -832,9 +832,12 @@ async fn an_unload_writes_nothing_and_the_restore_only_resumes() {
             .unwrap()
             .iter()
             .filter(|event| {
-                !(event["type"] == "input"
+                !((event["type"] == "input"
                     && ((event["name"] == "applied" && event["data"]["mode"] == "append")
                         || (event["name"] == "message" && event["data"]["user"].is_null())))
+                    || (event["type"] == "input-queue"
+                        && matches!(event["name"].as_str(), Some("node" | "recovered")))
+                    || (event["type"] == "prompt-state" && event["name"] == "recovered"))
             })
             .map(|event| format!("{}/{}", event["type"], event["name"]).replace('"', ""))
             .collect();

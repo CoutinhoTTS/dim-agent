@@ -4,6 +4,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter on/off · r reload · Ctrl+R refresh · Esc close" => {
             "Enter 開/關 · r 重新載入 · Ctrl+R 重新整理 · Esc 關閉"
         }
+        "i install · Ctrl+R refresh · Esc close" => "i 安裝 · Ctrl+R 重新整理 · Esc 關閉",
+        "Press i to install {name}." => "按 i 安裝 {name}。",
+        "not installed" => "未安裝",
         "Locked: Dim needs it, so it cannot be turned off." => "已鎖定：Dim 需要它，所以無法關閉。",
         "Loading plugins..." => "正在載入外掛…",
         "No plugins." => "沒有外掛。",

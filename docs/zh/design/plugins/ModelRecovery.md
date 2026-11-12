@@ -63,7 +63,7 @@ InputQueue 从不采用这条输入；Loop 只在启动该交接续接的那个�
 
 ## 5. 观察者
 
-Goal、Scheduler 与 Workflow 观察 turn；续接不写中间 `turn/end`，因此它们只看到该 turn 的一个 `turn/end`，不会把失败的请求当成工作结束。若续接也失败，终态 `turn/end` 携带那次失败，它们读到的是它。
+Goal 与 Workflow 观察 turn；续接不写中间 `turn/end`，因此它们只看到该 turn 的一个 `turn/end`，不会把失败的请求当成工作结束。若续接也失败，终态 `turn/end` 携带那次失败，它们读到的是它。
 
 ## 6. 规则检查
 

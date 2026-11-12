@@ -105,6 +105,10 @@
   },
   {
     "from": "dim-agent-scheduler",
+    "to": "dim-agent-scheduler"
+  },
+  {
+    "from": "dim-agent-scheduler",
     "to": "dim-client"
   },
   {
@@ -133,6 +137,10 @@
   },
   {
     "from": "dim-app-server",
+    "to": "dim-codemode"
+  },
+  {
+    "from": "dim-app-server",
     "to": "rutis"
   },
   {
@@ -150,6 +158,30 @@
   {
     "from": "dim-app-server",
     "to": "dim-modality"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-questions"
+  },
+  {
+    "from": "dim-codemode",
+    "to": "dim-agent-runtime"
   },
   {
     "from": "dim-modality",
@@ -178,6 +210,34 @@
   {
     "from": "dim-client",
     "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-event-hub",
+    "to": "dim-client"
   },
   {
     "from": "dim-acp",
@@ -320,6 +380,10 @@
     "to": "dim-client"
   },
   {
+    "from": "dim-session-title",
+    "to": "dim-goal"
+  },
+  {
     "from": "dim-goal",
     "to": "dim-agent-capabilities"
   },
@@ -353,6 +417,34 @@
   },
   {
     "from": "dim-goal",
+    "to": "dim-client"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-agent-types"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-app-server"
+  },
+  {
+    "from": "dim-report",
+    "to": "rutis"
+  },
+  {
+    "from": "dim-report",
+    "to": "dim-agent-runtime"
+  },
+  {
+    "from": "dim-report",
     "to": "dim-client"
   },
   {
@@ -401,6 +493,10 @@
   },
   {
     "from": "dimcode",
+    "to": "dim-event-hub"
+  },
+  {
+    "from": "dimcode",
     "to": "dim-goal"
   },
   {
@@ -418,6 +514,10 @@
   {
     "from": "dimcode",
     "to": "dim-ocr"
+  },
+  {
+    "from": "dimcode",
+    "to": "dim-report"
   },
   {
     "from": "dimcode",
@@ -457,6 +557,10 @@
   },
   {
     "from": "xtask",
+    "to": "dim-agent-scheduler"
+  },
+  {
+    "from": "xtask",
     "to": "dim-agent-types"
   },
   {
@@ -469,11 +573,19 @@
   },
   {
     "from": "xtask",
+    "to": "dim-event-hub"
+  },
+  {
+    "from": "xtask",
     "to": "dim-goal"
   },
   {
     "from": "xtask",
     "to": "dim-modality"
+  },
+  {
+    "from": "xtask",
+    "to": "dim-report"
   },
   {
     "from": "xtask",

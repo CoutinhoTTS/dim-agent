@@ -2,7 +2,7 @@
 
 Status: Accepted. Related: [RemoteGateway](plugins/RemoteGateway.md) (the target design), [overview §6.3 multiple nodes](overview.md#63-multiple-nodes), [App Server README](../../crates/dim-app-server/README.md).
 
-The Web workspace is a browser frontend for the App Server, started by `dimcode web` or toggled from `/web` in the TUI. It replaces the TypeScript `dim web` host (Bun server, RCP v2) with the existing App Server protocol v3. Phase 1 ships a **local web entry**: a loopback-only subset of RemoteGateway that does not wait for its prerequisites (PluginManager #3, rutis call-scoped requests #5, extended `pluginFiles`, Settings business sources). When RemoteGateway lands it absorbs this entry; the browser side does not change because it speaks the same Session methods either way.
+The Web workspace is a browser frontend for the App Server, started by `dimcode web` or toggled from `/web` in the TUI. It replaces the TypeScript `dim web` host (Bun server, RCP v2) with the existing App Server protocol v4. Phase 1 ships a **local web entry**: a loopback-only subset of RemoteGateway that does not wait for its prerequisites (PluginManager #3, rutis call-scoped requests #5, extended `pluginFiles`, Settings business sources). When RemoteGateway lands it absorbs this entry; the browser side does not change because it speaks the same Session methods either way.
 
 ## 1. Structure
 
@@ -25,7 +25,7 @@ flowchart LR
 | `Connection` change | `connection.rs` | A connection accepted by WebEntry carries `entry: Web`; Rpc serves it Session methods (including the execution Session methods, decision E3 of RemoteGateway) and the explicit local settings allowlist (§4.3), never daemon or Web-entry controls |
 | `dimcode web` | `crates/dim-cli` | Holder client: calls `web.open` over the local socket and keeps the connection; no HTTP stack in the CLI |
 | TUI `/web` | `crates/dim-cli` | Calls `web.toggle`; the daemon owns the on/off state, so the TUI stays open |
-| Frontend | `web/` at the repository root | Vue 3 + Vite app ported from the TypeScript `packages/cli-web`, with its transport rewritten for protocol v3 |
+| Frontend | `web/` at the repository root | Vue 3 + Vite app ported from the TypeScript `packages/cli-web`, with its transport rewritten for protocol v4 |
 
 ## 2. Local web entry
 
@@ -47,7 +47,7 @@ It is open while either reason exists and closes only when both are gone. The sw
 | `web.disable` | `{}` | `{enabled, open, address?, connections}`; used by `dimcode web --off`; it clears the switch but does not disconnect holders |
 | `web.status` | `{}` | `{enabled, open, address?, connections}` |
 
-All are management methods (local transport only, protocol v3). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; the TUI switch does not need a holder. When the last reason disappears the listener stops, every token is dropped and web connections detach. Nothing is persisted, so after a daemon restart the entry is off; `dimcode web` opens it again or `/web` enables it. `web.open`/`web.toggle` fail with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
+All are management methods (local transport only, protocol v4). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; the TUI switch does not need a holder. When the last reason disappears the listener stops, every token is dropped and web connections detach. Nothing is persisted, so after a daemon restart the entry is off; `dimcode web` opens it again or `/web` enables it. `web.open`/`web.toggle` fail with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
 
 ### 2.2 Authentication
 
@@ -102,9 +102,10 @@ For development against the repository checkout, and for a build that must carry
 | Item | Rule |
 | --- | --- |
 | Version | `hello` v3 with `clientKind: "web"`; v1/v2 → `protocol_version` |
-| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3 and read-only discovery methods below. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
+| Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3 and the management methods below. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
 | Model list | The read-only management methods `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Managed Provider discovery follows §4.2. Switching uses the Session method `session.model.update` |
-| UI directory | UiExtensions contributes `ui.extensions.list`, which is explicitly allowlisted and advertised in `hello.features` while available. Connection forwards `ui.extensions.changed` over the reliable control channel; clients refetch the directory on this notice. No other contributed management method becomes reachable |
+| UI directory | UiExtensions contributes `ui.extensions.list`, which is explicitly allowlisted and advertised in `hello.features` while available. Connection forwards `ui.extensions.changed` over the reliable control channel; clients refetch the directory on this notice |
+| Error-only reports | Report contributes `report.prepare`, `report.plan`, `report.generate` and `report.cancel`. The authenticated local Web entry explicitly admits these four methods and advertises them in `hello.features` while available. They take no Session or branch ID and use no Session data. [Report contract](plugins/Report.md#4-report-methods) |
 
 Compatibility: the bare `/ws` keeps today's rules (`hello` and `daemon.ping` only in protected profiles). Execution Session methods become reachable from the web entry; this is the same widening RemoteGateway records as E3, limited here to loopback connections authenticated by the local user's token.
 
@@ -151,9 +152,9 @@ The frontend directory is fixed when the daemon starts (§2.4); a daemon started
 | --- | --- |
 | `rpc/client.ts` | JSON-RPC over `/ws`: `hello` v3 (`clientKind: "web"`), request timeout, heartbeat with `daemon.ping`, reconnect with backoff and re-attach. Strict readers at this boundary; the rest of the app uses typed data |
 | `rpc/protocol.ts` | Hand-written types for the v3 methods and notifications the UI uses (`session.*`, `approval.*`, `session.event`, `session.state`, `session.model.progress`) |
-| `projection.ts` | Folds `session.history` pages, `session.event` and `session.model.progress` into timeline rows (user, assistant text, thinking, tool call and result, approval), following `crates/dim-cli/src/projection.rs`; also tracks the waiting `ask_user` calls of each branch (`step/tool-call` until its batch's `step/tool-result`) and folds each branch's goal (`goal.ts`, a port of `crates/dim-cli/src/goal.rs`) |
-| Sidebar | Workspaces are Session summaries grouped by `cwd`; new Session by `session.create {cwd}` with a typed path or a known workspace |
-| Chat | Timeline (markdown, Shiki) with a message rail (one marker per user message from three messages on, as dim-agent's rail: hover shows the message and its first reply, a click scrolls it into view and marks it for a moment; `/timeline` is not offered, dim-agent has none), composer (submit, stop, model menu and permission preset picker, below), approval prompt (`approval.request` → `approval.respond`; "Allow for this session" → `session.grants.add` and "Always allow" for a simple `exec` command → `permission.set_rules`, both before the allow), question prompt for `ask_user` (`step/tool-call` → `session.question.respond`, closed by `step/tool-result`); the approval and question prompts take the composer's place; queued messages of the main line above the composer (`input/message` until `input/applied` or `input/deleted`; Steer and Remove → `session.input.withdraw`, Steer resends the message's content with the withdrawal); composer attachments: pasted or dropped images are sent as image content blocks (`session.submit` with `user.content`), a paste longer than 16 KiB is stored with `attachment.put` when the Session serves it and its path is named in the message, as the TUI does (`crates/dim-cli/src/attachments.rs`); `@` file mentions: the composer offers the files of the Session's workspace from `session.files.search` (WorkspaceTools; the TUI picker's index and ranking), inserts a file as `@path` and sends it as a Markdown link to its absolute path (`[@path](/abs)`, as the TUI sends it); a directory steps into `@dir/` |
+| `projection.ts` | Folds `session.history` pages, `session.event` and `session.model.progress` into timeline rows (user, assistant text, thinking, tool call and result, approval), following `crates/dim-cli/src/projection.rs`; also tracks the waiting `ask_user` calls of each branch (`step/tool-call` until its batch's `step/tool-result`) and applies owner reads for pending inputs/questions and current Goal state |
+| Sidebar | Workspaces group Session summaries by `cwd` after excluding rows with the [internal origin](appserver/session-classification.md#31-the-origin); new Session by `session.create {cwd}` with a typed path or a known workspace |
+| Chat | Timeline (markdown, Shiki) with a message rail (one marker per user message from three messages on, as dim-agent's rail: hover shows the message and its first reply, a click scrolls it into view and marks it for a moment; `/timeline` is not offered, dim-agent has none), composer (submit, stop, model menu and permission preset picker, below), approval prompt (`approval.request` → `approval.respond`; "Allow for this session" → `session.grants.add` and "Always allow" for a simple `exec` command → `permission.set_rules`, both before the allow), question prompt for `ask_user` (`step/tool-call` → `session.question.respond`, closed by `step/tool-result`); the approval and question prompts take the composer's place; queued messages of the main line above the composer (`input/message` until `input/consumed` or `input/deleted`; Steer and Remove → `session.input.withdraw`, Steer resends the message's content with the withdrawal); composer attachments: pasted or dropped images are sent as image content blocks (`session.submit` with `user.content`), a paste longer than 16 KiB is stored with `attachment.put` when the Session serves it and its path is named in the message, as the TUI does (`crates/dim-cli/src/attachments.rs`); `@` file mentions: the composer offers the files of the Session's workspace from `session.files.search` (WorkspaceTools; the TUI picker's index and ranking), inserts a file as `@path` and sends it as a Markdown link to its absolute path (`[@path](/abs)`, as the TUI sends it); a directory steps into `@dir/` |
 | Session permissions | The composer and `/permissions` select the `main` preset under [ADR 018](../adr/018-permission-is-the-preset.md) and the [Permission policy contract](../architecture/rust-agent/plugins/Permission.md#policy-contract). The client reads `session.permission.get` and `permission/changed`, displays the preset and tool lists, and preserves both lists in a versioned `session.permission.update`. Conflicts refresh without retrying. Choosing Full access requires confirmation. Process isolation links to its Settings control. |
 | Lines | Right detail panel with a Lines tree and one tab per opened line; each tab folds that line's own history and sends, stops, approves and ends on its `branchId` (§4.1) |
 | i18n | `en` and `zh-CN` |
@@ -165,11 +166,25 @@ is reconciled by `titleRevision`, including explicit clears; an older directory
 reply cannot replace a newer title. After reconnect, re-attach before reading
 the directory, following the [Session notice window](appserver/session-notices.md#5-rpc-forwarding).
 
-Features outside the settings scope with no v3 backend are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, rename, goal, workflows, subagent panes, directory picker and git branch menu. Settings and saved-session management follow §4.3.
+Opening a Session by ID can still show its history. A Session with a known parent
+links to that parent. A parent's chat header offers a collapsed list of its child
+Sessions, using the relationships already returned in the directory.
+
+```text
+Sidebar                   Conversation
+  Update cache            Update cache
+                          > Child sessions (2)
+                            Inspect stale entries
+                            Approval review
+```
+
+Features outside the settings scope with no v3 backend are left out rather than stubbed: follow-up queue, attachments and file previews, file-history rewind, rename, workflows, subagent panes, directory picker and git branch menu. Settings and saved-session management follow §4.3.
 
 ### 4.1 Lines and branch
 
-A line is a Timeline of the same Session ([Timeline branches](timeline-branches.md) §1). The Web workspace keeps the main transcript in the center and follows lines in a right-side detail panel, modeled on the Kimi Code Web `/btw` panel (tabs, a scroll region with a composer, an empty state, and a full-screen panel on narrow shells). Unlike Kimi's read-only side chat, a Dim line continues to run tools and accepts operator input; the panel therefore includes `session.submit`, `session.stop`, approvals and `session.branch_end` for the line.
+A line is a Timeline of the same Session ([Timeline branches](timeline-branches.md) §1). The Web workspace follows [Clients’ bounded-window contract](clients.md#opening-a-conversation-with-a-bounded-window). Main and selected lines load at most four initial wire pages; only an explicit “Load earlier” action reads older content. Reconnect replaces opened transcripts with fresh windows. Raw pages are released after projection.
+
+The Web workspace keeps the main transcript in the center and follows lines in a right-side detail panel, modeled on the Kimi Code Web `/btw` panel (tabs, a scroll region with a composer, an empty state, and a full-screen panel on narrow shells). Unlike Kimi's read-only side chat, a Dim line continues to run tools and accepts operator input; the panel therefore includes `session.submit`, `session.stop`, approvals and `session.branch_end` for the line.
 
 ```
 ┌──────────────┬────────────────────────────────┬─────────────────────────────────┐
@@ -183,15 +198,32 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 
 | Item | Contract |
 | --- | --- |
-| Input | v3 `branch/create`, `branch/create-failed`, `branch/end`, `branch/ended` facts; `session.state` for every branch; each branch's own `session.history` pages |
-| Derived data | `web/src/lines.ts` owns the tree, line state and `after message N` count; `projection.ts` owns each line's transcript; `stores/chat.ts` owns one history cursor and live queue per branch |
+| Input | `session.branches` supplies the directory. Lifecycle facts and `session.state` update it. `session.branch.get` supplies the selected line’s purpose, end details and inherited message count. Only opened lines read their own transcript windows. |
+| Derived data | `lines.ts` keeps directory metadata, not historical input identities. Unknown message counts remain absent. `projection.ts` owns visible rows and live controls. `stores/chat.ts` keeps each opened window’s fixed head, backward cursor and in-flight live queue. |
 | Actions | `session.branch_create {parentBranchId, at, prompt}`, `session.branch_end {branchId}`, `session.submit`/`session.stop` with the line's `branchId`; approvals use the request's `branchId` |
 | Points | A user message's cut is its sequence minus one; a line's end is its newest `turn-end`. `session.branch_create` remains the validator; its refusal is shown in the dialog or line tab |
 | Switching | Opening a line adds or activates a tab; closing a tab does not end the line; main stays the center transcript |
 | Errors | `branch_missing`, `branch_ended`, `input_blocked`, an invalid cut and a disabled Branch tool are shown at the action that raised them; an ended line is read-only |
-| State | Line tabs are per Session and live in `stores/ui.ts`; the tree is rebuilt from facts on reload and reconnect. No line list method or storage format is added |
+| State | Line tabs are per Session and live in `stores/ui.ts`; the tree is read from the existing directory on reload and reconnect. No storage format is added |
 
 **Not in this phase:** session fork, a drawn DAG, compare/adopt and per-line model selection. Each needs its own client design.
+
+#### State outside the window
+
+Before enabling the conversation, read pending inputs with `session.input.pending`, pending questions
+with `session.question.pending` and current execution/output offsets with `session.turn.get` at the
+window's cutoff. Lists use their own keyset continuation and retain that cutoff. Read current Goal
+state through `session.goal.get`; refresh it after Goal commands or relevant live input/deletion facts.
+The browser no longer parses Goal blocks or keeps historical Goal inputs. The attach reply supplies
+the current model; a historical configuration in the window cannot overwrite it.
+
+Questions on unopened branches are restored at their directory heads without reading transcripts.
+Live question terminals update those control states. Directory discovery and background branch notices
+do not open transcripts. Results whose call is outside the window use `session.tool.get` with request
+and call ids; no history search is performed. Live events wait in order while that call is resolved.
+A failed owner read reports failure and leaves the affected conversation unavailable for retry.
+The window capability and pending-input/question/turn methods are required; unsupported servers fail
+explicitly without falling back to full history.
 
 #### Questions
 
@@ -245,7 +277,7 @@ commands are handled locally rather than submitted as model input.
 | `session` | `/compact` | Compact the main line's context (`session.context.compact`); listed when the Session's method table (`session.methods`) lists it. Reports the result as a notice |
 | `session` | `/usage` | Show the main line's context window usage (`session.context.usage`); listed under the same condition as `/compact` |
 | `session` | `/fork` | Fork the Session at its last finished turn (`session.fork {at}`) after a confirmation, then open the new Session; listed when the connection serves `session.fork` and main has a finished turn |
-| `session` | `/goal [words]` | Show the main line's goal, folded from its own events (as the TUI folds it), or write it: `/goal OBJECTIVE`, `set`, `edit`, `pause`, `resume` and `clear` call `session.goal.<call>` with `branchId: main`; listed when the Session's method table lists `session.goal.set`. The menu fills `/goal ` for its words |
+| `session` | `/goal [words]` | Show the main line's current goal through `session.goal.get`, or write it: `/goal OBJECTIVE`, `set`, `edit`, `pause`, `resume` and `clear` call `session.goal.<call>` with `branchId: main`; listed when the Session's method table lists `session.goal.set`. The menu fills `/goal ` for its words |
 | `model` | `/effort [value]` | List the main line model's reasoning effort choices (from `provider.catalog`, when the model advertises reasoning preferences), or set one with `session.model.update {modelPreferences: {reasoningEffort}}`, as `/effort` does in the TUI (`configure.rs`). Listed only when the model has choices. `/fast` is not offered: no model advertises service tiers yet |
 | `model` | `/permissions` | Open the composer's permission selector (below). Listed where the Session serves `session.permission.get` and `session.permission.update` |
 | `session` | `/lines` | Open the existing Session lines panel |
@@ -295,7 +327,7 @@ paired-device boundary of [RemoteGateway](plugins/RemoteGateway.md).
 The reference is the TypeScript repository's `packages/cli-web`, especially its
 `features/settings` components and `docs/packages/cli-web/settings-layout.md`.
 Reuse its layout, labels and interaction patterns with the current Web tokens;
-replace its `web.*` management bridge with the existing protocol v3 owners, not
+replace its `web.*` management bridge with the existing protocol v4 owners, not
 a second settings store or a compatibility implementation of the old protocol.
 
 #### Navigation and layout
@@ -315,6 +347,14 @@ Save actions follow all fields they submit, including model preferences. Provide
 list and add-dialog searches are independent; the custom-provider form can return
 to the picker, confirming before discarding a changed draft. Dialog close buttons
 remain square at the top right.
+
+The add dialog puts custom creation next to the Provider search. The connection
+form keeps connection fields and the enable toggle together. Test connection
+reports the number of models found. Only the probe result for the current draft
+seeds a new Provider; manually adding a model belongs to the Models tab. After
+the owner accepts a connection save, the dialog closes and the provider list
+shows the saved Provider and a confirmation. A rejected write keeps the draft
+and shows the owner's error in the form.
 
 Loading and failure states, including retry actions, remain inside the active
 dialog rather than behind it. Error banners wrap long server messages without
@@ -365,6 +405,36 @@ Settings owner. Do not expose a generic configuration-file or JSON editor.
 | Models | Existing `provider.models.*` and `provider.preferences.update`: search, enable/disable, create, edit, reset and delete where declared; expose supported limits, endpoint, reasoning and service-tier preferences without inventing defaults |
 | Other OAuth providers | Follow the returned account namespace and declared login methods; reuse the existing Codex/Grok account owners rather than treating their credentials as static API keys |
 | Chat integration | After a successful account, Provider or model mutation, reload authoritative discovery and reconcile the picker; preserve existing Session model-selection semantics |
+
+Both Dim sign-in surfaces fetch the signed-in Provider's model list with
+`provider.refresh` after browser or device authorization completes. Once the
+refresh succeeds, the chat picker reads the updated catalog. A refresh error
+leaves the user signed in and shows the reason in Settings. The account card
+offers `Refresh model list` for the signed-in Dim account. Provider details
+offer the same action next to the tabs when the owner advertises `refresh`.
+This includes disabled Providers with a saved connection that supports listing.
+The refresh error's Retry button in Provider details fetches the models again.
+
+```text
++-- Account ---------------------------------------+
+| Dim account        [Refresh model list] [Sign out] |
+| Model list refresh failed                          |
++----------------------------------------------------+
+
++-- Provider --------------------------------------+
+| [Connection] [Models]         [Refresh model list] |
+| Model list refresh failed                   [Retry] |
++----------------------------------------------------+
+
++-- Custom provider -------------------------------+
+| Provider name                                     |
+| API URL                                           |
+| API protocol               Authentication         |
+| Credential                                        |
+| [ ] Enable provider                               |
+|          [Cancel] [Test connection] [Save provider]|
++---------------------------------------------------+
+```
 
 Provider writes use the snapshot's expected version and the owner's field-operation
 contract ([Provider management](appserver/provider-management.md)); a conflict
@@ -785,7 +855,7 @@ must justify a responsibility beyond translating an already typed owner reply.
 | §1 Capability and App Server boundary | WebEntry is App Server process code, not a Capability; Transport, Connection and Rpc gain only the `entry: Web` record and its method filter |
 | §4.1, §4.9 Timeline writes | WebEntry writes no Timeline event; web calls reach Session owners exactly like local calls |
 | §4.3 Before callbacks | No check at a Session entry; only the HTTP upgrade is authenticated |
-| §4.7 Public events and services | The browser uses protocol v3 Session methods and notifications, and the explicit typed settings methods of existing owners |
+| §4.7 Public events and services | The browser uses protocol v4 Session methods and notifications, and the explicit typed settings methods of existing owners |
 | ADR 002 D1 Scope | Process-scoped: one entry per daemon |
 | ADR 002 D4 Configuration | No configuration is persisted in phase 1; the port is a `web.open` parameter |
 | ADR 002 D5 Language-neutral contracts | The HTTP surface and `web.*` methods are given in neutral form above |

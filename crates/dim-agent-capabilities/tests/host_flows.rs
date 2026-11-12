@@ -148,7 +148,12 @@ async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit()
             && failure.kind == ModelFailureKind::OutputLimit
             && failure.reason.as_deref().is_some_and(|reason| reason.contains("max_tokens")))));
     assert!(matches!(
-        &history.last().unwrap().kind,
+        &history
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Failed { .. },
             ..
@@ -172,7 +177,12 @@ async fn a_max_tokens_turn_keeps_the_session_usable_with_a_larger_output_limit()
     session.idle("main").await.unwrap();
     let history = chain_events(&session, "main", ..).await.unwrap();
     assert!(matches!(
-        &history.last().unwrap().kind,
+        &history
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .kind,
         EventKind::TurnEnd(TurnEndData {
             outcome: TurnOutcome::Completed { .. },
             ..
@@ -427,7 +437,7 @@ async fn stop_waits_for_native_cleanup_and_keeps_a_real_success() {
         assert!(cleaned.load(Ordering::SeqCst));
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("native operation succeeded".into()) && data.results[0].result.is_error.is_none())));
-        assert!(matches!(events.last().unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Cancelled { .. }, .. })));
+        assert!(matches!(events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Cancelled { .. }, .. })));
         agent.close().await.unwrap();
     }).await.unwrap();
 }
@@ -493,7 +503,9 @@ async fn invalid_model_stream_is_cancelled_and_drained_before_settlement() {
             chain_events(&session, "main", ..)
                 .await
                 .unwrap()
-                .last()
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
                 .unwrap()
                 .kind,
             EventKind::TurnEnd(TurnEndData {
@@ -1544,7 +1556,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                         "{outcomes:?}"
                     );
                     assert!(matches!(
-                        &events.last().unwrap().kind,
+                        &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
                         EventKind::TurnEnd(TurnEndData {
                             outcome: TurnOutcome::Cancelled { reason },
                             ..
@@ -1558,7 +1570,7 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                         EventKind::InputConsumed(data) if Some(&data.input_id) == steered.as_ref()
                     )));
                     assert!(matches!(
-                        &events.last().unwrap().kind,
+                        &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
                         EventKind::TurnEnd(TurnEndData {
                             outcome: TurnOutcome::Completed { .. },
                             ..
@@ -2130,12 +2142,12 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .wait_for(|progress| progress.thinking == "deep thought")
             .await
             .unwrap();
-        let thinking_part = session
-            .get::<ModelProgress>("main")
-            .unwrap()
-            .unwrap()
+        let open = session.get::<ModelProgress>("main").unwrap().unwrap();
+        let thinking_part = open
             .thinking_part_id
+            .clone()
             .expect("open thinking part id");
+        let thinking_started = open.thinking_started_at.expect("open thinking start");
         assert!(outputs(&chain_events(&session, "main", ..).await.unwrap()).is_empty());
         send(vec![
             ModelChunk::ThinkingEnd {
@@ -2152,6 +2164,7 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
         assert_eq!((shown.text_offset, shown.thinking_offset), (0, 12));
         let first_text_part = shown.text_part_id.clone().expect("first text part id");
         assert!(shown.thinking_part_id.is_none());
+        assert!(shown.thinking_started_at.is_none());
         assert_eq!(
             outputs(&chain_events(&session, "main", ..).await.unwrap()),
             ["thinking:deep thought"]
@@ -2197,6 +2210,7 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
         );
         let shown = session.get::<ModelProgress>("main").unwrap().unwrap();
         assert_eq!((shown.text_offset, shown.thinking_offset), (9005, 12));
+        assert!(shown.thinking_started_at.is_none());
         send(vec![
             ModelChunk::ToolArguments {
                 id: "call".into(),
@@ -2234,6 +2248,7 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
             .find(|event| matches!(event.kind, EventKind::Thinking(_)))
             .expect("thinking event");
         assert_eq!(thinking_event.id, thinking_part);
+        assert_eq!(thinking_event.create_at, thinking_started);
         let text_events: Vec<_> = events
             .iter()
             .filter(|event| matches!(event.kind, EventKind::Text(_)))
@@ -2249,6 +2264,168 @@ async fn model_output_is_committed_per_block_and_shown_as_progress_until_then() 
         assert_eq!(
             session.get::<ModelProgress>("main").unwrap().unwrap(),
             ModelProgress::default()
+        );
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// A thinking block's start is one producer-owned fact: progress keeps it
+/// across deltas and the durable first event carries it, so clients can show
+/// the same elapsed time while streaming and from history. A block that ends
+/// and a new one that starts each own their start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thinking_block_keeps_its_start_in_progress_and_history() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (chunks, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let agent = MinimalHost::start(&builder(
+            Arc::new(ChannelModel(Mutex::new(Some(receiver)))),
+            Arc::new(MockTools),
+        ))
+        .await
+        .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+        let send = |list: Vec<ModelChunk>| {
+            for chunk in list {
+                chunks.send(chunk).unwrap();
+            }
+        };
+        send(vec![
+            ModelChunk::MessageStart {
+                message_id: "thinking-start".into(),
+            },
+            ModelChunk::Thinking("first".into()),
+        ]);
+        progress
+            .wait_for(|progress| progress.thinking == "first")
+            .await
+            .unwrap();
+        let open = session.get::<ModelProgress>("main").unwrap().unwrap();
+        let part_id = open
+            .thinking_part_id
+            .clone()
+            .expect("open thinking part id");
+        let started_at = open.thinking_started_at.expect("thinking start");
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        send(vec![ModelChunk::Thinking(" second".into())]);
+        progress
+            .wait_for(|progress| progress.thinking == "first second")
+            .await
+            .unwrap();
+        let open = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert_eq!(open.thinking_part_id.as_deref(), Some(part_id.as_str()));
+        assert_eq!(open.thinking_started_at, Some(started_at));
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        send(vec![ModelChunk::ThinkingEnd {
+            thinking: "first second".into(),
+        }]);
+        progress
+            .wait_for(|progress| progress.thinking_offset == 12 && progress.thinking.is_empty())
+            .await
+            .unwrap();
+        let open = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert_eq!(
+            open.thinking_part_id.as_deref(),
+            Some(part_id.as_str()),
+            "a committed block stays open until another block replaces it"
+        );
+        assert_eq!(open.thinking_started_at, Some(started_at));
+
+        send(vec![ModelChunk::Text("answer".into())]);
+        progress
+            .wait_for(|progress| progress.text == "answer")
+            .await
+            .unwrap();
+        let open = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert_eq!(open.thinking_started_at, None);
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        send(vec![ModelChunk::Thinking("again".into())]);
+        progress
+            .wait_for(|progress| progress.thinking == "again")
+            .await
+            .unwrap();
+        let next = session.get::<ModelProgress>("main").unwrap().unwrap();
+        let next_part_id = next.thinking_part_id.clone().expect("next part id");
+        let next_started_at = next.thinking_started_at.expect("next start");
+        assert_ne!(next_part_id, part_id);
+        assert!(
+            next_started_at > started_at,
+            "{next_started_at} <= {started_at}"
+        );
+
+        send(vec![
+            ModelChunk::ThinkingEnd {
+                thinking: "again".into(),
+            },
+            ModelChunk::ToolStart {
+                id: "call".into(),
+                name: "echo".into(),
+            },
+        ]);
+        progress
+            .wait_for(|progress| progress.tools.iter().any(|tool| tool.call_id == "call"))
+            .await
+            .unwrap();
+        let shown = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert!(
+            shown.thinking_part_id.is_none(),
+            "a tool start ends the thought"
+        );
+        assert_eq!(shown.thinking_started_at, None);
+
+        send(vec![
+            ModelChunk::ToolArguments {
+                id: "call".into(),
+                name: "echo".into(),
+                delta: "{\"text\":\"hi\"}".into(),
+            },
+            ModelChunk::ToolUse(ToolCall {
+                id: "call".into(),
+                name: "echo".into(),
+                input: serde_json::from_value(serde_json::json!({"text":"hi"})).unwrap(),
+            }),
+            ModelChunk::MessageStop {
+                message_id: "thinking-start".into(),
+                reason: ModelStopReason::ToolUse,
+            },
+        ]);
+        drop(chunks);
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let thinking = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::Thinking(_)))
+            .expect("thinking event");
+        assert_eq!(thinking.id, part_id);
+        assert_eq!(thinking.create_at, started_at);
+        let second = events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::Thinking(_)))
+            .nth(1)
+            .expect("second thinking event");
+        assert_eq!(second.id, next_part_id);
+        assert_eq!(second.create_at, next_started_at);
+        let text = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::Text(_)))
+            .expect("text event");
+        assert!(
+            text.create_at > thinking.create_at,
+            "the block spans wall-clock time: {} -> {}",
+            thinking.create_at,
+            text.create_at
         );
         agent.close().await.unwrap();
     })
@@ -2646,10 +2823,9 @@ async fn open_turn(session: &dim_agent_runtime::Session) -> String {
         .expect("a started turn")
 }
 
-/// Waits until the dispatcher has handled every committed event.
-async fn dispatched_past(session: &dim_agent_runtime::Session, sequence: u64) {
+async fn queue_consumed_through(session: &dim_agent_runtime::Session, sequence: u64) {
     let mut dispatch = session.dispatch_watch("main").unwrap();
-    while dispatch.borrow().sequence < sequence {
+    while dispatch.borrow_and_update().sequence < sequence {
         dispatch.changed().await.unwrap();
     }
 }
@@ -2713,7 +2889,7 @@ async fn a_handover_input_is_held_without_being_applied_or_counted() {
             .submit("operator next".into(), InputMode::Queue, "main")
             .await
             .unwrap();
-        dispatched_past(&session, queued.sequence).await;
+        queue_consumed_through(&session, queued.sequence).await;
         assert_eq!(
             session
                 .get::<InputSnapshot>("main")
@@ -2726,7 +2902,7 @@ async fn a_handover_input_is_held_without_being_applied_or_counted() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         assert_eq!(
             session
                 .get::<InputSnapshot>("main")
@@ -2779,7 +2955,7 @@ async fn a_handover_input_is_deleted_at_its_turn_end_and_never_reaches_the_model
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         release.notify_one();
         deleted(&session, &handover.id).await;
         session.idle("main").await.unwrap();
@@ -2921,7 +3097,7 @@ async fn a_consumed_handover_input_is_not_deleted_at_turn_end() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         let timeline = slot.lock().unwrap().clone().expect("the branch Timeline");
         let consumed = timeline
             .append(
@@ -2931,7 +3107,7 @@ async fn a_consumed_handover_input_is_not_deleted_at_turn_end() {
                 .into(),
             )
             .unwrap();
-        dispatched_past(&session, consumed.sequence).await;
+        queue_consumed_through(&session, consumed.sequence).await;
         release.notify_one();
         session.idle("main").await.unwrap();
         let events = chain_events(&session, "main", ..).await.unwrap();
@@ -2974,12 +3150,12 @@ async fn a_held_handover_input_does_not_steal_the_next_queued_input() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         let operator = session
             .submit("operator next".into(), InputMode::Queue, "main")
             .await
             .unwrap();
-        dispatched_past(&session, operator.sequence).await;
+        queue_consumed_through(&session, operator.sequence).await;
         release.notify_one();
         deleted(&session, &handover.id).await;
         session.idle("main").await.unwrap();
@@ -3086,7 +3262,7 @@ async fn a_withdrawn_handover_input_is_deleted_once() {
             .input(handover_input("handover text", &turn, "request-1"), "main")
             .await
             .unwrap();
-        dispatched_past(&session, handover.sequence).await;
+        queue_consumed_through(&session, handover.sequence).await;
         let queue = session.service::<InputQueue>("main").unwrap();
         let (answer, replacement) = queue
             .withdraw(
@@ -3256,6 +3432,80 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
 const TOOL_IMAGE: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
 
+#[tokio::test]
+async fn replacing_a_tool_image_preserves_other_messages_and_the_stored_result() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = MinimalHost::start(&builder(
+        Arc::new(RecordingModel(requests.clone())),
+        Arc::new(Screenshot(true)),
+    ))
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig {
+            model: model_with_vision("text-only", false),
+            tools: Some(vec!["shot".into()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    session
+        .submit("keep this answer".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    session
+        .submit("tool:shot {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let sent = requests.lock().unwrap().last().unwrap().clone();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let stored = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(call) => Some(call.request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!Arc::ptr_eq(&sent, &stored));
+    assert_eq!(sent.messages.len(), stored.messages.len());
+    let mut replaced = 0;
+    for (before, after) in stored.messages.iter().zip(&sent.messages) {
+        if before == after {
+            assert!(Arc::ptr_eq(before, after), "unchanged messages stay shared");
+            continue;
+        }
+        replaced += 1;
+        let MessageContent::Parts(parts) = &after.content else {
+            panic!("tool results contain parts")
+        };
+        let [MessagePart::ToolResult { content, .. }] = parts.as_slice() else {
+            panic!("one tool result is adapted")
+        };
+        assert_eq!(
+            content,
+            &ToolContent::Blocks(vec![
+                ContentBlock::Text {
+                    text: "screenshot".into()
+                },
+                ContentBlock::Text {
+                    text: "[Image omitted: the current model does not accept images.]".into()
+                }
+            ])
+        );
+    }
+    assert_eq!(replaced, 1);
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::ToolResult(data) if data.results.iter().any(|result| matches!(
+            &result.result.content,
+            ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))
+        ))
+    )));
+    agent.close().await.unwrap();
+}
+
 /// A tool whose result is a text block, with or without a PNG block after it.
 struct Screenshot(bool);
 impl ToolDriver for Screenshot {
@@ -3373,7 +3623,12 @@ async fn tool_result_estimates(image: bool) -> Vec<f64> {
     let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(
         matches!(
-            events.last().unwrap().kind,
+            events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
             EventKind::TurnEnd(TurnEndData {
                 outcome: TurnOutcome::Completed { .. },
                 ..

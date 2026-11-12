@@ -1256,6 +1256,44 @@ impl TestStore {
     }
 }
 impl TimelineStore for TestStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        fn kinds(filter: &dim_agent_runtime::QueryFilter) -> Vec<String> {
+            use dim_agent_runtime::{QueryFilter, QueryOperand};
+            match filter {
+                QueryFilter::In {
+                    value: QueryOperand::Field { path },
+                    values,
+                } if path == "kind" => values
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_owned())
+                    .collect(),
+                QueryFilter::And { conditions } | QueryFilter::Or { conditions } => {
+                    conditions.iter().flat_map(kinds).collect()
+                }
+                _ => vec![],
+            }
+        }
+        Box::pin(async move {
+            let selected = query.filter.as_ref().map(kinds).unwrap_or_default();
+            if self.armed.lock().unwrap().as_deref() == Some(scope.key.branch_id.as_str())
+                && selected.as_slice() == ["input/message"]
+            {
+                return Err(AgentError::Storage("injected opening read failure".into()));
+            }
+            self.queries
+                .lock()
+                .unwrap()
+                .push((scope.key.branch_id.clone(), selected));
+            self.memory.query(scope, query, page).await
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -1342,26 +1380,6 @@ impl TimelineStore for TestStore {
         interpreter: &'a str,
     ) -> dim_agent_runtime::BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         self.memory.latest_snapshot(key, through, interpreter)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<'a, Result<TimelineQueryPage>> {
-        Box::pin(async move {
-            if self.armed.lock().unwrap().as_deref() == Some(key.branch_id.as_str())
-                && query.kinds.as_slice() == ["input/message"]
-            {
-                return Err(AgentError::Storage("injected opening read failure".into()));
-            }
-            self.queries
-                .lock()
-                .unwrap()
-                .push((key.branch_id.clone(), query.kinds.clone()));
-            self.memory.query(key, query, from, through).await
-        })
     }
 }
 
@@ -2678,8 +2696,12 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
     assert!(
         matches!(&local[0].kind, EventKind::BranchStart(data) if data.create_event == Some(create.sequence))
     );
+    let prompt = local
+        .iter()
+        .find(|event| matches!(event.kind, EventKind::InputMessage(_)))
+        .expect("the branch's first input");
     assert!(
-        matches!(&local[1].kind, EventKind::InputMessage(data) if matches!(
+        matches!(&prompt.kind, EventKind::InputMessage(data) if matches!(
             data.user.as_ref().map(|user| user.content.as_slice()),
             Some([ContentBlock::Text { text }]) if text == "final prompt"
         ))
@@ -2701,12 +2723,12 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
     assert_eq!(
         applied
             .iter()
-            .filter(|id| **id == local[1].id.as_str())
+            .filter(|id| **id == prompt.id.as_str())
             .count(),
         1,
         "the opening input is applied once"
     );
-    for id in applied.iter().filter(|id| **id != local[1].id.as_str()) {
+    for id in applied.iter().filter(|id| **id != prompt.id.as_str()) {
         let input = local
             .iter()
             .find(|event| event.id == **id)
@@ -3373,9 +3395,8 @@ async fn until_branch(session: &Session, branch: &str) {
     }
     panic!("branch {branch} was not restored");
 }
-/// Waits for the line to be idle with a parent block held at the parent's
-/// current head; a block behind the head is consumed by running the line one
-/// turn. Returns the block's sequence, its text and the head it reports.
+/// Waits for a held parent block covering the parent's latest operator input
+/// or tool use. Returns its sequence, text and the parent's observed head.
 async fn settle_line(session: &Session, branch: &str) -> (u64, String, u64) {
     for _ in 0..400 {
         patient(session.idle("main")).await.unwrap();
@@ -3393,7 +3414,17 @@ async fn settle_line(session: &Session, branch: &str) -> (u64, String, u64) {
             continue;
         }
         let (block_head, _) = parent_block(&text);
-        if block_head != head {
+        let activity = local_events(session, "main")
+            .await
+            .iter()
+            .filter(|event| {
+                matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_some())
+                    || matches!(event.kind, EventKind::ToolUse(_))
+            })
+            .map(|event| event.sequence)
+            .max()
+            .unwrap_or(0);
+        if block_head < activity {
             patient(session.submit("settle".into(), InputMode::Queue, branch))
                 .await
                 .unwrap();
@@ -4372,7 +4403,7 @@ impl ToolDriver for EffectTools {
                     signal: None,
                 });
             }
-            let mut result = ToolResult::text("touched");
+            let mut result = ToolResult::text("large result content".repeat(32768));
             result.effects = (!effects.is_empty()).then_some(effects);
             Ok(result)
         })
@@ -4386,9 +4417,12 @@ impl ToolDriver for EffectTools {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parent_read_carries_the_effects_its_tool_results_declared() {
     let probe = Arc::new(Probe::default());
-    let agent = MinimalHost::start(&builder_with_tools(&probe, Arc::new(EffectTools)))
-        .await
-        .unwrap();
+    let store = Arc::new(TestStore::refusing_ranges(Arc::new(
+        MemoryTimelineStore::default(),
+    )));
+    let mut builder = builder_with_tools(&probe, Arc::new(EffectTools));
+    builder.timeline_store(store.clone());
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig {
         tools: Some(vec![
             "echo".into(),
@@ -4418,6 +4452,11 @@ async fn a_parent_read_carries_the_effects_its_tool_results_declared() {
         soon(session.idle("main")).await.unwrap();
     }
     let page = page_of(&tool_call(&session, &child, r#"{"action":"read","branch":"main"}"#).await);
+    assert_eq!(
+        store.range_reads(),
+        0,
+        "branch reads must not decode whole stored events"
+    );
     let items = page["items"].as_array().expect("page items");
     let results: Vec<&serde_json::Value> = items
         .iter()
@@ -4617,12 +4656,16 @@ async fn main_re_reads_a_line_from_zero_and_the_cursor_follows_that_read() {
         .await,
     );
     let sequences = page_sequences(&zero);
-    assert!(
-        zero.to_string().contains("check the parser"),
-        "after 0 starts at the line's first event: {zero}"
-    );
+    let prompt_on_first_page = zero.to_string().contains("check the parser");
+    if !prompt_on_first_page {
+        assert!(
+            sequences.is_empty(),
+            "the opening page contains only hidden facts: {zero}"
+        );
+        assert_eq!(zero["done"], false, "hidden facts do not finish the read");
+    }
     let cursor = zero["nextCursor"].as_u64().unwrap();
-    assert!(cursor >= *sequences.last().unwrap());
+    assert!(cursor > 0 && cursor >= sequences.last().copied().unwrap_or(0));
     let next = page_of(
         &tool_call(
             &session,
@@ -4632,6 +4675,12 @@ async fn main_re_reads_a_line_from_zero_and_the_cursor_follows_that_read() {
         .await,
     );
     let sequences = page_sequences(&next);
+    if !prompt_on_first_page {
+        assert!(
+            next.to_string().contains("check the parser"),
+            "the next page reaches the opening input: {next}"
+        );
+    }
     assert!(
         sequences.iter().all(|sequence| *sequence > cursor),
         "the next read continues after {cursor}: {next}"
@@ -4644,10 +4693,11 @@ async fn main_re_reads_a_line_from_zero_and_the_cursor_follows_that_read() {
         )
         .await,
     );
-    assert!(
-        again.to_string().contains("check the parser"),
-        "after 0 re-reads a line from its start: {again}"
+    assert_eq!(
+        again["items"], zero["items"],
+        "after 0 re-reads the opening page"
     );
+    assert_eq!(again["nextCursor"], zero["nextCursor"]);
     assert_eq!(page_sequences(&again), page_sequences(&zero));
     let cursor = again["nextCursor"].as_u64().unwrap();
     let next = page_of(
@@ -6139,6 +6189,80 @@ async fn an_idle_line_tells_main_once_when_its_turn_ends_without_a_word() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_line_without_idle_notices_stays_quiet_after_restore() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_store(&probe, store.clone()))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let id = session.id().to_owned();
+    let result = tool_call(
+        &session,
+        "main",
+        r#"{"action":"create","prompt":"watch the tests","idleNotice":"none"}"#,
+    )
+    .await;
+    assert_eq!(result.is_error, None, "{:?}", result.content);
+    let child = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id != "main")
+        .expect("the create result names a published line")
+        .id;
+    until_events(&session, &child, |events| {
+        events.iter().any(|event| {
+            matches!(&event.kind, EventKind::TurnEnd(data) if matches!(&data.outcome, TurnOutcome::Completed { .. }))
+        })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").is_empty());
+    soon(agent.close()).await.unwrap();
+
+    let agent = MinimalHost::start(&builder_with_store(&probe, store))
+        .await
+        .unwrap();
+    let session = soon(agent.restore_session(id)).await.unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    let before = local_events(&session, &child)
+        .await
+        .last()
+        .unwrap()
+        .sequence;
+    session
+        .submit("Check again".into(), InputMode::Queue, &child)
+        .await
+        .unwrap();
+    until_events(&session, &child, |events| {
+        events.iter().any(|event| {
+            event.sequence > before
+                && matches!(&event.kind, EventKind::TurnEnd(data) if matches!(&data.outcome, TurnOutcome::Completed { .. }))
+        })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").is_empty());
+
+    let result = tool_call(
+        &session,
+        &child,
+        r#"{"action":"message","to":"main","content":"A test failed","mode":"steer"}"#,
+    )
+    .await;
+    assert_eq!(result.is_error, None, "{:?}", result.content);
+    until_events(&session, "main", |events| {
+        blocks_with(events, "<dim-branch-message")
+            .iter()
+            .any(|text| text.contains("A test failed"))
+    })
+    .await;
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_turn_that_steered_main_writes_no_idle_notice() {
     let probe = Arc::new(Probe::default());
     let agent = setup(&probe).await;
@@ -6434,53 +6558,102 @@ async fn a_host_lines_end_says_nothing_to_main() {
     assert!(line_block(&events).is_none());
     let tree = session.session_service::<TreeCommands>().unwrap();
     let facts = local_events(&session, &host).await;
-    let anchor = facts[facts.len() - 2].clone();
-    let query = TimelineQuery {
+    let head = facts.last().unwrap().sequence;
+    let mut query = TimelineQuery {
         scope: TimelineQueryScope::Branch,
         include_publishing: true,
-        from_event: Some(anchor.id.clone()),
-        from_sequence: None,
-        order_by: Default::default(),
-        direction: TimelineQueryDirection::Descending,
-        kinds: vec![],
-        flags: vec![],
-        event_id: None,
-        predicate: None,
-        limit: std::num::NonZeroU64::new(2).unwrap(),
-        offset: 1,
+        from: None,
+        through: Some(head),
+        query: QuerySpec {
+            filter: None,
+            select: QuerySelect::Fields {
+                fields: vec!["id".into()],
+            },
+            group_by: vec![],
+            pick: None,
+            order_by: vec![QueryOrder {
+                key: QueryOrderKey::Position,
+                direction: TimelineQueryDirection::Descending,
+            }],
+        },
+        page: Some(QueryPage {
+            limit: std::num::NonZeroU64::new(2).unwrap(),
+            after: None,
+        }),
     };
-    let page = tree.query(host.clone(), query.clone()).await.unwrap();
-    assert_eq!(page.through, facts.last().unwrap().sequence);
-    assert_eq!(page.events.len(), 2);
-    assert_eq!(page.events[0].id, facts[facts.len() - 3].id);
-    assert!(
-        page.events
-            .iter()
-            .all(|event| event.sequence < anchor.sequence)
+    let first = tree.query(host.clone(), query.clone()).await.unwrap();
+    assert_eq!(first.through, head);
+    let QueryOutput::Rows { rows } = first.result else {
+        panic!("expected property rows")
+    };
+    assert_eq!(
+        rows[0].values[0],
+        QueryValue::Value {
+            value: serde_json::json!(facts.last().unwrap().id)
+        }
     );
+    assert_eq!(
+        rows[1].values[0],
+        QueryValue::Value {
+            value: serde_json::json!(facts[facts.len() - 2].id)
+        }
+    );
+    query.page.as_mut().unwrap().after = first.next;
+    let second = tree.query(host.clone(), query.clone()).await.unwrap();
+    let QueryOutput::Rows { rows } = second.result else {
+        panic!("expected property rows")
+    };
+    assert_eq!(
+        rows[0].values[0],
+        QueryValue::Value {
+            value: serde_json::json!(facts[facts.len() - 3].id)
+        }
+    );
+    query.through = None;
     assert!(matches!(
-        tree.query(
-            host.clone(),
-            TimelineQuery {
-                scope: TimelineQueryScope::Chain,
-                ..query.clone()
-            }
-        )
-        .await,
+        tree.query(host.clone(), query.clone()).await,
         Err(AgentError::InvalidInput(_))
     ));
-    assert!(
-        tree.query(
-            host,
-            TimelineQuery {
-                from_event: Some("missing".into()),
-                ..query
-            }
-        )
-        .await
-        .unwrap()
-        .events
-        .is_empty()
+    query.through = Some(head);
+    query.page.as_mut().unwrap().after = None;
+    query.scope = TimelineQueryScope::Chain;
+    assert!(matches!(
+        tree.query(host.clone(), query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    query.scope = TimelineQueryScope::Branch;
+    query.through = Some(head + 1);
+    assert!(matches!(
+        tree.query(host.clone(), query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    query.through = Some(head);
+    query.from = Some(TimelinePosition {
+        branch_id: "main".into(),
+        sequence: 1,
+    });
+    assert!(matches!(
+        tree.query(host, query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    query.from = None;
+    query.through = None;
+    assert!(matches!(
+        session.query("main", query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    let main = tree.get("main").unwrap();
+    assert!(matches!(
+        main.query(query.clone()).await,
+        Err(AgentError::InvalidInput(_))
+    ));
+    query.include_publishing = false;
+    let via_session = session.query("main", query.clone()).await.unwrap();
+    query.through = Some(via_session.through);
+    let via_branch = main.query(query).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(via_session).unwrap(),
+        serde_json::to_value(via_branch).unwrap()
     );
     soon(agent.close()).await.unwrap();
 }

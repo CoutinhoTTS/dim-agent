@@ -379,7 +379,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 
 `local/pp-ocr` 在插件的引擎发布了平台包且 Node 可用的平台上提供；插件未安装或其行未在服务的平台上只列出 `local/apple-vision`。`local/apple-vision` 仍只在 Apple Silicon 上提供，因为其识别路径需要 Apple Silicon 的 I/O 客户端，其他平台如今天一样以 `platform` 原因缺席。Modality 只读取 `ocrHelper` 服务，因此无法也不去区分“插件未安装”与“它的行未在服务”：当目标未提供时，已持久化的 `local/pp-ocr` 默认值仍留在快照的选项中并标记为不可用，只带一个 `runtime` 原因“the PP-OCR plugin is not running”。`configure` 接受快照当前提供的目标，从不回答 `modality_unavailable`；既非这两个宿主目标之一的显式模型以 `model_unavailable` 失败。
 
-文本模式在两个目标间不同：`local/apple-vision` 经 PDFKit 优先使用 PDF 内嵌文本层，只识别必须识别的页面；`local/pp-ocr` 没有原生文本路径，会栅格化每一页，因此同一 PDF 可能得到不同的文本。两者遵守相同上限并产出相同形状的 `result.json`。
+文本模式在两个目标间不同：`local/apple-vision` 经 PDFKit 优先使用 PDF 内嵌文本层，只识别必须识别的页面；`local/pp-ocr` 没有原生文本路径，会栅格化每一页，因此同一 PDF 可能得到不同的文本。`text` 以换行连接各页文本；`local/apple-vision` 以空行连接。两者遵守相同上限并产出相同形状的 `result.json`。
 
 ### A.3 方法
 

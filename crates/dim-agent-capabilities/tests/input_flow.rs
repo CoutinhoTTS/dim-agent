@@ -14,9 +14,9 @@ use std::{
 use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
 use dim_agent_runtime::testing::{MinimalHost, branch_events};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, BoxFuture, MemoryTimelineStore, PublishCallback, Result,
-    Session, SessionConfig, StoredBranch, StoredEvent, TimelineKey, TimelineQuery,
-    TimelineQueryPage, TimelineStore, TimelineTrace,
+    AgentBuilder, AgentConfig, AgentError, BoxFuture, MemoryTimelineStore, PublishCallback,
+    QueryPage, QueryResult, QuerySpec, Result, Session, SessionConfig, StoredBranch, StoredEvent,
+    TimelineKey, TimelineReadScope, TimelineStore, TimelineTrace,
 };
 use dim_agent_types::{AgentEvent, ContentBlock, EventKind, InputMessageData, InputMode};
 use support::Events;
@@ -340,6 +340,7 @@ struct GatedStore {
     inputs: AtomicUsize,
     entered: Mutex<Option<oneshot::Sender<()>>>,
     release: Mutex<Option<oneshot::Receiver<()>>>,
+    query_gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
 impl GatedStore {
@@ -426,12 +427,26 @@ impl TimelineStore for GatedStore {
     }
     fn query<'a>(
         &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
-        self.memory.query(key, query, from, through)
+        scope: &'a TimelineReadScope,
+        query: &'a QuerySpec,
+        page: Option<&'a QueryPage>,
+    ) -> BoxFuture<'a, Result<QueryResult>> {
+        let submission = matches!(&query.filter, Some(dim_agent_runtime::QueryFilter::And { conditions })
+            if conditions.iter().any(|condition| matches!(condition,
+                dim_agent_runtime::QueryFilter::Compare {
+                    left: dim_agent_runtime::QueryOperand::Field { path }, ..
+                } if path == "data.submission_id")));
+        let gate = submission
+            .then(|| self.query_gate.lock().unwrap().take())
+            .flatten();
+        Box::pin(async move {
+            let result = self.memory.query(scope, query, page).await;
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+            result
+        })
     }
     fn read_segments<'a>(
         &'a self,
@@ -446,5 +461,62 @@ impl TimelineStore for GatedStore {
         sequence: u64,
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
         self.memory.trace(key, sequence)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_batches_recheck_submissions_before_the_atomic_commit() {
+    for partial in [false, true] {
+        let store = Arc::new(GatedStore::default());
+        let Fixture { host, session } = start(store.clone()).await;
+        let (entered, waiting) = oneshot::channel();
+        let (release, held) = oneshot::channel();
+        *store.query_gate.lock().unwrap() = Some((entered, held));
+        let reader = session.clone();
+        let delayed = tokio::spawn(async move {
+            reader
+                .inputs(
+                    vec![input("test:one", "one"), input("test:two", "two")],
+                    "main",
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut batch = vec![input("test:one", "one")];
+        if !partial {
+            batch.push(input("test:two", "two"));
+        }
+        let winner = session.inputs(batch, "main").await.unwrap();
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(10), delayed)
+            .await
+            .unwrap()
+            .unwrap();
+        if partial {
+            assert!(matches!(result, Err(AgentError::PartialSubmission(_))));
+            assert!(
+                session.lookup("main", "test:two").await.unwrap().is_none(),
+                "a stale read cannot partially append a batch"
+            );
+        } else {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .iter()
+                    .map(|event| &event.id)
+                    .collect::<Vec<_>>(),
+                winner.iter().map(|event| &event.id).collect::<Vec<_>>(),
+                "a concurrent replay returns the committed batch"
+            );
+        }
+        assert_eq!(
+            published_inputs(&session).await.len(),
+            winner.len(),
+            "a stale submission read never duplicates an input"
+        );
+        host.close().await.unwrap();
     }
 }

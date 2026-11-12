@@ -25,7 +25,7 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
         assert_eq!(hello["params"]["clientKind"], "other");
         assert_eq!(hello["params"]["clientName"], "AcpGateway");
         let reply = json!({"jsonrpc":"2.0","id":hello["id"],"result":{
-            "instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,
+            "instanceId":"fixture","serverVersion":"fixture","protocolVersion":4,
             "daemonProfile":{"kind":"product"},"features":["session.create","session.history"]
         }});
         write
@@ -37,7 +37,7 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
             serde_json::from_str(&read.next_line().await.unwrap().unwrap()).unwrap();
         let replies = format!(
             "{}\n{}\n",
-            json!({"jsonrpc":"2.0","id":second["id"],"result":{"order":2}}),
+            json!({"jsonrpc":"2.0","id":second["id"],"result":null}),
             json!({"jsonrpc":"2.0","id":first["id"],"result":{"order":1}})
         );
         write.write_all(replies.as_bytes()).await.unwrap();
@@ -51,6 +51,12 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
             .write_all(b"{\"text\":\"complete\"}}\n")
             .await
             .unwrap();
+        let missing: Value =
+            serde_json::from_str(&read.next_line().await.unwrap().unwrap()).unwrap();
+        write
+            .write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":missing["id"]})).as_bytes())
+            .await
+            .unwrap();
     });
     let config = ConnectionConfig {
         endpoint,
@@ -61,6 +67,7 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
         profile: Some(DaemonProfile::Product),
         client_kind: "other",
         client_name: "AcpGateway",
+        protocol_version: 4,
     };
     let mut client = Client::connect(&config).await.unwrap();
     assert_eq!(client.connection_config().endpoint, config.endpoint);
@@ -68,7 +75,7 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
     let second = client.send("session.second", json!({})).await.unwrap();
     assert_eq!(client.response(first).await.unwrap(), json!({"order":1}));
     assert!(
-        matches!(client.next().await.unwrap(), Message::Response { id, result: Ok(_) } if id == second)
+        matches!(client.next().await.unwrap(), Message::Response { id, result: Ok(Value::Null) } if id == second)
     );
     written.await.unwrap();
     assert!(
@@ -79,6 +86,14 @@ async fn an_owned_connection_preserves_identity_responses_and_partial_notificati
     resume.send(()).unwrap();
     assert!(
         matches!(client.next().await.unwrap(), Message::Notice { method, params } if method == "session.notice" && params == json!({"text":"complete"}))
+    );
+    assert_eq!(
+        client
+            .rpc("session.missing", json!({}))
+            .await
+            .unwrap_err()
+            .to_string(),
+        "Invalid App Server response identity"
     );
     server.await.unwrap();
     client.wait_closed().await.unwrap();
@@ -119,4 +134,59 @@ async fn loopback_capture_rejects_other_paths_without_consuming_the_callback() {
         );
     }
     accepted.await.unwrap();
+}
+
+#[test]
+fn conversation_windows_keep_atomic_pages_and_their_raw_cursors() {
+    use dim_client::{
+        window::Window,
+        wire::{DisplayPage, EventContent, HistoryWindow},
+    };
+    let event = |at| json!({"id":format!("event-{at}"),"sequence":at,"create_at":at,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"message"}]}}});
+    let mut window = Window::default();
+    let empty: HistoryWindow = serde_json::from_value(
+        json!({"events":[],"through":302,"nextAfter":302,"nextBefore":302,"done":false}),
+    )
+    .unwrap();
+    assert!(!window.push(empty).unwrap());
+    let page: HistoryWindow = serde_json::from_value(json!({"events":(1..=301).map(event).collect::<Vec<_>>(),"through":302,"nextAfter":301,"nextBefore":1,"done":true})).unwrap();
+    assert!(window.push(page).unwrap());
+    assert_eq!(
+        window.take().len(),
+        301,
+        "one oversized atomic page stays complete"
+    );
+    assert!(window.before.is_none());
+    let mut window = Window::default();
+    let newest: HistoryWindow = serde_json::from_value(json!({"events":(351..=449).map(event).collect::<Vec<_>>(),"through":449,"nextAfter":449,"nextBefore":301,"done":false})).unwrap();
+    assert!(!window.push(newest).unwrap());
+    let older: HistoryWindow = serde_json::from_value(json!({"events":(1..=300).map(event).collect::<Vec<_>>(),"through":449,"nextAfter":300,"nextBefore":1,"done":true})).unwrap();
+    assert!(window.push(older).unwrap());
+    let events = window.take();
+    assert_eq!(events.len(), 99);
+    assert_eq!(events[0].sequence, 351);
+    assert_eq!(
+        window.params("session", "main")["before"],
+        301,
+        "the raw boundary can precede the first visible event"
+    );
+    let mut earlier = Window::earlier(window.before.unwrap(), window.through.unwrap());
+    let page: HistoryWindow = serde_json::from_value(json!({"events":(1..=300).map(event).collect::<Vec<_>>(),"through":449,"nextAfter":300,"nextBefore":1,"done":true})).unwrap();
+    assert!(earlier.push(page).unwrap());
+    assert_eq!(earlier.take().len(), 300);
+    assert!(earlier.before.is_none());
+    let page: DisplayPage = serde_json::from_value(json!({
+        "items":[event(1),{"id":"compaction-2","sequence":2,"create_at":2,
+            "type":"display","name":"compaction","data":{"strategy":"summary"}}],
+        "through":2,"nextAfter":2,"nextBefore":1,"done":true
+    }))
+    .unwrap();
+    let mut display = Window::default();
+    assert!(display.push(page.into()).unwrap());
+    let items = display.take();
+    assert_eq!(items.len(), 2);
+    assert!(
+        matches!(&items[1].content, EventContent::CompactionSummary(summary) if summary.strategy=="summary")
+    );
+    assert_eq!(items[1].id, "compaction-2");
 }

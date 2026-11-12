@@ -20,6 +20,10 @@ pub enum RowKind {
     ToolCall,
     /// A `context/compaction-start` and the `context/compaction` that ends it.
     Compaction,
+    /// Context a hook injected after the operator's words: drawn as one muted
+    /// status row under the message, its body behind the detail setting. Not a
+    /// message, so no pick, count or rail reads it.
+    HookContext,
     Error,
     Status,
     /// A row kind the UI does not draw specially; it falls back to a status
@@ -56,11 +60,16 @@ pub struct ViewRow {
     /// A settled thought: how long it ran, in milliseconds.
     pub elapsed_ms: Option<u64>,
     pub tone: Option<RowTone>,
+    pub call_id: Option<String>,
+    pub tool_lookup_done: bool,
     pub tool_name: Option<String>,
     pub tool_input: Option<serde_json::Value>,
     /// The model request a tool call came from: the calls of one request are
     /// drawn as one group.
     pub batch: Option<String>,
+    /// The outer `codemode` call a child call belongs to; absent for a
+    /// top-level call.
+    pub parent_call_id: Option<String>,
     /// Work this row stands for that has not settled yet: a tool call
     /// without its result, or a user message the model has not consumed.
     pub pending: bool,
@@ -81,10 +90,15 @@ pub struct ViewRow {
     /// A line-opened marker: the line it opened, which a pick enters
     /// (timeline UI §4.4).
     pub line: Option<String>,
+    /// The user message row this row belongs to: a hook's context is part of
+    /// its message's group, so whatever settles the message settles it
+    /// (timeline UI §4.8).
+    pub parent_row: Option<String>,
     /// A compaction row's state and detail.
     pub compaction: Option<CompactionView>,
     /// A model failure's details, shown when the row is expanded.
     pub failure: Option<FailureDetail>,
+    pub reportable: bool,
 }
 
 /// A model failure as its error row's details print it.
@@ -117,13 +131,37 @@ pub struct RetryView {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionView {
     pub state: CompactionState,
+    pub detail: Option<CompactionDetail>,
     /// A completed compaction's summary text — the strategy's part of what
     /// replaced the cut history — or the reason or error of one that did not
     /// complete.
-    pub text: String,
+    pub text: std::sync::Arc<str>,
     /// The parts that keep a completed compaction above its bound, as the
     /// record names them; empty when the record carries no such mark.
     pub insufficient: Vec<CompactionPartSize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionDetail {
+    pub event_id: String,
+    pub sequence: u64,
+    pub state: CompactionDetailState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionDetailState {
+    Unloaded,
+    Loading,
+    Loaded,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CompactionTarget {
+    pub session_id: String,
+    pub branch_id: String,
+    pub event_id: String,
+    pub sequence: u64,
 }
 
 /// One part the record names in a compaction's insufficient-space mark.
@@ -208,6 +246,8 @@ pub enum LineState {
     Working,
     /// Open, with no turn running.
     Waiting,
+    /// The directory reports an ended branch without its terminal event.
+    Ended,
     /// It ended itself through the branch tool.
     EndedItself,
     /// Another issuer ended it: a host operation or the user.
@@ -260,13 +300,44 @@ pub struct TaskView {
     pub finished: Option<TaskFinish>,
 }
 
+/// How a task ended, as the owner that ended it classified it: a stop is not
+/// a failure, so the three outcomes stay distinct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskOutcome {
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl TaskOutcome {
+    /// The mark the task row draws before a finished task's label, one cell
+    /// each.
+    pub fn mark(self) -> &'static str {
+        match self {
+            Self::Completed => "\u{2713} ",
+            Self::Failed => "\u{2717} ",
+            Self::Stopped => "\u{2298} ",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskFinish {
     pub at: u64,
+    /// The owner's own status name, which the panel and a card show.
     pub status: &'static str,
-    pub failed: bool,
+    pub outcome: TaskOutcome,
+    /// Whether a read of recorded events produced this finish rather than the
+    /// live event stream: a replayed end is history, not news.
+    pub replayed: bool,
     pub text: String,
     pub exit_code: Option<i64>,
+}
+
+impl TaskFinish {
+    pub fn failed(&self) -> bool {
+        self.outcome == TaskOutcome::Failed
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -282,7 +353,10 @@ pub enum TaskOutputState {
     Unavailable,
     Unsupported,
     ReadError(String),
-    Finished { status: &'static str, failed: bool },
+    Finished {
+        status: &'static str,
+        outcome: TaskOutcome,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,6 +456,7 @@ pub struct ViewSnapshot {
     pub ended: Option<(u64, TurnEnd)>,
     /// `main` followed by this Session's lines, as the lines panel lists them.
     pub lines: Vec<LineView>,
+    pub unread_lines: std::collections::BTreeSet<String>,
     pub focus: String,
     /// The line opened beside the shown one, while its panel is open.
     pub side: Option<SideLine>,

@@ -152,8 +152,10 @@ pub enum ShellStatus {
 
 /// ADR 014 D1's fixed system roots: the sandbox builder mounts them read-only
 /// and file access treats them as read-only facts. macOS names `/private/etc`
-/// and its `/etc` alias; Windows has no sandbox backend and no roots.
-const PLATFORM_ROOTS: &[&str] = {
+/// and its `/etc` alias; Windows has no sandbox backend and no roots. A host
+/// that builds its own file-tool boundary reads this one list rather than
+/// restating it.
+pub const PLATFORM_ROOTS: &[&str] = {
     if cfg!(target_os = "macos") {
         &[
             "/System",

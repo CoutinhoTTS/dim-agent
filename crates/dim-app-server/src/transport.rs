@@ -745,6 +745,8 @@ async fn run_connection(
                                         features.extend([
                                             "session.history",
                                             "session.branches",
+                                            "session.branch.get",
+                                            "session.turn.get",
                                             "session.submit",
                                             "session.stop",
                                             "session.keys",
@@ -756,7 +758,14 @@ async fn run_connection(
                                             "session.branch_create",
                                             "session.branch_end",
                                             "session.create.origin",
+                                            "session.language",
                                         ]);
+                                        if params.protocol_version >= 3 {
+                                            features.extend([
+                                                "session.history.display",
+                                                "session.history.detail",
+                                            ]);
+                                        }
                                         if local && hub.config().product_home.is_some() {
                                             features.push("session.create.modelFromSession");
                                         }

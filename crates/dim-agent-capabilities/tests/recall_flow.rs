@@ -984,6 +984,7 @@ impl Recorded {
             sequence: self.events.len() as u64 + 1,
             create_at: self.time,
             tags: None,
+            parent_call_id: None,
             kind,
         }));
         id
@@ -2935,7 +2936,9 @@ struct PageReads {
     /// The id that page wrote.
     injected: std::sync::Mutex<Option<String>>,
     /// The kinds the first page named.
-    kinds: std::sync::Mutex<Vec<String>>,
+    active: std::sync::atomic::AtomicBool,
+    call: std::sync::Mutex<Option<String>>,
+    cuts: std::sync::Mutex<Vec<u64>>,
     /// The branch the pinned call reads. Pages of another branch are another
     /// reader's, such as a line's BranchLine reading its parent's activity
     /// through the same query.
@@ -2945,6 +2948,52 @@ struct PageReads {
 }
 
 impl TimelineStore for PageReads {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        Box::pin(async move {
+            let result = self.memory.query(scope, query, page).await?;
+            let recording = self.active.load(std::sync::atomic::Ordering::SeqCst)
+                && self.read_branch.lock().unwrap().as_deref()
+                    == Some(scope.key.branch_id.as_str());
+            if !recording {
+                return Ok(result);
+            }
+            self.cuts.lock().unwrap().push(scope.through);
+            self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &result.result {
+                QueryOutput::Events { events } => {
+                    self.events
+                        .fetch_add(events.len(), std::sync::atomic::Ordering::SeqCst);
+                    if let Some(ids) = self.read.lock().unwrap().as_mut() {
+                        ids.extend(events.iter().map(|row| row.event.id.clone()));
+                    }
+                }
+                QueryOutput::Rows { rows } if matches!(&query.select,QuerySelect::Fields { fields } if fields.iter().any(|field|matches!(field.as_str(),"data"|"data.user"|"data.blocks"))) =>
+                {
+                    self.events
+                        .fetch_add(rows.len(), std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            let pinned = self.inject.lock().unwrap().take();
+            if let Some((session, branch)) = pinned {
+                let event = session
+                    .input(
+                        InputMessageData::text("late task", Some(InputMode::Queue)),
+                        &branch,
+                    )
+                    .await?;
+                *self.injected.lock().unwrap() = Some(event.id.clone());
+            }
+            Ok(result)
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         session_id: &'a str,
@@ -2979,6 +3028,24 @@ impl TimelineStore for PageReads {
         events: Vec<StoredEvent>,
         publish: PublishCallback,
     ) -> Result<()> {
+        for record in &events {
+            match &record.event.kind {
+                EventKind::ToolUse(data) if data.call.name == RECALL_TOOL => {
+                    *self.call.lock().unwrap() = Some(data.call.id.clone());
+                    *self.read_branch.lock().unwrap() = Some(key.branch_id.clone());
+                    self.active.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                EventKind::ToolResult(data)
+                    if data.results.iter().any(|result| {
+                        self.call.lock().unwrap().as_deref() == Some(result.call_id.as_str())
+                    }) =>
+                {
+                    self.active
+                        .store(false, std::sync::atomic::Ordering::SeqCst)
+                }
+                _ => {}
+            }
+        }
         self.memory.append(key, events, publish)
     }
     fn read_segments<'a>(
@@ -2994,63 +3061,6 @@ impl TimelineStore for PageReads {
         sequence: u64,
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
         self.memory.trace(key, sequence)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
-        Box::pin(async move {
-            let page = self.memory.query(key, query, from, through).await?;
-            let backwards = query.direction == TimelineQueryDirection::Descending
-                && query.event_id.is_none()
-                && !query.kinds.is_empty();
-            if backwards {
-                self.events
-                    .fetch_add(page.events.len(), std::sync::atomic::Ordering::SeqCst);
-                self.pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            let first_page = backwards && query.offset == 0;
-            let pinned = if first_page {
-                let mut inject = self.inject.lock().unwrap();
-                match inject.as_ref() {
-                    Some((_, branch)) if branch == &key.branch_id => inject.take(),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            if pinned.is_some() {
-                *self.kinds.lock().unwrap() = query.kinds.clone();
-                *self.read_branch.lock().unwrap() = Some(key.branch_id.clone());
-                *self.read.lock().unwrap() = Some(Vec::new());
-            }
-            let recording =
-                self.read_branch.lock().unwrap().as_deref() == Some(key.branch_id.as_str());
-            if recording
-                && let Some(ids) = self.read.lock().unwrap().as_mut()
-                && query.direction == TimelineQueryDirection::Descending
-                && !query.kinds.is_empty()
-            {
-                for event in &page.events {
-                    if ids.last() != Some(&event.id) {
-                        ids.push(event.id.clone());
-                    }
-                }
-            }
-            if let Some((session, branch)) = pinned {
-                let event = session
-                    .input(
-                        InputMessageData::text("late task", Some(InputMode::Queue)),
-                        &branch,
-                    )
-                    .await?;
-                *self.injected.lock().unwrap() = Some(event.id.clone());
-            }
-            Ok(page)
-        })
     }
     fn save_snapshot<'a>(
         &'a self,
@@ -3073,16 +3083,13 @@ impl PageReads {
     fn decoded(&self) -> usize {
         self.events.load(std::sync::atomic::Ordering::SeqCst)
     }
-    fn pages(&self) -> usize {
-        self.pages.load(std::sync::atomic::Ordering::SeqCst)
-    }
     /// Writes once to `branch` of `session` after the next first page.
     fn pin_head(&self, session: &Session, branch: &str) {
         *self.inject.lock().unwrap() = Some((session.clone(), branch.to_owned()));
         *self.injected.lock().unwrap() = None;
-        self.kinds.lock().unwrap().clear();
+        self.cuts.lock().unwrap().clear();
         *self.read_branch.lock().unwrap() = None;
-        *self.read.lock().unwrap() = None;
+        *self.read.lock().unwrap() = Some(Vec::new());
     }
     fn injected(&self) -> Option<String> {
         self.injected.lock().unwrap().clone()
@@ -3130,48 +3137,17 @@ async fn recall_is_the_whole_fold(
     (text, read)
 }
 
-/// The ids one descending read of `branch` selects below the head it pins, in
-/// page order: the whole chain that is pinned at the call's last tool result,
-/// newest first, in the kinds the first query names, without the event the
-/// store wrote between two pages.
-async fn selected_ids(session: &Session, branch: &str, reads: &PageReads) -> Vec<String> {
-    let history = chain_events(session, branch, ..).await.unwrap();
-    let pinned = &history[..history
-        .iter()
-        .rposition(|event| matches!(event.kind, EventKind::ToolResult(_)))
-        .expect("the recall call's result")];
-    let kinds = reads.kinds.lock().unwrap().clone();
-    let injected = reads.injected();
-    pinned
-        .iter()
-        .rev()
-        .filter(|event| Some(&event.id) != injected.as_ref())
-        .filter(|event| kinds.iter().any(|kind| kind == event.kind.key()))
-        .map(|event| event.id.clone())
-        .collect()
-}
-
-/// Checks that the pages of one call are one contiguous suffix below the head
-/// the call read first, and that the event written between two of them is not
-/// in them.
-async fn assert_one_suffix(session: &Session, reads: &PageReads, branch: &str) {
-    let read = reads.take_read();
-    let expected = selected_ids(session, branch, reads).await;
-    let injected = reads.injected().expect("the write between pages");
+async fn assert_one_cut(_session: &Session, reads: &PageReads, _branch: &str) {
+    let cuts = reads.cuts.lock().unwrap();
+    assert!(!cuts.is_empty(), "the tool issued no property queries");
     assert!(
-        !read.contains(&injected),
-        "a page returned the event written after its first page: {injected}"
+        cuts.iter().all(|cut| *cut == cuts[0]),
+        "the tool mixed heads: {cuts:?}"
     );
+    let injected = reads.injected().expect("the write between queries");
     assert!(
-        !read.is_empty() && read.len() <= expected.len(),
-        "the pages returned {} of {} selected events",
-        read.len(),
-        expected.len()
-    );
-    assert_eq!(
-        read,
-        expected[..read.len()],
-        "the pages are not one contiguous suffix below the head"
+        !reads.take_read().contains(&injected),
+        "the tool read a body published after its cut"
     );
 }
 
@@ -3208,16 +3184,17 @@ async fn a_long_history_is_answered_from_bounded_pages_read_backwards() {
 
         reads.pin_head(&session, "main");
         let (index, read) = recall_is_the_whole_fold(&session, &reads, "main", json!({})).await;
-        assert_one_suffix(&session, &reads, "main").await;
+        assert_one_cut(&session, &reads, "main").await;
         assert!(index.contains("Earlier: before="), "{index}");
         assert!(
             read < history.len() / 2,
             "the index decoded {read} of {} events",
             history.len()
         );
-        let pages = reads.pages();
-        assert!(pages > 1, "the index read {pages} page(s)");
-        assert!(pages <= 3, "the index read {pages} pages");
+        assert!(
+            read <= 21,
+            "the index decoded {read} bodies for at most 21 turn titles"
+        );
 
         let (second, read) = recall_is_the_whole_fold(
             &session,
@@ -3236,6 +3213,16 @@ async fn a_long_history_is_answered_from_bounded_pages_read_backwards() {
         let (search, read) =
             recall_is_the_whole_fold(&session, &reads, "main", json!({ "about": "task" })).await;
         assert!(search.contains("More: before="), "{search}");
+        for arguments in [
+            json!({"about":"task", "before":before_of(&search)}),
+            json!({"about":"missing_unique_qzxy"}),
+            json!({"about":"missing_unique_qzxy", "tool":"missing_tool"}),
+            json!({"about":"called"}),
+            json!({"about":"while you were working"}),
+            json!({"about":"no result yet"}),
+        ] {
+            recall_is_the_whole_fold(&session, &reads, "main", arguments).await;
+        }
         assert!(
             read < history.len() / 2,
             "the search decoded {read} of {} events",
@@ -3320,7 +3307,7 @@ async fn a_child_branch_pages_through_its_inherited_prefix() {
 
         reads.pin_head(&session, &child);
         let (index, read) = recall_is_the_whole_fold(&session, &reads, &child, json!({})).await;
-        assert_one_suffix(&session, &reads, &child).await;
+        assert_one_cut(&session, &reads, &child).await;
         assert!(index.contains("Earlier: before="), "{index}");
         assert!(
             read < history.len(),

@@ -2,12 +2,16 @@ use dim_agent_capabilities::{
     host::{AuxiliaryModelHost, AuxiliaryRequest},
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, reply},
     session_broadcast::{SessionBroadcast, SessionBroadcastEvent, session_channel},
+    timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    AgentBuilder, CollaborationRole, Names, PartRegistry, PartScope, SessionConfig,
-    SessionIdentity, SessionLifecycle,
+    AgentBuilder, CollaborationRole, Names, PartRegistry, PartScope, QueryFilter, QueryOperand,
+    QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, SessionConfig,
+    SessionIdentity, SessionLifecycle, TimelineQuery, TimelineQueryScope,
 };
-use dim_agent_types::{AgentEvent, ContentBlock, EventKind, Message, ModelId, Role, UserInput};
+use dim_agent_types::{
+    ContentBlock, EventKind, InputBlock, Message, ModelId, Role, UserInput, markup::runtime_context,
+};
 use dim_app_server::{
     settings::{SettingsScope, SettingsService, SourceDeclaration},
     storage::{MetadataError, SessionStore, Title, TitleSource},
@@ -15,11 +19,11 @@ use dim_app_server::{
 use regex::Regex;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
-use rutis_bridge::session::{HostDispatch, Value as ServiceValue, arg, host_key, settle};
+use rutis_bridge::session::{Value as ServiceValue, arg, host_key, settle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    num::NonZeroU64,
     sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
@@ -133,7 +137,7 @@ impl DynPlugin for SessionTitlePlugin {
 
 struct SessionTitle {
     settings: Key<SettingsService>,
-    sessions: Key<dyn HostDispatch>,
+    tree: Key<TreeCommands>,
     store: Key<SessionStore>,
     auxiliary: Key<AuxiliaryModelHost>,
     identity: Key<SessionIdentity>,
@@ -145,7 +149,7 @@ impl SessionTitle {
     fn new(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
             settings: names.key()?,
-            sessions: host_key("sessions"),
+            tree: names.key()?,
             store: names.key()?,
             auxiliary: names.key()?,
             identity: names.key()?,
@@ -162,7 +166,7 @@ impl DynPlugin for SessionTitle {
     fn injects(&self) -> Vec<TypeKey> {
         vec![
             self.settings.erase(),
-            self.sessions.erase(),
+            self.tree.erase(),
             self.store.erase(),
             self.auxiliary.erase(),
             self.identity.erase(),
@@ -180,7 +184,7 @@ impl DynPlugin for SessionTitle {
                 ctx: ctx.clone(),
                 id: identity.session_id.clone(),
                 settings: ctx.require_at(&self.settings)?,
-                sessions: ctx.require_at(&self.sessions)?,
+                tree: ctx.require_at(&self.tree)?,
                 store: ctx.require_at(&self.store)?,
                 auxiliary: ctx.require_at(&self.auxiliary)?,
                 state: Mutex::new(State::default()),
@@ -269,7 +273,7 @@ struct Owner {
     ctx: Ctx,
     id: String,
     settings: Arc<SettingsService>,
-    sessions: Arc<dyn HostDispatch>,
+    tree: Arc<TreeCommands>,
     store: Arc<SessionStore>,
     auxiliary: Arc<AuxiliaryModelHost>,
     state: Mutex<State>,
@@ -296,45 +300,69 @@ impl Owner {
             if !self.current(epoch) || document.as_ref().is_ok_and(|d| !d.enabled) { return Ok("skipped"); }
             let stored = self.store.metadata(&self.id).await;
             if !self.current(epoch) || stored.as_ref().is_ok_and(|m| m.title.is_some()) { return Ok("skipped"); }
-            let mut first = None;
-            let mut model = None;
-            let mut operator = false;
-            let mut inputs = HashMap::<String, UserInput>::new();
-            let mut after = None;
-            let mut through = None;
-            loop {
-                let call = self.sessions.invoke("history", json!([{
-                    "sessionId": self.id, "branchId":"main", "after":after, "through":through,
-                    "atLeast":through.is_none().then_some(sequence),
-                }]).into()).map_err(|_| ())?;
-                let mut page = settle(call).await.map_err(|_| ())?.json().map_err(|_| ())?;
-                if page["ok"] != true { return Err(()); }
-                let page = page.get_mut("value").ok_or(())?;
-                let head = page["through"].as_u64().ok_or(())?;
-                let events: Vec<AgentEvent> = serde_json::from_value(page["events"].take()).map_err(|_| ())?;
-                through = Some(head);
-                for event in &events {
-                    match &event.kind {
-                        EventKind::InputMessage(message) => {
-                            if let Some(user) = &message.user {
-                                operator |= event.id == input_id;
-                                if first.is_none() { inputs.insert(event.id.clone(), user.clone()); }
-                            }
+            let kind = |value: &str| QueryFilter::In {
+                value: QueryOperand::Field { path: "kind".into() }, values: vec![value.into()],
+            };
+            let field = |path: &str, value: Value| QueryFilter::In {
+                value: QueryOperand::Field { path: path.into() }, values: vec![value],
+            };
+            let request = |through, filter, select, pick| TimelineQuery {
+                scope: TimelineQueryScope::Branch, from: None, through, include_publishing: false,
+                query: QuerySpec { filter: Some(filter), select, group_by: vec![], pick, order_by: vec![] },
+                page: Some(QueryPage { limit: NonZeroU64::MIN, after: None }),
+            };
+            let first = self.tree.query("main".into(), request(None, QueryFilter::And {
+                conditions: vec![kind("input/applied"), QueryFilter::Exists {
+                    condition: Box::new(QueryFilter::And { conditions: vec![
+                        kind("input/message"),
+                        QueryFilter::Compare {
+                            left: QueryOperand::Field { path: "id".into() },
+                            comparison: dim_agent_runtime::QueryComparison::Eq,
+                            right: QueryOperand::Outer { path: "data.input_id".into() },
                         },
-                        EventKind::InputApplied(applied) if first.is_none() => first = inputs.remove(&applied.input_id),
-                        EventKind::ContextConfigured(configured) => model = Some(ModelId {
-                            provider_id: configured.settings.provider_id.clone(),
-                            model_id: configured.settings.model_id.clone(),
-                        }),
-                        _ => {},
-                    }
+                        eligible_input(),
+                    ] }),
+                }],
+            }, QuerySelect::Fields { fields: vec!["data.input_id".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
+            let through = first.through;
+            if through < sequence { return Err(()); }
+            let QueryOutput::Rows { rows } = first.result else { return Err(()); };
+            let Some(first) = rows.first() else { return Ok("skipped"); };
+            let [QueryValue::Value { value: Value::String(first_id) }] = first.values.as_slice() else { return Err(()); };
+            let operator = self.tree.query("main".into(), request(Some(through), QueryFilter::And {
+                conditions: vec![kind("input/message"), field("id", input_id.into()), eligible_input()],
+            }, QuerySelect::Fields { fields: vec!["id".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = operator.result else { return Err(()); };
+            if rows.is_empty() { return Ok("skipped"); }
+            let input = self.tree.query("main".into(), request(Some(through), QueryFilter::And {
+                conditions: vec![kind("input/message"), field("id", first_id.clone().into())],
+            }, QuerySelect::Fields { fields: vec!["data.user".into(), "data.blocks".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = input.result else { return Err(()); };
+            let Some(row) = rows.first() else { return Err(()); };
+            let [user, blocks] = row.values.as_slice() else { return Err(()); };
+            let source = match (user, blocks) {
+                (QueryValue::Value { value: user }, _) => {
+                    let input: UserInput = serde_json::from_value(user.clone()).map_err(|_| ())?;
+                    input.content.iter().enumerate().filter_map(|(index, block)| match block {
+                        ContentBlock::Text { text } if !runtime_context(index, text) => Some(text.as_str()),
+                        _ => None,
+                    }).collect::<Vec<_>>().join("\n")
                 }
-                let Some(last) = events.last() else { break; };
-                after = Some(last.sequence);
-                if last.sequence >= head { break; }
-            }
-            if !self.current(epoch) || !operator { return Ok("skipped"); }
-            let Some(first) = first else { return Ok("skipped"); };
+                (_, QueryValue::Value { value: blocks }) => goal_objective(blocks).ok_or(())?,
+                _ => return Ok("skipped"),
+            };
+            let configured = self.tree.query("main".into(), request(Some(through), kind("context/configured"),
+                QuerySelect::Fields { fields: vec!["data.settings.providerId".into(), "data.settings.modelId".into()] },
+                Some(QueryPick::Last))).await.map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = configured.result else { return Err(()); };
+            let model = match rows.first() {
+                None => None,
+                Some(row) => {
+                    let [QueryValue::Value { value: Value::String(provider_id) }, QueryValue::Value { value: Value::String(model_id) }] = row.values.as_slice() else { return Err(()); };
+                    Some(ModelId { provider_id: provider_id.clone(), model_id: model_id.clone() })
+                }
+            };
+            if !self.current(epoch) { return Ok("skipped"); }
             {
                 let mut state = self.state.lock().unwrap();
                 if state.epoch != epoch || self.stop.is_cancelled() { return Ok("skipped"); }
@@ -344,9 +372,7 @@ impl Owner {
             entered = true;
             let document = document?;
             let stored = stored.map_err(|_| ())?;
-            let text = first.content.iter().filter_map(|block| match block {
-                ContentBlock::Text { text, .. } => Some(text.as_str()), _ => None,
-            }).collect::<Vec<_>>().join("\n").chars().take(2000).collect::<String>();
+            let text: String = source.chars().take(2000).collect();
             if text.trim_matches(space).is_empty() {
                 self.state.lock().unwrap().no_text = true;
                 return Ok("skipped");
@@ -524,6 +550,87 @@ impl Owner {
         ))
     }
 }
+
+/// The opening of the objective element (Goal.md A.5). Goal writes the
+/// objective as an element of its own lines, and the decoder requires the line
+/// break; eligibility requires it too, so the two checks cannot disagree.
+const OBJECTIVE_OPENING: &str = "<objective>\n";
+
+/// The applied inputs that may title a Session (SessionTitle.md §0.1, A10): an
+/// operator `input/message` with `data.user`, or Goal's applied `goal:state`
+/// record, which states the objective.
+///
+/// Goal's key identifies the record, and eligibility requires the same opening
+/// `goal_objective` decodes, so a record cannot be selected and then fail to
+/// decode. The condition stays narrow on purpose: Goal also writes a retired
+/// `goal:state` record with no objective when a goal is cleared, and such a
+/// record must not become the first eligible input and block a later title.
+fn eligible_input() -> QueryFilter {
+    QueryFilter::Or {
+        conditions: vec![
+            QueryFilter::Present {
+                value: QueryOperand::Field {
+                    path: "data.user".into(),
+                },
+            },
+            QueryFilter::Any {
+                field: "data.blocks".into(),
+                condition: Box::new(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Element { path: "key".into() },
+                            values: vec!["goal:state".into()],
+                        },
+                        QueryFilter::Contains {
+                            value: QueryOperand::Element {
+                                path: "text".into(),
+                            },
+                            text: OBJECTIVE_OPENING.into(),
+                        },
+                    ],
+                }),
+            },
+        ],
+    }
+}
+
+/// The objective an applied Goal state record states (Goal.md A.5): the block
+/// keyed `goal:state` whose marker is Goal's and whose body carries the
+/// `<objective>` element. Goal owns the format; SessionTitle follows it and
+/// owns no second contract (SessionTitle.md A10), and takes no dependency on
+/// Goal's implementation.
+fn goal_objective(blocks: &Value) -> Option<String> {
+    let blocks: Vec<InputBlock> = serde_json::from_value(blocks.clone()).ok()?;
+    blocks.iter().find_map(|block| {
+        let InputBlock::Raw { text, key, retire } = block;
+        if *retire || key.as_deref() != Some("goal:state") {
+            return None;
+        }
+        let rest = text.strip_prefix("<dim-goal ")?;
+        let end = rest.find('>')?;
+        if !rest[..end]
+            .split_whitespace()
+            .any(|attribute| attribute == "kind=\"state\"")
+        {
+            return None;
+        }
+        let body = &rest[end + 1..];
+        let start = body.find(OBJECTIVE_OPENING)? + OBJECTIVE_OPENING.len();
+        let end = start + body[start..].find("\n</objective>")?;
+        let objective = unescape(&body[start..end]);
+        (!objective.trim().is_empty()).then_some(objective)
+    })
+}
+
+/// The inverse of Goal's `escape` (Goal.md A.5): Goal owns the encoding, and
+/// SessionTitle mirrors the inverse here rather than calling Goal.
+fn unescape(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+}
+
 fn fallback_title(text: &str, max_length: usize) -> String {
     let text = SPACE.replace_all(text, " ");
     let text: String = text.trim_matches(space).chars().take(max_length).collect();

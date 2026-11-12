@@ -23,6 +23,7 @@ pub fn state_label(state: &LineState) -> String {
         LineState::Main => t("the session itself").to_owned(),
         LineState::Working => t("working").to_owned(),
         LineState::Waiting => t("waiting").to_owned(),
+        LineState::Ended => t("ended").to_owned(),
         LineState::EndedItself => t("ended itself").to_owned(),
         LineState::EndedByOperation => t("ended by an operation").to_owned(),
         LineState::EndedWith(ancestor) => tf("ended with {id}", &[("id", ancestor)]),
@@ -111,8 +112,10 @@ impl LinesPanel {
         let selected = self.list.selected_id();
         self.focus = snapshot.focus.clone();
         self.lines = snapshot.lines.clone();
-        let items = tree_order(&snapshot.lines)
-            .into_iter()
+        let order = tree_order(&snapshot.lines);
+        let items = order
+            .iter()
+            .copied()
             .map(|(index, depth)| {
                 let line = &snapshot.lines[index];
                 let state = state_label(&line.state);
@@ -122,11 +125,16 @@ impl LinesPanel {
                     String::new()
                 };
                 let mut detail = String::new();
+                let unread = snapshot.unread_lines.contains(&line.id);
+                if unread {
+                    detail.push_str(t("Unread"));
+                    detail.push_str(" · ");
+                }
                 if let Some(cut) = line.cut {
-                    detail = tf(
+                    detail.push_str(&tf(
                         "after message {count}",
                         &[("count", &cut.messages.to_string())],
-                    );
+                    ));
                     detail.push_str(" · ");
                 }
                 let title = if line.purpose.is_empty() {
@@ -140,13 +148,24 @@ impl LinesPanel {
                 detail.push_str(&viewed);
                 Item::new(
                     line.id.clone(),
-                    format!("{}{title}", "  ".repeat(depth)),
+                    format!(
+                        "{}{}{title}",
+                        "  ".repeat(depth),
+                        if unread { "* " } else { "" }
+                    ),
                     detail,
                 )
             })
             .collect();
         let preselect = selected
             .filter(|id| snapshot.lines.iter().any(|line| &line.id == id))
+            .or_else(|| {
+                order
+                    .iter()
+                    .map(|(index, _)| &snapshot.lines[*index])
+                    .find(|line| snapshot.unread_lines.contains(&line.id))
+                    .map(|line| line.id.clone())
+            })
             .or_else(|| Some(self.focus.clone()));
         self.list.set_items(Ok(items), preselect.as_deref());
     }
@@ -188,7 +207,8 @@ impl LinesPanel {
             if let Some(line) = self.lines.iter().find(|line| line.id == id) {
                 if matches!(
                     line.state,
-                    LineState::EndedItself
+                    LineState::Ended
+                        | LineState::EndedItself
                         | LineState::EndedByOperation
                         | LineState::EndedWith(_)
                         | LineState::CreationFailed

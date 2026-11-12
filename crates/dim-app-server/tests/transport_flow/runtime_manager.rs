@@ -4,7 +4,7 @@
 //! for real (`npm ci`, `pip install --require-hashes`).
 use super::*;
 use dim_app_server::{
-    runtime_manager::{Kind, Runtimes},
+    runtime_manager::{Environment, Kind, RuntimeService, Runtimes},
     session_typescript::SessionTypeScriptConfig,
 };
 use std::path::{Path, PathBuf};
@@ -193,7 +193,7 @@ async fn runtime_list_reports_an_absolute_path_for_a_relative_path_entry() {
             &dim_app_server::plugin_manager::Defaults::read(&defaults)
                 .unwrap()
                 .runtimes,
-            Some(relative.into_os_string()),
+            Some(environment(relative.into_os_string())),
         )
         .unwrap(),
     );
@@ -317,18 +317,23 @@ fn write_defaults(home: &Path, runtimes: &str) -> PathBuf {
     path
 }
 
-fn load_runtimes(
-    home: &Path,
-    defaults: &Path,
-    search_path: Option<std::ffi::OsString>,
-) -> Arc<Runtimes> {
+/// An environment holding only `path`, with every override unset: what a
+/// fixture's search path is.
+fn environment(path: std::ffi::OsString) -> Environment {
+    Environment {
+        path,
+        ..Default::default()
+    }
+}
+
+fn load_runtimes(home: &Path, defaults: &Path, environment: Option<Environment>) -> Arc<Runtimes> {
     Arc::new(
         Runtimes::load(
             home,
             &dim_app_server::plugin_manager::Defaults::read(defaults)
                 .unwrap()
                 .runtimes,
-            search_path,
+            environment,
         )
         .unwrap(),
     )
@@ -389,7 +394,7 @@ async fn a_system_uv_fixture_reads_ready_with_its_own_path() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     assert_eq!(
         runtimes.plan(Kind::Uv).interpreter,
         fixture.directory.join("uv"),
@@ -462,7 +467,7 @@ async fn a_removed_system_uv_reads_off_and_installs_again() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -523,7 +528,7 @@ async fn a_system_uv_below_the_floor_fails_with_its_version() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(_fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -559,7 +564,7 @@ async fn configuring_uv_writes_the_merged_file_and_applies_it() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "download", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -678,11 +683,11 @@ async fn uv_runtime_manager_downloads_the_pinned_tool() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires node 22.19+ and python3 3.12+ with pip on PATH, and the npm and PyPI registries"]
-async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
+#[ignore = "requires node 22.19+ and the npm registry"]
+async fn node_runtime_manager_restarts_a_failed_runtime() {
     let home = PathBuf::from("/tmp").join(format!("drm-{}", uuid::Uuid::new_v4()));
     let plugins = home.join("sources");
-    std::fs::create_dir_all(plugins.join("probe-py")).unwrap();
+    std::fs::create_dir_all(&plugins).unwrap();
     let defaults = home.join("default-plugins.json");
     std::fs::write(
         &defaults,
@@ -700,36 +705,8 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
         ),
     )
     .unwrap();
-    let python_marker = home.join("python-started");
-    std::fs::write(
-        plugins.join("probe-py/entry.py"),
-        format!(
-            "import pathlib\n\ninject = []\nprovides = {{}}\n\n\n\
-             async def apply(ctx, config):\n    pathlib.Path({:?}).write_text('yes')\n",
-            python_marker.to_str().unwrap()
-        ),
-    )
-    .unwrap();
-    std::fs::create_dir_all(home.join("plugins/.python")).unwrap();
-    std::os::unix::fs::symlink(
-        plugins.join("probe-py"),
-        home.join("plugins/.python/probe_py"),
-    )
-    .unwrap();
-    let rows = vec![
-        json!({"id": "probe", "name": plugins.join("probe.mjs"), "provides": {}}),
-        json!({"id": "probe-py", "name": "py:probe_py.entry", "provides": {}}),
-    ];
-    let runtimes = Arc::new(
-        Runtimes::load(
-            &home,
-            &dim_app_server::plugin_manager::Defaults::read(&defaults)
-                .unwrap()
-                .runtimes,
-            None,
-        )
-        .unwrap(),
-    );
+    let rows = vec![json!({"id": "probe", "name": plugins.join("probe.mjs"), "provides": {}})];
+    let runtimes = load_runtimes(&home, &defaults, None);
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -744,12 +721,6 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
     let list = client.rpc("runtime.list", json!({})).await;
     assert_ok(&list);
     assert_eq!(list["result"][0]["name"], "node");
-    assert_eq!(list["result"][1]["status"], "off", "{list}");
-    assert!(
-        list["result"][1]["path"].is_null(),
-        "a runtime that is off resolved nothing: {list}"
-    );
-    assert!(!python_marker.exists());
     let ready = status(&mut client, 0, "ready").await;
     assert_eq!(
         ready["path"],
@@ -779,17 +750,10 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
     assert_ne!(std::fs::read_to_string(&node_marker).unwrap(), pid);
     status(&mut client, 0, "ready").await;
 
-    let install = client
-        .rpc("runtime.install", json!({"name": "python"}))
-        .await;
-    assert_ok(&install);
-    appears(&python_marker).await;
-    status(&mut client, 1, "ready").await;
     let records: Value =
         serde_json::from_slice(&std::fs::read(home.join("runtimes/runtimes.json")).unwrap())
             .unwrap();
     assert_eq!(records["node"]["source"], "system");
-    assert_eq!(records["python"]["source"], "system");
     let checked = std::process::Command::new("node")
         .arg("--version")
         .output()
@@ -804,28 +768,62 @@ async fn node_runtime_manager_starts_rows_once_their_runtime_is_acquired() {
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires python3 3.12+ with pip on PATH and the PyPI registry"]
+async fn python_plugin_starts_after_runtime_install_and_daemon_restart() {
+    let home = PathBuf::from("/tmp").join(format!("drm-{}", uuid::Uuid::new_v4()));
+    let plugin = home.join("plugins/.python/probe_py");
+    std::fs::create_dir_all(&plugin).unwrap();
+    let defaults = write_defaults(&home, r#"{"python": {"source": "system", "auto": false}}"#);
+    let python_marker = home.join("python-started");
+    std::fs::write(
+        plugin.join("entry.py"),
+        format!(
+            "import pathlib\n\ninject = []\nprovides = {{}}\n\n\n\
+             async def apply(ctx, config):\n    pathlib.Path({:?}).write_text('yes')\n",
+            python_marker.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let start = || {
+        let runtimes = load_runtimes(&home, &defaults, None);
+        let rows = vec![json!({"id": "probe-py", "name": "py:probe_py.entry", "provides": {}})];
+        launch(
+            Arc::new(MockTools),
+            ServerConfig {
+                target_home: Some(home.clone()),
+                session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, rows)),
+                ..Default::default()
+            },
+        )
+    };
+    let server = start().await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let off = status(&mut client, 1, "off").await;
+    assert!(off["path"].is_null(), "{off}");
+    assert!(!python_marker.exists());
+
+    assert_ok(
+        &client
+            .rpc("runtime.install", json!({"name": "python"}))
+            .await,
+    );
+    appears(&python_marker).await;
+    let ready = status(&mut client, 1, "ready").await;
+    assert_eq!(ready["source"], "system", "{ready}");
+    let records: Value =
+        serde_json::from_slice(&std::fs::read(home.join("runtimes/runtimes.json")).unwrap())
+            .unwrap();
+    assert_eq!(records["python"]["source"], "system");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
 
     std::fs::remove_file(&python_marker).unwrap();
-    let runtimes = Arc::new(
-        Runtimes::load(
-            &home,
-            &dim_app_server::plugin_manager::Defaults::read(&defaults)
-                .unwrap()
-                .runtimes,
-            None,
-        )
-        .unwrap(),
-    );
-    let rows = vec![json!({"id": "probe-py", "name": "py:probe_py.entry", "provides": {}})];
-    let server = launch(
-        Arc::new(MockTools),
-        ServerConfig {
-            target_home: Some(home.clone()),
-            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, rows)),
-            ..Default::default()
-        },
-    )
-    .await;
+    let server = start().await;
     appears(&python_marker).await;
     server.shutdown();
     server.join().await.unwrap();
@@ -960,11 +958,10 @@ async fn node_runtime_manager_reads_the_configuration_when_it_applies_it() {
 
 /// Switching a running runtime's source replaces its launch command and
 /// starts the new interpreter, and leaves the other runtime alone: the case a
-/// configuration change exists for. It downloads the archive, so it runs only
-/// with the other ignored flows.
+/// configuration change exists for. It downloads the official archive.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "downloads the Node archive and installs its packages"]
-async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
+async fn runtime_switches_from_system_to_downloaded_node() {
     let home = PathBuf::from("/tmp").join(format!("drm-switch-{}", uuid::Uuid::new_v4()));
     let plugins = home.join("sources");
     std::fs::create_dir_all(&plugins).unwrap();
@@ -1028,10 +1025,10 @@ async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
         if seen != before {
             break seen;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the new interpreter never started a new process: {seen}"
-        );
+        if tokio::time::Instant::now() >= deadline {
+            let listed = client.rpc("runtime.list", json!({})).await;
+            panic!("the new interpreter never replaced process {seen}: {listed}");
+        }
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
     assert_ne!(after, before, "the new interpreter started a new process");
@@ -1053,6 +1050,270 @@ async fn node_runtime_manager_switches_a_running_runtime_to_another_source() {
     );
 
     drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A home whose Node resolves through `environment`, with the runtime's own
+/// packages already there: acquiring Node then runs no npm, so only the call
+/// under test does.
+fn fixture_home(name: &str, environment: Environment) -> (PathBuf, Arc<Runtimes>) {
+    let home = std::env::temp_dir().join(format!("drm-{name}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    let defaults = write_defaults(
+        &home,
+        r#"{"node": {"source": "system", "auto": false},
+            "python": {"source": "download", "auto": false},
+            "uv": {"source": "download", "auto": false}}"#,
+    );
+    let runtimes = load_runtimes(&home, &defaults, Some(environment));
+    let packages = runtimes.plan(Kind::Node).packages.clone().unwrap();
+    std::fs::create_dir_all(packages).unwrap();
+    (home, runtimes)
+}
+
+/// A server serving `home`'s runtimes.
+async fn serve(home: &Path, runtimes: Arc<Runtimes>) -> RunningServer {
+    launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            target_home: Some(home.to_owned()),
+            session_typescript: Some(SessionTypeScriptConfig::acquired(home, runtimes, vec![])),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A plugin's staging directory: its `package.json` and the lock npm reads.
+fn staging(home: &Path) -> PathBuf {
+    let dir = home.join("plugins/.staging/fixture");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name": "ocr-fixture", "version": "1.0.0", "dependencies": {"fixture-dep": "file:fixture-dep"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("package-lock.json"),
+        r#"{"name": "ocr-fixture", "version": "1.0.0", "lockfileVersion": 3, "packages": {"": {"name": "ocr-fixture", "version": "1.0.0", "dependencies": {"fixture-dep": "file:fixture-dep"}}}}"#,
+    )
+    .unwrap();
+    dir
+}
+
+/// The names in `dir`, sorted.
+fn entries(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `installPackages` installs a plugin's locked dependencies into the plugin's
+/// directory with Node's own npm, under the flags the runtime's own install
+/// uses (§5, §9 R1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn install_packages_installs_the_plugins_lock_with_the_nodes_own_npm() {
+    let fixture = FixtureNode::with(
+        "24.21.0",
+        "mkdir -p node_modules/fixture-dep\n\
+         echo 'export default 1' > node_modules/fixture-dep/index.js",
+    );
+    let (home, runtimes) = fixture_home("packages-install", environment(fixture.search_path()));
+    let server = serve(&home, runtimes).await;
+    let service = server
+        .service::<RuntimeService>()
+        .expect("the runtime service");
+    let dir = staging(&home);
+
+    service
+        .install_packages(&dir, &CancellationToken::new())
+        .await
+        .unwrap();
+
+    let runs = fixture.runs();
+    assert_eq!(runs.len(), 1, "npm ran once: {runs:?}");
+    let prefix = format!(
+        "{} ci --ignore-scripts --omit=dev --no-audit --no-fund --workspaces=false --registry ",
+        dir.canonicalize().unwrap().display()
+    );
+    assert!(runs[0].starts_with(&prefix), "{runs:?}");
+    assert!(
+        runs[0][prefix.len()..].starts_with("https://"),
+        "the registry is a URL: {runs:?}"
+    );
+    assert!(
+        dir.join("node_modules/fixture-dep/index.js").is_file(),
+        "npm installed into the plugin's directory"
+    );
+    assert_eq!(
+        entries(&dir),
+        ["node_modules", "package-lock.json", "package.json"],
+        "the install left nothing else, the cache included"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The registries are tried in the plan's order — `DIMCODE_NPM_REGISTRY`
+/// first, then `npmRegistries` (§5, G10) — and a failure names each one tried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn install_packages_tries_the_environment_registry_first_and_names_each() {
+    let registry = "https://env.invalid";
+    let fixture = FixtureNode::with(
+        "24.21.0",
+        // Refuses the registry this host sets; the pinned ones are tried next.
+        &format!(
+            "case \" $* \" in *\" --registry {registry} \"*) \
+             echo 'registry unavailable' >&2; exit 1;; esac"
+        ),
+    );
+    // The environment is this host's input: the process is never read, so no
+    // other flow in this binary sees the registry.
+    let mut environment = environment(fixture.search_path());
+    environment.npm_registry = Some(registry.into());
+    let (home, runtimes) = fixture_home("packages-registries", environment);
+    let server = serve(&home, runtimes).await;
+    let service = server
+        .service::<RuntimeService>()
+        .expect("the runtime service");
+    let dir = staging(&home);
+    let cancel = CancellationToken::new();
+
+    service.install_packages(&dir, &cancel).await.unwrap();
+    let runs = fixture.runs();
+    assert_eq!(
+        runs.len(),
+        2,
+        "the refused registry, then a pinned one: {runs:?}"
+    );
+    assert!(
+        runs[0].ends_with(&format!(" --registry {registry}")),
+        "{runs:?}"
+    );
+    assert!(
+        runs[1].ends_with(" --registry https://registry.npmjs.org"),
+        "{runs:?}"
+    );
+
+    // npm failing for every registry names every one it was given.
+    fixture.npm("echo refused >&2\nexit 1");
+    let error = service.install_packages(&dir, &cancel).await.unwrap_err();
+    assert_eq!(error.code, "install_failed", "{error}");
+    assert!(error.message.contains(registry), "{error}");
+    assert!(
+        error.message.contains("https://registry.npmjs.org"),
+        "{error}"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A cancelled `installPackages` kills npm and leaves `dir` to the caller:
+/// nothing is half-installed, and even the cache is gone (§5, §9 R1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn install_packages_cancelled_kills_npm_and_leaves_the_directory() {
+    let fixture = FixtureNode::with("24.21.0", "exit 0");
+    let running = fixture.path("running");
+    std::fs::write(&running, "").unwrap();
+    let pid = fixture.path("pid");
+    // npm blocks on a file until it is killed.
+    fixture.npm(&format!(
+        "echo $$ > '{}'\nexec tail -f '{}'",
+        pid.display(),
+        running.display()
+    ));
+    let (home, runtimes) = fixture_home("packages-cancel", environment(fixture.search_path()));
+    let server = serve(&home, runtimes).await;
+    let service = server
+        .service::<RuntimeService>()
+        .expect("the runtime service");
+    let dir = staging(&home);
+    let cancel = CancellationToken::new();
+    let call = tokio::spawn({
+        let service = service.clone();
+        let dir = dir.clone();
+        let cancel = cancel.clone();
+        async move { service.install_packages(&dir, &cancel).await }
+    });
+
+    // npm is running once it has written its own process id.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !pid.is_file() {
+        assert!(tokio::time::Instant::now() < deadline, "npm never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let process: u32 = std::fs::read_to_string(&pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    cancel.cancel();
+    let error = call.await.unwrap().unwrap_err();
+    assert_eq!(error.code, "cancelled", "{error}");
+
+    // The child is gone: dropping the command that owns it kills it.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while std::process::Command::new("kill")
+        .args(["-0", &process.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "npm {process} outlived the call"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        entries(&dir),
+        ["package-lock.json", "package.json"],
+        "the directory is left to its caller"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Node off and unacquirable: `installPackages` answers `node_unavailable`
+/// with the acquisition's reason, and npm never runs (§5, §9 R1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn install_packages_without_node_names_the_acquisition_failure() {
+    // A Node below the floor cannot be acquired.
+    let fixture = FixtureNode::with("22.18.0", "exit 0");
+    let (home, runtimes) = fixture_home("packages-unavailable", environment(fixture.search_path()));
+    let server = serve(&home, runtimes).await;
+    let service = server
+        .service::<RuntimeService>()
+        .expect("the runtime service");
+    let dir = staging(&home);
+
+    let error = service
+        .install_packages(&dir, &CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "node_unavailable", "{error}");
+    assert!(error.message.contains("22.18.0"), "{error}");
+    assert!(error.message.contains("22.19"), "{error}");
+    assert!(
+        fixture.runs().is_empty(),
+        "npm never ran: {:?}",
+        fixture.runs()
+    );
+
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
@@ -1177,31 +1438,77 @@ async fn watch_until(
     }
 }
 
-/// A `system` Node that passes the version check and the package step but
-/// never greets, so its connection row goes down without a real runtime.
-struct FixtureNode {
+/// A `system` Node that passes the version check and the package step without
+/// a real Node or npm: `bin/node` answers `--version` with its version, and
+/// `lib/node_modules/npm/bin/npm-cli.js` is the npm the check looks for.
+/// `new` answers nothing else, so its connection row never greets and goes
+/// down; `with` runs the npm body instead, after recording each run — the
+/// working directory, then the arguments. The plugin manager flows reuse the
+/// fixture for a plugin's dependency install.
+pub(super) struct FixtureNode {
     directory: PathBuf,
+    log: PathBuf,
 }
 
 impl FixtureNode {
-    fn new() -> Self {
-        let directory = std::env::temp_dir().join(format!("dm-node-{}", uuid::Uuid::new_v4()));
-        let bin = directory.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
+    pub(super) fn new() -> Self {
+        let directory = Self::directory();
         write_script(
-            &bin,
+            &directory.join("bin"),
             "node",
             "if [ \"$1\" = \"--version\" ]; then echo v22.19.0; fi",
         );
-        let npm = directory.join("lib/node_modules/npm/bin");
-        std::fs::create_dir_all(&npm).unwrap();
-        std::fs::write(npm.join("npm-cli.js"), "").unwrap();
-        Self { directory }
+        std::fs::write(directory.join("lib/node_modules/npm/bin/npm-cli.js"), "").unwrap();
+        let log = directory.join("npm.log");
+        Self { directory, log }
+    }
+
+    /// A Node reporting `version` and otherwise running what it was given.
+    pub(super) fn with(version: &str, npm: &str) -> Self {
+        let directory = Self::directory();
+        write_script(
+            &directory.join("bin"),
+            "node",
+            &format!("if [ \"$1\" = --version ]; then echo v{version}; exit 0; fi\nexec \"$@\""),
+        );
+        let log = directory.join("npm.log");
+        let fixture = Self { directory, log };
+        fixture.npm(npm);
+        fixture
+    }
+
+    fn directory() -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("dm-node-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(directory.join("bin")).unwrap();
+        std::fs::create_dir_all(directory.join("lib/node_modules/npm/bin")).unwrap();
+        directory
+    }
+
+    /// Replaces what npm does, after the run is recorded.
+    pub(super) fn npm(&self, body: &str) {
+        write_script(
+            &self.directory.join("lib/node_modules/npm/bin"),
+            "npm-cli.js",
+            &format!("echo \"$PWD $*\" >> '{}'\n{body}", self.log.display()),
+        );
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.directory.join(name)
     }
 
     /// The search path that resolves the fixture as the system Node.
-    fn search_path(&self) -> std::ffi::OsString {
+    pub(super) fn search_path(&self) -> std::ffi::OsString {
         self.directory.join("bin").into_os_string()
+    }
+
+    /// Each npm run: its working directory, then its arguments.
+    fn runs(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 }
 
@@ -1243,7 +1550,7 @@ async fn a_watch_streams_a_tool_install_to_the_watching_connection_only() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1307,7 +1614,7 @@ async fn a_watch_streams_a_failed_acquisition() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1350,7 +1657,7 @@ async fn a_watch_streams_a_configuration_change() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(_fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1394,7 +1701,7 @@ async fn a_second_watch_takes_over_the_first() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(_fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(_fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1450,7 +1757,7 @@ async fn a_closed_watcher_fails_nothing_for_another_watcher() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let server = launch(
         Arc::new(MockTools),
         ServerConfig {
@@ -1510,7 +1817,7 @@ async fn a_reload_answers_the_open_call_operation_interrupted() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "system", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(fixture.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(fixture.search_path())));
     let probe = Arc::new(std::sync::Mutex::new(None));
     let (server, _) = launch_with(
         Arc::new(MockTools),
@@ -1602,7 +1909,7 @@ async fn a_watch_streams_a_row_going_down() {
             "python": {"source": "download", "auto": false},
             "uv": {"source": "download", "auto": false}}"#,
     );
-    let runtimes = load_runtimes(&home, &defaults, Some(node.search_path()));
+    let runtimes = load_runtimes(&home, &defaults, Some(environment(node.search_path())));
     assert_eq!(
         runtimes.plan(Kind::Node).interpreter,
         node.directory.join("bin/node"),

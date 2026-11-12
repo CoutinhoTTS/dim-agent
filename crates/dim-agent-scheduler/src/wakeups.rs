@@ -6,12 +6,13 @@
 //! deadline, and never appears in `schedule.list` or in the run history.
 use crate::{
     document::{MAX_PROMPT_BYTES, canonical_instant, format_instant},
-    engine::{GRACE_SECONDS, escaped, lookup_input, sessions, target_gone},
+    engine::{GRACE_SECONDS, lookup_input, sessions, target_gone},
     methods::Shared,
     runs::SchedulerError,
 };
 use chrono::{DateTime, Duration, Utc};
 use dim_agent_capabilities::session_broadcast::{SessionNotice, notify};
+use dim_agent_types::markup::escaped;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;

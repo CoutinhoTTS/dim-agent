@@ -13,7 +13,7 @@ static ALLOCATOR: allocation::MeasuredAllocator = allocation::MeasuredAllocator;
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
-    history::{HistoryRenderer, read_context_in, replay_context, summary_message},
+    history::{HistoryRenderer, summary_message},
     host::*,
     timeline_tree::TreeCommands,
 };
@@ -48,6 +48,7 @@ fn record(sequence: u64, kind: EventKind) -> StoredEvent {
             sequence,
             create_at: dim_agent_runtime::core::unix_millis(),
             tags: None,
+            parent_call_id: None,
             kind,
         }),
         trace: None,
@@ -680,7 +681,13 @@ async fn read_load(
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let sessions = SessionStore::new(db.clone(), rutis::Ctx::root()?, 0);
     let fork_start = Instant::now();
-    sessions.fork_session("source", "fork", through).await?;
+    let config = sessions
+        .session_config_text("source")
+        .await?
+        .ok_or("the source record is missing")?;
+    sessions
+        .fork_session("source", "fork", through, &config)
+        .await?;
     let fork_end = Instant::now();
     let fork_ms = fork_start.elapsed().as_secs_f64() * 1000.;
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -796,8 +803,16 @@ async fn reads() -> std::result::Result<(), Error> {
         let mut timing = Vec::new();
         for _ in 0..20 {
             let start = Instant::now();
-            drop(replay_context(&timeline, 4).await?);
-            drop(replay_context(&timeline, 4).await?);
+            drop(
+                dim_agent_capabilities::history::HistoryRenderer::default()
+                    .replay_context(&timeline, 4)
+                    .await?,
+            );
+            drop(
+                dim_agent_capabilities::history::HistoryRenderer::default()
+                    .replay_context(&timeline, 4)
+                    .await?,
+            );
             timing.push(start.elapsed().as_secs_f64() * 1000.);
         }
         let captured = Arc::new(Mutex::new(None));
@@ -831,8 +846,16 @@ async fn reads() -> std::result::Result<(), Error> {
             let read = tokio::spawn(async move {
                 let through = reader.sequence();
                 let _ = started.send(());
-                drop(read_context_in(&context, "main", through).await?);
-                drop(read_context_in(&context, "main", through).await?);
+                drop(
+                    dim_agent_capabilities::history::HistoryRenderer::default()
+                        .context_in(&context, "main", through)
+                        .await?,
+                );
+                drop(
+                    dim_agent_capabilities::history::HistoryRenderer::default()
+                        .context_in(&context, "main", through)
+                        .await?,
+                );
                 Ok::<_, AgentError>(())
             });
             running.await?;
@@ -858,6 +881,16 @@ struct BarrierStore {
     mode: String,
 }
 impl TimelineStore for BarrierStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        self.inner.query(scope, query, page)
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -912,15 +945,7 @@ impl TimelineStore for BarrierStore {
     ) -> BoxFuture<'a, Result<Option<RecoverySnapshot>>> {
         self.inner.latest_snapshot(k, s, interpreter)
     }
-    fn query<'a>(
-        &'a self,
-        k: &'a TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        self.inner.query(k, query, from, through)
-    }
+
     fn append(&self, k: TimelineKey, e: Vec<StoredEvent>, publish: PublishCallback) -> Result<()> {
         let mode = self.mode.clone();
         self.inner.append(

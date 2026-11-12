@@ -14,6 +14,7 @@ pub mod exec;
 pub mod file_reads;
 pub mod files;
 pub mod mentions;
+mod pending;
 
 use crate::{
     host::{HostError, HostFuture, SessionFilesHost, ToolDriver, ToolExecutionContext, ToolHost},
@@ -53,7 +54,15 @@ const SEARCH_METHOD: &str = "session.files.search";
 pub struct WorkspaceToolsConfig {
     /// Absolute root of command output files, `<output_root>/<session_id>/`.
     pub output_root: PathBuf,
+    /// The root boundary of a session's file tools, when a host configures
+    /// one. The product passes `None`: the tools keep their unbounded
+    /// resolution, and ADR 014's facts keep deciding file access.
+    pub boundary: Option<files::FileToolBoundary>,
 }
+
+/// Re-exported for hosts that configure a boundary: the scenario evaluation
+/// harness.
+pub use files::FileToolBoundary;
 
 /// Installs WorkspaceTools: the process owner, which registers its Session and
 /// branch parts, and the parts themselves. The owner holds the file-write
@@ -254,13 +263,18 @@ impl ToolDriver for WorkspaceTools {
                 && let Some(path) = call.input.get("path").and_then(|value| value.as_str())
                 && !path.is_empty()
             {
+                // One effective home: the boundary's when configured, the
+                // platform's otherwise — the same home the executed tool
+                // resolves `~` against, so pre-admission resolution cannot
+                // disagree with execution.
                 let (cwd, home, path) = (
                     self.cwd.clone(),
-                    self.platform.home.clone(),
+                    self.files.home().to_owned(),
                     path.to_owned(),
                 );
-                let target =
-                    tokio::task::spawn_blocking(move || files::resolve_path(&cwd, &home, &path));
+                let target = tokio::task::spawn_blocking(move || {
+                    files::resolve_path(&cwd, &home, None, files::Access::Write, &path)
+                });
                 let path = tokio::select! {
                     result = target => result.map_err(|error| HostError::failed(error.to_string()))?
                         .map_err(HostError::failed)?,
@@ -335,6 +349,15 @@ impl DynPlugin for WorkspaceToolsPlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            // Fail closed where the handle-based path operations do not
+            // exist: a configured boundary would silently degrade to the
+            // unbounded path, so the Session part refuses to construct.
+            #[cfg(not(unix))]
+            if self.config.boundary.is_some() {
+                return Err(rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    "the file-tool root boundary needs handle-based path operations, which this platform does not provide".into(),
+                )));
+            }
             let platform = ctx.require_at(&self.platform)?;
             let config = ctx.require_at(&self.session_config)?;
             let identity = ctx.require_at(&self.identity)?;
@@ -342,14 +365,22 @@ impl DynPlugin for WorkspaceToolsPlugin {
             let methods = ctx.require_at(&self.methods)?;
             let cwd = PathBuf::from(&config.cwd);
             let output_dir = self.config.output_root.join(&identity.session_id);
+            // A configured boundary is the file tools' home too: `~`
+            // resolves against it, never against the platform home.
+            let home = self
+                .config
+                .boundary
+                .as_ref()
+                .map_or(platform.home.clone(), |boundary| boundary.home.clone());
             let tools = Arc::new(WorkspaceTools {
                 ctx: ctx.clone(),
                 facts: self.facts.clone(),
                 files: FileTools::with_coordinator(
                     cwd.clone(),
-                    platform.home.clone(),
+                    home,
                     output_dir.clone(),
                     self.coordinator.clone(),
+                    self.config.boundary.clone(),
                 ),
                 output_dir,
                 owner: ctx.get::<SessionFilesHost>(),
@@ -405,6 +436,20 @@ impl DynPlugin for WorkspaceToolsPlugin {
                         })?;
                         reply(serde_json::json!({"candidates": mentions::candidates(&found)}))
                     })
+                }),
+            )?;
+            let pending_tree = tools.tree.clone();
+            methods.register(
+                ctx,
+                "session.exec.pending",
+                vec![MethodDecl::new(
+                    "session.exec.pending",
+                    false,
+                    Interruption::Report,
+                )],
+                Arc::new(move |call, cancel, _| {
+                    let tree = pending_tree.clone();
+                    Box::pin(async move { pending::read(&tree, call.params, &cancel).await })
                 }),
             )?;
             let tree = tools.tree.clone();

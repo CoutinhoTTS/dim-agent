@@ -44,13 +44,12 @@ export const part = definePlugin({
           const page = await timeline.query({
             scope: 'branch',
             include_publishing: true,
-            from_sequence: 1n,
-            order_by: 'sequence',
-            direction: 'ascending',
-            limit: cutoff,
-            offset: 0n,
+            through: cutoff,
+            query: { select: { kind: 'events' } },
+            page: { limit: cutoff },
           })
-          for (const event of page.events) step(event, false)
+          if (page.result.kind !== 'events') throw new Error('expected event rows')
+          for (const { event } of page.result.events) step(event, false)
         }
         replayingMarker = written
         return cutoff

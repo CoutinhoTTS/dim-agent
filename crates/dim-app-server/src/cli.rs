@@ -478,7 +478,10 @@ pub fn run_with(
             defaults::install_local_execution(
                 &mut builder,
                 ModelProviderPlugin::process,
-                WorkspaceToolsConfig { output_root },
+                WorkspaceToolsConfig {
+                    boundary: None,
+                    output_root,
+                },
                 dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
             );
             permission_rules::install(&mut builder);
@@ -512,12 +515,14 @@ pub fn run_with(
             dim_agent_capabilities::prompt_suggestion::install(&mut builder);
             collaboration::install(&mut builder);
             dim_agent_questions::install(&mut builder);
+            dim_codemode::install(&mut builder);
             if let Some(root) = config
                 .product_home
                 .as_ref()
                 .or(config.plugin_files.as_ref())
             {
                 super::create_private_directory(&root.join("scheduler"))?;
+                super::create_private_directory(&root.join("eventhub"))?;
             }
             install(&mut builder);
         } else if mock_model {

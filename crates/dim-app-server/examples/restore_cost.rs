@@ -138,6 +138,25 @@ impl Probe {
     }
 }
 impl TimelineStore for Probe {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        self.timed_detail(
+            Op::Read,
+            self.inner.query(scope, query, page),
+            |result| match &result.result {
+                QueryOutput::Events { events } => events.len(),
+                QueryOutput::Rows { rows } => rows.len(),
+                _ => 0,
+            },
+            format!("properties {:?}", query.select),
+        )
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -246,19 +265,6 @@ impl TimelineStore for Probe {
             |_| 0,
         )
     }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        self.timed(
-            Op::Other,
-            self.inner.query(key, query, from, through),
-            |page| page.events.len(),
-        )
-    }
 }
 /// Wall time covered by at least one of `spans`, in ms.
 fn covered<'a>(spans: impl Iterator<Item = &'a Span>) -> f64 {
@@ -295,7 +301,7 @@ struct Restore {
     unload: f64,
     branches: f64,
     reads: usize,
-    read_events: usize,
+    read_items: usize,
     read_sum: f64,
     read_covered: f64,
     append: f64,
@@ -411,6 +417,7 @@ fn request_event(sequence: u64, request: Arc<ModelRequest>, call: bool) -> Store
             sequence,
             create_at: 1_760_000_000_000 + sequence,
             tags: None,
+            parent_call_id: None,
             kind,
         }),
         trace: None,
@@ -710,7 +717,7 @@ async fn main() -> std::result::Result<(), Error> {
                 unload: ms(unloading, Instant::now()),
                 branches: covered(of(Op::Branches)),
                 reads: of(Op::Read).count(),
-                read_events: of(Op::Read).map(|span| span.events).sum(),
+                read_items: of(Op::Read).map(|span| span.events).sum(),
                 read_sum: of(Op::Read).map(|span| ms(span.start, span.end)).sum(),
                 read_covered: covered(of(Op::Read)),
                 append: covered(of(Op::Append)),
@@ -763,12 +770,11 @@ async fn main() -> std::result::Result<(), Error> {
             "reacquireBranchesMedianMs":reacquire(|r| r.branches),
             "restoreCallMedianMs":of(|r| r.call),"unloadMedianMs":of(|r| r.unload),
             "branchesMedianMs":of(|r| r.branches),
-            "reads":restores[0].reads,"readEvents":restores[0].read_events,
+            "reads":restores[0].reads,"readItems":restores[0].read_items,
             "readSumMedianMs":of(|r| r.read_sum),"readCoveredMedianMs":of(|r| r.read_covered),
             "perReadMedianMs":of(|r| r.read_covered / r.reads.max(1) as f64),
             "appendMedianMs":of(|r| r.append),"outsideStoreMedianMs":of(|r| r.outside_store),
             "bytesPerEvent":bytes[target] as f64 / events[target] as f64,
-            "fullReads":restores[0].read_events as f64 / events[target] as f64,
             "peakLiveMedianMB":of(|r| r.peak_live),"idleLiveMedianMB":of(|r| r.idle_live),
             "unloadedLiveMedianMB":of(|r| r.unloaded_live),
             "debugAssertions":cfg!(debug_assertions)})

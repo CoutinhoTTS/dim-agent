@@ -5,8 +5,11 @@ use dim_agent_capabilities::input_queue::{
     append_blocks,
 };
 use dim_agent_capabilities::timeline_tree::TreeCommands;
-use dim_agent_runtime::{BranchDirectoryState, BranchOptions, TimelineQuery};
-use dim_agent_types::{BranchSource, EventKind, InputBlock, InputMode};
+use dim_agent_runtime::{
+    BranchOptions, QueryComparison, QueryFilter, QueryOperand, QueryOrder, QueryOrderKey,
+    QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, TimelineQuery,
+};
+use dim_agent_types::{BranchSource, InputBlock, InputMode};
 
 impl Connection {
     /// Runs the Session's submit checks before writing operator input (Hooks
@@ -44,6 +47,12 @@ impl Connection {
             mode: params.mode,
             ..InputMessageData::default()
         };
+        // The checks' contexts are appended to the operator's own content, so
+        // an input that carries none must be refused before the checks run:
+        // otherwise a check's context would be the only content, and the input
+        // it made valid would be written and titled after all.
+        data.validate()
+            .map_err(|reason| RpcError::from(AgentError::InvalidInput(reason.into())))?;
         match self
             .submit_check(
                 rpc,
@@ -63,7 +72,7 @@ impl Connection {
             SubmitCheckReply::Proceed { blocks } => append_blocks(&mut data.user, blocks),
         }
         let event = session.input(data, branch).await.map_err(RpcError::from)?;
-        if self.protocol_version() == 3 {
+        if self.protocol_version() >= 3 {
             let mut published = publication.watch();
             tokio::select! {
                 biased;
@@ -111,6 +120,7 @@ impl Connection {
         &self,
         rpc: &RpcService,
         params: History,
+        display: bool,
     ) -> Result<Reply, RpcError> {
         if params.latest_turn && params.after.is_some() {
             return Err(RpcError::invalid(
@@ -206,20 +216,11 @@ impl Connection {
             };
             let before = params.before.unwrap_or_else(|| through.saturating_add(1));
             let read = if session.ended_head(branch).is_some() {
-                HistoryRead::Ended(&tree)
+                HistoryRead::Ended(&tree, self.protocol_version())
             } else {
-                HistoryRead::Open(&session)
+                HistoryRead::Open(&session, self.protocol_version())
             };
-            let reply = window_at(
-                &read,
-                branch,
-                before,
-                limit,
-                through,
-                turn,
-                self.protocol_version(),
-            )
-            .await;
+            let reply = window_at(&read, branch, before, limit, through, turn, display).await;
             // The owner is chosen before the read: a line that ends in between
             // answers `BranchEnded`, and the tree serves the same request at its
             // fixed head.
@@ -231,75 +232,150 @@ impl Connection {
                         .is_some_and(|data| data.app_error == "branch_ended") =>
                 {
                     window_at(
-                        &HistoryRead::Ended(&tree),
+                        &HistoryRead::Ended(&tree, self.protocol_version()),
                         branch,
                         before,
                         limit,
                         through,
                         turn,
-                        self.protocol_version(),
+                        display,
                     )
                     .await
                 }
                 other => other,
             };
-            return reply.map(Reply::History);
-        }
-        let events = rpc
-            .index
-            .history_page(&params.session_id, branch, after, limit, through)
-            .await
-            .map_err(history_error)?;
-        // The page's events come from the index; its batch edges come from the
-        // same owner, and a line that ends in between serves them through the
-        // tree at its fixed head (ADR 021 D2).
-        let reply = if session.ended_head(branch).is_some() {
-            let tree = session
-                .session_service::<TreeCommands>()
-                .map_err(history_error)?;
-            forward_at(
-                &HistoryRead::Ended(&tree),
-                branch,
-                events,
-                after,
-                through,
-                self.protocol_version(),
-            )
-            .await
-        } else {
-            match forward_at(
-                &HistoryRead::Open(&session),
-                branch,
-                events.clone(),
-                after,
-                through,
-                self.protocol_version(),
-            )
-            .await
-            {
-                Err(error)
-                    if error
-                        .data
-                        .as_ref()
-                        .is_some_and(|data| data.app_error == "branch_ended") =>
-                {
-                    let tree = session
-                        .session_service::<TreeCommands>()
-                        .map_err(history_error)?;
-                    forward_at(
-                        &HistoryRead::Ended(&tree),
-                        branch,
-                        events,
-                        after,
-                        through,
-                        self.protocol_version(),
-                    )
-                    .await
+            return reply.map(|page| {
+                if display {
+                    Reply::HistoryDisplay(page.into())
+                } else {
+                    Reply::History(page)
                 }
-                other => other,
-            }
+            });
+        }
+        let tree = session
+            .session_service::<TreeCommands>()
+            .map_err(history_error)?;
+        let read = if session.ended_head(branch).is_some() {
+            HistoryRead::Ended(&tree, self.protocol_version())
+        } else {
+            HistoryRead::Open(&session, self.protocol_version())
         };
-        reply.map(Reply::History)
+        let reply = forward_page(&read, branch, after, limit, through, display).await;
+        let reply = match reply {
+            Err(error)
+                if error
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.app_error == "branch_ended") =>
+            {
+                forward_page(
+                    &HistoryRead::Ended(&tree, self.protocol_version()),
+                    branch,
+                    after,
+                    limit,
+                    through,
+                    display,
+                )
+                .await
+            }
+            other => other,
+        };
+        reply.map(|page| {
+            if display {
+                Reply::HistoryDisplay(page.into())
+            } else {
+                Reply::History(page)
+            }
+        })
+    }
+
+    pub(super) async fn history_detail(
+        &self,
+        rpc: &RpcService,
+        params: HistoryDetail,
+    ) -> Result<Reply, RpcError> {
+        if params.event_id.is_empty() || params.sequence == 0 {
+            return Err(RpcError::invalid(
+                "A detail requires an event identity and positive sequence",
+            ));
+        }
+        let session = self.session(rpc, &params.session_id)?;
+        let branch = params.branch_id.as_deref().expect("validated branchId");
+        if params.sequence > session.sequence(branch).map_err(history_error)? {
+            return Err(RpcError::invalid("Future detail position"));
+        }
+        let query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: Some(dim_agent_types::TimelinePosition {
+                branch_id: branch.into(),
+                sequence: params.sequence,
+            }),
+            through: Some(params.sequence),
+            include_publishing: false,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        completed_compaction(),
+                        QueryFilter::In {
+                            value: QueryOperand::Field { path: "id".into() },
+                            values: vec![params.event_id.clone().into()],
+                        },
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["data".into()],
+                },
+                group_by: vec![],
+                pick: None,
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: std::num::NonZeroU64::MIN,
+                after: None,
+            }),
+        };
+        let reply = match session.query(branch, query.clone()).await {
+            Err(AgentError::BranchEnded(_)) => {
+                session
+                    .session_service::<TreeCommands>()
+                    .map_err(history_error)?
+                    .query(branch.to_owned(), query)
+                    .await
+            }
+            other => other,
+        }
+        .map_err(history_error)?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("detail selects data")
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return Err(RpcError::app(
+                -32000,
+                "detail_not_found",
+                "The completed compaction is not visible at this position",
+            ));
+        };
+        let [QueryValue::Value { value }]: [_; 1] =
+            row.values.try_into().expect("compaction detail data")
+        else {
+            unreachable!("compaction data is present")
+        };
+        let detail = dim_agent_types::CompactionDetail {
+            event_id: params.event_id,
+            sequence: params.sequence,
+            data: serde_json::from_value(value)
+                .map_err(|error| RpcError::wire(-32603, error.to_string()))?,
+        };
+        let encoded = serde_json::value::to_raw_value(&detail)
+            .map_err(|error| RpcError::wire(-32603, error.to_string()))?;
+        if encoded.get().len() > REPLY_FRAME_BYTES {
+            return Err(RpcError::app(
+                -32000,
+                "detail_too_large",
+                "The compaction exceeds the display budget; export the Timeline to read the complete fact",
+            ));
+        }
+        Ok(Reply::HistoryDetail(encoded))
     }
 
     /// The branch's live keyed blocks at `through` (keyed-blocks §2.2): the
@@ -324,9 +400,20 @@ impl Connection {
             let tree = session
                 .session_service::<TreeCommands>()
                 .map_err(history_error)?;
-            scan_keys(&HistoryRead::Ended(&tree), branch, through).await?
+            scan_keys(
+                &HistoryRead::Ended(&tree, self.protocol_version()),
+                branch,
+                through,
+            )
+            .await?
         } else {
-            match scan_keys(&HistoryRead::Open(&session), branch, through).await {
+            match scan_keys(
+                &HistoryRead::Open(&session, self.protocol_version()),
+                branch,
+                through,
+            )
+            .await
+            {
                 // The line ended while the scan ran: the tree serves the same
                 // read at its fixed head (ADR 021 D2).
                 Err(error)
@@ -338,7 +425,12 @@ impl Connection {
                     let tree = session
                         .session_service::<TreeCommands>()
                         .map_err(history_error)?;
-                    scan_keys(&HistoryRead::Ended(&tree), branch, through).await?
+                    scan_keys(
+                        &HistoryRead::Ended(&tree, self.protocol_version()),
+                        branch,
+                        through,
+                    )
+                    .await?
                 }
                 other => other?,
             }
@@ -359,22 +451,29 @@ impl Connection {
         params: Branches,
     ) -> Result<Reply, RpcError> {
         let session = self.session(rpc, &params.session_id)?;
-        let branches = session
-            .directory()
-            .into_iter()
-            .map(|entry| wire::BranchDirectoryView {
-                branch: wire::BranchInfo::from(entry.info.clone()),
-                source: entry.info.source,
-                state: match entry.state {
-                    BranchDirectoryState::Open => "open",
-                    BranchDirectoryState::Ending => "ending",
-                    BranchDirectoryState::Ended => "ended",
-                },
-                head: entry.head,
-                end_event: entry.end_event,
-            })
-            .collect();
-        Ok(Reply::Branches(wire::BranchesResult { branches }))
+        Ok(Reply::Branches(wire::BranchesResult {
+            branches: session.directory().into_iter().map(Into::into).collect(),
+        }))
+    }
+
+    pub(super) async fn branch_get(
+        &self,
+        rpc: &RpcService,
+        params: BranchRequest,
+    ) -> Result<Reply, RpcError> {
+        let session = self.session(rpc, &params.session_id)?;
+        let tree = session
+            .session_service::<TreeCommands>()
+            .map_err(RpcError::from)?;
+        let read = tree
+            .display(params.branch_id)
+            .await
+            .map_err(RpcError::from)?;
+        let mut entry = wire::BranchDirectoryView::from(read.entry);
+        entry.purpose = read.purpose;
+        entry.cut_messages = read.cut_messages;
+        entry.end = read.end;
+        Ok(Reply::BranchGet(entry))
     }
 
     pub(super) async fn end_branch(
@@ -491,8 +590,6 @@ const HISTORY_TURN_BYTES: usize = 4 * 1024 * 1024;
 /// page above it fails `history_too_large`; a `session.keys` reply above it
 /// fails `keys_too_large`.
 const REPLY_FRAME_BYTES: usize = crate::outbound::MAX_FRAME_BYTES - 64 * 1024;
-/// Facts one page of the window's anchor read keeps.
-const TURN_WINDOW_PAGE: u64 = 256;
 /// Facts one page of the `session.keys` scan keeps.
 const KEYS_PAGE: u64 = 256;
 /// The most live keyed blocks one `session.keys` reply carries. The key is
@@ -541,122 +638,194 @@ async fn turn_window(
             window_start: 1,
         });
     }
-    let page = |kinds: Vec<String>,
-                direction: TimelineQueryDirection,
-                from: Option<u64>,
-                event_id: Option<String>| TimelineQuery {
+    let query = |filter, pick| TimelineQuery {
         scope: TimelineQueryScope::Branch,
+        from: None,
+        through: Some(through),
         include_publishing: false,
-        from_event: None,
-        from_sequence: from,
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction,
-        kinds,
-        flags: Vec::new(),
-        event_id,
-        predicate: None,
-        limit: std::num::NonZeroU64::new(TURN_WINDOW_PAGE).expect("a page keeps one event"),
-        offset: 0,
+        query: QuerySpec {
+            filter: Some(filter),
+            select: QuerySelect::Fields {
+                fields: vec!["position.sequence".into()],
+            },
+            group_by: vec![],
+            pick: Some(pick),
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: std::num::NonZeroU64::MIN,
+            after: None,
+        }),
     };
     let turned = tree
         .query(
             branch.to_owned(),
-            page(
-                vec!["turn/start".into()],
-                TimelineQueryDirection::Descending,
-                Some(through),
-                None,
+            query(
+                QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec!["turn/start".into()],
+                },
+                QueryPick::Last,
             ),
         )
         .await
         .map_err(history_error)?;
-    let Some(turn_start) = turned.events.first().map(|event| event.sequence) else {
+    let QueryOutput::Rows { rows } = turned.result else {
+        unreachable!("field selection returns rows")
+    };
+    let Some(row) = rows.first() else {
         return Ok(crate::storage::TurnWindow {
             turn_start: None,
             window_start: 1,
         });
     };
-    let first_step = tree
+    let [QueryValue::Value { value: start }] = row.values.as_slice() else {
+        unreachable!("turn start has a sequence")
+    };
+    let turn_start = start.as_u64().expect("event sequence is unsigned");
+    let step = tree
         .query(
             branch.to_owned(),
-            page(
-                vec!["step/model-start".into()],
-                TimelineQueryDirection::Ascending,
-                Some(turn_start.saturating_add(1)),
-                None,
+            query(
+                QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: vec!["step/model-start".into()],
+                        },
+                        QueryFilter::Compare {
+                            left: QueryOperand::Field {
+                                path: "position.sequence".into(),
+                            },
+                            comparison: QueryComparison::Gt,
+                            right: QueryOperand::Value {
+                                value: turn_start.into(),
+                            },
+                        },
+                    ],
+                },
+                QueryPick::First,
             ),
         )
         .await
-        .map_err(history_error)?
-        .events
-        .first()
-        .map(|event| event.sequence)
-        .filter(|sequence| *sequence <= through);
+        .map_err(history_error)?;
+    let QueryOutput::Rows { rows } = step.result else {
+        unreachable!("field selection returns rows")
+    };
     let mut window_start = turn_start;
     let mut consumed = false;
-    if let Some(first_step) = first_step {
-        let mut from = turn_start.saturating_add(1);
-        loop {
-            let reply = tree
-                .query(
-                    branch.to_owned(),
-                    page(
-                        vec!["input/consumed".into()],
-                        TimelineQueryDirection::Ascending,
-                        Some(from),
-                        None,
-                    ),
-                )
-                .await
-                .map_err(history_error)?;
-            let short = (reply.events.len() as u64) < TURN_WINDOW_PAGE;
-            let mut next = None;
-            for event in &reply.events {
-                if event.sequence >= first_step {
-                    break;
-                }
-                next = Some(event.sequence.saturating_add(1));
-                let EventKind::InputConsumed(data) = &event.kind else {
-                    unreachable!("the read selects consumed inputs")
-                };
-                let input = tree
-                    .query(
-                        branch.to_owned(),
-                        page(
-                            Vec::new(),
-                            TimelineQueryDirection::Ascending,
-                            None,
-                            Some(data.input_id.clone()),
-                        ),
-                    )
-                    .await
-                    .map_err(history_error)?;
-                if let Some(sequence) = input.events.first().map(|event| event.sequence) {
-                    window_start = window_start.min(sequence);
-                    consumed = true;
-                }
-            }
-            match next {
-                Some(next) if !short => from = next,
-                _ => break,
-            }
+    if let Some(row) = rows.first() {
+        let [QueryValue::Value { value: first_step }] = row.values.as_slice() else {
+            unreachable!("model start has a sequence")
+        };
+        let inputs = tree
+            .query(
+                branch.to_owned(),
+                query(
+                    QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["input/message".into()],
+                            },
+                            QueryFilter::Exists {
+                                condition: Box::new(QueryFilter::And {
+                                    conditions: vec![
+                                        QueryFilter::In {
+                                            value: QueryOperand::Field {
+                                                path: "kind".into(),
+                                            },
+                                            values: vec!["input/consumed".into()],
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "data.input_id".into(),
+                                            },
+                                            comparison: QueryComparison::Eq,
+                                            right: QueryOperand::Outer { path: "id".into() },
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "position.sequence".into(),
+                                            },
+                                            comparison: QueryComparison::Gt,
+                                            right: QueryOperand::Value {
+                                                value: turn_start.into(),
+                                            },
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "position.sequence".into(),
+                                            },
+                                            comparison: QueryComparison::Lt,
+                                            right: QueryOperand::Value {
+                                                value: first_step.clone(),
+                                            },
+                                        },
+                                    ],
+                                }),
+                            },
+                        ],
+                    },
+                    QueryPick::First,
+                ),
+            )
+            .await
+            .map_err(history_error)?;
+        let QueryOutput::Rows { rows } = inputs.result else {
+            unreachable!("field selection returns rows")
+        };
+        if let Some(row) = rows.first() {
+            let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
+                unreachable!("input has a sequence")
+            };
+            window_start = window_start.min(sequence.as_u64().expect("event sequence is unsigned"));
+            consumed = true;
         }
     }
     if !consumed {
         let newest = tree
             .query(
                 branch.to_owned(),
-                page(
-                    vec!["input/message".into()],
-                    TimelineQueryDirection::Descending,
-                    Some(turn_start),
-                    None,
+                query(
+                    QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["input/message".into()],
+                            },
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "position.sequence".into(),
+                                },
+                                comparison: QueryComparison::Le,
+                                right: QueryOperand::Value {
+                                    value: turn_start.into(),
+                                },
+                            },
+                        ],
+                    },
+                    QueryPick::Last,
                 ),
             )
             .await
             .map_err(history_error)?;
-        if let Some(sequence) = newest.events.first().map(|event| event.sequence) {
-            window_start = window_start.min(sequence);
+        let QueryOutput::Rows { rows } = newest.result else {
+            unreachable!("field selection returns rows")
+        };
+        if let Some(row) = rows.first() {
+            let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
+                unreachable!("input has a sequence")
+            };
+            window_start = window_start.min(sequence.as_u64().expect("event sequence is unsigned"));
         }
     }
     Ok(crate::storage::TurnWindow {
@@ -669,8 +838,8 @@ async fn turn_window(
 /// Timeline, through its Session, or an ended line's stored history, through
 /// the tree that owns its fixed head (ADR 021 D2).
 enum HistoryRead<'a> {
-    Open(&'a Session),
-    Ended(&'a TreeCommands),
+    Open(&'a Session, u32),
+    Ended(&'a TreeCommands, u32),
 }
 
 impl HistoryRead<'_> {
@@ -680,30 +849,21 @@ impl HistoryRead<'_> {
         query: TimelineQuery,
     ) -> Result<dim_agent_runtime::TimelineQueryReply, AgentError> {
         match self {
-            Self::Open(session) => session.query(branch, query).await,
-            Self::Ended(tree) => tree.query(branch.to_owned(), query).await,
+            Self::Open(session, _) => session.query(branch, query).await,
+            Self::Ended(tree, _) => tree.query(branch.to_owned(), query).await,
         }
     }
 
     async fn batch_end(&self, branch: &str, sequence: u64) -> Result<(), AgentError> {
         match self {
-            Self::Open(session) => session.batch_end(branch, sequence).await,
-            Self::Ended(tree) => tree.batch_end(branch.to_owned(), sequence).await,
+            Self::Open(session, _) => session.batch_end(branch, sequence).await,
+            Self::Ended(tree, _) => tree.batch_end(branch.to_owned(), sequence).await,
         }
     }
 }
 
-/// The branch segment's live keyed blocks at `through` (keyed-blocks §3): one
-/// descending scan of the four kinds that runs from `through` down to the
-/// branch's opening. `input/deleted` is collected in the same pass; InputQueue
-/// writes it only for an input it still holds unapplied, so the deletion is
-/// always above the input it removes and the descending scan meets it first.
-/// A block is live only when its input is absent from that set, and a retire
-/// written by a deleted input never ends the key. The scan stops at the first
-/// opening (`branch/start` or `session/forked`) and discards everything below
-/// it: a fork's copied facts and a branch's inherited prefix are not the
-/// branch's own segment. Pages advance by sequence, never `offset` (ADR 019
-/// D2): the storage reader fetches `offset + limit` rows before skipping.
+/// The latest live blocks in this branch's own segment, excluding deleted inputs.
+/// The opening excludes the inherited prefix and a fork's copied facts.
 async fn scan_keys(
     read: &HistoryRead<'_>,
     branch: &str,
@@ -711,94 +871,178 @@ async fn scan_keys(
 ) -> Result<Vec<wire::KeyEntry>, RpcError> {
     let mut found: HashMap<String, (u64, usize, wire::KeyEntry)> = HashMap::new();
     let mut closed: HashSet<String> = HashSet::new();
-    let mut deleted: HashSet<String> = HashSet::new();
-    let mut from = through;
-    while from > 0 {
+    let opened = read
+        .query(
+            branch,
+            TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(through),
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["branch/start".into(), "session/forked".into()],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["position.sequence".into()],
+                    },
+                    group_by: vec![],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: std::num::NonZeroU64::MIN,
+                    after: None,
+                }),
+            },
+        )
+        .await
+        .map_err(history_error)?;
+    let QueryOutput::Rows { rows } = opened.result else {
+        unreachable!("field selection returns rows")
+    };
+    let from = rows.first().map(|row| {
+        let [QueryValue::Value { value: sequence }] = row.values.as_slice() else {
+            unreachable!("opening has a sequence")
+        };
+        dim_agent_types::TimelinePosition {
+            branch_id: branch.into(),
+            sequence: sequence.as_u64().expect("event sequence is unsigned"),
+        }
+    });
+    let mut after = None;
+    loop {
         let page = read
             .query(
                 branch,
                 TimelineQuery {
                     scope: TimelineQueryScope::Branch,
+                    from: from.clone(),
+                    through: Some(through),
                     include_publishing: false,
-                    from_event: None,
-                    from_sequence: Some(from),
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Descending,
-                    kinds: vec![
-                        "input/message".into(),
-                        "input/deleted".into(),
-                        "branch/start".into(),
-                        "session/forked".into(),
-                    ],
-                    flags: Vec::new(),
-                    event_id: None,
-                    predicate: None,
-                    limit: std::num::NonZeroU64::new(KEYS_PAGE).expect("a page keeps one event"),
-                    offset: 0,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::And {
+                            conditions: vec![
+                                QueryFilter::In {
+                                    value: QueryOperand::Field {
+                                        path: "kind".into(),
+                                    },
+                                    values: vec!["input/message".into()],
+                                },
+                                QueryFilter::Any {
+                                    field: "data.blocks".into(),
+                                    condition: Box::new(QueryFilter::Present {
+                                        value: QueryOperand::Element { path: "key".into() },
+                                    }),
+                                },
+                                QueryFilter::Not {
+                                    condition: Box::new(QueryFilter::Exists {
+                                        condition: Box::new(QueryFilter::And {
+                                            conditions: vec![
+                                                QueryFilter::In {
+                                                    value: QueryOperand::Field {
+                                                        path: "kind".into(),
+                                                    },
+                                                    values: vec!["input/deleted".into()],
+                                                },
+                                                QueryFilter::Compare {
+                                                    left: QueryOperand::Field {
+                                                        path: "data.input_id".into(),
+                                                    },
+                                                    comparison: QueryComparison::Eq,
+                                                    right: QueryOperand::Outer {
+                                                        path: "id".into(),
+                                                    },
+                                                },
+                                            ],
+                                        }),
+                                    }),
+                                },
+                            ],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: vec![
+                                "id".into(),
+                                "position.sequence".into(),
+                                "data.blocks".into(),
+                            ],
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![QueryOrder {
+                            key: QueryOrderKey::Position,
+                            direction: TimelineQueryDirection::Descending,
+                        }],
+                    },
+                    page: Some(QueryPage {
+                        limit: std::num::NonZeroU64::new(KEYS_PAGE).unwrap(),
+                        after,
+                    }),
                 },
             )
             .await
             .map_err(history_error)?;
-        let exhausted = (page.events.len() as u64) < KEYS_PAGE;
-        let mut done = false;
-        for event in &page.events {
-            match &event.kind {
-                EventKind::BranchStart(_) | EventKind::SessionForked(_) => {
-                    done = true;
-                    break;
+        let QueryOutput::Rows { rows } = page.result else {
+            unreachable!("field selection returns rows")
+        };
+        for row in rows {
+            let [
+                QueryValue::Value {
+                    value: serde_json::Value::String(id),
+                },
+                QueryValue::Value { value: sequence },
+                QueryValue::Value { value: blocks },
+            ] = row.values.as_slice()
+            else {
+                unreachable!("keyed input has id, sequence and blocks")
+            };
+            let sequence = sequence.as_u64().expect("event sequence is unsigned");
+            let blocks: Vec<InputBlock> = serde_json::from_value(blocks.clone())
+                .expect("input blocks follow their event contract");
+            for (index, block) in blocks.iter().enumerate().rev() {
+                let InputBlock::Raw {
+                    text,
+                    key: Some(key),
+                    retire,
+                } = block
+                else {
+                    continue;
+                };
+                if found.contains_key(key) {
+                    continue;
                 }
-                EventKind::InputDeleted(data) => {
-                    deleted.insert(data.input_id.clone());
+                if *retire {
+                    closed.insert(key.clone());
+                    continue;
                 }
-                EventKind::InputMessage(data) if !deleted.contains(&event.id) => {
-                    for (index, block) in data.blocks.iter().enumerate().rev() {
-                        let InputBlock::Raw {
-                            text,
-                            key: Some(key),
-                            retire,
-                        } = block
-                        else {
-                            continue;
-                        };
-                        if found.contains_key(key) {
-                            continue;
-                        }
-                        if *retire {
-                            closed.insert(key.clone());
-                            continue;
-                        }
-                        if closed.contains(key) {
-                            continue;
-                        }
-                        found.insert(
-                            key.clone(),
-                            (
-                                event.sequence,
-                                index,
-                                wire::KeyEntry {
-                                    key: key.clone(),
-                                    sequence: event.sequence,
-                                    input_id: event.id.clone(),
-                                    text: text.clone(),
-                                },
-                            ),
-                        );
-                        if found.len() > KEYS_ENTRY_LIMIT {
-                            return Err(too_many_keys());
-                        }
-                    }
+                if closed.contains(key) {
+                    continue;
                 }
-                EventKind::InputMessage(_) => {}
-                _ => {}
+                found.insert(
+                    key.clone(),
+                    (
+                        sequence,
+                        index,
+                        wire::KeyEntry {
+                            key: key.clone(),
+                            sequence,
+                            input_id: id.clone(),
+                            text: text.clone(),
+                        },
+                    ),
+                );
+                if found.len() > KEYS_ENTRY_LIMIT {
+                    return Err(too_many_keys());
+                }
             }
         }
-        if done || exhausted {
+        after = page.next;
+        if after.is_none() {
             break;
         }
-        from = page
-            .events
-            .last()
-            .map_or(0, |event| event.sequence.saturating_sub(1));
     }
     let mut entries: Vec<_> = found.into_values().collect();
     entries.sort_by_key(|(sequence, index, _)| (*sequence, *index));
@@ -812,10 +1056,19 @@ async fn window_at(
     limit: usize,
     through: u64,
     turn: crate::storage::TurnWindow,
-    version: u32,
+    display: bool,
 ) -> Result<wire::HistoryResult, RpcError> {
-    let events = window_page(read, branch, before, limit, through, turn.window_start).await?;
-    history_window(read, branch, events, through, turn, version).await
+    let events = window_page(
+        read,
+        branch,
+        before,
+        limit,
+        through,
+        turn.window_start,
+        display,
+    )
+    .await?;
+    history_window(read, branch, events, through, turn).await
 }
 
 /// The newest events below `before` inside `window_start..=through`
@@ -830,7 +1083,8 @@ async fn window_page(
     limit: usize,
     through: u64,
     window_start: u64,
-) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>, RpcError> {
+    display: bool,
+) -> Result<Vec<HistoryItem>, RpcError> {
     if through > 0 {
         read.batch_end(branch, through)
             .await
@@ -843,24 +1097,12 @@ async fn window_page(
     let Some(end) = batch_end_at_or_below(read, branch, top, window_start).await? else {
         return Ok(Vec::new());
     };
-    let mut low = end
+    let low = end
         .saturating_sub(limit.saturating_sub(1) as u64)
         .max(1)
         .max(window_start);
-    loop {
-        let events = window_events(read, branch, low, end).await?;
-        let Some(first) = events.first().map(|event| event.sequence) else {
-            return Ok(Vec::new());
-        };
-        if low <= window_start || low == 1 {
-            return Ok(events);
-        }
-        let start = batch_start(read, branch, first, window_start).await?;
-        if start >= low {
-            return Ok(events);
-        }
-        low = start;
-    }
+    let low = batch_start(read, branch, low, window_start).await?;
+    window_items(read, branch, low, end, display).await
 }
 
 /// The greatest atomic-batch end at or below `top`, searching no lower than
@@ -902,34 +1144,160 @@ async fn batch_start(
 }
 
 /// `low..=end` through the source query.
-async fn window_events(
+async fn window_items(
     read: &HistoryRead<'_>,
     branch: &str,
     low: u64,
     end: u64,
-) -> Result<Vec<Arc<dim_agent_types::AgentEvent>>, RpcError> {
+    display: bool,
+) -> Result<Vec<HistoryItem>, RpcError> {
     let limit = end.saturating_sub(low).saturating_add(1).max(1);
-    Ok(read
+    let filter = if display {
+        QueryFilter::And {
+            conditions: vec![
+                wire::ProductEvent::query_filter(),
+                QueryFilter::Not {
+                    condition: Box::new(completed_compaction()),
+                },
+            ],
+        }
+    } else {
+        wire::ProductEvent::query_filter()
+    };
+    let reply = read
         .query(
             branch,
             TimelineQuery {
                 scope: TimelineQueryScope::Branch,
+                from: Some(dim_agent_types::TimelinePosition {
+                    branch_id: branch.into(),
+                    sequence: low,
+                }),
+                through: Some(end),
                 include_publishing: false,
-                from_event: None,
-                from_sequence: Some(low),
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Ascending,
-                kinds: Vec::new(),
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: std::num::NonZeroU64::new(limit).expect("a page keeps one event"),
-                offset: 0,
+                query: QuerySpec {
+                    filter: Some(filter),
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: std::num::NonZeroU64::new(limit).unwrap(),
+                    after: None,
+                }),
             },
         )
         .await
-        .map_err(history_error)?
-        .events)
+        .map_err(history_error)?;
+    let QueryOutput::Events { events } = reply.result else {
+        unreachable!("event selection returns events")
+    };
+    let version = match read {
+        HistoryRead::Open(_, version) | HistoryRead::Ended(_, version) => *version,
+    };
+    let mut visible = history_items(events.into_iter().map(|row| row.event).collect(), version)?;
+    if display {
+        let reply = read
+            .query(
+                branch,
+                TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: Some(dim_agent_types::TimelinePosition {
+                        branch_id: branch.into(),
+                        sequence: low,
+                    }),
+                    through: Some(end),
+                    include_publishing: false,
+                    query: QuerySpec {
+                        filter: Some(completed_compaction()),
+                        select: QuerySelect::Fields {
+                            fields: [
+                                "id",
+                                "position.sequence",
+                                "create_at",
+                                "data.start",
+                                "data.strategy",
+                                "data.diagnostics.insufficientSpace",
+                            ]
+                            .map(String::from)
+                            .to_vec(),
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: std::num::NonZeroU64::new(limit).unwrap(),
+                        after: None,
+                    }),
+                },
+            )
+            .await
+            .map_err(history_error)?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("display selects summary fields")
+        };
+        for row in rows {
+            let [id, sequence, create_at, start, strategy, insufficient_space]: [_; 6] =
+                row.values.try_into().expect("compaction summary fields");
+            let value = |value| match value {
+                QueryValue::Value { value } => value,
+                _ => unreachable!("required compaction summary field"),
+            };
+            let optional = |value| match value {
+                QueryValue::Missing => None,
+                QueryValue::Value { value } => Some(value),
+                _ => unreachable!("scalar compaction summary field"),
+            };
+            let item = wire::CompactionItem {
+                id: serde_json::from_value(value(id)).expect("event id"),
+                sequence: serde_json::from_value(value(sequence)).expect("event sequence"),
+                create_at: serde_json::from_value(value(create_at)).expect("event creation time"),
+                data: dim_agent_types::CompactionSummary {
+                    start: optional(start)
+                        .map(|value| serde_json::from_value(value).expect("compaction start")),
+                    strategy: serde_json::from_value(value(strategy)).expect("compaction strategy"),
+                    insufficient_space: optional(insufficient_space)
+                        .map(|value| serde_json::from_value(value).expect("insufficient space")),
+                },
+            };
+            let encoded = serde_json::value::to_raw_value(&item)
+                .map_err(|error| RpcError::wire(-32603, error.to_string()))?;
+            visible.push(HistoryItem {
+                sequence: item.sequence,
+                bytes: encoded.get().len(),
+                event: Some(encoded),
+            });
+        }
+        visible.sort_unstable_by_key(|item| item.sequence);
+    }
+    let mut visible = visible.into_iter().peekable();
+    Ok((low..=end)
+        .map(|sequence| {
+            if visible.peek().is_some_and(|item| item.sequence == sequence) {
+                visible.next().unwrap()
+            } else {
+                HistoryItem {
+                    sequence,
+                    bytes: 0,
+                    event: None,
+                }
+            }
+        })
+        .collect())
+}
+
+fn completed_compaction() -> QueryFilter {
+    QueryFilter::And {
+        conditions: [("kind", "context/compaction"), ("data.status", "completed")]
+            .into_iter()
+            .map(|(path, value)| QueryFilter::In {
+                value: QueryOperand::Field { path: path.into() },
+                values: vec![value.into()],
+            })
+            .collect(),
+    }
 }
 
 /// One event of a history page with its encoded form, built once, and size.
@@ -1075,15 +1443,33 @@ async fn batch_end_from(
 /// byte target. A trimmed page is a short page, not the end: `done` is false
 /// and `nextAfter` is its last returned sequence, so the client continues as
 /// it does today.
-async fn forward_at(
+async fn forward_page(
     read: &HistoryRead<'_>,
     branch: &str,
-    events: Vec<Arc<dim_agent_types::AgentEvent>>,
     after: u64,
+    limit: usize,
     through: u64,
-    version: u32,
+    display: bool,
 ) -> Result<wire::HistoryResult, RpcError> {
-    let items = history_items(events, version)?;
+    if after > 0 {
+        read.batch_end(branch, after).await.map_err(history_error)?;
+    }
+    read.batch_end(branch, through)
+        .await
+        .map_err(history_error)?;
+    let mut end = after.saturating_add(limit as u64).min(through);
+    while end < through && end > after {
+        match read.batch_end(branch, end).await {
+            Ok(()) => break,
+            Err(AgentError::InvalidInput(_)) => end += 1,
+            Err(error) => return Err(history_error(error)),
+        }
+    }
+    let items = if end > after {
+        window_items(read, branch, after + 1, end, display).await?
+    } else {
+        Vec::new()
+    };
     let keep = bounded_batches(read, branch, &items, false).await?;
     let next_after = keep
         .end
@@ -1110,12 +1496,10 @@ async fn forward_at(
 async fn history_window(
     read: &HistoryRead<'_>,
     branch: &str,
-    events: Vec<Arc<dim_agent_types::AgentEvent>>,
+    mut items: Vec<HistoryItem>,
     through: u64,
     turn: crate::storage::TurnWindow,
-    version: u32,
 ) -> Result<wire::HistoryResult, RpcError> {
-    let mut items = history_items(events, version)?;
     let keep = bounded_batches(read, branch, &items, true).await?;
     let kept = items.split_off(keep.start);
     let next_before = kept.first().map(|item| item.sequence);

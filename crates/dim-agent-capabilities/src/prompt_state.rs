@@ -20,8 +20,8 @@ pub struct PromptSnapshot {
     pub revision: Option<PromptReference>,
     pub system_revision: Option<PromptReference>,
     pub system: String,
-    turns: BTreeSet<String>,
-    tasks: BTreeSet<PromptScope>,
+    pub(crate) turns: BTreeSet<String>,
+    pub(crate) tasks: BTreeSet<PromptScope>,
 }
 
 impl PromptSnapshot {
@@ -85,64 +85,80 @@ impl PromptSnapshot {
         }
     }
 
+    pub(crate) fn changed(&mut self, timeline: &str, revision: &str, changes: &[PromptChange]) {
+        let revision = PromptReference {
+            timeline: timeline.to_owned(),
+            revision: revision.to_owned(),
+        };
+        let mut system_changed = false;
+        for change in changes {
+            let (source, scope) = match change {
+                PromptChange::Set { entry } => (&entry.source, &entry.scope),
+                PromptChange::Revoke { source, scope } => (source, scope),
+            };
+            let key = (source.clone(), scope.clone());
+            system_changed |= self
+                .entries
+                .get(&key)
+                .is_some_and(|entry| entry.delivery == PromptDelivery::System);
+            match change {
+                PromptChange::Set { entry } if self.active(scope) => {
+                    system_changed |= entry.delivery == PromptDelivery::System;
+                    self.entries.insert(key, entry.clone());
+                }
+                PromptChange::Set { .. } => {}
+                PromptChange::Revoke { .. } => {
+                    self.entries.remove(&key);
+                }
+            }
+        }
+        self.revision = Some(revision.clone());
+        if system_changed {
+            self.system_revision = Some(revision);
+            self.rebuild_system();
+        }
+    }
+
+    pub(crate) fn rebuild_system(&mut self) {
+        let mut entries: Vec<_> = self
+            .entries
+            .values()
+            .filter(|entry| entry.delivery == PromptDelivery::System)
+            .collect();
+        entries.sort_by(|a, b| {
+            a.order
+                .cmp(&b.order)
+                .then(a.source.cmp(&b.source))
+                .then(a.scope.cmp(&b.scope))
+        });
+        self.system = entries
+            .into_iter()
+            .map(|entry| entry.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+    }
+
     pub fn apply(&mut self, event: &AgentEvent) {
-        match &event.kind {
+        self.apply_kind(&event.kind);
+    }
+
+    pub(crate) fn apply_kind(&mut self, kind: &EventKind) {
+        match kind {
             EventKind::ContextConfigured(data) => {
                 self.configuration = Some((*data.settings).clone());
+                return;
             }
             EventKind::PromptChanged(data) => {
-                let revision = PromptReference {
-                    timeline: data.timeline.clone(),
-                    revision: data.revision.clone(),
-                };
-                let mut system_changed = false;
-                for change in &data.changes {
-                    let (source, scope) = match change {
-                        PromptChange::Set { entry } => (&entry.source, &entry.scope),
-                        PromptChange::Revoke { source, scope } => (source, scope),
-                    };
-                    let key = (source.clone(), scope.clone());
-                    system_changed |= self
-                        .entries
-                        .get(&key)
-                        .is_some_and(|entry| entry.delivery == PromptDelivery::System);
-                    match change {
-                        PromptChange::Set { entry } if self.active(scope) => {
-                            system_changed |= entry.delivery == PromptDelivery::System;
-                            self.entries.insert(key, entry.clone());
-                        }
-                        PromptChange::Set { .. } => {}
-                        PromptChange::Revoke { .. } => {
-                            self.entries.remove(&key);
-                        }
-                    }
-                }
-                self.revision = Some(revision.clone());
-                if system_changed {
-                    self.system_revision = Some(revision);
-                    let mut entries: Vec<_> = self
-                        .entries
-                        .values()
-                        .filter(|entry| entry.delivery == PromptDelivery::System)
-                        .collect();
-                    entries.sort_by(|a, b| {
-                        a.order
-                            .cmp(&b.order)
-                            .then(a.source.cmp(&b.source))
-                            .then(a.scope.cmp(&b.scope))
-                    });
-                    self.system = entries
-                        .into_iter()
-                        .map(|entry| entry.body.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                }
+                self.changed(&data.timeline, &data.revision, &data.changes);
+                return;
             }
             EventKind::TurnStart(data) => {
-                self.turns.insert(data.turn_id.clone());
+                self.set_turn_active(&data.turn_id, true);
+                return;
             }
             EventKind::TurnEnd(data) => {
-                self.turns.remove(&data.turn_id);
+                self.set_turn_active(&data.turn_id, false);
+                return;
             }
             EventKind::BranchStart(_) => self.turns.clear(),
             EventKind::ContextScope(data) => match data.status {
@@ -155,6 +171,19 @@ impl PromptSnapshot {
             },
             _ => return,
         }
+        self.retain_active();
+    }
+
+    pub(crate) fn set_turn_active(&mut self, turn_id: &str, active: bool) {
+        if active {
+            self.turns.insert(turn_id.to_owned());
+        } else {
+            self.turns.remove(turn_id);
+        }
+        self.retain_active();
+    }
+
+    fn retain_active(&mut self) {
         let turns = &self.turns;
         let tasks = &self.tasks;
         self.entries.retain(|(_, scope), _| match scope {

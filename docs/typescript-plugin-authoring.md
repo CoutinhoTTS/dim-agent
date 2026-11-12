@@ -24,7 +24,8 @@ provider and the methods it serves to other languages. This table says which to 
 | Need | Service and scope | Availability |
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented when the host supplies an authorized product root and provisions parent directories; use its native transactions and lifecycle scope. |
-| Start or drive another Session | `sessions`, process | Implemented by Agents; all eight methods are typed. |
+| Start or drive another Session | `sessions`, process | Implemented by Agents; all nine methods are typed. |
+| Publish events to subscribed branches | `eventHub`, process | Implemented by EventHub: `declare` and `publish`, served to the calling row. Inject it: the row loads only while EventHub runs and declares at `apply`. |
 | Read current branch permissions or host defaults | `sessionPermissions`, process | Generated from Agents: `permission({sessionId, branchId})` and `permissionDefaults({})`. |
 | Read or set a Session's title | `sessionMetadata`, process | Implemented by SessionStore: `read` and the revision-checked `setTitle` ([title metadata](design/appserver/session-title-metadata.md)). SessionTitle is the title's one writer; other plugins only read. |
 | Read/update business configuration | `settings`, process | Owner registration, read/write and Settings event delivery implemented; a row registers its sources with `register` in its `apply`. |
@@ -77,24 +78,23 @@ const counter = definePlugin({
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     const timeline = ctx.use<Services['timeline']>('timeline')
-    let count = 0
+    let count = 0n
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
     // One registration: the rebuild folds this branch's facts and returns the
     // cutoff of its read, then the events above it arrive as live.
     await dispatcher.consume('example-counter', ['input/message'], async () => {
-      let from: bigint | undefined
-      for (;;) {
-        const page = await timeline.query({
-          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
-          direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
-        })
-        page.events.forEach(fold)
-        const last = page.events.at(-1)
-        if (last === undefined || page.events.length < 256) return BigInt(page.through)
-        from = BigInt(last.sequence) + 1n
-      }
+      const page = await timeline.query({
+        scope: 'branch', include_publishing: true,
+        query: {
+          filter: { op: 'in', value: { kind: 'field', path: 'kind' }, values: ['input/message'] },
+          select: { kind: 'count' },
+        },
+      })
+      if (page.result.kind !== 'count') throw new Error('expected a count')
+      count = BigInt(page.result.count)
+      return BigInt(page.through)
     }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count }) })
   },
@@ -474,6 +474,55 @@ without native root indices or caller context arguments. Mutating methods decode
 package selectors but refuse them as `invalid_path` before I/O. Project enablement
 and definition semantics remain with Settings and the Workflow package.
 
+## Publishing events
+
+Declare `inject: ['eventHub']` and use `ctx.use<EventHub>('eventHub')`. EventHub serves
+this process service to every language of a row; it has `declare` and `publish` and
+nothing else, so a producer cannot create or remove another Session's subscriptions.
+The injected name gates the row: it starts once EventHub provides the service and
+unloads with it. It declares at `apply`, and again when a publish answers `unknown_source`.
+`declare` names the source, its guide (the text the model reads for its marker) and its
+types ([EventHub §2.1](design/plugins/EventHub.md#21-the-catalog-of-sources-and-types)).
+`publish` answers one receipt per target branch: `delivered` carries the `inputId` and
+`sequence`, `gone` a branch that takes no more input, and `failed` a `code` that says
+whether the write is in doubt — `transport` means the `sessions` call failed or its reply
+could not be read. A retry with the same `id` is safe: delivery is idempotent per branch,
+and a branch that already holds the input answers `repeated: true`. The
+[producer fixture](../runtime/fixtures/event-hub-producer.ts) is this row with the retry.
+
+```ts
+import { definePlugin } from '@arcships/rutis'
+import type { EventHub, EventHubDeclaration, EventHubErrorThrown } from 'dimcode/plugin'
+
+export default definePlugin({
+  name: 'ExampleProducer',
+  inject: ['eventHub'],
+  provides: {},
+  async apply(ctx) {
+    const hub = ctx.use<EventHub>('eventHub')
+    const declaration: EventHubDeclaration = {
+      source: 'example',
+      guide: 'An `example.ping` event says the producer is alive; no reply is needed.',
+      types: [{ type: 'example.ping', description: 'A liveness ping', mode: 'queue' }],
+    }
+    await hub.declare(declaration)
+    const request = { source: 'example', type: 'example.ping', id: 'ping-1', body: 'hello' }
+    try {
+      const reply = await hub.publish(request)
+      const failures = reply.deliveries.filter(delivery => delivery.status === 'failed')
+      if (failures.length > 0) console.warn('publish answered', failures)
+    } catch (error) {
+      const failure = error as EventHubErrorThrown
+      // unknown_source: this row holds no declaration, so declare and retry
+      // with the same id, which each branch accepts once.
+      if (failure.code !== 'unknown_source') throw failure
+      await hub.declare(declaration)
+      await hub.publish(request)
+    }
+  },
+})
+```
+
 ## Session tools and client methods
 
 A Session part registers its tools with the Session's `toolRegistry` and its client method
@@ -773,7 +822,7 @@ parts.
 
 | Service | Contract |
 | --- | --- |
-| `dispatcher` | `consume(name, keys, rebuild, handler)` registers an ordered consumer on the calling part's context. It subscribes first and holds the matching facts, calls `rebuild` once — the part reads the facts it folds through `timeline.query` including its publishing facts and returns the cutoff that read took — then delivers the held facts above the cutoff and each later matching fact, in sequence order, and none twice. `listen(name, keys, handler)` registers a live consumer only, for a part that does not rebuild. A handler's throw/rejection follows the native branch failure path. `committed/local/history` read committed history. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
+| `dispatcher` | `consume(name, keys, rebuild, handler)` registers an ordered consumer on the calling part's context. It subscribes first and holds the matching facts, calls `rebuild` once — the part reads the facts it folds through `timeline.query` including its publishing facts and returns the cutoff that read took — then delivers the held facts above the cutoff and each later matching fact, in sequence order, and none twice. `listen(name, keys, handler)` registers a live consumer only, for a part that does not rebuild. A handler's throw/rejection follows the native branch failure path. `committed()` returns the committed cutoff; read facts and properties through `timeline.query`. `notify/sequence/changed` expose native dispatch progress and wakeups, not an ordered event subscription. |
 | `treeCommands` | Session directory `list/info`, validated `input` by branch id and `create`. These are the Rust data methods, not the process `sessions` request envelopes. |
 | `branchLifecycle` | Background work waits for `activated()` and releases its resources when `closing()` resolves. Never wait for activation inside a Dispatcher callback. |
 | `timelineIdentity` | `get()` returns the original Session and branch ids. |
@@ -794,26 +843,23 @@ export const counter = definePlugin({
   async apply(ctx) {
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     const timeline = ctx.use<Services['timeline']>('timeline')
-    let count = 0
+    let count = 0n
     let through = 0n
     const fold = (event: BranchEvent) => {
       if (event.type === 'input' && event.name === 'message') count++
     }
     await dispatcher.consume('example-counter', ['input/message'], async () => {
-      let from: bigint | undefined
-      for (;;) {
-        const page = await timeline.query({
-          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
-          direction: 'ascending', kinds: ['input/message'], limit: 256n, offset: 0n,
-        })
-        page.events.forEach(fold)
-        const last = page.events.at(-1)
-        if (last === undefined || page.events.length < 256) {
-          through = BigInt(page.through)
-          return through
-        }
-        from = BigInt(last.sequence) + 1n
-      }
+      const page = await timeline.query({
+        scope: 'branch', include_publishing: true,
+        query: {
+          filter: { op: 'in', value: { kind: 'field', path: 'kind' }, values: ['input/message'] },
+          select: { kind: 'count' },
+        },
+      })
+      if (page.result.kind !== 'count') throw new Error('expected a count')
+      count = BigInt(page.result.count)
+      through = BigInt(page.through)
+      return BigInt(page.through)
     }, event => fold(event))
     ctx.provide('exampleCounter', { get: () => ({ count, through }) })
   },
@@ -823,11 +869,11 @@ export const counter = definePlugin({
 Its plugin registers it for `branch` and lists `"exampleCounter": "branch"` in its row's
 `instanceNames` ([One row per plugin](#one-row-per-plugin)).
 
-`consume` subscribes first and holds the events that match the keys, then calls the rebuild, which
-reads this branch's facts through its published head with the facts written and not yet published,
-a page at a time, and folds them itself. The reply's `through` is the cutoff of that read, and it is
-the last page's cutoff when the read pages; an earlier cutoff would re-read what lies between the
-two. The registration returns that cutoff as the rebuild's value, then releases the held facts
+`consume` subscribes first and holds the events that match the keys, then calls the rebuild.
+This example queries a count, including committed facts that have not been published. The reply's
+`through` is its cutoff. A rebuild that needs multiple pages passes that same cutoff and each
+returned continuation to the next query; it consumes each page before requesting another. The
+registration returns the fixed cutoff as the rebuild's value, then releases the held facts
 above it, and each later matching fact reaches the handler directly; none is folded twice. Live
 facts wait until the rebuild returns, so do what the rebuild leaves to do, such as ending the
 operations a previous generation left open, before returning. A rebuild repeats no external side
@@ -836,9 +882,7 @@ branch part and is rebuilt on each generation.
 
 The kind list of the read is the kinds the rebuild folds, which are not always the keys the part
 consumes: a rebuild may fold the terminals of the operations its part issues. A part that reads
-nothing may use `listen` instead, which delivers live facts only; a read of `local` or `history`
-inside a rebuild works too, and the [real Node part](../runtime/fixtures/branch-part.ts) reads that
-way.
+nothing may use `listen` instead, which delivers live facts only. The [real Node part](../runtime/fixtures/branch-part.ts) also rebuilds through `timeline.query`.
 
 Callbacks can run on opening facts before publication. Register long work in the part's owned
 tasks and return; do not wait for dispatch, activation or a child creation whose progress depends
@@ -884,7 +928,7 @@ appending their events. The branch's Timeline is closed by the branch itself, so
 `close`.
 
 Extension events behave like any other branch event. `dispatcher.consume` with a key such as
-`myplugin/*` delivers them in order, `local` and `history` return them, they are persisted and
+`myplugin/*` delivers them in order, `timeline.query` returns them, they are persisted and
 restored with the branch, and a restored generation rebuilds from them. They never reach the
 model's context; write an adopted input or return a tool result when the model needs content
 ([ADR 001](adr/001-harness-foundation.md#events-and-ownership-issue-2)). Existing v1-v3 client
@@ -902,7 +946,7 @@ export const checkpoints = definePlugin({
     const dispatcher = ctx.use<Services['dispatcher']>('dispatcher')
     const timeline = ctx.use<Services['timeline']>('timeline')
     // Rebuild from your own events in history; act only on live events.
-    let steps = 0
+    let steps = 0n
     const fold = (event: BranchEvent) => {
       if (event.type === 'myplugin') steps++
     }
@@ -910,22 +954,21 @@ export const checkpoints = definePlugin({
       if (event.type === 'myplugin') {
         fold(event)
       } else {
-        await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1 } })
+        await timeline.append({ type: 'myplugin', name: 'checkpoint', data: { step: steps + 1n } })
       }
     }
     // Rebuild from your own events in history; act only on live events.
     await dispatcher.consume('example-checkpoints', ['myplugin/*', 'turn/end'], async () => {
-      let from: bigint | undefined
-      for (;;) {
-        const page = await timeline.query({
-          scope: 'branch', include_publishing: true, ...(from === undefined ? {} : { from_sequence: from }),
-          direction: 'ascending', kinds: ['myplugin/*'], limit: 256n, offset: 0n,
-        })
-        page.events.forEach(fold)
-        const last = page.events.at(-1)
-        if (last === undefined || page.events.length < 256) return BigInt(page.through)
-        from = BigInt(last.sequence) + 1n
-      }
+      const page = await timeline.query({
+        scope: 'branch', include_publishing: true,
+        query: {
+          filter: { op: 'prefix', value: { kind: 'field', path: 'kind' }, prefix: 'myplugin/' },
+          select: { kind: 'count' },
+        },
+      })
+      if (page.result.kind !== 'count') throw new Error('expected a count')
+      steps = BigInt(page.result.count)
+      return BigInt(page.through)
     }, event => release(event))
   },
 })
@@ -962,6 +1005,11 @@ pass the plugin module, or its object or function, to `registerDefinition`, and 
 
 
 ## Packaging and trust
+
+The [plugin distribution proposal](design/plugin-distribution.md) defines the requirements for
+catalog discovery, repository subdirectory installation, authoring and debugging skills, and
+their human guides and tool reference. Its new fields and commands are proposals; use the
+supported package contract below until the owning interfaces are available.
 
 Keep the `dimcode/plugin` import type-only. Use a plugin's own build dependencies
 to resolve it and bundle the rutis SDK/business dependencies, or include them in

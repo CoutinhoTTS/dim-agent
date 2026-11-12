@@ -472,6 +472,8 @@ struct Env {
     sources: Arc<Sources>,
     model: Arc<Model>,
     dir: PathBuf,
+    /// The store the host and the tests share, so a test can seed a Session.
+    store: Arc<MemoryTimelineStore>,
     /// The `HooksSession` instance the test can unload, when the harness
     /// mounts it through an owner (`Env::with_mounted_hooks`).
     hooks: Arc<Mutex<Vec<FiberView>>>,
@@ -483,23 +485,37 @@ struct Env {
 }
 impl Env {
     async fn new() -> Self {
-        Self::build(Arc::new(Model::default()), None, false, Extra::None).await
+        Self::build(
+            Arc::new(Model::default()),
+            None,
+            false,
+            Extra::None,
+            Duration::from_secs(10),
+        )
+        .await
     }
 
     async fn with(model: Arc<Model>, strategy: Option<Arc<Small>>) -> Self {
-        Self::build(model, strategy, false, Extra::None).await
+        Self::build(model, strategy, false, Extra::None, Duration::from_secs(10)).await
     }
 
     /// The same host, with `HooksSession` mounted as a child of a test owner
     /// so a test can unload it mid-call.
     async fn with_mounted_hooks(model: Arc<Model>, strategy: Option<Arc<Small>>) -> Self {
-        Self::build(model, strategy, true, Extra::None).await
+        Self::build(model, strategy, true, Extra::None, Duration::from_secs(10)).await
     }
 
     /// A Session whose registry declares `extra` and whose configuration
     /// mounts `mounted`.
     async fn with_tools(extra: Extra, mounted: &[&str]) -> Self {
-        let mut env = Self::build(Arc::new(Model::default()), None, false, extra).await;
+        let mut env = Self::build(
+            Arc::new(Model::default()),
+            None,
+            false,
+            extra,
+            Duration::from_secs(10),
+        )
+        .await;
         env.mounted = mounted.iter().map(|name| (*name).to_owned()).collect();
         env
     }
@@ -509,6 +525,7 @@ impl Env {
         strategy: Option<Arc<Small>>,
         mounted_hooks: bool,
         extra: Extra,
+        startup_timeout: Duration,
     ) -> Self {
         let context_model: Option<Arc<dyn ResolveContextModel>> = match &strategy {
             Some(strategy) => {
@@ -541,7 +558,9 @@ impl Env {
         *sources.home.lock().unwrap() = Some(dir.join("home"));
         let rules = Arc::new(TestRules::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
-        builder.timeline_store(Arc::new(MemoryTimelineStore::default()));
+        builder.startup_timeout(startup_timeout);
+        let store = Arc::new(MemoryTimelineStore::default());
+        builder.timeline_store(store.clone());
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))
@@ -562,6 +581,7 @@ impl Env {
             &mut builder,
             ModelProviderPlugin::new,
             WorkspaceToolsConfig {
+                boundary: None,
                 output_root: dir.join("outputs"),
             },
             dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
@@ -646,10 +666,24 @@ impl Env {
             sources,
             model,
             dir,
+            store,
             hooks,
             branch_hooks,
             mounted: vec!["read".into(), "exec".into()],
             probe,
+        }
+    }
+
+    /// The configuration a Session of this environment is created with.
+    fn session_config(&self) -> SessionConfig {
+        SessionConfig {
+            cwd: self.dir.join("work").to_string_lossy().into_owned(),
+            tools: Some(self.mounted.clone()),
+            permission_policy: PermissionPolicy {
+                preset: PermissionPreset::FullAccess,
+                ..Default::default()
+            },
+            ..Default::default()
         }
     }
 
@@ -685,13 +719,11 @@ impl Env {
     async fn session_with(&self, preset: PermissionPreset) -> Session {
         self.agent
             .create_session(SessionConfig {
-                cwd: self.dir.join("work").to_string_lossy().into_owned(),
-                tools: Some(self.mounted.clone()),
                 permission_policy: PermissionPolicy {
                     preset,
                     ..Default::default()
                 },
-                ..Default::default()
+                ..self.session_config()
             })
             .await
             .unwrap()
@@ -1371,6 +1403,21 @@ async fn stop_follow_ups_are_bounded_at_three_and_flag_the_driven_turns() {
             .collect::<Vec<_>>()
     );
     assert_eq!(payloads.len(), 3, "{payloads:?}");
+    let tags: Vec<_> = events(&session)
+        .await
+        .into_iter()
+        .filter_map(|event| event.tags.clone())
+        .flatten()
+        .filter(|tag| tag.starts_with("hooks:stop-follow-up:"))
+        .collect();
+    assert_eq!(
+        tags,
+        [
+            "hooks:stop-follow-up:1",
+            "hooks:stop-follow-up:2",
+            "hooks:stop-follow-up:3"
+        ]
+    );
     assert_eq!(
         payloads
             .iter()
@@ -3553,6 +3600,15 @@ async fn matchers_keep_selecting_tools_with_an_adopted_tool_part() {
     turn(&session, "tool:lookup {\"query\":\"x\"}").await;
     wait_file(&mcp, "the MCP alias did not select lookup").await;
     assert_eq!(last_result(&session).await.is_error, None);
+    let id = session.id().to_owned();
+    session.close().await.unwrap();
+    let restored = env.agent.restore_session(id).await.unwrap();
+    std::fs::remove_file(&bash).unwrap();
+    std::fs::remove_file(&mcp).unwrap();
+    turn(&restored, "tool:exec {\"command\":\"true\"}").await;
+    wait_file(&bash, "restored Bash alias did not select exec").await;
+    turn(&restored, "tool:lookup {\"query\":\"restored\"}").await;
+    wait_file(&mcp, "restored MCP alias did not select lookup").await;
     env.close().await;
 }
 
@@ -3956,6 +4012,285 @@ async fn a_prompt_submit_hook_precedes_a_referenced_skill() {
             _ => true,
         }),
         "a reference in the recorded hook context loads nothing: {user:?}"
+    );
+    env.close().await;
+}
+
+async fn stored_session(env: &Env, id: &str, drafts: Vec<EventDraft>) {
+    env.store
+        .create_session(id, &env.session_config())
+        .await
+        .unwrap();
+    let timeline = Timeline::new(
+        Ctx::root().unwrap(),
+        TimelineKey {
+            session_id: id.into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        env.store.clone(),
+    );
+    timeline
+        .append_batch_registered(drafts, |_| Ok(()))
+        .unwrap();
+    dim_agent_runtime::core::close_timeline(&timeline)
+        .await
+        .unwrap();
+}
+
+fn queued_follow_up(round: Option<u32>) -> EventDraft {
+    let mut draft = EventDraft::new(EventKind::InputMessage(InputMessageData {
+        blocks: vec![dim_agent_capabilities::context_block::raw(
+            "<dim-hooks kind=\"follow-up\">continue</dim-hooks>".into(),
+            None,
+        )],
+        mode: Some(InputMode::Queue),
+        ..InputMessageData::default()
+    }));
+    draft.tags = round.map(|round| vec![format!("hooks:stop-follow-up:{round}")]);
+    draft
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_follow_up_keeps_its_round_after_session_restore() {
+    let env = Env::new().await;
+    let payloads = env.path("restored-stop-payloads");
+    env.sources.set(document(serde_json::json!({
+        "Stop": [command(serde_json::json!({"type":"command", "command":format!("{{ cat; echo; }} >> {}; echo again >&2; exit 2",payloads.display())}))]
+    })));
+    stored_session(&env, "follow-up", vec![queued_follow_up(Some(2))]).await;
+    let session = env.agent.restore_session("follow-up".into()).await.unwrap();
+    wait_blocks(&session, "follow-up", 2).await;
+    wait_event(&session, |kind| match kind {
+        EventKind::InputMessage(data)
+            if data.blocks.iter().any(|b| block_text(b).contains("again")) =>
+        {
+            Some(())
+        }
+        _ => None,
+    })
+    .await;
+    for _ in 0..500 {
+        if events(&session)
+            .await
+            .iter()
+            .filter(|e| matches!(&e.kind, EventKind::TurnEnd(_)))
+            .count()
+            >= 2
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    session.idle("main").await.unwrap();
+    let follow_ups: Vec<_> = events(&session).await.into_iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.blocks.iter().any(|block| block_text(block).starts_with("<dim-hooks kind=\"follow-up\">")))).collect();
+    assert_eq!(
+        follow_ups.len(),
+        2,
+        "restore must not reset the continuation budget"
+    );
+    assert_eq!(
+        follow_ups[0].tags.as_deref(),
+        Some(["hooks:stop-follow-up:2".to_owned()].as_slice())
+    );
+    assert_eq!(
+        follow_ups[1].tags.as_deref(),
+        Some(["hooks:stop-follow-up:3".to_owned()].as_slice())
+    );
+    let seen: Vec<serde_json::Value> = std::fs::read_to_string(payloads)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0]["stop_hook_active"], true);
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_legacy_queued_follow_up_finishes_without_starting_another_hook() {
+    let env = Env::new().await;
+    let ran = env.path("legacy-stop-ran");
+    env.sources.set(document(serde_json::json!({
+        "Stop": [command(serde_json::json!({"type":"command", "command":format!("printf ran > {}; echo again >&2; exit 2",ran.display())}))]
+    })));
+    stored_session(&env, "legacy-follow-up", vec![queued_follow_up(None)]).await;
+    let session = env
+        .agent
+        .restore_session("legacy-follow-up".into())
+        .await
+        .unwrap();
+    wait_event(&session, |kind| {
+        matches!(kind, EventKind::TurnEnd(_)).then_some(())
+    })
+    .await;
+    session.idle("main").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        env.model.requests.lock().unwrap().len(),
+        1,
+        "the queued work must execute once"
+    );
+    assert!(
+        !ran.exists(),
+        "legacy recovery must not infer a fresh continuation budget"
+    );
+    assert_eq!(hook_blocks(&session, "follow-up").await.len(), 1);
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recovery_settlements_start_no_hook_but_new_tool_failures_do() {
+    let env = Env::new().await;
+    let seen = env.path("failure-payloads");
+    env.sources.set(document(serde_json::json!({
+        "PostToolUseFailure": [command(serde_json::json!({"type":"command", "command":format!("{{ cat; echo; }} >> {}",seen.display())}))]
+    })));
+    let original = env.session().await;
+    let started = env.path("interrupted-tool-started");
+    let release = env.path("interrupted-tool-release");
+    original.submit(format!("tool:exec {}", serde_json::json!({"command":format!("printf started > {}; while [ ! -f {} ]; do sleep 0.02; done",started.display(),release.display())})),InputMode::Queue,"main").await.unwrap();
+    wait_file(&started, "the original tool did not start").await;
+    let history = events(&original).await;
+    let batch = history
+        .iter()
+        .rev()
+        .find(|event| matches!(&event.kind, EventKind::ToolCall(_)))
+        .unwrap()
+        .clone();
+    let EventKind::ToolCall(call) = &batch.kind else {
+        unreachable!()
+    };
+    let old_call = call.calls[0].id.clone();
+    let prefix = history
+        .into_iter()
+        .take_while(|event| event.sequence <= batch.sequence)
+        .map(|event| EventDraft {
+            id: Some(event.id.clone()),
+            tags: event.tags.clone(),
+            parent_call_id: event.parent_call_id.clone(),
+            kind: event.kind.clone(),
+        })
+        .collect();
+    original.close().await.unwrap();
+    let before = std::fs::read_to_string(&seen)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    stored_session(&env, "unfinished-tool", prefix).await;
+    let session = env
+        .agent
+        .restore_session("unfinished-tool".into())
+        .await
+        .unwrap();
+    wait_event(&session, |kind| matches!(kind, EventKind::ToolResult(data) if data.call_event_id.as_deref() == Some(batch.id.as_str())).then_some(())).await;
+    session.idle("main").await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&seen)
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        before,
+        "recovery settlement must not run user commands"
+    );
+    turn(&session, "tool:exec {\"command\":\"exit 1\"}").await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while std::fs::read_to_string(&seen)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            <= before
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a real tool failure must still run its hook");
+    let payloads: Vec<serde_json::Value> = std::fs::read_to_string(seen)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(payloads.len(), before + 1);
+    assert_ne!(payloads.last().unwrap()["tool_use_id"], old_call);
+    assert_eq!(payloads.last().unwrap()["tool_response"]["is_error"], true);
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_reload_resolves_the_tool_that_started_before_hooks_mounted() {
+    let env = Env::with_mounted_hooks(Arc::new(Model::default()), None).await;
+    let (started, release, seen) = (
+        env.path("tool-started"),
+        env.path("tool-release"),
+        env.path("reloaded-post"),
+    );
+    env.sources.set(document(serde_json::json!({
+        "PostToolUse": [command(serde_json::json!({"type":"command", "command":format!("cat > {}",seen.display())}))]
+    })));
+    let session = env.session().await;
+    let shell = format!(
+        "printf started > {}; while [ ! -f {} ]; do sleep 0.02; done",
+        started.display(),
+        release.display()
+    );
+    session
+        .submit(
+            format!("tool:exec {}", serde_json::json!({"command":shell})),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&started, "the tool did not start").await;
+    let hooks = env.branch_hooks.lock().unwrap().last().cloned().unwrap();
+    hooks.restart().await.unwrap();
+    std::fs::write(release, "").unwrap();
+    wait_file(&seen, "the reloaded Hooks must observe the new result").await;
+    session.idle("main").await.unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(seen).unwrap()).unwrap();
+    assert_eq!(payload["tool_name"], "exec");
+    assert_eq!(payload["tool_input"]["command"], shell);
+    env.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_consumed_operator_input_discards_a_running_hooks_output() {
+    let env = Env::new().await;
+    let (entered, release, finished) = (
+        env.path("old-hook-entered"),
+        env.path("old-hook-release"),
+        env.path("old-hook-finished"),
+    );
+    env.sources.set(document(serde_json::json!({
+        "PostToolUse": [command(serde_json::json!({"type":"command", "command":format!("printf started > {}; while [ ! -f {} ]; do sleep 0.02; done; printf done > {}; printf 'stale hook content'",entered.display(),release.display(),finished.display())}))]
+    })));
+    let session = env.session().await;
+    session
+        .submit(
+            "tool:exec {\"command\":\"true\"}".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    wait_file(&entered, "the hook did not start").await;
+    session.idle("main").await.unwrap();
+    let newer = session
+        .submit("new operator input".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    wait_event(&session, |kind| {
+        matches!(kind, EventKind::InputConsumed(data) if data.input_id == newer.id).then_some(())
+    })
+    .await;
+    std::fs::write(release, "").unwrap();
+    wait_file(&finished, "the hook did not finish").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        hook_blocks(&session, "post-tool").await.is_empty(),
+        "the consumed operator input must invalidate old output"
     );
     env.close().await;
 }

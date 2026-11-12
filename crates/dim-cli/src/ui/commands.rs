@@ -197,6 +197,7 @@ pub const COMMANDS: &[Command] = &[
         Needs::Session,
     ),
     slash("export", "export this conversation", &[], Needs::Session),
+    slash("earlier", "load earlier conversation", &[], Needs::Session),
     slash(
         "goal",
         "follow or change the shown line's goal",
@@ -300,6 +301,10 @@ pub const COMMANDS: &[Command] = &[
         Needs::Nothing,
     ),
     slash("keys", "show the key bindings", &[], Needs::Nothing),
+    Command {
+        requires_exact_name: true,
+        ..slash("report", "report the current session", &[], Needs::Nothing)
+    },
     Command {
         key: Some("Ctrl+C Ctrl+C"),
         requires_exact_name: true,

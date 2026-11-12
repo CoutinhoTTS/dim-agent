@@ -8,11 +8,12 @@ use crate::{
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryOrderBy, TimelineQueryScope,
+    NoConfig, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec,
+    QueryValue, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryScope,
+    TimelineReadScope, TimelineReadSegment,
 };
 pub use dim_agent_types::AgentProfile;
-use dim_agent_types::{ContentBlock, EventKind};
+use dim_agent_types::{EventKind, TimelinePosition};
 use rutis::host::{
     BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
@@ -107,6 +108,22 @@ impl Event for UnloadedSessionDeleted {
     const NAME: &'static str = "agent/unloaded-session-deleted";
     type Value = ();
 }
+/// The end of a Session whose stored rows a successful delete removed,
+/// whether it was loaded or not. Emitted on the process root after
+/// SessionStore removed the rows, so a listener can tell a delete from a
+/// close that keeps the rows
+/// ([EventHub §9.1](../../../docs/design/plugins/EventHub.md),
+/// [sessions service](../../../docs/design/appserver/sessions-service.md)).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDeleted {
+    pub agent_id: String,
+    pub session_id: String,
+}
+impl Event for SessionDeleted {
+    const NAME: &'static str = "agent/session-deleted";
+    type Value = ();
+}
 
 /// Agent-scoped operations fail before any Session is involved.
 #[derive(Debug, thiserror::Error)]
@@ -174,6 +191,23 @@ pub(crate) enum DeleteOutcome {
     Removed(bool),
     /// Nothing was removed; this says what uses the Session.
     InUse(String),
+}
+
+/// What a delete leaves for its caller to announce once the admission gate
+/// is released
+/// ([EventHub §9.1](../../../docs/design/plugins/EventHub.md#91-agents-announces-every-delete-that-removed-the-stored-rows)): a
+/// listener may take the EventHub Session lock, which a `subscribe` holds
+/// across `sessions.input`, and `sessions.input` waits for that gate in
+/// [`AgentIndex::acquire`].
+struct Removed {
+    deleted: bool,
+    notices: Vec<DeletedNotice>,
+}
+
+/// One notice a delete emits after its gate is released.
+enum DeletedNotice {
+    Unloaded(UnloadedSessionDeleted),
+    Session(SessionDeleted),
 }
 
 struct Entry {
@@ -357,12 +391,24 @@ async fn session_history_page(
         session.batch_end(branch, after).await?;
     }
     session.batch_end(branch, through).await?;
-    let mut events = session
-        .query(branch, history_page_query(after, limit))
-        .await?
-        .events;
-    events.retain(|event| event.sequence <= through);
-    while let Some(sequence) = events.last().map(|event| event.sequence) {
+    if after >= through || limit == 0 {
+        return Ok(vec![]);
+    }
+    let mut from = after + 1;
+    let mut wanted = limit;
+    let mut events = Vec::new();
+    loop {
+        let reply = session
+            .query(branch, history_page_query(branch, from, through, wanted))
+            .await?;
+        let QueryOutput::Events { events: rows } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        if rows.is_empty() {
+            break;
+        }
+        events.extend(rows.into_iter().map(|row| row.event));
+        let sequence = events.last().unwrap().sequence;
         if sequence >= through {
             break;
         }
@@ -371,14 +417,8 @@ async fn session_history_page(
             Err(AgentError::InvalidInput(_)) => {}
             Err(error) => return Err(error),
         }
-        let next = session
-            .query(branch, history_page_query(sequence, 1))
-            .await?
-            .events;
-        let Some(event) = next.into_iter().find(|event| event.sequence <= through) else {
-            break;
-        };
-        events.push(event);
+        from = sequence + 1;
+        wanted = 1;
     }
     Ok(events)
 }
@@ -400,21 +440,26 @@ async fn ended_page(
 }
 
 /// The facts after `after` a page asks for, up to `limit`.
-fn history_page_query(after: u64, limit: usize) -> dim_agent_runtime::TimelineQuery {
-    dim_agent_runtime::TimelineQuery {
-        scope: dim_agent_runtime::TimelineQueryScope::Branch,
+fn history_page_query(branch: &str, from: u64, through: u64, limit: usize) -> TimelineQuery {
+    TimelineQuery {
+        scope: TimelineQueryScope::Branch,
         include_publishing: false,
-        from_event: None,
-        from_sequence: Some(after.saturating_add(1)),
-        order_by: dim_agent_runtime::TimelineQueryOrderBy::Sequence,
-        direction: dim_agent_runtime::TimelineQueryDirection::Ascending,
-        kinds: Vec::new(),
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: NonZeroU64::new(u64::try_from(limit).unwrap_or(u64::MAX).max(1))
-            .expect("a page keeps one fact"),
-        offset: 0,
+        from: Some(TimelinePosition {
+            branch_id: branch.into(),
+            sequence: from,
+        }),
+        through: Some(through),
+        query: QuerySpec {
+            filter: None,
+            select: QuerySelect::Events,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: NonZeroU64::new(limit as u64).expect("a page keeps one fact"),
+            after: None,
+        }),
     }
 }
 
@@ -429,24 +474,19 @@ async fn chain_through(
     at: u64,
     rest: &mut RestPoint,
 ) -> dim_agent_runtime::Result<()> {
-    let mut query = history_page_query(0, PREFIX_PAGE as usize);
-    query.scope = dim_agent_runtime::TimelineQueryScope::Chain;
+    let mut query = history_page_query("main", 1, at, PREFIX_PAGE as usize);
+    query.scope = TimelineQueryScope::Chain;
+    query.from = None;
     loop {
         let reply = session.query("main", query.clone()).await?;
-        let short = (reply.events.len() as u64) < PREFIX_PAGE;
-        let last = reply.positions.last().map(|position| position.sequence);
-        let cut = reply.events.partition_point(|event| event.sequence <= at);
-        rest.page(&reply.events[..cut]);
-        if reply
-            .events
-            .last()
-            .is_some_and(|event| event.sequence >= at)
-        {
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        let events: Vec<_> = events.into_iter().map(|row| row.event).collect();
+        rest.page(&events);
+        query.page.as_mut().unwrap().after = reply.next;
+        if query.page.as_ref().unwrap().after.is_none() {
             break;
-        }
-        match (short, last) {
-            (false, Some(last)) => query.from_sequence = Some(last + 1),
-            _ => break,
         }
     }
     Ok(())
@@ -851,7 +891,13 @@ impl AgentIndex {
                             AgentError::fault("project authorization", error.to_string())
                         })?;
                 }
-                let session = host.agent.restore_session(id.into()).await?;
+                let version = self
+                    .version_of(id)
+                    .unwrap_or(crate::protocol::PROTOCOL_VERSION);
+                let session = host
+                    .agent
+                    .restore_session_for_version(id.into(), version)
+                    .await?;
                 let ctx = self.ctx.get().expect("AgentsPlugin apply sets its context");
                 ctx.parallel(SessionRestored {
                     agent_id: host.agent_id.clone(),
@@ -1031,71 +1077,96 @@ impl AgentIndex {
         through: u64,
         created_at: u64,
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
-        let inputs = TimelineQuery {
+        let query = TimelineQuery {
             scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
             include_publishing: false,
-            from_event: None,
-            from_sequence: None,
-            order_by: TimelineQueryOrderBy::Sequence,
-            direction: TimelineQueryDirection::Ascending,
-            kinds: vec!["input/message".into()],
-            flags: Vec::new(),
-            event_id: None,
-            predicate: None,
-            limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT)
-                .expect("a summary scan keeps at least one input"),
-            offset: 0,
+            query: QuerySpec {
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec!["input/message".into()],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec![
+                        "data.user.content[].type".into(),
+                        "data.user.content[].text".into(),
+                    ],
+                },
+                group_by: vec![],
+                pick: None,
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT).unwrap(),
+                after: None,
+            }),
         };
         let loaded = match self.session(id) {
-            Some((_, session)) => match async {
-                let events = session.query("main", inputs.clone()).await?.events;
-                Ok::<_, AgentError>(events)
-            }
-            .await
-            {
-                Ok(events) => Some(events),
-                // Released under the read: the store holds every event it
-                // published (idle unload D8).
+            Some((_, session)) => match session.query("main", query.clone()).await {
+                Ok(reply) => Some(reply.result),
                 Err(_) if session.is_unloading() => None,
                 Err(error) => return Err(error),
             },
             None => None,
         };
-        let events = if let Some(events) = loaded {
-            events
-        } else {
-            let store = self
-                .session_store
-                .as_ref()
-                .ok_or_else(|| AgentError::Closed(id.into()))?;
-            let key = TimelineKey {
-                session_id: id.into(),
-                branch_id: "main".into(),
-            };
-            store
-                .timeline_store()
-                .query(&key, &inputs, 1, through)
-                .await?
-                .events
-        };
-        let preview = events
-            .iter()
-            .find_map(|event| {
-                let EventKind::InputMessage(data) = &event.kind else {
-                    return None;
+        let result = match loaded {
+            Some(result) => result,
+            None => {
+                let store = self
+                    .session_store
+                    .as_ref()
+                    .ok_or_else(|| AgentError::Closed(id.into()))?;
+                let scope = TimelineReadScope {
+                    key: TimelineKey {
+                        session_id: id.into(),
+                        branch_id: "main".into(),
+                    },
+                    through,
+                    segments: vec![TimelineReadSegment {
+                        branch_id: "main".into(),
+                        from: 1,
+                        through,
+                        stored_through: through,
+                        tail: vec![],
+                    }],
                 };
-                data.user.as_ref()
+                store
+                    .timeline_store()
+                    .query(&scope, &query.query, query.page.as_ref())
+                    .await?
+                    .result
+            }
+        };
+        let QueryOutput::Rows { rows } = result else {
+            unreachable!("field selection returns rows")
+        };
+        let preview = rows
+            .iter()
+            .find_map(|row| match row.values.as_slice() {
+                [QueryValue::Missing, QueryValue::Missing] => None,
+                [
+                    QueryValue::Elements { values: kinds },
+                    QueryValue::Elements { values: texts },
+                ] => Some((kinds, texts)),
+                _ => unreachable!("user content projections retain array positions"),
             })
-            .and_then(|user| {
-                let text = user
-                    .content
+            .and_then(|(kinds, texts)| {
+                let text = kinds
                     .iter()
-                    .filter_map(|block| {
-                        if let ContentBlock::Text { text } = block {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
+                    .zip(texts)
+                    .filter_map(|(kind, text)| match (kind, text) {
+                        (
+                            QueryValue::Value {
+                                value: serde_json::Value::String(kind),
+                            },
+                            QueryValue::Value {
+                                value: serde_json::Value::String(text),
+                            },
+                        ) if kind == "text" => Some(text.as_str()),
+                        _ => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -1105,86 +1176,112 @@ impl AgentIndex {
         let updated_at = self
             .latest_activity(id, through)
             .await?
-            .map_or(created_at, |event| event.create_at);
+            .unwrap_or(created_at);
         Ok((preview, updated_at))
     }
 
-    /// The newest Session-activity event on `main` at or before `through`,
-    /// or `None` when the branch holds none (issue #1099): the value the
-    /// summary's `updatedAt` derives from, selected by the same predicate
-    /// and kinds as the storage catalog, so the two listings cannot
-    /// disagree. A Session in memory answers from its published facts; an
-    /// unloading or absent one is read from the store.
-    ///
-    /// The query asks for the activity kinds descending, and rows whose kind
-    /// is activity but whose message is host-injected are skipped, so the
-    /// read walks only as far as the candidate run that trails the answer.
+    /// The newest Session activity timestamp on main through the fixed cutoff.
+    /// Idle unload falls back to persisted facts, which include all published facts.
     async fn latest_activity(
         &self,
         id: &str,
         through: u64,
-    ) -> dim_agent_runtime::Result<Option<Arc<dim_agent_types::AgentEvent>>> {
-        let mut to = through;
-        loop {
-            if to == 0 {
-                return Ok(None);
-            }
-            let query = |from_sequence: Option<u64>| TimelineQuery {
-                scope: TimelineQueryScope::Branch,
-                include_publishing: false,
-                from_event: None,
-                from_sequence,
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: crate::storage::ACTIVITY_KINDS
-                    .iter()
-                    .map(|kind| (*kind).into())
-                    .collect(),
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: NonZeroU64::new(Self::SUMMARY_SCAN_LIMIT)
-                    .expect("an activity page keeps at least one event"),
-                offset: 0,
-            };
-            let events = match self.session(id) {
-                Some((_, session)) => match session.query("main", query(Some(to))).await {
-                    Ok(page) => Some(page.events),
-                    // Released under the read: the store holds every event
-                    // it published (idle unload D8).
-                    Err(_) if session.is_unloading() => None,
-                    Err(error) => return Err(error),
+    ) -> dim_agent_runtime::Result<Option<u64>> {
+        let query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: false,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: crate::storage::ACTIVITY_KINDS
+                                .iter()
+                                .map(|kind| (*kind).into())
+                                .collect(),
+                        },
+                        QueryFilter::Or {
+                            conditions: vec![
+                                QueryFilter::Not {
+                                    condition: Box::new(QueryFilter::In {
+                                        value: QueryOperand::Field {
+                                            path: "kind".into(),
+                                        },
+                                        values: vec!["input/message".into()],
+                                    }),
+                                },
+                                QueryFilter::Present {
+                                    value: QueryOperand::Field {
+                                        path: "data.user".into(),
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["create_at".into()],
                 },
-                None => None,
-            };
-            let events = if let Some(events) = events {
-                events
-            } else {
+                group_by: vec![],
+                pick: Some(QueryPick::Last),
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::MIN,
+                after: None,
+            }),
+        };
+        let loaded = match self.session(id) {
+            Some((_, session)) => match session.query("main", query.clone()).await {
+                Ok(reply) => Some(reply.result),
+                Err(_) if session.is_unloading() => None,
+                Err(error) => return Err(error),
+            },
+            None => None,
+        };
+        let result = match loaded {
+            Some(result) => result,
+            None => {
                 let store = self
                     .session_store
                     .as_ref()
                     .ok_or_else(|| AgentError::Closed(id.into()))?;
-                let key = TimelineKey {
-                    session_id: id.into(),
-                    branch_id: "main".into(),
+                let scope = TimelineReadScope {
+                    key: TimelineKey {
+                        session_id: id.into(),
+                        branch_id: "main".into(),
+                    },
+                    through,
+                    segments: vec![TimelineReadSegment {
+                        branch_id: "main".into(),
+                        from: 1,
+                        through,
+                        stored_through: through,
+                        tail: vec![],
+                    }],
                 };
                 store
                     .timeline_store()
-                    .query(&key, &query(None), 1, to)
+                    .query(&scope, &query.query, query.page.as_ref())
                     .await?
-                    .events
-            };
-            if let Some(event) = events
-                .iter()
-                .find(|event| crate::storage::activity(&event.kind))
-            {
-                return Ok(Some(event.clone()));
+                    .result
             }
-            let Some(last) = events.last() else {
-                return Ok(None);
+        };
+        let QueryOutput::Rows { rows } = result else {
+            unreachable!("field selection returns rows")
+        };
+        Ok(rows.first().map(|row| {
+            let [QueryValue::Value { value: timestamp }] = row.values.as_slice() else {
+                unreachable!("event has a creation timestamp")
             };
-            to = last.sequence.saturating_sub(1);
-        }
+            timestamp
+                .as_u64()
+                .expect("event creation timestamp is unsigned")
+        }))
     }
 
     pub(crate) async fn prepare_session(
@@ -1251,6 +1348,8 @@ impl AgentIndex {
         leader: Option<&str>,
         origin: SessionOrigin,
     ) -> dim_agent_runtime::Result<Session> {
+        let mut config = config;
+        config.exclude_codemode_below(version);
         match self
             .prepare_session(host, &config, version, leader, origin)
             .await
@@ -1313,10 +1412,12 @@ impl AgentIndex {
         Self::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
-        let deleted = self.remove_locked(id, &slot).await?;
+        let removed = self.remove_locked(id, &slot).await?;
+        let deleted = removed.deleted;
         drop(gate);
         drop(slot);
         self.directory.inner.lock().expect("agent index").sweep();
+        self.announce(removed).await;
         Ok(deleted)
     }
 
@@ -1333,13 +1434,21 @@ impl AgentIndex {
         Self::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
-        let outcome = match self.in_use_reason(id).await? {
-            Some(reason) => DeleteOutcome::InUse(reason),
-            None => DeleteOutcome::Removed(self.remove_locked(id, &slot).await?),
+        // One match yields both the outcome and what there is to announce, so
+        // neither an `unreachable!()` arm nor a second decision is needed.
+        let (outcome, removed) = match self.in_use_reason(id).await? {
+            Some(reason) => (DeleteOutcome::InUse(reason), None),
+            None => {
+                let removed = self.remove_locked(id, &slot).await?;
+                (DeleteOutcome::Removed(removed.deleted), Some(removed))
+            }
         };
         drop(gate);
         drop(slot);
         self.directory.inner.lock().expect("agent index").sweep();
+        if let Some(removed) = removed {
+            self.announce(removed).await;
+        }
         Ok(outcome)
     }
 
@@ -1356,12 +1465,13 @@ impl AgentIndex {
 
     /// Removes `id` with its admission gate held: its led members, its owned
     /// Agents, its close, what the store holds of it, and its slot. The
-    /// caller drops the gate and the slot and sweeps after this returns.
+    /// caller drops the gate and the slot and sweeps after this returns,
+    /// then emits [`Removed::notices`] with [`Self::announce`].
     async fn remove_locked(
         &self,
         id: &str,
         slot: &Arc<SessionSlot>,
-    ) -> dim_agent_runtime::Result<bool> {
+    ) -> dim_agent_runtime::Result<Removed> {
         if let Some(records) = &self.records {
             for member in records.led_members(id).await? {
                 Box::pin(self.delete(&member)).await?;
@@ -1381,6 +1491,13 @@ impl AgentIndex {
             }
         }
         let unloaded = loaded.is_none() && !slot.closed.load(Ordering::Acquire);
+        // The delete notice names the Session's owner even when this process
+        // never loaded it: `session_owners` still holds the row, and the
+        // delete removes it, so it is read here (EventHub §9.1).
+        let recorded_owner = match &self.session_store {
+            Some(store) => store.owner(id).await?,
+            None => None,
+        };
         let stored = match &self.session_store {
             Some(store) => store.delete_session(id).await?,
             None => false,
@@ -1400,20 +1517,65 @@ impl AgentIndex {
             let agent_id = agent_id.clone();
             self.release_owned(&agent_id).await;
         }
-        if let Some((agent_id, _)) = owner.filter(|_| unloaded && stored) {
-            let (_, root) = self
-                .loader
-                .get()
-                .expect("AgentsPlugin apply sets the loader");
-            let announcement = Arc::new(UnloadedSessionDeleted {
+        let mut notices = Vec::new();
+        if let Some((agent_id, _)) = owner.clone().filter(|_| unloaded && stored) {
+            notices.push(DeletedNotice::Unloaded(UnloadedSessionDeleted {
                 agent_id,
                 session_id: id.to_owned(),
-            });
-            if let Err(error) = root.parallel(announcement).await {
-                tracing::warn!(%error, session_id = id, "Deletion of an unloaded Session was not announced");
+            }));
+        }
+        // Every delete that removed the Session's stored rows announces
+        // itself, loaded or not: a listener that holds state for the Session
+        // removes it, and a close, which keeps the rows, does not
+        // ([EventHub §9.1]). The notice carries the
+        // owner the index held, else the store's, and an empty `agentId` when
+        // neither recorded one.
+        if deleted {
+            let agent_id = owner
+                .map(|(agent_id, _)| agent_id)
+                .or(recorded_owner)
+                .unwrap_or_default();
+            notices.push(DeletedNotice::Session(SessionDeleted {
+                agent_id,
+                session_id: id.to_owned(),
+            }));
+        }
+        Ok(Removed { deleted, notices })
+    }
+
+    /// Emits a delete's notices. The caller has released the Session's
+    /// admission gate: a listener takes the EventHub Session lock
+    /// (`crates/dim-event-hub/src/hub.rs`), and a `subscribe` holds that
+    /// lock across `sessions.input`, which waits for this gate in
+    /// [`AgentIndex::acquire`]. Emitting under the gate would deadlock the
+    /// two.
+    ///
+    /// A led member's delete goes through [`Self::delete`] and announces
+    /// after the member's own gate is released; the parent's gate is still
+    /// held then. A listener can wait on the parent's gate only through a
+    /// `subscribe` to the parent, which takes the parent's Session lock
+    /// there; the member's notice reaches a listener that takes the
+    /// member's lock alone, so that path does not deadlock.
+    async fn announce(&self, removed: Removed) {
+        let (_, root) = self
+            .loader
+            .get()
+            .expect("AgentsPlugin apply sets the loader");
+        for notice in removed.notices {
+            let (name, error) = match notice {
+                DeletedNotice::Unloaded(notice) => (
+                    "an unloaded Session",
+                    root.parallel(Arc::new(notice)).await.err(),
+                ),
+                DeletedNotice::Session(notice) => (
+                    "a Session delete",
+                    root.parallel(Arc::new(notice)).await.err(),
+                ),
+            };
+            if let Some(error) = error {
+                tracing::warn!(%error, "Deletion was not announced: {name}");
             }
         }
-        Ok(deleted)
     }
     /// Why `id` is in use, for a delete that requires an inactive Session:
     /// its uses, its hold or a line of it, or a Session it leads, recursively.
@@ -1574,10 +1736,23 @@ impl AgentIndex {
         let version = self
             .version_of(source)
             .ok_or_else(|| AgentError::Closed(source.into()))?;
-        let config = session.config().clone();
+        // The record is the Session's current configuration: an in-place
+        // update (`session.language.update`) rewrites it, while the live
+        // Session keeps the value its apply ran with at creation. One read
+        // feeds the live fork and the record the copy writes, so a concurrent
+        // update cannot make them disagree.
+        let stored = store
+            .session_config_text(source)
+            .await?
+            .ok_or_else(|| AgentError::Closed(source.to_owned()))?;
+        let mut config = serde_json::from_str::<SessionConfig>(&stored)
+            .map_err(|error| AgentError::Storage(format!("the source configuration: {error}")))?;
+        // A fork of an older protocol keeps the live Session's codemode
+        // exclusion; the stored record is written without it, as on create.
+        config.exclude_codemode_below(version);
         let source = source.to_owned();
         let (id, prepare) = self.prepared(config.cwd.clone(), move |fork| {
-            Box::pin(async move { store.fork_session(&source, &fork, at).await })
+            Box::pin(async move { store.fork_session(&source, &fork, at, &stored).await })
         });
         let creation = usage
             .host
@@ -1990,6 +2165,20 @@ impl DynPlugin for AgentsPlugin {
                     Ok(Some(
                         Box::new(configuration::AgentsSessionPlugin::new(mount.names)?)
                             as Box<dyn DynPlugin>,
+                    ))
+                },
+            )?;
+            let with_store = self.stored.is_some();
+            parts.register(
+                ctx,
+                dim_agent_runtime::PartScope::Session,
+                "SessionLanguage",
+                move |mount| {
+                    Ok(Some(
+                        Box::new(crate::session_language::SessionLanguagePlugin::new(
+                            mount.names,
+                            with_store,
+                        )?) as Box<dyn DynPlugin>,
                     ))
                 },
             )?;

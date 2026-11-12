@@ -1,5 +1,4 @@
 use super::*;
-use dim_agent_capabilities::history::read_context_in;
 use dim_agent_runtime::testing::chain_events;
 use rutis::host::CtxHost;
 
@@ -1435,6 +1434,7 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: native.join("outputs"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
@@ -1863,7 +1863,8 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
     );
     assert_eq!(client.rpc("session.permission.update", json!({"sessionId":sid,"branchId":"main","expectedVersion":policy["result"]["version"],"policy":policy["result"]["policy"]})).await["error"]["data"]["appError"], "permission_conflict");
     async fn project_rule(session: &dim_agent_runtime::Session) -> (String, String) {
-        let context = read_context_in(session, "main", session.sequence("main").unwrap())
+        let context = dim_agent_capabilities::history::HistoryRenderer::default()
+            .context_in(session, "main", session.sequence("main").unwrap())
             .await
             .unwrap();
         let system = serde_json::to_string(
@@ -1903,7 +1904,8 @@ async fn local_product_operations_use_real_tools_and_survive_rpc_reload() {
             )
             .await,
     );
-    let context = read_context_in(&session, "main", session.sequence("main").unwrap())
+    let context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .context_in(&session, "main", session.sequence("main").unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -2577,6 +2579,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         request_id: Some("request-1".into()),
         text_part_id: Some("text-part-1".into()),
         thinking_part_id: Some("thinking-part-1".into()),
+        thinking_started_at: Some(1_700_000_000_500),
         text: text.into(),
         text_offset: 3,
         thinking: "weighing".into(),
@@ -2605,6 +2608,7 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         last["params"],
         json!({"sessionId":sid,"branchId":"main","turnId":"turn-1","requestId":"request-1",
             "textPartId":"text-part-1","thinkingPartId":"thinking-part-1",
+            "thinkingStartedAt":1_700_000_000_500u64,
             "text":"x".repeat(updates),"textOffset":3,"thinking":"weighing","thinkingOffset":5,
             "tools":[{"callId":"call-1","name":"echo","arguments":"{\"text\":\"he"}]})
     );
@@ -2654,6 +2658,10 @@ async fn model_progress_reaches_v3_subscribers_without_persisting() {
         appended.iter().all(|event| {
             matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_none())
                 || matches!(event.kind, EventKind::InputApplied(_))
+                || matches!(
+                    event.kind.key(),
+                    "input-queue/node" | "input-queue/recovered" | "prompt-state/recovered"
+                )
         }),
         "model progress does not persist facts: {appended:?}"
     );

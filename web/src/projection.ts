@@ -12,11 +12,11 @@
  * `rows` re-renders only the rows that changed.
  */
 import { failureLine } from "./failures"
-import { GoalFold, type Goal } from "./goal"
+import type { Goal } from "./goal"
 import type { AskQuestion, ModelFailure, ModelId, ModelProgress, ProviderPresentation, QueuedInput, SessionEvent, ToolResult } from "./rpc/protocol"
 
 export type TimelineRow =
-  | { kind: "user"; key: string; text: string; skills?: string[]; at: number; sequence: number; cut: number }
+  | { kind: "user"; key: string; text: string; skills?: string[]; hooks?: number; at: number; sequence: number; cut: number }
   | { kind: "assistant"; key: string; text: string; streaming: boolean }
   | { kind: "thinking"; key: string; text: string; streaming: boolean; elapsedMs?: number }
   | { kind: "tool"; key: string; callId: string; name: string; input: Record<string, unknown>; pending: boolean; result?: ToolResult }
@@ -49,24 +49,21 @@ export class Projection {
   model: ModelId | undefined
   private answers = new Map<string, Stream>()
   private thoughts = new Map<string, Stream>()
-  private requestStarts = new Map<string, number>()
+  /** The block start of each open thought, its first durable `thinking` event. */
+  private thoughtStarts = new Map<string, number>()
   private tools = new Map<string, number>()
   private lines = new Map<string, number>()
   /** `ask_user` calls whose batch has no `step/tool-result` yet, oldest first. */
   private asks: Array<{ requestId: string; callId: string; questions: AskQuestion[] }> = []
   /** Messages the server holds in the queue: written, not yet adopted, not withdrawn. */
   private held = new Map<string, QueuedInput>()
-  /** The branch's goal, folded from its events (goal.ts). */
-  readonly goalFold = new GoalFold()
+  goal: Goal | undefined
+  private controlCursor = 0
+  private output: { requestId: string; textCharacters: number; thinkingCharacters: number } | undefined
   /** Requests whose text, thinking or tool row already showed. */
   private showedOutput = new Set<string>()
   /** The error of the model failure the latest turn end may repeat. */
   private shownFailure: string | undefined
-
-  /** The goal in force on this branch. */
-  get goal(): Goal | undefined {
-    return this.goalFold.goal()
-  }
 
   /** The messages still queued on this branch, oldest first. */
   queued(): readonly QueuedInput[] {
@@ -78,21 +75,54 @@ export class Projection {
     return this.asks
   }
 
+  restoreControls(inputs: readonly QueuedInput[], asks: typeof this.asks, through: number): void {
+    this.held = new Map(inputs.map(input => [input.id, input]))
+    this.asks = asks
+    this.controlCursor = through
+  }
+
+  applyControl(event: SessionEvent): void {
+    if (event.sequence <= this.controlCursor) return
+    this.controlCursor = event.sequence
+    const content = event.content
+    switch (content.kind) {
+      case "input":
+        if (content.user !== undefined) this.held.set(event.id, { id: event.id, text: content.text ?? "", skills: content.skills, hooks: content.hooks, user: content.user })
+        break
+      case "input-consumed":
+      case "input-deleted": this.held.delete(content.inputId); break
+      case "tool-call":
+        for (const ask of content.asks) this.asks.push({ requestId: content.requestId, callId: ask.callId, questions: ask.questions })
+        break
+      case "tool-result":
+        this.asks = this.asks.filter(ask => ask.requestId !== content.requestId || !content.results.some(result => result.callId === ask.callId))
+        break
+    }
+  }
+
+  activeOutput(output: { requestId: string; textCharacters: number; thinkingCharacters: number }): void {
+    this.output = output
+    const answer = this.answers.get(output.requestId)
+    const thought = this.thoughts.get(output.requestId)
+    if (answer !== undefined) answer.writtenChars = output.textCharacters
+    if (thought !== undefined) thought.writtenChars = output.thinkingCharacters
+  }
+
   /** Applies one event; false when it was already applied. */
   apply(event: SessionEvent): boolean {
     if (event.sequence <= this.cursor) return false
     this.cursor = event.sequence
-    this.goalFold.apply(event)
+    this.applyControl(event)
     const content = event.content
     switch (content.kind) {
       case "input":
-        if (content.user !== undefined) this.held.set(event.id, { id: event.id, text: content.text ?? "", skills: content.skills, user: content.user })
         if (content.text !== undefined) {
           this.push({
             kind: "user",
             key: `user-${event.sequence}`,
             text: content.text,
             skills: content.skills,
+            ...(content.hooks === undefined ? {} : { hooks: content.hooks }),
             at: event.createAt,
             sequence: event.sequence,
             cut: Math.max(0, event.sequence - 1),
@@ -100,8 +130,8 @@ export class Projection {
         }
         break
       case "input-applied":
+      case "input-consumed":
       case "input-deleted":
-        this.held.delete(content.inputId)
         break
       case "source-input": {
         const notice = branchNotice(content.text, content.mode)
@@ -137,19 +167,18 @@ export class Projection {
         break
       }
       case "model-start":
-        this.requestStarts.set(content.requestId, event.createAt)
         break
       case "thinking": {
         this.showedOutput.add(content.requestId)
+        if (!this.thoughts.has(content.requestId)) this.thoughtStarts.set(content.requestId, event.createAt)
         const thought = this.openThinking(content.requestId)
         commit(thought, content.delta)
-        const start = this.requestStarts.get(content.requestId)
-        this.update(thought.index, { text: shown(thought), ...(start === undefined ? {} : { elapsedMs: Math.max(0, event.createAt - start) }) })
+        this.update(thought.index, { text: shown(thought) })
         break
       }
       case "text": {
         this.showedOutput.add(content.requestId)
-        this.closeThinking(content.requestId)
+        this.closeThinking(content.requestId, event.createAt)
         const answer = this.openAnswer(content.requestId)
         commit(answer, content.delta)
         this.update(answer.index, { text: shown(answer) })
@@ -157,26 +186,25 @@ export class Projection {
       }
       case "tool-use":
         this.showedOutput.add(content.requestId)
-        this.closeThinking(content.requestId)
+        this.closeThinking(content.requestId, event.createAt)
         this.closeAnswer(content.requestId)
-        this.requestStarts.delete(content.requestId)
         this.tools.set(content.callId, this.push({ kind: "tool", key: `tool-${content.callId}`, callId: content.callId, name: content.name, input: content.input, pending: true }))
         break
+      case "tool-use-start":
+        this.closeThinking(content.requestId, event.createAt)
+        break
       case "tool-call":
-        for (const ask of content.asks) this.asks.push({ requestId: content.requestId, callId: ask.callId, questions: ask.questions })
         break
       case "tool-completed":
         this.completeTool(content.callId, content.result)
         break
       case "tool-result":
         for (const result of content.results) this.completeTool(result.callId, result.result)
-        this.asks = this.asks.filter((ask) => ask.requestId !== content.requestId || !content.results.some((result) => result.callId === ask.callId))
         break
       case "model-end": {
         const incomplete = this.showedOutput.delete(content.requestId)
-        this.closeThinking(content.requestId)
+        this.closeThinking(content.requestId, event.createAt)
         this.closeAnswer(content.requestId)
-        this.requestStarts.delete(content.requestId)
         if (content.error !== undefined) {
           const failure = content.failure
           const text = content.presentation !== undefined
@@ -189,9 +217,8 @@ export class Projection {
       }
       case "turn-end": {
         this.lastTurnEnd = event.sequence
-        for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId)
+        for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId, event.createAt)
         for (const requestId of [...this.answers.keys()]) this.closeAnswer(requestId)
-        this.requestStarts.clear()
         // The marker belongs to this turn only, whatever the outcome.
         const shown = this.shownFailure
         this.shownFailure = undefined
@@ -218,6 +245,7 @@ export class Projection {
     if (progress.thinking !== "") {
       this.showedOutput.add(requestId)
       const thought = this.openThinking(requestId)
+      if (progress.thinkingStartedAt !== undefined && !this.thoughtStarts.has(requestId)) this.thoughtStarts.set(requestId, progress.thinkingStartedAt)
       thought.progress = { text: progress.thinking, offset: progress.thinkingOffset }
       this.update(thought.index, { text: shown(thought) })
     }
@@ -227,6 +255,14 @@ export class Projection {
       answer.progress = { text: progress.text, offset: progress.textOffset }
       this.update(answer.index, { text: shown(answer) })
     }
+  }
+
+  prepend(rows: readonly TimelineRow[], prefix: string): void {
+    const count = rows.length
+    for (const stream of [...this.answers.values(), ...this.thoughts.values()]) stream.index += count
+    for (const [key, index] of this.tools) this.tools.set(key, index + count)
+    for (const [key, index] of this.lines) this.lines.set(key, index + count)
+    this.rows = rows.map(row => ({ ...row, key: `${prefix}:${row.key}`, ...((row.kind === "assistant" || row.kind === "thinking") ? { streaming: false } : {}) })).concat(this.rows)
   }
 
   private push(row: TimelineRow): number {
@@ -241,7 +277,7 @@ export class Projection {
   private openThinking(requestId: string): Stream {
     let thought = this.thoughts.get(requestId)
     if (thought === undefined) {
-      thought = { index: this.push({ kind: "thinking", key: `thinking-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: 0 }
+      thought = { index: this.push({ kind: "thinking", key: `thinking-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: this.output?.requestId === requestId ? this.output.thinkingCharacters : 0 }
       this.thoughts.set(requestId, thought)
     }
     return thought
@@ -250,18 +286,20 @@ export class Projection {
   private openAnswer(requestId: string): Stream {
     let answer = this.answers.get(requestId)
     if (answer === undefined) {
-      answer = { index: this.push({ kind: "assistant", key: `assistant-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: 0 }
+      answer = { index: this.push({ kind: "assistant", key: `assistant-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: this.output?.requestId === requestId ? this.output.textCharacters : 0 }
       this.answers.set(requestId, answer)
     }
     return answer
   }
 
-  /** A thought settles when the request moves on: progress never written (an interrupted thought) goes. */
-  private closeThinking(requestId: string): void {
+  /** A thought settles when the request moves on: progress never written (an interrupted thought) goes, and its duration spans its first event to `closedAt`. */
+  private closeThinking(requestId: string, closedAt: number): void {
     const thought = this.thoughts.get(requestId)
     if (thought === undefined) return
     this.thoughts.delete(requestId)
-    this.update(thought.index, { text: thought.written, streaming: false })
+    const start = this.thoughtStarts.get(requestId)
+    this.thoughtStarts.delete(requestId)
+    this.update(thought.index, { text: thought.written, streaming: false, ...(start === undefined ? {} : { elapsedMs: Math.max(0, closedAt - start) }) })
   }
 
   private closeAnswer(requestId: string): void {

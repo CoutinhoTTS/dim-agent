@@ -391,6 +391,16 @@ pub struct Options {
     /// The execution switches, provided to HostPlatform and the root when
     /// present; the settings tool and snapshot parts are registered with it.
     pub execution: Option<Arc<dyn ExecutionSettingsSource>>,
+    /// The host's user override of `dim/base`, provided at the root when
+    /// present.
+    pub base_prompt: Option<Arc<dyn dim_agent_capabilities::prompt_sources::BasePromptSettings>>,
+    /// The host's user override of the Skills instructions, provided at the
+    /// root when present.
+    pub skills_instructions:
+        Option<Arc<dyn dim_agent_capabilities::skills::SkillsInstructionsSettings>>,
+    /// Register both prompt-settings names without providing a host: the
+    /// parts must fall back to the built-in text instead of waiting for one.
+    pub missing_settings_hosts: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -405,6 +415,9 @@ impl Default for Options {
             require_without_install: false,
             clients: None,
             execution: None,
+            base_prompt: None,
+            skills_instructions: None,
+            missing_settings_hosts: false,
         }
     }
 }
@@ -457,6 +470,34 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     if let Some(store) = options.store {
         builder.timeline_store(store);
+    }
+    if options.missing_settings_hosts {
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::prompt_sources::BasePromptSettingsHost,
+        >(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::skills::SkillsInstructionsSettingsHost,
+        >(builder.catalog_mut(), None);
+    }
+    if let Some(base) = &options.base_prompt {
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::prompt_sources::BasePromptSettingsHost,
+        >(builder.catalog_mut(), None);
+        let host: Arc<dyn dim_agent_capabilities::prompt_sources::BasePromptSettings> =
+            base.clone();
+        builder.process_value(Arc::new(
+            dim_agent_capabilities::prompt_sources::BasePromptSettingsHost(host),
+        ));
+    }
+    if let Some(instructions) = &options.skills_instructions {
+        dim_agent_runtime::names::register::<
+            dim_agent_capabilities::skills::SkillsInstructionsSettingsHost,
+        >(builder.catalog_mut(), None);
+        let host: Arc<dyn dim_agent_capabilities::skills::SkillsInstructionsSettings> =
+            instructions.clone();
+        builder.process_value(Arc::new(
+            dim_agent_capabilities::skills::SkillsInstructionsSettingsHost(host),
+        ));
     }
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
@@ -769,6 +810,28 @@ impl HoldingStore {
 }
 
 impl TimelineStore for HoldingStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        let hold = self.held(&scope.key.branch_id);
+        self.reads.lock().unwrap().extend(
+            scope
+                .segments
+                .iter()
+                .map(|segment| (segment.branch_id.clone(), segment.from..=segment.through)),
+        );
+        Box::pin(async move {
+            if hold {
+                self.enter_held_read().await;
+            }
+            self.memory.query(scope, query, page).await
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -848,24 +911,5 @@ impl TimelineStore for HoldingStore {
         sequence: u64,
     ) -> BoxFuture<'a, Result<Option<TimelineTrace>>> {
         self.memory.trace(key, sequence)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<dim_agent_runtime::TimelineQueryPage>> {
-        let hold = self.held(&key.branch_id);
-        self.reads
-            .lock()
-            .unwrap()
-            .push((key.branch_id.clone(), from..=through));
-        Box::pin(async move {
-            if hold {
-                self.enter_held_read().await;
-            }
-            self.memory.query(key, query, from, through).await
-        })
     }
 }

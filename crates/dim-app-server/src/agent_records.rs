@@ -164,6 +164,7 @@ impl AgentRecords {
                 let mut query = connection
                     .prepare(
                         "SELECT session_id FROM agent_sessions WHERE leader_session_id = ?1 \
+                         AND CASE WHEN json_valid(config) THEN json_extract(config, '$.collaborationRole') END = 'member' \
                          ORDER BY session_id",
                     )
                     .map_err(storage_error)?;
@@ -218,7 +219,9 @@ impl AgentRecords {
                 let mut query = connection
                     .prepare(
                         "SELECT session_id, leader_session_id FROM agent_sessions \
-                         WHERE leader_session_id IS NOT NULL ORDER BY session_id",
+                         WHERE leader_session_id IS NOT NULL \
+                         AND CASE WHEN json_valid(config) THEN json_extract(config, '$.collaborationRole') END = 'member' \
+                         ORDER BY session_id",
                     )
                     .map_err(storage_error)?;
                 let rows = query
@@ -282,7 +285,7 @@ impl AgentRecords {
                     _ => None,
                 };
                 let protocol_version = match version {
-                    Value::Integer(version) if (1..=3).contains(&version) => Some(version as u32),
+                    Value::Integer(version) if (1..=crate::protocol::PROTOCOL_VERSION as i64).contains(&version) => Some(version as u32),
                     _ => None,
                 };
                 let error = if !has_session {

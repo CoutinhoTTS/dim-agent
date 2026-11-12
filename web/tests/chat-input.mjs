@@ -66,7 +66,7 @@ const renderer = createRenderer({
 const all = (element) => [element, ...element.children.flatMap(all)]
 const text = (element) => (element.type === "comment" ? "" : element.text) + element.children.map(text).join("")
 const button = (root, label) => all(root).find((element) => element.type === "button" && (text(element) === label || element.props["aria-label"] === label))
-const flush = async () => { for (let i = 0; i < 8; i++) { await Promise.resolve(); await nextTick() } }
+const flush = async () => { await new Promise(setImmediate); await nextTick() }
 const click = (element) => element.props.onClick({ stopPropagation() {} })
 const submitQuestion = (root) => all(root).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} })
 const question = (branchId, callId, multiSelect = false) => ({
@@ -95,7 +95,7 @@ function mount(t, branchId, questions = [], component, stores = {}) {
     },
     connection: { supports: () => false },
     models: { available: false, load: async () => {} },
-    sessions: { byId: new Map() },
+    sessions: { byId: new Map(), summaries: [] },
     toast: { push() {} },
     ui: { shellMode: "wide", approvalKeyboard: () => false },
     ...stores,
@@ -117,10 +117,14 @@ async function permissionSession(t, policy) {
   t.after(() => chat.$dispose())
   const server = { policy, version: 3, updates: [], failure: undefined }
   const connection = {
-    supports: () => true,
+    supports: (method) => ["session.history.latestTurn", "session.methods", "session.permission.get", "session.permission.update"].includes(method),
     client: { async call(method, params, read) {
-      if (method === "session.attach") return read({})
-      if (method === "session.methods") return read({ methods: ["session.permission.get", "session.permission.update"].map((name) => ({ name })) })
+      if (method === "session.attach") return read({ model: { providerId: "test", modelId: "test" } })
+      if (method === "session.methods") return read({ methods: ["session.permission.get", "session.permission.update", "session.input.pending", "session.question.pending", "session.turn.get"].map((name) => ({ name })) })
+      if (method === "session.branches") return read({ branches: [] })
+      if (method === "session.input.pending") return read({ ...params, inputs: [], next: null })
+      if (method === "session.question.pending") return read({ ...params, batches: [], next: null })
+      if (method === "session.turn.get") return read({ ...params, turn: null, output: null })
       if (method === "session.history") return read({ events: [], through: 0, nextAfter: 0, done: true })
       if (method === "session.permission.get") return read({ policy: server.policy, version: server.version })
       assert.equal(method, "session.permission.update")

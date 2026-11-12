@@ -12,16 +12,16 @@ use dim_agent_types::{
     CollaborationOutcome, CollaborationTarget, ContentBlock, ContextCompactionResult, ExecStatus,
     InputMode, InsufficientSpacePartName, JsonObject, Message, MessageContent, MessagePart,
     ModelFailure, ModelFailureKind, ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult,
-    TurnOutcome, UserInput,
+    TurnOutcome, UserInput, markup,
 };
 use serde_json::Value;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    ApprovalView, CompactionPart, CompactionPartSize, CompactionState, CompactionView,
-    FailureDetail, LineCut, LineState, LineView, MemberCard, MemberConversationState, MemberTarget,
-    QueuedInput, RetryView, RowKind, RowTone, TaskFinish, TaskKind, TaskTarget, TaskView, TurnEnd,
-    ViewRow, ViewSnapshot, WorkflowView,
+    ApprovalView, CompactionDetail, CompactionDetailState, CompactionPart, CompactionPartSize,
+    CompactionState, CompactionView, FailureDetail, LineCut, LineState, LineView, MemberCard,
+    MemberConversationState, MemberTarget, QueuedInput, RetryView, RowKind, RowTone, TaskFinish,
+    TaskKind, TaskOutcome, TaskTarget, TaskView, TurnEnd, ViewRow, ViewSnapshot, WorkflowView,
 };
 use crate::wire::{Event, EventContent, Progress, WorkflowRun, WorkflowState};
 
@@ -31,6 +31,9 @@ struct OpenThought {
     index: usize,
     /// The request's `step/thinking` deltas so far.
     written: String,
+    /// When the block's first durable `step/thinking` arrived; the block's
+    /// start. `None` while only progress shows it.
+    started_at: Option<u64>,
 }
 
 #[derive(Default)]
@@ -48,31 +51,25 @@ pub struct Projection {
     rows: Vec<Arc<ViewRow>>,
     /// The assistant row each model request streams into.
     assistant_rows: HashMap<String, usize>,
-    /// When each running model request started, to time its reasoning.
-    request_starts: HashMap<String, u64>,
     /// The reasoning row each model request streams into while it is open.
     thinking_rows: HashMap<String, OpenThought>,
+    thinking_characters: HashMap<String, u64>,
     /// The tool row each call id opened.
-    tool_rows: HashMap<String, usize>,
+    tool_rows: HashMap<(String, String), usize>,
     /// The compaction row each `context/compaction-start` opened, by its
     /// sequence: the result names that start.
     compaction_rows: HashMap<u64, usize>,
     running: bool,
     approvals: Vec<ApprovalView>,
     pub questions: crate::question::Pending,
-    /// Written messages without their `input/applied` yet. Each enters the
-    /// transcript when it comes, so the transcript keeps the order the model
-    /// sees and a withdrawn input never becomes a row; the queue strip shows
-    /// them while a turn runs. Withdrawal re-submits the kept `UserInput` as
-    /// Steer. Each keeps its input id and the sequence it was submitted at.
-    held: Vec<(String, u64, UserInput)>,
+    inputs: Vec<dim_agent_types::PendingInput>,
     /// The row each written user message draws in, by input id, until its
     /// `input/consumed` settles that row.
     input_rows: HashMap<String, usize>,
     /// Unfinished tasks and the latest 50 terminal results.
     tasks: Vec<TaskView>,
     /// The `exec` call each background task came from, until it ends.
-    background: HashMap<TaskTarget, String>,
+    background: HashMap<TaskTarget, (String, String)>,
     /// The newest turn end: its sequence and how the turn ended.
     ended: Option<(u64, TurnEnd)>,
     /// Requests whose text, thinking or tool row already showed.
@@ -89,8 +86,7 @@ pub struct Projection {
     /// Agent ids a finished `agent.list` read was asked to name, whether or
     /// not it returned them: only a card naming another id reads again.
     agents_read: std::collections::HashSet<String>,
-    /// The shown branch's goal, folded from its own events (Goal §A.3).
-    goal: crate::goal::Fold,
+    pub goal: Option<crate::goal::Goal>,
 }
 
 impl Projection {
@@ -187,17 +183,62 @@ impl Projection {
         }
     }
 
+    /// Applies an event the live stream carried.
     pub fn apply(&mut self, branch_id: &str, event: &Event) {
+        self.fold(branch_id, event, false);
+    }
+
+    /// Applies an event a read replayed from recorded history: a task it ends
+    /// had already ended before this interface attached.
+    pub fn replay(&mut self, branch_id: &str, event: &Event) {
+        self.fold(branch_id, event, true);
+    }
+
+    fn fold(&mut self, branch_id: &str, event: &Event, replayed: bool) {
         match &event.content {
             EventContent::ToolCall(data) => {
-                self.questions.asked(branch_id, &event.id, data);
+                self.questions
+                    .asked(branch_id, &event.id, &data.request_id, &data.calls);
                 if self.owns(branch_id) {
+                    if let Some(parent) = &event.parent_call_id {
+                        if !self
+                            .tool_rows
+                            .contains_key(&(data.request_id.clone(), parent.clone()))
+                        {
+                            return;
+                        }
+                        for call in &data.calls {
+                            if self
+                                .tool_rows
+                                .contains_key(&(data.request_id.clone(), call.id.clone()))
+                            {
+                                continue;
+                            }
+                            let row_id = serde_json::to_string(&(&data.request_id, &call.id))
+                                .expect("tool identity is JSON");
+                            let index = self.push(row_id, RowKind::ToolCall, String::new());
+                            let row = self.row(index);
+                            row.call_id = Some(call.id.clone());
+                            row.tool_lookup_done = true;
+                            row.tool_name = Some(call.name.clone());
+                            row.tool_input = Some(Value::Object(call.input.clone()));
+                            row.batch = Some(data.request_id.clone());
+                            row.parent_call_id = Some(parent.clone());
+                            row.pending = true;
+                            self.tool_rows
+                                .insert((data.request_id.clone(), call.id.clone()), index);
+                        }
+                    }
                     for call in data
                         .calls
                         .iter()
                         .filter(|call| call.name == crate::question::TOOL)
                     {
-                        if let Some(index) = self.tool_rows.get(&call.id).copied() {
+                        if let Some(index) = self
+                            .tool_rows
+                            .get(&(data.request_id.clone(), call.id.clone()))
+                            .copied()
+                        {
                             self.row(index).parked = true;
                         }
                     }
@@ -221,12 +262,17 @@ impl Projection {
         {
             return;
         }
-        self.goal.apply(event);
         let sequence = event.sequence;
         match &event.content {
             EventContent::Input(data) => {
                 if let Some(user) = &data.user {
-                    self.held.push((event.id.clone(), sequence, user.clone()));
+                    self.inputs.push(dim_agent_types::PendingInput {
+                        input_id: event.id.clone(),
+                        sequence,
+                        mode: data.effective_mode(),
+                        user: Some(user.clone()),
+                        applied: false,
+                    });
                 } else if let Some(text) = data.blocks.iter().find_map(|block| {
                     let dim_agent_types::InputBlock::Raw { text, .. } = block;
                     ShellRun::parse(text).is_some().then(|| text.clone())
@@ -240,13 +286,23 @@ impl Projection {
                 }
             }
             EventContent::InputApplied(data) => {
-                if let Some(index) = self.held.iter().position(|(id, _, _)| *id == data.input_id) {
-                    let (id, submitted, user) = self.held.remove(index);
-                    self.push_user(&id, sequence, submitted, &user);
+                if let Some(input) = self
+                    .inputs
+                    .iter_mut()
+                    .find(|input| input.input_id == data.input_id && !input.applied)
+                {
+                    input.applied = true;
+                    let input = input.clone();
+                    self.push_user(
+                        &input.input_id,
+                        sequence,
+                        input.sequence,
+                        input.user.as_ref().expect("visible input"),
+                    );
                 }
             }
             EventContent::InputDeleted(data) => {
-                self.held.retain(|(id, _, _)| *id != data.input_id);
+                self.inputs.retain(|input| input.input_id != data.input_id);
             }
             EventContent::BranchCreate(data) => {
                 let id = data.branch.get(..8).unwrap_or(&data.branch);
@@ -287,27 +343,7 @@ impl Projection {
                 );
             }
             EventContent::ExecStarted(data) => {
-                let label = self
-                    .rows
-                    .iter()
-                    .find(|row| row.row_id == data.call_id)
-                    .and_then(|row| row.tool_input.as_ref()?.get("command")?.as_str())
-                    .filter(|command| !command.is_empty())
-                    .unwrap_or(data.description.as_str())
-                    .to_owned();
-                let target = TaskTarget {
-                    branch_id: branch_id.to_owned(),
-                    task_id: data.task_id.clone(),
-                };
-                self.tasks.push(TaskView {
-                    id: event.id.clone(),
-                    branch_id: branch_id.to_owned(),
-                    kind: TaskKind::Command(target.clone()),
-                    label,
-                    started_at: event.create_at,
-                    finished: None,
-                });
-                self.background.insert(target, data.call_id.clone());
+                self.exec_started(branch_id, data, &event.id, event.create_at)
             }
             EventContent::ExecEnded(data) => {
                 let target = TaskTarget {
@@ -326,8 +362,12 @@ impl Projection {
                             ExecStatus::Failed => "Failed",
                             ExecStatus::Cancelled => "Cancelled",
                         },
-                        failed: data.status == ExecStatus::Failed
-                            || data.result.is_error == Some(true),
+                        outcome: match data.status {
+                            ExecStatus::Completed => TaskOutcome::Completed,
+                            ExecStatus::Failed => TaskOutcome::Failed,
+                            ExecStatus::Cancelled => TaskOutcome::Stopped,
+                        },
+                        replayed,
                         text: result_text(&data.result),
                         exit_code: data
                             .result
@@ -337,9 +377,12 @@ impl Projection {
                             .and_then(Value::as_i64),
                     });
                 }
-                if let Some(call_id) = self.background.remove(&target)
+                if let Some((request_id, call_id)) = self.background.remove(&target)
                     && self.owns(branch_id)
-                    && let Some(index) = self.rows.iter().position(|row| row.row_id == call_id)
+                    && let Some(index) = self.rows.iter().position(|row| {
+                        row.call_id.as_deref() == Some(call_id.as_str())
+                            && row.batch.as_deref() == Some(request_id.as_str())
+                    })
                 {
                     let row = self.row(index);
                     row.result_is_error =
@@ -354,114 +397,32 @@ impl Projection {
                 }
             }
             EventContent::CollaborationRequest(data) => {
-                let task = TaskView {
-                    id: event.id.clone(),
-                    branch_id: branch_id.to_owned(),
-                    kind: TaskKind::Member(MemberTarget::Starting),
-                    label: data.prompt.lines().next().unwrap_or("").to_owned(),
-                    started_at: event.create_at,
-                    finished: None,
-                };
-                if self.owns(branch_id)
-                    && let Some(index) = self.tool_rows.get(&data.call_id).copied()
-                    && self.rows[index].batch.as_deref() == Some(data.request_id.as_str())
-                    && self.rows[index].member.is_none()
-                {
-                    let (agent, agent_id) = match &data.target {
-                        CollaborationTarget::Agent { agent_id }
-                        | CollaborationTarget::Member { agent_id, .. } => {
-                            let name = self.agent_names.get(agent_id).unwrap_or(agent_id);
-                            (
-                                name.clone(),
-                                (!agent_id.contains(':')).then(|| agent_id.clone()),
-                            )
-                        }
-                        CollaborationTarget::Temporary { profile } => (profile.name.clone(), None),
-                    };
-                    self.row(index).member = Some(Box::new(MemberCard {
-                        task: task.clone(),
-                        agent,
-                        agent_id,
-                        prompt: data.prompt.clone(),
-                        model: None,
-                        activity: None,
-                        observation: None,
-                    }));
-                    self.cards.insert(event.id.clone(), index);
-                }
-                self.tasks.push(task);
+                self.delegation_started(branch_id, data, &event.id, event.create_at)
             }
             EventContent::CollaborationDelivered(data) => {
-                let starting = |task: &TaskView| {
-                    task.branch_id == branch_id
-                        && task.id == data.op_event_id
-                        && task.finished.is_none()
-                        && task.kind == TaskKind::Member(MemberTarget::Starting)
-                };
-                let update = |task: &mut TaskView| match &data.delivery {
-                    CollaborationDelivery::Ok {
-                        agent_id,
-                        session_id,
-                        ..
-                    } => {
-                        task.kind = TaskKind::Member(if agent_id.contains(':') {
-                            MemberTarget::Provider
-                        } else {
-                            MemberTarget::Session(session_id.clone())
-                        });
-                    }
-                    CollaborationDelivery::Error { error } => {
-                        task.finished = Some(TaskFinish {
-                            at: event.create_at,
-                            status: "Failed",
-                            failed: true,
-                            text: serde_json::to_value(error)
-                                .expect("typed delivery error serializes")
-                                .as_str()
-                                .expect("typed delivery error is a string")
-                                .to_owned(),
-                            exit_code: None,
-                        });
-                    }
-                };
-                if let Some(task) = self.tasks.iter_mut().find(|task| starting(task)) {
-                    update(task);
-                }
-                let delivered = match &data.delivery {
-                    CollaborationDelivery::Ok { agent_id, .. } => Some((
-                        self.agent_names.get(agent_id).unwrap_or(agent_id).clone(),
-                        (!agent_id.contains(':')).then(|| agent_id.clone()),
-                    )),
-                    CollaborationDelivery::Error { .. } => None,
-                };
-                if let Some(card) = self.card(branch_id, &data.op_event_id)
-                    && starting(&card.task)
-                {
-                    update(&mut card.task);
-                    match delivered {
-                        Some((name, agent_id)) if card.agent_id.is_some() => {
-                            card.agent = name;
-                            card.agent_id = agent_id;
-                        }
-                        Some(_) => {}
-                        None => card.agent_id = None,
-                    }
-                }
+                self.delegation_delivered(branch_id, data, event.create_at, replayed)
             }
             EventContent::CollaborationResult(data) => {
-                let (status, failed, text) = match &data.outcome {
-                    CollaborationOutcome::Completed => ("Completed", false, data.text.clone()),
-                    CollaborationOutcome::Failed { reason } => {
-                        ("Failed", true, format!("{reason}\n{}", data.text))
+                let (status, outcome, text) = match &data.outcome {
+                    CollaborationOutcome::Completed => {
+                        ("Completed", TaskOutcome::Completed, data.text.clone())
                     }
-                    CollaborationOutcome::Cancelled { reason } => {
-                        ("Cancelled", false, format!("{reason}\n{}", data.text))
-                    }
+                    CollaborationOutcome::Failed { reason } => (
+                        "Failed",
+                        TaskOutcome::Failed,
+                        format!("{reason}\n{}", data.text),
+                    ),
+                    CollaborationOutcome::Cancelled { reason } => (
+                        "Cancelled",
+                        TaskOutcome::Stopped,
+                        format!("{reason}\n{}", data.text),
+                    ),
                 };
                 let finish = TaskFinish {
                     at: event.create_at,
                     status,
-                    failed,
+                    outcome,
+                    replayed,
                     text,
                     exit_code: None,
                 };
@@ -493,30 +454,31 @@ impl Projection {
                 let index = self.push(format!("agent-{sequence}"), RowKind::Status, text);
                 self.row(index).tone = tone;
             }
-            EventContent::ModelStart(data) => {
-                self.request_starts
-                    .insert(data.request_id.clone(), event.create_at);
-            }
+            EventContent::ModelStart(_) => {}
             EventContent::Thinking(data) => {
+                *self
+                    .thinking_characters
+                    .entry(data.request_id.clone())
+                    .or_default() += data.delta.chars().count() as u64;
                 self.showed.insert(data.request_id.clone());
                 let index = self.open_thinking(&data.request_id);
-                let elapsed = self
-                    .request_starts
-                    .get(&data.request_id)
-                    .map(|start| event.create_at.saturating_sub(*start));
                 let thought = self
                     .thinking_rows
                     .get_mut(&data.request_id)
                     .expect("opened above");
+                let first = thought.written.is_empty();
+                thought.started_at.get_or_insert(event.create_at);
                 thought.written.push_str(&data.delta);
                 let text = thought.written.clone();
                 let row = self.row(index);
                 row.text = text;
-                row.elapsed_ms = elapsed;
+                if first {
+                    row.row_id = format!("thinking-{}", event.id);
+                }
             }
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
-                self.close_thinking(&data.request_id);
+                self.close_thinking(&data.request_id, event.create_at);
                 let index = match self.assistant_rows.get(&data.request_id) {
                     Some(index) => *index,
                     None => {
@@ -534,28 +496,35 @@ impl Projection {
             }
             EventContent::ToolUse(data) => {
                 self.showed.insert(data.request_id.clone());
-                self.close_thinking(&data.request_id);
+                self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
-                self.request_starts.remove(&data.request_id);
-                let row_id = if self.rows.iter().any(|row| row.row_id == data.call.id) {
-                    format!("{}-{}", data.call.id, self.rows.len())
-                } else {
-                    data.call.id.clone()
-                };
+                let row_id = serde_json::to_string(&(&data.request_id, &data.call.id))
+                    .expect("tool identity is JSON");
                 let index = self.push(row_id, RowKind::ToolCall, String::new());
                 let row = self.row(index);
+                row.call_id = Some(data.call.id.clone());
+                row.tool_lookup_done = true;
                 row.tool_name = Some(data.call.name.clone());
                 row.tool_input = Some(Value::Object(data.call.input.clone()));
                 row.batch = Some(data.request_id.clone());
                 row.pending = true;
-                self.tool_rows.insert(data.call.id.clone(), index);
+                self.tool_rows
+                    .insert((data.request_id.clone(), data.call.id.clone()), index);
+            }
+            EventContent::ToolUseStart(data) => {
+                self.close_thinking(&data.request_id, event.create_at);
             }
             EventContent::ToolCompleted(data) => {
-                self.complete_tool(&data.call_id, &data.result);
+                self.complete_tool(&data.request_id, &data.call_id, &data.result, true);
             }
             EventContent::ToolResult(data) => {
                 for result in &data.results {
-                    self.complete_tool(&result.call_id, &result.result);
+                    self.complete_tool(
+                        &data.request_id,
+                        &result.call_id,
+                        &result.result,
+                        event.parent_call_id.is_none(),
+                    );
                 }
             }
             EventContent::CompactionStart(_) => {
@@ -565,31 +534,37 @@ impl Projection {
                     String::new(),
                 );
                 self.row(index).compaction = Some(CompactionView {
+                    detail: None,
                     state: CompactionState::Running,
-                    text: String::new(),
+                    text: String::new().into(),
                     insufficient: Vec::new(),
                 });
                 self.compaction_rows.insert(sequence, index);
             }
             EventContent::Compaction(data) => {
-                let index = match data
-                    .start
-                    .and_then(|start| self.compaction_rows.remove(&start))
-                {
-                    Some(index) => index,
-                    None => self.push(
-                        format!("compaction-{sequence}"),
-                        RowKind::Compaction,
-                        String::new(),
-                    ),
-                };
-                self.row(index).compaction = Some(compaction_view(&data.outcome));
+                self.finish_compaction(sequence, data.start, compaction_view(&data.outcome));
+            }
+            EventContent::CompactionSummary(data) => {
+                self.finish_compaction(
+                    sequence,
+                    data.start,
+                    CompactionView {
+                        state: CompactionState::Completed,
+                        detail: Some(CompactionDetail {
+                            event_id: event.id.clone(),
+                            sequence,
+                            state: CompactionDetailState::Unloaded,
+                        }),
+                        text: String::new().into(),
+                        insufficient: compaction_sizes(data.insufficient_space.as_ref()),
+                    },
+                );
             }
             EventContent::ModelEnd(data) => {
+                self.thinking_characters.remove(&data.request_id);
                 let incomplete = self.showed.remove(&data.request_id);
-                self.close_thinking(&data.request_id);
+                self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
-                self.request_starts.remove(&data.request_id);
                 self.retry = None;
                 if let ModelOutputOutcome::Failed {
                     error,
@@ -620,12 +595,12 @@ impl Projection {
             EventContent::TurnEnd(data) => {
                 let open: Vec<String> = self.thinking_rows.keys().cloned().collect();
                 for request_id in open {
-                    self.close_thinking(&request_id);
+                    self.close_thinking(&request_id, event.create_at);
                 }
-                self.request_starts.clear();
                 self.turn_end(sequence, &data.outcome);
             }
             EventContent::InputConsumed(data) => {
+                self.inputs.retain(|input| input.input_id != data.input_id);
                 if let Some(index) = self.input_rows.remove(&data.input_id) {
                     self.row(index).pending = false;
                 }
@@ -640,7 +615,6 @@ impl Projection {
             | EventContent::InputWithdraw(_)
             | EventContent::TurnStart(_)
             | EventContent::ModelUsage(_)
-            | EventContent::ToolUseStart(_)
             | EventContent::ToolStart(_)
             | EventContent::Other => {}
         }
@@ -686,6 +660,11 @@ impl Projection {
         self.ended = Some((sequence, end));
     }
 
+    pub fn active_output(&mut self, output: &dim_agent_types::ActiveOutput) {
+        self.thinking_characters
+            .insert(output.request_id.clone(), output.thinking_characters);
+    }
+
     pub fn set_running(&mut self, running: bool) {
         self.running = running;
     }
@@ -694,14 +673,21 @@ impl Projection {
     /// It cuts just before `submitted`, where its input was written, even
     /// when it enters the transcript later (timeline UI §4.1), and a message
     /// stays pending until the model consumes it (§4.8).
+    ///
+    /// The row carries the operator's words. Context a capability appended
+    /// after them is not theirs, so each `dim-hooks` block becomes its own row
+    /// right after this one (`crates/dim-agent-types/src/markup.rs`). Each
+    /// names this row as its parent, so whatever settles the message settles
+    /// them and they never commit it on their own.
     fn push_user(&mut self, input_id: &str, sequence: u64, submitted: u64, user: &UserInput) {
-        let text = text_of(&user.content);
+        let text = user_text(&user.content);
         let kind = if ShellRun::parse(&text).is_some() {
             RowKind::Shell
         } else {
             RowKind::UserMessage
         };
         let index = self.push(format!("user-{sequence}"), kind, text);
+        let row_id = self.rows[index].row_id.clone();
         let row = self.row(index);
         row.cut = Some(submitted.saturating_sub(1));
         row.display = user_display(&user.content);
@@ -709,14 +695,18 @@ impl Projection {
         if row.pending {
             self.input_rows.insert(input_id.to_owned(), index);
         }
+        for (at, body) in hook_contexts(&user.content).into_iter().enumerate() {
+            let hook = self.push(format!("hook-{sequence}-{at}"), RowKind::HookContext, body);
+            self.row(hook).parent_row = Some(row_id.clone());
+        }
     }
 
     /// The content of a held message, to re-submit it as Steer.
     pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
-        self.held
+        self.inputs
             .iter()
-            .find(|(id, _, _)| id == input_id)
-            .map(|(_, _, user)| user)
+            .find(|input| input.input_id == input_id && !input.applied)
+            .and_then(|input| input.user.as_ref())
     }
 
     pub fn add_approval(
@@ -735,7 +725,11 @@ impl Projection {
         {
             return;
         }
-        if let Some(index) = self.tool_rows.get(&request_id).copied() {
+        if let Some(index) = self
+            .tool_rows
+            .iter()
+            .find_map(|((_, call), index)| (call == &request_id).then_some(*index))
+        {
             self.row(index).parked = true;
         }
         self.approvals.push(ApprovalView {
@@ -782,27 +776,20 @@ impl Projection {
     }
 
     pub fn snapshot(&self) -> ViewSnapshot {
-        let mut pending: Vec<_> = self.input_rows.iter().collect();
-        pending.sort_by_key(|(_, index)| **index);
+        let mut pending: Vec<_> = self.inputs.iter().collect();
+        pending.sort_by_key(|input| (!input.applied, input.sequence));
         let queued = pending
             .into_iter()
-            .map(|(id, index)| {
-                let row = &self.rows[*index];
-                QueuedInput {
-                    id: id.clone(),
-                    text: row.text.clone(),
-                    display: row.display.clone(),
-                    held: false,
-                    recallable: false,
-                }
+            .filter_map(|input| {
+                let user = input.user.as_ref()?;
+                Some(QueuedInput {
+                    id: input.input_id.clone(),
+                    text: user_text(&user.content),
+                    display: user_display(&user.content),
+                    held: !input.applied,
+                    recallable: !input.applied && recallable(&user.content),
+                })
             })
-            .chain(self.held.iter().map(|(id, _, user)| QueuedInput {
-                id: id.clone(),
-                text: text_of(&user.content),
-                display: user_display(&user.content),
-                held: true,
-                recallable: matches!(user.content.as_slice(), [ContentBlock::Text { .. }]),
-            }))
             .collect();
         ViewSnapshot {
             rows: self.rows.clone(),
@@ -812,15 +799,319 @@ impl Projection {
             queued,
             tasks: self.tasks.clone(),
             ended: self.ended,
-            goal: self.goal.goal(),
+            goal: self.goal.clone(),
             retry: self.retry.clone(),
             ..ViewSnapshot::default()
         }
     }
 
-    /// The goal in force on this branch, folded from its events so far.
-    pub fn goal(&self) -> Option<crate::goal::Goal> {
-        self.goal.goal()
+    pub fn exec_started(
+        &mut self,
+        branch_id: &str,
+        data: &dim_agent_types::ExecStartedData,
+        event_id: &str,
+        started_at: u64,
+    ) {
+        if self
+            .tasks
+            .iter()
+            .any(|task| task.branch_id == branch_id && task.id == event_id)
+        {
+            return;
+        }
+
+        let label = self
+            .rows
+            .iter()
+            .find(|row| {
+                row.call_id.as_deref() == Some(data.call_id.as_str())
+                    && row.batch.as_deref() == Some(data.request_id.as_str())
+            })
+            .and_then(|row| row.tool_input.as_ref()?.get("command")?.as_str())
+            .filter(|command| !command.is_empty())
+            .unwrap_or(data.description.as_str())
+            .to_owned();
+        let target = TaskTarget {
+            branch_id: branch_id.to_owned(),
+            task_id: data.task_id.clone(),
+        };
+        self.tasks.push(TaskView {
+            id: event_id.to_owned(),
+            branch_id: branch_id.to_owned(),
+            kind: TaskKind::Command(target.clone()),
+            label,
+            started_at,
+            finished: None,
+        });
+        self.background
+            .insert(target, (data.request_id.clone(), data.call_id.clone()));
+    }
+    pub fn delegation_started(
+        &mut self,
+        branch_id: &str,
+        data: &dim_agent_types::CollaborationRequestData,
+        event_id: &str,
+        started_at: u64,
+    ) {
+        if self
+            .tasks
+            .iter()
+            .any(|task| task.branch_id == branch_id && task.id == event_id)
+        {
+            return;
+        }
+
+        let task = TaskView {
+            id: event_id.to_owned(),
+            branch_id: branch_id.to_owned(),
+            kind: TaskKind::Member(MemberTarget::Starting),
+            label: data.prompt.lines().next().unwrap_or("").to_owned(),
+            started_at,
+            finished: None,
+        };
+        if self.owns(branch_id)
+            && let Some(index) = self
+                .tool_rows
+                .get(&(data.request_id.clone(), data.call_id.clone()))
+                .copied()
+            && self.rows[index].batch.as_deref() == Some(data.request_id.as_str())
+            && self.rows[index].member.is_none()
+        {
+            let (agent, agent_id) = match &data.target {
+                CollaborationTarget::Agent { agent_id }
+                | CollaborationTarget::Member { agent_id, .. } => {
+                    let name = self.agent_names.get(agent_id).unwrap_or(agent_id);
+                    (
+                        name.clone(),
+                        (!agent_id.contains(':')).then(|| agent_id.clone()),
+                    )
+                }
+                CollaborationTarget::Temporary { profile } => (profile.name.clone(), None),
+            };
+            self.row(index).member = Some(Box::new(MemberCard {
+                task: task.clone(),
+                agent,
+                agent_id,
+                prompt: data.prompt.clone(),
+                model: None,
+                activity: None,
+                observation: None,
+            }));
+            self.cards.insert(event_id.to_owned(), index);
+        }
+        self.tasks.push(task);
+    }
+    pub fn delegation_delivered(
+        &mut self,
+        branch_id: &str,
+        data: &dim_agent_types::CollaborationDeliveredData,
+        started_at: u64,
+        replayed: bool,
+    ) {
+        let starting = |task: &TaskView| {
+            task.branch_id == branch_id
+                && task.id == data.op_event_id
+                && task.finished.is_none()
+                && task.kind == TaskKind::Member(MemberTarget::Starting)
+        };
+        let update = |task: &mut TaskView| match &data.delivery {
+            CollaborationDelivery::Ok {
+                agent_id,
+                session_id,
+                ..
+            } => {
+                task.kind = TaskKind::Member(if agent_id.contains(':') {
+                    MemberTarget::Provider
+                } else {
+                    MemberTarget::Session(session_id.clone())
+                });
+            }
+            CollaborationDelivery::Error { error } => {
+                task.finished = Some(TaskFinish {
+                    at: started_at,
+                    status: "Failed",
+                    outcome: TaskOutcome::Failed,
+                    replayed,
+                    text: serde_json::to_value(error)
+                        .expect("typed delivery error serializes")
+                        .as_str()
+                        .expect("typed delivery error is a string")
+                        .to_owned(),
+                    exit_code: None,
+                });
+            }
+        };
+        if let Some(task) = self.tasks.iter_mut().find(|task| starting(task)) {
+            update(task);
+        }
+        let delivered = match &data.delivery {
+            CollaborationDelivery::Ok { agent_id, .. } => Some((
+                self.agent_names.get(agent_id).unwrap_or(agent_id).clone(),
+                (!agent_id.contains(':')).then(|| agent_id.clone()),
+            )),
+            CollaborationDelivery::Error { .. } => None,
+        };
+        if let Some(card) = self.card(branch_id, &data.op_event_id)
+            && starting(&card.task)
+        {
+            update(&mut card.task);
+            match delivered {
+                Some((name, agent_id)) if card.agent_id.is_some() => {
+                    card.agent = name;
+                    card.agent_id = agent_id;
+                }
+                Some(_) => {}
+                None => card.agent_id = None,
+            }
+        }
+    }
+
+    pub fn pending_exec(&mut self, branch: &str, task: &dim_agent_types::PendingExec) {
+        if self
+            .tasks
+            .iter()
+            .any(|known| known.branch_id == branch && known.id == task.event_id)
+        {
+            return;
+        }
+        let target = TaskTarget {
+            branch_id: branch.into(),
+            task_id: task.task_id.clone(),
+        };
+        self.tasks.push(TaskView {
+            id: task.event_id.clone(),
+            branch_id: branch.into(),
+            kind: TaskKind::Command(target.clone()),
+            label: task.description.clone(),
+            started_at: task.started_at,
+            finished: None,
+        });
+        self.background
+            .insert(target, (task.request_id.clone(), task.call_id.clone()));
+    }
+
+    pub fn clear_inventory(&mut self, branch: &str) {
+        self.questions.clear_branch(branch);
+        self.tasks
+            .retain(|task| task.branch_id != branch || task.finished.is_some());
+        self.background
+            .retain(|target, _| target.branch_id != branch);
+        if self.owns(branch) {
+            self.inputs.clear();
+            for (_, index) in self.input_rows.drain() {
+                Arc::make_mut(&mut self.rows[index]).pending = false;
+            }
+        }
+    }
+
+    pub fn pending_input(&mut self, input: &dim_agent_types::PendingInput) {
+        if input.user.is_none() {
+            return;
+        }
+        if input.applied
+            && let Some(index) = self.rows.iter().position(|row| {
+                row.cut == Some(input.sequence.saturating_sub(1))
+                    && row.kind == RowKind::UserMessage
+            })
+        {
+            self.row(index).pending = true;
+            self.input_rows.insert(input.input_id.clone(), index);
+        }
+        self.inputs.push(input.clone());
+    }
+
+    pub fn prepend(&mut self, mut older: Self) {
+        older.rows.retain(|row| {
+            if let Some(existing) = self
+                .rows
+                .iter_mut()
+                .find(|existing| existing.row_id == row.row_id)
+            {
+                if matches!(
+                    row.kind,
+                    RowKind::AssistantMessage | RowKind::StreamingAssistant
+                ) {
+                    let existing = Arc::make_mut(existing);
+                    existing.text = format!("{}{}", row.text, existing.text);
+                } else if row.kind == RowKind::ToolCall && row.batch == existing.batch {
+                    let existing = Arc::make_mut(existing);
+                    existing.tool_lookup_done |= row.tool_lookup_done;
+                    if existing.tool_input.is_none() {
+                        existing.tool_name = row.tool_name.clone();
+                        existing.tool_input = row.tool_input.clone();
+                    }
+                }
+                false
+            } else {
+                true
+            }
+        });
+        let count = older.rows.len();
+        for map in [
+            &mut self.assistant_rows,
+            &mut self.input_rows,
+            &mut self.cards,
+        ] {
+            for index in map.values_mut() {
+                *index += count;
+            }
+        }
+        for index in self.tool_rows.values_mut() {
+            *index += count;
+        }
+        for index in self.compaction_rows.values_mut() {
+            *index += count;
+        }
+        for thought in self.thinking_rows.values_mut() {
+            thought.index += count;
+        }
+        older.rows.append(&mut self.rows);
+        self.rows = older.rows;
+    }
+
+    pub fn trim(&mut self, limit: usize) {
+        let count = self.rows.len().saturating_sub(limit);
+        if count == 0 {
+            return;
+        }
+        self.rows.drain(..count);
+        for map in [
+            &mut self.assistant_rows,
+            &mut self.input_rows,
+            &mut self.cards,
+        ] {
+            map.retain(|_, index| match index.checked_sub(count) {
+                Some(at) => {
+                    *index = at;
+                    true
+                }
+                None => false,
+            });
+        }
+        self.tool_rows
+            .retain(|_, index| match index.checked_sub(count) {
+                Some(at) => {
+                    *index = at;
+                    true
+                }
+                None => false,
+            });
+        self.compaction_rows
+            .retain(|_, index| match index.checked_sub(count) {
+                Some(at) => {
+                    *index = at;
+                    true
+                }
+                None => false,
+            });
+        self.thinking_rows
+            .retain(|_, thought| match thought.index.checked_sub(count) {
+                Some(at) => {
+                    thought.index = at;
+                    true
+                }
+                None => false,
+            });
     }
 
     pub fn tasks(&self) -> &[TaskView] {
@@ -841,11 +1132,86 @@ impl Projection {
         self.running
     }
 
+    pub fn missing_tool(&self) -> Option<(String, String)> {
+        self.rows.iter().find_map(|row| {
+            if row.kind != RowKind::ToolCall || row.tool_lookup_done {
+                return None;
+            }
+            Some((row.batch.clone()?, row.call_id.clone()?))
+        })
+    }
+
+    pub fn tool_lookup(
+        &mut self,
+        request: &str,
+        call: &str,
+        origin: Option<dim_agent_types::ToolUseData>,
+    ) {
+        if let Some(index) = self.rows.iter().position(|row| {
+            row.batch.as_deref() == Some(request) && row.call_id.as_deref() == Some(call)
+        }) {
+            let row = self.row(index);
+            row.tool_lookup_done = true;
+            if let Some(origin) = origin {
+                row.tool_name = Some(origin.call.name);
+                row.tool_input = Some(Value::Object(origin.call.input));
+            }
+        }
+    }
+
     pub fn rows(&self) -> &[Arc<ViewRow>] {
         &self.rows
     }
 
     /// The lines `main` recorded, without `main` itself (design §14).
+    pub fn directory(&mut self, entry: &dim_client::wire::BranchEntry) {
+        if entry.branch_id == "main" {
+            return;
+        }
+        let previous = self
+            .lines
+            .iter()
+            .position(|line| line.id == entry.branch_id);
+        if previous.is_some()
+            && entry.purpose.is_none()
+            && entry.cut_messages.is_none()
+            && entry.end.is_none()
+        {
+            return;
+        }
+        let view = LineView {
+            id: entry.branch_id.clone(),
+            parent: entry.parent_branch_id.clone(),
+            purpose: entry.purpose.clone().unwrap_or_default(),
+            state: if entry.state == "ended" {
+                match &entry.end {
+                    Some(end) => match (&end.source, &end.ancestor) {
+                        (_, Some(ancestor)) => LineState::EndedWith(ancestor.clone()),
+                        (BranchSource::Tool { .. }, None) => LineState::EndedItself,
+                        (BranchSource::Host { .. }, None) => LineState::EndedByOperation,
+                    },
+                    None => LineState::Ended,
+                }
+            } else {
+                LineState::Waiting
+            },
+            cut: entry
+                .branch_point
+                .zip(entry.cut_messages)
+                .map(|(sequence, messages)| LineCut {
+                    sequence,
+                    messages: messages
+                        .try_into()
+                        .expect("message count fits the client address space"),
+                }),
+        };
+        if let Some(index) = previous {
+            self.lines[index] = view;
+        } else {
+            self.lines.push(view);
+        }
+    }
+
     pub fn line_views(&self) -> &[LineView] {
         &self.lines
     }
@@ -872,20 +1238,22 @@ impl Projection {
         })
     }
 
-    /// Adopts a stored run of this Session from `branch_id`.
+    /// Adopts a stored run of this Session from `branch_id`. Every caller
+    /// reads the run's own record, so a run that already ended is history.
     pub fn set_workflow(&mut self, branch_id: &str, run: WorkflowRun) {
         let finished = (!run.state.unfinished()).then(|| {
-            let (status, failed) = match run.state {
-                WorkflowState::Completed => ("Completed", false),
-                WorkflowState::Failed => ("Failed", true),
-                WorkflowState::Stopped => ("Stopped", false),
-                WorkflowState::Interrupted => ("Interrupted", true),
+            let (status, outcome) = match run.state {
+                WorkflowState::Completed => ("Completed", TaskOutcome::Completed),
+                WorkflowState::Failed => ("Failed", TaskOutcome::Failed),
+                WorkflowState::Stopped => ("Stopped", TaskOutcome::Stopped),
+                WorkflowState::Interrupted => ("Interrupted", TaskOutcome::Failed),
                 WorkflowState::Running | WorkflowState::Stopping => unreachable!("terminal"),
             };
             TaskFinish {
                 at: run.ended_at.unwrap_or(run.created_at),
                 status,
-                failed,
+                outcome,
+                replayed: true,
                 text: String::new(),
                 exit_code: None,
             }
@@ -1095,9 +1463,12 @@ impl Projection {
             streaming: false,
             elapsed_ms: None,
             tone: None,
+            call_id: None,
+            tool_lookup_done: false,
             tool_name: None,
             tool_input: None,
             batch: None,
+            parent_call_id: None,
             pending: false,
             parked: false,
             result_text: None,
@@ -1107,10 +1478,27 @@ impl Projection {
             member: None,
             cut: None,
             line: None,
+            parent_row: None,
             compaction: None,
             failure: None,
+            reportable: false,
         }));
         self.rows.len() - 1
+    }
+
+    pub fn mark_reportable_error(&mut self, previous_rows: usize) -> bool {
+        if previous_rows >= self.rows.len() {
+            return false;
+        }
+        let Some(row) = self
+            .rows
+            .last_mut()
+            .filter(|row| row.kind == RowKind::Error)
+        else {
+            return false;
+        };
+        Arc::make_mut(row).reportable = true;
+        true
     }
 
     fn push_error(&mut self, text: String, failure: Option<FailureDetail>) {
@@ -1141,8 +1529,21 @@ impl Projection {
             return;
         }
         let index = self.open_thinking(request_id);
+        if let Some(started_at) = progress.thinking_started_at {
+            self.thinking_rows
+                .get_mut(request_id)
+                .expect("opened above")
+                .started_at
+                .get_or_insert(started_at);
+        }
         let thought = &self.thinking_rows[request_id];
-        if thought.written.chars().count() as u64 != progress.thinking_offset {
+        if self
+            .thinking_characters
+            .get(request_id)
+            .copied()
+            .unwrap_or(0)
+            != progress.thinking_offset
+        {
             return;
         }
         let text = format!("{}{}", thought.written, progress.thinking);
@@ -1165,18 +1566,23 @@ impl Projection {
             OpenThought {
                 index,
                 written: String::new(),
+                started_at: None,
             },
         );
         index
     }
 
     /// A thought settles when the request moves on, as the Timeline holds
-    /// it: progress that was never written (an interrupted thought) goes.
-    fn close_thinking(&mut self, request_id: &str) {
+    /// it: progress that was never written (an interrupted thought) goes, and
+    /// its duration spans its first event to `closed_at`.
+    fn close_thinking(&mut self, request_id: &str, closed_at: u64) {
         if let Some(thought) = self.thinking_rows.remove(request_id) {
             let row = self.row(thought.index);
             row.streaming = false;
             row.text = thought.written;
+            row.elapsed_ms = thought
+                .started_at
+                .map(|start| closed_at.saturating_sub(start));
         }
     }
 
@@ -1187,8 +1593,73 @@ impl Projection {
         }
     }
 
-    fn complete_tool(&mut self, call_id: &str, result: &ToolResult) {
-        let Some(index) = self.tool_rows.remove(call_id) else {
+    fn finish_compaction(&mut self, sequence: u64, start: Option<u64>, view: CompactionView) {
+        let index = match start.and_then(|start| self.compaction_rows.remove(&start)) {
+            Some(index) => index,
+            None => self.push(
+                format!("compaction-{sequence}"),
+                RowKind::Compaction,
+                String::new(),
+            ),
+        };
+        self.row(index).compaction = Some(view);
+    }
+
+    pub fn compaction_detail(
+        &mut self,
+        event_id: &str,
+        sequence: u64,
+        state: CompactionDetailState,
+        data: Option<&dim_agent_types::ContextCompactionData>,
+    ) -> bool {
+        let Some(index) = self.rows.iter().position(|row| {
+            row.compaction
+                .as_ref()
+                .and_then(|view| view.detail.as_ref())
+                .is_some_and(|detail| detail.event_id == event_id && detail.sequence == sequence)
+        }) else {
+            return false;
+        };
+        let view = self.row(index).compaction.as_mut().expect("compaction row");
+        if let Some(data) = data {
+            let loaded = compaction_view(&data.outcome);
+            view.text = loaded.text;
+        } else {
+            view.text = "".into();
+        }
+        view.detail.as_mut().expect("detail identity").state = state;
+        true
+    }
+
+    fn complete_tool(
+        &mut self,
+        request_id: &str,
+        call_id: &str,
+        result: &ToolResult,
+        create_if_missing: bool,
+    ) {
+        let index = self
+            .tool_rows
+            .remove(&(request_id.to_owned(), call_id.to_owned()))
+            .or_else(|| {
+                self.rows.iter().position(|row| {
+                    row.call_id.as_deref() == Some(call_id)
+                        && row.batch.as_deref() == Some(request_id)
+                })
+            })
+            .or_else(|| {
+                if !create_if_missing {
+                    return None;
+                }
+                let row_id =
+                    serde_json::to_string(&(request_id, call_id)).expect("tool identity is JSON");
+                let index = self.push(row_id, RowKind::ToolCall, String::new());
+                let row = self.row(index);
+                row.call_id = Some(call_id.into());
+                row.batch = Some(request_id.into());
+                Some(index)
+            });
+        let Some(index) = index else {
             return;
         };
         let row = self.row(index);
@@ -1215,20 +1686,7 @@ fn compaction_view(outcome: &ContextCompactionResult) -> CompactionView {
             ..
         } => {
             let text = replacement_text(replacement, *replacement_parts);
-            let insufficient = diagnostics
-                .insufficient_space
-                .as_ref()
-                .map(|space| {
-                    space
-                        .parts
-                        .iter()
-                        .map(|part| CompactionPartSize {
-                            part: compaction_part(part.part),
-                            tokens: part.tokens,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let insufficient = compaction_sizes(diagnostics.insufficient_space.as_ref());
             (CompactionState::Completed, text, insufficient)
         }
         ContextCompactionResult::Skipped { reason, .. } => {
@@ -1242,10 +1700,22 @@ fn compaction_view(outcome: &ContextCompactionResult) -> CompactionView {
         }
     };
     CompactionView {
+        detail: None,
         state,
-        text,
+        text: text.into(),
         insufficient,
     }
+}
+
+fn compaction_sizes(space: Option<&dim_agent_types::InsufficientSpace>) -> Vec<CompactionPartSize> {
+    space
+        .into_iter()
+        .flat_map(|space| &space.parts)
+        .map(|part| CompactionPartSize {
+            part: compaction_part(part.part),
+            tokens: part.tokens,
+        })
+        .collect()
 }
 
 /// A part of the insufficient-space mark, as this client names it.
@@ -1348,11 +1818,33 @@ fn one_line(text: &str) -> String {
 /// The marker a loaded Skill block starts with (Skills §9).
 const SKILL_BLOCK: &str = "<dim-skill name=\"";
 
+/// The text of `blocks` verbatim, one block per line. For the model's own
+/// text — a tool result, a provider message — where a marker is part of what
+/// it said (`<dim-hooks …>` in a tool result stays as written).
 fn text_of(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            ContentBlock::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The operator's own words of a message: its text blocks, without the runtime
+/// context a capability appended after them
+/// (`crates/dim-agent-types/src/markup.rs`). The first block is always theirs.
+/// A later block that opens any of the vocabulary's names is not theirs; only
+/// `dim-hooks` and `dim-skill` have a row of their own.
+pub(crate) fn user_text(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
         .enumerate()
-        .filter(|(index, block)| loaded_skill(*index, block).is_none())
+        .filter(|(index, block)| match block {
+            ContentBlock::Text { text } => !markup::runtime_context(*index, text),
+            ContentBlock::Image { .. } => true,
+        })
         .filter_map(|(_, block)| match block {
             ContentBlock::Text { text } => Some(text.as_str()),
             ContentBlock::Image { .. } => None,
@@ -1361,16 +1853,84 @@ fn text_of(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-/// The Skill a loaded block names: a text block after the first that starts
-/// with the marker carries a Skill's instructions, which are shown as one
-/// line instead.
-fn loaded_skill(index: usize, block: &ContentBlock) -> Option<String> {
-    if index == 0 {
-        return None;
+/// The body of each hook context a message carries, in order.
+pub(crate) fn hook_contexts(blocks: &[ContentBlock]) -> Vec<String> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            let ContentBlock::Text { text } = block else {
+                return None;
+            };
+            (markup::runtime_element(index, text) == Some("dim-hooks"))
+                .then(|| element_body(text, "</dim-hooks>"))
+        })
+        .collect()
+}
+
+/// The one line that names a loaded Skill, in the interface language: the
+/// message's presentation and the plain log both say it.
+pub(crate) fn skill_loaded_label(name: &str) -> String {
+    crate::ui::i18n::tf("Skill loaded: {name}", &[("name", name)])
+}
+
+/// The text of each message block the log prints after the operator's words, in
+/// the order the content has them: one line per loaded Skill, then a hook's
+/// context as the row names it. `None` for the words, which the `> ` record has.
+pub(crate) fn context_lines(blocks: &[ContentBlock]) -> Vec<String> {
+    blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| match block {
+            ContentBlock::Text { text } => {
+                if let Some(name) = loaded_skill(index, block) {
+                    Some(skill_loaded_label(&name))
+                } else if markup::runtime_element(index, text) == Some("dim-hooks") {
+                    let body = element_body(text, "</dim-hooks>");
+                    Some(hook_context_label(body.trim().lines().count().max(1)))
+                } else {
+                    None
+                }
+            }
+            ContentBlock::Image { .. } => None,
+        })
+        .collect()
+}
+
+/// The one line that names a hook's context, in the interface language: the
+/// TUI row and the plain log both say it. `lines` is the stored line count of
+/// the body, which is one for a paragraph the terminal will wrap.
+pub(crate) fn hook_context_label(lines: usize) -> String {
+    match lines {
+        1 => crate::ui::i18n::tf("Hook context · {count} line", &[("count", "1")]),
+        count => crate::ui::i18n::tf(
+            "Hook context · {count} lines",
+            &[("count", &count.to_string())],
+        ),
     }
+}
+
+/// Whether a queued message can go back into the draft by Shift+Left: its own
+/// words first, then only context the runtime appended for the model. An input
+/// with an image or with a second operator text block stays queued, as it did
+/// when the rule was "exactly one text block" — the notice about attachments
+/// depends on that, not on appended context.
+fn recallable(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().enumerate().all(|(index, block)| match block {
+        ContentBlock::Text { text } => index == 0 || markup::runtime_context(index, text),
+        ContentBlock::Image { .. } => false,
+    })
+}
+
+/// The Skill a loaded block names: a text block after the first that opens the
+/// Skill element names it, and its instructions are shown as one line instead.
+fn loaded_skill(index: usize, block: &ContentBlock) -> Option<String> {
     let ContentBlock::Text { text } = block else {
         return None;
     };
+    if markup::runtime_element(index, text) != Some("dim-skill") {
+        return None;
+    }
     let rest = text.strip_prefix(SKILL_BLOCK)?;
     let name = rest.split('"').next()?;
     (!name.is_empty()).then(|| {
@@ -1381,8 +1941,8 @@ fn loaded_skill(index: usize, block: &ContentBlock) -> Option<String> {
     })
 }
 
-/// The presentation of an operator message: its text with an image marker per
-/// image and one line per loaded Skill; `None` when its text is the message.
+/// The presentation of an operator message: its words with an image marker per
+/// image and one line per loaded Skill; `None` when its words are the message.
 fn user_display(blocks: &[ContentBlock]) -> Option<String> {
     let mut images = 0;
     let mut skills = Vec::new();
@@ -1391,6 +1951,7 @@ fn user_display(blocks: &[ContentBlock]) -> Option<String> {
         match block {
             ContentBlock::Text { text } => match loaded_skill(index, block) {
                 Some(name) => skills.push(name),
+                None if markup::runtime_context(index, text) => {}
                 None => lines.push(text.clone()),
             },
             ContentBlock::Image { .. } => {
@@ -1404,7 +1965,7 @@ fn user_display(blocks: &[ContentBlock]) -> Option<String> {
     }
     let mut display = lines.join("\n");
     for skill in skills {
-        let line = crate::ui::i18n::tf("Skill loaded: {name}", &[("name", &skill)]);
+        let line = skill_loaded_label(&skill);
         if !display.is_empty() {
             display.push('\n');
         }
@@ -1604,12 +2165,120 @@ mod tests {
         projection.progress(&progress("Look at the\nparser", 0));
         let rows = projection.snapshot().rows;
         assert_eq!(rows[0].text, "Look at the\nparser first");
-        assert_eq!(rows[0].elapsed_ms, Some(3000));
+        assert_eq!(
+            rows[0].elapsed_ms, None,
+            "an open thought claims no duration"
+        );
 
         apply(&mut projection, &[step(6, "text", "Done.")]);
         let rows = projection.snapshot().rows;
         assert!(!rows[0].streaming);
+        assert_eq!(rows[0].elapsed_ms, Some(1000), "the span of the block");
         assert_eq!(rows[1].kind, RowKind::StreamingAssistant);
+    }
+
+    #[test]
+    fn progress_start_times_a_thought_before_its_first_written_event() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                serde_json::json!({ "id": "in-1", "sequence": 1, "create_at": 1000, "type": "input", "name": "message", "data": {} }),
+                model_start(2),
+            ],
+        );
+        let open: Progress = serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0,
+            "thinking": "weigh", "thinkingOffset": 0,
+            "thinkingStartedAt": 4000,
+        }))
+        .unwrap();
+        projection.progress(&open);
+        assert_eq!(projection.snapshot().rows[0].text, "weigh");
+
+        apply(&mut projection, &[step(5, "thinking", "weigh")]);
+        apply(&mut projection, &[step(6, "text", "Done.")]);
+        assert_eq!(
+            projection.snapshot().rows[0].elapsed_ms,
+            Some(2000),
+            "the producer start, not the first written event, times the block"
+        );
+    }
+
+    #[test]
+    fn a_tool_start_settles_a_thought_before_its_arguments_arrive() {
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                serde_json::json!({ "id": "in-1", "sequence": 1, "create_at": 1000, "type": "input", "name": "message", "data": {} }),
+                model_start(2),
+            ],
+        );
+        apply(&mut projection, &[step(5, "thinking", "weigh")]);
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "id": "tool-start-1", "sequence": 6, "create_at": 6000,
+                "type": "step", "name": "tool-use-start",
+                "data": { "turn_id": "t1", "request_id": "r1", "call_id": "call", "name": "echo" },
+            })],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(!rows[0].streaming);
+        assert_eq!(
+            rows[0].elapsed_ms,
+            Some(1000),
+            "the thought ends when the call starts, not when its arguments finish"
+        );
+    }
+
+    #[test]
+    fn a_window_keeps_an_older_calls_result_and_earlier_load_supplies_its_arguments() {
+        let result = serde_json::json!({"id":"result","sequence":20,"create_at":20,
+            "type":"step","name":"tool-result","data":{"turn_id":"turn","request_id":"request",
+            "results":[{"call_id":"call","result":{"content":"finished"}}]}});
+        let mut current = Projection::default();
+        apply(&mut current, &[result.clone(), result]);
+        assert_eq!(current.rows().len(), 1);
+        assert_eq!(current.rows()[0].result_text.as_deref(), Some("finished"));
+        assert!(current.rows()[0].tool_input.is_none());
+        let mut older = Projection::default();
+        apply(
+            &mut older,
+            &[serde_json::json!({"id":"use","sequence":3,"create_at":3,
+            "type":"step","name":"tool-use","data":{"turn_id":"turn","request_id":"request",
+            "call":{"id":"call","name":"exec","input":{"command":"echo finished"}}}})],
+        );
+        current.prepend(older);
+        assert_eq!(current.rows().len(), 1);
+        let row = &current.rows()[0];
+        assert_eq!(row.tool_name.as_deref(), Some("exec"));
+        assert_eq!(row.tool_input.as_ref().unwrap()["command"], "echo finished");
+        assert_eq!(row.result_text.as_deref(), Some("finished"));
+        assert!(!row.pending);
+    }
+
+    #[test]
+    fn a_window_resumes_reasoning_after_omitted_blocks_without_copying_the_prefix() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[step(100, "thinking", "visible")]);
+        projection.active_output(&dim_agent_types::ActiveOutput {
+            request_id: "r1".into(),
+            text_characters: 500,
+            thinking_characters: 1007,
+        });
+        projection.progress(&progress(" tail", 1007));
+        assert_eq!(projection.snapshot().rows[0].text, "visible tail");
+        apply(
+            &mut projection,
+            &[step(101, "thinking", " tail"), step(102, "text", "reply")],
+        );
+        projection.progress(&progress("next thought", 1012));
+        let rows = projection.snapshot().rows;
+        assert_eq!(rows[0].text, "visible tail");
+        assert_eq!(rows[2].text, "next thought");
     }
 
     #[test]
@@ -2070,6 +2739,100 @@ mod tests {
         crate::ui::i18n::set(previous);
     }
 
+    /// #1380: a prompt hook's context is not the operator's words. The row
+    /// carries what they sent, the hook's block becomes its own row, and the
+    /// queued form of the same input does not repeat the body.
+    #[test]
+    fn a_hooks_context_is_its_own_row_and_never_the_operators_words() {
+        let hook =
+            "<dim-hooks kind=\"prompt-submit\">\nread src/parser.rs\nkeep it short\n</dim-hooks>";
+        let input = serde_json::json!({
+            "id": "hooked", "sequence": 9, "create_at": 1,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [
+                {"type": "text", "text": "why does the parser stall?"},
+                {"type": "text", "text": hook},
+            ]}, "mode": "queue"},
+        });
+        let applied = serde_json::json!({
+            "id": "hooked-applied", "sequence": 10, "create_at": 1,
+            "type": "input", "name": "applied", "data": {"input_id": "hooked"},
+        });
+        let mut projection = Projection::default();
+        apply(&mut projection, &[input]);
+
+        // While it waits, the queue shows the operator's words only.
+        let queued = projection.snapshot().queued;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].text, "why does the parser stall?");
+        assert_eq!(
+            queued[0].display, None,
+            "the hook's body is not part of the message's presentation"
+        );
+        assert!(
+            queued[0].recallable,
+            "a message a hook added context to can still go back to the draft"
+        );
+
+        apply(&mut projection, &[applied]);
+        let rows = projection.snapshot().rows;
+        assert_eq!(rows[0].kind, RowKind::UserMessage);
+        assert_eq!(rows[0].text, "why does the parser stall?");
+        assert_eq!(rows[1].kind, RowKind::HookContext);
+        assert_eq!(rows[1].text, "read src/parser.rs\nkeep it short");
+        assert_eq!(
+            rows.len(),
+            2,
+            "one hook block is one row, and the message is the other"
+        );
+    }
+
+    /// The first block is the operator's even when it opens a hook marker, and
+    /// an input carrying their own second text block stays out of the draft as
+    /// it did before, so the attachments notice keeps its meaning.
+    #[test]
+    fn an_operators_own_marker_is_their_words_and_two_blocks_stay_queued() {
+        let input = |id: &str, sequence: u64, content: serde_json::Value| {
+            serde_json::json!({
+                "id": id, "sequence": sequence, "create_at": 1,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": content}, "mode": "queue"},
+            })
+        };
+        let mut projection = Projection::default();
+        apply(
+            &mut projection,
+            &[
+                input(
+                    "typed",
+                    1,
+                    serde_json::json!([{"type": "text", "text": "<dim-hooks kind=\"prompt-submit\">mine</dim-hooks>"}]),
+                ),
+                input(
+                    "two",
+                    2,
+                    serde_json::json!([
+                        {"type": "text", "text": "first paragraph"},
+                        {"type": "text", "text": "second paragraph"},
+                    ]),
+                ),
+            ],
+        );
+        let queued = projection.snapshot().queued;
+        let typed = queued.iter().find(|input| input.id == "typed").unwrap();
+        assert_eq!(
+            typed.text,
+            "<dim-hooks kind=\"prompt-submit\">mine</dim-hooks>"
+        );
+        assert!(typed.recallable);
+        let two = queued.iter().find(|input| input.id == "two").unwrap();
+        assert_eq!(two.text, "first paragraph\nsecond paragraph");
+        assert!(
+            !two.recallable,
+            "two operator blocks are not what Shift+Left scrolls back"
+        );
+    }
+
     #[test]
     fn a_queued_message_cuts_at_its_submission_and_a_withdrawn_one_is_not_counted() {
         let input = |sequence: u64, id: &str, text: &str, mode: &str| {
@@ -2277,9 +3040,32 @@ mod tests {
         assert_eq!(
             rows[0].compaction,
             Some(CompactionView {
+                detail: None,
                 state: CompactionState::Running,
-                text: String::new(),
+                text: String::new().into(),
                 insufficient: Vec::new(),
+            })
+        );
+        let mut lazy = Projection::default();
+        apply(
+            &mut lazy,
+            &[
+                compaction_start(3),
+                serde_json::json!({"id":"event-4","sequence":4,"create_at":4,
+                "type":"display","name":"compaction","data":{"start":3,"strategy":"summary"}}),
+            ],
+        );
+        let rows = lazy.snapshot().rows;
+        assert_eq!(rows.len(), 1, "the summary settles the same running row");
+        let view = rows[0].compaction.as_ref().unwrap();
+        assert_eq!(view.state, CompactionState::Completed);
+        assert!(view.text.is_empty(), "the body has not been requested");
+        assert_eq!(
+            view.detail,
+            Some(CompactionDetail {
+                event_id: "event-4".into(),
+                state: CompactionDetailState::Unloaded,
+                sequence: 4
             })
         );
 
@@ -2302,6 +3088,7 @@ mod tests {
         assert_eq!(
             rows[0].compaction,
             Some(CompactionView {
+                detail: None,
                 state: CompactionState::Completed,
                 text: "<dim-summary>\nThe parser is half done.\n</dim-summary>".into(),
                 insufficient: Vec::new(),
@@ -2355,7 +3142,7 @@ mod tests {
             .map(|row| {
                 let compaction = row.compaction.as_ref().expect("a compaction row");
                 assert_eq!(compaction.state, CompactionState::Completed);
-                compaction.text.as_str()
+                compaction.text.as_ref()
             })
             .collect();
         assert_eq!(summaries, [summary, summary]);
@@ -2402,7 +3189,7 @@ mod tests {
             .iter()
             .map(|row| {
                 let compaction = row.compaction.as_ref().expect("a compaction row");
-                (compaction.state, compaction.text.as_str())
+                (compaction.state, compaction.text.as_ref())
             })
             .collect();
         assert_eq!(
@@ -2434,6 +3221,7 @@ mod tests {
         assert_eq!(
             rows[0].compaction,
             Some(CompactionView {
+                detail: None,
                 state: CompactionState::Failed,
                 text: "context is not configured".into(),
                 insufficient: Vec::new(),
@@ -2658,6 +3446,98 @@ mod tests {
         let rows = projection.snapshot().rows;
         let row = rows.iter().find(|row| row.kind == RowKind::Error).unwrap();
         assert_eq!(row.text, "turn failed: context preparation failed");
+    }
+
+    /// Every end the command owner writes arrives as `exec/ended` with a
+    /// status: a timeout, a kill and a non-zero exit are `failed`, and a stop
+    /// is `cancelled`. The status is authoritative, so a stop stays stopped
+    /// even though `ExecProcess::finish_background` marks its result as an
+    /// error, which is the payload the owner writes.
+    #[test]
+    fn a_timed_out_killed_or_non_zero_exit_task_finishes_failed() {
+        let started = |task: &str| {
+            serde_json::json!({
+                "id": format!("started-{task}"),
+                "sequence": 1,
+                "create_at": 1000,
+                "type": "exec",
+                "name": "started",
+                "data": {
+                    "turn_id": "turn", "request_id": "request",
+                    "call_id": task, "task_id": task,
+                    "description": "cargo build",
+                    "output_path": "/server/private/output",
+                },
+            })
+        };
+        for (task, status, result, outcome) in [
+            (
+                "timed-out",
+                "failed",
+                serde_json::json!({"content": "Command timed out.", "isError": true}),
+                TaskOutcome::Failed,
+            ),
+            (
+                "killed",
+                "failed",
+                serde_json::json!({
+                    "content": "Command terminated with SIGKILL.",
+                    "isError": true,
+                    "structuredContent": {"signal": "SIGKILL"},
+                }),
+                TaskOutcome::Failed,
+            ),
+            (
+                "exit-seven",
+                "failed",
+                serde_json::json!({
+                    "content": "Command failed with exit code 7.",
+                    "isError": true,
+                    "structuredContent": {"exitCode": 7},
+                }),
+                TaskOutcome::Failed,
+            ),
+            (
+                "done",
+                "completed",
+                serde_json::json!({"content": "Command finished."}),
+                TaskOutcome::Completed,
+            ),
+            (
+                "stopped",
+                "cancelled",
+                serde_json::json!({
+                    "content": "Command cancelled by user.",
+                    "isError": true,
+                    "structuredContent": {"signal": "SIGTERM"},
+                }),
+                TaskOutcome::Stopped,
+            ),
+        ] {
+            let mut projection = Projection::default();
+            apply(
+                &mut projection,
+                &[
+                    started(task),
+                    serde_json::json!({
+                        "id": format!("ended-{task}"),
+                        "sequence": 2,
+                        "create_at": 2000,
+                        "type": "exec",
+                        "name": "ended",
+                        "data": {"task_id": task, "status": status, "result": result},
+                    }),
+                ],
+            );
+            let snapshot = projection.snapshot();
+            let finish = snapshot.tasks[0]
+                .finished
+                .as_ref()
+                .expect("a finished task");
+            assert_eq!(finish.outcome, outcome, "{task}: {finish:?}");
+            assert_eq!(finish.at, 2000, "{task}: the end's own time");
+            assert!(!finish.replayed, "{task}: the live stream carried the end");
+        }
     }
 
     #[test]

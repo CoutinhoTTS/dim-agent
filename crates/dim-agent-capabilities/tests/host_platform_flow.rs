@@ -152,6 +152,7 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
     const CHILD_HOME: &str = "DIM_TEST_SHELL_CACHE_HOME";
     let Some(home) = std::env::var_os(CHILD_HOME) else {
         let home = std::env::temp_dir().join(format!("dim-shell-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         let home = home.canonicalize().unwrap();
         let bin = home.join("bin");

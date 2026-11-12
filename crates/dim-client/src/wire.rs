@@ -1,4 +1,4 @@
-//! Public RPC v3 product-event and progress boundary types.
+//! Public RPC product-event and progress boundary types.
 //!
 //! These are decoded once at the boundary and handed to the projection and
 //! the scrollback printer as plain values. Nothing else parses these shapes.
@@ -14,7 +14,35 @@ pub struct Event {
     pub sequence: u64,
     /// Unix milliseconds the runtime wrote the event at.
     pub create_at: u64,
+    /// v4 only: the outer call of a child tool batch.
+    pub parent_call_id: Option<String>,
     pub content: EventContent,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventNotice {
+    pub session_id: String,
+    pub branch_id: String,
+    pub event: Event,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayNotice {
+    pub session_id: String,
+    pub branch_id: String,
+    pub item: Event,
+}
+
+impl From<DisplayNotice> for EventNotice {
+    fn from(notice: DisplayNotice) -> Self {
+        Self {
+            session_id: notice.session_id,
+            branch_id: notice.branch_id,
+            event: notice.item,
+        }
+    }
 }
 #[derive(Clone, Deserialize)]
 pub struct Configuration {
@@ -71,6 +99,7 @@ pub enum EventContent {
     ToolStart(ToolStartData),
     CompactionStart(ContextCompactionStartData),
     Compaction(ContextCompactionData),
+    CompactionSummary(CompactionSummary),
     Other,
 }
 
@@ -84,6 +113,8 @@ impl<'de> Deserialize<'de> for Event {
             id: String,
             sequence: u64,
             create_at: u64,
+            #[serde(default)]
+            parent_call_id: Option<String>,
             r#type: String,
             name: String,
             data: serde_json::Value,
@@ -95,6 +126,9 @@ impl<'de> Deserialize<'de> for Event {
             ));
         }
         let content = match (wire.r#type.as_str(), wire.name.as_str()) {
+            ("display", "compaction") => EventContent::CompactionSummary(
+                serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
+            ),
             ("branch", "create") => EventContent::BranchCreate(
                 serde_json::from_value(wire.data).map_err(serde::de::Error::custom)?,
             ),
@@ -200,6 +234,7 @@ impl<'de> Deserialize<'de> for Event {
             id: wire.id,
             sequence: wire.sequence,
             create_at: wire.create_at,
+            parent_call_id: wire.parent_call_id,
             content,
         })
     }
@@ -217,6 +252,9 @@ pub struct Progress {
     /// `thinking_offset` characters of the request's `step/thinking` deltas.
     pub thinking: String,
     pub thinking_offset: u64,
+    /// Unix milliseconds at which the open thinking block started; present
+    /// while a thinking block is open.
+    pub thinking_started_at: Option<u64>,
     /// The retry this request is waiting to make, while it sleeps.
     pub retry: Option<RetryProgress>,
 }
@@ -271,4 +309,181 @@ impl History {
         }
         Ok(None)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryWindow {
+    pub events: Vec<Value>,
+    pub through: u64,
+    pub next_before: Option<u64>,
+    next_after: u64,
+}
+
+/// A display page contains complete product events or explicit display summaries.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayPage {
+    pub items: Vec<Value>,
+    pub through: u64,
+    pub next_before: Option<u64>,
+    next_after: u64,
+    done: bool,
+}
+
+impl From<DisplayPage> for HistoryWindow {
+    fn from(page: DisplayPage) -> Self {
+        Self {
+            events: page.items,
+            through: page.through,
+            next_before: page.next_before,
+            next_after: page.next_after,
+        }
+    }
+}
+
+impl From<DisplayPage> for History {
+    fn from(page: DisplayPage) -> Self {
+        Self {
+            events: page.items,
+            through: page.through,
+            next_after: page.next_after,
+            done: page.done,
+        }
+    }
+}
+
+impl HistoryWindow {
+    /// Validates a backward page against its exclusive upper bound and fixed
+    /// cutoff. A latest-turn boundary does not end the branch's history.
+    pub fn next(&self, before: Option<u64>, through: Option<u64>) -> Result<Option<u64>> {
+        if self.through > JS_MAX_SAFE_INTEGER
+            || through.is_some_and(|head| head != self.through)
+            || self.next_after > self.through
+            || self.next_before.is_some_and(|first| {
+                first == 0
+                    || first > self.next_after
+                    || before.is_some_and(|before| first >= before)
+            })
+            || !self.events.is_empty() && self.next_before.is_none()
+        {
+            return Err("Invalid backward history cursor".into());
+        }
+        let mut previous = None;
+        for event in &self.events {
+            let sequence = event["sequence"]
+                .as_u64()
+                .ok_or("Invalid history event sequence")?;
+            if previous.is_some_and(|previous| sequence <= previous)
+                || self.next_before.is_some_and(|first| sequence < first)
+                || sequence > self.next_after
+                || before.is_some_and(|before| sequence >= before)
+            {
+                return Err("History event is outside its backward page".into());
+            }
+            previous = Some(sequence);
+        }
+        Ok(self.next_before.filter(|before| *before > 1))
+    }
+}
+
+/// The record `session.attach` replies for the Session it opened. A server
+/// from before the record existed replies `{}`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attached {
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub model: Option<dim_agent_types::ModelId>,
+    #[serde(default)]
+    pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
+    /// The adopted configuration's preferences; absent when it carries none.
+    #[serde(default)]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
+    /// The Session's workspace; absent from servers older than the record.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The Session's stored title; absent from servers older than the title
+    /// fields, and `None` when it has none.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// The title's revision; 0 on a server that reports none.
+    #[serde(default)]
+    pub title_revision: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingQuestions {
+    pub branch_id: String,
+    pub through: u64,
+    pub batches: Vec<dim_agent_types::PendingQuestionBatch>,
+    pub next: Option<Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInputs {
+    pub branch_id: String,
+    pub through: u64,
+    pub inputs: Vec<dim_agent_types::PendingInput>,
+    pub next: Option<Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingTasks {
+    pub branch_id: String,
+    pub through: u64,
+    pub tasks: Vec<dim_agent_types::PendingExec>,
+    pub next: Option<Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingDelegations {
+    pub branch_id: String,
+    pub through: u64,
+    pub requests: Vec<dim_agent_types::PendingDelegation>,
+    pub next: Option<Value>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnRead {
+    pub branch_id: String,
+    pub through: u64,
+    pub turn: Option<TurnBoundary>,
+    pub output: Option<dim_agent_types::ActiveOutput>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnBoundary {
+    pub turn_id: String,
+    pub sequence: u64,
+    pub ended: bool,
+}
+
+#[derive(Deserialize)]
+pub struct BranchDirectory {
+    pub branches: Vec<BranchEntry>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchEntry {
+    pub purpose: Option<String>,
+    pub cut_messages: Option<u64>,
+    pub end: Option<dim_agent_types::BranchEndData>,
+    pub branch_id: String,
+    pub parent_branch_id: Option<String>,
+    pub branch_point: Option<u64>,
+    pub state: String,
+    pub head: u64,
+}
+
+#[derive(Deserialize)]
+pub struct MethodTable {
+    pub methods: Vec<MethodDeclaration>,
+}
+#[derive(Deserialize)]
+pub struct MethodDeclaration {
+    pub name: String,
+    pub mutating: bool,
 }

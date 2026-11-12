@@ -3,16 +3,19 @@
 //! `approval/respond`. Interrupts arrive through the caller's cancellation
 //! token; branch close and reload settle what remains.
 //!
-//! Every path that ends a request removes it under the Approval lock and
-//! writes `approval/cancelled` after releasing it, while [`Approval::replay`]
-//! reads under the same lock: the end of a replayed request always follows
-//! the replay, and a removed request is not replayed.
+//! Pending requests are replayed under the lock that removes them, so an end
+//! notification follows any replay that included the request. Requests end through
+//! a consumed `approval/respond` or an `approval/cancelled` terminal; automatic
+//! policy settlement registers removal with its terminal. A removed request is
+//! not replayed.
 use crate::{
     host::HostError,
-    permission::{Decision, Permission},
+    permission::{Decision, Permission, PermissionState},
 };
 use dim_agent_runtime::{
-    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, Timeline, rebuild_facts,
+    AgentError, CAPABILITY_RELOADING, Dispatcher, Names, QueryComparison, QueryFilter,
+    QueryOperand, QueryOutput, QueryPage, QuerySelect, QuerySpec, QueryValue, StateCell, Timeline,
+    TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, ApprovalCancelledData, ApprovalDecision, ApprovalRequestData,
@@ -22,6 +25,7 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::{
     collections::HashMap,
+    num::NonZeroU64,
     sync::{Arc, Mutex},
 };
 use tokio::sync::oneshot;
@@ -63,7 +67,9 @@ struct Inner {
 
 pub struct Approval {
     timeline: Arc<Timeline>,
+    dispatcher: Arc<Dispatcher>,
     permission: Arc<Permission>,
+    policy: Arc<StateCell<PermissionState>>,
     inner: Mutex<Inner>,
 }
 impl Approval {
@@ -77,18 +83,20 @@ impl Approval {
     /// `Ok` means the call may start. `cancel` is the caller's batch token;
     /// the last cancellation check before the start happens here. The
     /// admission decision asks Permission's advisors with the call's source
-    /// (Hooks A.6.1); the recheck after an answer is a plain decision.
+    /// (Hooks A.6.1); subsequent rechecks are plain decisions without advisors.
     pub async fn admit(
         &self,
         call: AdmitCall,
         risk: Option<&str>,
         cancel: CancellationToken,
     ) -> Result<(), HostError> {
-        let reason = match self
+        let mut policies = self.policy.subscribe();
+        let mut dispatched = self.dispatcher.watch();
+        let admission = self
             .permission
             .admit_decision(&call.call, &call.source, risk, &cancel)
-            .await?
-        {
+            .await?;
+        let reason = match admission.decision {
             Decision::Allow if cancel.is_cancelled() => {
                 return Err(HostError::Cancelled(CANCELLED.into()));
             }
@@ -100,7 +108,7 @@ impl Approval {
             return Err(HostError::Cancelled(CANCELLED.into()));
         }
         let checked = call.call.clone();
-        let (response, received) = oneshot::channel();
+        let (response, mut received) = oneshot::channel();
         let registered = cancel.clone();
         let mut registered_id = None;
         let committed = self.timeline.append_registered(
@@ -146,17 +154,116 @@ impl Approval {
             unreachable!("before transforms keep the event key");
         };
         let approval_id = &data.approval_id;
-        let decision = tokio::select! {
-            biased;
-            decision = received => decision,
-            _ = cancel.cancelled() => {
-                let taken = take(&mut self.inner.lock().unwrap(), approval_id);
-                if taken.is_some() {
-                    self.cancelled(approval_id, CANCELLED);
+        let mut pending = PendingDrop {
+            approval: self,
+            approval_id: approval_id.clone(),
+            armed: true,
+        };
+        let mut recheck = false;
+        let decision = loop {
+            tokio::select! {
+                biased;
+                decision = &mut received => break decision,
+                _ = cancel.cancelled() => {
+                    let taken = take(&mut self.inner.lock().unwrap(), approval_id);
+                    if taken.is_some() {
+                        self.cancelled(approval_id, CANCELLED);
+                    }
+                    return Err(HostError::Cancelled(CANCELLED.into()));
                 }
-                return Err(HostError::Cancelled(CANCELLED.into()));
+                decision = async {
+                    if !recheck {
+                        policies.changed().await.map_err(|_| {
+                            HostError::Cancelled(CAPABILITY_RELOADING.into())
+                        })?;
+                    }
+                    let through = loop {
+                        let state = dispatched.borrow_and_update().clone();
+                        if let Some(error) = state.failure {
+                            return Err(HostError::failed(error.to_string()));
+                        }
+                        if state.sequence >= self.timeline.committed() {
+                            break state.sequence;
+                        }
+                        dispatched.changed().await.map_err(|_| {
+                            HostError::Cancelled(CAPABILITY_RELOADING.into())
+                        })?;
+                    };
+                    self.permission.decide(&checked, risk, &cancel).await.map(|decision| (through, decision))
+                } => {
+                    recheck = false;
+                    let (through, decision) = decision?;
+                    let result = match decision {
+                        _ if cancel.is_cancelled() => Err(HostError::Cancelled(CANCELLED.into())),
+                        Decision::Allow if !admission.advisor_approval => Ok(()),
+                        Decision::Allow | Decision::Ask { .. } => continue,
+                        Decision::Deny { reason } => Err(HostError::failed(reason)),
+                    };
+                    let reason = match &result {
+                        Ok(()) => "Approval no longer required by the permission policy".into(),
+                        Err(error) => error.to_string(),
+                    };
+                    let mut deferred = false;
+                    let committed = self.timeline.append_registered(
+                        EventKind::ApprovalCancelled(ApprovalCancelledData {
+                            approval_id: approval_id.clone(),
+                            reason,
+                        }).into(),
+                        |event| {
+                            if let Some(error) = self.dispatcher.failure() {
+                                return Err(error);
+                            }
+                            if through + 1 != event.sequence
+                                || take(&mut self.inner.lock().unwrap(), approval_id).is_none()
+                            {
+                                deferred = true;
+                                return Err(AgentError::Cancelled("Approval settlement deferred".into()));
+                            }
+                            Ok(())
+                        },
+                    );
+                    if deferred {
+                        recheck = true;
+                        continue;
+                    }
+                    let terminal = committed.map_err(|error| HostError::failed(error.to_string()))?;
+                    pending.disarm();
+                    let mut published = self.timeline.watch();
+                    loop {
+                        if let Some(error) = self.timeline.failure().or_else(|| self.dispatcher.failure()) {
+                            return Err(HostError::failed(error.to_string()));
+                        }
+                        let (sequence, closed) = *published.borrow_and_update();
+                        if sequence >= terminal.sequence {
+                            break;
+                        }
+                        if closed {
+                            return Err(HostError::Cancelled(CAPABILITY_RELOADING.into()));
+                        }
+                        tokio::select! {
+                            _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
+                            changed = published.changed() => {
+                                changed.map_err(|_| HostError::Cancelled(CAPABILITY_RELOADING.into()))?;
+                            }
+                            changed = dispatched.changed() => {
+                                changed.map_err(|_| HostError::Cancelled(CAPABILITY_RELOADING.into()))?;
+                            }
+                        }
+                    }
+                    if result.is_ok()
+                        && let Decision::Deny { reason } | Decision::Ask { reason } =
+                            self.permission.decide(&checked, risk, &cancel).await?
+                    {
+                        return Err(HostError::failed(reason));
+                    }
+                    if cancel.is_cancelled() {
+                        return Err(HostError::Cancelled(CANCELLED.into()));
+                    }
+                    return result;
+                }
             }
         };
+        pending.disarm();
         match decision {
             Err(_) => Err(HostError::Cancelled(CAPABILITY_RELOADING.into())),
             Ok(None) => Err(HostError::Cancelled(CANCELLED.into())),
@@ -228,30 +335,98 @@ impl Approval {
         }
         result.await.unwrap_or(Err(ApprovalRespondError::Closed))
     }
-    /// Ends the requests an earlier generation left open. They were settled
-    /// at its unload unless the process stopped.
-    fn rebuild(&self, events: &[Arc<AgentEvent>]) -> dim_agent_runtime::Result<()> {
-        let mut open = Vec::new();
-        for event in events {
-            match &event.kind {
-                EventKind::ApprovalRequest(data) => open.push(data.approval_id.clone()),
-                EventKind::ApprovalRespond(ApprovalRespondData { approval_id, .. })
-                | EventKind::ApprovalCancelled(ApprovalCancelledData { approval_id, .. }) => {
-                    open.retain(|id| id != approval_id)
-                }
-                _ => {}
+    async fn rebuild(&self) -> dim_agent_runtime::Result<u64> {
+        let through = self.timeline.committed();
+        let mut request = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::Compare {
+                            left: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            comparison: QueryComparison::Eq,
+                            right: QueryOperand::Value {
+                                value: "approval/request".into(),
+                            },
+                        },
+                        QueryFilter::Not {
+                            condition: Box::new(QueryFilter::Exists {
+                                condition: Box::new(QueryFilter::And {
+                                    conditions: vec![
+                                        QueryFilter::In {
+                                            value: QueryOperand::Field {
+                                                path: "kind".into(),
+                                            },
+                                            values: vec![
+                                                "approval/respond".into(),
+                                                "approval/cancelled".into(),
+                                            ],
+                                        },
+                                        QueryFilter::Compare {
+                                            left: QueryOperand::Field {
+                                                path: "data.approval_id".into(),
+                                            },
+                                            comparison: QueryComparison::Eq,
+                                            right: QueryOperand::Outer {
+                                                path: "data.approval_id".into(),
+                                            },
+                                        },
+                                    ],
+                                }),
+                            }),
+                        },
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["data.approval_id".into()],
+                },
+                group_by: Vec::new(),
+                pick: None,
+                order_by: Vec::new(),
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::new(256).expect("a page contains identities"),
+                after: None,
+            }),
+        };
+        loop {
+            let reply = self.timeline.query(request.clone()).await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("approval recovery selects identity fields")
+            };
+            for row in rows {
+                let Some(QueryValue::Value {
+                    value: serde_json::Value::String(approval_id),
+                }) = row.values.into_iter().next()
+                else {
+                    return Err(AgentError::fault(
+                        "Approval",
+                        "an approval request has no approval identity",
+                    ));
+                };
+                self.timeline.append(
+                    EventKind::ApprovalCancelled(ApprovalCancelledData {
+                        approval_id,
+                        reason: "Approval cancelled: execution did not survive recovery".into(),
+                    })
+                    .into(),
+                )?;
             }
+            let Some(next) = reply.next else {
+                break;
+            };
+            request
+                .page
+                .as_mut()
+                .expect("identity queries are paged")
+                .after = Some(next);
         }
-        for approval_id in open {
-            self.timeline.append(
-                EventKind::ApprovalCancelled(ApprovalCancelledData {
-                    approval_id,
-                    reason: "Approval cancelled: execution did not survive recovery".into(),
-                })
-                .into(),
-            )?;
-        }
-        Ok(())
+        Ok(through)
     }
     fn consume(&self, event: &AgentEvent) {
         let EventKind::ApprovalRespond(data) = &event.kind else {
@@ -305,6 +480,30 @@ impl Approval {
     }
 }
 
+/// Removes a pending request when its admission future is dropped, so a
+/// cancelled child does not leave a prompt that can authorize nothing.
+struct PendingDrop<'a> {
+    approval: &'a Approval,
+    approval_id: String,
+    armed: bool,
+}
+impl PendingDrop<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for PendingDrop<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let taken = take(&mut self.approval.inner.lock().unwrap(), &self.approval_id);
+        if taken.is_some() {
+            self.approval.cancelled(&self.approval_id, CANCELLED);
+        }
+    }
+}
+
 fn take(inner: &mut Inner, approval_id: &str) -> Option<Pending> {
     let index = inner
         .pending
@@ -318,6 +517,7 @@ pub struct ApprovalPlugin {
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
     permission: Key<Permission>,
+    policy: Key<StateCell<PermissionState>>,
 }
 impl ApprovalPlugin {
     pub fn new(names: &Names<'_>) -> Result<Self, Error> {
@@ -326,6 +526,7 @@ impl ApprovalPlugin {
             timeline: names.key()?,
             dispatcher: names.key()?,
             permission: names.key()?,
+            policy: names.state_cell()?,
         })
     }
 }
@@ -338,6 +539,7 @@ impl DynPlugin for ApprovalPlugin {
             self.timeline.erase(),
             self.dispatcher.erase(),
             self.permission.erase(),
+            self.policy.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -345,9 +547,12 @@ impl DynPlugin for ApprovalPlugin {
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let permission = ctx.require_at(&self.permission)?;
+            let policy = ctx.require_at(&self.policy)?;
             let service = Arc::new(Approval {
                 timeline,
+                dispatcher: dispatcher.clone(),
                 permission,
+                policy,
                 inner: Mutex::new(Inner::default()),
             });
             let closing = service.clone();
@@ -357,7 +562,6 @@ impl DynPlugin for ApprovalPlugin {
             })?;
             let rebuild = service.clone();
             let live = service.clone();
-            let timeline = service.timeline.clone();
             dispatcher
                 .consume(
                     ctx,
@@ -365,16 +569,7 @@ impl DynPlugin for ApprovalPlugin {
                     ["approval/respond"].map(String::from).to_vec(),
                     Arc::new(move || {
                         let rebuild = rebuild.clone();
-                        let timeline = timeline.clone();
-                        Box::pin(async move {
-                            let reply = rebuild_facts(
-                                &timeline,
-                                &["approval/request", "approval/respond", "approval/cancelled"],
-                            )
-                            .await?;
-                            rebuild.rebuild(&reply.events)?;
-                            Ok(reply.through)
-                        })
+                        Box::pin(async move { rebuild.rebuild().await })
                     }),
                     Arc::new(move |event| {
                         live.consume(&event);

@@ -11,6 +11,7 @@ use dim_agent_capabilities::{
         PrepareContextHost,
     },
 };
+pub use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{
     Agent, AgentBuilder, AgentConfig, BoxFuture, Feature, Names, Session, Timeline,
     TimelineIdentity, testing::chain_events,
@@ -178,6 +179,7 @@ impl Fixture {
             profile: None,
             client_kind: "other",
             client_name: "Goal flow",
+            protocol_version: 4,
         })
         .await
         .unwrap();
@@ -622,11 +624,34 @@ pub async fn branch_creates(session: &Session, branch: &str) -> Vec<(u64, Branch
 /// The user text of the first input on `branch`. A branch that is still being
 /// built has no published events yet.
 pub async fn first_user_text(session: &Session, branch: &str) -> String {
+    let tree = session
+        .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()
+        .unwrap();
+    let mut last = String::new();
     for _ in 0..750 {
-        let Ok(events) = branch_events(session, branch, ..).await else {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            continue;
+        let through = match session.sequence(branch) {
+            Ok(through) => through,
+            Err(error) => {
+                last = error.to_string();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
         };
+        let events = match tree.page(branch.into(), 0, 4096, through).await {
+            Ok(events) => events,
+            Err(error) => {
+                last = error.to_string();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                continue;
+            }
+        };
+        last = format!(
+            "head {through}, kinds {:?}",
+            events
+                .iter()
+                .map(|event| event.kind.key())
+                .collect::<Vec<_>>()
+        );
         for event in events {
             if let EventKind::InputMessage(data) = &event.kind
                 && let Some(user) = &data.user
@@ -637,7 +662,7 @@ pub async fn first_user_text(session: &Session, branch: &str) -> String {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("no user input on {branch}")
+    panic!("no user input on {branch}: {last}")
 }
 
 /// Every tool result text on `branch`, with whether it was an error.
@@ -751,66 +776,6 @@ pub async fn evaluation_of(session: &Session, branch: &str) -> String {
         .strip_prefix("goal:evaluate:")
         .expect("Goal's operation id")
         .to_owned()
-}
-
-/// The facts `session` holds on `branch` within `range`, oldest first.
-pub async fn branch_events<R: std::ops::RangeBounds<u64> + Send>(
-    session: &Session,
-    branch: &str,
-    range: R,
-) -> dim_agent_runtime::Result<Vec<Arc<dim_agent_types::AgentEvent>>> {
-    use dim_agent_runtime::{
-        TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy, TimelineQueryScope,
-    };
-    use std::ops::Bound;
-    let start = match range.start_bound() {
-        Bound::Included(start) => *start,
-        Bound::Excluded(start) => start + 1,
-        Bound::Unbounded => 1,
-    };
-    let end = match range.end_bound() {
-        Bound::Included(end) => Some(*end),
-        Bound::Excluded(end) => Some(end.saturating_sub(1)),
-        Bound::Unbounded => None,
-    };
-    let mut events = Vec::new();
-    let mut after = start.saturating_sub(1);
-    loop {
-        let reply = session
-            .query(
-                branch,
-                TimelineQuery {
-                    scope: TimelineQueryScope::Branch,
-                    from_event: None,
-                    from_sequence: (after > 0).then_some(after),
-                    order_by: TimelineQueryOrderBy::Sequence,
-                    direction: TimelineQueryDirection::Ascending,
-                    include_publishing: false,
-                    kinds: Vec::new(),
-                    flags: Vec::new(),
-                    event_id: None,
-                    predicate: None,
-                    limit: std::num::NonZeroU64::new(4096).unwrap(),
-                    offset: 0,
-                },
-            )
-            .await?;
-        let short = reply.events.len() < 4096;
-        events.extend(
-            reply
-                .events
-                .into_iter()
-                .filter(|event| end.is_none_or(|end| event.sequence <= end)),
-        );
-        match events.last() {
-            Some(last) if !short => after = last.sequence,
-            _ => break,
-        }
-        if end.is_some_and(|end| events.last().unwrap().sequence >= end) {
-            break;
-        }
-    }
-    Ok(events)
 }
 
 fn home() -> PathBuf {

@@ -55,6 +55,10 @@ async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("context-breakdown") => context_breakdown().await?,
         Some("summary-eval") => summary_eval::run().await?,
         Some("scenario-eval") => scenario_eval::run().await?,
+        // The hidden serve entry of an isolated scenario run: `run_once`
+        // starts its own binary with this subcommand and a params file, and
+        // the child serves the run, drives it over its socket and judges it.
+        Some("scenario-eval-serve") => scenario_eval::serve_entry(std::env::args().nth(2)).await?,
         Some("prompt-eval") => prompt_eval::run().await?,
         Some("check") => {
             boundaries(false)?;
@@ -592,8 +596,9 @@ async fn context_breakdown() -> std::result::Result<(), Box<dyn std::error::Erro
     let through = session.sequence("main")?;
     let mut phases = Vec::new();
     let read_start = allocation::live();
-    let context =
-        dim_agent_capabilities::history::read_context_in(&session, "main", through).await?;
+    let context = dim_agent_capabilities::history::HistoryRenderer::default()
+        .context_in(&session, "main", through)
+        .await?;
     phases.push(json!({
         "phase": "read",
         "live": allocation::live(),
@@ -792,7 +797,7 @@ fn disposable_database(
         database,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
-    source.backup(rusqlite::MAIN_DB, &copy, None)?;
+    source.backup(rusqlite::MAIN_DB, &copy, rusqlite::backup::NO_PROGRESS)?;
     Ok((directory, copy))
 }
 

@@ -35,6 +35,8 @@ export type SessionSummary = SessionTitle & {
   running: boolean
   sequence: number
   preview?: string
+  origin?: "client" | "acp" | "internal" | "unknown"
+  parentSessionId?: string
   /** Unix milliseconds of the last main-branch event. */
   updatedAt: number
 }
@@ -42,6 +44,8 @@ export type SessionSummary = SessionTitle & {
 export type CreateResult = { sessionId: string; model: ModelId; sequence: number }
 
 export type HistoryPage = {
+  nextBefore?: number
+  turnStart?: number
   events: SessionEvent[]
   through: number
   nextAfter: number
@@ -115,15 +119,16 @@ export type PermissionPolicy = {
 export type PermissionState = { version: number; policy: PermissionPolicy }
 
 /** A message the server holds in the queue of a running branch. */
-export type QueuedInput = { id: string; text: string; skills?: string[]; user: UserInput }
+export type QueuedInput = { id: string; text: string; skills?: string[]; hooks?: number; user: UserInput }
 
 /** `session.input.withdraw`: the queued input was removed, or the server had already adopted it. */
 export type WithdrawResult = { status: "deleted" } | { status: "notHeld" }
 
 /** The Timeline facts the projection folds; every other kind is `other`. */
 export type EventContent =
-  | { kind: "input"; text?: string; user?: UserInput; skills?: string[]; blocks: RawBlock[] }
+  | { kind: "input"; text?: string; user?: UserInput; skills?: string[]; hooks?: number; blocks: RawBlock[] }
   | { kind: "source-input"; text: string; mode?: string; blocks: RawBlock[] }
+  | { kind: "input-consumed"; inputId: string }
   | { kind: "input-applied"; inputId: string }
   | { kind: "input-deleted"; inputId: string }
   | { kind: "permission-changed"; policy: PermissionPolicy }
@@ -137,9 +142,10 @@ export type EventContent =
   | { kind: "model-start"; requestId: string }
   | { kind: "thinking"; requestId: string; delta: string }
   | { kind: "text"; requestId: string; delta: string }
+  | { kind: "tool-use-start"; requestId: string; callId: string; name: string }
   | { kind: "tool-use"; requestId: string; callId: string; name: string; input: Record<string, unknown> }
   | { kind: "tool-call"; requestId: string; asks: AskCall[] }
-  | { kind: "tool-completed"; callId: string; result: ToolResult }
+  | { kind: "tool-completed"; requestId: string; callId: string; result: ToolResult }
   | { kind: "tool-result"; requestId: string; results: Array<{ callId: string; result: ToolResult }> }
   | { kind: "model-end"; requestId: string; error?: string; presentation?: ProviderPresentation; failure?: ModelFailure }
   | { kind: "context-configured"; model: ModelId }
@@ -170,8 +176,10 @@ export type ModelFailure = {
 export type SessionEvent = {
   id: string
   sequence: number
-  /** Unix milliseconds the runtime wrote the event at. */
+  /** Unix milliseconds at which the event's fact was recorded: the commit time, except a thinking block's first `step/thinking`, which carries the block's start. Order by `sequence`, not this field. */
   createAt: number
+  /** v4 only: the outer call of a child tool batch. */
+  parentCallId?: string
   content: EventContent
 }
 
@@ -195,6 +203,8 @@ export type ModelProgress = {
   thinking: string
   /** Unicode scalar values of the request's `step/thinking` deltas before `thinking`. */
   thinkingOffset: number
+  /** Unix milliseconds at which the open thinking block started; absent when no block is open. */
+  thinkingStartedAt?: number
   /** The retry this request is waiting to make, while it sleeps. */
   retry?: ModelRetryProgress
 }
@@ -277,6 +287,8 @@ export interface AgentEvent {
   type: string;
   name: string;
   data: JsonObject;
+  /** v4 only: the outer call of a child tool batch. */
+  parent_call_id?: string;
   /** Extension events only: the producer's reading switches. */
   context_render?: boolean;
   context_state?: boolean;
@@ -287,7 +299,7 @@ export type InterruptResult = { sequence: number }
 
 export type Notification =
   | { method: "ui.extensions.changed"; revision: number }
-  | { method: "session.event"; sessionId: string; branchId: string; event: SessionEvent }
+  | { method: "session.event" | "session.display"; sessionId: string; branchId: string; event: SessionEvent }
   | ({ method: "session.state" } & StateNotice)
   | { method: "session.model.progress"; progress: ModelProgress }
   | { method: "approval.request"; request: ApprovalRequest }

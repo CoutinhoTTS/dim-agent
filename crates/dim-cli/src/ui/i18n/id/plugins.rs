@@ -4,6 +4,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter on/off · r reload · Ctrl+R refresh · Esc close" => {
             "Enter nyala/mati · r muat ulang · Ctrl+R segarkan · Esc tutup"
         }
+        "i install · Ctrl+R refresh · Esc close" => "i pasang · Ctrl+R segarkan · Esc tutup",
+        "Press i to install {name}." => "Tekan i untuk memasang {name}.",
+        "not installed" => "belum terpasang",
         "Locked: Dim needs it, so it cannot be turned off." => {
             "Terkunci: Dim memerlukannya, jadi tidak bisa dimatikan."
         }

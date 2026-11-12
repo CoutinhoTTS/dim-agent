@@ -517,6 +517,58 @@ struct Changes {
     refresh: watch::Receiver<()>,
 }
 
+/// One entry of the Session's selection that its reconcile keeps active.
+struct Active {
+    entry: McpServerEntry,
+    cancel: CancellationToken,
+    /// The generation this entry's discovery acquired, kept for as long as the
+    /// entry stays selected: a refresh replaces the discovery without leaving
+    /// the generation with no lease, which would retire it (ADR 004) and with
+    /// it the start backoff the generation recorded.
+    lease: Arc<Lease>,
+}
+
+/// The generation an entry's discovery holds. `reconcile` keeps one per active
+/// entry; the discovering task keeps the connection in it.
+#[derive(Default)]
+struct Lease(Mutex<Option<Arc<McpConnection>>>);
+impl Lease {
+    fn hold(&self, connection: &Arc<McpConnection>) {
+        *self.0.lock().unwrap() = Some(connection.clone());
+    }
+    /// Drops the hold: a discovery that ended on its own error leaves nothing
+    /// using the generation, so it retires (ADR 004).
+    fn release(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
+/// Publishes the entry as `Connecting` and runs one discovery for it with
+/// `cancel` and `lease`.
+fn start_discovery(
+    directory: &Arc<McpService>,
+    owner: &Arc<McpSession>,
+    project: Option<usize>,
+    id: &str,
+    cancel: &CancellationToken,
+    lease: &Arc<Lease>,
+    tasks: &TaskTracker,
+) {
+    owner.state.update(|state| {
+        state
+            .servers
+            .insert(id.to_owned(), McpSourceState::Connecting);
+    });
+    tasks.spawn(discover(
+        directory.clone(),
+        owner.clone(),
+        project,
+        id.to_owned(),
+        cancel.clone(),
+        lease.clone(),
+    ));
+}
+
 async fn reconcile(
     directory: Arc<McpService>,
     owner: Arc<McpSession>,
@@ -525,7 +577,7 @@ async fn reconcile(
     mut changes: Changes,
     tasks: TaskTracker,
 ) {
-    let mut active: BTreeMap<String, (McpServerEntry, CancellationToken)> = BTreeMap::new();
+    let mut active: BTreeMap<String, Active> = BTreeMap::new();
     let mut force = false;
     let closing = session.closing();
     tokio::pin!(closing);
@@ -542,40 +594,56 @@ async fn reconcile(
             Ok(catalog) => {
                 owner.state.update(|state| state.catalog_error = None);
                 let entries = catalog.servers;
-                active.retain(|id, (entry, cancel)| {
-                    let keep = !force
-                        && !cancel.is_cancelled()
+                active.retain(|id, active| {
+                    let keep = !active.cancel.is_cancelled()
                         && entries.get(id).is_some_and(|next| {
-                            next.source == entry.source && next.configuration == entry.configuration
+                            next.source == active.entry.source
+                                && next.configuration == active.entry.configuration
                         });
                     if !keep {
-                        cancel.cancel();
+                        active.cancel.cancel();
                         if !entries.get(id).is_some_and(McpServerEntry::enabled) {
                             owner.remove(id);
                         }
                     }
                     keep
                 });
+                if force {
+                    for (id, active) in active.iter_mut() {
+                        active.cancel.cancel();
+                        active.cancel = owner.stopped.child_token();
+                        if active.entry.enabled() {
+                            start_discovery(
+                                &directory,
+                                &owner,
+                                project,
+                                id,
+                                &active.cancel,
+                                &active.lease,
+                                &tasks,
+                            );
+                        }
+                    }
+                }
                 for (id, entry) in entries {
                     if active.contains_key(&id) {
                         continue;
                     }
                     let cancel = owner.stopped.child_token();
+                    let lease = Arc::new(Lease::default());
                     if entry.enabled() {
-                        owner.state.update(|state| {
-                            state.servers.insert(id.clone(), McpSourceState::Connecting);
-                        });
-                        tasks.spawn(discover(
-                            directory.clone(),
-                            owner.clone(),
-                            project,
-                            id.clone(),
-                            cancel.clone(),
-                        ));
+                        start_discovery(&directory, &owner, project, &id, &cancel, &lease, &tasks);
                     } else {
                         owner.publish(&id, None, McpSourceState::Disabled, &cancel);
                     }
-                    active.insert(id, (entry, cancel));
+                    active.insert(
+                        id,
+                        Active {
+                            entry,
+                            cancel,
+                            lease,
+                        },
+                    );
                 }
             }
             Err(error) => {
@@ -593,8 +661,8 @@ async fn reconcile(
             result = changes.applied.changed() => { if result.is_err() { break; } false },
         };
     }
-    for (_, (_, cancel)) in active {
-        cancel.cancel();
+    for (_, active) in active {
+        active.cancel.cancel();
     }
 }
 
@@ -604,11 +672,13 @@ async fn discover(
     project: Option<usize>,
     id: String,
     cancel: CancellationToken,
+    lease: Arc<Lease>,
 ) {
-    let mut lease = None;
+    let mut held = None;
     let result = async {
         let connection = directory.server(owner.connections.clone(), project, id.clone(), &cancel).await?;
-        lease = Some(connection.clone());
+        lease.hold(&connection);
+        held = Some(connection.clone());
         let mut changed = connection.tool_changes();
         let mut state = connection.subscribe();
         let mut credential = connection.credential_changes();
@@ -767,7 +837,12 @@ async fn discover(
             }
         }
     }.await;
-    let withdrawn = lease.take().is_some_and(|lease| lease.withdrawn());
+    let withdrawn = held.take().is_some_and(|held| held.withdrawn());
+    // The replacement owns the slot once this discovery is cancelled; only a
+    // discovery that ended on its own error releases the generation.
+    if result.is_err() && !cancel.is_cancelled() {
+        lease.release();
+    }
     match result {
         Ok(()) => {}
         Err(error) if withdrawn || matches!(error, McpError::Disabled) => {

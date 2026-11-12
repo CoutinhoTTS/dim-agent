@@ -12,6 +12,14 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Held" => "Retida",
         "Incorporating" => "A incorporar",
+        "Unread" => "Não lida",
+        "Unread · waiting for your next message" => "Não lida · a aguardar a sua próxima mensagem",
+        "/queue view · awaiting model consumption" => {
+            "/queue ver · a aguardar processamento pelo modelo"
+        }
+        "/queue view · waiting for your next message" => {
+            "/queue ver · a aguardar a sua próxima mensagem"
+        }
         "Enter export · Esc cancel" => "Enter exportar · Esc cancelar",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "As mensagens com anexos permanecem em fila; use /queue para orientar ou eliminá-las"
@@ -19,9 +27,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/queue manage · shift+← edit last · ctrl+s steer now" => {
             "/queue gerir · shift+← editar a última · ctrl+s orientar já"
         }
-        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
-            "+{count} mais · /queue gerir · shift+← editar a última · ctrl+s orientar já"
-        }
+        "+{count} more · {hint}" => "+{count} mais · {hint}",
         "steer or delete queued messages" => "orientar com mensagens em fila ou eliminá-las",
         "export this conversation" => "exportar esta conversa",
         "That message has already left the queue." => "Essa mensagem já saiu da fila.",
@@ -387,6 +393,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Suggestions" => "Sugestões",
         "Skills" => "Competências",
         "Skill loaded: {name}" => "Competência carregada: {name}",
+        "Hook context · {count} line" => "Contexto do hook · {count} linha",
+        "Hook context · {count} lines" => "Contexto do hook · {count} linhas",
         "Commands" => "Comandos",
         "Command Palette" => "Paleta de comandos",
         "No matches" => "Sem resultados",
@@ -528,6 +536,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "drawing diagram… {count} lines" => "a desenhar diagrama… {count} linhas",
         // notify.rs
         "Task complete" => "Tarefa concluída",
+        "Background task finished: {label}" => "Tarefa em segundo plano concluída: {label}",
+        "Background task failed: {label}" => "Tarefa em segundo plano falhou: {label}",
+        "Background task stopped: {label}" => "Tarefa em segundo plano interrompida: {label}",
         "Permission needed: {tool}" => "Permissão necessária: {tool}",
         "Question waiting for your answer" => "Pergunta à espera de resposta",
         "Notify when agent needs you" => "Notificar quando o agente precisar de si",

@@ -144,9 +144,15 @@ fn install_with_prompt_capability_and_branch(
             }),
         )
         .require_feature(
-            Feature::new("ContextPreparation").branch("ContextPreparation", |names| {
-                Ok(Box::new(ContextPreparationPlugin::new(names)?))
-            }),
+            Feature::new("ContextPreparation")
+                .branch("ContextUsage", |names| {
+                    Ok(Box::new(crate::context_usage::ContextUsagePlugin::new(
+                        names,
+                    )?))
+                })
+                .branch("ContextPreparation", |names| {
+                    Ok(Box::new(ContextPreparationPlugin::new(names)?))
+                }),
         )
         .require_feature(
             Feature::new("Prompt")
@@ -158,7 +164,13 @@ fn install_with_prompt_capability_and_branch(
                 .branch("Prompt", |names| Ok(Box::new(PromptPlugin::new(names)?))),
         )
         .require_feature(
-            Feature::new("Loop").branch("Loop", |names| Ok(Box::new(LoopPlugin::new(names)?))),
+            Feature::new("Loop")
+                .session("LoopMethods", |names| {
+                    Ok(Box::new(crate::agent_loop::read::LoopMethodsPlugin::new(
+                        names,
+                    )?))
+                })
+                .branch("Loop", |names| Ok(Box::new(LoopPlugin::new(names)?))),
         )
         .require_feature(
             Feature::new("ModelProvider")
@@ -175,6 +187,11 @@ fn install_with_prompt_capability_and_branch(
         )
         .require_feature(
             Feature::new("ToolExecution")
+                .session("ToolMethods", |names| {
+                    Ok(Box::new(
+                        crate::tool_executor::read::ToolMethodsPlugin::new(names)?,
+                    ))
+                })
                 .branch("ToolBinding", |names| {
                     Ok(Box::new(ToolBindingPlugin::new(names)?))
                 })

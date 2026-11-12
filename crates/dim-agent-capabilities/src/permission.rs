@@ -10,18 +10,17 @@
 //! The admission decision also asks the advisors registered with it (Hooks
 //! A.6.1): a branch part registers one with [`Permission::register_advice`]
 //! while it runs, and the advice is folded with Permission's own decision.
-//! [`Permission::decide`] stays the plain decision, for the admission's
-//! recheck after an answer.
+//! [`Permission::decide`] evaluates current policy without asking advisors.
 use crate::{
     file_access::FileAccessFacts,
     host::{HostError, HostFuture},
     host_platform::HostPlatform,
-    workspace_tools::files::{canonical_prefix, resolve_path},
+    workspace_tools::files::{Access, canonical_prefix, resolve_path},
 };
 use dim_agent_runtime::{
-    AgentError, Dispatcher, Names, Registration, Registrations, SessionConfig, SessionIdentity,
-    StateCell, Timeline, TimelineQuery, TimelineQueryDirection, TimelineQueryOrderBy,
-    TimelineQueryScope,
+    AgentError, Dispatcher, Names, QueryComparison, QueryFilter, QueryOperand, QueryOutput,
+    QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Registration, Registrations,
+    SessionConfig, SessionIdentity, StateCell, Timeline, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, ApprovalCallData, BranchSource, COMMAND_SEPARATORS, CommandMatch, CommandRule,
@@ -44,6 +43,13 @@ pub enum Decision {
     Allow,
     Ask { reason: String },
     Deny { reason: String },
+}
+
+/// An admission decision and whether an advisor requires an explicit response.
+pub struct ToolAdmission {
+    pub decision: Decision,
+    /// A policy change cannot answer an advisor's approval question.
+    pub advisor_approval: bool,
 }
 
 const CANCELLED: &str = "Tool execution cancelled.";
@@ -168,10 +174,15 @@ impl Permission {
         source: &BranchSource,
         risk: Option<&str>,
         cancel: &CancellationToken,
-    ) -> Result<Decision, HostError> {
+    ) -> Result<ToolAdmission, HostError> {
         let decision = self.decide(call, risk, cancel).await?;
         let own = match decision {
-            Decision::Deny { .. } => return Ok(decision),
+            Decision::Deny { .. } => {
+                return Ok(ToolAdmission {
+                    decision,
+                    advisor_approval: false,
+                });
+            }
             Decision::Allow => AdmissionDecision::Allow,
             Decision::Ask { .. } => AdmissionDecision::Ask,
         };
@@ -208,11 +219,14 @@ impl Permission {
                 Some(Ok(ToolAdviceReply::Allow)) => allow = true,
             }
         }
-        Ok(match (deny, ask) {
-            (Some(reason), _) => Decision::Deny { reason },
-            (None, Some(reason)) => Decision::Ask { reason },
-            (None, None) if allow => Decision::Allow,
-            (None, None) => decision,
+        Ok(ToolAdmission {
+            advisor_approval: ask.is_some(),
+            decision: match (deny, ask) {
+                (Some(reason), _) => Decision::Deny { reason },
+                (None, Some(reason)) => Decision::Ask { reason },
+                (None, None) if allow => Decision::Allow,
+                (None, None) => decision,
+            },
         })
     }
 
@@ -471,8 +485,10 @@ impl Permission {
             let workspace = std::fs::canonicalize(&cwd).map_err(|error| {
                 format!("Failed to resolve workspace {}: {error}", cwd.display())
             })?;
-            let target = match home {
-                Some(home) => resolve_path(&cwd, &home, &path),
+            let target: Result<PathBuf, String> = match home {
+                Some(home) => {
+                    resolve_path(&cwd, &home, None, Access::Write, &path).map_err(String::from)
+                }
                 None => canonical_prefix(PathBuf::from(path)),
             };
             target.map(|target| (workspace, target))
@@ -535,26 +551,64 @@ impl Permission {
             .timeline
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Chain,
+                from: None,
+                through: Some(self.timeline.committed()),
                 include_publishing: true,
-                from_event: None,
-                from_sequence: None,
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: vec!["permission/changed".into()],
-                flags: Vec::new(),
-                event_id: None,
-                predicate: None,
-                limit: NonZeroU64::MIN,
-                offset: 0,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::Compare {
+                        left: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        comparison: QueryComparison::Eq,
+                        right: QueryOperand::Value {
+                            value: "permission/changed".into(),
+                        },
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec![
+                            "data.policy".into(),
+                            "position.branch_id".into(),
+                            "position.sequence".into(),
+                        ],
+                    },
+                    group_by: Vec::new(),
+                    pick: Some(QueryPick::Last),
+                    order_by: Vec::new(),
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
             })
             .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("permission recovery selects the latest policy and position")
+        };
         let mut state = self.state.get();
-        if let Some((event, position)) = reply.events.first().zip(reply.positions.first())
-            && let EventKind::PermissionChanged(data) = &event.kind
-        {
-            state.policy = data.policy.clone();
-            if position.branch_id == self.timeline.branch_id() {
-                state.version = position.sequence;
+        if let Some(row) = rows.into_iter().next() {
+            let Ok(
+                [
+                    QueryValue::Value { value: policy },
+                    QueryValue::Value {
+                        value: serde_json::Value::String(branch_id),
+                    },
+                    QueryValue::Value {
+                        value: serde_json::Value::Number(sequence),
+                    },
+                ],
+            ) = <[_; 3]>::try_from(row.values)
+            else {
+                return Err(AgentError::fault(
+                    "Permission",
+                    "a policy change has no policy or position",
+                ));
+            };
+            state.policy = serde_json::from_value(policy)
+                .map_err(|error| AgentError::fault("Permission", error.to_string()))?;
+            if branch_id == self.timeline.branch_id() {
+                state.version = sequence
+                    .as_u64()
+                    .expect("policy versions are unsigned sequences");
             }
         }
         self.inner.lock().unwrap().written = state.version;

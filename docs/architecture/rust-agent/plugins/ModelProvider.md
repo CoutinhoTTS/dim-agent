@@ -16,6 +16,10 @@ place, an image the request cannot carry gets the other placeholder, and every
 other image is sent as is. The decision changes the request only; the adopted
 input, the Timeline and the stored tool result never change.
 
+The adapter selects replacements before copying content. An unchanged request
+keeps its Arc without cloning text, thinking, tool arguments or result blocks.
+When images change, only those messages are copied; other messages stay shared.
+
 ## Dependencies
 
 | Service | Purpose |
@@ -36,11 +40,19 @@ The first event of each text/thinking block is preassigned its block id as the
 event `id`; later same-kind deltas are grouped by the open block until a
 thinking/text/tool event starts the next one. Provider `TextEnd`/`ThinkingEnd`
 are not durable boundaries. `ModelProgress` exposes the same ids as
-`text_part_id` / `thinking_part_id` while the block is open.
+`text_part_id` / `thinking_part_id` while the block is open, and the open
+thinking block's `thinking_started_at` is the Unix-millisecond time at which it
+opened. The block's first durable `step/thinking` event carries that same time
+as `create_at`, so the start survives history, replay and fork.
 Progress state is transient. Only one call runs at a time. Steer may replace a
 request before irreversible output; stop cancels and drains native work.
-Cleanup cancels, joins tasks and aggregates failures. Replay fails unended
-historical calls without invoking the model again. Retry is bounded by kind:
+Cleanup cancels, joins tasks and aggregates failures. Recovery fails unended
+historical calls without invoking the model again. It reads only operation and
+provider/model identities and failure-chain counters for those calls, plus their tool-use identities and
+argument completion state. Both complete and incomplete tool-use arguments are
+settled with their existing distinct error texts. Request messages, tools and
+system content are not restored. Steer and interrupt state use the same fixed
+committed boundary as the unsettled-call query. Retry is bounded by kind:
 `network`, `rate_limited`, `server_error` and once `malformed_response` back off
 1 s doubling to a 30 s cap within a 300 s budget, over at most 8 attempts, and
 it cannot repeat irreversible output. While a retry sleeps, `ModelProgress.retry`

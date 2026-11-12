@@ -1,6 +1,7 @@
 //! Startup waits follow a daemon that reports real store-upgrade progress:
-//! the spawn wait, the start-lock waiter, the one line on stderr and JSON
-//! stdout staying clean (#1213).
+//! the start-lock waiter, the wait for a daemon another client started, the
+//! spawn wait, the one line on stderr and JSON stdout staying clean (#1213,
+//! #1335).
 //!
 //! Every test here shortens a startup bound through `DIM_TEST_*`, which only a
 //! debug build reads, so the module is a debug-build check.
@@ -441,4 +442,332 @@ fn the_upgrade_line_stays_off_json_stdout() {
     }
     assert!(!stdout.contains("Upgrading the local store"), "{stdout}");
     assert_eq!(stderr.matches(UPGRADING).count(), 1, "{stderr}");
+}
+
+/// #1335: a spawned daemon that finds the store owned by another process
+/// leaves a startup note that says so, and the client prints that sentence
+/// instead of the bare exit status.
+#[test]
+fn a_child_finding_the_store_owned_reports_the_owner() {
+    let home = Home::new();
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.0.join("rust/dimcode.sqlite.lock"))
+        .unwrap();
+    // Another daemon owns the store and writes no progress note: a fresh
+    // store, or one already at this format, upgrades nothing.
+    lease.lock().unwrap();
+    let output = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "15000")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    lease.unlock().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("Another dimcode-server is using the store"),
+        "the client names the owner: {stderr}"
+    );
+    assert!(stderr.contains("Details:"), "{stderr}");
+    assert!(
+        !stderr.contains("App Server exited (exit status"),
+        "{stderr}"
+    );
+}
+
+/// #1335: a client that starts while another daemon is mid-upgrade — the store
+/// lease held by a live process, a progress note from that process, no socket,
+/// and no client holding the start lock — waits for the upgrade and connects,
+/// instead of spawning a second daemon that fails admission.
+#[test]
+fn a_client_finding_another_daemons_upgrade_waits_for_it() {
+    use std::io::BufRead;
+
+    let home = Home::new();
+    let note = note_path(&home);
+    let bound = Duration::from_millis(1500);
+    // The upgrading daemon owns the store lease.
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.0.join("rust/dimcode.sqlite.lock"))
+        .unwrap();
+    lease.lock().unwrap();
+    write_progress_note(&note, std::process::id(), 1);
+    // It rewrites its progress note every 50 ms from a pid that is alive and
+    // is not the client's own; no client holds `daemon.start.lock`.
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let stop = Arc::clone(&stop);
+        let note = note.clone();
+        thread::spawn(move || {
+            let mut counter = 1;
+            while !stop.load(Ordering::SeqCst) {
+                counter += 1;
+                // A later version may add fields to the progress line; this
+                // one adds a value that is not a number, which a reader must
+                // ignore as the daemon's own reader does.
+                let temp = note.with_file_name(format!(
+                    "{}.{counter}.tmp",
+                    note.file_name().unwrap().to_string_lossy()
+                ));
+                fs::write(
+                    &temp,
+                    format!(
+                        "dimcode-startup-progress v1 pid={}\nstore-upgrade from=33 to=34 progress={counter} stage=rewrite\n",
+                        std::process::id()
+                    ),
+                )
+                .unwrap();
+                fs::set_permissions(&temp, fs::Permissions::from_mode(0o600)).unwrap();
+                fs::rename(&temp, &note).unwrap();
+                thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let mut client = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "1500")
+        .args(["models", "fixture"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr_text = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&stderr_text);
+    let pipe = std::io::BufReader::new(client.stderr.take().unwrap());
+    let reader = thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut line = String::new();
+        while pipe.read_line(&mut line).unwrap_or(0) > 0 {
+            sink.lock().unwrap().push_str(&line);
+            line.clear();
+        }
+    });
+    let started = Instant::now();
+    while !stderr_text.lock().unwrap().contains(UPGRADING) {
+        if let Some(status) = client.try_wait().unwrap() {
+            stop.store(true, Ordering::SeqCst);
+            let _ = wait(client);
+            reader.join().unwrap();
+            let stderr = stderr_text.lock().unwrap().clone();
+            panic!("the client stopped ({status}) instead of waiting for the upgrade: {stderr}");
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the client never reported the upgrade it found: {}",
+            stderr_text.lock().unwrap()
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    // Keep the upgrade running a whole bound past the report: a client that
+    // only waits a fixed time has spawned, and failed, by now.
+    let reported = Instant::now();
+    while reported.elapsed() < bound + Duration::from_millis(500) {
+        if let Some(status) = client.try_wait().unwrap() {
+            stop.store(true, Ordering::SeqCst);
+            let _ = wait(client);
+            reader.join().unwrap();
+            let stderr = stderr_text.lock().unwrap().clone();
+            panic!("the client stopped ({status}) after one bound of progress: {stderr}");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The upgrade finishes: the note goes, the lease is released, and the
+    // daemon begins to serve.
+    stop.store(true, Ordering::SeqCst);
+    writer.join().unwrap();
+    let _ = fs::remove_file(&note);
+    lease.unlock().unwrap();
+    let daemon = home.daemon(|wire| {
+        wire.2 = true;
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        let catalog = wire.read("provider.catalog");
+        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        wire.reply(&catalog, json!({"catalog":{"version":1,"disabledModelIds":[],"models":[]}}));
+    });
+    let output = wait(client);
+    reader.join().unwrap();
+    daemon.join().unwrap();
+    let stderr = stderr_text.lock().unwrap().clone();
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stderr.matches(UPGRADING).count(), 1, "{stderr}");
+    assert!(!note.exists(), "the connected daemon removed the note");
+}
+
+/// #1335: a progress note whose pid is gone belongs to a daemon that died
+/// mid-upgrade; the client starts its own instead of waiting.
+#[test]
+fn a_progress_note_from_a_dead_pid_does_not_hold_up_the_start() {
+    let home = Home::new();
+    let note = note_path(&home);
+    let mut gone = Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    write_progress_note(&note, pid, 50);
+    let server = script(
+        &home,
+        "server",
+        &format!("exec '{}' app-server \"$@\"", env!("CARGO_BIN_EXE_dimcode")),
+    );
+    let output = home
+        .command()
+        .args(["--server", server.to_str().unwrap(), "models", "fixture"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains(UPGRADING), "{stderr}");
+    assert!(!note.exists(), "the started daemon removed the note");
+}
+
+/// Runs a command that starts the daemon over a note that names no daemon to
+/// wait for: the client starts its own at once, connects, and prints no
+/// upgrade line.
+fn a_note_naming_no_daemon_does_not_hold_up_the_start(write: impl FnOnce(&std::path::Path)) {
+    let home = Home::new();
+    let note = note_path(&home);
+    write(&note);
+    let server = script(
+        &home,
+        "server",
+        &format!("exec '{}' app-server \"$@\"", env!("CARGO_BIN_EXE_dimcode")),
+    );
+    let output = home
+        .command()
+        .args(["--server", server.to_str().unwrap(), "models", "fixture"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains(UPGRADING), "{stderr}");
+    assert!(!note.exists(), "the started daemon removed the note");
+}
+
+/// #1335: a note whose header names the failure kind is not a progress note,
+/// whatever its body: the client starts its own daemon instead of waiting on
+/// it.
+#[test]
+fn a_failure_note_does_not_hold_up_the_start() {
+    let pid = std::process::id();
+    a_note_naming_no_daemon_does_not_hold_up_the_start(|note| {
+        fs::write(
+            note,
+            format!(
+                "dimcode-startup-failure v1 pid={pid}\nstore-upgrade from=33 to=34 progress=1\n"
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(note, fs::Permissions::from_mode(0o600)).unwrap();
+    });
+}
+
+/// #1335: a progress note another user can read is not the daemon's private
+/// note: the client starts its own daemon instead of waiting on it.
+#[test]
+fn a_progress_note_that_is_not_private_does_not_hold_up_the_start() {
+    let pid = std::process::id();
+    a_note_naming_no_daemon_does_not_hold_up_the_start(|note| {
+        write_progress_note(note, pid, 50);
+        fs::set_permissions(note, fs::Permissions::from_mode(0o644)).unwrap();
+    });
+}
+
+/// The hello of a daemon of another build that an idle replacement stops.
+fn old_hello() -> Value {
+    json!({"instanceId":"old","serverVersion":"0.0.1-old","protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.summaries","daemon.shutdown.completed","daemon.shutdown.ifIdle"]})
+}
+
+/// #1335: a client that already spawned its own daemon and then finds another
+/// build's daemon on the endpoint reaps that child once the daemon is
+/// stopped, and starts a successor instead of reporting the child's exit.
+#[test]
+fn a_child_that_lost_the_store_is_reaped_and_a_successor_starts() {
+    let home = Home::new();
+    let note = note_path(&home);
+    // The store is leased until the fixture daemon is stopped, so the client's
+    // own child fails admission and exits while the client meets it: the
+    // stale child whose exit the loop must not report.
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(home.0.join("rust/dimcode.sqlite.lock"))
+        .unwrap();
+    lease.lock().unwrap();
+    // A note from a dead pid is no daemon to wait for; the client removes it
+    // when it starts its own, and a child that fails admission writes its
+    // failure note there with its own pid. A note that no longer names the
+    // dead pid is therefore the spawn.
+    let mut gone = Command::new("true").spawn().unwrap();
+    let pid = gone.id();
+    gone.wait().unwrap();
+    write_progress_note(&note, pid, 50);
+    let watched = note.clone();
+    let stale = format!("pid={pid}");
+    let mut client = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "15000")
+        .args(["models", "fixture"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // `Home::daemon` binds synchronously and the client retries the endpoint
+    // every 50 ms after its spawn, so this thread has that window to bind;
+    // the daemon below answers that attempt, when the child is already there.
+    let started = Instant::now();
+    while fs::read_to_string(&note).is_ok_and(|text| text.contains(&stale)) {
+        assert!(
+            client.try_wait().unwrap().is_none(),
+            "the client stopped before it spawned"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the client never started its own daemon"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        client.try_wait().unwrap().is_none(),
+        "the client stopped before the endpoint answered"
+    );
+    let daemon = home.daemon(move |wire| {
+        let hello = wire.read("hello");
+        wire.reply(&hello, old_hello());
+        let shutdown = wire.read("daemon.shutdown");
+        assert_eq!(shutdown["params"], json!({"ifIdle": true}));
+        // The spawned child has failed admission once its note is beside the
+        // store; the store goes free only then, for the client's successor.
+        let started = Instant::now();
+        while !watched.exists() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the spawned child did not fail admission: {:?}",
+                std::fs::read_to_string(watched.parent().unwrap().join("daemon.log"))
+                    .unwrap_or_default()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        lease.unlock().unwrap();
+        wire.reply(&shutdown, json!({}));
+    });
+    let output = wait(client);
+    daemon.join().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the client starts its successor instead of reporting the reaped child: {stderr}"
+    );
+    assert!(!stderr.contains("Another dimcode-server"), "{stderr}");
+    assert!(!note.exists(), "the successor removed the note");
 }

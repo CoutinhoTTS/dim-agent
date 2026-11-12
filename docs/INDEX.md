@@ -7,6 +7,9 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Model startup](design/model-startup.md): temporary model, effort and multi-protocol connections with branch/member/compaction inheritance
 - [Model failures](design/model-failures.md)（[中文](zh/design/model-failures.md)）: the failure kind, the fact on the terminal event, who words the line, and retry (#1197)
 - [模型请求重试与任务续接方案](design/research/model-retry-recovery.md)（中文，#1210）：请求重试的可见性、独立恢复能力的边界及所有者合同需求
+- [服务面：跨语言形状的策略、盘点与第一批改造](design/service-faces.md)（中文，Draft）：#1289 的标记与检查、#1300 的当前 118 个名字 face 盘点、#1292 的第一批数据面
+- [插件远程化：可行性与落地路径](design/research/remote-plugins.md)（中文，研究稿）：rutis 链路能跨什么、HostPlatform/exec/基础工具/存储各自能不能远程化、推荐拓扑与分阶段
+- [Watch：任务观察与 side branch](design/research/side-eval.md)（中文，设计提案）：Watch 与 Pursuit 的用户边界、分支切点、订阅与 prompt 的组合、管理与关注、采样开销
 - [Overall design for undesigned features](design/overview.md)（[中文](zh/design/overview.md)）
 - [Plugin designs index](design/plugins/README.md)（[中文](zh/design/plugins/README.md)）
 - [AcpGateway implementation contract](design/acp-gateway-implementation.md)（中文，#436）：protocol mapping, client-host plugin wiring, lifecycle and unsupported features
@@ -16,6 +19,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Agent context: goals and requirements to define](design/agent-context.md)（中文；branches, compaction, model prompts; requirements, not design）
 - [Migration plugin](design/plugins/Migration.md)（中文；on-demand legacy data import, native-role history, retry and incremental import; implementation plan included）
 - [Plugin management: requirements](design/plugin-management.md)（中文；one plugin concept, install, reload, replacement; requirements, not design）
+- [插件发现、分发与作者入口](design/plugin-distribution.md)（中文）：GitHub topic、内置官方目录、仓库子目录安装、runtime 选择与文档/skill 分工
 - [Skills installation](design/plugins/Skills.md): preview of a local or Git source without a manifest, selective installation into the user root, update and confirmed removal of loose Skills (#740)
 - [Document templates](templates/README.md)
 - [ADR 002 — Plugin scope](adr/002-plugin-scope.md)（[中文](zh/adr/002-plugin-scope.md)）
@@ -37,6 +41,20 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Sessions and branches are plugins, not loader instances](design/thin-instances.md): Session and branch scopes as plain plugins that mark their group on rutis 0.19.3, so creation reads no loader table (#594)
 - [Architecture and ownership](architecture/README.md)
 - [Architecture decisions](adr/README.md)
+- [ADR 022 — Timeline 属性查询与正文重建](adr/022-event-property-queries.md)（中文）：目标 API 与模块结构、属性查询、业务状态恢复和正文释放
+- [ADR 023 — 上下文用量由独立分支部件维护](adr/023-context-usage.md)（中文）：ContextUsage 的职责、增量统计、服务商校准及后续设计边界
+- [Resume：按业务对象设计计算与读取](design/resume-read-design.md)（中文，草案）：usage、输入队列、Prompt、显示详情、SQL 执行和恢复校验的分项设计与成本验收
+- [当前状态字段索引](design/appserver/timeline-state-read-indexes.md)（中文，草案）：现有API缺口、完整索引键、源位置前驱和SQL扫描验收
+- [状态保存与恢复读取](design/owner-state-indexed-reads.md)（中文，草案）：按业务对象决定持久化；当前队列点查、Prompt有效引用、Usage数字和真实流程读写数量
+- [Timeline 数组元素查询](design/timeline-array-rows.md)（中文，草案）：元素行、原下标、固定范围与按身份取值
+- [Timeline 未完成成员索引](design/appserver/timeline-member-index.md)（中文，草案）：版本集合、同事务维护、分页和新增读写成本
+- [Timeline 身份与恢复操作查询](design/appserver/timeline-identity-reads.md)（中文，草案）：ID 定位、模型/压缩未完成集合及索引验收
+- [Session 显示读取](design/appserver/session-display-read.md)（中文，草案）：显示摘要、按需详情、能力协商、实时流与有界分块
+- [Timeline 属性查询与消费端改造](design/timeline-property-query.md)（中文）：查询契约、SQL 与内容解码、恢复和请求构造的修改方案
+- [Timeline read consumers and page execution](design/timeline-read-followups.md): bounded Web windows, title/activity field reads and cumulative SQL page costs
+- [输入、轮次及活动输出的当前状态读取](design/input-state-read.md)：输入队列、轮次身份和输出字符水位
+- [Goal 属性查询与状态恢复](design/plugins/Goal-property-queries.md)（中文）：统一状态记录下的查询对象、状态来源、剩余遍历和删除重算提案
+- [Goal 状态结果读取](design/plugins/Goal-state-read.md)（中文，草案）：完整目标业务状态；运行只在内存，重载暂停，不恢复旧执行
 - [Rust agent design documents](architecture/README.md#design-documents)
 - [Owner-independent Timeline instances](design/collaboration-timeline.md) (#335)
 - [Timeline branches](design/timeline-branches.md): what branches are for, branch versus member and fork, messages between lines, identity across compaction, ending a line (#427)（[中文](zh/design/timeline-branches.md)）
@@ -56,6 +74,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
+- [Session and error reports](design/plugins/Report.md) ([#1319](https://github.com/arcships/dim/issues/1319))
 - [Read-only member conversations in the CLI](design/member-conversation.md) (#300, #333, #324, #263)
 - [Subagent model policy](design/subagent-model-policy.md) (#263)
 - [Subagent tool approval and permission inheritance](design/subagent-tool-approval.md): requesting-branch policy, leader decision tools, user review, cancellation and recovery (#19, #29, #257)
@@ -79,9 +98,11 @@ This index is navigation. Delivery status lives in issues, not here.
 - [F5 HostPlatform process isolation boundary](design/host-platform-isolation.md)
 - [Model host](../crates/dim-agent-aimux/README.md)
 - [Storage format](design/appserver/native-storage-format.md)
+- [Child tool batches across clients](design/appserver/child-tool-batches.md) (#1326): v4 child events, v3 visibility, TUI/CLI/web grouping and the Code Mode session gate
 - [Management methods](design/appserver/management-methods.md)
 - [Provider management for Desktop and CLI](design/appserver/provider-management.md) (#329)（[中文](zh/design/appserver/provider-management.md)）
 - [Settings service](design/appserver/settings-service.md)（[中文](zh/design/appserver/settings-service.md)）
+- [Prompt overrides](design/appserver/prompt-overrides.md) (#1314): the `prompts` Settings source, three owner ports and the client entry
 - [MCP OAuth](design/appserver/mcp-oauth.md)（[中文](zh/design/appserver/mcp-oauth.md)）
 - [MCP Apps host contract](design/appserver/mcp-apps.md) (#451): the document a tool declares, a view's tool call and its admission, what a client renders
 - [Session files](design/appserver/session-files.md)（[中文](zh/design/appserver/session-files.md)）
@@ -94,10 +115,12 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Keyed blocks: the session.keys read](design/appserver/keyed-blocks.md) (#958)（[中文](zh/design/appserver/keyed-blocks.md)）
 - [SessionStore title metadata](design/appserver/session-title-metadata.md)（[中文](zh/design/appserver/session-title-metadata.md)）
 - [Restore-scoped shared history read](design/appserver/restore-shared-read.md) (#193)（[中文](zh/design/appserver/restore-shared-read.md)）
-- [Restore validation reuse](design/appserver/restore-validation.md) (#601)
+- [Native Session restore read boundary](design/appserver/restore-validation.md) (#1320): directory admission and validation of selected content
 - [Cold first session.attach](design/appserver/cold-attach-profile.md) (#713)
 - [Idle Session unload](design/appserver/idle-unload.md) (#126, #331)（[中文](zh/design/appserver/idle-unload.md)）
 - [Request delta storage](design/appserver/request-delta-storage.md) (#193)（[中文](zh/design/appserver/request-delta-storage.md)）
 - [Timeline export](design/appserver/timeline-export.md) (ADR 005 D3, #275)（[中文](zh/design/appserver/timeline-export.md)）
 - [Release packaging and self-hosted workflows](release/README.md)
+- [Container image release](release/docker-image.md) (Draft): the proposed ghcr.io image for the Linux executable, its volumes, clients, build from original release archives and security boundary
+- [Tool origin read](design/tool-origin-read.md) — point lookup for tool arguments outside a transcript window.
 - [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)

@@ -182,6 +182,8 @@ models.reset 只移除 descriptor 覆盖，保留端点覆盖；endpoint: clear 
 models.reset 恢复仍存在的默认项，用户项用 delete。refresh 保留用户模型、覆盖、偏好和
 显式禁用，沿用 admitted 配置冲突检查。托管目录换账号 refresh 时，偏好随 descriptor 覆盖
 和禁用项一起清空；同账号 refresh 则保留它们。托管账号目录不通过这些方法新增用户模型/路由。
+静态提供方只要已保存凭据或使用匿名认证，且驱动和定义都支持远端发现，就可以显式刷新。
+禁用的提供方刷新后仍保持禁用，模型仍不可用于执行。
 models.edit 修改用户模型的 descriptor 时替换该项 userModels，不把用户 ID 写入 modelConfigOverrides。
 models.set_enabled 接受默认模型及用户模型的 ID，并给出账号可用的完整集合：不对应任何目录项的
 ID 被拒绝，不可用项保持原有启用状态。这些操作从同一记录更新有效目录和路由，
@@ -212,9 +214,11 @@ create/update 相同的 URL/header/network 校验。测试修改后的 base URL 
 
 Provider 持久保存的偏好供客户端读取；[F3 客户端](../../../design/model-configuration.md) 把偏好和其所属的**完整 `{providerId,modelId}`** 一起传给既有
 session.create/session.model.update。指定目标不可用就报错，不去掉目标重试或回退其他模型。
-服务端不自动应用保存偏好；显式目标省略偏好仍从目录默认开始，包括模型声明的默认推理档位和
-服务层级；无目标 F3 只改已采用模型的
-指定参数。`/fast` 仍只修改当前 Session；保存 serviceTier 是持久 fast/tier 选择，但只有客户端
+服务端不自动应用保存偏好；显式目标省略偏好仍从目录默认开始，包括模型声明的默认推理档位、
+服务层级和推理摘要；无目标 F3 只改已采用模型的
+指定参数。哪些目录声明会被应用、其余为何只描述模型，见
+[模型配置规则](../../../design/model-configuration.md#model-parameters)。
+`/fast` 仍只修改当前 Session；保存 serviceTier 是持久 fast/tier 选择，但只有客户端
 显式传入才生效。其他消费模型不自动继承聊天偏好。
 
 用量复用已交付的 `account.usage {providerId} -> Usage`：原生 account namespace 转发

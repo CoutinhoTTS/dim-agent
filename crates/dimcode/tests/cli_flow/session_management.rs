@@ -30,7 +30,7 @@ fn the_product_profile_installs_native_titles_without_a_foreign_runtime() {
             }
         }
     };
-    let hello = call("hello", json!({"protocolVersion":3,"clientKind":"cli"}));
+    let hello = call("hello", json!({"protocolVersion":4,"clientKind":"cli"}));
     assert!(hello.get("result").is_some(), "{hello}");
     let settings = call(
         "settings.read",

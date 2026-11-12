@@ -59,6 +59,67 @@ fn home_browsing_and_exit_need_no_session_in_both_tui_modes() {
 }
 
 #[test]
+fn first_shell_command_creates_once_without_submitting_a_model_turn() {
+    for fullscreen in [false, true] {
+        for private in [false, true] {
+            let home = Home::new();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[]);
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                wire.created();
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+                for text in ["printf first-shell", "printf second-shell"] {
+                    let run = wire.read("shell.run");
+                    assert_eq!(run["params"]["sessionId"], "session");
+                    assert_eq!(run["params"]["branchId"], "main");
+                    assert_eq!(run["params"]["command"], text);
+                    assert_eq!(run["params"]["mode"], if private { "private" } else { "record" });
+                    wire.reply(&run, json!({"runId":run["params"]["runId"],"status":"completed","exitCode":0,"output":format!("{text}-output\n"),"truncated":false,"durationMs":1}));
+                    if text == "printf first-shell" {
+                        wire.no_context();
+                    }
+                }
+                let submit = wire.read("session.submit");
+                assert_eq!(submit["params"]["sessionId"], "session");
+                assert_eq!(submit["params"]["text"], "next message");
+                wire.reply(&submit, json!({"event":{}}));
+                wire.event(9, "text", json!({"turn_id":"next","request_id":"model","delta":"message accepted"}));
+                assert_eq!(wire.trailing_request(), None);
+            });
+            let mut command = command(&home);
+            if fullscreen {
+                command.arg("--fullscreen");
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until("Welcome to DIM");
+            terminal.write(if private {
+                b"!!printf first-shell\r"
+            } else {
+                b"!printf first-shell\r"
+            });
+            terminal.until("first-shell-output");
+            terminal.write(if private {
+                b"!!printf second-shell\r"
+            } else {
+                b"!printf second-shell\r"
+            });
+            terminal.until("second-shell-output");
+            terminal.write(b"next message\r");
+            terminal.until("message accepted");
+            terminal.write(b"/exit\r");
+            terminal.until("Bye!");
+            assert!(terminal.wait().success());
+            daemon.join().unwrap();
+            assert!(!terminal.transcript.contains("Sign in with /login"));
+        }
+    }
+}
+
+#[test]
 fn first_text_or_draft_creates_once_with_startup_options_in_both_tui_modes() {
     for fullscreen in [false, true] {
         for draft in [false, true] {
@@ -384,6 +445,7 @@ fn resume_effort_only_sends_forced_inheritance_before_submitting() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        wire.no_pending_questions(8);
         let idle = wire.read("session.idle");
         wire.reply(&idle, json!({"sequence":8}));
         let submit = wire.read("session.submit");
@@ -413,15 +475,17 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
         let home = Home::new();
         let (calls, observed) = std::sync::mpsc::channel();
         let daemon = home.daemon(move |wire| {
+        wire.2 = true;
         let mut creates = 0;
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             let request: Value = serde_json::from_str(&line).unwrap();
             line.clear();
+            if wire.2 && wire.empty_state(&request) { continue; }
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-                    "protocolVersion":3,"daemonProfile":{"kind":"product"},
-                    "features":["session.create","session.create.modelFromSession","session.history","provider.list"]}),
+                    "protocolVersion":4,"daemonProfile":{"kind":"product"},
+                    "features":["session.create","session.create.modelFromSession","session.history","session.history.latestTurn","session.methods","provider.list"]}),
                 "session.create" => {
                     creates += 1;
                     calls.send(request["params"].clone()).unwrap();
@@ -434,6 +498,7 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
                 "session.attach" => {
                     let mut record = attach_record(&request);
                     record["model"] = json!({"providerId":"session-source","modelId":"model"});
+                    if switched { record["model"]=json!({"providerId":"configured-provider","modelId":"selected-model"}); record["modelPreferences"]=json!({"reasoningEffort":"low"}); }
                     record
                 }
                 "session.history" => {
@@ -590,9 +655,7 @@ fn temporary_model_preferences_use_adopted_choices_without_a_provider_catalog() 
             let mut record = attach_record(&attach);
             record["model"]["providerId"] = json!("temporary");
             record["modelPreferences"] = json!({"reasoningEffort":"high"});
-            if !from_history {
-                record["capabilitySnapshot"] = snapshot.clone();
-            }
+            record["capabilitySnapshot"] = snapshot.clone();
             wire.reply(&attach, record);
             let history = wire.read("session.history");
             let events = if from_history {
@@ -894,6 +957,19 @@ fn startup_environment_is_not_read_by_help_version_or_management() {
             }
             assert!(text.contains("--autocompact"));
             assert!(text.contains("--model"));
+            let (_, entries) = text.split_once("\nCommands:\n").unwrap();
+            let (entries, _) = entries.split_once("\nModel startup:\n").unwrap();
+            for line in entries.lines().filter(|line| !line.is_empty()) {
+                assert!(
+                    line == "Options:" || line.starts_with("  "),
+                    "help entries and descriptions must be indented: {line:?}"
+                );
+            }
+            assert!(text.contains("\n                                  -p sends TEXT"));
+            assert!(text.contains("\n  dimcode exec --model model-id --effort high"));
+            for line in text.lines() {
+                assert!(line.len() <= 80, "help exceeds 80 columns: {line:?}");
+            }
         }
         assert!(!text.contains("invalid-secret"));
     }
@@ -909,12 +985,14 @@ fn configured_model_selection_preserves_legacy_creation() {
     fs::write(&config, "{}").unwrap();
     let digest = format!("{:x}", Sha256::digest(b"{}"));
     let daemon = home.daemon(move |wire| {
+        wire.2 = true;
+        wire.2 = true;
         let hello = wire.read("hello");
         wire.reply(
             &hello,
             json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-            "protocolVersion":3,"daemonProfile":{"kind":"configured","modelConfigSha256":digest},
-            "features":["session.create","session.history"]}),
+            "protocolVersion":4,"daemonProfile":{"kind":"configured","modelConfigSha256":digest},
+            "features":["session.create","session.history","session.history.latestTurn","session.methods"]}),
         );
         let create = wire.read("session.create");
         assert_eq!(
@@ -1053,18 +1131,20 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
             "temporary-source"
         };
         let daemon = home.daemon(move |wire| {
+            wire.2=true;
             let mut line = String::new();
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 line.clear();
+                if wire.2 && wire.empty_state(&request) { continue; }
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => {
-                        let mut features = vec!["session.create", "session.history", "provider.list"];
+                        let mut features = vec!["session.create", "session.history", "session.history.latestTurn", "session.methods", "provider.list"];
                         if management {
                             features.push("provider.management");
                         }
                         json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-                            "protocolVersion":3,"daemonProfile":{"kind":"product"},"features":features})
+                            "protocolVersion":4,"daemonProfile":{"kind":"product"},"features":features})
                     }
                     "session.attach" => {
                         let mut record = attach_record(&request);

@@ -153,7 +153,7 @@ new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Ses
 
 | 表面 | 首版 | 原生路径 / 缺口 |
 | --- | --- | --- |
-| `session/fork` | 条件可接，单独启用 SDK `unstable_session_fork` | 无锚点时固定 main head；有 Lody turnId 时定位该真实 turn 的 `turn/end` sequence。`session.fork {sessionId,at}` → 新 id → attach。原生 rest-point 检查决定能否 fork；活动 turn 内的切点失败，不偷偷改成早一点的切点 |
+| `session/fork` | 仅在原生同时声明 `session.fork` 与 `session.turn.get` 时提供；单独启用 SDK `unstable_session_fork` | 无锚点时固定 main head；有 Lody turnId 时定位该真实 turn 的 `turn/end` sequence。`session.fork {sessionId,at}` → 新 id → attach。原生 rest-point 检查决定能否 fork；活动 turn 内的切点失败，不偷偷改成早一点的切点 |
 | `providers/list` | 读取可复用；整组语义待选择 | `provider.management {}` → 安全可配置 Provider 投影；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
 | `providers/set` | 编辑可复用；共享设置或临时覆盖待选择 | `provider.management {providerId}` → 同版本 `provider.update` 是共享设置的路径；全量 headers、固定 driver/auth 和凭据归属须准确转换。临时覆盖另缺采用接口，见 §4.5 |
 | `providers/disable` | 禁用可复用；共享设置或临时覆盖待选择 | 同版本 `provider.update {patch:{enabled:false}}` 是持久化禁用，不是 CLI disconnect、delete、logout 或清除临时 override；不能混淆，见 §4.5 |
@@ -292,8 +292,8 @@ native reply、事件和 live progress 可以先后任意到达。先登记 subm
 ### 5.2 固定头与 live 合流
 
 1. 为同一 Session 的 new/load/resume/fork/history 操作同步建立一个准备槽位，再开始 await；并发 load 共用该槽位，不能创建两个消费者。失败清除槽位，关闭标志阻止迟到准备重新登记。
-2. attach 前登记接收路由；attach 后先缓存该 Session 的 live 事件和 notices。调用 `session.history {sessionId,branchId:"main",after:0,limit:256}` 固定返回的 through=H；后续页显式传 through=H，并使用原生 nextAfter 前进。不能因过滤后的 events 为空就提前结束。
-3. 按 sequence 折叠至 H，依据原生 done 结束；history 中删除的输入不渲染成有效用户消息，raw-only input 不渲染。Gateway 自己的 prompt 不重复 echo，其他客户端的真实 user input 可以投影。
+2. attach 前登记接收路由；attach 后先缓存该 Session 的 live 事件和 notices。首次准备使用 [客户端首屏窗口](clients.md#opening-a-conversation-with-a-bounded-window)：以 latestTurn 固定 through=H，再用 before 补足窗口。未结束任务、待答问题及委派等旧状态按该契约单独读取；不能靠全历史回放恢复。断线补读则从此前已消费游标继续。
+3. 将读到的窗口按 sequence 折叠；首屏停止条件由客户端窗口契约决定。history 中删除的输入不渲染成有效用户消息，raw-only input 不渲染。Gateway 自己的 prompt 不重复 echo，其他客户端的真实 user input 可以投影。
 4. 丢弃缓存中已折叠的 durable events，顺序消费 H 之后的部分；progress 用 request id 和 Unicode scalar offsets 与 committed text/thinking 合流。resume 不向 ACP 输出 H 以内的旧内容。load 的回放 updates 全部成功写出后才回复。
 5. Session notice 无 Timeline sequence。标题按 titleRevision 去重；非持久状态不可仅靠 history 恢复，重新查询公开元数据。所有 I/O、reply 和回放都检查连接 generation，旧 generation 不能写入新连接。
 
@@ -374,13 +374,15 @@ cancel 到达 submit reply 之前时保留 cancel 标志，等拿到 input id �
 | `approval.request`、`approval.resolved`、`approval.cancelled` | permission 请求和本地 waiter 结算；all branches 的审批均转交。显式保留 branchId/requestId，不能用 callId 单独关联 |
 | `SessionStore` title notice / native list metadata | 标准 session_info_update；按 revision 更新。manual 可映射 explicit；auto 不足以区分 generated/fallback，省略不可靠的 titleSource |
 | `session.context.usage` | 有值时 `usage_update {used:ceil(estimatedInputTokens),size:floor(contextWindow)}`，两个字段按 ACP 的 `u64` 输出 JSON 整数。这是估算上下文量。缺数据时不发送，未知 cost 省略，不能写 cost:0。不要把累计 token 消耗当上下文占用 |
-| `context/compaction-start`、`context/compaction` | 真正的 compaction activity；start/terminal 配对，completed/skipped/failed/cancelled 区分。只透传真实 diagnostics，不伪造节省量/耗时 |
+| `context/compaction-start`、`context/compaction`、完成压缩显示摘要 | 真正的 compaction activity；start/terminal 配对，completed/skipped/failed/cancelled 区分。显示摘要按 start（缺省时按终态 sequence）完成同一活动并释放开始记录；只透传真实 diagnostics，摘要不补造节省量/耗时。回放与实时重复事实不重复发送活动 |
 | `exec/started`、`exec/ended` | 后台任务的真实开始/终态，按 §8.3 生成独立 tool lifecycle + task metadata；不把原 exec 工具返回当后台结束 |
 | `collaboration/request`、`collaboration/delivered`、`collaboration/result` | 按 §8.3 投影最小 subagent snapshot 流；执行身份是 request，不能把可复用的 member Session 当作一次执行 |
 | child branch 普通内容 | 首版不混入主线 assistant 输出，也不借状态流声明已经接入 child 输出流 |
 | plan / proposal plan / scheduled task | 没有完整、已接入的公开来源，首版不合成 |
 
 共享 [wire.rs](../../crates/dim-client/src/wire.rs) 定义产品事件、progress 和固定头历史页边界，CLI 与 Gateway 直接消费同一类型。保留 input/consumed、turn/start、model/usage 等关联事实，不用 UI running 状态补猜，也不在投影层重复 parse 已知数据。
+
+协商显示模式后，完成压缩仅投影开始/完成状态及已知的 automatic 标记，不发送 `usedTokensBefore`、`usedTokensAfter`、`durationMs` 或 `rawOutput`。ACP 不为补诊断自动读取 `session.history.detail`，避免每次完成都加载 replacement。未完成结果仍按原完整事实透传已有原因和诊断；旧服务器完整事件模式也保留原诊断投影。
 
 ## 8. Lody 方法和能力逐项决策
 

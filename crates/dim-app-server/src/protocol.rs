@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub(crate) async fn canonical_cwd(cwd: &str) -> Result<std::path::PathBuf, RpcError> {
@@ -106,6 +106,8 @@ pub enum Call {
     Submit(Submit),
     InputLookup(InputLookup),
     History(History),
+    HistoryDisplay(History),
+    HistoryDetail(HistoryDetail),
     Keys(Keys),
     Stop(Stop),
     Idle(Idle),
@@ -116,6 +118,7 @@ pub enum Call {
     BranchCreate(BranchCreate),
     BranchEnd(BranchEnd),
     Branches(Branches),
+    BranchGet(BranchRequest),
     AgentCreate(AgentCreate),
     AgentList,
     AgentClose(AgentClose),
@@ -192,6 +195,10 @@ pub const UI_HOST_METHODS: [&str; 6] = [
 /// Management methods available to authenticated loopback Web clients.
 /// Replies contain account metadata and credential presence, never credentials.
 pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
+    "report.prepare",
+    "report.plan",
+    "report.generate",
+    "report.cancel",
     "ui.extensions.list",
     "provider.management",
     "provider.create",
@@ -557,6 +564,12 @@ pub struct Create {
     /// `acp` from an editor (#557). Any other value is refused at the boundary.
     #[serde(default, deserialize_with = "optional_non_null")]
     pub origin: Option<SessionOrigin>,
+    /// The operator's reply language for this Session. Absent means none was
+    /// selected and the base rule stands; clients send it only when the
+    /// daemon's `hello.features` names `session.language`, because older
+    /// daemons reject unknown fields.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub language: Option<dim_agent_runtime::ReplyLanguage>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -680,6 +693,8 @@ pub struct Fork {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Attach {
     pub session_id: String,
+    #[serde(default)]
+    pub display: bool,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -724,6 +739,17 @@ pub struct History {
     /// Exclusive upper cursor of a backward page.
     #[serde(default, deserialize_with = "optional_cursor")]
     pub before: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HistoryDetail {
+    pub session_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub branch_id: Option<String>,
+    pub event_id: String,
+    #[serde(deserialize_with = "cursor")]
+    pub sequence: u64,
 }
 /// `session.keys`: the live keyed blocks of one branch segment at a fixed
 /// position (keyed-blocks §2.1).
@@ -790,7 +816,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 36] = [
+const BUILTIN_METHODS: [&str; 39] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -813,6 +839,8 @@ const BUILTIN_METHODS: [&str; 36] = [
     "session.submit",
     "session.input_lookup",
     "session.history",
+    "session.history.display",
+    "session.history.detail",
     "session.keys",
     "session.stop",
     "session.idle",
@@ -823,6 +851,7 @@ const BUILTIN_METHODS: [&str; 36] = [
     "session.branch_create",
     "session.branch_end",
     "session.branches",
+    "session.branch.get",
     "agent.create",
     "agent.list",
     "agent.close",
@@ -888,6 +917,8 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.submit" => Call::Submit(params(raw_params)?),
             "session.input_lookup" => Call::InputLookup(params(raw_params)?),
             "session.history" => Call::History(params(raw_params)?),
+            "session.history.display" => Call::HistoryDisplay(params(raw_params)?),
+            "session.history.detail" => Call::HistoryDetail(params(raw_params)?),
             "session.keys" => Call::Keys(params(raw_params)?),
             "session.stop" => Call::Stop(params(raw_params)?),
             "session.idle" => Call::Idle(params(raw_params)?),
@@ -898,6 +929,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "session.branch_create" => Call::BranchCreate(params(raw_params)?),
             "session.branch_end" => Call::BranchEnd(params(raw_params)?),
             "session.branches" => Call::Branches(params(raw_params)?),
+            "session.branch.get" => Call::BranchGet(params(raw_params)?),
             "agent.create" => Call::AgentCreate(params(raw_params)?),
             "agent.list" => {
                 let _: Empty = params(raw_params)?;
@@ -1190,8 +1222,7 @@ pub struct SessionInfo {
     /// The Session's creation origin; protocol v3 with a native store (#557).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<SessionOrigin>,
-    /// The leader Session a Collaboration member belongs to; absent when the
-    /// store records none (#557).
+    /// The stored parent Session; absent when the store records none (#557).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     /// `title`, `titleSource` and `titleRevision` from SessionStore (S5b);
@@ -1267,7 +1298,10 @@ pub enum Reply {
     Submit(SubmitResult),
     InputLookup(InputLookupResult),
     History(crate::tree_protocol::HistoryResult),
+    HistoryDisplay(crate::tree_protocol::DisplayResult),
+    HistoryDetail(Box<serde_json::value::RawValue>),
     Branches(crate::tree_protocol::BranchesResult),
+    BranchGet(crate::tree_protocol::BranchDirectoryView),
     Keys(crate::tree_protocol::KeysResult),
     BranchCreate(crate::tree_protocol::CreateResult),
     Barrier(crate::tree_protocol::BarrierResult),
@@ -1378,6 +1412,7 @@ notifications! {
     ApprovalCancelled(ApprovalCancelled) = "approval.cancelled",
     Closed(ClosedNotice) = "session.closed",
     TreeEvent(crate::tree_protocol::EventNotice) = "session.event",
+    Display(crate::tree_protocol::DisplayNotice) = "session.display",
     BranchState(crate::tree_protocol::StateNotice) = "session.state",
     TreeApprovalRequest(crate::tree_protocol::ApprovalRequest) = "approval.request",
     TreeApprovalCancelled(crate::tree_protocol::ApprovalCancelled) = "approval.cancelled",

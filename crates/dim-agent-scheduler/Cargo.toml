@@ -25,8 +25,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 chrono-tz = "0.10"
 croner = "4"
 
+[features]
+# Flow tests hold a target-gone disable between its read and its write.
+testing = []
+
 [dev-dependencies]
-rusqlite = "0.40.2"
+dim-agent-scheduler = { path = ".", features = ["testing"] }
+rusqlite = "0.41.1"
 tempfile = "3"
 tokio.workspace = true
 serde_json.workspace = true

@@ -48,7 +48,7 @@ runtime/plugins/light-ocr/
 ```
 
 - `dim-plugin.json` 声明 `"dependencies": "npm"` 与 `"version"`；两个成员都归 PluginManager（[PluginManager §2.1](PluginManager.md#21-插件目录及其清单)）。运行的是副本，从不包含随发行的目录。
-- `package.json` 声明两个依赖：精确的 `@arcships/light-ocr` `0.5.9`，以及与 `runtime/package-lock.json` 相同版本的 `@arcships/rutis`，因为默认插件或已安装插件从自己的 `node_modules` 解析 `@arcships/rutis`（[RuntimeManager §6](RuntimeManager.md#6-发布)）。
+- `package.json` 声明三个依赖：精确的 `@arcships/light-ocr` `0.5.9`，与 facade 自身锁定版本（`0.1.9`）相同的 `@arcships/light-ocr-runtime`，以及与 `runtime/package-lock.json` 相同版本的 `@arcships/rutis`，因为默认插件或已安装插件从自己的 `node_modules` 解析 `@arcships/rutis`（[RuntimeManager §6](RuntimeManager.md#6-发布)）。helper 从 runtime 包的 `platformIdentity` 读取平台身份——facade 的文档 API 选择平台包时用的正是同一个导出——因此插件直接声明该 runtime，lock 中只保留一份副本。
 - `package-lock.json` 用 npm `integrity` 锁定每个包，包括 facade 自身的锁定——runtime `0.1.9`、模型 `light-ocr-model-ppocrv6-small` `0.3.4` 与各平台包——因为 facade 把它们声明为自己的依赖。决定运行什么的是 lock，而不是版本范围，正如 `runtime/package-lock.json` 对运行时包的作用。
 - 升级 light-ocr 是一次 Dim 改动：本插件中的新 lock，像任何依赖变更一样评审。新发行带有新的 `version`：下次启动时已安装副本在后台重新获取，只有新副本就绪后才切换记录，旧副本在此之前继续服务（[PluginManager §3.1](PluginManager.md#31-启动)）。同一条路径通过 `plugin.update` 修复失败的重新获取；`@arcships/rutis` 与运行时不再匹配的插件也以同样方式被替换。
 - 随发行的目录不带 `node_modules`，也没有构建产物：`scripts/stage-plugins.mjs` 复制它但不运行 `npm ci`（[RuntimeManager §6](RuntimeManager.md#6-发布)）。安装时不运行任何包的 lifecycle 脚本，因为安装使用 `--ignore-scripts`。
@@ -68,7 +68,7 @@ Desktop 迁移到 `plugin.install {source: {optional: "light-ocr"}}`，启用该
 
 | 方法 | 类型 | 请求 | 回复 |
 | --- | --- | --- | --- |
-| `describe` | 异步 | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, executable, args, read}` 或 `null` |
+| `describe` | 异步 | `{}` | `{contract: 1, target: {providerId: "local", modelId: "pp-ocr"}, executable, args, read}` |
 
 - `contract` 是本插件实现的 helper 契约版本，`1`。仅当它与 Modality 实现的版本相等时 Modality 才提供该目标；仍在运行的旧副本使目标不可用并带“the PP-OCR plugin needs an update”，直到重新获取完成（Modality §A.2.1）。
 - `target` 是 `{providerId: "local", modelId: "pp-ocr"}`，因此 Modality 把该目标列为 `local/pp-ocr`。
@@ -92,11 +92,11 @@ helper 遵循 Modality 已定义的 helper 契约（Modality §A.2）：
 - 写入每个产物前先计算其大小，若任务的产物将越过 1 GiB 则以 `resource_limit_exceeded` 拒绝。Modality 在写入每个文件时计入同一上限，因此目录持有量从不超过它。
 - 从字节嗅探输入，从不依赖声明的媒体类型，接受 PNG 与 JPEG 图像以及 PDF 文档。
 
-`result.json` 是 Modality 的文档形状：`{text, pageCount, pages: [{page, text, width, height, imagePath?, regions: [{text, confidence, polygon}]}]}`。`text` 是各页文本以换行连接；每页的 `page.text` 是其行以换行连接；`polygon` 是页面像素中的四组 `[x, y]`，从左上角开始顺时针排列——这正是 `crates/dim-ocr` 已为 `local/apple-vision` 定义的编码。
+`result.json` 是 Modality 的文档形状：`{text, pageCount, pages: [{page, text, width, height, imagePath?, regions: [{text, confidence, polygon}]}]}`。`text` 是各页文本以换行连接，`local/apple-vision` 则以空行连接；每页的 `page.text` 是其行以换行连接；`polygon` 是页面像素中的四组 `[x, y]`，从左上角开始顺时针排列——这正是 `crates/dim-ocr` 已为 `local/apple-vision` 定义的编码。
 
 ### 4.2 图像
 
-图像输入只读一次，用 `createEngine({execution: {provider: "cpu"}}).recognizeEncoded(bytes)` 识别。结果是一页：`page` 为 1，`width` 与 `height` 取自 `imageWidth` 与 `imageHeight`，`regions` 取自 `lines`（`text`、`confidence`、`box` 作为多边形），`text` 由各行按阅读顺序连接。图像输入不产生 `page-NNNN.png`：它未被栅格化，`layout` 模式下其页面的 `imagePath` 缺席，因为输入本身就是页面图像。`invalid_image`、`unsupported_pixel_format` 或 `invalid_argument` 的 `OcrError` 是类型化拒绝 `invalid_input`。
+图像输入只读一次，用 `createEngine({execution: {provider: "cpu"}, reducedLimits: {maxPixels: 25_000_000, …}}).recognizeEncoded(bytes, {applyExif: true})` 识别。引擎以缩减后的引擎上限携带 Modality 的 25,000,000 像素页面界限：facade 原样透传 `reducedLimits`（0.5.9 的 `packages/light-ocr/src/index.d.ts` 第 11–15 行；其形状见 `packages/runtime/src/index.d.ts`:63–66），binding 要求每个旧字段并逐一校验（`bindings/node/src/addon.cpp`:447–484），且引擎只能缩减其 bundle 的上限（`docs/native-api.md`:344），因此这个界限没有点名的字段保持锁定 bundle 自身的值；这些被复制的上限属于 lock 安装的模型版本，lock 更新改变该版本时测试会失败。超过该界限的图像在识别开始前就是 `resource_limit_exceeded`：binding 先读编码头，在解码或推理之前把解码尺寸与该 `maxPixels` 比较（`bindings/node/src/encoded_image.cpp`:228、241–243）。结果是一页：`page` 为 1，`width` 与 `height` 取自 `imageWidth` 与 `imageHeight`，`regions` 取自 `lines`（`text`、`confidence`、`box` 作为多边形），`text` 由各行按阅读顺序连接。图像输入不产生 `page-NNNN.png`：它未被栅格化，`layout` 模式下其页面的 `imagePath` 缺席，因为输入本身就是页面图像。`invalid_image`、`unsupported_pixel_format` 或 `invalid_argument` 的 `OcrError` 是类型化拒绝 `invalid_input`。
 
 ### 4.3 PDF
 
@@ -104,13 +104,13 @@ PDF 用 `createDocumentEngine({engineOptions: {execution: {provider: "cpu"}}}).r
 
 `layout` 模式下 helper 用平台包的 `pdfium` 导出——文档引擎自己加载的渲染器——以相同的 `dpi` 再次渲染每一页，把字节写成 `page-NNNN.png`，并设置该页的 `imagePath`。第二次渲染是取得页面图像的唯一方式：文档 API 返回行与尺寸，不返回像素。那里的渲染失败是 `local_runtime_failed`。`text` 模式下除识别本身外不再渲染页面图像。
 
-文档引擎没有针对加密 PDF 的错误码：栅格化器在加载文档时报告口令或权限失败。light-ocr 加载的绑定 `pdfium-native` 0.6.1 把 PDFium 的 `FPDF_ERR_PASSWORD` 映射为 `PASSWORD:Password required or incorrect`，把 `FPDF_ERR_SECURITY` 映射为 `SECURITY:Unsupported security scheme`（`src/napi_helpers.h` 的 `GetPdfiumErrorMessage`，第 24–55 行，两个 case 在 37–44 行），`src/pdfium_addon.cc:57` 用该消息拒绝加载。helper 把消息以 `PASSWORD:` 或 `SECURITY:` 开头的加载拒绝报告为 `encrypted_pdf`；其他加载或渲染失败是带渲染器消息的 `invalid_input`。
+文档引擎没有针对加密 PDF 的错误码：栅格化器在加载文档时报告口令或权限失败。light-ocr 加载的绑定 `pdfium-native` 0.6.1 把 PDFium 的 `FPDF_ERR_PASSWORD` 映射为 `PASSWORD:Password required or incorrect`，把 `FPDF_ERR_SECURITY` 映射为 `SECURITY:Unsupported security scheme`（`src/napi_helpers.h` 的 `GetPdfiumErrorMessage`，第 24–55 行，两个 case 在 37–44 行），`src/pdfium_addon.cc:57` 用该消息拒绝加载。以普通错误形式到达 helper 的每一次 PDFium 失败——文档引擎自身的加载或识别中的栅格化，以及 `layout` 模式下 helper 自己的 `loadDocument`（它读取同一份输入字节）——都按其消息前缀归类：`PASSWORD:` 或 `SECURITY:` 为 `encrypted_pdf`，`FILE:`、`FORMAT:`、`PAGE:` 或 `UNKNOWN:` 为 `invalid_input`，其他为 `local_runtime_failed`。上文第二次渲染的失败发生在页面已被识别之后，无论消息是什么都是 `local_runtime_failed`：引擎已经加载过这些字节并渲染、识别过该页，输入不可能是原因。
 
 ### 4.4 结果与错误映射
 
 | light-ocr | Modality helper 契约 |
 | --- | --- |
-| `DocumentPage.index`（从 1 开始） | `pages[].page` |
+| `DocumentPage.index`（从 0 开始）+ 1 | `pages[].page` |
 | `DocumentPage.width`、`height` | `pages[].width`、`pages[].height` |
 | `DocumentLine.text` / `OcrLine.text` | `pages[].text` 的行、`regions[].text` |
 | `DocumentLine.confidence` / `OcrLine.confidence` | `regions[].confidence`，限制在 [0, 1] |
@@ -141,7 +141,7 @@ CPU 路径已在 `HostPlatform::spawn_confined` 于 macOS arm64 构建的配置�
 
 ## 7. 安全
 
-- **信任锚。** 插件的 `package-lock.json` 是唯一的包来源，由 RuntimeManager 以 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund` 安装；npm 按 lock 的 `integrity` 校验每个包，且不运行任何 lifecycle 脚本（[RuntimeManager §3.2](RuntimeManager.md#32-获取)、§7）。registry 是 RuntimeManager 的规则；镜像不增加信任。随发行的插件目录从不被修改。
+- **信任锚。** 插件的 `package-lock.json` 是唯一的包来源，由 RuntimeManager 以 `npm ci --omit=dev --ignore-scripts --no-audit --no-fund --workspaces=false` 安装；npm 按 lock 的 `integrity` 校验每个包，且不运行任何 lifecycle 脚本（[RuntimeManager §3.2](RuntimeManager.md#32-获取)、§7）。registry 是 RuntimeManager 的规则；镜像不增加信任。随发行的插件目录从不被修改。
 - **不可信输入。** 输入文档只在受限 helper 中解析。Modality 与 daemon 从不打开它、从不解析它，也从不把它的内容交给其他进程。这是 OCR 作为宿主任务而非适配器的原因（Modality §A.2）。
 - **隔离。** helper 在 `HostPlatform::spawn_confined` 下以 `SystemServices::None` 运行：Node 安装根目录、插件目录与输入可读；任务工作目录可写；无网络。已在 macOS arm64 与 CPU 提供方上测量：工作目录之外不写任何东西——每次运行后目录为空——也不创建 Core ML 缓存。在不提供任何隔离的平台上——Windows，以及没有 `bubblewrap` 的 Linux——helper 无隔离运行，Modality 在任务上记录 `confined: false`（Modality A14）；插件自己不作任何声明，也不做探测。
 - **运行时无下载。** helper 只加载磁盘上已锁定的包。它没有网络，也没有更新器；包缺失或损坏是 `local_runtime_unavailable`。
@@ -209,8 +209,10 @@ HostPlatform 的 `spawn_confined` 与 `Confinement` 已存在；本插件对它�
 {
   "name": "dim-light-ocr",
   "private": true,
+  "type": "module",
   "dependencies": {
     "@arcships/light-ocr": "0.5.9",
+    "@arcships/light-ocr-runtime": "<facade 锁定的版本>",
     "@arcships/rutis": "<runtime/package-lock.json 锁定的版本>"
   }
 }
@@ -222,7 +224,7 @@ lock 以 `integrity` 锁定 facade、它的 runtime、模型与平台包，以�
 
 没有自动化测试会下载、安装或加载真实引擎。
 
-- **helper 单元测试。** 测试树中的 fixture `node_modules/@arcships/light-ocr` 导出 `createEngine`、`createDocumentEngine`、`getVersion`、`hasPdfSupport` 与 `OcrError`，其结果与失败由测试控制。helper 作为子进程在 fixture 输入上运行，测试断言 argv 解析、产物名字与形状、`text.txt` 内容、多边形转换、上限检查、§4.4 的每个错误映射，以及拒绝时不会在越界后留下部分产物。不获取任何东西；fixture 是仓库中的一个目录。
+- **helper 单元测试。** 测试树中的 fixture `node_modules/@arcships/light-ocr` 提供 helper 用到的导出，另加 `getVersion`，以证明 helper 不需要别的；其结果与失败由测试控制。helper 作为子进程在 fixture 输入上运行，测试断言 argv 解析、产物名字与形状、`text.txt` 内容、多边形转换、上限检查、§4.4 的每个错误映射，以及拒绝时不会在越界后留下部分产物。不获取任何东西；fixture 是仓库中的一个目录。
 - **行与插件测试。** 行连同 fixture 引擎一起加载，断言 `describe` 符合 Modality A.2.1 的形状——`target`、`executable` = `process.execPath`、`args`、`read`。服务在场、缺席与移除是 Modality 的验收流程，用桩提供方运行（Modality 附录 D 第 9 项）；插件自身的测试只覆盖它发布的描述。
 - **安装测试。** 用一个声明 `dependencies` 的 fixture 插件，PluginManager 的获取会复制它、从本地 fixture registry 安装其锁定依赖并改名到位；随发行的目录不变（PluginManager 附录 C 第 13 项）。
 - **唯一一次真实运行。** 一次端到端验收，不进 CI，在 macOS arm64 上：从发布的 optional 目录安装插件，从公共 registry 取真实 lock，对一页 PNG 和两页 PDF 以两种输出模式运行 `modality.ocr.recognize`，断言文本、页数、`layout` 模式下的 `page-NNNN.png`、退出码 0、`confined: true`，以及 helper 未在工作目录之外写任何东西。它会安装并在受限进程中加载下载的原生代码，因此由人手动运行，从不作为常规测试套件的一部分。
@@ -233,7 +235,7 @@ lock 以 `integrity` 锁定 facade、它的 runtime、模型与平台包，以�
 1. 安装前，`plugin.list` 以 `optional: true` 显示 `light-ocr`；`dimcode plugin install --optional light-ocr` 把它复制到 `<home>/plugins/light-ocr/<version>+<suffix>`，在那里安装其锁定依赖并打开它；随发行的目录没有 `node_modules` 且未被修改。
 2. 插件已安装且行在运行时，`modality.capabilities` 在 `local/apple-vision` 之外列出 `local/pp-ocr`；插件关闭、Pending 或移除后，只列出 `local/apple-vision`，其余不变。
 3. 图像任务返回文本与区域；`layout` 任务返回相同的区域，且图像输入没有页面图像；PDF 任务每页返回一页；两页 PDF 在 `layout` 模式下返回 `page-0001.png` 与 `page-0002.png`。
-4. 上限生效：501 页的 PDF 和超过 100 MiB 的输入是 `resource_limit_exceeded`；加密 PDF 是 `encrypted_pdf`；损坏的图像是 `invalid_input`。
+4. 上限与拒绝在任务上结算为 `invalid_input`：501 页的 PDF，其消息携带 helper 的上限；加密 PDF，带 helper 的 `encrypted_pdf` 消息；超过 100 MiB 的输入，在提交时即被拒绝，任何 helper 都不会运行；损坏的图像。Modality 把 helper 的 `resource_limit_exceeded` 与 `encrypted_pdf` 折叠为 `invalid_input`，而 helper 测试直接断言这两个 code。
 5. 取消与超时会杀死 helper；任务结算为 cancelled 或 failed，工作目录被删除。
 6. macOS 上 `confined: true`；Windows 与没有 `bubblewrap` 的 Linux 上 `confined: false`。
 7. 新发行的副本在下次启动时把已安装插件后台重新获取到新的 `<version>+<suffix>` 目录：只有新副本就绪后才切换记录与 `dir`，旧副本继续服务并留在磁盘上直到下次启动的清理，目标无需再 `enable` 一次即可继续工作；失败的重新获取保留旧副本，并在 `plugin.list` 中显示，直到 `plugin.update` 修复。

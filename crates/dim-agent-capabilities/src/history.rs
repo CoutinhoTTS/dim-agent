@@ -1,7 +1,7 @@
 use crate::prompt_state::PromptSnapshot;
 use dim_agent_runtime::{
-    AgentError, ContextHistory, Session, Timeline, TimelineQuery, TimelineQueryDirection,
-    TimelineQueryFlag, TimelineQueryOrderBy, TimelineQueryPredicate, TimelineQueryReply,
+    AgentError, ContextHistory, QueryCursor, QueryFilter, QueryOperand, QueryOutput, QueryPage,
+    QuerySelect, QuerySpec, QueryValue, Session, Timeline, TimelineQuery, TimelineQueryReply,
     TimelineQueryScope,
 };
 use dim_agent_types::*;
@@ -9,175 +9,107 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, num::NonZeroU64, sync::Arc};
 
-/// The read that selects one event and returns its chain position.
-pub(crate) fn chain_by_id(id: &str) -> TimelineQuery {
+mod settled_output;
+pub(crate) use settled_output::settled_request_output;
+
+pub(crate) fn chain_by_id(id: &str, through: u64, select: QuerySelect) -> TimelineQuery {
     TimelineQuery {
         scope: TimelineQueryScope::Chain,
         include_publishing: false,
-        from_event: None,
-        from_sequence: None,
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Ascending,
-        kinds: Vec::new(),
-        flags: Vec::new(),
-        event_id: Some(id.to_owned()),
-        predicate: None,
-        limit: NonZeroU64::MIN,
-        offset: 0,
+        from: None,
+        through: Some(through),
+        query: QuerySpec {
+            filter: Some(QueryFilter::In {
+                value: QueryOperand::Field { path: "id".into() },
+                values: vec![id.into()],
+            }),
+            select,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: NonZeroU64::MIN,
+            after: None,
+        }),
     }
-}
-
-/// The newest page of one kind over the branch chain. `from_sequence` bounds
-/// this branch at that sequence, so a caller that knows its own bound reads no
-/// later fact while its ancestors still reach their cuts; `predicate` is the
-/// one equality the store pushes down.
-pub(crate) fn newest_chain(
-    kind: Option<&str>,
-    from_sequence: Option<u64>,
-    predicate: Option<TimelineQueryPredicate>,
-    limit: u64,
-) -> TimelineQuery {
-    TimelineQuery {
-        scope: TimelineQueryScope::Chain,
-        include_publishing: false,
-        from_event: None,
-        from_sequence: from_sequence.filter(|sequence| *sequence > 0),
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Descending,
-        kinds: kind.map(str::to_owned).into_iter().collect(),
-        flags: Vec::new(),
-        event_id: None,
-        predicate,
-        limit: NonZeroU64::new(limit).expect("a page keeps at least one event"),
-        offset: 0,
-    }
-}
-
-/// The oldest page of `kinds` over the branch chain, from the event
-/// `from_event` names or from the chain's start.
-pub(crate) fn rising_chain(
-    from_event: Option<&str>,
-    kinds: Vec<String>,
-    limit: u64,
-) -> TimelineQuery {
-    TimelineQuery {
-        scope: TimelineQueryScope::Chain,
-        include_publishing: false,
-        from_event: from_event.map(str::to_owned),
-        from_sequence: None,
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Ascending,
-        kinds,
-        flags: Vec::new(),
-        event_id: None,
-        predicate: None,
-        limit: NonZeroU64::new(limit).expect("a page keeps at least one event"),
-        offset: 0,
-    }
-}
-
-/// The chain read a projection folds: the events carrying either context flag,
-/// ascending from the event `from_event` names or from the chain's start.
-fn context_chain(from_event: Option<&str>, offset: u64, limit: u64) -> TimelineQuery {
-    context_read(
-        TimelineQueryScope::Chain,
-        from_event.map(str::to_owned),
-        None,
-        offset,
-        limit,
-    )
-}
-
-/// The same read on one branch, from the event at `from`.
-fn context_branch(from: u64, limit: u64) -> TimelineQuery {
-    context_read(TimelineQueryScope::Branch, None, Some(from), 0, limit)
 }
 
 fn context_read(
     scope: TimelineQueryScope,
-    from_event: Option<String>,
-    from_sequence: Option<u64>,
-    offset: u64,
-    limit: u64,
+    from: Option<TimelinePosition>,
+    through: u64,
+    include_publishing: bool,
+    page: QueryPage,
 ) -> TimelineQuery {
     TimelineQuery {
         scope,
-        include_publishing: false,
-        from_event,
-        from_sequence,
-        order_by: TimelineQueryOrderBy::Sequence,
-        direction: TimelineQueryDirection::Ascending,
-        kinds: Vec::new(),
-        flags: vec![TimelineQueryFlag::Render, TimelineQueryFlag::State],
-        event_id: None,
-        predicate: None,
-        limit: NonZeroU64::new(limit).expect("a page keeps at least one event"),
-        offset,
+        from,
+        through: Some(through),
+        include_publishing,
+        query: QuerySpec {
+            filter: Some(QueryFilter::Or {
+                conditions: ["context.render", "context.state"]
+                    .map(|path| QueryFilter::In {
+                        value: QueryOperand::Field { path: path.into() },
+                        values: vec![true.into()],
+                    })
+                    .to_vec(),
+            }),
+            select: QuerySelect::Events,
+            group_by: vec![],
+            pick: None,
+            order_by: vec![],
+        },
+        page: Some(page),
     }
 }
 
-/// One page of the events a projection folds, each with its chain position.
+/// One page consumed by the context projection, with its chain positions.
 pub(crate) struct ContextPage {
     pub events: Vec<Arc<AgentEvent>>,
     pub positions: Vec<TimelinePosition>,
 }
 
-/// The read a projection folds, page by page: the chain from where the fold
-/// begins, then this branch by sequence.
-///
-/// A fold starts at the event a checkpoint names, which may sit in an ancestor,
-/// and only a chain read begins there; the next chain page begins at the event
-/// the last one ended at, so the ancestor prefix costs one id lookup a page
-/// instead of a page that re-selects what it folded. The fold switches to this
-/// branch as soon as a page reaches it, and a page then costs what it returns.
+/// Continuation of one context projection at a fixed cutoff; holds no events.
 pub(crate) struct FoldRead<'a> {
     reads: ContextReads<'a>,
-    /// The event the chain read begins at; `None` at the chain's start.
     begin: Option<String>,
-    own: String,
-    /// The position the last chain page ended at; a read that names it again
-    /// returns the same fact, which the fold drops.
-    last: Option<TimelinePosition>,
-    /// The sequence this branch continues at; `None` while the fold reads the
-    /// chain.
-    sequence: Option<u64>,
-    /// The last position the fold may read.
+    from: Option<TimelinePosition>,
     through: u64,
-    /// Whether the fold also reads this branch's facts written above the
-    /// published head.
     tail: bool,
+    after: Option<QueryCursor>,
+    exhausted: bool,
 }
 
 impl<'a> FoldRead<'a> {
     fn new(reads: ContextReads<'a>, begin: Option<String>, through: u64) -> Self {
         Self {
-            own: reads.branch(),
             reads,
             begin,
-            last: None,
-            sequence: None,
+            from: None,
             through,
             tail: false,
+            after: None,
+            exhausted: false,
         }
     }
 
-    /// A fold of this branch's Timeline.
     pub(crate) fn timeline(timeline: &'a Timeline, begin: Option<String>, through: u64) -> Self {
         Self::new(ContextReads::Timeline(timeline), begin, through)
     }
 
-    /// A fold of this branch from `sequence` on: a checkpoint records the
-    /// position of its resume, which is where a read begins when no event
-    /// carries the id the checkpoint names.
     pub(crate) fn from_sequence(timeline: &'a Timeline, sequence: u64, through: u64) -> Self {
         Self {
-            sequence: Some(sequence),
+            from: Some(TimelinePosition {
+                branch_id: timeline.branch_id(),
+                sequence,
+            }),
+            exhausted: sequence > through,
             ..Self::new(ContextReads::Timeline(timeline), None, through)
         }
     }
 
-    /// A fold through the Session facade, for callers that do not hold the
-    /// branch's Timeline.
     pub(crate) fn in_session(
         session: &'a Session,
         branch: &'a str,
@@ -187,67 +119,82 @@ impl<'a> FoldRead<'a> {
         Self::new(ContextReads::Session(session, branch), begin, through)
     }
 
-    /// Also reads this branch's own facts written above the published head, up
-    /// to the fold's bound: a page then asks the query for its committed bound
-    /// ([ADR 020 D3](../../../docs/adr/020-timeline-read-convergence.md)). A
-    /// Session facade has no such read, so a fold through it stays at the
-    /// published head.
     pub(crate) fn tail(mut self) -> Self {
-        self.tail = true;
+        self.tail = matches!(self.reads, ContextReads::Timeline(_));
         self
     }
 
-    /// The next page of up to `limit` facts, or `None` when the fold has read
-    /// everything at or below `through`. A page shorter than `limit` ends the
-    /// fold after it, so a page that a read began at an event the last page
-    /// already held is filled on from the next event.
     pub(crate) async fn next(
         &mut self,
         limit: u64,
     ) -> dim_agent_runtime::Result<Option<ContextPage>> {
-        let mut page = ContextPage {
-            events: Vec::new(),
-            positions: Vec::new(),
-        };
-        loop {
-            let repeated = u64::from(self.last.is_some());
-            let asked = limit - page.events.len() as u64 + repeated;
-            let mut query = match self.sequence {
-                Some(sequence) => context_branch(sequence, asked),
-                None => context_chain(self.begin.as_deref(), 0, asked),
-            };
-            if self.tail
-                && let ContextReads::Timeline(timeline) = &self.reads
-                && self.through > timeline.sequence()
-            {
-                query.include_publishing = true;
-            }
-            let reply = self.reads.query(query).await?;
-            let Some(mut read) = bounded(reply, &self.own, self.through) else {
-                break;
-            };
-            let exhausted = (read.events.len() as u64) < asked;
-            if self.last.as_ref() == read.positions.first() {
-                read.events.remove(0);
-                read.positions.remove(0);
-            }
-            let Some(last) = read.positions.last().cloned() else {
-                break;
-            };
-            if last.branch_id == self.own {
-                self.sequence = Some(last.sequence + 1);
-                self.last = None;
-            } else {
-                self.begin = read.events.last().map(|event| event.id.clone());
-                self.last = Some(last);
-            }
-            page.events.extend(read.events);
-            page.positions.extend(read.positions);
-            if exhausted || page.events.len() as u64 >= limit {
-                break;
-            }
+        if self.exhausted {
+            return Ok(None);
         }
-        Ok((!page.events.is_empty()).then_some(page))
+        if let Some(id) = &self.begin {
+            let reply = self
+                .reads
+                .query(TimelineQuery {
+                    scope: TimelineQueryScope::Chain,
+                    from: None,
+                    through: Some(self.through),
+                    include_publishing: self.tail,
+                    query: QuerySpec {
+                        filter: Some(QueryFilter::In {
+                            value: QueryOperand::Field { path: "id".into() },
+                            values: vec![id.clone().into()],
+                        }),
+                        select: QuerySelect::Fields {
+                            fields: vec!["position".into()],
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: NonZeroU64::MIN,
+                        after: None,
+                    }),
+                })
+                .await?;
+            let QueryOutput::Rows { rows } = reply.result else {
+                unreachable!("field selection returns rows")
+            };
+            let Some(row) = rows.into_iter().next() else {
+                self.exhausted = true;
+                return Ok(None);
+            };
+            let [QueryValue::Value { value }] = row.values.as_slice() else {
+                unreachable!("event has a position")
+            };
+            self.from = Some(
+                serde_json::from_value(value.clone()).expect("position follows the query contract"),
+            );
+            self.begin = None;
+        }
+        let reply = self
+            .reads
+            .query(context_read(
+                TimelineQueryScope::Chain,
+                self.from.clone(),
+                self.through,
+                self.tail,
+                QueryPage {
+                    limit: NonZeroU64::new(limit).expect("a context page holds an event"),
+                    after: self.after.clone(),
+                },
+            ))
+            .await?;
+        self.after = reply.next;
+        self.exhausted = self.after.is_none();
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        let (events, positions): (Vec<_>, Vec<_>) = events
+            .into_iter()
+            .map(|row| (row.event, row.position))
+            .unzip();
+        Ok((!events.is_empty()).then_some(ContextPage { events, positions }))
     }
 }
 
@@ -255,21 +202,6 @@ impl<'a> FoldRead<'a> {
 /// store holds no event with that id, so no fact lies after it.
 fn resume_unread(context: &ContextHistory) -> bool {
     context.checkpoint.is_some() && context.events.is_empty()
-}
-
-/// The facts a fold keeps from a reply: no fact above `through` on the read's
-/// own branch.
-fn bounded(reply: TimelineQueryReply, branch: &str, through: u64) -> Option<ContextPage> {
-    let mut events = Vec::with_capacity(reply.events.len());
-    let mut positions = Vec::with_capacity(reply.positions.len());
-    for (event, position) in reply.events.into_iter().zip(reply.positions) {
-        if position.branch_id == branch && position.sequence > through {
-            break;
-        }
-        events.push(event);
-        positions.push(position);
-    }
-    (!events.is_empty()).then_some(ContextPage { events, positions })
 }
 
 /// One page split where its branch changes, in read order: a chain page may
@@ -450,17 +382,28 @@ impl HistoryRenderer {
             ));
         }
         let segments = timeline.segments(through)?;
-        let Some(cut) = timeline
-            .query(chain_by_id(retain_from))
-            .await?
-            .positions
-            .into_iter()
-            .next()
-        else {
+        let reply = timeline
+            .query(chain_by_id(
+                retain_from,
+                through,
+                QuerySelect::Fields {
+                    fields: vec!["position".into()],
+                },
+            ))
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        let Some(row) = rows.into_iter().next() else {
             return Err(AgentError::InvalidInput(
                 "Compaction cut is outside the branch chain".into(),
             ));
         };
+        let [QueryValue::Value { value }] = row.values.as_slice() else {
+            unreachable!("event has a position")
+        };
+        let cut: TimelinePosition =
+            serde_json::from_value(value.clone()).expect("position follows the query contract");
         let boundary = segments
             .iter()
             .position(|(branch, _)| *branch == cut.branch_id)
@@ -707,18 +650,26 @@ impl HistoryRenderer {
                 let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome else {
                     continue;
                 };
-                let cut = timeline
-                    .query(chain_by_id(retain_from))
-                    .await?
-                    .positions
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| {
-                        AgentError::fault(
-                            "History",
-                            "Compaction cut is outside the stream".to_owned(),
-                        )
-                    })?;
+                let reply = timeline
+                    .query(chain_by_id(
+                        retain_from,
+                        through,
+                        QuerySelect::Fields {
+                            fields: vec!["position".into()],
+                        },
+                    ))
+                    .await?;
+                let QueryOutput::Rows { rows } = reply.result else {
+                    unreachable!("field selection returns rows")
+                };
+                let row = rows.into_iter().next().ok_or_else(|| {
+                    AgentError::fault("History", "Compaction cut is outside the stream".to_owned())
+                })?;
+                let [QueryValue::Value { value }] = row.values.as_slice() else {
+                    unreachable!("event has a position")
+                };
+                let cut: TimelinePosition = serde_json::from_value(value.clone())
+                    .expect("position follows the query contract");
                 let Some(end) = segments
                     .iter()
                     .find(|(name, _)| name == &cut.branch_id)
@@ -788,101 +739,84 @@ pub struct StreamedContext {
     pub compaction_cut: Option<dim_agent_types::TimelinePosition>,
 }
 
-/// Read the shared prompt/input/output projection using its supported cache.
-pub async fn read_context(
-    timeline: &Timeline,
-    through: u64,
-) -> dim_agent_runtime::Result<ContextHistory> {
-    HistoryRenderer::default().context(timeline, through).await
-}
-
-/// Read the context at `through` from its facts alone, selecting no
-/// checkpoint: the fold begins at the chain's start.
-pub async fn replay_context(
-    timeline: &Timeline,
-    through: u64,
-) -> dim_agent_runtime::Result<ContextHistory> {
-    HistoryRenderer::default()
-        .replay_context(timeline, through)
-        .await
-}
-
-/// [`replay_context`] through the Session facade, for callers that do not hold
-/// the branch's Timeline. A Session exposes no recovery snapshot, so the fold
-/// begins at the chain's start, and the branches it covered are the ones the
-/// reply placed facts in.
-pub async fn read_context_in(
-    session: &Session,
-    branch: &str,
-    through: u64,
-) -> dim_agent_runtime::Result<ContextHistory> {
-    if through > session.sequence(branch)? {
-        return Err(AgentError::InvalidInput(format!(
-            "future timeline sequence {through}"
-        )));
-    }
-    let mut read = FoldRead::in_session(session, branch, None, through);
-    let mut events = Vec::new();
-    let mut positions: Vec<TimelinePosition> = Vec::new();
-    while let Some(page) = read.next(FOLD_PAGE).await? {
-        events.extend(page.events);
-        positions.extend(page.positions);
-    }
-    let mut ancestry: Vec<String> = Vec::new();
-    for position in &positions {
-        if ancestry.last() != Some(&position.branch_id) {
-            ancestry.push(position.branch_id.clone());
+impl HistoryRenderer {
+    /// [`Self::replay_context`] through the Session facade, for callers that do not hold
+    /// the branch's Timeline. A Session exposes no recovery snapshot, so the fold
+    /// begins at the chain's start, and the branches it covered are the ones the
+    /// reply placed facts in.
+    pub async fn context_in(
+        &self,
+        session: &Session,
+        branch: &str,
+        through: u64,
+    ) -> dim_agent_runtime::Result<ContextHistory> {
+        if through > session.sequence(branch)? {
+            return Err(AgentError::InvalidInput(format!(
+                "future timeline sequence {through}"
+            )));
         }
+        let mut read = FoldRead::in_session(session, branch, None, through);
+        let mut events = Vec::new();
+        let mut positions: Vec<TimelinePosition> = Vec::new();
+        while let Some(page) = read.next(FOLD_PAGE).await? {
+            events.extend(page.events);
+            positions.extend(page.positions);
+        }
+        let mut ancestry: Vec<String> = Vec::new();
+        for position in &positions {
+            if ancestry.last() != Some(&position.branch_id) {
+                ancestry.push(position.branch_id.clone());
+            }
+        }
+        Ok(ContextHistory {
+            checkpoint: None,
+            ancestry,
+            events,
+            positions,
+        })
     }
-    Ok(ContextHistory {
-        checkpoint: None,
-        ancestry,
-        events,
-        positions,
-    })
 }
 
 /// One message an input or the projection places, with the in-effect
 /// state it changes: `Some((key, None))` ends a key.
-struct ProjectionEntry {
-    id: String,
-    message: Message,
+pub(crate) struct ProjectionEntry {
+    pub(crate) id: String,
+    pub(crate) message: Arc<Message>,
     state: Option<(String, Option<ContextBaselineEntry>)>,
 }
 
 /// Raw blocks in order, then the operator's words; each is one message.
-fn render_input(event: &AgentEvent, input: &InputMessageData) -> Vec<ProjectionEntry> {
-    let mut entries: Vec<_> = input
+pub(crate) fn render_input<'a>(
+    consumed_id: &'a str,
+    input: &'a InputMessageData,
+) -> impl Iterator<Item = ProjectionEntry> + 'a {
+    input
         .blocks
         .iter()
         .enumerate()
-        .map(|(index, block)| {
+        .map(move |(index, block)| {
             let InputBlock::Raw { text, key, retire } = block;
-            let message = Message::text(Role::User, text);
+            let message = Arc::new(Message::text(Role::User, text));
             ProjectionEntry {
-                id: format!("{}:block:{index}", event.id),
+                id: format!("{consumed_id}:block:{index}"),
                 state: key.as_ref().map(|key| {
                     (
                         key.clone(),
                         (!retire).then(|| ContextBaselineEntry {
                             key: key.clone(),
-                            source_event: event.id.clone(),
-                            message: Arc::new(message.clone()),
+                            source_event: consumed_id.to_owned(),
+                            message: message.clone(),
                         }),
                     )
                 }),
                 message,
             }
         })
-        .collect();
-    if let Some(user) = &input.user {
-        entries.push(ProjectionEntry {
-            id: event.id.clone(),
-            message: user_message(user),
+        .chain(input.user.as_ref().map(move |user| ProjectionEntry {
+            id: consumed_id.to_owned(),
+            message: Arc::new(user_message(user)),
             state: None,
-        });
-    }
-    entries
+        }))
 }
 
 /// Keeps about `keep` bytes of `text`, half from the start and half from
@@ -1049,7 +983,7 @@ fn replay(
                         data.input_id
                     )
                 })?;
-                for projection in render_input(event, &input) {
+                for projection in render_input(&event.id, &input) {
                     apply(&mut history, &mut delivered_state, projection);
                 }
             }
@@ -1093,35 +1027,35 @@ fn replay(
             }
             EventKind::ModelOutputEnd(data) => {
                 let output = std::mem::take(&mut output);
-                if matches!(data.outcome, ModelOutputOutcome::Completed { .. }) {
-                    history.push(assistant(event.id.clone(), output, baseline.clone()));
-                } else {
-                    history.extend(interrupted(event.id.clone(), output, &baseline));
-                }
+                history.extend(
+                    settled_output_message(
+                        output,
+                        matches!(data.outcome, ModelOutputOutcome::Completed { .. }),
+                    )
+                    .map(|message| {
+                        entry(event.id.clone(), Arc::new(message), false, baseline.clone())
+                    }),
+                );
                 output_open = false;
             }
             EventKind::ToolResult(data) => {
                 if data.call_event_id.is_none() && output_open {
-                    history.extend(interrupted(
-                        event.id.clone(),
-                        std::mem::take(&mut output),
-                        &baseline,
-                    ));
+                    history.extend(
+                        settled_output_message(std::mem::take(&mut output), false).map(|message| {
+                            entry(event.id.clone(), Arc::new(message), false, baseline.clone())
+                        }),
+                    );
                     output_open = false;
                 }
                 for (index, item) in data.results.iter().enumerate() {
                     let id = format!("{}:{index}", event.id);
                     history.push(entry(
                         id,
-                        Message {
-                            role: Role::ToolResult,
-                            content: MessageContent::Parts(vec![MessagePart::ToolResult {
-                                tool_use_id: item.call_id.clone(),
-                                content: item.result.content.clone(),
-                                structured_content: None,
-                                is_error: item.result.is_error,
-                            }]),
-                        },
+                        Arc::new(tool_result_message(
+                            &item.call_id,
+                            &item.result.content,
+                            item.result.is_error,
+                        )),
                         false,
                         baseline.clone(),
                     ));
@@ -1130,7 +1064,7 @@ fn replay(
                             |(context_index, message)| {
                                 entry(
                                     format!("{}:{index}:{context_index}", event.id),
-                                    message.clone(),
+                                    Arc::new(message.clone()),
                                     true,
                                     baseline.clone(),
                                 )
@@ -1295,18 +1229,6 @@ pub(crate) fn projected_messages(
     messages
 }
 
-/// The replay rule's messages in order, without building a list.
-pub(crate) fn projected_message_refs<'a>(
-    compaction: Option<&'a ContextCompactionData>,
-    history: &'a [HistoryEntry],
-) -> impl Iterator<Item = &'a Message> + 'a {
-    let (replacement, baseline, history) = segments(compaction, history);
-    replacement
-        .iter()
-        .chain(baseline.iter().map(|entry| entry.message.as_ref()))
-        .chain(history.iter().map(|entry| entry.message.as_ref()))
-}
-
 /// The replay rule applied to a whole `ContextHistory`.
 pub fn context_messages(context: &ContextHistory, history: &[HistoryEntry]) -> Vec<Arc<Message>> {
     projected_messages(context_compaction(context), history)
@@ -1434,7 +1356,6 @@ impl ContextReads<'_> {
             Self::Session(session, branch) => session.batch_end(branch, through).await,
         }
     }
-    /// One bounded read of the branch's facts.
     async fn query(&self, request: TimelineQuery) -> dim_agent_runtime::Result<TimelineQueryReply> {
         match self {
             Self::Timeline(timeline) => timeline.query(request).await,
@@ -1451,50 +1372,103 @@ impl ContextReads<'_> {
         if through == 0 {
             return Ok(None);
         }
-        let Some(compaction) = self
+        let reply = self
             .query(TimelineQuery {
                 scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(through),
                 include_publishing: false,
-                from_event: None,
-                from_sequence: Some(through),
-                order_by: TimelineQueryOrderBy::Sequence,
-                direction: TimelineQueryDirection::Descending,
-                kinds: vec!["context/compaction".into()],
-                flags: Vec::new(),
-                event_id: None,
-                predicate: Some(TimelineQueryPredicate {
-                    path: "status".into(),
-                    value: serde_json::Value::String("completed".into()),
+                query: QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "kind".into(),
+                                },
+                                values: vec!["context/compaction".into()],
+                            },
+                            QueryFilter::In {
+                                value: QueryOperand::Field {
+                                    path: "data.status".into(),
+                                },
+                                values: vec!["completed".into()],
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["position.sequence".into(), "data.retain_from".into()],
+                    },
+                    group_by: vec![],
+                    pick: Some(dim_agent_runtime::QueryPick::Last),
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
                 }),
-                limit: NonZeroU64::MIN,
-                offset: 0,
             })
-            .await?
-            .events
-            .into_iter()
-            .next()
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let [
+            QueryValue::Value { value: sequence },
+            QueryValue::Value { value: retain_from },
+        ] = row.values.as_slice()
         else {
-            return Ok(None);
+            unreachable!("completed compaction has a sequence and retain_from")
         };
-        let EventKind::ContextCompaction(data) = &compaction.kind else {
-            return Ok(None);
+        let cut = self
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Branch,
+                from: None,
+                through: Some(through),
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::And {
+                        conditions: vec![
+                            QueryFilter::In {
+                                value: QueryOperand::Field { path: "id".into() },
+                                values: vec![retain_from.clone()],
+                            },
+                            QueryFilter::Compare {
+                                left: QueryOperand::Field {
+                                    path: "position.sequence".into(),
+                                },
+                                comparison: dim_agent_runtime::QueryComparison::Lt,
+                                right: QueryOperand::Value {
+                                    value: sequence.clone(),
+                                },
+                            },
+                        ],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["position.sequence".into()],
+                    },
+                    group_by: vec![],
+                    pick: None,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            })
+            .await?;
+        let QueryOutput::Rows { rows } = cut.result else {
+            unreachable!("field selection returns rows")
         };
-        let ContextCompactionResult::Completed { retain_from, .. } = &data.outcome else {
-            return Ok(None);
-        };
-        let Some(cut) = self
-            .query(chain_by_id(retain_from))
-            .await?
-            .positions
-            .into_iter()
-            .next()
-        else {
-            return Ok(None);
-        };
-        Ok(
-            (cut.branch_id == self.branch() && cut.sequence < compaction.sequence)
-                .then_some(cut.sequence),
-        )
+        Ok(rows.into_iter().next().map(|row| {
+            let [QueryValue::Value { value }] = row.values.as_slice() else {
+                unreachable!("event has a sequence")
+            };
+            value
+                .as_u64()
+                .expect("position sequence is an unsigned integer")
+        }))
     }
     /// The line's published head, which a cut may not pass.
     fn head(&self) -> dim_agent_runtime::Result<u64> {
@@ -1509,9 +1483,34 @@ impl ContextReads<'_> {
         from: u64,
         through: u64,
     ) -> dim_agent_runtime::Result<Option<ContextPage>> {
-        let reply = self.query(context_branch(from, FOLD_PAGE)).await?;
-        Ok(bounded(reply, &self.branch(), through))
+        if from > through {
+            return Ok(None);
+        }
+        let reply = self
+            .query(context_read(
+                TimelineQueryScope::Branch,
+                Some(TimelinePosition {
+                    branch_id: self.branch(),
+                    sequence: from,
+                }),
+                through,
+                false,
+                QueryPage {
+                    limit: NonZeroU64::new(FOLD_PAGE).unwrap(),
+                    after: None,
+                },
+            ))
+            .await?;
+        let QueryOutput::Events { events } = reply.result else {
+            unreachable!("event selection returns events")
+        };
+        let (events, positions): (Vec<_>, Vec<_>) = events
+            .into_iter()
+            .map(|row| (row.event, row.position))
+            .unzip();
+        Ok((!events.is_empty()).then_some(ContextPage { events, positions }))
     }
+
     fn branch(&self) -> String {
         match self {
             Self::Timeline(timeline) => timeline.branch_id(),
@@ -1601,45 +1600,48 @@ pub async fn validate_context_boundary_in(
     boundary_at(ContextReads::Session(session, branch), through).await
 }
 
-fn assistant(
-    id: String,
-    parts: Vec<MessagePart>,
-    baseline: Arc<[ContextBaselineEntry]>,
-) -> HistoryEntry {
-    entry(
-        id,
-        Message {
-            role: Role::Assistant,
-            content: MessageContent::Parts(parts),
-        },
-        false,
-        baseline,
-    )
+/// Completed output keeps all parts, including an empty assistant message.
+/// Interrupted output discards thinking and omits an empty message.
+pub(crate) fn settled_output_message(output: Vec<MessagePart>, completed: bool) -> Option<Message> {
+    let parts = if completed {
+        output
+    } else {
+        output
+            .into_iter()
+            .filter(|part| !matches!(part, MessagePart::Thinking { .. }))
+            .collect()
+    };
+    (completed || !parts.is_empty()).then_some(Message {
+        role: Role::Assistant,
+        content: MessageContent::Parts(parts),
+    })
 }
 
-/// The committed text and started calls of an output that did not complete,
-/// without its thinking; nothing when neither exists.
-fn interrupted(
-    id: String,
-    output: Vec<MessagePart>,
-    baseline: &Arc<[ContextBaselineEntry]>,
-) -> Option<HistoryEntry> {
-    let parts: Vec<_> = output
-        .into_iter()
-        .filter(|part| !matches!(part, MessagePart::Thinking { .. }))
-        .collect();
-    (!parts.is_empty()).then(|| assistant(id, parts, baseline.clone()))
+pub(crate) fn tool_result_message(
+    call_id: &str,
+    content: &ToolContent,
+    is_error: Option<bool>,
+) -> Message {
+    Message {
+        role: Role::ToolResult,
+        content: MessageContent::Parts(vec![MessagePart::ToolResult {
+            tool_use_id: call_id.to_owned(),
+            content: content.clone(),
+            structured_content: None,
+            is_error,
+        }]),
+    }
 }
 
 fn entry(
     id: String,
-    message: Message,
+    message: Arc<Message>,
     tool_context: bool,
     baseline: Arc<[ContextBaselineEntry]>,
 ) -> HistoryEntry {
     HistoryEntry {
         id,
-        message: Arc::new(message),
+        message,
         tool_context,
         baseline,
         event_id: String::new(),

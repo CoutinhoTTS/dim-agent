@@ -169,13 +169,14 @@ impl Screen {
         let (mut layout, mut wanted) = self.layout(frame, size);
         let tail = visible_tail(&layout, wanted);
         let rows_changed = self.painted_differs(&layout, wanted);
+        let cursor = cursor_target(&layout, self.viewport_top(), wanted);
         let nothing = frame.commits.is_empty()
             && !resized
             && !rows_changed
             && wanted == self.viewport_height
             && tail == self.tail
-            && !self.cursor_needs_move(&layout, wanted)
-            && self.cursor_visible == frame.cursor.is_some();
+            && !self.cursor_needs_move(cursor)
+            && self.cursor_visible == cursor.is_some();
         if nothing {
             return out;
         }
@@ -264,13 +265,8 @@ impl Screen {
             .any(|(i, row)| self.painted.get(i).and_then(|p| p.as_deref()) != Some(row.as_str()))
     }
 
-    fn cursor_needs_move(&self, frame: &Frame, wanted: u16) -> bool {
-        match (frame.cursor, self.cursor_at) {
-            (None, _) => false,
-            (Some((row, col)), at) => {
-                at != Some((col, self.top.min(self.size.1.saturating_sub(wanted)) + row))
-            }
-        }
+    fn cursor_needs_move(&self, target: Option<(u16, u16)>) -> bool {
+        target.is_some_and(|target| self.cursor_at != Some(target))
     }
 
     fn commit(&mut self, text: &str, out: &mut Vec<u8>) {
@@ -552,9 +548,8 @@ impl Screen {
     }
 
     fn place_cursor(&mut self, frame: &Frame, out: &mut Vec<u8>) {
-        match frame.cursor {
-            Some((row, col)) => {
-                let target = (col, self.viewport_top() + row);
+        match cursor_target(frame, self.viewport_top(), self.viewport_height) {
+            Some(target) => {
                 self.anchor = target.1;
                 if self.cursor_at != Some(target) {
                     push_move(out, target.0, target.1);
@@ -648,20 +643,36 @@ fn lay_out(row: &str, cols: usize) -> Option<Laid<'_>> {
 /// top rows are the ones cut.
 fn visible_tail(frame: &Frame, height: u16) -> u16 {
     let tail = frame.anchor.min(frame.live.len());
-    let cut = frame.live.len().saturating_sub(height.max(1) as usize);
-    tail.saturating_sub(cut) as u16
+    tail.saturating_sub(cut_rows(frame.live.len(), height as usize)) as u16
+}
+
+/// Live rows the viewport cuts off the region's top: the rows before its
+/// first on-screen row.
+fn cut_rows(len: usize, height: usize) -> usize {
+    len.saturating_sub(height.max(1))
 }
 
 /// The rows that fit: when the live region is taller than the viewport the
 /// bottom rows win (the composer lives there).
 fn visible_rows(live: &[String], height: u16) -> Vec<String> {
     let height = height.max(1) as usize;
-    let skip = live.len().saturating_sub(height);
-    let mut rows: Vec<String> = live[skip..].to_vec();
+    let mut rows: Vec<String> = live[cut_rows(live.len(), height)..].to_vec();
     while rows.len() < height {
         rows.push(String::new());
     }
     rows
+}
+
+/// Where the frame's cursor lands on screen when the viewport shows
+/// `height` rows of `frame.live` from `top`. The frame's row indexes the
+/// whole live region, so the rows cut from its top move the cursor up by
+/// that many; a row among the cut ones, or past the painted rows, is not on
+/// screen: `None`.
+fn cursor_target(frame: &Frame, top: u16, height: u16) -> Option<(u16, u16)> {
+    let height = height.max(1) as usize;
+    let (row, col) = frame.cursor?;
+    let row = (row as usize).checked_sub(cut_rows(frame.live.len(), height))?;
+    (row < height).then_some((col, top.saturating_add(row as u16)))
 }
 
 /// A character that may need scrubbing: a C0 or C1 control (ESC among
@@ -1451,6 +1462,44 @@ mod tests {
         assert!(emu.cursor_visible, "cursor shown again after the paint");
     }
 
+    /// The frame's cursor row indexes the whole live region; the rows the
+    /// viewport cuts from its top are not on screen, so they must not push
+    /// the caret down off its row.
+    #[test]
+    fn caret_stays_on_its_row_when_the_live_region_is_cut_at_the_top() {
+        let size = (40, 5);
+        let mut screen = Screen::new(size, true);
+        let mut emu = Emu::new(size.0 as usize, size.1 as usize);
+        let live = [
+            "tail 1",
+            "tail 2",
+            "",
+            "╭────────────╮",
+            "│ › hi       │",
+            "╰────────────╯",
+            "AGENT ⏵⏵ Workspace write",
+        ];
+        emu.feed(&screen.render(&frame(&[], &live, Some((4, 2))), size));
+        let rows = emu.rows_text();
+        assert_eq!(rows[2], live[4], "{rows:?}");
+        assert_eq!((emu.cx, emu.cy), (2, 2), "{rows:?}");
+    }
+
+    /// A caret whose own row was cut away has nowhere on screen to go: it
+    /// waits hidden instead of dropping onto the rows below.
+    #[test]
+    fn caret_above_the_cut_rows_waits_hidden() {
+        let size = (40, 2);
+        let mut screen = Screen::new(size, true);
+        let mut emu = Emu::new(size.0 as usize, size.1 as usize);
+        let live = ["one", "two", "three", "composer", "status"];
+        emu.feed(&screen.render(&frame(&[], &live, Some((0, 1))), size));
+        assert_eq!(emu.rows_text(), ["composer", "status"]);
+        assert!(!emu.cursor_visible, "the caret's row is not on screen");
+        let again = screen.render(&frame(&[], &live, Some((0, 1))), size);
+        assert!(again.is_empty(), "hidden and still: {again:?}");
+    }
+
     #[test]
     fn oversized_live_region_keeps_the_bottom_rows_and_some_history() {
         let (mut screen, mut emu) = setup(true);
@@ -1507,6 +1556,8 @@ mod tests {
         tail: Vec<String>,
         /// Queued messages shown above the composer.
         queue: usize,
+        /// Background task rows shown above the composer.
+        tasks: usize,
         panel: usize,
         replaced: bool,
     }
@@ -1518,10 +1569,11 @@ mod tests {
         }
 
         /// The next frame: the tail grows, folds or is committed, a panel
-        /// opens, changes or closes, a question takes the composer's place.
+        /// opens, changes or closes, a question takes the composer's place,
+        /// or the background task row appears, changes and leaves.
         fn step(&mut self) -> Frame {
             let mut commits = Vec::new();
-            match self.rng.below(9) {
+            match self.rng.below(10) {
                 0 | 1 => {
                     for _ in 0..1 + self.rng.below(3) {
                         let row = self.label("t");
@@ -1554,6 +1606,7 @@ mod tests {
                 }
                 5 | 6 => self.panel = self.rng.below(7) as usize,
                 7 => self.replaced = !self.replaced,
+                8 => self.tasks = self.rng.below(3) as usize,
                 _ => self.queue = self.rng.below(3) as usize,
             }
             self.frame(commits)
@@ -1562,6 +1615,7 @@ mod tests {
         fn frame(&self, commits: Vec<String>) -> Frame {
             let mut live: Vec<String> = self.tail.clone();
             live.extend((0..self.queue).map(|n| format!("queued {n}")));
+            live.extend((0..self.tasks).map(|n| format!("◐ {} · cargo build {n}m", self.tasks)));
             let anchor = live.len();
             if self.replaced {
                 live.push("DOCK question".to_owned());
@@ -1612,6 +1666,7 @@ mod tests {
                 next: 0,
                 tail: Vec::new(),
                 queue: 0,
+                tasks: 0,
                 panel: 0,
                 replaced: false,
             };
@@ -1690,6 +1745,7 @@ mod tests {
                 next: 0,
                 tail: Vec::new(),
                 queue: 0,
+                tasks: 0,
                 panel: 0,
                 replaced: false,
             };

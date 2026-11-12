@@ -4,12 +4,12 @@
 
 > **离线资源节点。** 关于资源节点离线的各行描述的是 P3 多节点行为。#5 已撤回（rutis 是外部依赖，链接断开时会撤掉导入的服务），这些行在 P3 按总览 §6.3 重新设计：节点服务在每次调用时按 Session 的资源节点查找，该字段在 P3 加入 `SessionConfig`（[A.3](#a3-sessionconfig-字段)）。P1/P2 中每个 Session 都使用控制节点。
 
-进程插件以 Collaboration 已有的方式访问 Session：通过 Agents 和公共的 Session 接口。本文把这种访问定义为语言中立的进程服务 `sessions`（ADR 002 D5），由 Agents 提供，因此 TypeScript 或 Python 进程插件（Scheduler、Workflow）可以按名称使用它。其方法为 `launch`、`input`、`lookup`、`history`、`withdraw`、`stop`、`idle` 和 `delete`，请求与回复均为数据（[A.1](#a1-sessions-服务)）。在 Rust 中，它是 `AgentIndex` 加上 `Session` 门面（[附录 E](#附录-e-rust-绑定)）。本文不增加任何宿主或门面插件。Agents 从不会重载的目录部分提供它，因此 Agents 重载只让进行中的调用失败，从不让调用方重载（D3，#35）；绑定、生命周期及其依据的 spike 见 [sessions 服务](../appserver/sessions-service.md)设计。
+进程插件以 Collaboration 已有的方式访问 Session：通过 Agents 和公共的 Session 接口。本文把这种访问定义为语言中立的进程服务 `sessions`（ADR 002 D5），由 Agents 提供，因此 TypeScript 或 Python 进程插件（Scheduler、Workflow）可以按名称使用它。其方法为 `launch`、`input`、`lookup`、`exists`、`history`、`withdraw`、`stop`、`idle` 和 `delete`，请求与回复均为数据（[A.1](#a1-sessions-服务)）。在 Rust 中，它是 `AgentIndex` 加上 `Session` 门面（[附录 E](#附录-e-rust-绑定)）。本文不增加任何宿主或门面插件。Agents 从不会重载的目录部分提供它，因此 Agents 重载只让进行中的调用失败，从不让调用方重载（D3，#35）；绑定、生命周期及其依据的 spike 见 [sessions 服务](../appserver/sessions-service.md)设计。
 
 | 补充 | 所有者 | 使用方 |
 | --- | --- | --- |
 | `sessions` 服务：按名称、纯数据地访问 Session | Agents | Scheduler、Workflow 进程部分 |
-| 策略以启动方为上限的 `launch` | Agents | Scheduler、Workflow |
+| 生效策略按启动方策略或宿主上限收拢的 `launch` | Agents | Scheduler、Workflow |
 | `SessionConfig` 字段 `interactive` | Agents | 从所属 Session 的 `SessionConfig` 读取它的插件（Questions、SessionTitle） |
 | 带来源 raw 块的输入（标记、key、`submissionId`） | InputQueue 数据合同、运行时门面 | Scheduler、Workflow；Goal 分支部分写入相同形式，Hooks 分支部分（待设计）也会如此 |
 | 固定前缀读取 | 运行时门面（`sequence` 与 `history`）与分页读 `AgentIndex::history_page`（A.5） | 进程调用方，以及依据 Timeline 事实做决定的分支部分 |
@@ -219,13 +219,14 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 ### A.1 sessions 服务
 
-`sessions` 是由 Agents 提供的进程服务，没有实例 key。结构为 camelCase 字段的 JSON；字段名后的 `?` 表示可选，`|` 分隔备选项。除 `launch` 与 `delete` 外，每次调用都会 acquire 该 Session（必要时恢复），并在回复前保持其已装载。调用不携带调用方身份。各方法的步骤、策略上限与生命周期见 [sessions 服务](../appserver/sessions-service.md)设计。
+`sessions` 是由 Agents 提供的进程服务，没有实例 key。结构为 camelCase 字段的 JSON；字段名后的 `?` 表示可选，`|` 分隔备选项。除 `launch`、`delete` 与 `exists` 外，每次调用都会 acquire 该 Session（必要时恢复），并在回复前保持其已装载；`exists` 读取该 Session 是否仍存在，从不 acquire 或恢复它。调用不携带调用方身份。各方法的步骤、策略上限与生命周期见 [sessions 服务](../appserver/sessions-service.md)设计。
 
 | 方法 | 模式 | 请求 | 回复 | 错误 |
 | --- | --- | --- | --- | --- |
 | `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`、`agent_unknown`、`session_closed`、`branch_missing`（启动方）、`branch_ended`（启动方）、`reloading`、`failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`、`ambiguous`、`session_closed`、`branch_missing`、`branch_ended`、`reloading`、`publication_unknown`、`failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`、`session_closed`、`branch_missing`、`branch_ended`、`reloading` |
+| `exists` | async | `{sessionId}` | `{exists}` | `rejected`、`reloading` |
 | `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`、`future_sequence`、`session_closed`、`branch_missing`、`reloading` |
 | `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`、`session_closed`、`branch_missing`、`branch_ended`、`reloading`、`publication_unknown` |
 | `stop` | async | `{sessionId, branchId, reason?}` | `{sequence}` | `session_closed`、`branch_missing`、`branch_ended`、`reloading` |
@@ -302,6 +303,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 ```text
 // SessionConfig（新字段；已有：permissionPolicy, cwd, model, systemPrompt, tools?, collaborationRole）
 { "interactive": true }             // false：exec、自动化；缺省：true
+{ "language": "zh-CN" }             // 缺省：没有选择，base 规则成立
 ```
 
 `interactive` 表示 Session 有可交互的对象，能回答它的提问和审批：可以是通过客户端操作的用户，也可以是另一个 Session 或分支的 agent（例如 Collaboration 的 leader），不要求必须是人。ACP Session 是交互的：编辑器回答它的审批。`interactive` 在创建时固定。装配从不读取它（ADR 002 D3，#30），因此工具集合保持不变，fork 后保留提示词前缀及其 KV cache。关心它的插件直接从 Session 的配置读取：Questions（`ask_user` 照常声明，并回答当前没有可以回答的对象）和 SessionTitle（只为交互式的 leader Session 起标题）。
@@ -318,6 +320,10 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | --- | --- | --- |
 | 不含 `interactive`（C2 之前的全部记录，C2 之后的交互式记录） | 交互 | 交互 |
 | `"interactive": false` | 非交互 | 交互（忽略该字段；可以接受） |
+
+`language` 是操作者为该 Session 选择的回复语言：`en`、`zh-CN`、`zh-Hant`、`ja`、`ko`、`id`、`de`、`fr`、`es`、`pt-BR` 与 `pt-PT` 之一，英文名由 [PromptSources §3](../plugins/PromptSources.md#3-agent-prompt-language-状态来源) 给出。`session.create` 接受 `language?`；`session.language.get` 与 `session.language.update` 读取并修改它，更新取一个代码或 `{action: "clear"}`。客户端只在 `hello.features` 列出 `session.language` 时发送创建参数，因为 `session.create` 会拒绝旧版守护进程上的未知字段。记录中没有该成员表示没有选择，也不产生状态块。原生存储保持版本 13，并在 Session 运行时就地更新该成员；旧版守护进程忽略它。fork 随其余配置一起复制该值。更新先在 `main` 上采纳，并在回复之前让每个已加载的分支也采纳，因此分支的下一次请求就带着新值、无需唤醒；之后加载的分支读到当前值，各分支的定时检查是兜底。
+
+更新先写记录、替换当前值，再让 Prompt 采纳该 source。写记录之前的失败不改变值。写记录之后的失败或 `interrupted` 回复保留已存下的新值，由各分支的定时检查送达该分支；收到错误的客户端用 `session.language.get` 读回当前值。
 
 `tools` 是 Session 可选的挂载列表，创建时确定。`session.create {tools?}` 设置它；不带该参数时 Session 取其 Agent profile 可选的 `tools`，profile 没有列表时 Session 也没有（产品默认如此）。profile 或成员的列表限定该 agent 能看到的工具；有列表的 Collaboration 成员总是挂载 `agent`。没有挂载列表时，Session 按宿主的顺序声明全部宿主工具，再按名称声明部件经 `toolRegistry` 注册的全部工具。有挂载列表时，Session 按列表顺序只声明其中列出的宿主工具与注册工具；`[]` 不声明其中任何一个。两种情况下其他来源（MCP）的工具都排在其后，由来源自己的配置决定。列出但没有任何部件注册的工具不声明，并报告一次；有部件注册后即声明。重复名称使 Session 创建失败。已声明工具的调用是否执行由 Permission 决定，Permission 从不改变工具声明（[session-boundary A.5](session-boundary.md#a5-工具贡献)）。原生存储只在 Session 有挂载列表时写入 `tools`。
 
@@ -336,6 +342,7 @@ fork 复制源 Session 的整个 `SessionConfig`；权限预设随复制过来�
 | 写入路径 | 该服务追加 `input/withdraw`，然后以 InputQueue 对该指令的决定作答。InputQueue 的复核只使用其自身的决策状态（持有集合），从不对另一所有者的事实加锁 |
 | 撤回并作为 Steer 重新提交 | 一个原子批次：针对旧输入的 `input/withdraw` 加新的 Steer `input/message`。撤回只在旧输入仍被持有时生效；新输入无论如何都会写入 |
 | 应用之后 | 已应用的输入无法撤回；Loop 照常消费它，无需改动 |
+| 被拒绝的 `steer` | `steer` 按操作者送来的样子、在任何提交检查之前、撤回被决定之前校验，因此没有操作者内容的 `steer` 以 `session_invalid_input` 失败；针对队列并不持有的输入的 `steer` 回答这个错误而不是 `notHeld`，并且撤回与替代输入都不写入 |
 
 ### A.5 固定前缀读取
 

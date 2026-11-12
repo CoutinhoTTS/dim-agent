@@ -1,10 +1,11 @@
 use crate::{
     AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
-    StoredEvent, TimelineKey, TimelineQuery, TimelineQueryDirection, TimelineQueryPage,
-    TimelineQueryScope, TimelineStore, TimelineTrace,
+    StoredEvent, TimelineKey, TimelineStore, TimelineTrace,
 };
-use dim_agent_types::{BranchCreateAt, EventKind, RecoverySnapshot, TimelinePosition};
+use dim_agent_types::{BranchCreateAt, EventKind, RecoverySnapshot};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Mutex};
+
+mod query;
 
 /// In-memory storage for standalone Agents, tests and development profiles.
 #[derive(Default)]
@@ -24,6 +25,21 @@ impl MemoryTimelineStore {
     }
 }
 impl TimelineStore for MemoryTimelineStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a crate::TimelineReadScope,
+        query: &'a crate::QuerySpec,
+        page: Option<&'a crate::QueryPage>,
+    ) -> BoxFuture<'a, Result<crate::QueryResult>> {
+        Box::pin(async move {
+            let sessions = self.0.lock().unwrap();
+            let session = sessions.get(&scope.key.session_id).ok_or_else(|| {
+                AgentError::Storage(format!("unknown session {}", scope.key.session_id))
+            })?;
+            query::execute(session, scope, query, page)
+        })
+    }
+
     fn create_session<'a>(
         &'a self,
         session_id: &'a str,
@@ -110,8 +126,22 @@ impl TimelineStore for MemoryTimelineStore {
     }
     fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            if self.batch_end_at(key, sequence).await? > sequence {
+                return Err(AgentError::InvalidInput(format!(
+                    "sequence {sequence} is inside an atomic batch"
+                )));
+            }
+            Ok(())
+        })
+    }
+    fn batch_end_at<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(async move {
             if sequence == 0 {
-                return Ok(());
+                return Ok(0);
             }
             let sessions = self.0.lock().unwrap();
             let session = sessions.get(&key.session_id).ok_or_else(|| {
@@ -124,12 +154,7 @@ impl TimelineStore for MemoryTimelineStore {
             let record = branch.events.get((sequence - 1) as usize).ok_or_else(|| {
                 AgentError::Storage(format!("Timeline has no sequence {sequence}"))
             })?;
-            if record.batch_end > sequence {
-                return Err(AgentError::InvalidInput(format!(
-                    "sequence {sequence} is inside an atomic batch"
-                )));
-            }
-            Ok(())
+            Ok(record.batch_end)
         })
     }
     fn append(
@@ -217,57 +242,7 @@ impl TimelineStore for MemoryTimelineStore {
                 .collect()
         })
     }
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<TimelineQueryPage>> {
-        Box::pin(async move {
-            if query.scope != TimelineQueryScope::Branch {
-                return Err(AgentError::InvalidInput(
-                    "a store read applies one branch; the Timeline service composes the chain"
-                        .into(),
-                ));
-            }
-            let sessions = self.0.lock().unwrap();
-            let session = sessions.get(&key.session_id).ok_or_else(|| {
-                AgentError::Storage(format!("unknown session {}", key.session_id))
-            })?;
-            let events = &session
-                .branches
-                .get(&key.branch_id)
-                .ok_or_else(|| AgentError::Storage(format!("unknown branch {}", key.branch_id)))?
-                .events;
-            let mut matched: Vec<&StoredEvent> = events
-                .iter()
-                .filter(|record| record.event.sequence >= from && record.event.sequence <= through)
-                .filter(|record| query.accepts(&record.event))
-                .collect();
-            if query.direction == TimelineQueryDirection::Descending {
-                matched.reverse();
-            }
-            let offset = usize::try_from(query.offset).unwrap_or(usize::MAX);
-            let limit = usize::try_from(query.limit.get()).unwrap_or(usize::MAX);
-            let skipped = matched.len().min(offset);
-            let page: Vec<&StoredEvent> = matched.into_iter().skip(skipped).take(limit).collect();
-            Ok(TimelineQueryPage {
-                positions: page
-                    .iter()
-                    .map(|record| TimelinePosition {
-                        branch_id: key.branch_id.clone(),
-                        sequence: record.event.sequence,
-                    })
-                    .collect(),
-                events: page
-                    .into_iter()
-                    .map(|record| record.event.clone())
-                    .collect(),
-                skipped: skipped as u64,
-            })
-        })
-    }
+
     fn trace<'a>(
         &'a self,
         key: &'a TimelineKey,

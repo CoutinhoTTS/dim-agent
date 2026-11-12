@@ -73,6 +73,10 @@ function num(source: Json, key: string, at: string): number {
   return value
 }
 
+function optNum(source: Json, key: string, at: string): number | undefined {
+  return source[key] === undefined || source[key] === null ? undefined : num(source, key, at)
+}
+
 /** A nonnegative finite number; token counts are floats on the wire. */
 function finite(source: Json, key: string, at: string): number {
   const value = source[key]
@@ -210,6 +214,9 @@ export function readSummaries(value: unknown): SessionSummary[] {
     const at = `session.summaries[${index}]`
     const source = obj(item, at)
     const preview = optStr(source, "preview", at)
+    const origin = optStr(source, "origin", at)
+    if (origin !== undefined && origin !== "client" && origin !== "acp" && origin !== "internal" && origin !== "unknown") fail(`${at}.origin`, "client, acp, internal or unknown")
+    const parentSessionId = optStr(source, "parentSessionId", at)
     return {
       ...readSessionTitle(source, at),
       sessionId: str(source, "sessionId", at),
@@ -219,6 +226,8 @@ export function readSummaries(value: unknown): SessionSummary[] {
       running: bool(source, "running", at),
       sequence: num(source, "sequence", at),
       ...(preview === undefined ? {} : { preview }),
+      ...(origin === undefined ? {} : { origin }),
+      ...(parentSessionId === undefined ? {} : { parentSessionId }),
       updatedAt: num(source, "updatedAt", at),
     }
   })
@@ -252,6 +261,21 @@ export function readHistory(value: unknown): HistoryPage {
     through: num(source, "through", "session.history"),
     nextAfter: num(source, "nextAfter", "session.history"),
     done: bool(source, "done", "session.history"),
+    ...(source.nextBefore === undefined ? {} : { nextBefore: num(source, "nextBefore", "session.history") }),
+    ...(source.turnStart === undefined ? {} : { turnStart: num(source, "turnStart", "session.history") }),
+  }
+}
+
+export function readDisplayHistory(value: unknown): HistoryPage {
+  const at = "session.history.display"
+  const source = obj(value, at)
+  return {
+    events: arr(source.items, `${at}.items`).map((item, index) => readEvent(item, `${at}.items[${index}]`)),
+    through: num(source, "through", at),
+    nextAfter: num(source, "nextAfter", at),
+    done: bool(source, "done", at),
+    ...(source.nextBefore === undefined ? {} : { nextBefore: num(source, "nextBefore", at) }),
+    ...(source.turnStart === undefined ? {} : { turnStart: num(source, "turnStart", at) }),
   }
 }
 
@@ -418,21 +442,51 @@ function loadedSkill(text: string): string | undefined {
 }
 
 /**
- * The operator's own text of a message and the Skills its blocks loaded: a
- * text block after the first that starts with the marker is a loaded Skill,
- * shown as one line and never as its instructions.
+ * The element names a submit check can append to a message, as
+ * `crates/dim-agent-types/src/markup.rs` writes them: that crate owns the
+ * vocabulary, and this is the one client that cannot link it. A name matches a
+ * whole element, so a longer name that starts with one does not match.
  */
-function userText(blocks: unknown, at: string): { text: string; skills: string[] } {
+const RUNTIME_MARKERS = ["dim-hooks", "dim-skill"] as const
+
+/** The element `text` opens, when it opens one of those after the first block. */
+function runtimeElement(index: number, text: string): (typeof RUNTIME_MARKERS)[number] | undefined {
+  if (index === 0 || !text.startsWith("<")) return undefined
+  return RUNTIME_MARKERS.find((name) => {
+    if (!text.startsWith(`<${name}`)) return false
+    const rest = text.slice(name.length + 1)
+    return rest.startsWith(">") || /^\s/.test(rest)
+  })
+}
+
+/**
+ * The operator's own text of a message, the Skills its blocks loaded, and how
+ * many hook contexts it carries. A text block after the first that opens one of
+ * those elements is not their words: a Skill shows as one line, a hook's
+ * context as a count, and neither joins the message.
+ */
+function userText(blocks: unknown, at: string): { text: string; skills: string[]; hooks: number } {
   const text: string[] = []
   const skills: string[] = []
+  let hooks = 0
   arr(blocks, at).forEach((item, index) => {
     const block = obj(item, `${at}[${index}]`)
     if (block.type !== "text" || typeof block.text !== "string") return
-    const skill = index === 0 ? undefined : loadedSkill(block.text)
-    if (skill === undefined) text.push(block.text)
-    else skills.push(skill)
+    const element = runtimeElement(index, block.text)
+    if (element === "dim-skill") {
+      const skill = loadedSkill(block.text)
+      if (skill !== undefined) {
+        skills.push(skill)
+        return
+      }
+    }
+    if (element === "dim-hooks") {
+      hooks += 1
+      return
+    }
+    text.push(block.text)
   })
-  return { text: text.join("\n"), skills }
+  return { text: text.join("\n"), skills, hooks }
 }
 
 function textOf(blocks: unknown, at: string): string {
@@ -495,11 +549,13 @@ function content(type: string, name: string, data: Json, at: string): EventConte
         return { kind: "source-input", text, blocks, ...(mode === undefined ? {} : { mode }) }
       }
       const user = obj(data.user, `${at}.user`)
-      const { text, skills } = userText(user.content, `${at}.user.content`)
-      return { kind: "input", text, user: readUserInput(user, `${at}.user`), skills: skills.length === 0 ? undefined : skills, blocks }
+      const { text, skills, hooks } = userText(user.content, `${at}.user.content`)
+      return { kind: "input", text, user: readUserInput(user, `${at}.user`), skills: skills.length === 0 ? undefined : skills, ...(hooks === 0 ? {} : { hooks }), blocks }
     }
     case "input/applied":
       return { kind: "input-applied", inputId: str(data, "input_id", at) }
+    case "input/consumed":
+      return { kind: "input-consumed", inputId: str(data, "input_id", at) }
     case "permission/changed":
       return { kind: "permission-changed", policy: readPermissionPolicy(data.policy, `${at}.policy`) }
     case "input/deleted":
@@ -551,6 +607,8 @@ function content(type: string, name: string, data: Json, at: string): EventConte
       return { kind: "thinking", requestId: str(data, "request_id", at), delta: str(data, "delta", at) }
     case "step/text":
       return { kind: "text", requestId: str(data, "request_id", at), delta: str(data, "delta", at) }
+    case "step/tool-use-start":
+      return { kind: "tool-use-start", requestId: str(data, "request_id", at), callId: str(data, "call_id", at), name: str(data, "name", at) }
     case "step/tool-call":
       return { kind: "tool-call", requestId: str(data, "request_id", at), asks: readAsks(arr(data.calls, `${at}.calls`), `${at}.calls`) }
     case "step/tool-use": {
@@ -564,7 +622,7 @@ function content(type: string, name: string, data: Json, at: string): EventConte
       }
     }
     case "step/tool-completed":
-      return { kind: "tool-completed", callId: str(data, "call_id", at), result: toolResult(data.result, `${at}.result`) }
+      return { kind: "tool-completed", requestId: str(data, "request_id", at), callId: str(data, "call_id", at), result: toolResult(data.result, `${at}.result`) }
     case "step/tool-result":
       return {
         kind: "tool-result",
@@ -656,10 +714,14 @@ function readEvent(value: unknown, at: string): SessionEvent {
   const source = obj(value, at)
   const type = str(source, "type", at)
   const name = str(source, "name", at)
+  const parent = source.parent_call_id === undefined || source.parent_call_id === null
+    ? undefined
+    : str(source, "parent_call_id", at)
   return {
     id: str(source, "id", at),
     sequence: num(source, "sequence", at),
     createAt: num(source, "create_at", at),
+    ...(parent === undefined ? {} : { parentCallId: parent }),
     content: content(type, name, obj(source.data, `${at}.data`), `${at}.data`),
   }
 }
@@ -708,6 +770,13 @@ export function readNotification(method: string, value: unknown): Notification |
         branchId: str(params, "branchId", method),
         event: readEvent(params.event, `${method}.event`),
       }
+    case "session.display":
+      return {
+        method,
+        sessionId: str(params, "sessionId", method),
+        branchId: str(params, "branchId", method),
+        event: readEvent(params.item, `${method}.item`),
+      }
     case "session.state":
       return {
         method,
@@ -719,6 +788,7 @@ export function readNotification(method: string, value: unknown): Notification |
     case "session.model.progress": {
       const requestId = optStr(params, "requestId", method)
       const retry = readRetryProgress(params.retry, `${method}.retry`)
+      const thinkingStartedAt = optNum(params, "thinkingStartedAt", method)
       return {
         method,
         progress: {
@@ -729,6 +799,7 @@ export function readNotification(method: string, value: unknown): Notification |
           textOffset: num(params, "textOffset", method),
           thinking: str(params, "thinking", method),
           thinkingOffset: num(params, "thinkingOffset", method),
+          ...(thinkingStartedAt === undefined ? {} : { thinkingStartedAt }),
           ...(retry === undefined ? {} : { retry }),
         },
       }
@@ -817,4 +888,110 @@ export function readSubmit(value: unknown): import("./protocol").SubmitResult {
 }
 export function readInterrupt(value: unknown): import("./protocol").InterruptResult {
   return { sequence: num(obj(value, "session.stop"), "sequence", "session.stop") }
+}
+
+export type BranchEntry = {
+  branchId: string
+  parentBranchId?: string
+  branchPoint?: number
+  state: string
+  head: number
+  purpose?: string
+  cutMessages?: number
+  end?: { source: { kind: string }; ancestor?: string }
+}
+
+export function readBranchEntry(value: unknown): BranchEntry {
+  const at = "branch"
+  const source = obj(value, at)
+  const branchId = str(source, "branchId", at)
+  const end = source.end === undefined || source.end === null ? undefined : obj(source.end, `${at}.end`)
+  return {
+    branchId,
+    parentBranchId: branchId === "main" ? undefined : str(source, "parentBranchId", at),
+    branchPoint: branchId === "main" ? undefined : num(source, "branchPoint", at),
+    state: str(source, "state", at), head: num(source, "head", at),
+    purpose: optStr(source, "purpose", at),
+    cutMessages: source.cutMessages === undefined || source.cutMessages === null ? undefined : num(source, "cutMessages", at),
+    end: end === undefined ? undefined : {
+      source: { kind: str(obj(end.source, `${at}.end.source`), "kind", `${at}.end.source`) },
+      ancestor: optStr(end, "ancestor", `${at}.end`),
+    },
+  }
+}
+
+export function readBranches(value: unknown): BranchEntry[] {
+  return arr(obj(value, "session.branches").branches, "session.branches.branches").map(readBranchEntry)
+}
+
+export function readBranchDetail(value: unknown): BranchEntry {
+  return readBranchEntry(value)
+}
+
+export function readAttached(value: unknown): ModelId {
+  return modelId(obj(value, "session.attach").model, "session.attach.model")
+}
+
+export type InputPage = { branchId: string; through: number; inputs: import("./protocol").QueuedInput[]; next: unknown }
+
+export function readPendingInputs(value: unknown): InputPage {
+  const at = "session.input.pending"
+  const source = obj(value, at)
+  const inputs = arr(source.inputs, `${at}.inputs`).flatMap((item, index) => {
+    const rowAt = `${at}.inputs[${index}]`
+    const row = obj(item, rowAt)
+    if (row.user === null) return []
+    const user = readUserInput(obj(row.user, `${rowAt}.user`), `${rowAt}.user`)
+    const display = userText(user.content, `${rowAt}.user.content`)
+    return [{ id: str(row, "inputId", rowAt), text: display.text, skills: display.skills, ...(display.hooks === 0 ? {} : { hooks: display.hooks }), user }]
+  })
+  return { branchId: str(source, "branchId", at), through: num(source, "through", at), inputs, next: source.next }
+}
+
+export type QuestionPage = { branchId: string; through: number; asks: Array<{ requestId: string; callId: string; questions: AskQuestion[] }>; next: unknown }
+
+export function readPendingQuestions(value: unknown): QuestionPage {
+  const at = "session.question.pending"
+  const source = obj(value, at)
+  const asks = arr(source.batches, `${at}.batches`).flatMap((item, index) => {
+    const rowAt = `${at}.batches[${index}]`
+    const batch = obj(item, rowAt)
+    return readAsks(arr(batch.calls, `${rowAt}.calls`), `${rowAt}.calls`).map(ask => ({ requestId: str(batch, "requestId", rowAt), ...ask }))
+  })
+  return { branchId: str(source, "branchId", at), through: num(source, "through", at), asks, next: source.next }
+}
+
+export function readTurn(value: unknown) {
+  const at = "session.turn.get"
+  const source = obj(value, at)
+  const turn = source.turn === null ? undefined : obj(source.turn, `${at}.turn`)
+  const output = source.output === null ? undefined : obj(source.output, `${at}.output`)
+  return {
+    branchId: str(source, "branchId", at), through: num(source, "through", at),
+    turn: turn === undefined ? undefined : { sequence: num(turn, "sequence", `${at}.turn`), ended: bool(turn, "ended", `${at}.turn`) },
+    output: output === undefined ? undefined : { requestId: str(output, "requestId", `${at}.output`), textCharacters: num(output, "textCharacters", `${at}.output`), thinkingCharacters: num(output, "thinkingCharacters", `${at}.output`) },
+  }
+}
+
+export function readGoal(value: unknown): import("../goal").Goal | undefined {
+  const at = "session.goal.get"
+  const source = obj(value, at)
+  if (source.goal === null) return undefined
+  const goal = obj(source.goal, `${at}.goal`)
+  const status = obj(goal.status, `${at}.goal.status`)
+  const kind = str(status, "kind", `${at}.goal.status`)
+  if (!["active", "paused", "completed", "blocked", "none"].includes(kind)) return fail(`${at}.goal.status.kind`, "a goal status")
+  return {
+    objective: str(goal, "objective", `${at}.goal`), evaluator: bool(goal, "evaluator", `${at}.goal`),
+    status: kind === "paused" ? { kind, reason: str(status, "reason", `${at}.goal.status`) } : { kind: kind as "active" | "completed" | "blocked" | "none" },
+  }
+}
+
+export function readTool(value: unknown) {
+  const at = "session.tool.get"
+  const source = obj(value, at)
+  if (source.call === null) return undefined
+  const data = obj(source.call, `${at}.call`)
+  const call = obj(data.call, `${at}.call.call`)
+  return { requestId: str(data, "request_id", `${at}.call`), callId: str(call, "id", `${at}.call.call`), name: str(call, "name", `${at}.call.call`), input: obj(call.input, `${at}.call.call.input`) }
 }

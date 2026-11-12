@@ -1,6 +1,6 @@
 //! Line-mode answers to `ask_user` (Questions design A.5) against a scripted
 //! daemon: choices, custom text, a decline, questions of another branch read
-//! from its history, every `session.question.respond` reply, closing on
+//! from its pending inventory, every `session.question.respond` reply, closing on
 //! another client's answer or a cancel, Ctrl+C and EOF, also with an answer
 //! in flight, and `exec` without a terminal.
 use super::*;
@@ -87,8 +87,6 @@ fn rejected() -> Vec<(Value, &'static str)> {
 fn deploy() -> Value {
     json!({"header":"Deploy","question":"Where to deploy?","options":[{"label":"production"},{"label":"staging"}]})
 }
-/// The opening `session.state` notices and the first `child` history read.
-/// `main` was read at the attach.
 fn child_state(wire: &mut Wire) -> Value {
     for branch in ["main", "child"] {
         wire.notice(
@@ -96,28 +94,68 @@ fn child_state(wire: &mut Wire) -> Value {
             json!({"sessionId":"session","branchId":branch,"running":true,"stopping":false}),
         );
     }
-    let history = wire.read("session.history");
+    let pending = wire.read("session.question.pending");
     assert_eq!(
-        history["params"],
-        json!({"sessionId":"session","branchId":"child","after":0,"limit":256})
+        pending["params"],
+        json!({"sessionId":"session","branchId":"child"})
     );
-    history
+    pending
 }
-/// Two history pages of `child`; the second holds a `step/tool-call` with
-/// `calls`, asked before this client attached.
-fn child_history(wire: &mut Wire, history: &Value, calls: Value) {
+
+fn child_pending(wire: &mut Wire, pending: &Value, calls: Value) {
     wire.reply(
-        history,
-        json!({"events":[],"through":3,"nextAfter":2,"done":false}),
+        pending,
+        json!({"branchId":"child", "through":3, "next":null,
+        "batches":[{"eventId":"child-3", "sequence":3,
+            "requestId":calls["request_id"], "calls":calls["calls"]}]}),
     );
-    let next = wire.read("session.history");
-    assert_eq!(
-        next["params"],
-        json!({"sessionId":"session","branchId":"child","after":2,"limit":256,"through":3})
-    );
-    wire.reply(
-        &next,
-        json!({"events":[event("child", 3, "tool-call", calls)],"through":3,"nextAfter":3,"done":true}),
+}
+
+#[test]
+fn main_questions_outside_the_window_survive_resume_without_replaying_settled_calls() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        for page in 0..4 {
+            let request = wire.read("session.history");
+            if page == 0 {
+                assert_eq!(request["params"]["latestTurn"], true);
+            } else {
+                assert_eq!(request["params"]["before"], 2000 - page * 256);
+            }
+            wire.reply(&request,json!({"events":[],"through":2000,
+                "nextBefore":2000-(page+1)*256,"nextAfter":2000-page*256,"done":true}));
+        }
+        let pending = wire.read("session.question.pending");
+        step(wire,"main",1990,"tool-call",asked("settled-request","settled",json!([today()])));
+        step(wire,"main",1991,"tool-result",answered("main-1990","settled-request","settled",false));
+        let data = asked("old-request","old-call",json!([database()]));
+        wire.reply(&pending,json!({"branchId":"main","through":2000,"next":null,
+            "batches":[{"eventId":"main-3","sequence":3,"requestId":"old-request","calls":data["calls"]}]}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle,json!({"sequence":2000}));
+        let response = wire.read("session.question.respond");
+        assert_eq!(response["params"]["requestId"], "old-request");
+        assert_eq!(response["params"]["callId"], "old-call");
+        wire.reply(&response,json!({}));
+        step(wire,"main",2001,"tool-result",answered("main-3","old-request","old-call",false));
+        wire.detach();
+    });
+    let mut command = home.command();
+    command.args(["--resume", "session"]);
+    let mut terminal = Terminal::launch(command);
+    terminal.until("Choose 1-2");
+    terminal.write(b"2\r");
+    terminal.editor();
+    terminal.write(b"/exit\r");
+    assert!(terminal.wait().success(), "{}", terminal.transcript);
+    daemon.join().unwrap();
+    assert!(
+        !terminal.transcript.contains("Ship today?"),
+        "{}",
+        terminal.transcript
     );
 }
 
@@ -179,9 +217,9 @@ fn interactive_questions_take_choices_custom_text_and_a_decline() {
             );
         }
         step(wire, "main", 14, "tool-call", asked("r2", "c1", json!([today()])));
-        let child = wire.read("session.history");
+        let child = wire.read("session.question.pending");
         assert_eq!(child["params"]["branchId"], "child");
-        let gone = wire.read("session.history");
+        let gone = wire.read("session.question.pending");
         assert_eq!(gone["params"]["branchId"], "gone");
         fail(wire, &gone, -32000, "branch_missing");
         fail(wire, &child, -32000, "internal_error");
@@ -258,7 +296,7 @@ fn interactive_questions_take_choices_custom_text_and_a_decline() {
 }
 
 /// A9 and A.3: a question asked on another branch before the attach is read
-/// from that branch's history once and answered with its `branchId`.
+/// from that branch's pending inventory and answered with its `branchId`.
 /// `invalid_params` asks again; other failures and `question_not_pending`
 /// keep the answer for a resend. A prompt closes on its call's
 /// `step/tool-result` when another client answered or the call was
@@ -273,7 +311,7 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
         wire.reply(&submit, json!({"event":{}}));
         let idle = wire.read("session.idle");
         let history = child_state(wire);
-        child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
+        child_pending(wire, &history, asked("rk", "k1", json!([deploy()])));
         step(wire, "child", 3, "tool-call", asked("rk", "k1", json!([deploy()])));
         let respond = wire.read("session.question.respond");
         assert_eq!(
@@ -348,8 +386,8 @@ fn questions_of_every_branch_are_answered_and_close_on_their_results() {
 }
 
 /// §4.3: a later model request asks with a call id an earlier one used. The
-/// later call arrives live before the history page holding the earlier call
-/// and its result: that result settles only the earlier call, the later
+/// later call and the earlier result arrive while the pending read is in flight.
+/// The result above its cutoff settles only the earlier call; the later
 /// prompt stays open, and the answer names the later call's request.
 #[test]
 fn a_reused_call_id_is_answered_with_its_own_request() {
@@ -361,21 +399,10 @@ fn a_reused_call_id_is_answered_with_its_own_request() {
         wire.reply(&submit, json!({"event":{}}));
         let idle = wire.read("session.idle");
         let history = child_state(wire);
+        step(wire, "child", 4, "tool-result", answered("child-3", "r1", "k1", false));
         step(wire, "child", 5, "tool-call", asked("r2", "k1", json!([deploy()])));
-        wire.reply(
-            &history,
-            json!({"events":[
-                event("child", 3, "tool-call", asked("r1", "k1", json!([today()]))),
-                event("child", 4, "tool-result", answered("child-3", "r1", "k1", false))],
-                "through":5,"nextAfter":4,"done":false}),
-        );
-        let next = wire.read("session.history");
         read.send(()).unwrap();
-        wire.reply(
-            &next,
-            json!({"events":[event("child", 5, "tool-call", asked("r2", "k1", json!([deploy()])))],
-                "through":5,"nextAfter":5,"done":true}),
-        );
+        child_pending(wire, &history, asked("r1", "k1", json!([today()])));
         let respond = wire.read("session.question.respond");
         assert_eq!(
             respond["params"],
@@ -434,6 +461,7 @@ fn ctrl_c_or_eof_at_a_question_stops_its_branch() {
                 &history,
                 json!({"events":[],"through":8,"nextAfter":8,"done":true}),
             );
+            wire.no_pending_questions(8);
             let idle = wire.read("session.idle");
             let run = (case == "running").then(|| {
                 wire.notice("session.model.progress", json!({"sessionId":"session","branchId":"main","requestId":"model","textOffset":0,"text":"model working","thinking":"","thinkingOffset":0}));
@@ -448,7 +476,7 @@ fn ctrl_c_or_eof_at_a_question_stops_its_branch() {
                 .as_array_mut()
                 .unwrap()
                 .push(json!({"id":"k2","name":"ask_user","input":{"questions":[today()]}}));
-            child_history(wire, &history, calls);
+            child_pending(wire, &history, calls);
             if case == "running" {
                 step(
                     wire,
@@ -543,14 +571,14 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
                     end(wire, 11, "cancelled");
                     wire.reply(&stop, json!({"sequence":11}));
                     wire.reply(&idle, json!({"sequence":11}));
-                    child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
+                    child_pending(wire, &history, asked("rk", "k1", json!([deploy()])));
                     let child = wire.read("session.stop");
                     assert_eq!(child["params"]["branchId"], "child");
                     wire.reply(&child, json!({"sequence":5}));
                 }
                 "child" => {
                     let history = child_state(wire);
-                    child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
+                    child_pending(wire, &history, asked("rk", "k1", json!([deploy()])));
                     let child = wire.read("session.stop");
                     assert_eq!(
                         child["params"],
@@ -567,7 +595,7 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
                     let history = child_state(wire);
                     end(wire, 11, "completed");
                     wire.reply(&idle, json!({"sequence":11}));
-                    child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
+                    child_pending(wire, &history, asked("rk", "k1", json!([deploy()])));
                     let stop = wire.read("session.stop");
                     assert_eq!(
                         stop["params"],
@@ -578,7 +606,7 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
                 _ => {
                     let history = child_state(wire);
                     step(wire, "child", 4, "tool-result", answered("child-3", "rk", "k1", true));
-                    child_history(wire, &history, asked("rk", "k1", json!([deploy()])));
+                    child_pending(wire, &history, asked("rk", "k1", json!([deploy()])));
                     end(wire, 11, "completed");
                     wire.reply(&idle, json!({"sequence":11}));
                 }
@@ -731,9 +759,17 @@ fn tui_questions_restore_a_child_and_interrupt_its_branch() {
     let home = Home::new();
     let (continue_shell, shell_completion) = mpsc::channel();
     let daemon = home.daemon(move |wire| {
-        wire.hello(&["shell.run", "shell.stop"]);
+        wire.hello(&["shell.run", "shell.stop", "session.methods"]);
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
+        let methods = wire.read("session.methods");
+        wire.reply(&methods, json!({"methods":[
+            {"name":"session.input.pending","mutating":false},
+            {"name":"session.exec.pending","mutating":false},
+            {"name":"session.turn.get","mutating":false},
+            {"name":"session.question.pending","mutating":false}
+        ]}));
+        wire.2 = true;
         let history = wire.read("session.history");
         wire.reply(
             &history,
@@ -744,12 +780,18 @@ fn tui_questions_restore_a_child_and_interrupt_its_branch() {
         wire.reply(&providers, json!([]));
         let shell = wire.read("shell.run");
         assert_eq!(shell["params"]["mode"], "private");
-        let child = child_state(wire);
-        child_history(
-            wire,
-            &child,
-            asked("child-request", "c1", json!([deploy()])),
-        );
+        for branch in ["main", "child"] {
+            wire.notice("session.state", json!({"sessionId":"session","branchId":branch,"running":true,"stopping":false}));
+        }
+        let child = wire.read("session.turn.get");
+        assert_eq!(child["params"]["branchId"], "child");
+        wire.reply(&child, json!({"branchId":"child","through":3,"turn":null,"output":null}));
+        let questions = wire.read("session.question.pending");
+        assert_eq!(questions["params"]["branchId"], "child");
+        wire.reply(&questions, json!({"branchId":"child","through":3,"batches":[{
+            "eventId":"child-3","sequence":3,"requestId":"child-request",
+            "calls":asked("child-request", "c1", json!([deploy()]))["calls"]
+        }],"next":null}));
         let stop = wire.read("session.stop");
         assert_eq!(stop["params"]["sessionId"], "session");
         assert_eq!(stop["params"]["branchId"], "child");

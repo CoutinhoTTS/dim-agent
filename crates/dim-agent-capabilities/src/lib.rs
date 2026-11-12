@@ -8,6 +8,7 @@ pub mod context_methods;
 pub mod context_model;
 mod context_policy;
 pub mod context_preparation;
+mod context_usage;
 pub mod defaults;
 pub mod environment_clients;
 pub mod exec_stop;
@@ -76,6 +77,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<prompt::InitialPromptConfiguration>(catalog, session);
     register::<prompt_guide::GuideEntries>(catalog, session);
     register::<prompt_registry::PromptRegistry>(catalog, session);
+    register::<prompt_sources::SessionLanguage>(catalog, session);
     register::<skills::SessionSkills>(catalog, session);
     register::<host::PrepareModelHost>(catalog, session);
     register::<host::PrepareContextHost>(catalog, session);
@@ -96,6 +98,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<agent_loop::AgentLoop>(catalog, branch);
     register::<prompt::Prompt>(catalog, branch);
     register::<context_preparation::ContextPreparation>(catalog, branch);
+    register::<context_usage::ContextUsage>(catalog, branch);
     register::<context_preparation::ConfigurationPublisher>(catalog, branch);
     register::<model_provider::ModelProvider>(catalog, branch);
     register::<tool_executor::ToolExecutor>(catalog, branch);
@@ -103,6 +106,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<permission::Permission>(catalog, branch);
     register::<approval::Approval>(catalog, branch);
     register::<skills::SkillsBranch>(catalog, branch);
+    register::<prompt_sources::PromptSourcesBranch>(catalog, branch);
     register::<workspace_tools::background::BackgroundExec>(catalog, branch);
     register::<shell_session::ShellSession>(catalog, branch);
     register::<dyn exec_stop::ExecStop>(catalog, branch);
@@ -133,6 +137,7 @@ impl PublicService for dyn exec_stop::ExecStop {}
 impl PublicService for workspace_tools::file_reads::FileReads {}
 impl PublicService for timeline_tree::BranchLine {}
 impl PublicService for timeline_tree::TreeCommands {}
+impl PublicService for prompt_sources::PromptSourcesBranch {}
 impl PublicService for wait::Wait {}
 impl PublicService for skills::SkillsBranch {}
 impl PublicService for prompt::Prompt {}

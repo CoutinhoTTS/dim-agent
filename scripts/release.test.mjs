@@ -25,14 +25,14 @@ const installName=(directory)=>{
   return match?match[1]:path.basename(directory);
 };
 
-/** A checkout whose default list names `plugins`, each one carrying a package. */
-function packageCheckout(temporary,plugins) {
+/** A checkout whose default list names `plugins` and, when given, `optional`, each one carrying a package. */
+function packageCheckout(temporary,plugins,optional) {
   const checkout=path.join(temporary,'checkout');
   mkdirSync(path.join(checkout,'scripts'),{recursive:true});
   mkdirSync(path.join(checkout,'runtime'),{recursive:true});
   cpSync(path.join(root,'scripts/stage-plugins.mjs'),path.join(checkout,'scripts/stage-plugins.mjs'));
-  writeFileSync(path.join(checkout,'runtime/default-plugins.json'),`${JSON.stringify({plugins})}\n`);
-  for (const [name,relative] of Object.entries(plugins)) {
+  writeFileSync(path.join(checkout,'runtime/default-plugins.json'),`${JSON.stringify(optional?{plugins,optional}:{plugins})}\n`);
+  for (const [name,relative] of [...Object.entries(plugins),...Object.entries(optional??{})]) {
     const plugin=path.join(checkout,'runtime',relative);
     mkdirSync(plugin,{recursive:true});
     writeFileSync(path.join(plugin,'package.json'),`{"name":"${name}"}\n`);
@@ -109,7 +109,7 @@ test('workflow actions use immutable commits',()=>{
   }
 });
 
-test('the default list stages only its content plugin and runs no npm ci', {skip:process.platform==='win32'}, (t)=>{
+test('the default list stages its content and optional plugins and runs no npm ci', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');
   mkdirSync(bin);
@@ -123,13 +123,16 @@ test('the default list stages only its content plugin and runs no npm ci', {skip
   assert.equal(existsSync(log),false,'no default plugin needs npm ci');
   const record=JSON.parse(readFileSync(path.join(output,'.stage-plugins.json'),'utf8'));
   assert.equal(record.schemaVersion,1);
-  assert.deepEqual(Object.keys(record.plugins),['plugin-authoring']);
+  assert.deepEqual(Object.keys(record.plugins),['plugin-authoring','light-ocr']);
   for (const name of ['goal','workflow']) {
     assert.equal(existsSync(path.join(output,'plugins',name)),false,name);
   }
   assert(existsSync(path.join(output,'plugins/plugin-authoring/dim-plugin.json')));
+  assert(existsSync(path.join(output,'plugins/light-ocr/index.ts')));
+  assert.equal(existsSync(path.join(output,'plugins/light-ocr/node_modules')),false,'an optional plugin stages without dependencies');
   const defaults=JSON.parse(readFileSync(path.join(output,'default-plugins.json')));
   assert.deepEqual(Object.keys(defaults.plugins),['plugin-authoring']);
+  assert.deepEqual(Object.keys(defaults.optional),['light-ocr']);
 });
 
 test('staging a package plugin update is incremental and never leaves a half stage', {skip:process.platform==='win32'}, (t)=>{
@@ -522,6 +525,164 @@ test('a recorded parent directory does not remove the plugins inside it', {skip:
   assert.equal('retired' in after.plugins,false);
 });
 
+test('stages an optional plugin without its dependencies', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const {log,env}=stubNpm(temporary,t);
+  const script=packageCheckout(temporary,{first:'plugins/first'},{native:'plugins/native'});
+  const source=path.join(temporary,'checkout/runtime/plugins/native');
+  writeFileSync(path.join(source,'package.json'),'{"name":"native","dependencies":{"native-lib":"1.0.0"}}\n');
+  writeFileSync(path.join(source,'package-lock.json'),`${JSON.stringify({name:'native',lockfileVersion:3,packages:{'':{name:'native',dependencies:{'native-lib':'1.0.0'}},'node_modules/native-lib':{version:'1.0.0'}}})}\n`);
+  const output=path.join(temporary,'staged');
+  const installs=()=>existsSync(log)?readFileSync(log,'utf8').trim().split('\n').filter(Boolean):[];
+  const assertStaged=(label)=>{
+    for (const file of ['package.json','package-lock.json','index.ts']) assert(existsSync(path.join(output,'plugins/native',file)),`${label}: ${file}`);
+    assert.equal(existsSync(path.join(output,'plugins/native/node_modules')),false,`${label}: the optional plugin has no node_modules`);
+    assert(existsSync(path.join(output,'plugins/first/node_modules')),`${label}: the default plugin has its node_modules`);
+    assert(installs().length>0,`${label}: the default plugin ran npm ci`);
+    assert.deepEqual(installs().filter((directory)=>installName(directory)!=='first'),[],`${label}: npm ci ran only for the default plugin`);
+  };
+  const fresh=spawnSync(process.execPath,[script,output],{encoding:'utf8',env:{...process.env,...env}});
+  assert.equal(fresh.status,0,fresh.stderr);
+  assert.match(fresh.stdout,/Staged 2 plugins/);
+  assertStaged('fresh stage');
+  const updated=spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
+  assert.equal(updated.status,0,updated.stderr);
+  assert.match(updated.stdout,/Updated 2 plugins/);
+  assert.match(updated.stdout,/npm ci: first/);
+  assertStaged('update');
+});
+
+test('an update removes a node_modules left in an optional plugin', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const {log,env}=stubNpm(temporary,t);
+  const script=packageCheckout(temporary,{},{native:'plugins/native'});
+  const output=path.join(temporary,'staged');
+  const update=()=>spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
+  assert.equal(update().status,0);
+  const modules=path.join(output,'plugins/native/node_modules');
+  mkdirSync(modules,{recursive:true});
+  writeFileSync(path.join(modules,'leftover.js'),'');
+  const cleaned=update();
+  assert.equal(cleaned.status,0,cleaned.stderr);
+  assert.equal(existsSync(modules),false,'the leftover node_modules is gone');
+  assert(existsSync(path.join(output,'plugins/native/index.ts')));
+  assert.equal(existsSync(log),false,'npm ci never ran');
+});
+
+test('an update records optional plugins and retires one that leaves the list', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const {env}=stubNpm(temporary,t);
+  const script=packageCheckout(temporary,{first:'plugins/first'},{native:'plugins/native'});
+  const config=path.join(temporary,'checkout/runtime/default-plugins.json');
+  const output=path.join(temporary,'staged');
+  const record=path.join(output,'.stage-plugins.json');
+  const update=()=>spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
+  assert.equal(update().status,0);
+  assert.deepEqual(JSON.parse(readFileSync(record,'utf8')).plugins.native,{dir:'plugins/native'});
+  writeFileSync(config,`${JSON.stringify({plugins:{first:'plugins/first'}})}\n`);
+  const retired=update();
+  assert.equal(retired.status,0,retired.stderr);
+  assert.equal(existsSync(path.join(output,'plugins/native')),false);
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(record,'utf8')).plugins,'native'),false);
+  writeFileSync(record,`${JSON.stringify({schemaVersion:1,plugins:{first:{hash:null,dir:'plugins/first'}}})}\n`);
+  const reread=update();
+  assert.equal(reread.status,0,reread.stderr);
+  assert.match(JSON.parse(readFileSync(record,'utf8')).plugins.first.hash,/^[0-9a-f]{64}$/);
+});
+
+test('a portable stage checks default plugin locks but not optional ones', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const {env}=stubNpm(temporary,t);
+  const script=packageCheckout(temporary,{first:'plugins/first'},{native:'plugins/native'});
+  writeFileSync(path.join(temporary,'checkout/runtime/plugins/native/package-lock.json'),`${JSON.stringify({name:'native',lockfileVersion:3,packages:{'node_modules/native-lib':{version:'1.0.0',os:['linux'],cpu:['x64']}}})}\n`);
+  const output=path.join(temporary,'staged');
+  const staged=spawnSync(process.execPath,[script,output,'--portable'],{encoding:'utf8',env:{...process.env,...env}});
+  assert.equal(staged.status,0,staged.stderr);
+  assert(existsSync(path.join(output,'plugins/native/index.ts')));
+  assert.equal(existsSync(path.join(output,'plugins/native/node_modules')),false);
+});
+
+test('plugins that share a staged directory fail before staging', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const {env}=stubNpm(temporary,t);
+  const script=packageCheckout(temporary,{first:'plugins/first'},{alias:'plugins/alias'});
+  const runtime=path.join(temporary,'checkout/runtime');
+  const config=path.join(runtime,'default-plugins.json');
+  const output=path.join(temporary,'staged');
+  const record=path.join(output,'.stage-plugins.json');
+  const update=()=>spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
+  assert.equal(update().status,0);
+  const before=readFileSync(record,'utf8');
+  const modules=path.join(output,'plugins/first/node_modules');
+  assert(existsSync(modules));
+  const shared=path.join(runtime,'plugins/shared');
+  mkdirSync(shared,{recursive:true});
+  writeFileSync(path.join(shared,'package.json'),'{"name":"shared"}\n');
+  writeFileSync(path.join(shared,'package-lock.json'),'{"name":"shared","lockfileVersion":3,"packages":{"":{"name":"shared"}}}\n');
+  writeFileSync(path.join(shared,'index.ts'),'export {};\n');
+  writeFileSync(config,`${JSON.stringify({plugins:{first:'plugins/shared'},optional:{alias:'plugins/./shared'}})}\n`);
+  const sharedUpdate=update();
+  assert.notEqual(sharedUpdate.status,0);
+  assert.match(sharedUpdate.stderr,/first \(plugins\/shared\) and alias \(plugins\/\.\/shared\)/);
+  assert.equal(readFileSync(record,'utf8'),before);
+  assert(existsSync(modules));
+  const fresh=path.join(temporary,'fresh');
+  const sharedFresh=spawnSync(process.execPath,[script,fresh],{encoding:'utf8',env:{...process.env,...env}});
+  assert.notEqual(sharedFresh.status,0);
+  assert.match(sharedFresh.stderr,/first \(plugins\/shared\) and alias \(plugins\/\.\/shared\)/);
+  assert.equal(existsSync(fresh),false);
+  const nested=path.join(runtime,'plugins/nested');
+  mkdirSync(path.join(nested,'inner'),{recursive:true});
+  writeFileSync(path.join(nested,'index.ts'),'export {};\n');
+  writeFileSync(path.join(nested,'inner/index.ts'),'export {};\n');
+  writeFileSync(config,`${JSON.stringify({plugins:{outer:'plugins/nested'},optional:{inner:'plugins/nested/inner'}})}\n`);
+  const nestedFresh=path.join(temporary,'nested-fresh');
+  const nestedStage=spawnSync(process.execPath,[script,nestedFresh],{encoding:'utf8',env:{...process.env,...env}});
+  assert.notEqual(nestedStage.status,0);
+  assert.match(nestedStage.stderr,/outer \(plugins\/nested\) and inner \(plugins\/nested\/inner\)/);
+  assert.equal(existsSync(nestedFresh),false);
+  mkdirSync(path.join(runtime,'plugins/Shared'),{recursive:true});
+  writeFileSync(path.join(runtime,'plugins/Shared/index.ts'),'export {};\n');
+  writeFileSync(config,`${JSON.stringify({plugins:{upper:'plugins/Shared'},optional:{lower:'plugins/shared'}})}\n`);
+  const caseFresh=path.join(temporary,'case-fresh');
+  const caseStage=spawnSync(process.execPath,[script,caseFresh],{encoding:'utf8',env:{...process.env,...env}});
+  assert.notEqual(caseStage.status,0);
+  assert.match(caseStage.stderr,/upper \(plugins\/Shared\) and lower \(plugins\/shared\)/);
+  assert.equal(existsSync(caseFresh),false);
+  mkdirSync(path.join(runtime,'plugins/shared/inner'),{recursive:true});
+  writeFileSync(path.join(runtime,'plugins/shared/inner/index.ts'),'export {};\n');
+  writeFileSync(config,`${JSON.stringify({plugins:{upper:'plugins/Shared'},optional:{lower:'plugins/shared/inner'}})}\n`);
+  const mixedFresh=path.join(temporary,'mixed-fresh');
+  const mixedStage=spawnSync(process.execPath,[script,mixedFresh],{encoding:'utf8',env:{...process.env,...env}});
+  assert.notEqual(mixedStage.status,0);
+  assert.match(mixedStage.stderr,/upper \(plugins\/Shared\) and lower \(plugins\/shared\/inner\)/);
+  assert.equal(existsSync(mixedFresh),false);
+});
+
+test('a name listed as both a default and an optional plugin fails before staging', {skip:process.platform==='win32'}, (t)=>{
+  const temporary=fixture(t);
+  const {env}=stubNpm(temporary,t);
+  const script=packageCheckout(temporary,{first:'plugins/first'},{native:'plugins/native'});
+  const config=path.join(temporary,'checkout/runtime/default-plugins.json');
+  const output=path.join(temporary,'staged');
+  const record=path.join(output,'.stage-plugins.json');
+  const update=()=>spawnSync(process.execPath,[script,output,'--update'],{encoding:'utf8',env:{...process.env,...env}});
+  assert.equal(update().status,0);
+  const before=readFileSync(record,'utf8');
+  writeFileSync(config,`${JSON.stringify({plugins:{first:'plugins/first',native:'plugins/native-default'},optional:{native:'plugins/native'}})}\n`);
+  const changed=update();
+  assert.notEqual(changed.status,0);
+  assert.match(changed.stderr,/both "plugins" and "optional"/);
+  assert.match(changed.stderr,/native/);
+  assert.equal(readFileSync(record,'utf8'),before);
+  assert(existsSync(path.join(output,'plugins/native/index.ts')));
+  const fresh=path.join(temporary,'fresh');
+  const created=spawnSync(process.execPath,[script,fresh],{encoding:'utf8',env:{...process.env,...env}});
+  assert.notEqual(created.status,0);
+  assert.match(created.stderr,/both "plugins" and "optional"/);
+  assert.equal(existsSync(fresh),false);
+});
+
 test('a platform-specific plugin package is refused for a portable stage', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const checkout=path.join(temporary,'checkout');
@@ -550,7 +711,46 @@ test('the current default plugins pass the portable check', {skip:process.platfo
   assert.equal(staged.status,0,staged.stderr);
   const defaults=JSON.parse(readFileSync(path.join(output,'default-plugins.json')));
   assert.deepEqual(Object.keys(defaults.plugins),['plugin-authoring']);
-  assert.deepEqual(readdirSync(path.join(output,'plugins')),['plugin-authoring']);
+  // The portable check covers default plugins only: the optional plugin
+  // ships too, its platform packages are the install's business.
+  assert.deepEqual(readdirSync(path.join(output,'plugins')).sort(),['light-ocr','plugin-authoring']);
+});
+
+/// The repository's own optional map: every entry is a complete plugin
+/// directory, and staging copies it without its dependencies (LightOcr
+/// Appendix D item 9, on the real tree).
+test('the shipped optional plugins are complete and stage without dependencies', {skip:process.platform==='win32'}, (t)=>{
+  const runtime=path.join(root,'runtime');
+  const {plugins,optional}=JSON.parse(readFileSync(path.join(runtime,'default-plugins.json'),'utf8'));
+  const names=Object.keys(optional??{});
+  assert(names.length>0,'the default list ships at least one optional plugin');
+  for (const name of names) {
+    const directory=path.join(runtime,optional[name]);
+    assert(existsSync(directory),`${name}: ${optional[name]} does not exist`);
+    const manifest=JSON.parse(readFileSync(path.join(directory,'dim-plugin.json'),'utf8'));
+    assert.equal(manifest.name,name,`${name}: dim-plugin.json names ${manifest.name}`);
+    assert.match(manifest.version??'',/^\d+\.\d+\.\d+$/,`${name}: version ${manifest.version}`);
+    if (manifest.dependencies==='npm') {
+      for (const file of ['package.json','package-lock.json']) {
+        assert(existsSync(path.join(directory,file)),`${name}: declares npm dependencies without ${file}`);
+      }
+    }
+    assert.equal(Object.hasOwn(plugins,name),false,`${name} is listed as both a default and an optional plugin`);
+    assert.equal(readdirSync(directory).includes('node_modules'),false,`${name}: the shipped directory carries node_modules`);
+  }
+  const temporary=fixture(t);
+  const bin=path.join(temporary,'bin');
+  mkdirSync(bin);
+  writeFileSync(path.join(bin,'npm'),'#!/bin/bash\nexit 1\n',{mode:0o755});
+  const output=path.join(temporary,'staged');
+  const staged=run('stage-plugins.mjs',[output],{PATH:`${bin}:${process.env.PATH}`});
+  assert.equal(staged.status,0,staged.stderr);
+  for (const name of names) {
+    const shipped=readdirSync(path.join(runtime,optional[name])).sort();
+    const copied=readdirSync(path.join(output,optional[name])).sort();
+    assert.deepEqual(copied,shipped,`${name}: the stage does not carry the shipped files`);
+    assert.equal(existsSync(path.join(output,optional[name],'node_modules')),false,`${name}: the stage carries node_modules`);
+  }
 });
 
 test('stages public native payload, packs it and rejects modified content', {skip:process.platform==='win32'}, (t)=>{
@@ -604,7 +804,7 @@ test('stages the default plugins beside bin/ in the native archive and the npm p
   writeFileSync(path.join(npmBin,'npm'),'#!/bin/bash\nmkdir -p "$PWD/node_modules/@arcships/rutis"\nexit 0\n',{mode:0o755});
   const selected=run('stage-plugins.mjs',[plugins],{PATH:`${npmBin}:${process.env.PATH}`});
   assert.equal(selected.status,0,selected.stderr);
-  assert.deepEqual(readdirSync(path.join(plugins,'plugins')),['plugin-authoring']);
+  assert.deepEqual(readdirSync(path.join(plugins,'plugins')).sort(),['light-ocr','plugin-authoring']);
   assert.notEqual(run('stage-release.mjs',[bin,path.join(temporary,'empty'),version,commit,'--plugins',bin]).status,0);
   const stage=path.join(temporary,'stage');
   assert.notEqual(run('stage-release.mjs',[bin,stage,version,commit,'--plugins',plugins]).status,0);

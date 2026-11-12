@@ -8,12 +8,15 @@
 //! the implementation of the version its request declared.
 use crate::{
     context_preparation::ToolSetAdoption,
-    history::context_configuration,
     host::ModelSettings,
     prompt::{Prompt, ToolAdoptOutcome},
     tool_registry::{ToolContribution, ToolRegistry, ToolSourceSet},
 };
-use dim_agent_runtime::{AgentError, BranchLifecycle, BranchOpening, Dispatcher, Names, Timeline};
+use dim_agent_runtime::{
+    AgentError, BranchLifecycle, BranchOpening, Dispatcher, Names, QueryFilter, QueryOperand,
+    QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Timeline, TimelineQuery,
+    TimelineQueryScope,
+};
 use dim_agent_types::*;
 use futures_util::FutureExt;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -184,6 +187,23 @@ impl ToolBinding {
             .ok_or_else(|| format!("Unknown tool: {name}"))
     }
 
+    /// Every declaration the request pinned, sorted by name, from the
+    /// request's snapshot only.
+    pub fn definitions(&self, request_id: &str) -> Result<Vec<ToolDefinition>, String> {
+        let state = self.state.lock().unwrap();
+        let snapshot = state
+            .snapshots
+            .get(request_id)
+            .ok_or_else(|| format!("request {request_id} has no active tool binding"))?;
+        let mut definitions = snapshot
+            .tools
+            .values()
+            .map(|tool| tool.definition.clone())
+            .collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(definitions)
+    }
+
     /// Moves a request's snapshot to its budget recovery request.
     pub fn transfer(&self, from: &str, to: &str) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
@@ -218,18 +238,52 @@ impl ToolBinding {
         cancel: &CancellationToken,
     ) -> dim_agent_runtime::Result<()> {
         let (adoption, sets) = current(&self.registry);
-        let prefix = crate::history::read_context(timeline, timeline.sequence()).await?;
-        let Some(configuration) = context_configuration(&prefix) else {
+        let reply = timeline
+            .query(TimelineQuery {
+                scope: TimelineQueryScope::Chain,
+                from: None,
+                through: Some(timeline.sequence()),
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["context/configured".into()],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["data.settings".into()],
+                    },
+                    group_by: vec![],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: std::num::NonZeroU64::MIN,
+                    after: None,
+                }),
+            })
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("configuration settings fields")
+        };
+        let Some(row) = rows.into_iter().next() else {
             return Ok(());
         };
-        let declared = match &configuration.settings.tools {
+        let [QueryValue::Value { value }] =
+            <[_; 1]>::try_from(row.values).expect("one settings field")
+        else {
+            unreachable!("configuration has settings")
+        };
+        let configuration: ModelConfiguration =
+            serde_json::from_value(value).expect("settings follow their event contract");
+        let declared = match &configuration.tools {
             Some(tools) => {
-                *tools == adoption.tools
-                    && configuration.settings.tool_sources == adoption.tool_sources
+                *tools == adoption.tools && configuration.tool_sources == adoption.tool_sources
             }
             None => only_contributed(&adoption),
         };
-        self.state.lock().unwrap().declares_tools = configuration.settings.tools.is_some();
+        self.state.lock().unwrap().declares_tools = configuration.tools.is_some();
         if declared {
             let mut state = self.state.lock().unwrap();
             if state.adopted.is_none() {

@@ -8,7 +8,7 @@ fn old_hello(server: &str, features: Value) -> Value {
     json!({
         "instanceId": "old",
         "serverVersion": server,
-        "protocolVersion": 3,
+        "protocolVersion": 4,
         "daemonProfile": {"kind": "product"},
         "features": features,
     })
@@ -49,7 +49,7 @@ fn serve_successor(successor: &UnixListener) {
         assert_eq!(hello["method"], "hello");
         wire.reply(
             &hello,
-            json!({"instanceId":"new","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
+            json!({"instanceId":"new","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history"]}),
         );
         let catalog = wire.read("provider.catalog");
         wire.reply(&catalog, json!({"catalog":null}));
@@ -340,12 +340,13 @@ fn two_starting_clients_with_no_daemon_start_one() {
 fn the_daemon_notice_never_reaches_json_stdout() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
+        wire.2 = true;
         let hello = wire.read("hello");
         wire.reply(
             &hello,
             old_hello(
                 "0.0.1-old",
-                json!(["session.create","session.history","session.summaries","daemon.shutdown.completed"]),
+                json!(["session.create","session.history","session.history.latestTurn","session.methods","session.summaries","daemon.shutdown.completed"]),
             ),
         );
         let summaries = wire.read("session.summaries");

@@ -1479,7 +1479,6 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
                 "settings.update",
             ],
         );
-        // A line opens from main; focusing it reads the line's own history.
         wire.notice(
             "session.event",
             json!({"sessionId":"session","branchId":"main","event":{
@@ -1488,18 +1487,10 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
                         "source":{"kind":"host","operation_id":"op-1"},
                         "prompt":"child work"}}}),
         );
-        let history = wire.read("session.history");
-        assert_eq!(history["params"]["branchId"], "line-1");
-        wire.reply(
-            &history,
-            json!({"events":[{"id":"start-line-1","sequence":10,"create_at":1,
-                    "type":"branch","name":"start","data":{"parent":"main"}}],
-                "through":10,"nextAfter":10,"done":true}),
-        );
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let transcript = wire.read("session.history");
         assert_eq!(transcript["params"]["branchId"], "line-1");
-        assert_eq!(transcript["params"]["after"], 0);
+        assert_eq!(transcript["params"]["latestTurn"], true);
         wire.reply(
             &transcript,
             json!({"events":[{"id":"start-line-1","sequence":10,"create_at":1,
@@ -1907,7 +1898,7 @@ fn workflow_commands_write_and_enable_against_the_real_owner() {
             stream.get_mut(),
             "{}",
             json!({"jsonrpc":"2.0","id":1,"method":"hello",
-                   "params":{"protocolVersion":3,"clientKind":"cli"}})
+                   "params":{"protocolVersion":4,"clientKind":"cli"}})
         )
         .ok()?;
         let mut line = String::new();

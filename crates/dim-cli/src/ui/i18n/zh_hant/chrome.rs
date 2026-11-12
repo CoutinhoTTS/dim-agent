@@ -6,6 +6,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No queued messages." => "佇列中沒有訊息。",
         "Held · awaiting application" => "暫存中 · 等待套用",
         "Incorporating · awaiting model consumption" => "納入中 · 等待模型讀取",
+        "Unread · waiting for your next message" => "未讀取 · 等待你的下一則訊息",
+        "Unread" => "未讀取",
+        "/queue view · awaiting model consumption" => "/queue 檢視 · 等待模型讀取",
+        "/queue view · waiting for your next message" => "/queue 檢視 · 等待你的下一則訊息",
         "Held" => "暫存中",
         "Incorporating" => "納入中",
         "Enter export · Esc cancel" => "Enter 匯出 · Esc 取消",
@@ -15,9 +19,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/queue manage · shift+← edit last · ctrl+s steer now" => {
             "/queue 管理 · shift+← 編輯最後一則 · ctrl+s 立即 steer"
         }
-        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
-            "還有 {count} 則 · /queue 管理 · shift+← 編輯最後一則 · ctrl+s 立即 steer"
-        }
+        "+{count} more · {hint}" => "還有 {count} 則 · {hint}",
         "steer or delete queued messages" => "對佇列訊息執行 steer 或刪除",
         "export this conversation" => "匯出此對話",
         "That message has already left the queue." => "該訊息已離開佇列。",
@@ -323,6 +325,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Suggestions" => "建議",
         "Skills" => "技能",
         "Skill loaded: {name}" => "已載入技能：{name}",
+        "Hook context · {count} line" => "鉤子上下文 · {count} 行",
+        "Hook context · {count} lines" => "鉤子上下文 · {count} 行",
         "Commands" => "指令",
         "Command Palette" => "命令面板",
         "No matches" => "無相符項目",
@@ -456,6 +460,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "drawing diagram… {count} lines" => "正在繪製圖表… {count} 行",
         // notify.rs
         "Task complete" => "任務已完成",
+        "Background task finished: {label}" => "後台任務已完成：{label}",
+        "Background task failed: {label}" => "後台任務失敗：{label}",
+        "Background task stopped: {label}" => "後台任務已停止：{label}",
         "Permission needed: {tool}" => "需要授權：{tool}",
         "Question waiting for your answer" => "有問題等你回答",
         "Notify when agent needs you" => "需要你時通知",

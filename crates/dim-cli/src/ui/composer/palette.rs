@@ -443,6 +443,7 @@ mod tests {
             "timeline",
             "queue",
             "export",
+            "earlier",
             "goal",
             "tasks",
             "rename",
@@ -463,6 +464,7 @@ mod tests {
             "theme",
             "language",
             "keys",
+            "report",
             "exit",
         ];
         for context in [
@@ -504,13 +506,13 @@ mod tests {
             names("/se", SCROLLBACK),
             [
                 "settings", "resume", "new", "models", "effort", "fast", "agent", "fork", "lines",
-                "rename", "mcp"
+                "rename", "mcp", "report"
             ]
         );
         assert_eq!(names("/stg", SCROLLBACK), ["settings"]);
         assert_eq!(
-            &names("/re", SCROLLBACK)[..4],
-            ["resume", "rename", "reload-skills", "effort"]
+            &names("/re", SCROLLBACK)[..5],
+            ["resume", "rename", "reload-skills", "report", "effort"]
         );
         assert!(names("/ss", SCROLLBACK).contains(&"resume"));
         assert!(names("/quit", SCROLLBACK).contains(&"exit"));

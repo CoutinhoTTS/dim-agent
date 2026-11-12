@@ -101,6 +101,7 @@ flowchart TB
 | 关于某个 Session 的客户端方法 | 注册到该 Session 的 `sessionMethods` 的命名空间，由 Rpc 经该 Session 分发（[A.1](contracts/session-boundary.md#a1-方法贡献)） | Questions, Goal, SessionTitle, Attachments, ShellInput, InputQueue（`session.input.withdraw`） |
 | 宿主管理方法 | 进程插件注册到 `managementMethods` 的命名空间，由 Rpc 按调用查找 | 现有管理方法, Settings（业务配置，`settings.read`/`settings.update`/`settings.sources`/`settings.projects`，S8b，已实现）, Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RemoteGateway |
 | 访问其他 Session | Agents 的 `sessions` 服务（`launch`、`input`、`history`、`idle` 等），与 Collaboration 的做法相同（[Session 访问](contracts/session-access.md#a1-sessions-服务)） | Scheduler, Workflow |
+| 把事件交给订阅了它的 Session | 进程服务 `eventHub`，它经 Agents 的 `sessions` 服务逐条投递 ([EventHub](plugins/EventHub.md)) | 生产方：IM、SaaS 与 CI 通知、定时器、其他 agent；Session 的 `events` 工具与客户端的 `eventhub.*` 方法负责订阅 |
 
 ```mermaid
 flowchart LR
@@ -264,31 +265,28 @@ sequenceDiagram
 
 ### 5.5 经 Agents 的定时运行
 
-[Scheduler](plugins/Scheduler.md) 的设计状态以其所有者文档为准，可选包及其公开流程验证已实现（[#317](https://github.com/arcships/dim/pull/317)），安装按其 §1.3 显式进行。图示为其自持的 create 模式运行流程。S2、Settings 与 pluginFiles 的[公开装配](../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。
+[Scheduler](plugins/Scheduler.md) 的设计状态以其所有者文档为准，可选包及其公开流程验证已实现（[#317](https://github.com/arcships/dim/pull/317)），安装按其 §1.3 显式进行。图示为其设计规定的投递流程。S2、Settings 与 pluginFiles 的[公开装配](../../design/process-typescript.md#52-public-pluginfiles-binding)已提供。
 
 ```mermaid
 sequenceDiagram
   participant SC as Scheduler（进程）
   participant AI as Agents sessions
   participant PF as Scheduler pluginFiles
-  SC->>PF: 持久化运行 launching
-  SC->>AI: launch（S2 创建非交互 Session）
-  AI-->>SC: sessionId、有效 policy
-  SC->>PF: 持久化 launch 回复
+  SC->>PF: 持久化投递 delivering
+  opt launch 目标
+    SC->>AI: launch(S2 创建非交互 Session)
+    AI-->>SC: sessionId、有效 policy
+    SC->>PF: 持久化 Session 与停止时刻
+  end
   SC->>AI: input Queue，带 dim-scheduler 标记
   AI-->>SC: 已发布输入 receipt
-  SC->>PF: 持久化 submitted
-  loop 本运行输入尚未到达终态
-    SC->>AI: history(main)，固定已发布前缀并分页
-    AI-->>SC: 本输入的消费与轮次事实
-  end
-  SC->>PF: 持久化运行终态
-  opt A.6 选定的报告
-    SC->>AI: 向记录的报告分支 input Steer
+  SC->>PF: 持久化 delivered
+  opt launch 目标
+    SC->>AI: 到停止时刻停止
   end
 ```
 
-跟踪器按 [§3.2](plugins/Scheduler.md#32-完成与超时) 读取自己输入的已发布历史，不保留原生 idle 等待。先保存运行终态，再按 [A.6](plugins/Scheduler.md#a6-运行结果投递) 尝试一次报告；失败记录后不补发。结果经目标分支正常消费输入进入模型上下文。
+一条投递向目标分支写入一条输入，之后什么都不读([Scheduler §3.1](plugins/Scheduler.md#31-窗口到期)、[A.5](plugins/Scheduler.md#a5-timeline-与-capability-机制))。launch 目标先启动，记录其停止时刻，并在到点时停止([§3.2](plugins/Scheduler.md#32-完成与超时))。投递记录就是结果，不写任何报告。目标分支正常消费该输入后，其文本进入模型上下文。
 
 ### 5.6 Collaboration 委派给外部 Agent
 
@@ -443,7 +441,7 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | 系统 | `/exit`、`/theme`、`/keys`、升级 | CLI |
 | 系统 | `/settings` | 每项属于各自插件；由 CLI 汇总 |
 | 系统 | `/usage` | 扩展：ContextPreparation、ManagedProviders |
-| 系统 | `/language` | CLI；扩展：PromptSources |
+| 系统 | `/language` | CLI（界面语言）；Session 的回复语言经 PromptSources 的 `session.language.get/update` 到达 |
 | 系统 | `/debug`、调试日志 | 现有：进程日志（`daemon.log`、`RUST_LOG`，[ADR 005](../../adr/005-observability.md) D1） |
 | 系统 | `/stats`、鼠标设置 | 不在范围内 |
 | Agent 行为 | `/agent` | 扩展：Agents、Prompt、PromptSources |
@@ -486,14 +484,14 @@ ADR 002 中记录的 HostPlatform exec shell 变更（作为业务配置在每�
 | **已撤回（#28）。** Approval | 补充 | 在模型步骤打开期间，接受宿主来源的准入（由 ModelProvider 针对 `approval_ask` 流条目发起），写入普通的 `approval/request`、`approval/respond`、`approval/cancelled` 事实；通用，不了解 model kind | ExternalAgent（首个使用方） |
 | InputQueue | 变更 | 按序消费 `input/withdraw {input_id, reason?}`（`reason`：提议的通用可选文本，最多 2 KiB，任何生产方都可写入，由客户端显示；InputQueue 做决定时忽略它；不带它的事件不变；设计规则 §4 第 9 条允许必需事件带描述性字段），只为它仍持有且未应用的输入写入 `input/deleted {input_id}`（否则不写入，`notHeld`）；经 `sessionMethods` 提供 `session.input.withdraw`（命名空间 `session.input`，提议中）；“撤回并作为 Steer 重新提交”作为一个批次；队列状态从事件重建（[Session 访问 A.4](contracts/session-access.md#a4-撤回)） | `Ctrl+S`、`/queue`；AcpGateway、Scheduler |
 | Permission, ToolExecutor, Approval | 变更 | Approval 把 `AdmitCall.source` 传给 Permission 的准入决定；Permission 在其中（策略与命令规则之后、结果不是 Deny 时）调用向它登记的建议者并合并其 `none`/`allow`/`ask`/`deny` 建议（deny 优先，其次 ask，再次 allow；建议从不推翻 Deny）；Approval 在回应后的复核仍是普通 `decide`，不再询问；ToolExecutor 不变。通用，不带业务含义（[Hooks A.6.1](plugins/Hooks.md#a61-permission-的工具建议)） | Hooks `PreToolUse` |
-| Rpc `session.submit` 与 `session.branch_create`、InputQueue `InputMethods`、CLI | 变更 | 写入操作者输入之前（`session.submit`、`session.branch_create {prompt}`、`session.input.withdraw {steer}`），入口调用向 Session 的 `submitChecks` 登记的检查；被拦下时调用以 `input_blocked`（消息 `Hook <source>: <reason>`，`data` 只有 `appError`）失败且不写入任何内容，否则把返回的块追加到该输入的用户内容中、操作者自己的内容之后，使其仍是操作者输入（新分支的提示词不带这些块）。`input_blocked` 在 App Server README 与 CLI 中加入保证未提交任何东西的 `session.submit` 错误。调用方断开不取消任何东西。不改事件与持久化格式。通用（[Hooks A.6.2](plugins/Hooks.md#a62-操作者输入入口处的提交检查)） | Hooks `UserPromptSubmit` |
+| Rpc `session.submit` 与 `session.branch_create`、InputQueue `InputMethods`、CLI | 变更 | 写入操作者输入之前（`session.submit`、`session.branch_create {prompt}`、`session.input.withdraw {steer}`），入口调用向 Session 的 `submitChecks` 登记的检查；被拦下时调用以 `input_blocked`（消息 `Hook <source>: <reason>`，`data` 只有 `appError`）失败且不写入任何内容，否则把返回的块中每一个运行时标记元素追加到该输入的用户内容中、操作者自己的内容之后，使其仍是操作者输入，不是这样的块则丢弃（新分支的提示词不带这些块）。`input_blocked` 在 App Server README 与 CLI 中加入保证未提交任何东西的 `session.submit` 错误。调用方断开不取消任何东西。不改事件与持久化格式。通用（[Hooks A.6.2](plugins/Hooks.md#a62-操作者输入入口处的提交检查)） | Hooks `UserPromptSubmit` |
 | **已撤回（现有门面）。** 运行时 Session 门面 | 补充 | 按命名空间查找 `sessionMethods`：Rpc 经现有门面读取该 Session 唯一的 `sessionMethods` 表，固定前缀读取也由现有门面组合实现（#50） | Rpc；进程调用方 |
 | ToolRegistry | 补充 | 任何语言的部件向 `toolRegistry` 注册工具（[方法 A.5](contracts/session-boundary.md#a5-工具贡献)） | 非 Rust 的 Session 工具 |
 | Agent 装配 | 补充 | 收集每个已安装插件在 `provides` 中声明的具名服务；可选的 Session 与分支部分按已启用插件安装 | 所有 Session 插件 |
 | Permission | 补充 | 命令规则在使用时读取（不新增风险类别：未知风险按未分类处理，#45） | `/approvals` |
 | ModelProvider | 补充 | 构建请求时发送用户内容或工具结果中的图像，模型不支持图像或请求无法携带时改为文本占位；历史不变（从 Rpc 移出） | Attachments |
 | Prompt, PromptSources | 补充 | Prompt 发布的已采纳模型配置；使用 PromptSources 现有的 `dim/session` System 条目，原子采纳 profile 的提示词和可选模型 | `/effort`、`/fast`、`/agent` |
-| PromptSources | 补充 | 提示词语言来源 | `/language` |
+| PromptSources | 补充 | 提示词语言来源 | Session 的回复语言（`session.language.*`） |
 | ContextPreparation | 补充 | 用量查询；手动压缩；实现 `ResolveContextModel` 的生产环境压缩宿主 | `/usage`、`/compact` |
 | FileStorage | 补充 | 根目录下的目录列举与删除（S6）；目录创建（S5a，[Session 文件](appserver/session-files.md#7-filestorage-新增操作)） | Session 文件、清理 |
 | HostPlatform | 补充 | 进程启动时的 OS 隔离只用于 agent 决定的命令（`exec` 与持久 shell；macOS seatbelt、Linux bubblewrap、Windows 明确不可用）、按节点的宿主本地配置；把给定字节写入子进程 stdin 然后关闭的进程启动，用于 Hook 命令这类配置命令，它们不施加 agent 沙箱，与 MCP stdio 服务器相同（[ADR 003](../adr/003-approval-scope.md) D2，[Hooks A.6.3](plugins/Hooks.md#a63-带初始-stdin-的进程启动)）；exec argv 辅助；宿主自有助手的受限启动（超时、受限输出、无网络，与用户的开关无关）；每次 spawn 时读取 exec shell（ADR 002）；到控制节点的链接断开时，该节点的 HostPlatform 结束它启动的进程 | 沙箱；ShellInput、Hooks、ExternalAgent |

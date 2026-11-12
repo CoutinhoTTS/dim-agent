@@ -216,6 +216,79 @@ async fn respond(session: &Session, params: Value) -> Result<Value, RpcError> {
     )?;
     accepted.reply.await.unwrap()
 }
+
+#[tokio::test]
+async fn pending_questions_are_selected_at_a_fixed_cut_without_unrelated_tool_arguments() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session(true).await;
+    fixture.model.push(&[
+        ("ask_user", "c1", json!({"questions":[database()]})),
+        (
+            "wait",
+            "other",
+            json!({"unrelated": "not-question-data".repeat(10_000)}),
+        ),
+    ]);
+    session
+        .submit("plan".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let asked = waiting(&session, "main", "c1").await;
+    for _ in 0..300 {
+        session
+            .submit("later queued input".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+    }
+    let provider = session
+        .session_service::<SessionMethods>()
+        .unwrap()
+        .provider("session.question.pending")
+        .unwrap();
+    let read = |through: Option<u64>| {
+        provider
+            .accept(
+                "session.question.pending".into(),
+                json!({"sessionId":session.id(),"branchId":"main","through":through}),
+                None,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .unwrap()
+    };
+    let first = read(None).reply.await.unwrap().unwrap();
+    let through = first["through"].as_u64().unwrap();
+    assert_eq!(first["branchId"], "main");
+    assert!(first["next"].is_null());
+    let batches: Vec<PendingQuestionBatch> =
+        serde_json::from_value(first["batches"].clone()).unwrap();
+    assert_eq!(batches.len(), 1);
+    assert!(
+        through - batches[0].sequence >= 300,
+        "the question predates the transcript window"
+    );
+    assert_eq!(batches[0].request_id, asked.1);
+    assert_eq!(batches[0].calls.len(), 1);
+    assert_eq!(batches[0].calls[0].id, "c1");
+    assert_eq!(batches[0].calls[0].input["questions"], json!([database()]));
+    assert!(!first.to_string().contains("not-question-data"));
+    session
+        .interrupt("main", "finish inventory test".into())
+        .unwrap();
+    session.idle("main").await.unwrap();
+    assert!(
+        read(None).reply.await.unwrap().unwrap()["batches"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        read(Some(through)).reply.await.unwrap().unwrap(),
+        first,
+        "a terminal fact after the fixed cut does not change the inventory page"
+    );
+    fixture.agent.close().await.unwrap();
+}
 /// A call as a client names it: its branch, the `request_id` of its
 /// `step/tool-call` and its call id.
 type Asked = (String, String, String);
@@ -451,8 +524,12 @@ async fn answers_and_declines_become_the_results_the_model_reads() {
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event.kind, EventKind::Extension(_))),
-        "Questions writes no events"
+            .filter(|event| matches!(event.kind, EventKind::Extension(_)))
+            .all(|event| matches!(
+                event.kind.key(),
+                "input-queue/node" | "input-queue/recovered" | "prompt-state/recovered"
+            )),
+        "Questions adds no extension facts beyond queue and prompt recovery"
     );
     fixture.shutdown().await;
 }

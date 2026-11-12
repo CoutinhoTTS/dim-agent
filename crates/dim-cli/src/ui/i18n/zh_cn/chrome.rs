@@ -6,6 +6,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "No queued messages." => "队列中没有消息。",
         "Held · awaiting application" => "暂存中 · 等待应用",
         "Incorporating · awaiting model consumption" => "纳入中 · 等待模型读取",
+        "Unread · waiting for your next message" => "未读取 · 等待你的下一条消息",
+        "Unread" => "未读取",
+        "/queue view · awaiting model consumption" => "/queue 查看 · 等待模型读取",
+        "/queue view · waiting for your next message" => "/queue 查看 · 等待你的下一条消息",
+        "+{count} more · {hint}" => "还有 {count} 条 · {hint}",
         "Held" => "暂存中",
         "Incorporating" => "纳入中",
         "Enter export · Esc cancel" => "Enter 导出 · Esc 取消",
@@ -14,9 +19,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "/queue manage · shift+← edit last · ctrl+s steer now" => {
             "/queue 管理 · shift+← 编辑最后一条 · ctrl+s 立即 steer"
-        }
-        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
-            "还有 {count} 条 · /queue 管理 · shift+← 编辑最后一条 · ctrl+s 立即 steer"
         }
         "steer or delete queued messages" => "对队列消息执行 steer 或删除",
         "export this conversation" => "导出此对话",
@@ -310,6 +312,47 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "configure tool approvals" => "配置工具审批",
         "choose ask or full access" => "选择询问或完全访问",
         "open settings" => "打开设置",
+        "report the current session" => "上报当前会话",
+        "Run /report to create a report." => "输入 /report 生成报告。",
+        "No session to report." => "没有可上报的会话。",
+        "Usage: /report" => "用法：/report",
+        "Report this session" => "上报当前会话",
+        "Report this error" => "上报此错误",
+        "Report ready" => "报告已生成",
+        "ZIP contents: report.md, diagnostics.json" => "ZIP 内容：report.md、diagnostics.json",
+        "Model · Generate locally" => "模型 · 本地生成",
+        "Local generation makes zero model requests." => "本地生成不会调用模型。",
+        "Session model" => "会话模型",
+        "Redact [x]" => "脱敏 [x]",
+        "Redact [ ]" => "脱敏 [ ]",
+        "Options" => "选项",
+        "Generate report" => "生成报告",
+        "Refresh report plan" => "刷新报告计划",
+        "Prepare report again" => "重新准备报告",
+        "Evidence · Recent session activity" => "证据 · 最近的会话活动",
+        "Evidence · No recent session activity" => "证据 · 近期没有可上报的会话活动",
+        "Evidence · Observed error only" => "证据 · 只有观察到的错误",
+        "Evidence · Timeline omitted" => "证据 · 已省略时间线",
+        "Evidence · Timeline read failed" => "证据 · 无法读取时间线",
+        "Evidence · Timeline unavailable" => "证据 · 时间线不可用",
+        "Some options were unsupported." => "部分选项不受支持。",
+        "Options · for example: omit timeline, keep error codes" => {
+            "选项 · 例如 omit timeline, keep error codes"
+        }
+        "Options must fit within 1 KiB" => "选项不得超过 1 KiB",
+        "Enter apply · Esc back" => "Enter 应用 · Esc 返回",
+        "Save ZIP" => "保存 ZIP",
+        "Saved ZIP" => "ZIP 已保存至",
+        "Could not save ZIP" => "无法保存 ZIP",
+        "Invalid report ZIP" => "报告 ZIP 无效",
+        "Could not open the share destination" => "无法打开分享页面",
+        "Opened GitHub issue draft" => "已打开 GitHub Issue 草稿",
+        "Opened Discord" => "已打开 Discord",
+        "Preparing report…" => "正在准备报告…",
+        "Updating report plan…" => "正在更新报告计划…",
+        "Generating report…" => "正在生成报告…",
+        "Cancelling generation…" => "正在取消生成…",
+        "↑↓/Tab move · Enter select · Esc close" => "↑↓/Tab 切换 · Enter 选择 · Esc 关闭",
         "exit" => "退出应用",
 
         "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
@@ -320,6 +363,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Suggestions" => "建议",
         "Skills" => "技能",
         "Skill loaded: {name}" => "已加载技能：{name}",
+        "Hook context · {count} line" => "钩子上下文 · {count} 行",
+        "Hook context · {count} lines" => "钩子上下文 · {count} 行",
         "Commands" => "命令",
         "Command Palette" => "命令面板",
         "No matches" => "无匹配项",
@@ -444,11 +489,35 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Subagent model policy: {error}" => "子代理模型策略：{error}",
         "drawing diagram… {count} lines" => "正在绘制图表…已收到 {count} 行",
         "Task complete" => "任务已完成",
+        "Background task finished: {label}" => "后台任务已完成：{label}",
+        "Background task failed: {label}" => "后台任务失败：{label}",
+        "Background task stopped: {label}" => "后台任务已停止：{label}",
         "Permission needed: {tool}" => "需要授权：{tool}",
         "Question waiting for your answer" => "有问题等你回答",
         "Notify when agent needs you" => "需要你时通知",
         "Show ACP sessions" => "显示 ACP 会话",
         "Prompt suggestion" => "提示建议",
+        "Prompts" => "提示词",
+        "Base prompt" => "基础提示",
+        "Compaction prompt" => "压缩提示",
+        "Skills instructions" => "Skills 说明",
+        "custom" => "自定义",
+        "built-in" => "内置",
+        "skills replaces the marker and call shape; the skill tool and list stay · r reset" => {
+            "skills 会替换标记与调用形状；skill 工具和列表不受影响 · r 重置"
+        }
+        "Prompt saved; applies to new Sessions" => "提示词已保存；对新会话生效",
+        "A prompt save is still in progress" => "提示词保存尚未完成",
+        "Prompt settings are not available" => "提示词设置不可用",
+        "↑↓ move · Enter edit · r reset · Esc close" => {
+            "↑↓ 移动 · Enter 编辑 · r 重置 · Esc 关闭"
+        }
+        "↑↓ move · Enter select · ←→/Space change · r reset · Esc close" => {
+            "↑↓ 移动 · Enter 选择 · ←→/空格 更改 · r 重置 · Esc 关闭"
+        }
+        "Resetting {field}; the old text is kept in {path}" => {
+            "正在重置 {field}；旧文本保留在 {path}"
+        }
         "Prompt suggestion: {error}" => "提示建议：{error}",
         "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume." => {
             "本会话因提示建议未被采用而暂停。在 /settings 中关闭再开启即可恢复。"

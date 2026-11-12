@@ -19,7 +19,7 @@ use rutis::host::CtxHost;
 use rutis_bridge::session::{HostDispatch, Reply, Value, caller_row};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, sync::atomic::Ordering};
 use tokio_util::sync::CancellationToken;
 
 /// A branch of a Session.
@@ -154,6 +154,18 @@ pub enum LookupReply {
     Unknown,
 }
 
+/// `exists` (§6.9): whether the Session id still exists.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExistsRequest {
+    pub session_id: String,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistsReply {
+    pub exists: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HistoryRequest {
@@ -258,6 +270,7 @@ impl From<AgentError> for SessionsError {
             AgentError::UnknownBranch(_) => Self::BranchMissing { message },
             AgentError::BranchEnded(_) => Self::BranchEnded { message },
             AgentError::Reloading(_) => Self::Reloading { message },
+            AgentError::PublicationUnknown(_) => Self::PublicationUnknown { message },
             AgentError::InvalidInput(_) => Self::Rejected { message },
             AgentError::AmbiguousSubmission(_) => Self::Ambiguous { message },
             _ => Self::Failed { message },
@@ -509,6 +522,40 @@ impl AgentIndex {
         .await
     }
 
+    /// Answers whether Session `id` still exists (§6.9): it has an owner or
+    /// SessionStore records, the facts `acquire` reads before it restores
+    /// anything. A read: it creates no slot, takes no lease, acquires
+    /// nothing, restores nothing and writes no event, so idle unload sees no
+    /// effect. `false` means the Session was deleted; a closed, restorable
+    /// Session is `true` because its rows remain.
+    pub async fn exists(&self, request: ExistsRequest) -> Result<ExistsReply, SessionsError> {
+        self.until_unloaded(async {
+            let id = &request.session_id;
+            let (deleted, owned) = {
+                let inner = self.directory.inner.lock().expect("agent index");
+                (
+                    inner
+                        .sessions
+                        .get(id)
+                        .is_some_and(|slot| slot.deleted.load(Ordering::Acquire)),
+                    inner.owner(id).is_some(),
+                )
+            };
+            if deleted {
+                return Ok(ExistsReply { exists: false });
+            }
+            if owned {
+                return Ok(ExistsReply { exists: true });
+            }
+            let exists = match &self.session_store {
+                Some(store) => store.has_records(id).await?,
+                None => false,
+            };
+            Ok(ExistsReply { exists })
+        })
+        .await
+    }
+
     /// Pages the branch's own events through a fixed sequence. A caller pages
     /// with `after` set to the last returned sequence until it reaches
     /// `through`.
@@ -636,7 +683,7 @@ pub(crate) struct SessionsService(pub(crate) Ctx);
 impl HostDispatch for SessionsService {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(json!({
-            "launch": "async", "input": "async", "lookup": "async",
+            "launch": "async", "input": "async", "lookup": "async", "exists": "async",
             "history": "async", "withdraw": "async", "stop": "async", "idle": "async",
             "delete": "async",
         }))
@@ -701,6 +748,7 @@ async fn call(
             })
         }
         "lookup" => reply(index.lookup(request(args)?).await?),
+        "exists" => reply(index.exists(request(args)?).await?),
         "history" => reply(index.history(request(args)?).await?),
         "withdraw" => reply(match index.withdraw(request(args)?).await? {
             Withdrawal::Deleted { sequence } => json!({"status": "deleted", "sequence": sequence}),

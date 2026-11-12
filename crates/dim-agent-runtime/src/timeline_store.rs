@@ -1,6 +1,4 @@
-use crate::{
-    BoxFuture, BranchRecord, Result, SessionConfig, TimelineQuery, TimelineQueryPage, TimelineTrace,
-};
+use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
 use dim_agent_types::{AgentEvent, RecoverySnapshot};
 use std::{ops::RangeInclusive, sync::Arc};
 
@@ -9,6 +7,44 @@ use std::{ops::RangeInclusive, sync::Arc};
 pub struct TimelineKey {
     pub session_id: String,
     pub branch_id: String,
+}
+
+/// A complete logical scope, captured by the Timeline before storage I/O.
+#[derive(Debug, Clone)]
+pub struct TimelineReadScope {
+    pub key: TimelineKey,
+    pub through: u64,
+    pub segments: Vec<TimelineReadSegment>,
+}
+
+impl TimelineReadScope {
+    /// Binds continuation data to logical facts, independently of tail persistence progress.
+    pub fn query_binding(&self, query: &crate::QuerySpec) -> Result<String> {
+        let intervals: Vec<_> = self
+            .segments
+            .iter()
+            .map(|segment| (&segment.branch_id, segment.from, segment.through))
+            .collect();
+        serde_json::to_string(&(
+            &self.key.session_id,
+            &self.key.branch_id,
+            self.through,
+            intervals,
+            query,
+        ))
+        .map_err(|error| crate::AgentError::InvalidInput(error.to_string()))
+    }
+}
+
+/// One inclusive branch interval. Stored events stop at `stored_through`;
+/// the tail supplies the remaining committed events without overlap.
+#[derive(Debug, Clone)]
+pub struct TimelineReadSegment {
+    pub branch_id: String,
+    pub from: u64,
+    pub through: u64,
+    pub stored_through: u64,
+    pub tail: Vec<Arc<AgentEvent>>,
 }
 
 /// One stored event and its atomic publication boundary.
@@ -39,6 +75,14 @@ pub type PublishCallback = Box<dyn FnOnce(Result<()>) + Send + 'static>;
 /// Each Session id has at most one live load per store; callers serialize
 /// closing and restoring that id, including when Agents share a store.
 pub trait TimelineStore: Send + Sync + 'static {
+    /// Computes a validated query over the complete fixed scope and its disjoint tail.
+    fn query<'a>(
+        &'a self,
+        scope: &'a TimelineReadScope,
+        query: &'a crate::QuerySpec,
+        page: Option<&'a crate::QueryPage>,
+    ) -> BoxFuture<'a, Result<crate::QueryResult>>;
+
     fn create_session<'a>(
         &'a self,
         session_id: &'a str,
@@ -61,11 +105,9 @@ pub trait TimelineStore: Send + Sync + 'static {
         &'a self,
         session_id: &'a str,
     ) -> BoxFuture<'a, Result<Option<SessionConfig>>>;
-    /// Returns the Session's branch directory after checking the stored
-    /// Timeline. An implementation may reuse a check it already ran for this
-    /// Session in the same store while the stored directory and every branch
-    /// head are unchanged. The first check of a Session in a process reads the
-    /// whole Timeline.
+    /// Returns the Session's branch directory without reading event history.
+    /// Persisted directory metadata is checked here; event and content decoding
+    /// errors are reported by the operations that read them.
     fn branches<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>>;
     fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>>;
     fn append(
@@ -80,6 +122,28 @@ pub trait TimelineStore: Send + Sync + 'static {
     /// a batch. An interior sequence is invalid input; a sequence the branch
     /// does not store is a storage error.
     fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>>;
+    /// Returns the end of the batch containing `sequence`, without decoding event content.
+    /// Zero denotes the position before the first event.
+    fn batch_end_at<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> BoxFuture<'a, Result<u64>> {
+        Box::pin(async move {
+            let mut end = sequence;
+            loop {
+                match self.batch_end(key, end).await {
+                    Ok(()) => return Ok(end),
+                    Err(crate::AgentError::InvalidInput(_)) => {
+                        end = end.checked_add(1).ok_or_else(|| {
+                            crate::AgentError::Storage("batch sequence overflow".into())
+                        })?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+    }
     /// Range starts may be inside a batch; the end must be a batch boundary.
     fn read<'a>(
         &'a self,
@@ -108,57 +172,19 @@ pub trait TimelineStore: Send + Sync + 'static {
                     "future Timeline cursor".into(),
                 ));
             }
-            let records = self.read(key, after.max(1)..=through).await?;
-            if after > 0
-                && records
-                    .first()
-                    .is_some_and(|record| record.batch_end != after)
-            {
-                return Err(crate::AgentError::InvalidInput(
-                    "cursor is inside an atomic batch".into(),
-                ));
-            }
-            if limit == 0 {
+            self.batch_end(key, after).await?;
+            self.batch_end(key, through).await?;
+            if limit == 0 || after == through {
                 return Ok(vec![]);
             }
-            let mut records: Vec<_> = records
-                .into_iter()
-                .filter(|record| record.event.sequence > after)
-                .collect();
-            if let Some(record) = records.get(limit - 1) {
-                let end = record.batch_end;
-                records.retain(|record| record.event.sequence <= end);
-            }
+            let target = after
+                .saturating_add(u64::try_from(limit).unwrap_or(u64::MAX))
+                .min(through);
+            let end = self.batch_end_at(key, target).await?;
+            let records = self.read(key, after + 1..=end).await?;
             Ok(records)
         })
     }
-    /// One per-branch read for [`TimelineQuery`] (ADR 019, plugin contract
-    /// §5.4): applies the read point, direction, kinds, flags, event id,
-    /// predicate, limit and offset to `key`'s branch and returns up to `limit`
-    /// matching facts, ordered by sequence in the query's direction, each with
-    /// its position.
-    ///
-    /// `query.scope` must be `TimelineQueryScope::Branch`. The Timeline
-    /// service composes the chain by reading each ancestor and then the
-    /// queried branch with this method, carrying the offset the earlier
-    /// segment did not use. Paging is skipping: `offset` matching facts are
-    /// passed over before the page, so a page shorter than the limit means the
-    /// selection is exhausted, and a page may end inside an atomic batch.
-    /// `skipped` is the number of matching facts the read passed over, at most
-    /// `offset`, so a caller can carry the rest into its next segment. The
-    /// query's `bound` is the service's: the cut arrives as `from` and
-    /// `through`.
-    ///
-    /// A read point past the branch's published head and any other scope are
-    /// invalid input. A kind, flag, id or data path the store does not know
-    /// selects no rows; it is not an error.
-    fn query<'a>(
-        &'a self,
-        key: &'a TimelineKey,
-        query: &'a TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> BoxFuture<'a, Result<TimelineQueryPage>>;
     /// Decodes all segments in one read scope, sharing content across branches.
     fn read_segments<'a>(
         &'a self,

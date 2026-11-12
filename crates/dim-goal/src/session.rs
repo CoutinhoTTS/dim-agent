@@ -1,7 +1,8 @@
 //! Goal's Session part (design §1, A.1, A.2): the `goal_update` tool, the
 //! `session.goal.*` methods and the guide entry. It writes changes by branch
 //! id through the branch part's Owner, which composes their records, and never
-//! reads Goal's state.
+//! reads Goal's state to admit a change. `get` queries the committed Goal fields
+//! independently of the transcript window.
 
 use crate::branch::{Change, Changes};
 use crate::text::{self, OBJECTIVE_LIMIT, SUMMARY_LIMIT};
@@ -12,7 +13,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands,
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
-use dim_agent_runtime::Names;
+use dim_agent_runtime::{Names, SessionIdentity, TimelineKey};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -25,6 +26,7 @@ pub struct GoalSession {
     tools: Key<ToolRegistry>,
     methods: Key<SessionMethods>,
     guide: Key<GuideEntries>,
+    identity: Key<SessionIdentity>,
     changes: Changes,
 }
 
@@ -35,6 +37,7 @@ impl GoalSession {
             tools: names.key()?,
             methods: names.key()?,
             guide: names.key()?,
+            identity: names.key()?,
             changes,
         })
     }
@@ -50,6 +53,7 @@ impl DynPlugin for GoalSession {
             self.tools.erase(),
             self.methods.erase(),
             self.guide.erase(),
+            self.identity.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -58,6 +62,7 @@ impl DynPlugin for GoalSession {
             let tools = ctx.require_at(&self.tools)?;
             let methods = ctx.require_at(&self.methods)?;
             let guide = ctx.require_at(&self.guide)?;
+            let identity = ctx.require_at(&self.identity)?;
             guide.register(
                 ctx,
                 GuideScope::Session,
@@ -82,26 +87,50 @@ impl DynPlugin for GoalSession {
                     },
                     handler: Arc::new(GoalUpdate {
                         changes: self.changes.clone(),
+                        identity: identity.clone(),
                     }),
                 },
             )?;
             let owner = Arc::new(Owner {
                 tree,
+                identity,
                 changes: self.changes.clone(),
             });
             methods.register(
                 ctx,
                 "session.goal",
-                ["set", "edit", "pause", "resume", "clear"]
+                ["set", "edit", "pause", "resume", "clear", "get"]
                     .into_iter()
                     .map(|name| {
-                        MethodDecl::new(&format!("session.goal.{name}"), true, Interruption::Report)
+                        MethodDecl::new(
+                            &format!("session.goal.{name}"),
+                            name != "get",
+                            Interruption::Report,
+                        )
                     })
                     .collect(),
-                Arc::new(move |call, _cancel, _progress| {
+                Arc::new(move |call, cancel, _progress| {
                     let MethodCall { method, params, .. } = call;
                     let owner = owner.clone();
-                    Box::pin(async move { owner.call(&method, params).await })
+                    Box::pin(async move {
+                        if method == "session.goal.get" {
+                            let id = branch_of(&params)?;
+                            return tokio::select! {
+                                result = async {
+                                    match owner.tree.get(&id) {
+                                        Ok(_) => owner.changes.current(&TimelineKey {
+                                            session_id: owner.identity.session_id.clone(),
+                                            branch_id: id,
+                                        }).await,
+                                        Err(dim_agent_runtime::AgentError::BranchEnded(_)) => crate::read::current(&owner.tree, &id, &cancel).await,
+                                        Err(error) => Err(error),
+                                    }
+                                } => reply(result?),
+                                _ = cancel.cancelled() => Err(RpcError::interrupted()),
+                            };
+                        }
+                        owner.call(&method, params).await
+                    })
                 }),
             )?;
             Ok(Effect::Done)
@@ -111,6 +140,7 @@ impl DynPlugin for GoalSession {
 
 struct Owner {
     tree: Arc<TreeCommands>,
+    identity: Arc<SessionIdentity>,
     changes: Changes,
 }
 
@@ -164,7 +194,13 @@ impl Owner {
         self.tree.get(&branch).map_err(RpcError::from)?;
         let sequence = self
             .changes
-            .change(&branch, change)
+            .change(
+                &TimelineKey {
+                    session_id: self.identity.session_id.clone(),
+                    branch_id: branch,
+                },
+                change,
+            )
             .await
             .map_err(RpcError::from)?;
         reply(json!({ "sequence": sequence }))
@@ -192,6 +228,7 @@ fn text_value(value: Option<&Value>, limit: usize) -> Option<String> {
 /// write.
 struct GoalUpdate {
     changes: Changes,
+    identity: Arc<SessionIdentity>,
 }
 
 impl ToolHandler for GoalUpdate {
@@ -214,7 +251,17 @@ impl ToolHandler for GoalUpdate {
                 completed: status == "completed",
                 summary,
             };
-            match self.changes.change(&context.branch_id, change).await {
+            match self
+                .changes
+                .change(
+                    &TimelineKey {
+                        session_id: self.identity.session_id.clone(),
+                        branch_id: context.branch_id,
+                    },
+                    change,
+                )
+                .await
+            {
                 Ok(_) => Ok(ToolResult::text(format!("goal_update recorded: {status}."))),
                 Err(error) => Ok(ToolResult::error(error.to_string())),
             }

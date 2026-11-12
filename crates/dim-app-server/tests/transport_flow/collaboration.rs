@@ -58,6 +58,16 @@ struct CountingTimelineStore {
 }
 
 impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        self.memory.query(scope, query, page)
+    }
+
     fn create_session<'a>(
         &'a self,
         id: &'a str,
@@ -157,18 +167,6 @@ impl dim_agent_runtime::TimelineStore for CountingTimelineStore {
         dim_agent_runtime::Result<Option<dim_agent_types::RecoverySnapshot>>,
     > {
         self.memory.latest_snapshot(key, through, interpreter)
-    }
-    fn query<'a>(
-        &'a self,
-        key: &'a dim_agent_runtime::TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<
-        'a,
-        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryPage>,
-    > {
-        self.memory.query(key, query, from, through)
     }
 }
 
@@ -469,26 +467,26 @@ impl dim_agent_runtime::TimelineStore for InputHoldStore {
     }
     fn query<'a>(
         &'a self,
-        key: &'a dim_agent_runtime::TimelineKey,
-        query: &'a dim_agent_runtime::TimelineQuery,
-        from: u64,
-        through: u64,
-    ) -> dim_agent_runtime::BoxFuture<
-        'a,
-        dim_agent_runtime::Result<dim_agent_runtime::TimelineQueryPage>,
-    > {
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
         Box::pin(async move {
             let matching = match &*self.hold.lock().unwrap() {
                 HoldKind::Consumed(session) | HoldKind::ConsumedNow(session) => {
-                    key.session_id == *session
-                        && query.kinds.iter().any(|kind| kind == "input/consumed")
+                    use dim_agent_runtime::{QueryFilter, QueryOperand};
+                    scope.key.session_id == *session
+                        && matches!(query.filter.as_ref(),
+                            Some(QueryFilter::In { value: QueryOperand::Field { path }, values })
+                                if path == "kind" && values.iter().any(|value| value == "input/consumed"))
                 }
                 _ => false,
             };
             if self.holds(matching) {
                 self.read_hold().await;
             }
-            self.memory.query(key, query, from, through).await
+            self.memory.query(scope, query, page).await
         })
     }
 }
@@ -529,7 +527,7 @@ async fn launch_held_team(
     dim_app_server::collaboration::install(&mut builder);
     let server = serve(builder, config).await.unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -580,7 +578,7 @@ impl rutis::host::DynPlugin for CaptureMemberConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn product_collaboration_adopts_profile_and_default_capabilities() {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let home = std::env::temp_dir().join(format!("dim-team-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let configs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -595,7 +593,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
                 move |names| Ok(Box::new(CaptureMemberConfig::new(names, observed.clone())?)),
             ));
         }).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let capabilities = dim_agent_types::CatalogCapabilities::with_limits(32000, 128);
         let models = ["alpha", "beta"].map(|id| json!({"modelId":id,"displayName":id,"status":"active",
             "capabilities":capabilities}));
@@ -626,7 +624,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
         for method in ["collaboration.model_policy", "collaboration.set_model_policy"] {
             assert!(client.features.as_array().unwrap().contains(&json!(method)));
         }
-        let mut remote = Client::new_version(&server, true, 3).await;
+        let mut remote = Client::new_version(&server, true, 4).await;
         assert_eq!(remote.rpc("collaboration.model_policy", json!({})).await["error"]["data"]["appError"], "local_transport_required");
         let read = client.rpc("collaboration.model_policy", json!({})).await;
         assert_eq!(read["result"]["policy"], json!({"mode":"agent"}));
@@ -648,7 +646,7 @@ async fn product_collaboration_adopts_profile_and_default_capabilities() {
             reply["result"]["revision"].as_str().unwrap().to_owned()
         };
         let fixed = set(&mut client, &initial, json!({"mode":"fixed","model":model("alpha")})).await;
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         let stale = other.rpc("collaboration.set_model_policy", json!({"expectedRevision":initial,"policy":{"mode":"inherit"}})).await;
         assert_eq!(stale["error"]["data"]["appError"], "collaboration_model_policy_conflict", "{stale}");
         let reread = other.rpc("collaboration.model_policy", json!({})).await;
@@ -854,7 +852,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
         .await
         .unwrap();
         let agent = server.agent().unwrap();
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let lead = leader(&mut client, allowed()).await;
         let session = agent.get_session(&lead).unwrap();
         let agent_id = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
@@ -1049,6 +1047,102 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
     })
     .await
     .unwrap();
+}
+
+/// `ServerConfig::plugin_tools` off leaves the `PluginTools` part
+/// unregistered, so no Session the process serves declares `plugin`, a
+/// collaboration member whose profile names it included; the default still
+/// offers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn plugin_tools_off_removes_the_plugin_tool_from_every_session() {
+    fn declares(tools: &[dim_agent_types::ToolDefinition], name: &str) -> bool {
+        tools.iter().any(|tool| tool.name == name)
+    }
+    for plugin_tools in [true, false] {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let home =
+                std::env::temp_dir().join(format!("dim-plugin-tools-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&home).unwrap();
+            let mut config = ServerConfig {
+                // A target home is a plugin home (lib.rs), so the process
+                // runs PluginManager; without a product home it keeps the
+                // mock model the other Collaboration tests use.
+                target_home: Some(home.clone()),
+                plugin_tools,
+                ..Default::default()
+            };
+            // The default profile, which a `default` Agent's members adopt,
+            // names `plugin`: the member's own tools list is the profile's.
+            config.session_defaults.tools = Some(
+                ["plugin", "echo", "wait", "agent"]
+                    .map(String::from)
+                    .to_vec(),
+            );
+            let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+            let mut client = Client::new_version(&server, false, 3).await;
+            let created = client
+                .rpc(
+                    "session.create",
+                    json!({"cwd": std::env::temp_dir(),
+                        "tools": ["echo", "wait", "agent", "plugin"],
+                        "permissionPolicy": {"allowedTools": ["echo", "wait", "agent"]}}),
+                )
+                .await;
+            assert_ok(&created);
+            let lead = created["result"]["sessionId"].as_str().unwrap().to_owned();
+            let lead_session = agent.get_session(&lead).unwrap();
+            let model_tools = async |session: &Session| {
+                poll("model call", async || {
+                    events(session)
+                        .await
+                        .iter()
+                        .find_map(|event| match &event.kind {
+                            EventKind::ModelCall(data) => Some(data.request.tools.clone()),
+                            _ => None,
+                        })
+                })
+                .await
+                .unwrap_or_default()
+            };
+            let default_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            say(
+                &mut client,
+                &lead,
+                tool(json!({"action": "request", "agentId": default_agent, "prompt": "hello"})),
+                "queue",
+            )
+            .await;
+            let lead_tools = model_tools(&lead_session).await;
+            assert_eq!(
+                declares(&lead_tools, "plugin"),
+                plugin_tools,
+                "leader tools with plugin_tools={plugin_tools}: {lead_tools:?}"
+            );
+            returned(&mut client, &lead, &lead_session, 1).await;
+            let member = next_member(&lead_session, 0).await;
+            let member_session = poll("member session", async || agent.get_session(&member)).await;
+            let member_tools = model_tools(&member_session).await;
+            assert!(
+                declares(&member_tools, "echo"),
+                "member keeps the tools it can declare: {member_tools:?}"
+            );
+            assert_eq!(
+                declares(&member_tools, "plugin"),
+                plugin_tools,
+                "member tools with plugin_tools={plugin_tools}: {member_tools:?}"
+            );
+            drop(client);
+            server.shutdown();
+            server.join().await.unwrap();
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("collaboration flow timed out with plugin_tools={plugin_tools}")
+        });
+    }
 }
 
 /// A leader Session of the default Agent; members inherit its policy.
@@ -1310,7 +1404,7 @@ fn result_of(events: &[Arc<AgentEvent>], member: &str) -> Vec<CollaborationOutco
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_delegates_and_team_members_communicate() {
     let (server, agent) = launch_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     assert!(
         !client
             .features
@@ -1826,7 +1920,7 @@ async fn leader_delegates_and_team_members_communicate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn temporary_agents_stay_private_during_concurrent_create_and_close() {
     let (server, agent) = launch_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     let foreign = leader(&mut client, allowed()).await;
@@ -1891,7 +1985,7 @@ async fn temporary_agents_stay_private_during_concurrent_create_and_close() {
 async fn a_member_is_an_internal_child_of_its_leader() {
     let store = Store::new();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     say(
@@ -1959,7 +2053,7 @@ async fn a_member_is_an_internal_child_of_its_leader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn members_cancel_close_and_leave_the_team() {
     let (server, agent) = launch_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     let default_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
@@ -2331,7 +2425,7 @@ async fn members_cancel_close_and_leave_the_team() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_stop_and_close_settle_requests() {
     let (server, agent) = launch_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"preset": "workspace-write", "allowedTools": ["echo", "wait"]}),
@@ -2478,7 +2572,7 @@ async fn leader_stop_and_close_settle_requests() {
 }
 
 /// Mock tools plus `hold`, which returns once the test adds a permit.
-struct GateTools(Arc<tokio::sync::Semaphore>);
+pub(super) struct GateTools(pub(super) Arc<tokio::sync::Semaphore>);
 impl ToolDriver for GateTools {
     fn definitions(&self) -> Vec<ToolDefinition> {
         let mut tools = MockTools.definitions();
@@ -2582,7 +2676,7 @@ async fn member_work(mut config: ServerConfig) {
         .get_or_insert_default()
         .push("hold".into());
     let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -2930,6 +3024,7 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
         &mut builder,
         ModelProviderPlugin::new,
         WorkspaceToolsConfig {
+            boundary: None,
             output_root: home.0.join("command-output"),
         },
         dim_agent_capabilities::timeline_tree::BranchToolConfig::default(),
@@ -2959,7 +3054,7 @@ async fn a_member_stop_reports_cancellation_and_a_later_steer_does_not_reopen_th
     .await
     .unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     process_typescript::select_model(&mut client).await;
     let created = client
         .rpc(
@@ -3149,7 +3244,7 @@ async fn a_client_cancel_stops_a_running_member_and_writes_nothing_when_idle() {
         .get_or_insert_default()
         .push("hold".into());
     let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -3309,7 +3404,7 @@ async fn a_client_cancel_from_another_branch_leaves_the_owning_branch_turn_runni
         |_| {},
     )
     .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let created = client
         .rpc(
             "session.create",
@@ -3553,6 +3648,47 @@ async fn stop_reason(session: &Session) -> String {
     .await
 }
 
+/// Every `stop/interrupt` reason on the member's main line, in order.
+async fn stop_reasons(session: &Session) -> Vec<String> {
+    events(session)
+        .await
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::StopInterrupt(data) => Some(data.reason.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The member's turn ends cancelled with `reason`, once it has: the last
+/// `turn/end` of its main line is that outcome.
+async fn turn_cancelled(session: &Session, reason: &str) {
+    poll(&format!("the member's turn ends `{reason}`"), async || {
+        events(session)
+            .await
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::TurnEnd(data) => Some(data.outcome.clone()),
+                _ => None,
+            })
+            .filter(|outcome| {
+                matches!(outcome, dim_agent_types::TurnOutcome::Cancelled { reason: actual }
+                    if actual == reason)
+            })
+    })
+    .await;
+}
+
+/// The leader's results for `member`, read from its main line after its
+/// Session closed: an ended line keeps the facts it committed.
+async fn closed_results(lead_session: &Session, member: &str) -> Vec<CollaborationOutcome> {
+    result_of(
+        &branch_events(lead_session, "main", ..).await.unwrap(),
+        member,
+    )
+}
+
 /// The member's input and its sequence for the request whose prompt contains
 /// `needle`, once its `input/message` is published.
 async fn request_input(session: &Session, needle: &str) -> (String, u64) {
@@ -3754,7 +3890,7 @@ async fn a_client_cancel_after_the_member_input_is_applied_stops_the_turn_it_sta
     let cancelling = {
         let lead = lead.clone();
         let member = member.clone();
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         tokio::spawn(async move {
             other
                 .rpc(
@@ -3844,7 +3980,7 @@ async fn a_client_cancel_refuses_a_new_request_to_the_member_until_it_returns() 
     let cancelling = {
         let lead = lead.clone();
         let member = member.clone();
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         tokio::spawn(async move {
             other
                 .rpc(
@@ -3967,7 +4103,7 @@ async fn a_client_cancel_stops_the_turn_it_named_not_the_one_that_replaced_it() 
     let cancelling = {
         let lead = lead.clone();
         let member = member.clone();
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         tokio::spawn(async move {
             other
                 .rpc(
@@ -4086,7 +4222,7 @@ async fn a_detached_cancel_wait_stops_the_turn_it_named_not_the_one_that_replace
     let cancelling = {
         let lead = lead.clone();
         let member = member.clone();
-        let mut other = Client::new_version(&server, false, 3).await;
+        let mut other = Client::new_version(&server, false, 4).await;
         tokio::spawn(async move {
             other
                 .rpc(
@@ -4191,6 +4327,756 @@ async fn a_detached_cancel_wait_stops_the_turn_it_named_not_the_one_that_replace
     server.join().await.unwrap();
 }
 
+/// Issue #1254: a leader's turn stop that lands while the request's input is
+/// still being appended writes no member stop itself; the delivery carries
+/// the stop out once the input exists, and the turn that consumed it ends
+/// with the leader's reason, which the one result names.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_interrupt_during_the_request_input_append_stops_the_turn_it_starts() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, _gate) =
+            launch_held_team(store.clone()).await;
+        let (member, member_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+        let (entered, release, _) = store.arm(HoldKind::RequestInput);
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        entered
+            .await
+            .expect("the request's input is being appended");
+        // The request is undelivered while its input append is held, so the
+        // leader's turn stop covers it and writes no member stop of its own.
+        assert_ok(
+            &client
+                .rpc(
+                    "session.stop",
+                    json!({"sessionId": lead, "branchId": "main"}),
+                )
+                .await,
+        );
+        assert!(
+            stop_reasons(&member_session).await.is_empty(),
+            "the leader's stop alone stops nothing"
+        );
+        release.release();
+
+        let (input, _) = request_input(&member_session, "tool:hold").await;
+        turn_cancelled(&member_session, "interrupted by leader").await;
+        assert_eq!(
+            stop_reasons(&member_session).await,
+            vec!["interrupted by leader".to_owned()],
+            "the delivery stops the member once"
+        );
+        let stop = events(&member_session)
+            .await
+            .iter()
+            .find(|event| matches!(&event.kind, EventKind::StopInterrupt(_)))
+            .expect("the stop is committed")
+            .sequence;
+        let consumed = consumed_at(&member_session, &input).await;
+        assert_eq!(
+            consumed.len(),
+            1,
+            "the request's turn consumed its input once: {consumed:?}"
+        );
+        assert!(
+            consumed[0] < stop,
+            "the input is consumed before the stop: {} < {stop}",
+            consumed[0]
+        );
+        let outcomes = result_of(&events(&lead_session).await, &member);
+        assert_eq!(
+            outcomes.last(),
+            Some(&CollaborationOutcome::Cancelled {
+                reason: "interrupted by leader".into()
+            })
+        );
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Issue #1254: when the leader covers the request first and a client cancel
+/// arrives while the input is still being appended, the cancel answers
+/// `cancelled` and adds nothing. One carry-out writes the leader's stop, and
+/// the one result names the leader's reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_after_the_leader_covers_the_request_adds_no_second_stop() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, _gate) =
+            launch_held_team(store.clone()).await;
+        let (member, member_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+        let (entered, release, _) = store.arm(HoldKind::RequestInput);
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        entered
+            .await
+            .expect("the request's input is being appended");
+        assert_ok(
+            &client
+                .rpc(
+                    "session.stop",
+                    json!({"sessionId": lead, "branchId": "main"}),
+                )
+                .await,
+        );
+        let cancelled = client
+            .rpc(
+                "session.collaboration.cancel",
+                json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+            )
+            .await;
+        assert_ok(&cancelled);
+        assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+        release.release();
+
+        turn_cancelled(&member_session, "interrupted by leader").await;
+        assert_eq!(
+            stop_reasons(&member_session).await,
+            vec!["interrupted by leader".to_owned()],
+            "the client's cancel adds no second stop"
+        );
+        let outcomes = result_of(&events(&lead_session).await, &member);
+        assert_eq!(
+            outcomes.last(),
+            Some(&CollaborationOutcome::Cancelled {
+                reason: "interrupted by leader".into()
+            })
+        );
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Issue #1254: a client cancel that arrives while the leader's carry-out is
+/// already running answers `cancelled` and starts nothing of its own. The one
+/// stop and the one result keep the leader's reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_cancel_while_the_leaders_carry_out_runs_adds_no_second_stop() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, _gate) =
+            launch_held_team(store.clone()).await;
+        let (member, member_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+        let (entered, release, _) = store.arm(HoldKind::RequestInput);
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        entered
+            .await
+            .expect("the request's input is being appended");
+        // The leader's turn stop covers the undelivered request; the delivery
+        // starts the carry-out once the input's id is published.
+        assert_ok(
+            &client
+                .rpc(
+                    "session.stop",
+                    json!({"sessionId": lead, "branchId": "main"}),
+                )
+                .await,
+        );
+        // Hold the carry-out's own check, so the cancel meets it running.
+        let (checked, release_check, _) = store.arm(HoldKind::ConsumedNow(member.clone()));
+        release.release();
+        checked
+            .await
+            .expect("the leader's carry-out checks the member's facts");
+        let (input, _) = request_input(&member_session, "tool:hold").await;
+        poll("the request's turn consumes its input", async || {
+            consumed_at(&member_session, &input).await.first().copied()
+        })
+        .await;
+
+        // The input is published and the leader's carry-out runs: the cancel
+        // records only the client's flag and answers.
+        let cancelled = client
+            .rpc(
+                "session.collaboration.cancel",
+                json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+            )
+            .await;
+        assert_ok(&cancelled);
+        assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+        release_check.release();
+
+        let turn = poll("the member's cancelled turn", async || {
+            events(&member_session)
+                .await
+                .iter()
+                .rev()
+                .find_map(|event| match &event.kind {
+                    EventKind::TurnEnd(data) => Some(data.outcome.clone()),
+                    _ => None,
+                })
+                .filter(|outcome| matches!(outcome, dim_agent_types::TurnOutcome::Cancelled { .. }))
+        })
+        .await;
+        assert!(
+            matches!(&turn, dim_agent_types::TurnOutcome::Cancelled { reason }
+                if reason == "interrupted by leader"),
+            "{turn:?}"
+        );
+        assert_eq!(
+            stop_reasons(&member_session).await,
+            vec!["interrupted by leader".to_owned()],
+            "the client's cancel adds no second stop"
+        );
+        let outcomes = result_of(&events(&lead_session).await, &member);
+        assert_eq!(
+            outcomes.last(),
+            Some(&CollaborationOutcome::Cancelled {
+                reason: "interrupted by leader".into()
+            })
+        );
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Issue #1254: a leader branch close carries the stop out at the stage the
+/// request's input reached, off the branch's own teardown. With the input
+/// handed to Loop and not yet consumed, the close returns while the carry-out
+/// is parked on the member's facts; after the branch is gone, the carry-out
+/// lets the member consume the input and stops that turn with the leader's
+/// reason, and the close's result is `leader closed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_branch_close_stops_the_turn_that_consumed_the_request_input() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, _gate) =
+            launch_held_team(store.clone()).await;
+        let (member, member_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+        let (entered, release, _) = store.arm(HoldKind::Applied(member.clone()));
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        entered
+            .await
+            .expect("the member applies the request's input");
+        // The request's id is published once its delivery returns; the close
+        // then starts the carry-out from the interrupt.
+        poll("the request is delivered", async || {
+            (events(&lead_session)
+                .await
+                .iter()
+                .filter(|event| {
+                    matches!(&event.kind, EventKind::CollaborationDelivered(data)
+                        if matches!(&data.delivery, CollaborationDelivery::Ok { session_id, .. }
+                            if session_id == &member))
+                })
+                .count()
+                >= 2)
+                .then_some(())
+        })
+        .await;
+        // Hold the carry-out's own check of the member's facts: the close must
+        // return while the carry-out is parked there, because the carry-out
+        // rides Collaboration's tracker, not the branch's.
+        let (checked, release_check, _) = store.arm(HoldKind::ConsumedNow(member.clone()));
+        let closing = tokio::spawn(lead_session.close());
+        checked
+            .await
+            .expect("the carry-out checks the member's facts");
+        tokio::time::timeout(Duration::from_secs(5), closing)
+            .await
+            .expect("the branch close returns while the carry-out is parked")
+            .unwrap()
+            .unwrap();
+        assert!(
+            agent.get_session(&member).is_some(),
+            "the leader's close leaves the member open"
+        );
+
+        // The check saw the input applied and not consumed, so the carry-out
+        // waits for the turn that consumes it and stops that turn.
+        release_check.release();
+        release.release();
+        turn_cancelled(&member_session, "interrupted by leader").await;
+        assert_eq!(
+            stop_reasons(&member_session).await,
+            vec!["interrupted by leader".to_owned()],
+            "the daemon-level wait stops the turn once"
+        );
+        let outcomes = closed_results(&lead_session, &member).await;
+        assert_eq!(
+            outcomes.last(),
+            Some(&CollaborationOutcome::Cancelled {
+                reason: "leader closed".into()
+            })
+        );
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Issue #1254: a request whose turn already ended writes nothing on a later
+/// leader stop, even while the member runs another turn: the carry-out names
+/// the ended turn, the turn-scoped stop answers `None`, and that other turn
+/// runs to its own end. The close's result is still `leader closed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_stop_after_the_request_turn_ended_writes_nothing() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, gate) =
+            launch_held_team(store.clone()).await;
+        let (member, member_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        let (input, _) = request_input(&member_session, "tool:hold").await;
+        let consumed = poll("the request's turn consumes its input", async || {
+            consumed_at(&member_session, &input).await.first().copied()
+        })
+        .await;
+        // An unrelated turn keeps the member busy after the request's turn
+        // ends, so the delivery's settle waits and the request is still open
+        // when the leader closes.
+        say(&mut client, &member, "tool:hold {}".to_owned(), "queue").await;
+        gate.add_permits(1);
+        let end = poll("the request's turn ends", async || {
+            events(&member_session)
+                .await
+                .iter()
+                .find(|event| {
+                    event.sequence > consumed && matches!(&event.kind, EventKind::TurnEnd(_))
+                })
+                .map(|event| (event.sequence, event.kind.clone()))
+        })
+        .await;
+        assert!(
+            matches!(&end.1, EventKind::TurnEnd(data)
+                if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. })),
+            "the request's turn ends on its own: {:?}",
+            end.1
+        );
+        let unrelated = poll("the unrelated turn starts", async || {
+            events(&member_session)
+                .await
+                .iter()
+                .find(|event| {
+                    event.sequence > end.0 && matches!(&event.kind, EventKind::TurnStart(_))
+                })
+                .map(|event| event.sequence)
+        })
+        .await;
+
+        lead_session.close().await.unwrap();
+        assert!(
+            agent.get_session(&member).is_some(),
+            "the leader's close leaves the member open"
+        );
+        assert!(
+            stop_reasons(&member_session).await.is_empty(),
+            "the ended request turn writes no stop"
+        );
+        let outcomes = closed_results(&lead_session, &member).await;
+        assert_eq!(
+            outcomes.last(),
+            Some(&CollaborationOutcome::Cancelled {
+                reason: "leader closed".into()
+            })
+        );
+
+        // The unrelated turn runs to its own end, untouched.
+        gate.add_permits(1);
+        let later = poll("the unrelated turn ends", async || {
+            events(&member_session)
+                .await
+                .iter()
+                .find(|event| {
+                    event.sequence > unrelated && matches!(&event.kind, EventKind::TurnEnd(_))
+                })
+                .map(|event| event.kind.clone())
+        })
+        .await;
+        assert!(
+            matches!(&later, EventKind::TurnEnd(data)
+                if matches!(data.outcome, dim_agent_types::TurnOutcome::Completed { .. })),
+            "the unrelated turn ends on its own: {later:?}"
+        );
+        assert!(
+            stop_reasons(&member_session).await.is_empty(),
+            "no stop lands on the unrelated turn"
+        );
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Issue #1254, order 2: a client cancel carried out first keeps its single
+/// carry-out when the leader covers the request later. The branch close
+/// records only the leader's reason and the forced settle; the client's wait
+/// survives the branch and writes the one stop, and the request has one
+/// result, `leader closed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_branch_close_after_a_client_cancel_keeps_one_carry_out() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, _gate) =
+            launch_held_team(store.clone()).await;
+        let (member, member_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+
+        // Drive the client cancel into its (S) wait: the applied append is
+        // held, so the cancel's own check runs before the input is consumed
+        // and the wait parks on the next read of `input/consumed`.
+        let (entered, release, _) = store.arm(HoldKind::Applied(member.clone()));
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        entered
+            .await
+            .expect("the member applies the request's input");
+        let (entered_read, release_read, checked) = store.arm(HoldKind::Consumed(member.clone()));
+        let cancelling = {
+            let lead = lead.clone();
+            let member = member.clone();
+            let mut other = Client::new_version(&server, false, 4).await;
+            tokio::spawn(async move {
+                other
+                    .rpc(
+                        "session.collaboration.cancel",
+                        json!({"sessionId": lead, "branchId": "main",
+                            "memberSessionId": member}),
+                    )
+                    .await
+            })
+        };
+        checked
+            .expect("the cancel checks the input")
+            .await
+            .expect("the cancel checks the input");
+        release.release();
+        entered_read
+            .await
+            .expect("the wait reads the member's consumed input");
+        let cancelled = cancelling.await.expect("the cancel call");
+        assert_ok(&cancelled);
+        assert_eq!(cancelled["result"]["status"], "cancelled", "{cancelled}");
+
+        lead_session.close().await.unwrap();
+        assert!(
+            agent.get_session(&member).is_some(),
+            "the leader's close leaves the member open"
+        );
+        release_read.release();
+
+        turn_cancelled(&member_session, "cancelled by the client").await;
+        assert_eq!(
+            stop_reasons(&member_session).await,
+            vec!["cancelled by the client".to_owned()],
+            "the client's single carry-out writes the one stop"
+        );
+        let outcomes = closed_results(&lead_session, &member).await;
+        assert_eq!(
+            outcomes.last(),
+            Some(&CollaborationOutcome::Cancelled {
+                reason: "leader closed".into()
+            })
+        );
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Issue #1254: a branch close covers every request the branch holds, and
+/// every covered request gets its carry-out started: with two members whose
+/// inputs are both handed to Loop, both consuming turns end with the leader's
+/// reason and each request has one `leader closed` result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_leader_branch_close_starts_every_covered_carry_out() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, _gate) =
+            launch_held_team(store.clone()).await;
+        let (first, first_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+        say(
+            &mut client,
+            &lead,
+            tool(json!({"action": "request", "agentId": holder,
+                "prompt": "tool:echo {\"text\":\"ready\"}"})),
+            "queue",
+        )
+        .await;
+        let second = next_member(&lead_session, 1).await;
+        let second_session = agent.get_session(&second).unwrap();
+        let outcome = poll("the second member's first request", async || {
+            result_of(&events(&lead_session).await, &second)
+                .into_iter()
+                .next()
+        })
+        .await;
+        assert_eq!(outcome, CollaborationOutcome::Completed, "{outcome:?}");
+
+        // Both requests are delivered, and both members hold their applied
+        // input: the branch close meets two covered requests at the same
+        // stage.
+        let (entered, release_first, _) = store.arm(HoldKind::Applied(first.clone()));
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": first,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        entered.await.expect("the first member applies its input");
+        let (entered, release_second, _) = store.arm(HoldKind::Applied(second.clone()));
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": second,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        entered.await.expect("the second member applies its input");
+
+        let closing = tokio::spawn(lead_session.close());
+        release_first.release();
+        release_second.release();
+        closing.await.unwrap().unwrap();
+        assert!(
+            agent.get_session(&first).is_some() && agent.get_session(&second).is_some(),
+            "the leader's close leaves the members open"
+        );
+
+        for (member, session) in [(&first, &first_session), (&second, &second_session)] {
+            turn_cancelled(session, "interrupted by leader").await;
+            assert_eq!(
+                stop_reasons(session).await,
+                vec!["interrupted by leader".to_owned()],
+                "each covered request is stopped once: {}",
+                member
+            );
+            let outcomes = closed_results(&lead_session, member).await;
+            assert_eq!(
+                outcomes.last(),
+                Some(&CollaborationOutcome::Cancelled {
+                    reason: "leader closed".into()
+                })
+            );
+        }
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// Issue #1254: a client attached to the member can delete the request's
+/// input before the leader's carry-out withdraws it. No turn will consume a
+/// deleted input, so the carry-out ends with nothing to stop and the
+/// member's stopping mark goes with it: the request settles cancelled, no
+/// stop is written, and the next request to the same member is accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_withdraw_of_the_request_input_ends_the_carried_out_stop() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (store, _, _) = InputHoldStore::new();
+        let (server, agent, mut client, lead, lead_session, holder, gate) =
+            launch_held_team(store.clone()).await;
+        let (member, member_session) =
+            settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+        let deliveries = async |session: &Session| {
+            events(session)
+                .await
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::CollaborationDelivered(data) => Some(data.delivery.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<CollaborationDelivery>>()
+        };
+
+        // The member's own turn is held at its applied append: its queue
+        // stays in the `starting` window and its Loop phase stays `Idle`, so
+        // the request below is admitted, and its input waits behind that
+        // turn instead of being handed to Loop.
+        let (entered, release, _) = store.arm(HoldKind::Applied(member.clone()));
+        say(&mut client, &member, "tool:hold {}".to_owned(), "queue").await;
+        entered.await.expect("the member applies its own input");
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:hold {}"}),
+            ),
+            "queue",
+        )
+        .await;
+        // The request is recorded before its input is written, so a cancel
+        // that answers `cancelled` proves the request was admitted while the
+        // member's phase was still `Idle`; one that answers `idle` wrote
+        // nothing.
+        poll("the request is admitted", async || {
+            let cancelled = client
+                .rpc(
+                    "session.collaboration.cancel",
+                    json!({"sessionId": lead, "branchId": "main", "memberSessionId": member}),
+                )
+                .await;
+            (cancelled["result"]["status"] == "cancelled").then_some(())
+        })
+        .await;
+
+        // Hold the carry-out's own check, so the member's client withdraws
+        // the request's input before the leader's withdrawal runs.
+        let (checked, release_check, _) = store.arm(HoldKind::ConsumedNow(member.clone()));
+        release.release();
+        checked
+            .await
+            .expect("the carry-out checks the member's facts");
+        let (input, _) = request_input(&member_session, "tool:hold").await;
+
+        // The member's own client deletes the input while InputQueue still
+        // holds it unapplied, so the withdrawal deletes rather than
+        // `notHeld`, and its reply follows the published `input/deleted`.
+        let withdrawn = client
+            .rpc(
+                "session.input.withdraw",
+                json!({"sessionId": member, "branchId": "main", "inputId": input,
+                    "reason": "the member took it back"}),
+            )
+            .await;
+        assert_ok(&withdrawn);
+        assert_eq!(withdrawn["result"]["status"], "deleted", "{withdrawn}");
+        release_check.release();
+
+        // The member's held turn ends on its own, and the request settles
+        // from the cancel with no stop written: the deleted input never got
+        // a turn.
+        gate.add_permits(1);
+        let outcomes = poll("the cancelled request settles", async || {
+            let outcomes = result_of(&events(&lead_session).await, &member);
+            (outcomes.len() >= 2).then_some(outcomes)
+        })
+        .await;
+        assert_eq!(
+            outcomes.last(),
+            Some(&CollaborationOutcome::Cancelled {
+                reason: "cancelled by the client".into()
+            }),
+            "{outcomes:?}"
+        );
+        assert!(
+            stop_reasons(&member_session).await.is_empty(),
+            "a deleted input writes no stop"
+        );
+
+        // The member takes new work: the mark did not outlive the carry-out.
+        let before = deliveries(&lead_session).await.len();
+        say(
+            &mut client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:echo {\"text\":\"after\"}"}),
+            ),
+            "queue",
+        )
+        .await;
+        let delivery = poll("the next request's delivery", async || {
+            deliveries(&lead_session).await.get(before).cloned()
+        })
+        .await;
+        assert!(
+            matches!(delivery, CollaborationDelivery::Ok { .. }),
+            "the member takes new work after the deleted input: {delivery:?}"
+        );
+        let outcomes = poll("the next request settles", async || {
+            let outcomes = result_of(&events(&lead_session).await, &member);
+            (outcomes.len() >= 3).then_some(outcomes)
+        })
+        .await;
+        assert_eq!(outcomes.last(), Some(&CollaborationOutcome::Completed));
+
+        server.shutdown();
+        server.join().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 /// The Team relation decides who may cancel: another leader's member and an
 /// unknown id are both `team_member_not_found`, and a member Session answers
 /// `invalid_params`.
@@ -4204,7 +5090,7 @@ async fn a_client_cancel_refuses_another_teams_member_an_unknown_id_and_a_member
         .get_or_insert_default()
         .push("hold".into());
     let (server, agent) = launch_with_agent(Arc::new(GateTools(gate.clone())), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -4394,7 +5280,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
     dim_app_server::collaboration::install(&mut builder);
     let server = serve(builder, config).await.unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent"]}),
@@ -4613,7 +5499,7 @@ async fn undispatched_results_name_calls_from_their_starts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_page_carries_the_effects_its_tool_results_declared() {
     let (server, agent) = launch_with_agent(Arc::new(EffectTools), ServerConfig::default()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "touch"]}),
@@ -4708,7 +5594,7 @@ async fn a_member_page_carries_the_effects_its_tool_results_declared() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn collaboration_facts_publish_to_tree_protocols_only() {
     let (server, agent) = launch_team().await;
-    let mut tree = Client::new_version(&server, false, 3).await;
+    let mut tree = Client::new_version(&server, false, 4).await;
     let default_agent = tree.rpc("agent.list", json!({})).await["result"][0]["agentId"]
         .as_str()
         .unwrap()
@@ -4785,7 +5671,7 @@ async fn stored_member_read_acquires_it_and_it_can_unload_and_work_again() {
         },
     )
     .await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let lead = leader(&mut client, allowed()).await;
     assert_ok(
         &client
@@ -5200,7 +6086,7 @@ async fn a_stop_before_delivered_covers_the_request_however_late_it_is_handled()
         }
     })
     .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     hold.leader.set(lead.clone()).unwrap();
@@ -5297,7 +6183,7 @@ async fn a_cancel_before_the_result_reports_cancelled_however_late_it_is_deliver
         })
     }));
     let (server, agent) = launch_gated(gate.clone(), ServerConfig::default()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     let lead_session = agent.get_session(&lead).unwrap();
@@ -5368,7 +6254,7 @@ async fn an_operation_of_a_turn_interrupted_before_a_reload_is_refused() {
         },
     )
     .await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     assert_ok(
@@ -5479,7 +6365,7 @@ async fn a_request_covered_before_its_member_input_is_refused() {
         }
     })
     .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     hold.leader.set(lead.clone()).unwrap();
@@ -5572,7 +6458,7 @@ async fn held(session: &Session) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn open_requests_hold_their_leader_until_the_last_result() {
     let (server, agent, gate, directory) = launch_holding_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -5657,7 +6543,7 @@ async fn the_idle_unload_pass_keeps_a_leader_with_an_open_request() {
     let (server, agent, gate, directory) =
         launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
             .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -5828,7 +6714,7 @@ async fn deleting_the_last_two_members_together_ends_their_agent() {
         ..Default::default()
     };
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     assert_ok(
@@ -5862,7 +6748,7 @@ async fn deleting_the_last_two_members_together_ends_their_agent() {
     returned(&mut client, &lead, &lead_session, 2).await;
     let second = next_member(&lead_session, 1).await;
 
-    let mut other = Client::new_version(&server, true, 3).await;
+    let mut other = Client::new_version(&server, true, 4).await;
     let (deleted, _) = tokio::join!(
         client.rpc("session.delete", json!({"sessionId": first})),
         other.rpc("session.delete", json!({"sessionId": second})),
@@ -5916,7 +6802,7 @@ async fn deleting_the_last_two_members_together_ends_their_agent() {
 async fn a_leader_whose_member_is_in_use_is_not_deleted_when_inactive_is_required() {
     let store = super::deletion::Store::new();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
@@ -5934,7 +6820,7 @@ async fn a_leader_whose_member_is_in_use_is_not_deleted_when_inactive_is_require
     let member = next_member(&lead_session, 0).await;
     // An attached client keeps the member in use; the leader itself is idle
     // once its request completed.
-    let mut watcher = Client::new_version(&server, true, 3).await;
+    let mut watcher = Client::new_version(&server, true, 4).await;
     assert_ok(
         &watcher
             .rpc("session.attach", json!({"sessionId":member}))
@@ -6032,7 +6918,7 @@ async fn startup_removes_an_incomplete_and_an_orphaned_delegation() {
         ..Default::default()
     };
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let listed = client.rpc("agent.list", json!({})).await;
     assert_eq!(
         listed["result"].as_array().unwrap().len(),
@@ -6090,7 +6976,7 @@ async fn listed(client: &mut Client, lead: &str, lead_session: &Session, id: &st
 async fn closing_a_member_keeps_a_temporary_agent_with_an_unloaded_member() {
     let (server, agent, _gate, directory) =
         launch_holding_team_unloading(Duration::from_millis(200), |_| {}).await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let (lead, lead_session, temporary, first, second) =
         unloaded_temporary_members(&mut client, &agent).await;
 
@@ -6168,7 +7054,7 @@ async fn deleting_unloaded_members_ends_their_relations_and_the_temporary_agent(
     let (server, agent, _gate, directory) =
         launch_holding_team_unloading(Duration::from_millis(200), |builder| loads.install(builder))
             .await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let (lead, lead_session, temporary, first, second) =
         unloaded_temporary_members(&mut client, &agent).await;
 
@@ -6225,7 +7111,7 @@ async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent
             sessions.install(builder);
         })
         .await;
-    let mut client = Client::new_version(&server, true, 3).await;
+    let mut client = Client::new_version(&server, true, 4).await;
     let (lead, lead_session, temporary, first, second) =
         unloaded_temporary_members(&mut client, &agent).await;
 
@@ -6268,7 +7154,7 @@ async fn unloaded_members_deleted_across_a_reload_end_with_their_temporary_agent
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_settlement_of_a_request_releases_its_leader() {
     let (server, agent, _gate, directory) = launch_holding_team().await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(
         &mut client,
         json!({"allowedTools": ["echo", "wait", "agent", "hold"]}),
@@ -6384,7 +7270,7 @@ async fn a_closing_leader_gives_no_hold_and_refuses_the_request() {
         }
     })
     .await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     gate.leader.set(lead.clone()).unwrap();
     hold.leader.set(lead.clone()).unwrap();
@@ -6689,7 +7575,7 @@ async fn configured_agent_descriptions_replace_the_builtin_text() {
         let (server, agent) =
             launch_with_collaboration(Arc::new(MockTools), ServerConfig::default(), collaboration)
                 .await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let lead = leader(&mut client, allowed()).await;
         let lead_session = agent.get_session(&lead).unwrap();
         say(&mut client, &lead, "hello".into(), "queue").await;
@@ -6752,7 +7638,7 @@ async fn parts_required_without_install_keep_the_builtin_descriptions() {
     .await
     .unwrap();
     let agent = server.agent().unwrap();
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = tokio::time::timeout(Duration::from_secs(20), leader(&mut client, allowed()))
         .await
         .expect("the Session is created within the wait");
@@ -6780,7 +7666,7 @@ async fn a_restart_restores_a_delegation_and_keeps_it_private() {
         ..Default::default()
     };
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     let lead = leader(&mut client, allowed()).await;
     let lead_session = agent.get_session(&lead).unwrap();
     say(
@@ -6823,7 +7709,7 @@ async fn a_restart_restores_a_delegation_and_keeps_it_private() {
     server.join().await.unwrap();
 
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
-    let mut client = Client::new_version(&server, false, 3).await;
+    let mut client = Client::new_version(&server, false, 4).await;
     assert_eq!(
         client.rpc("agent.list", json!({})).await["result"]
             .as_array()
@@ -6880,7 +7766,7 @@ async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_
     tokio::time::timeout(Duration::from_secs(30), async {
         let runs = Arc::new(AtomicUsize::new(0));
         let (server, agent) = approval_team(runs.clone()).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","danger","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
         assert_ok(&created);
         let lead = created["result"]["sessionId"].as_str().unwrap();
@@ -7016,7 +7902,7 @@ async fn member_tool_approval_reviews_the_original_action_and_settles_cancelled_
 async fn new_members_sample_requesting_branch_policy_and_reused_members_keep_theirs() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let (server, agent) = launch_team().await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let lead = leader(&mut client, allowed()).await;
         let lead_session = agent.get_session(&lead).unwrap();
         let policy = json!({"preset":"workspace-write","allowedTools":["agent","echo","wait"],"disallowedTools":["forbidden"]});
@@ -7053,7 +7939,7 @@ async fn member_approval_cancellation_and_policy_tightening_never_execute_a_late
     tokio::time::timeout(Duration::from_secs(30), async {
         let runs = Arc::new(AtomicUsize::new(0));
         let (server, agent) = approval_team(runs.clone()).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
         assert_ok(&created);
         let lead = created["result"]["sessionId"].as_str().unwrap();
@@ -7138,7 +8024,7 @@ async fn a_stopped_turn_keeps_a_delivered_members_later_approval_reachable() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let runs = Arc::new(AtomicUsize::new(0));
         let (server, agent) = approval_team(runs.clone()).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","wait","danger","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent","wait"]}})).await;
         assert_ok(&created);
         let lead = created["result"]["sessionId"].as_str().unwrap();
@@ -7188,7 +8074,7 @@ async fn missing_permission_state_refuses_a_committed_member_request_without_cre
         });
         let gate = DispatchGate::new(hold);
         let (server, agent) = launch_gated(gate.clone(), ServerConfig::default()).await;
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let lead = leader(&mut client, allowed()).await;
         gate.leader.set(lead.clone()).unwrap();
         let session = agent.get_session(&lead).unwrap();
@@ -7262,7 +8148,7 @@ async fn member_routes_are_authorized_only_after_the_owning_branch_consumes_the_
             ..Default::default()
         }).await.unwrap();
         let agent = server.agent().unwrap();
-        let mut client = Client::new_version(&server, false, 3).await;
+        let mut client = Client::new_version(&server, false, 4).await;
         let created = client.rpc("session.create", json!({"cwd":std::env::temp_dir(),"tools":["agent","echo","member_approval_allow","member_approval_reject"],"permissionPolicy":{"preset":"workspace-write","allowedTools":["agent"]}})).await;
         assert_ok(&created);
         let lead = created["result"]["sessionId"].as_str().unwrap();

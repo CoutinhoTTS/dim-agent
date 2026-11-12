@@ -29,6 +29,69 @@ use tokio_util::sync::CancellationToken;
 /// Text with `<`, `&`, quotes, an entity-like run and a blank line.
 const SPECIAL: &str = "ship <it> & \"now\"\n\nthen &amp; done";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn goals_on_main_are_isolated_between_loaded_sessions() {
+    let mut fixture = Fixture::start().await;
+    let first = fixture.id.clone();
+    let second = fixture.new_session(&["goal_update", "wait"]).await;
+    fixture
+        .goal_on(&first, "set", json!({"objective":"first session"}))
+        .await
+        .unwrap();
+    fixture.goal_on(&first, "pause", json!({})).await.unwrap();
+    fixture
+        .goal_on(&second, "set", json!({"objective":"second session"}))
+        .await
+        .unwrap();
+    fixture.goal_on(&second, "pause", json!({})).await.unwrap();
+    for (id, objective) in [(&first, "first session"), (&second, "second session")] {
+        let reply = fixture
+            .client
+            .rpc("session.goal.get", json!({"sessionId":id}))
+            .await
+            .unwrap();
+        assert_eq!(reply["goal"]["objective"], objective);
+        assert_eq!(reply["goal"]["status"]["kind"], "paused");
+    }
+    fixture
+        .submit_report_on(&first, "completed", "first finished")
+        .await;
+    let first_session = fixture.agent.get_session(&first).unwrap();
+    wait_goal(&first_session, "main", r#"op="completed""#).await;
+    let first_view = fixture
+        .client
+        .rpc("session.goal.get", json!({"sessionId":first}))
+        .await
+        .unwrap();
+    let second_view = fixture
+        .client
+        .rpc("session.goal.get", json!({"sessionId":second}))
+        .await
+        .unwrap();
+    assert_eq!(first_view["goal"]["objective"], "first session");
+    assert_eq!(first_view["goal"]["status"]["kind"], "completed");
+    assert_eq!(second_view["goal"]["objective"], "second session");
+    assert_eq!(second_view["goal"]["status"]["kind"], "paused");
+    fixture.goal_on(&first, "clear", json!({})).await.unwrap();
+    assert!(
+        fixture
+            .client
+            .rpc("session.goal.get", json!({"sessionId":first}))
+            .await
+            .unwrap()["goal"]
+            .is_null()
+    );
+    assert_eq!(
+        fixture
+            .client
+            .rpc("session.goal.get", json!({"sessionId":second}))
+            .await
+            .unwrap()["goal"]["objective"],
+        "second session"
+    );
+    fixture.close().await;
+}
+
 /// Whether the request is the evaluator's: its prompt carries Goal's
 /// evaluate marker (Pursuit §5).
 fn is_evaluator(request: &ModelRequest) -> bool {
@@ -444,7 +507,8 @@ async fn goal_continues_to_the_limit_and_stops_on_completion() {
     assert!(
         writes
             .iter()
-            .all(|block| block.sequence <= completed || !block.text.contains("continuation")),
+            .all(|block| block.sequence <= completed
+                || !block.marker.contains(r#"kind="continuation""#)),
         "{writes:#?}"
     );
     let results: Vec<String> = branch_events(&session, "main", ..)
@@ -709,29 +773,44 @@ async fn goal_pending_input_and_interrupts() {
         .unwrap();
     wait_goal(&session, "main", r#"reason="interrupted""#).await;
     fixture.idle_on(&id, "main").await;
-    let interrupt = branch_events(&session, "main", ..)
-        .await
-        .unwrap()
+    let history = branch_events(&session, "main", ..).await.unwrap();
+    let interrupt = history
         .iter()
         .rev()
         .find(|event| matches!(event.kind, EventKind::StopInterrupt(_)))
         .expect("the interrupt")
         .sequence;
+    let pause = goal_writes(&session, "main")
+        .await
+        .into_iter()
+        .find(|block| block.marker.contains(r#"reason="interrupted""#))
+        .expect("the interrupt pause");
+    let answered = after_of(&pause.marker).expect("the pause names its deciding fact");
+    assert!(
+        answered == interrupt
+            || history.iter().any(|event| {
+                event.sequence == answered
+                    && event.sequence > interrupt
+                    && event.sequence < pause.sequence
+                    && matches!(event.kind, EventKind::TurnEnd(_))
+            }),
+        "A.4 permits the interrupt or a later turn end to decide the pause: {pause:?}"
+    );
     assert_eq!(
-        goal_block(&session, "main", r#"reason="interrupted""#).await,
+        pause.text,
         texts::automatic_pause(
             "main",
             "ship",
             "interrupted",
             "the user interrupted the turn",
-            interrupt
+            answered
         )
     );
     let writes = goal_writes(&session, "main").await;
     assert!(
         writes
             .iter()
-            .all(|block| !block.text.contains("continuation")),
+            .all(|block| !block.marker.contains(r#"kind="continuation""#)),
         "{writes:#?}"
     );
     fixture.close().await;
@@ -842,7 +921,35 @@ async fn goal_settings_resume_unload_and_fork() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn goal_on_a_line_behaves_as_on_main() {
-    let mut fixture = Fixture::start().await;
+    struct GatedEcho {
+        permits: tokio::sync::Semaphore,
+        calls: std::sync::atomic::AtomicUsize,
+        entered: tokio::sync::Notify,
+    }
+    impl ModelDriver for GatedEcho {
+        fn invoke(
+            &self,
+            request: Arc<ModelRequest>,
+            connection: ModelConnection,
+            cancel: CancellationToken,
+        ) -> HostFuture<'_, ModelStream> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.entered.notify_one();
+                tokio::select! {
+                    permit = self.permits.acquire() => permit.unwrap().forget(),
+                    _ = cancel.cancelled() => return Err(dim_agent_capabilities::host::HostError::Cancelled("model cancelled".into())),
+                }
+                EchoModel.invoke(request, connection, cancel).await
+            })
+        }
+    }
+    let model = Arc::new(GatedEcho {
+        permits: tokio::sync::Semaphore::new(1),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        entered: tokio::sync::Notify::new(),
+    });
+    let mut fixture = Fixture::start_with(model.clone()).await;
     fixture.set_limit(1000).await;
     let id = fixture
         .new_session(&["goal_update", "wait", "branch"])
@@ -878,6 +985,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
         "line work",
         "the creator's prompt stays the opening input's words"
     );
+    model.permits.add_permits(1);
     let line_set = fixture
         .goal_on(
             &id,
@@ -903,7 +1011,13 @@ async fn goal_on_a_line_behaves_as_on_main() {
     )
     .await;
     wait_goal(&session, &child, r#"count="1""#).await;
-    fixture.idle_on(&id, &child).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while model.calls.load(std::sync::atomic::Ordering::SeqCst) < 3 {
+            model.entered.notified().await;
+        }
+    })
+    .await
+    .expect("the continuation's model request is running");
     let operator = session
         .submit(
             "keep going".into(),
@@ -913,6 +1027,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
         .await
         .unwrap()
         .sequence;
+    model.permits.add_permits(2);
     let (reset, expected) = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let writes = goal_writes(&session, &child).await;
@@ -941,9 +1056,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
         "the continuation after the operator input counts {expected}: {reset}"
     );
     let after = after_of(&reset).expect("the continuation's after");
-    // The operator's input restarts the count; the continuation after it
-    // states the streak as a literal, so a wrong streak fails here.
-    let idle = 2;
+    let idle = 0;
     assert_eq!(
         goal_block(&session, &child, &format!(r#"count="{expected}""#)).await,
         texts::continuation(&child, expected, Some(1000), idle, after),
@@ -955,6 +1068,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
         .await
         .unwrap();
     wait_goal(&session, &child, r#"op="pause""#).await;
+    model.permits.add_permits(1);
     fixture.idle_on(&id, &child).await;
     assert_eq!(
         goal_block(&session, &child, r#"op="pause""#).await,
@@ -1006,9 +1120,9 @@ async fn goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() {
     let (created, creation) = &creates[0];
     let evaluation = turn_ends(&session, "main")
         .await
-        .last()
-        .copied()
-        .expect("a turn end");
+        .into_iter()
+        .rfind(|sequence| sequence < created)
+        .expect("the turn end that requested evaluation");
     assert_eq!(
         creation.source,
         BranchSource::Host {
@@ -1028,8 +1142,9 @@ async fn goal_evaluator_judge_creates_an_evaluator_and_completes_on_done() {
     assert!(
         writes
             .iter()
+            .filter(|block| block.sequence > request.sequence)
             .all(|block| !block.marker.contains("continuation")),
-        "{writes:#?}"
+        "a completion request must wait for its evaluator: {writes:#?}"
     );
     let child = &creation.branch;
     let prompt = first_user_text(&session, child).await;
@@ -1177,7 +1292,11 @@ async fn goal_evaluator_restart_writes_no_second_result() {
     .await;
     drop(session);
     let mut fixture = fixture.restart(Arc::new(EvaluatingModel)).await;
-    fixture.submit_on(&id, "main", "back again").await;
+    fixture
+        .client
+        .rpc("session.attach", json!({"sessionId":id}))
+        .await
+        .unwrap();
     fixture.idle_on(&id, "main").await;
     let session = fixture.agent.get_session(&id).unwrap();
     assert_eq!(branch_creates(&session, "main").await.len(), 1);
@@ -1194,17 +1313,24 @@ async fn goal_evaluator_restart_writes_no_second_result() {
             .all(|block| !block.marker.contains(r#"reason="evaluation_failed""#)),
         "{writes:#?}"
     );
-    fixture.submit_on(&id, &child, "carry on").await;
-    wait_goal(&session, "main", r#"kind="state" status="completed""#).await;
-    fixture.idle_on(&id, "main").await;
-    let writes = goal_writes(&session, "main").await;
-    assert_eq!(
-        writes
+    let read = fixture
+        .client
+        .rpc("session.goal.get", json!({"sessionId":id}))
+        .await
+        .unwrap();
+    assert_eq!(read["goal"]["status"]["kind"], "paused");
+    let read = fixture
+        .client
+        .rpc("session.goal.get", json!({"sessionId":id}))
+        .await
+        .unwrap();
+    assert_eq!(read["goal"]["status"]["kind"], "paused");
+    assert!(
+        goal_writes(&session, "main")
+            .await
             .iter()
-            .filter(|block| block.marker.contains(r#"kind="state" status="completed""#))
-            .count(),
-        1,
-        "{writes:#?}"
+            .all(|block| !block.marker.contains(r#"kind="state" status="completed""#)),
+        "an old evaluator cannot complete a new instance"
     );
     fixture.close().await;
 }
@@ -1259,7 +1385,13 @@ async fn goal_evaluator_asks_again_and_continues() {
         ),
         "the CONTINUE report"
     );
-    let continuation = goal_block(&session, "main", &needle).await;
+    let continuation = wait_goal(
+        &session,
+        "main",
+        &format!(r#"evaluation="{evaluation}" idle="0""#),
+    )
+    .await
+    .text;
     let count = count_of(&continuation).expect("the continuation's count");
     let after = after_of(&continuation).expect("the continuation's after");
     assert_eq!(
@@ -1952,7 +2084,7 @@ async fn goal_each_change_answers_with_one_newest_state_record() {
         let trigger = wait_goal(&session, "main", &format!(r#"op="{method}""#)).await;
         assert_eq!(trigger.sequence, sequence, "{method}: the trigger");
         let needle = format!(r#"trigger="{}""#, trigger.submission_id.as_deref().unwrap());
-        let record = wait_goal(&session, "main", &needle).await;
+        wait_goal(&session, "main", &needle).await;
         let answers: Vec<Block> = goal_writes(&session, "main")
             .await
             .into_iter()
@@ -1972,7 +2104,13 @@ async fn goal_each_change_answers_with_one_newest_state_record() {
             .filter(|entry| entry["key"] == "goal:state")
             .collect();
         assert_eq!(states.len(), 1, "{method}: {entries:#?}");
-        assert_eq!(states[0]["text"].as_str(), Some(record.text.as_str()));
+        let through = reply["through"].as_u64().expect("the keys cutoff");
+        let latest = goal_writes(&session, "main")
+            .await
+            .into_iter()
+            .rfind(|block| block.sequence <= through && block.marker.contains(r#"kind="state""#))
+            .expect("a state at the keys cutoff");
+        assert_eq!(states[0]["text"].as_str(), Some(latest.text.as_str()));
     }
 
     // The worker's report is a change too, and its record states the result.

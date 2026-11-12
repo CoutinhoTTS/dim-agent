@@ -10,6 +10,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Incorporating · awaiting model consumption" => "반영 중 · 모델 읽기 대기",
         "Held" => "보류 중",
         "Incorporating" => "반영 중",
+        "Unread" => "읽지 않음",
+        "Unread · waiting for your next message" => "읽지 않음 · 다음 메시지 대기",
+        "/queue view · awaiting model consumption" => "/queue 보기 · 모델 읽기 대기",
+        "/queue view · waiting for your next message" => "/queue 보기 · 다음 메시지 대기",
         "Enter export · Esc cancel" => "Enter 내보내기 · Esc 취소",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "첨부 파일이 있는 메시지는 대기열에 남습니다. /queue에서 steer하거나 삭제하세요"
@@ -17,9 +21,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "/queue manage · shift+← edit last · ctrl+s steer now" => {
             "/queue 관리 · shift+← 마지막 편집 · ctrl+s 지금 steer"
         }
-        "+{count} more · /queue manage · shift+← edit last · ctrl+s steer now" => {
-            "+{count}개 더 · /queue 관리 · shift+← 마지막 편집 · ctrl+s 지금 steer"
-        }
+        "+{count} more · {hint}" => "+{count}개 더 · {hint}",
         "steer or delete queued messages" => "대기열 메시지 steer 또는 삭제",
         "export this conversation" => "이 대화 내보내기",
         "That message has already left the queue." => "해당 메시지는 이미 대기열에서 나갔습니다.",
@@ -337,6 +339,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Suggestions" => "추천",
         "Skills" => "스킬",
         "Skill loaded: {name}" => "스킬 로드됨: {name}",
+        "Hook context · {count} line" => "훅 컨텍스트 · {count}줄",
+        "Hook context · {count} lines" => "훅 컨텍스트 · {count}줄",
         "Commands" => "명령",
         "Command Palette" => "명령 팔레트",
         "No matches" => "결과 없음",
@@ -476,6 +480,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "drawing diagram… {count} lines" => "다이어그램 그리는 중… {count}줄",
         // notify.rs
         "Task complete" => "작업 완료",
+        "Background task finished: {label}" => "백그라운드 작업 완료: {label}",
+        "Background task failed: {label}" => "백그라운드 작업 실패: {label}",
+        "Background task stopped: {label}" => "백그라운드 작업 중지됨: {label}",
         "Permission needed: {tool}" => "권한 필요: {tool}",
         "Question waiting for your answer" => "답변 대기 중인 질문",
         "Notify when agent needs you" => "에이전트 요청 시 알림",

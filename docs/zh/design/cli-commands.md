@@ -20,12 +20,12 @@ scrollback 与 fullscreen TUI 都按同一个固定的、经过整理的顺序�
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
-/tools /tui /theme /language /keys /exit
+/tools /tui /theme /language /keys /report /exit
 ```
 
 `/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述顺序。
 排序不受界面语言影响；打开 `/` 默认选中 `/new`，Enter 会新建会话。未筛选列表中的 `/exit` 始终在最后。
-退出必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
+上报错误和退出必须完整匹配命令名或别名才执行：选择不完整匹配时只补全命令名并保留输入框。
 完整输入的命令（包括隐藏命令）仍走各自的处理流程。
 菜单选择即使完整匹配命令名，也可能只补全：带行内参数的命令和 `/goal` 会填入输入框，等待另一次提交。
 `Tab` 只补全选中行，从不执行也不发送：命令补全为其名称，带参数的命令同时补全名称后的空格，
@@ -106,7 +106,8 @@ Fullscreen, 8 rows             Scrollback, 8 rows
 
 ```text
 按键                 空闲                         运行中
-Enter               提交                         排队草稿；草稿为空：steer 最早的排队消息
+Enter               提交；草稿为空且任务行显示时    排队草稿；草稿为空：steer 最早的排队消息；
+                    打开 /tasks                  没有排队消息时，任务行显示则打开 /tasks
 Tab                 选择较早消息                 选择较早消息
                     （fullscreen）               （fullscreen）
 Shift+Left          —                            草稿为空：把最新一条排队消息取回草稿
@@ -116,15 +117,22 @@ Up / Down           输入历史                     输入历史
 Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，草稿为空）
 ```
 
+草稿为空时按 Enter 只有在更早的分支都不适用时才打开 `/tasks`：先是两种模式下的
+shell 运行拦截，再是 steer 最早的排队消息，只有在没有排队消息时才轮到它。任务行必须
+正在显示，即有任务在运行、或有刚结束的任务仍在淡出；后台没有任何任务时，这个按键既不
+提交也不打开。
+
 - 排队消息在当前运行结束后运行，每次运行一条。被 steer 的消息在当前运行的下一个轮次边界并入该运行。
 - 取回消息和中断都通过 `session.input.withdraw` 撤回消息。文字只在撤回被删除后才进入草稿。
   已离开队列的消息不会放回，其文字也不会再次发送。
 - 中断产生的撤回先于 stop 发出，因此运行不会开始下一条排队消息。
+- 第一块之后的文字块若以运行时自己的标记开头，就是能力追加的上下文而非操作者的话——与标题和目录预览
+  读取时同一条规则（Hooks A.6.2、Skills §9）——因此不回到草稿；只是看起来像标记的操作者文字仍会回到草稿。
 - `Ctrl+C` 清空草稿。`Esc` 从不清空草稿。
 
 ### 队列条
 
-有消息排队时，输入框上方的队列条在带标题的边框里画出队列：按排队顺序排列，最先运行的一条在最上面，最后一行提示作用于队列的按键。运行中，草稿为空时，`Shift+Left` 把最新排队的消息取回输入框编辑。`Ctrl+S` steer 当前草稿；草稿为空时，`Ctrl+S` 或 `Enter` steer 最早的排队消息。Up/Down 仍用于输入历史。提示只在命令表里有对应命令时才写出命令名，因此它写出的 `/name` 都在本地执行，不会作为用户消息发给模型。目前没有查看队列的命令，所以提示只列按键。
+有消息排队时，输入框上方的队列条在带标题的边框里画出队列：按排队顺序排列，最先运行的一条在最上面，最后一行提示作用于队列的按键。运行中，草稿为空时，`Shift+Left` 把最新排队的消息取回输入框编辑。`Ctrl+S` steer 当前草稿；草稿为空时，`Ctrl+S` 或 `Enter` steer 最早的排队消息。没有排队消息时，草稿为空的 Enter 在任务行显示期间打开 `/tasks`，见[运行按键](#运行按键与排队)。Up/Down 仍用于输入历史。提示只在命令表里有对应命令时才写出命令名，因此它写出的 `/name` 都在本地执行，不会作为用户消息发给模型。目前没有查看队列的命令，所以提示只列按键。
 
 ```text
 ┌─ Queue (2) ─────────────────────────────────────┐
@@ -292,6 +300,9 @@ fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
 终端界面在 `/connect` 的每一行上提供这些操作：未登录的账号显示 `Sign in`，打开即进入它唯一的
 流程；已登录的账号显示状态并提供 `Sign out`。命名空间为 `account` 的行改为打开 Dim 账号的
 `/login` 面板，其中包含身份、套餐与用量。没有描述符的提供方保留连接表单，打开时什么也不启动。
+连接已保存且没有未保存的编辑时，「编辑模型」打开该提供方的[模型管理面板](#models-领域)
+（`Models · <name>`），禁用的提供方也可进入。若提供方提供 `refresh` 动作，在该管理面板按
+Ctrl+R 会拉取目录。
 
 ```text
 /connect
@@ -316,6 +327,23 @@ fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
 │   Restart device login                       │
 │   Waiting for authorization                  │
 ╰─ Select to copy · Enter opens link ──────────╯
+```
+
+终端界面和行客户端登录 Dim 账号成功后，都会等待该账号提供方的 `provider.refresh` 请求完成。
+刷新成功后，终端界面打开 `/models`。刷新失败时，账号面板显示已登录的账号和失败原因，
+焦点停在「刷新模型列表」。在该行按 Enter 可刷新同一提供方的模型，并在面板查看结果。
+「打开模型列表」读取已保存的目录。行客户端将刷新失败写入标准错误，并提示用
+`dimcode models PROVIDER --refresh` 重试。登录仍然成功。
+
+```text
++-- DimAgent OAuth -------------------------+
+|   已登录账号                             |
+|   打开模型列表                           |
+| > 刷新模型列表                           |
+|   查看套餐                               |
+|   退出登录                               |
+|   错误：刷新模型列表失败：连接超时       |
++---------------- Up/Down 移动, Enter 执行 -+
 ```
 
 `dimcode login [PROVIDER]` 在行客户端启动同样的流程，并打印守护进程返回的 URL 或验证码；
@@ -546,7 +574,7 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
 
 - add 用外部编辑器打开适配器给出的新建条目文档——所有者的创建形态，填入示例值——并以领域的创建方法写入。文档没有改动时不写入；被拒绝时保留草稿，下次 Ctrl+N 重新打开用户的文本，与 Ctrl+E 对编辑的处理一致。冲突时也同样保留：新建没有 revision，丢弃草稿与过期 revision 的关联只是编辑的规则，不适用于新建。把条目追加到已读到列表的 add（如命令规则领域）改为重试冲突，因为追加不覆盖任何内容。`dimcode <area> add PATH`（`-` 表示 stdin）是不经编辑器的同一次写入。
 - remove 先在键提示里询问，动词随条目报告：会把条目移出的删除是 `Remove <label>? Enter confirm · Esc cancel`，会把条目恢复为默认的重置是 `Reset <label>? Enter confirm · Esc cancel`。除 Enter 外的任何键都取消且什么都不改。Enter 调用领域的移除方法，然后重新读取该领域，消息也用同一个动词。`dimcode <area> remove ID` 不提问直接移除，因为命令行上输入的 id 就是意图，与 `dimcode logout PROVIDER` 不提问直接退出一致。
-- run 对所选条目调用领域的具名操作。答复会改变领域所列内容的运行——Scheduler 的立即运行会加入任务的历史和上次结果——重新读取该领域，并把答复作为消息报告；所有者跳过的一次运行会说明原因。答复不改变领域所列内容的运行，像 inspect 一样把答复作为详情显示，且不重新读取该领域：MCP 的 test 是临时连接发现的工具列表。所有者是否把该方法声明为 mutating 并不决定这一点，因为 `mcp.test` 会运行该条目，却仍然不写入领域所列的任何内容。需要参数的操作是该领域自己的步骤，不属于这个种类：条目携带输入文档，run 种类在调用前用外部编辑器打开它。
+- run 对所选条目调用领域的具名操作。答复会改变领域所列内容的运行——Scheduler 的立即运行会加入任务的投递历史与上次投递——重新读取该领域，并把答复作为消息报告；所有者跳过的一次运行会说明原因。答复不改变领域所列内容的运行，像 inspect 一样把答复作为详情显示，且不重新读取该领域：MCP 的 test 是临时连接发现的工具列表。所有者是否把该方法声明为 mutating 并不决定这一点，因为 `mcp.test` 会运行该条目，却仍然不写入领域所列的任何内容。需要参数的操作是该领域自己的步骤，不属于这个种类：条目携带输入文档，run 种类在调用前用外部编辑器打开它。
 - inspect 向适配器索取条目的详情：一个标题和若干行，而不是一个视图。面板用它替代列表显示，方向键与 PageUp/PageDown 滚动，Esc 带着保留的选中项回到列表，再按一次 Esc 关闭面板。`dimcode <area> inspect ID` 打印同样的行，或该领域自己的动词，如果它的设计另有规定。
 
 `/workflow:save` 让领域在面板的新建编辑器中打开：第一个视图到达时，面板像 Ctrl+N 那样在新建文档上打开编辑器；领域不提供 add 时，面板停留在列表，并显示支持检查给出的那句话。
@@ -610,31 +638,34 @@ Hooks（#809）：`/hooks` 面板与 `dimcode hooks list|enable|disable|edit|set
 
 ### Scheduler 领域
 
-Scheduler（#815）：`/scheduled` 面板，`/schedule` 在两种模式下都是它的别名，以及 `dimcode scheduled list|enable ID|disable ID|edit ID|set ID PATH|add PATH|remove ID|run ID|history ID`，经 `schedule.list`、`schedule.save`、`schedule.delete`、`schedule.set_enabled`、`schedule.run_now` 与 `schedule.history`（[Scheduler §A.3](plugins/Scheduler.md#a3-管理方法)）。每个任务是条目：名称是标签，调度、下次窗口与上次结果分别是详情。所有者无法使用其调度的任务标记为无效，详情带上所有者的消息；已停用的任务说明没有下次窗口。所有者不报告分组，所以任务共用 `jobs` 一个分组。
+Scheduler（#815）：`/scheduled` 面板，`/schedule` 在两种模式下都是它的别名，以及 `dimcode scheduled list|enable ID|disable ID|edit ID|set ID PATH|add PATH|remove ID|run ID|history ID`，经 `schedule.list`、`schedule.save`、`schedule.delete`、`schedule.set_enabled`、`schedule.run_now` 与 `schedule.history`（[Scheduler §A.3](plugins/Scheduler.md#a3-管理方法)）。每个任务是条目：名称是标签，调度、下次窗口、上次投递、目标与停用原因是详情。目标行说明任务在哪里投递——session 目标是 `Delivers to Session {session} branch {branch} ({mode}).`，launch 目标是 `Launches a new Session in {cwd}.`。所有者无法使用其调度的任务标记为无效，详情带上所有者的消息；已停用的任务说明没有下次窗口，所有者因目标消失而停用的任务另加 `Disabled: {code} at {instant}.`。所有者不报告分组，所以任务共用 `jobs` 一个分组。
 
-任务的文档就是所有者写入的那条记录；客户端只改动 `schedule.save` 接受的字段——`name`、`schedule`、`prompt`、`cwd`、`model`、`mode`、`policy`、`max_run_minutes`、`enabled`、`session_id` 与 `agent_id`——并把 id 放在 Save 动作上、把任务的 revision 作为草稿读取时的 revision。`schedule.save` 是合并到已存任务上的补丁，所以一次编辑只写入草稿改动的成员：适配器重新读取该任务，草稿的 revision 不再等于任务的就拒绝，然后带着 id 与 revision 只发送改动的成员。没有改动任何可编辑成员的草稿不写入；草稿删除的成员无法清除，因为补丁没有 null：写入在发送前就被拒绝，并指出该成员。例外是 `mode` 变为 `create` 时被删除的 `session_id`，由所有者自己清除。revision 过期就是 `schedule_conflict`，即类型化的冲突：什么都不写，重新读取任务，下次编辑打开当前记录。`created_by`、`policy_cap` 与 `enabled_at` 由所有者推导，客户端从不发送。新条目从所有者的创建形态开始——一个名称、一个 `every` 示例调度、一个提示词与会话的工作区——以不带 revision 的 `schedule.save` 写入。`inspect` 就是 `history`：任务最近的运行，最新的在前，带所有者记录的状态。
+任务的文档就是所有者写入的那条记录；客户端只改动 `schedule.save` 接受的字段——`name`、`schedule`、`prompt` 与 `target`——并把 id 放在 Save 动作上、把任务的 revision 作为草稿读取时的 revision。`schedule.save` 是合并到已存任务上的补丁，所以一次编辑只写入草稿改动的成员：适配器重新读取该任务，草稿的 revision 不再等于任务的就拒绝，然后带着 id 与 revision 只发送改动的成员。没有改动任何可编辑成员的草稿不写入；草稿删除的成员无法清除，因为补丁没有 null：写入在发送前就被拒绝，并指出该成员。例外是 `target`，草稿省略时更新保留已存值，所以编辑不能改变任务的目标。revision 过期就是 `schedule_conflict`，即类型化的冲突：什么都不写，重新读取任务，下次编辑打开当前记录。`created_by`、`enabled_at` 与 `disabled_reason` 由所有者推导，客户端从不发送；启用与暂停是 `schedule.set_enabled`，不是一次保存。新条目从所有者的创建形态开始——一个名称、一个 `every` 示例调度、一个提示词与一个目标——以不带 revision 的 `schedule.save` 写入。`inspect` 就是 `history`：任务最近的投递，最新的在前，带所有者记录的状态。
 
 ```text
 ╭─ Scheduler ──────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ >                                                                                                                    │
 │                                                                                                                      │
 │   jobs                                                                                                               │
-│ › nightly-build   enabled                                                                                            │
-│   release         disabled  invalid                                                                                  │
+│ › nightly-build   disabled                                                                                           │
+│   release         enabled  invalid                                                                                   │
 │                                                                                                                      │
 │   every 60 minutes                                                                                                   │
-│   Next run 2026-11-02T09:00:00.000Z.                                                                                 │
-│   Last run completed at 2026-11-01T09:00:12.000Z.                                                                    │
+│   No next run.                                                                                                       │
+│   Last run delivered at 2026-11-01T09:00:12.000Z.                                                                    │
+│   Delivers to Session session-1 branch main (queue).                                                                 │
+│   Disabled: session_closed at 2026-11-01T10:00:00.000Z.                                                              │
 ╰───── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Ctrl+T run · Tab inspect · Esc close ─╯
 ```
 
-Ctrl+T 立即运行所选任务，并报告所有者的答复——`launching`，或运行被跳过的原因；Tab 用任务的历史替代列表显示：
+Ctrl+T 立即运行所选任务，并报告所有者为手动窗口记录的投递——session 目标答复 `delivering`，或带原因的 `missed`；launch 目标答复 `launching` 或带原因的 `skipped`——Tab 用任务的历史替代列表显示：
 
 ```text
 ╭─ Recent runs of nightly-build ─────────────────────────────╮
-│ 2026-11-01T09:00:12.000Z  completed                        │
-│ 2026-11-01T08:00:05.000Z  skipped (overlap)                │
-│ 2026-10-31T09:00:03.000Z  completed                        │
+│ 2026-11-01T09:00:12.000Z  delivered                        │
+│ 2026-11-01T08:00:05.000Z  missed                           │
+│ (previous_delivery_unsettled)                              │
+│ 2026-10-31T09:00:03.000Z  delivered                        │
 ╰───────────────────────────────────── ↑↓ scroll · Esc back ─╯
 ```
 
@@ -781,23 +812,10 @@ run 就是 `mcp.test`：它执行或联系已存条目一次，不写入领域�
 
 命令规则（#819）：Permissions 面板的 Command rules 行，以及 `dimcode permissions list|add PATH|remove RULE`，管理用户的命令规则（[权限控制](#权限控制)、[命令规则](appserver/permission-command-rules.md)）。所有者用 `permission.rules` 报告规则列表及其 Settings revision，并用 `permission.set_rules` 按该 revision 替换整个列表；revision 过期即为 `permission_rules_conflict`。
 
-该行追加在三个权限档之后，现有行因此保持原位置。它打开本领域的面板，Esc 返回 Permissions 面板。
+该行位于 Permissions 面板的 Related settings 分组，在三个预设之后（见[权限控制](#权限控制)）。
+它打开本领域的面板，Esc 返回 Permissions，并保持 Command rules 行的焦点。
 
 ```text
-╭─ Permissions ─────────────────────────────────────────────────╮
-│ >                                                             │
-│   Read only            reads only; writes and commands are    │
-│                        refused                                │
-│   Workspace write      writes inside the workspace; asks      │
-│                        outside it                             │
-│   Full access          no path limits; tools run without      │
-│                        asking                                 │
-│   Command rules                                             › │
-│   Process isolation                                Settings › │
-│                                                               │
-│   The preset fixes the path boundary.                         │
-╰──── ↑↓/Tab move · Enter apply · Esc close ────────────────────╯
-
 ╭─ Command rules ───────────────────────────────────────────────╮
 │ >                                                             │
 │   user                                                        │
@@ -854,15 +872,15 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode hooks edit` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开用户 Hook 文档，并以 `hooks.catalog` 报告的 revision 经 `hooks.save` 写回；交互式编辑需要终端。 |
 | `dimcode hooks set PATH` | 从 `PATH`（`-` 表示 stdin）读取用户 Hook 文档并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
 | `/hooks` | 打开会话所在工作区的 Hooks 面板（[管理界面](#管理界面)）：每个来源一个条目，项目来源提供 toggle，用户文档提供 edit。 |
-| `dimcode scheduled list` | 经 `schedule.list` 列出 Scheduler 持有的任务（[Scheduler](plugins/Scheduler.md#a3-管理方法)）：每个任务的 id、名称、计划、状态、下一次窗口与上次结果，然后是计划无法被 owner 使用的任务。 |
+| `dimcode scheduled list` | 经 `schedule.list` 列出 Scheduler 持有的任务（[Scheduler](plugins/Scheduler.md#a3-管理方法)）：每个任务的 id、名称、计划、状态、下一次窗口、上次投递与目标，然后是计划无法被 owner 使用的任务。 |
 | `dimcode scheduled enable\|disable ID` | 经 `schedule.set_enabled` 启用或暂停单个任务，然后再次报告任务。 |
 | `dimcode scheduled edit ID` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开单个任务的文档，并以列表报告的 revision 经 `schedule.save` 写回；交互式编辑需要终端。 |
 | `dimcode scheduled set ID PATH` | 从 `PATH`（`-` 表示 stdin）读取单个任务的文档并写入，用写入前紧邻读到的 revision；内容没有变化时不写入。 |
-| `dimcode scheduled add PATH` | 从 `PATH`（`-` 表示 stdin）读取文档，不经 revision 经 `schedule.save` 创建任务：id、`created_by` 与 `policy_cap` 由 owner 推导。 |
+| `dimcode scheduled add PATH` | 从 `PATH`(`-` 表示 stdin)读取文档，不经 revision 经 `schedule.save` 创建任务：文档写明目标，id、`created_by` 与 `enabled_at` 由 owner 推导。 |
 | `dimcode scheduled remove ID` | 不经确认，经 `schedule.delete` 删除单个任务：命令行上的 id 就是意图。 |
-| `dimcode scheduled run ID` | 经 `schedule.run_now` 立即运行单个任务，并报告 owner 返回的内容，或它跳过这次运行的原因。 |
-| `dimcode scheduled history ID` | 经 `schedule.history` 打印单个任务最近的运行，最新的在前，并带上每次运行的状态与时间。 |
-| `/scheduled`、`/schedule` | 打开 Scheduler 面板（[管理界面](#管理界面)）：每个任务一个条目，带计划、下一次窗口与上次结果，以及 toggle、edit、add、remove、run 与 inspect 种类；Scheduler 中 inspect 的动词是 history。任务属于主机，不属于会话或工作区；只有新建任务的默认 `cwd` 来自会话。 |
+| `dimcode scheduled run ID` | 经 `schedule.run_now` 立即运行单个任务，并报告它为手动窗口记录的投递，或手动窗口被跳过的原因。 |
+| `dimcode scheduled history ID` | 经 `schedule.history` 打印单个任务最近的投递，最新的在前，每次带上时间与状态及 owner 的详情。 |
+| `/scheduled`、`/schedule` | 打开 Scheduler 面板([管理界面](#管理界面))：每个任务一个条目，带计划、下一次窗口、上次投递、目标与停用原因，以及 toggle、edit、add、remove、run 与 inspect 种类；Scheduler 中 inspect 的动词是 history。任务属于主机，不属于会话或工作区；新建任务要写明目标。 |
 | `dimcode workflow list` | 经 `workflow.list` 列出定义（[Workflow](plugins/Workflow.md#a3-管理方法)）：每个定义的名称、来源、状态与描述，然后是无效定义的问题。 |
 | `dimcode workflow enable\|disable NAME` | 经 `settings.read` 与 `settings.update` 启用或停用该名称的项目定义，然后再次报告定义。 |
 | `dimcode workflow edit NAME` | 用 `$VISUAL`、`$EDITOR` 或平台默认编辑器打开用户定义的文档，并以用户文档读取时的 revision 经 `workflow.save` 写回；给出项目名称时改为给出要编辑的文件。 |
@@ -897,11 +915,12 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `dimcode account PROVIDER` | 打印被描述账号的非机密状态。 |
 | `dimcode logout PROVIDER` | 让被描述的账号退出。 |
 | `/connect` | 列出 `provider.management` 报告的提供方；被描述的账号打开签到或退出步骤，其他提供方打开连接表单。 |
+| `/report` | 上报当前 Session。回合进行中或没有错误时均可使用。可将报告保存为 ZIP，查看保存路径，并在保存后打开分享页面。参见[报告契约](../../design/plugins/Report.md#2-client-interaction)。 |
 | `/exit` | 在空闲的交互提示符处断开并退出。 |
 | `!command` / `!!command` | 以 record/private 模式调用 Session 现有的 `shell.run`，模型回合进行中也可用。 |
 | `--permission read-only\|workspace-write\|full-access` | 为 `dimcode`、`tui`、`exec` 和 `exec resume` 选择新建或恢复的 Session 的预设（[权限控制](#权限控制)）。 |
 | `/goal [OBJECTIVE \| set OBJECTIVE \| edit OBJECTIVE \| pause \| resume \| clear]` | 在行客户端和两种终端 UI 模式下读取并写入当前显示线的目标（[目标](#目标)）。 |
-| `/permissions` | 打开 Permissions 面板：三个预设以及各自允许什么、链接到 Settings 进程隔离控件的行，以及列出、添加、删除用户命令规则的 Command rules 行（[权限控制](#权限控制)）。 |
+| `/permissions` | 打开 Permissions 面板：Permission mode 分组以单选标记展示三个预设；Related settings 分组提供 Command rules 和 Process isolation 子菜单入口。只有焦点条目的 Hint 说明其作用范围与后果（[权限控制](#权限控制)）。 |
 | `/approvals`、`/approval` | `/permissions` 的兼容别名，支持相同的预设参数。 |
 
 `dimcode hooks` 只写用户的 Hook 文档，而且只经 edit 这一种类：`dimcode hooks edit`、
@@ -952,14 +971,16 @@ queue/steer 规则；启动之后不再有任何一层重新解析命令行。
 继承来的描述符。守护进程是 detached 的，
 stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不解析历史、也不依赖客户端
 可能关闭的管道的通道。启动前 CLI 删除 `<native home>/dimcode.sqlite.startup`；原生 home
-是守护进程自己的 home，即 `<home>/rust`。子进程在客户端连上之前退出时，CLI 读取这份
+是守护进程自己的 home，即 `<home>/rust`。这份说明是来自另一个存活进程的进度说明时，
+CLI 保留它，先等那个进程，不启动自己的守护进程。子进程在客户端连上之前退出时，CLI 读取这份
 说明（最多 16 KiB，且只接受普通文件；Unix 上还要求属于当前用户、组和其他用户都没有
 权限）。Unix 上这套权限就是说明的保护，因为守护进程以 0600 写它；Windows 上 CLI 只
 检查普通文件、大小和首行，边界是 home 目录继承的 ACL。CLI 要求首行是
 `dimcode-startup-failure v1 pid=<child pid>`，去掉正文中除换行和制表符以外的控制字符，
 把正文作为命令的错误返回，并在后面加上 `Details: <native home>/daemon.log`。存储门禁在
 诊断出不兼容时写这份说明，写明库、标记、守护进程支持的格式、库是更新、标记与结构
-不符、无法识别还是过旧，以及恢复办法（[原生存储格式 §
+不符、无法识别还是过旧，以及恢复办法；库被另一个进程占用时也写同一类型，写明占用者，
+以及占用者正在升级时的 pid 和格式（[原生存储格式 §
 启动不兼容诊断](../../design/appserver/native-storage-format.md#启动不兼容诊断)）。
 没有匹配的说明时，内嵌守护进程保留现有的 `App Server exited (<status>); see ...`，
 `--server` 指定的程序则报出该选项必须指向独立的 `dim-app-server` 二进制。失败的启动读完后
@@ -969,11 +990,14 @@ stderr 追加到 `daemon.log`，所以每次启动的一份说明是唯一既不
 格式升级运行期间，守护进程把同一份说明写成进度类型：首行
 `dimcode-startup-progress v1 pid=<pid>`，正文
 `store-upgrade from=<from> to=<to> progress=<n>`，最多每秒一次，并在每个升级步骤结束时
-再写一次；库新建或已是最新格式时不写。两个启动等待都读它：spawn 等待只认自己子进程的
-pid，start 锁等待认任意 pid；计数每增加一次，等待上限就向后推一个上限本身（spawn 10 秒，
-start 锁为一次验证过的 shutdown 加一次启动再加一段余量）。格式升级是会上报进展并推进上限的
-长阶段；启动的其他阶段都受客户端固定上限约束。第一次见到时在所有模式下向
-stderr 打印一次 `正在把本地库从格式 v<from> 升级到 v<to>；大库可能需要一段时间。`；
+再写一次；库新建或已是最新格式时不写。三个启动等待都读它：spawn 之前的等待和 start 锁
+等待认任意 pid，spawn 等待只认自己子进程的 pid；计数每增加一次，等待上限就向后推一个
+上限本身（spawn 之前的等待和 spawn 等待为 10 秒，start 锁为一次验证过的 shutdown 加一次
+启动再加一段余量）。格式升级是会上报进展并推进上限的长阶段；启动的其他阶段都受客户端
+固定上限约束。spawn 之前，说明指向其他存活 pid 时客户端等待：库被占用，升级结束前没有
+socket。进展推进上限，客户端重试 socket，守护进程开始服务后即连上；pid 已不存在、或
+指向客户端自己的说明是过期的，客户端启动自己的守护进程。客户端第一次读到这类说明时在
+所有模式下向 stderr 打印一次 `正在把本地库从格式 v<from> 升级到 v<to>；大库可能需要一段时间。`；
 stdout 和 JSON 输出不变。只认识失败类型的客户端忽略进度类型，退回上面的通用错误文本。
 开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
 构建或 `--home PATH` 两条路。
@@ -1335,7 +1359,7 @@ Ctrl+C 提示 CLI 正在等待结果，并持续消费后续中断直到操作�
 Permission 拥有由 `session.create {permissionPolicy}` 初始化、经带版本的
 `session.permission.get/update` 更新的分支策略。策略就是预设与工具名单，见
 [Permission 合同](../../architecture/rust-agent/plugins/Permission.md#policy-contract)；
-预设决定路径边界，进程隔离留在 Settings（[ADR 018](../../adr/018-permission-is-the-preset.md)）。命令规则仍使用
+参见 [ADR 018](../../adr/018-permission-is-the-preset.md)。命令规则仍使用
 `permission.rules`/`permission.set_rules`（[F2](appserver/permission-command-rules.md)）；文件授权仍使用
 `session.grants.add/remove`（[ADR 012](../../adr/012-session-grants.md)）。
 
@@ -1345,18 +1369,9 @@ Permission 拥有由 `session.create {permissionPolicy}` 初始化、经带版�
 | Path scope | 由预设和 Session grant 决定 | [文件访问事实](../../adr/014-file-access-facts.md) |
 | Process isolation | Off / Sandboxed · No network / Sandboxed · Network allowed | `execution` 设置，不属于 Permission |
 
-```text
-/permissions
-  > Read only        reads only; writes and commands are refused
-    Workspace write  writes inside the workspace; asks outside it
-    Full access      no path limits; tools run without asking
-    Command rules    >
-    Process isolation  Settings >
-  The preset fixes the path boundary.
-```
-
-`↑↓` 移动，`Enter` 应用高亮的那一档，`Esc` 关闭。没有第二个策略控件：预设同时回答"什么能运行"和
-"什么先询问"，所以客户端不把文件范围或进程隔离当作权限维度。
+[Permissions 面板](#permissions)把 Session 的预设与用户范围的设置分组展示。
+没有第二个策略控件：预设同时回答"什么能运行"和"什么先询问"，所以客户端不把文件范围或进程隔离
+当作权限维度（[ADR 018](../../adr/018-permission-is-the-preset.md)）。
 
 各预设按风险判定，在 `disallowedTools` 和 deny 规则之后，文件检查仍优先：
 
@@ -1364,7 +1379,7 @@ Permission 拥有由 `session.create {permissionPolicy}` 初始化、经带版�
 | --- | --- |
 | `read-only` | 读取工作区、系统目录、Session 自有文件和已授权路径直接运行，其他读取需要询问；Session 工具运行；文件写入、命令、网络和未分类工具被拒绝 |
 | `workspace-write` | 上述读取直接运行、其他读取需要询问；工作区内文件写入和 Session 工具运行；写入系统目录或 Session 自有文件被拒绝；其他工作区外写入、命令、网络和未分类工具需要询问 |
-| `full-access` | 每个工具调用都直接运行，不询问 |
+| `full-access` | 跳过预设审批；显式拒绝与进程隔离仍然生效 |
 
 deny 规则在任何预设下都生效。allow 规则只把简单命令的询问变成运行，从不解除拒绝。产品和配置型
 守护进程配置以 `workspace-write` 创建 Session；这个默认值不变。
@@ -1474,25 +1489,45 @@ Session 创建配置 --> main 当前策略 --分支点--> 子分支策略
 预设选择器。选择作用于 `main`，每次更新使用当前完整策略与版本，保留工具列表。
 保存失败既不改变记住的选择，也不回退到其他预设。
 
-Process isolation 行链接到 Settings 的进程隔离控件；Esc 返回本面板。
-Command rules 行打开[命令规则领域](#命令规则领域)的管理面板，在那里列出、添加和删除规则；Esc 返回本面板。终端 UI 中 `/permissions` 后面的参数改为打开该面板，而不是被忽略；面板打开时就带着一行说明参数在哪里生效——行内提示符与 `dimcode permissions`——这行一直显示在面板的答复之上，直到用户在这里按下第一个键，无论首次读取要多久；紧凑语法属于行内提示符。
+Process isolation 行链接到 Settings 的进程隔离控件；Esc 返回本面板并保持该行的焦点。
+Command rules 行打开[命令规则领域](#命令规则领域)的管理面板，在那里列出、添加和删除规则；
+Esc 返回本面板并保持 Command rules 行的焦点。两种 TUI 模式都保留返回时的焦点，包括从 Settings
+打开 Permissions 的情况。
+
+终端 UI 中 `/permissions` 后面的参数改为打开该面板，而不是被忽略；面板打开时就带着一行说明参数在哪里生效——行内提示符与 `dimcode permissions`——这行一直显示在面板的答复之上，直到用户在这里按下第一个键，无论首次读取要多久；紧凑语法属于行内提示符。
 
 ```text
-Permissions (main branch)
-> Read only        reads only; writes and commands are refused
-  Workspace write  writes inside the workspace; asks outside it
-  Full access      no path limits; tools run without asking
-  Command rules                             >
-  Process isolation                 Settings >
-
-The preset fixes the path boundary.
-
-↑↓/Tab move · Enter apply · Esc close
+╭─ Permissions ──────────────────────────────────────────────────────────╮
+│ Permission mode                                                        │
+│   ( ) Read only                                                        │
+│   (*) Workspace write                                                  │
+│   ( ) Full access                                                      │
+│ Related settings                                                       │
+│   Command rules  ›                                                     │
+│   Process isolation  ›                                                 │
+│                                                                        │
+│ Hint: Current session; remembered for new sessions. Workspace writes    │
+│       allowed; commands, network and ungranted outside access usually   │
+│       ask.                                                             │
+╰──── ↑↓/Tab move · Enter keep mode · Esc close ──────────────────────────╯
 ```
 
-每一行都写明该预设允许什么、会询问什么，所以不需要第二个菜单。仅打开面板不写入；`Enter` 通过带版本的更新
-写入预设，工具列表保持不变。说明指出预设决定路径边界，并指向 Settings 的进程隔离设置。
+两个分组标题不可选择，以加粗的强调色显示，比选项向左对齐两列，不带作用范围说明。
+面板标题仍在边框内，说明仍在选项下方。颜色与缩进区分标题和可选内容，不在矮终端上增加行。
+`(*)` 标记生效的预设，与焦点行无关；其他预设用 `( )`。焦点使用现有的选择高亮。
+Related settings 使用 `›`，不用单选标记。实时策略更新改变生效标记，不移动焦点。
+只有焦点条目的说明出现在 Hint 中。预设的 Hint 说明作用于当前 Session，并记住为新 Session 的选择；
+启动行为仍由[启动时选择](#启动时选择)定义。Read only 拒绝写入与命令，外部读取可能询问；
+Workspace write 允许工作区写入，命令、网络与未授权的外部访问通常询问；Full access 跳过预设审批，
+重新评估目标分支的待处理调用，但显式拒绝与隔离仍然生效。Command rules 作用于用户范围；
+allow 规则只跳过询问，从不解除拒绝。Process isolation 的 Hint 说明其用户范围；它打开 Settings，
+影响新进程，且独立于权限模式。
 
+`↑↓`/`Tab` 在条目间移动，`Esc` 关闭。未生效的预设在页脚显示 `Enter use mode`，
+生效的预设显示 `Enter keep mode`，子菜单显示 `Enter open`。仅打开或浏览面板不写入。
+已有 Session 时，在预设上按 `Enter` 会读取当前策略；只有所选预设不同时才执行带版本的更新，
+保留工具列表。保持已生效的预设不写入策略更新。成功选择后仍会保存后续 Session 的偏好，
+即使不需要策略更新（见[启动时选择](#启动时选择)）；Home 上尚无 Session 时，标记反映记住的偏好。
 审批提示不提供组合式放宽快捷入口。
 
 行模式提示符下，无参数命令打印生效的预设与支持时的编号命令规则。打印的规则与 revision 保留给 `remove`。
@@ -1516,7 +1551,7 @@ Command rules (user scope, every Session):
 | 形式 | 调用 | 冲突 |
 | --- | --- | --- |
 | `/permissions` | 对 `main` 调用 `session.permission.get`；`permission.rules`；现有 execution 设置读取 | 无 |
-| 面板中选择预设 | `get` 后 `update`，保留工具列表 | 每次重试前重新读取；从不替换工具列表 |
+| 面板中选择预设（已有 Session） | `get`；只有预设不同时才 `update`，保留工具列表 | 每次重试前重新读取；所选预设已生效时不写入；从不替换工具列表 |
 | `/permissions PRESET`（旧操作） | `get`；`full-access` 需要 `[y/N]` 确认，回车、其他回答、EOF 和 Ctrl+C 都表示否；然后用读取的版本和其余不变的策略 `update` | `permission_conflict`：重新读取，打印当前策略，不写入；由用户重新决定 |
 | `/permissions allow\|deny exact\|prefix COMMAND` | `permission.rules`；除非已有相同规则，否则 `set_rules(revision, rules + rule)`，然后打印新列表 | 重新读取并重试，最多 3 次：添加不取决于其他规则 |
 | `/permissions remove N` | `set_rules(列表的修订号, 去掉第 N 条后的列表)`，然后打印新列表 | `permission_rules_conflict`：重新读取，打印当前列表，不删除 |
