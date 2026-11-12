@@ -119,6 +119,46 @@ pub(crate) fn live_thinking(text: &str, expanded: bool, width: usize, p: &Palett
     rows
 }
 
+pub(crate) fn streamed_thinking(
+    text: &str,
+    elapsed_ms: Option<u64>,
+    width: usize,
+    p: &Palette,
+) -> Vec<String> {
+    let mut rows = settled_thinking(text, None, true, width, p);
+    if let Some(ms) = elapsed_ms {
+        rows.push(thinking_row("", width, p));
+        rows.push(thinking_title(
+            &tf("Thought for {duration}", &[("duration", &duration(ms))]),
+            width,
+            p,
+        ));
+    }
+    rows
+}
+
+/// The immutable prefix of a running thought. The last two wrapped rows
+/// remain live while words, graphemes and emphasis markers are incomplete.
+pub(crate) fn thinking_prefix(text: &str, width: usize) -> String {
+    let body = thinking_body(text, width);
+    let mut stable = body.len().saturating_sub(2);
+    while stable > 0 && body[stable - 1].is_empty() {
+        stable -= 1;
+    }
+    let characters = body[..stable]
+        .iter()
+        .flat_map(|row| row.chars())
+        .filter(|c| !c.is_whitespace())
+        .count();
+    let end = text
+        .char_indices()
+        .filter(|(_, c)| !c.is_whitespace())
+        .take(characters)
+        .last()
+        .map_or(0, |(at, c)| at + c.len_utf8());
+    text[..end].to_owned()
+}
+
 /// A settled thought: one row with its duration and the start of its last
 /// paragraph (the conclusion), or the whole text behind the bar when
 /// expanded.
@@ -544,13 +584,15 @@ pub(crate) fn render_block(
             text,
             elapsed_ms,
             expanded,
-        } => settled_thinking(
-            &crate::sanitize::safe(text),
-            *elapsed_ms,
-            *expanded,
-            width,
-            p,
-        ),
+            streamed,
+        } => {
+            let text = crate::sanitize::safe(text);
+            if *streamed && *expanded {
+                streamed_thinking(&text, *elapsed_ms, width, p)
+            } else {
+                settled_thinking(&text, *elapsed_ms, *expanded, width, p)
+            }
+        }
         Block::ToolGroup(group) => render_group(group, width, p, RUNNING_MARK),
         Block::Compaction {
             state,
