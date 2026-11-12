@@ -5067,7 +5067,7 @@ fn tui_resizing_during_thinking_preserves_multiline_history() {
     let mut terminal = Terminal::resume_tui(command);
     terminal.until("Ask anything...");
     terminal.raw(b"first user line\nsecond user line\nlast user line\r");
-    terminal.until("Thinking…");
+    terminal.until("Thought");
     for (cols, rows) in [(100, 24), (60, 24), (120, 40), (45, 18), (100, 36)] {
         terminal.consumed = terminal.transcript.len();
         let size = libc::winsize {
