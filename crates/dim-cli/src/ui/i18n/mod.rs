@@ -119,6 +119,10 @@ mod tests {
                 "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close",
                 "Default for new sessions in {folder}: {model}",
                 "Default for new sessions: {model}",
+                "Hook context · {count} line",
+                "Hook context · {count} lines",
+                "Stop hook follow-up · {count} line",
+                "Stop hook follow-up · {count} lines",
             ] {
                 assert_ne!(t(key), key, "{code} lacks {key:?}");
             }
@@ -257,7 +261,17 @@ mod tests {
             if locale == Locale::En {
                 continue;
             }
-            for key in [PLAIN, COUNTS, UPGRADING] {
+            for key in [
+                PLAIN,
+                COUNTS,
+                UPGRADING,
+                crate::ui::sessions_panel::HINT,
+                "Delete \"{name}\"?",
+                "Deleted {name}.",
+                "Nothing was removed: no stored Session {name}.",
+                "Delete failed",
+                crate::session_command::DELETE_UNSUPPORTED,
+            ] {
                 let translated = table(locale, key);
                 assert!(translated.is_some(), "{code} lacks {key:?}");
                 assert_ne!(translated.unwrap(), key, "{code} copies {key:?}");
@@ -279,6 +293,12 @@ mod tests {
                     ],
                 ),
                 (UPGRADING, vec![("from", "33"), ("to", "34")]),
+                ("Delete \"{name}\"?", vec![("name", "fixture-name")]),
+                ("Deleted {name}.", vec![("name", "fixture-name")]),
+                (
+                    "Nothing was removed: no stored Session {name}.",
+                    vec![("name", "fixture-name")],
+                ),
             ] {
                 let text = tf(key, &args);
                 for (_, value) in args {
