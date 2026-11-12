@@ -1113,11 +1113,14 @@ Select a model
   Manual: no models · add a model with provider.models.create
   Edit models                Manual  manual
   Subagent models: Agent choice
-Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
 ```
 
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
 models PROVIDER inspect MODEL` prints the lines the detail shows.
+
+Enter also writes the default a new Session in this folder reads ([provider management
+§4](appserver/provider-management.md#4-client-integration)).
 
 Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
 modes; explicit-value forms and the line client keep their command behavior. The selection

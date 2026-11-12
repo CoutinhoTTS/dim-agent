@@ -340,9 +340,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "종료",
 
         // composer/palette.rs
-        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 선택 · ←/→ 추론 강도 · Ctrl+X 저장값 지우기 · Esc 지우기/닫기"
+        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 선택 및 기본 설정 · ←/→ 추론 강도 · Ctrl+X 저장값 지우기 · Esc 지우기/닫기"
         }
+        "Default for new sessions in {folder}: {model}" => "새 세션의 {folder} 기본 모델: {model}",
+        "Default for new sessions: {model}" => "새 세션 기본 모델: {model}",
         "Enter select · Esc clear/close" => "Enter 선택 · Esc 지우기/닫기",
         "esc close" => "esc 닫기",
         "Suggestions" => "추천",

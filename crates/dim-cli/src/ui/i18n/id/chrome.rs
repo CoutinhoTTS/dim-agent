@@ -380,9 +380,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "keluar",
 
         // composer/palette.rs
-        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter pilih · ←/→ upaya · Ctrl+X hapus simpanan · Esc hapus/tutup"
+        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter pilih + default · ←/→ upaya · Ctrl+X hapus simpanan · Esc hapus/tutup"
         }
+        "Default for new sessions in {folder}: {model}" => {
+            "Model default untuk sesi baru di {folder}: {model}"
+        }
+        "Default for new sessions: {model}" => "Model default untuk sesi baru: {model}",
         "Enter select · Esc clear/close" => "Enter pilih · Esc hapus/tutup",
         "esc close" => "esc tutup",
         "Suggestions" => "Saran",

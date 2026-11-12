@@ -324,9 +324,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "離開",
 
         // composer/palette.rs
-        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選擇 · ←/→ 推理強度 · Ctrl+X 清除已儲存 · Esc 清除/關閉"
+        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 選擇並設為預設 · ←/→ 推理強度 · Ctrl+X 清除已儲存 · Esc 清除/關閉"
         }
+        "Default for new sessions in {folder}: {model}" => {
+            "新工作階段在 {folder} 的預設模型：{model}"
+        }
+        "Default for new sessions: {model}" => "新工作階段的預設模型：{model}",
         "Enter select · Esc clear/close" => "Enter 選擇 · Esc 清除/關閉",
         "esc close" => "esc 關閉",
         "Suggestions" => "建議",

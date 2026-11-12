@@ -2763,6 +2763,16 @@ impl App {
                     self.shell_done(running, result);
                 }
             }
+            Update::ModelDefault { folder, model } => {
+                let notice = match folder {
+                    Some(folder) => tf(
+                        "Default for new sessions in {folder}: {model}",
+                        &[("folder", &crate::ui::tilde(&folder)), ("model", &model)],
+                    ),
+                    None => tf("Default for new sessions: {model}", &[("model", &model)]),
+                };
+                self.notices.push(notice);
+            }
             Update::Notice(text) => {
                 self.notices.push(t(&text).to_owned());
             }
@@ -2955,7 +2965,7 @@ impl App {
                     p.handle_key(key, self.snapshot.as_ref().expect("attached queue"))
                 }
                 Prompt::Export(p) => match p.handle_key(key) {
-                    ListEvent::Pick(format) => Effect::Export(if format == "markdown" {
+                    ListEvent::Pick { id: format, .. } => Effect::Export(if format == "markdown" {
                         crate::export::Format::Markdown
                     } else {
                         crate::export::Format::Json
@@ -3946,12 +3956,14 @@ impl App {
                 provider_id,
                 model_id,
                 reasoning_effort,
+                label,
             } => {
                 self.prompt = None;
                 self.host.send(Command::SelectModel {
                     provider_id,
                     model_id,
                     reasoning_effort,
+                    label,
                 });
             }
             Effect::SetEffort { model, value } => {

@@ -384,9 +384,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "quitter",
 
         // composer/palette.rs
-        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter choisir · ←/→ effort · Ctrl+X oublier · Esc effacer/fermer"
+        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter choisir + défaut · ←/→ effort · Ctrl+X oublier · Esc effacer/fermer"
         }
+        "Default for new sessions in {folder}: {model}" => {
+            "Modèle par défaut des nouvelles sessions dans {folder} : {model}"
+        }
+        "Default for new sessions: {model}" => "Modèle par défaut des nouvelles sessions : {model}",
         "Enter select · Esc clear/close" => "Enter choisir · Esc effacer/fermer",
         "esc close" => "esc fermer",
         "Suggestions" => "Suggestions",

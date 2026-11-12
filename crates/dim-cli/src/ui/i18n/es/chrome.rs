@@ -396,9 +396,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "salir",
 
         // composer/palette.rs
-        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter elegir · ←/→ esfuerzo · Ctrl+X borrar guardado · Esc borrar/cerrar"
+        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter elegir + predeterminado · ←/→ esfuerzo · Ctrl+X borrar guardado · Esc borrar/cerrar"
         }
+        "Default for new sessions in {folder}: {model}" => {
+            "Modelo por defecto para sesiones nuevas en {folder}: {model}"
+        }
+        "Default for new sessions: {model}" => "Modelo por defecto para sesiones nuevas: {model}",
         "Enter select · Esc clear/close" => "Enter elegir · Esc borrar/cerrar",
         "esc close" => "esc cerrar",
         "Suggestions" => "Sugerencias",

@@ -362,9 +362,11 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓/Tab move · Enter select · Esc close" => "↑↓/Tab 切换 · Enter 选择 · Esc 关闭",
         "exit" => "退出应用",
 
-        "Enter select · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 选择 · ←/→ 推理强度 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
+        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 选择并设为默认 · ←/→ 推理强度 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
         }
+        "Default for new sessions in {folder}: {model}" => "新会话在 {folder} 的默认模型：{model}",
+        "Default for new sessions: {model}" => "新会话的默认模型：{model}",
         "Enter select · Esc clear/close" => "Enter 选择 · Esc 清除/关闭",
         "esc close" => "Esc 关闭",
         "Suggestions" => "建议",
