@@ -117,6 +117,8 @@ writable
 - The tool is registered with the existing `toolRegistry` and `ToolContribution`; it is admitted and executed like every tool.
 - The read handler calls the setting module's read port. A future write path adds a typed setter and separates the write risk.
 
+Service faces follow the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services): v1 consumes the process `executionSettingsHost`, `internal(legacy-no-consumer)`, and the Session `toolRegistry` data face. The tool's input and result are data; its Rust part is not leaf-ready.
+
 ## 5. Permission
 
 - Permission sees one tool name: `settings`.

@@ -152,6 +152,8 @@ The in-memory presence read is infallible; it returns an empty list for an unkno
 | `BranchLifecycle` | Wait for publication before appending; stop when the branch closes |
 | Process bus (`ClientsChanged`) | Wake on a connection change |
 
+Service faces follow the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services): the process `sessionClientsHost` is `internal(legacy-no-consumer)`; `sessionIdentity`, `timeline` and `branchLifecycle` are data faces. This Rust projection is not a leaf-ready foreign part.
+
 No Prompt registry, no configure control, no version.
 
 ### Requirements raised to mechanism owners
