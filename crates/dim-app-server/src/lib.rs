@@ -5,6 +5,7 @@ pub mod cli;
 pub mod codex_oauth;
 pub mod collaboration;
 mod collaboration_model_policy;
+mod configured_models_management;
 mod connection;
 mod control;
 mod exec_shell_settings;
@@ -717,6 +718,18 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 Ok(Box::new(dim_agent_aimux::ConfiguredModelsPlugin(
                     models.clone(),
                 )))
+            },
+        )?);
+        // The full Provider part is product-only; a development profile still
+        // needs `provider.management` for client model pickers, answered from
+        // the same configured catalog execution uses.
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            |names| {
+                Ok(Box::new(
+                    configured_models_management::ConfiguredModelsManagementPlugin::new(names)?,
+                ))
             },
         )?);
     }
