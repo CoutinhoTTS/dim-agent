@@ -10,6 +10,7 @@ mod connection;
 mod control;
 mod exec_shell_settings;
 mod execution_settings;
+mod fun_providers;
 pub mod grok_oauth;
 pub mod hooks_settings;
 mod managed_oauth;
@@ -89,6 +90,9 @@ pub struct ServerConfig {
     /// Admission is disabled until the product execution profile is installed.
     pub session_execution: bool,
     pub model_catalog: Option<Arc<dim_agent_aimux::AimuxModels>>,
+    /// Fun-owned providers. Mutually exclusive with `product_home` and
+    /// `model_catalog`; a sync replaces its catalog without a restart.
+    pub fun_catalog: Option<Arc<dim_provider_fun::FunCatalogState>>,
     pub file_roots: Vec<PathBuf>,
     pub session_defaults: SessionConfig,
     pub hello_timeout: Duration,
@@ -137,6 +141,7 @@ impl Default for ServerConfig {
             daemon_profile: protocol::DaemonProfile::Mock,
             session_execution: true,
             model_catalog: None,
+            fun_catalog: None,
             file_roots: vec![],
             session_defaults: SessionConfig::default(),
             hello_timeout: Duration::from_secs(5),
@@ -158,7 +163,7 @@ impl ServerConfig {
     }
 
     pub(crate) fn protected_profile(&self) -> bool {
-        self.product_home.is_some() || self.model_catalog.is_some()
+        self.product_home.is_some() || self.model_catalog.is_some() || self.fun_catalog.is_some()
     }
 }
 #[derive(Debug, thiserror::Error)]
@@ -471,7 +476,17 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             "configured and product model providers are mutually exclusive".into(),
         ));
     }
-    if config.model_catalog.is_some()
+    if config.fun_catalog.is_some() && config.product_home.is_some() {
+        return Err(ServerError::Configuration(
+            "Fun providers and a product home are mutually exclusive".into(),
+        ));
+    }
+    if config.fun_catalog.is_some() && config.model_catalog.is_some() {
+        return Err(ServerError::Configuration(
+            "Fun providers and --model-config are mutually exclusive".into(),
+        ));
+    }
+    if (config.model_catalog.is_some() || config.fun_catalog.is_some())
         && config.target_home.is_none()
         && config.database_path.is_none()
     {
@@ -703,10 +718,39 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         builder.catalog(),
         move |_| Ok(Box::new(files.clone())),
     )?);
-    if config.model_catalog.is_some() || product_root.is_some() {
+    if config.model_catalog.is_some() || config.fun_catalog.is_some() || product_root.is_some() {
         rows.push(register_part(&mut builtins, builder.catalog(), |_| {
             Ok(Box::new(dim_agent_aimux::AimuxPlugin))
         })?);
+    }
+    if let Some(state) = &config.fun_catalog {
+        dim_provider_fun::register_names(&mut builder);
+        let state = state.clone();
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                Ok(Box::new(dim_provider_fun::FunProviderPlugin::new(
+                    names,
+                    state.clone(),
+                )?))
+            },
+        )?);
+        let state = config
+            .fun_catalog
+            .as_ref()
+            .expect("Fun catalog checked above")
+            .clone();
+        rows.push(register_part(
+            &mut builtins,
+            builder.catalog(),
+            move |names| {
+                Ok(Box::new(fun_providers::FunProviderMethodsPlugin::new(
+                    names,
+                    state.clone(),
+                )?))
+            },
+        )?);
     }
     if let Some(models) = &config.model_catalog {
         dim_agent_aimux::register_names(&mut builder);
@@ -720,18 +764,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 )))
             },
         )?);
-        // The full Provider part is product-only; a development profile still
-        // needs `provider.management` for client model pickers, answered from
-        // the same configured catalog execution uses.
-        rows.push(register_part(
-            &mut builtins,
-            builder.catalog(),
-            |names| {
-                Ok(Box::new(
-                    configured_models_management::ConfiguredModelsManagementPlugin::new(names)?,
-                ))
-            },
-        )?);
+        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+            Ok(Box::new(
+                configured_models_management::ConfiguredModelsManagementPlugin::new(names)?,
+            ))
+        })?);
     }
     if let (Some(path), Some(files_root)) = (&config.database_path, session_files_root) {
         let path = path.clone();

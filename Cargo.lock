@@ -1228,6 +1228,7 @@ dependencies = [
  "dim-app-server",
  "dim-codemode",
  "dim-modality",
+ "dim-provider-fun",
  "encoding_rs",
  "flate2",
  "foldhash 0.2.0",
@@ -1524,6 +1525,21 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "dim-provider-fun"
+version = "0.1.0-alpha.18"
+dependencies = [
+ "dim-agent-capabilities",
+ "dim-agent-runtime",
+ "dim-agent-types",
+ "http",
+ "rutis",
+ "serde",
+ "serde_json",
+ "tokio-util",
+ "url",
 ]
 
 [[package]]

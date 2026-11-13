@@ -266,6 +266,7 @@ pub fn run_with(
     };
     let mut threads = 2usize;
     let mut model_config = None;
+    let mut fun_providers = None;
     let mut mock_model = false;
     let mut node = None;
     let mut js_runtime = None;
@@ -311,6 +312,11 @@ pub fn run_with(
                     args.next().ok_or("--model-config requires a path")?,
                 ))
             }
+            "--fun-providers" => {
+                fun_providers = Some(PathBuf::from(
+                    args.next().ok_or("--fun-providers requires a path")?,
+                ))
+            }
             "--mock-model" => mock_model = true,
             "--node" => node = Some(PathBuf::from(args.next().ok_or("--node requires a path")?)),
             "--js-runtime" => {
@@ -335,7 +341,7 @@ pub fn run_with(
             }
             "--help" => {
                 println!(
-                    "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--defaults FILE] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
+                    "dim-app-server (--product-home PATH | --model-config PATH | --fun-providers PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--defaults FILE] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH\n\
                      dim-app-server --vacuum --database PATH"
                 );
@@ -410,31 +416,61 @@ pub fn run_with(
     if mock_model && model_config.is_some() {
         return Err("Cannot combine --model-config and --mock-model".into());
     }
-    if config.product_home.is_some() && (mock_model || model_config.is_some()) {
-        return Err("Cannot combine --product-home with a development model profile".into());
+    if mock_model && fun_providers.is_some() {
+        return Err("Cannot combine --fun-providers and --mock-model".into());
     }
-    if !mock_model && model_config.is_none() && config.product_home.is_none() {
-        return Err("Product home is required; use --product-home PATH, --model-config PATH or --mock-model".into());
+    if model_config.is_some() && fun_providers.is_some() {
+        return Err("Cannot combine --model-config and --fun-providers".into());
+    }
+    if config.product_home.is_some()
+        && (mock_model || model_config.is_some() || fun_providers.is_some())
+    {
+        return Err(
+            "Cannot combine --product-home with a development profile or Fun providers".into(),
+        );
+    }
+    if !mock_model
+        && model_config.is_none()
+        && fun_providers.is_none()
+        && config.product_home.is_none()
+    {
+        return Err("Product home is required; use --product-home PATH, --model-config PATH, --fun-providers PATH or --mock-model".into());
     }
     if config.product_home.is_none() && config.plugin_files.is_none() {
         config.plugin_files = config.target_home.clone();
     }
-    if config.product_home.is_some() || model_config.is_some() {
+    if config.product_home.is_some() || model_config.is_some() || fun_providers.is_some() {
         product_session_defaults(&mut config.session_defaults);
     } else {
         config.session_defaults.permission_policy.allowed_tools =
             vec!["echo".into(), "wait".into()];
     }
+    let fun = if let Some(path) = fun_providers.as_deref() {
+        let loaded = dim_provider_fun::load(path)?;
+        let sha256 = {
+            use sha2::Digest;
+            format!("{:x}", sha2::Sha256::digest(&loaded.bytes))
+        };
+        config.daemon_profile = crate::protocol::DaemonProfile::Configured {
+            model_config_sha256: sha256,
+        };
+        config.fun_catalog = Some(loaded.state.clone());
+        Some(loaded.state)
+    } else {
+        None
+    };
     let models = if let Some(path) = model_config.as_deref() {
         let (models, profile) = model_profile(path)?;
         config.daemon_profile = profile;
         Some(models)
     } else {
-        config.daemon_profile = if config.product_home.is_some() {
-            crate::protocol::DaemonProfile::Product
-        } else {
-            crate::protocol::DaemonProfile::Mock
-        };
+        if fun.is_none() {
+            config.daemon_profile = if config.product_home.is_some() {
+                crate::protocol::DaemonProfile::Product
+            } else {
+                crate::protocol::DaemonProfile::Mock
+            };
+        }
         None
     };
     let mut agent_config = AgentConfig::default();
@@ -449,13 +485,21 @@ pub fn run_with(
             metadata: None,
         };
     }
+    if let Some(fun) = &fun {
+        let selection = fun.current().default_selection();
+        agent_config.model = dim_agent_types::ModelId {
+            provider_id: selection.provider_id.clone(),
+            model_id: selection.model_id.clone(),
+        };
+        config.session_defaults.model = selection;
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
         .enable_all()
         .build()?;
     let operation = async move {
         let mut builder = AgentBuilder::new(agent_config);
-        if config.product_home.is_some() || models.is_some() {
+        if config.product_home.is_some() || models.is_some() || fun.is_some() {
             let product_home = config
                 .product_home
                 .as_ref()
@@ -492,7 +536,14 @@ pub fn run_with(
             builder
                 .session_value(Arc::new(HistoryRenderer::default()))
                 .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))));
-            if let Some(models) = &models {
+            if let Some(fun) = &fun {
+                defaults::install_compaction(
+                    &mut builder,
+                    Arc::new(dim_provider_fun::FunContextModel::new(fun.clone())),
+                    ProductSummaryStrategyConfig::default(),
+                );
+                dim_provider_fun::install(&mut builder);
+            } else if let Some(models) = &models {
                 defaults::install_compaction(
                     &mut builder,
                     models.clone(),

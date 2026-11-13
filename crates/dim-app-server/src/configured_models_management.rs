@@ -11,11 +11,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use dim_agent_capabilities::host::SelectableModelsHost;
-use dim_agent_capabilities::methods::{
-    Interruption, MethodCall, MethodDecl, RpcError, reply,
-};
-use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
+use dim_agent_capabilities::methods::{Interruption, MethodCall, MethodDecl, RpcError, reply};
 use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::Serialize;
 
 use crate::methods::ManagementMethods;
@@ -58,13 +56,9 @@ impl DynPlugin for ConfiguredModelsManagementPlugin {
                 Arc::new(move |_call: MethodCall, stopping, _| {
                     let selectable = selectable.clone();
                     Box::pin(async move {
-                        let models = selectable
-                            .0
-                            .selectable(stopping)
-                            .await
-                            .map_err(|error| {
-                                RpcError::app(-32000, "provider_failed", error.to_string())
-                            })?;
+                        let models = selectable.0.selectable(stopping).await.map_err(|error| {
+                            RpcError::app(-32000, "provider_failed", error.to_string())
+                        })?;
                         reply(ManagementView::from_models(models))
                     })
                 }),
