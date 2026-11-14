@@ -1001,8 +1001,7 @@ pub async fn edit(
                         let result = if entry.directory {
                             entry
                                 .path
-                                .strip_prefix(base)
-                                .unwrap_or(&entry.path)
+                                .trim_prefix(base)
                                 .to_str()
                                 .ok_or_else(|| "File paths must be UTF-8".into())
                                 .map(|path| {

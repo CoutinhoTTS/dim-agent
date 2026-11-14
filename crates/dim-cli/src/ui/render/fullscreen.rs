@@ -1759,7 +1759,7 @@ fn focus_row(row: &str, offset: usize, last: usize, cols: usize, p: &Palette) ->
 /// A row of the picked member card: an accent bar in its margin column,
 /// the row itself unchanged.
 fn card_focus_row(row: &str, width: usize, p: &Palette) -> String {
-    let rest = row.strip_prefix(' ').unwrap_or(row);
+    let rest = row.trim_prefix(' ');
     format!(
         "{}{}",
         fg("▌", &p.accent),
@@ -2740,7 +2740,7 @@ mod tests {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
         for n in 0..6 {
-            let rows: Vec<String> = (0..4).map(|r| format!("block {n} row {r}")).collect();
+            let rows: Vec<String> = Vec::from_fn(4, |r| format!("block {n} row {r}"));
             let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
             doc.say(&rows);
         }

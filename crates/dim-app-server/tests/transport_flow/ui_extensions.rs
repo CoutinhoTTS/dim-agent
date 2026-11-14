@@ -770,7 +770,7 @@ async fn a_local_client_reads_session_resources_with_its_session() {
     let home = home.canonicalize().unwrap();
     config.target_home = Some(home.clone());
     config.file_roots = vec![home.clone()];
-    let data: Vec<u8> = (0..300_000u32).map(|index| (index % 251) as u8).collect();
+    let data: Vec<u8> = Vec::from_fn(300_000, |index| (index % 251) as u8);
     let media = home.join("media.bin");
     std::fs::write(&media, &data).unwrap();
     let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;

@@ -59,7 +59,7 @@ fn variants(id: &str) -> Vec<String> {
     static SEPARATORS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[_:\s]+").unwrap());
     let lower = id.trim().to_lowercase();
     let normalized = SEPARATORS
-        .replace_all(lower.strip_prefix("models/").unwrap_or(&lower), "-")
+        .replace_all(lower.trim_prefix("models/"), "-")
         .into_owned();
     let last = normalized.rsplit('/').next().unwrap_or_default().to_owned();
     if last == normalized {

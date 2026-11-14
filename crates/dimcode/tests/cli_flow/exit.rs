@@ -67,7 +67,7 @@ fn keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit() {
                 let mut active = fullscreen;
                 for _ in 0..3 {
                     terminal.write(b"/tui\r");
-                    active = !active;
+                    active.toggle();
                     terminal.until(if active { "\x1b[?1049h" } else { "\x1b[?1049l" });
                     terminal.until("\x1b[?2026l");
                     check(&terminal.transcript, active, kitty);

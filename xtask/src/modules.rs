@@ -71,7 +71,7 @@ pub fn generate(workspace: &Path) -> Result<Vec<(&'static str, String)>> {
         .current_dir(workspace)
         .output()?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        return Err(String::from_utf8_lossy_owned(output.stderr).into());
     }
     let metadata: Value = serde_json::from_slice(&output.stdout)?;
     let packages = metadata["packages"]
@@ -247,11 +247,7 @@ impl SourceGraph {
         let mut module = Module {
             root: root.to_owned(),
             parent,
-            file: file
-                .strip_prefix(workspace)
-                .unwrap_or(file)
-                .to_string_lossy()
-                .into_owned(),
+            file: file.trim_prefix(workspace).to_string_lossy().into_owned(),
             definitions: BTreeMap::new(),
             imports: vec![],
             paths: BTreeSet::new(),

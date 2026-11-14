@@ -1041,7 +1041,7 @@ pub(super) fn canonical(s: &str) -> String {
     let lower = s.trim().to_lowercase();
     let mut result = String::new();
     let mut separator = false;
-    for ch in lower.strip_prefix("models/").unwrap_or(&lower).chars() {
+    for ch in lower.trim_prefix("models/").chars() {
         if ch == '_' || ch == ':' || ch.is_whitespace() {
             if !separator {
                 result.push('-');

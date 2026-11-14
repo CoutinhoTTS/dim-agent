@@ -552,7 +552,7 @@ fn a_child_finding_the_store_owned_reports_the_owner() {
         .output()
         .unwrap();
     lease.unlock().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(
         stderr.contains("Another dimcode-server is using the store"),
