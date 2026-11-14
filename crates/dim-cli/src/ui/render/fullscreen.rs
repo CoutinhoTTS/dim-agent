@@ -2740,7 +2740,7 @@ mod tests {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
         for n in 0..6 {
-            let rows: Vec<String> = (0..4).map(|r| format!("block {n} row {r}")).collect();
+            let rows: Vec<String> = Vec::from_fn(4, |r| format!("block {n} row {r}"));
             let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
             doc.say(&rows);
         }

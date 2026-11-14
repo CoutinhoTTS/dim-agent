@@ -1508,7 +1508,7 @@ mod tests {
     #[test]
     fn oversized_live_region_keeps_the_bottom_rows_and_some_history() {
         let (mut screen, mut emu) = setup(true);
-        let live: Vec<String> = (0..20).map(|n| format!("row {n}")).collect();
+        let live: Vec<String> = Vec::from_fn(20, |n| format!("row {n}"));
         let refs: Vec<&str> = live.iter().map(String::as_str).collect();
         drive(&mut screen, &mut emu, &frame(&[], &refs, None));
         assert_eq!(screen.viewport_height(), SIZE.1 - MIN_HISTORY_ROWS);

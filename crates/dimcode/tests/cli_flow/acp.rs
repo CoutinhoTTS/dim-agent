@@ -732,7 +732,7 @@ fn acp_stdio_bounds_in_flight_reads_and_releases_completed_requests() {
     let (release, delayed) = std::sync::mpsc::sync_channel(0);
     let daemon = home.daemon(move |wire| {
         wire.hello(METHODS);
-        let calls: Vec<_> = (0..128).map(|_| wire.read("session.list")).collect();
+        let calls: Vec<_> = Vec::from_fn(128, |_| wire.read("session.list"));
         waiting.send(()).unwrap();
         delayed.recv_timeout(PATIENCE).unwrap();
         for call in calls {
