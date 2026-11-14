@@ -913,7 +913,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use url::Url;
 
-    fn dns(host: &'static str, ips: &[&str]) -> std::mem::DropGuard<&'static str, fn(&'static str)> {
+    fn dns(
+        host: &'static str,
+        ips: &[&str],
+    ) -> std::mem::DropGuard<&'static str, fn(&'static str)> {
         test_dns::insert(
             host,
             test_dns::Answer::Ips(ips.iter().map(|ip| ip.parse().unwrap()).collect()),

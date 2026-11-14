@@ -739,10 +739,7 @@ pub(super) fn unified_diff(before: &str, after: &str) -> String {
                 similar::ChangeTag::Equal => ' ',
             };
             let value = change.value();
-            lines.push(format!(
-                "{sign}{}",
-                value.trim_suffix('\n')
-            ));
+            lines.push(format!("{sign}{}", value.trim_suffix('\n')));
         }
     }
     lines.join("\n")

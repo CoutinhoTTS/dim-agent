@@ -8135,9 +8135,7 @@ fn goodbye_panel(resume: Option<&str>) -> Vec<String> {
 
 /// The rows of a committed chunk (its closing newline ends the last row).
 fn raw_rows(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.trim_suffix('\n')
-        .split('\n')
-        .map(str::to_owned)
+    text.trim_suffix('\n').split('\n').map(str::to_owned)
 }
 
 /// Paints plain text with a colour.

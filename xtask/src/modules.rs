@@ -247,10 +247,7 @@ impl SourceGraph {
         let mut module = Module {
             root: root.to_owned(),
             parent,
-            file: file
-                .trim_prefix(workspace)
-                .to_string_lossy()
-                .into_owned(),
+            file: file.trim_prefix(workspace).to_string_lossy().into_owned(),
             definitions: BTreeMap::new(),
             imports: vec![],
             paths: BTreeSet::new(),
