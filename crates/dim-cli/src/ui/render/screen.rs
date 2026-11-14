@@ -283,7 +283,7 @@ impl Screen {
             viewport: Rect::new(0, self.viewport_top(), self.size.0, self.viewport_height),
             reset: false,
         };
-        let text = text.strip_suffix('\n').unwrap_or(text);
+        let text = text.trim_suffix('\n');
         let text = &scrub_keeping_newlines(text);
         let written = text.split('\n').count() as u16;
         let before = self.top;
@@ -308,7 +308,7 @@ impl Screen {
     /// once and wrapped by the terminal over the rows below it; only a row
     /// taller than the screen goes the erasing way.
     fn commit_in_place(&mut self, text: &str, out: &mut Vec<u8>) -> bool {
-        let text = text.strip_suffix('\n').unwrap_or(text);
+        let text = text.trim_suffix('\n');
         let text = scrub_keeping_newlines(text);
         let rows: Vec<&str> = text.split('\n').collect();
         let (cols, lines) = (self.size.0 as usize, self.size.1 as usize);

@@ -1759,7 +1759,7 @@ fn focus_row(row: &str, offset: usize, last: usize, cols: usize, p: &Palette) ->
 /// A row of the picked member card: an accent bar in its margin column,
 /// the row itself unchanged.
 fn card_focus_row(row: &str, width: usize, p: &Palette) -> String {
-    let rest = row.strip_prefix(' ').unwrap_or(row);
+    let rest = row.trim_prefix(' ');
     format!(
         "{}{}",
         fg("▌", &p.accent),

@@ -954,7 +954,7 @@ impl Reader {
                     let Some(value) = self.element(connection, session, array, number)? else {
                         return Ok(None);
                     };
-                    return project_property(&value, index.1.strip_prefix('.').unwrap_or(index.1))
+                    return project_property(&value, index.1.trim_prefix('.'))
                         .map(Some);
                 }
                 if rest.starts_with('.') {
@@ -991,7 +991,7 @@ impl Reader {
                     session,
                     refs,
                     field,
-                    rest.strip_prefix('.').unwrap_or(rest),
+                    rest.trim_prefix('.'),
                 );
             }
         }

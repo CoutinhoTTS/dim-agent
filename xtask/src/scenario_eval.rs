@@ -1182,7 +1182,7 @@ fn parse_selection(value: &str) -> Result<(&str, &str, usize)> {
     if arm != "current" && arm != "candidate" {
         return Err(format!("--run {value}: an arm is current or candidate").into());
     }
-    let index = run.strip_prefix("run-").unwrap_or(run);
+    let index = run.trim_prefix("run-");
     let run = index
         .parse::<usize>()
         .map_err(|_| format!("--run {value}: {run} is not a run index"))?;

@@ -1070,9 +1070,7 @@ fn percent_decode(text: &str) -> String {
 }
 
 fn origin_of(redirect_uri: &str) -> &str {
-    redirect_uri
-        .strip_suffix("/auth/callback")
-        .unwrap_or(redirect_uri)
+    redirect_uri.trim_suffix("/auth/callback")
 }
 
 #[cfg(test)]

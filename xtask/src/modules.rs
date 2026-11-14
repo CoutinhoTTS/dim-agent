@@ -248,8 +248,7 @@ impl SourceGraph {
             root: root.to_owned(),
             parent,
             file: file
-                .strip_prefix(workspace)
-                .unwrap_or(file)
+                .trim_prefix(workspace)
                 .to_string_lossy()
                 .into_owned(),
             definitions: BTreeMap::new(),

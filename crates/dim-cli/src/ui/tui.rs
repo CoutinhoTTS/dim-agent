@@ -8135,8 +8135,7 @@ fn goodbye_panel(resume: Option<&str>) -> Vec<String> {
 
 /// The rows of a committed chunk (its closing newline ends the last row).
 fn raw_rows(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.strip_suffix('\n')
-        .unwrap_or(text)
+    text.trim_suffix('\n')
         .split('\n')
         .map(str::to_owned)
 }
@@ -9016,8 +9015,7 @@ mod tests {
                     .map(|text| text.trim_start_matches('›').trim().to_owned())
                     .unwrap_or_default();
                 let placeholder = inside
-                    .strip_prefix(drawn.app.composer.text())
-                    .unwrap_or(&inside)
+                    .trim_prefix(drawn.app.composer.text())
                     .trim()
                     .to_owned();
                 assert!(

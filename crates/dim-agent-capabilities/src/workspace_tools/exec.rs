@@ -1664,7 +1664,7 @@ fn correct_windows_path(value: &str) -> String {
         if let Some(letter) = chars.next().filter(|letter| drive(*letter)) {
             let tail = chars.as_str();
             if tail.is_empty() || tail.starts_with('/') {
-                let tail = tail.strip_prefix('/').unwrap_or(tail);
+                let tail = tail.trim_prefix('/');
                 return format!(
                     "{}:\\{}",
                     letter.to_ascii_uppercase(),

@@ -741,7 +741,7 @@ pub(super) fn unified_diff(before: &str, after: &str) -> String {
             let value = change.value();
             lines.push(format!(
                 "{sign}{}",
-                value.strip_suffix('\n').unwrap_or(value)
+                value.trim_suffix('\n')
             ));
         }
     }
