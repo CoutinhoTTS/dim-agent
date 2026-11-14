@@ -649,16 +649,20 @@ fn an_id_is_identified_before_its_numbers_are_read() {
     }
 }
 
-/// One canonical id names three vendor rows and their numbers differ, so the
-/// display name of one row is what settles which of them answers.
+/// One canonical id names three vendor rows and their numbers and efforts
+/// differ, so the display name of one row is what settles which of them
+/// answers, and that row's efforts come with it.
 #[test]
 fn a_canonical_id_is_narrowed_by_the_display_name() {
     let catalog = catalog(json!([vendor(
         "acme",
         json!([
-            with_canonical(
-                row("acme-v4-flash", "Acme V4 Flash", 200_000, 64_000),
-                "acme/acme-v4.1-flash-1017",
+            with_efforts(
+                with_canonical(
+                    row("acme-v4-flash", "Acme V4 Flash", 200_000, 64_000),
+                    "acme/acme-v4.1-flash-1017",
+                ),
+                &["low", "high"],
             ),
             with_canonical(
                 row(
@@ -669,9 +673,12 @@ fn a_canonical_id_is_narrowed_by_the_display_name() {
                 ),
                 "acme/acme-v4.1-flash-1017",
             ),
-            with_canonical(
-                row("acme-flash", "Acme V4.1 Flash", 1_000_000, 128_000),
-                "acme/acme-v4.1-flash-1017",
+            with_efforts(
+                with_canonical(
+                    row("acme-flash", "Acme V4.1 Flash", 1_000_000, 128_000),
+                    "acme/acme-v4.1-flash-1017",
+                ),
+                &["low", "high", "max"],
             ),
         ])
     ),]));
@@ -684,6 +691,15 @@ fn a_canonical_id_is_narrowed_by_the_display_name() {
     assert_eq!(
         entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
         Some("acme-canonical")
+    );
+    assert!(
+        efforts(&narrowed).is_some_and(|efforts| !efforts.is_empty()),
+        "the narrowed row offers efforts, so carrying them is visible"
+    );
+    assert_ne!(
+        efforts(&narrowed),
+        efforts(&bundled(&catalog, "acme", "acme-v4-flash")),
+        "the rows offer different efforts, so which one answers is visible"
     );
     assert_eq!(efforts(&entry), efforts(&narrowed));
 }
