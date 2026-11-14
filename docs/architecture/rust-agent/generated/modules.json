@@ -28792,7 +28792,8 @@
         "path ModelEntry",
         "path ModelSource::Custom",
         "path ProviderProjection",
-        "path ProviderRole::Vendor"
+        "path ProviderRole::Vendor",
+        "path entry_kind"
       ]
     },
     {
