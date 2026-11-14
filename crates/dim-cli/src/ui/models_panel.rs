@@ -7,6 +7,7 @@
 //! Select a model
 //! > Provider / model          ZDR  ‹ high ›  current
 //!   Other provider / model    low
+//!   Third provider / model    —
 //!   Edit models
 //!   Subagent models: Agent choice
 //! Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
@@ -27,7 +28,9 @@
 //! the model and writes it as the default the next Session in the launch
 //! workspace reads; a cycled effort is saved as its `reasoningEffort` and sent
 //! with the model's other saved preferences. A model with no advertised effort
-//! ignores the arrows. Typing in the filter keeps ←/→ for the cursor.
+//! ignores the arrows; one that advertises efforts draws `—` in the effort cell
+//! until one is chosen, saved or declared, bracketed while the row is focused.
+//! Typing in the filter keeps ←/→ for the cursor.
 //!
 //! Choosing a policy writes only `collaboration.set_model_policy`; the leader's
 //! model and the provider default are untouched.
@@ -507,7 +510,7 @@ fn effort_detail(model: &ModelItem, chosen: Option<&str>, focused: bool, current
             None => "‹ — ›".to_owned(),
         }
     } else {
-        shown.unwrap_or("").to_owned()
+        shown.unwrap_or("—").to_owned()
     };
     let state = match (effort.is_empty(), current) {
         (true, true) => t("current").to_owned(),
@@ -867,6 +870,83 @@ mod tests {
         assert!(screen.contains("unidentified"), "{screen}");
     }
 
+    /// A row that offers efforts and has none chosen, saved or declared says
+    /// that a choice exists, where a row that offers none says nothing.
+    #[test]
+    fn an_unfocused_row_that_offers_efforts_and_has_none_selected_says_so() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, None),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains('—'), "{screen}");
+        assert!(!row.contains("low") && !row.contains("high"), "{screen}");
+        let plain = screen
+            .lines()
+            .find(|line| line.contains("plain"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(!plain.contains('—'), "{screen}");
+    }
+
+    /// Focused, the row brackets that placeholder the way it brackets an
+    /// effort it would send.
+    #[test]
+    fn a_focused_row_that_offers_efforts_and_has_none_selected_brackets_it() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, None),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        assert_eq!(panel.handle_key(key_of(KeyCode::Down)), Effect::None);
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains("‹ — ›"), "{screen}");
+    }
+
+    /// What the model would use takes the placeholder's place, so a declared
+    /// default reads as the effort it is.
+    #[test]
+    fn a_declared_default_effort_stands_in_for_the_placeholder() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, Some("high")),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains("high"), "{screen}");
+        assert!(!row.contains('—'), "{screen}");
+    }
+
     #[test]
     fn arrows_cycle_the_highlighted_models_effort_and_enter_adopts_it() {
         let mut panel = panel();
@@ -898,6 +978,7 @@ mod tests {
         let mut panel = panel();
         assert_eq!(panel.handle_key(key_of(KeyCode::Down)), Effect::None);
         assert!(!drawn(&panel).contains('‹'), "{}", drawn(&panel));
+        assert!(!drawn(&panel).contains('—'), "{}", drawn(&panel));
         assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
         assert!(matches!(
             panel.handle_key(key_of(KeyCode::Enter)),
