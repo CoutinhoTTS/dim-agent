@@ -1,5 +1,8 @@
-use dim_app_server::model_catalog::{BundledCatalog, ModelEdit, ModelSource, ProviderProjection};
+use dim_app_server::model_catalog::{
+    BundledCatalog, ModelEdit, ModelEntry, ModelSource, ProviderProjection, ProviderRole,
+};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 #[test]
 fn bundled_lookup_preserves_explicit_asymmetric_limits_and_hidden_metadata() {
@@ -47,7 +50,7 @@ fn a_bundled_match_declares_both_limits_and_an_unmatched_descriptor_has_none() {
     assert_eq!(matched.capabilities.max_output_tokens, Some(128_000));
     assert!(matched.capabilities.missing_limits().is_empty());
     let id = "zzzz-private-descriptor";
-    assert!(catalog.fallback(id).is_none());
+    assert!(catalog.fallback(&Default::default(), id).is_none());
     let unmatched = catalog.project(&provider, &json!({ "id": id })).unwrap();
     assert_eq!(
         unmatched.capabilities.missing_limits(),
@@ -112,6 +115,8 @@ fn normalized_family_lookup_matches_prefixed_ids() {
             }),
         )
         .unwrap();
+    // A plain id that the vendor declares resolves at the vendor: the id is
+    // how the model is spelled, not a different model.
     assert_eq!(
         entry
             .metadata
@@ -119,7 +124,7 @@ fn normalized_family_lookup_matches_prefixed_ids() {
             .unwrap()
             .matched_provider_id
             .as_deref(),
-        Some("custom-provider")
+        Some("deepseek")
     );
     let official = catalog
         .project(
@@ -389,4 +394,1277 @@ fn every_bundled_provider_states_whether_it_serves_or_resells() {
     assert!(sellers.contains(&"openai"));
     assert!(resellers.contains(&"openrouter"));
     assert_eq!(catalog.role("not-a-provider"), None);
+}
+
+#[test]
+fn a_plan_provider_is_marked_and_its_api_entry_is_not() {
+    let catalog = BundledCatalog::load().unwrap();
+    assert_eq!(catalog.is_plan("openai-codex"), Some(true));
+    assert_eq!(catalog.is_plan("openai"), Some(false));
+    assert_eq!(catalog.is_plan("not-a-provider"), None);
+    let plans: Vec<_> = catalog
+        .providers()
+        .filter(|provider| catalog.is_plan(&provider.provider_id) == Some(true))
+        .map(|provider| provider.provider_id.as_str())
+        .collect();
+    assert_eq!(plans.len(), 27, "{plans:?}");
+    for api in ["openai", "moonshot", "zai", "deepseek", "minimax"] {
+        assert_eq!(catalog.is_plan(api), Some(false), "{api}");
+    }
+}
+
+/// Projects one id as a relay outside the catalog, which is the projection a
+/// gateway that ships no bundled list has.
+fn relay(catalog: &BundledCatalog, id: &str) -> ModelEntry {
+    prefixed_relay(catalog, id, None)
+}
+
+/// The same projection, with the prefix the provider states its ids carry.
+fn prefixed_relay(catalog: &BundledCatalog, id: &str, prefix: Option<&str>) -> ModelEntry {
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        glued_prefix: prefix.map(str::to_owned),
+        ..Default::default()
+    };
+    catalog.project(&provider, &json!({ "id": id })).unwrap()
+}
+
+/// Projects one id through a builtin provider's own bundled list.
+fn builtin(catalog: &BundledCatalog, provider_id: &str, id: &str) -> ModelEntry {
+    let provider = ProviderProjection {
+        provider_id: provider_id.into(),
+        source: Some(ModelSource::Builtin),
+        models: catalog
+            .bundled_models(provider_id)
+            .unwrap_or_default()
+            .to_vec(),
+        ..Default::default()
+    };
+    catalog.project(&provider, &json!({ "id": id })).unwrap()
+}
+
+fn matched(entry: &ModelEntry) -> (&str, &str) {
+    let metadata = entry.metadata.as_ref().unwrap();
+    (
+        metadata
+            .matched_provider_id
+            .as_deref()
+            .unwrap_or("provider-default"),
+        metadata.matched_model_id.as_deref().unwrap_or("-"),
+    )
+}
+
+fn numbers(entry: &ModelEntry) -> (Option<u64>, Option<u64>) {
+    (
+        entry.capabilities.context_window,
+        entry.capabilities.max_output_tokens,
+    )
+}
+
+/// The rows outside the vendor and `custom-provider` lists that carry `id`
+/// exactly, as `(provider, window, output, placeholder)`. A provider whose pair
+/// is its stated default is flagged, because it declares nothing.
+fn seller_numbers(catalog: &BundledCatalog, id: &str) -> Vec<(String, u64, u64, bool)> {
+    let placeholders = [("tokenflux", 4_096, 4_096), ("aihubmix", 8_192, 8_192)];
+    catalog
+        .providers()
+        .filter(|provider| {
+            !matches!(
+                catalog.role(&provider.provider_id),
+                Some(ProviderRole::Vendor)
+            ) && provider.provider_id != "custom-provider"
+        })
+        .flat_map(|provider| {
+            provider
+                .models
+                .iter()
+                .filter(|model| model.model_id == id)
+                .filter_map(|model| {
+                    Some((
+                        provider.provider_id.clone(),
+                        model.capabilities.context_window?,
+                        model.capabilities.max_output_tokens?,
+                        placeholders.iter().any(|(pid, w, o)| {
+                            *pid == provider.provider_id
+                                && model.capabilities.context_window == Some(*w)
+                                && model.capabilities.max_output_tokens == Some(*o)
+                        }),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The effort lists the rows outside the vendor and `custom-provider` lists
+/// declare for `id`.
+fn declared_efforts(catalog: &BundledCatalog, id: &str) -> Vec<Vec<String>> {
+    catalog
+        .providers()
+        .filter(|provider| {
+            !matches!(
+                catalog.role(&provider.provider_id),
+                Some(ProviderRole::Vendor)
+            ) && provider.provider_id != "custom-provider"
+        })
+        .flat_map(|provider| {
+            provider
+                .models
+                .iter()
+                .filter(|model| model.model_id == id)
+                .filter_map(|model| {
+                    model
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.reasoning.as_ref())
+                        .and_then(|reasoning| reasoning.effort_options.clone())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The ids #1519's cases name, answered by the first four steps: the vendor's
+/// own list, its tokens, its canonical id and display name, and the
+/// `custom-provider` declaration. Each expected window and output cap is read
+/// from the bundled row of the provider named beside it, so a catalog change
+/// moves the expectation with it.
+#[test]
+fn an_id_is_identified_before_its_numbers_are_read() {
+    let catalog = BundledCatalog::load().unwrap();
+    for (id, provider, model) in [
+        ("deepseek-flash", "deepseek", "deepseek-flash"),
+        ("kimi-k3", "moonshot", "kimi-k3"),
+        ("kimi-k3:batch", "moonshot", "kimi-k3"),
+        ("glm-5.2", "zai", "glm-5.2"),
+        ("gemini-3.1-pro-preview", "google", "gemini-3.1-pro-preview"),
+        ("gpt-5.5", "openai", "gpt-5.5"),
+        ("kimi-k2.7-code", "moonshot", "kimi-k2.7-code"),
+        ("MiniMax-M3", "minimax", "MiniMax-M3"),
+        ("kimi-k3-20250929", "moonshot", "kimi-k3"),
+        ("claude-opus-5-5-20260101", "anthropic", "claude-opus-5-5"),
+    ] {
+        let entry = relay(&catalog, id);
+        assert_eq!(matched(&entry), (provider, model), "{id}");
+        let row = catalog
+            .bundled_models(provider)
+            .unwrap()
+            .iter()
+            .find(|row| row.model_id == model)
+            .unwrap_or_else(|| panic!("{id}: {provider} lists no {model}"));
+        let expected = (
+            row.capabilities.context_window,
+            row.capabilities.max_output_tokens,
+        );
+        assert!(
+            expected.0.is_some() && expected.1.is_some(),
+            "{id}: {provider} declares no limit for {model}"
+        );
+        assert_eq!(numbers(&entry), expected, "{id}");
+    }
+    let declared = relay(&catalog, "kimi-k2.5");
+    assert_eq!(matched(&declared), ("custom-provider", "kimi-k2.5"));
+    assert_eq!(numbers(&declared), (Some(262_144), Some(262_144)));
+    assert_eq!(
+        declared
+            .metadata
+            .as_ref()
+            .unwrap()
+            .match_strategy
+            .as_deref(),
+        Some("custom-provider")
+    );
+}
+
+/// The DeepSeek case: three vendor rows share one canonical id, and only the
+/// display name picks between them, so the narrowed rule reports one row.
+#[test]
+fn a_canonical_id_is_narrowed_by_the_display_name() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "deepseek-v4.1-flash");
+    assert_eq!(matched(&entry), ("deepseek", "deepseek-flash"));
+    assert_eq!(numbers(&entry), (Some(1_000_000), Some(384_000)));
+    assert_eq!(
+        entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
+        Some("deepseek-canonical")
+    );
+    let efforts = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .reasoning
+        .as_ref()
+        .and_then(|reasoning| reasoning.effort_options.clone())
+        .unwrap();
+    assert_eq!(efforts, ["low", "high", "max"]);
+}
+
+/// An API entry beats the plan that the same vendor sells beside it, and on
+/// the plan's own provider the plan's own numbers still win.
+#[test]
+fn an_api_entry_beats_a_plan_entry() {
+    let catalog = BundledCatalog::load().unwrap();
+    let on_a_relay = relay(&catalog, "gpt-5.5");
+    assert_eq!(matched(&on_a_relay), ("openai", "gpt-5.5"));
+    assert_eq!(numbers(&on_a_relay).0, Some(1_050_000));
+    let on_the_plan = builtin(&catalog, "openai-codex", "gpt-5.5");
+    assert_eq!(matched(&on_the_plan), ("openai-codex", "gpt-5.5"));
+    assert_eq!(numbers(&on_the_plan).0, Some(258_400));
+    let kimi = relay(&catalog, "kimi-k2.7-code");
+    assert_eq!(matched(&kimi), ("moonshot", "kimi-k2.7-code"));
+    assert_eq!(numbers(&kimi).1, Some(262_144));
+}
+
+/// A row that names a different model is not an answer for this one, so the
+/// id keeps the projection's own default rather than its family base.
+#[test]
+fn a_variant_is_not_its_family_base() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "gpt-5-codex");
+    assert_ne!(matched(&entry), ("openai", "gpt-5"));
+    assert_ne!(numbers(&entry), (Some(400_000), Some(128_000)));
+}
+
+/// Several rows claim one id, declare different numbers, and no API entry
+/// exists between them, so none of them may supply numbers.
+#[test]
+fn two_vendors_claiming_one_id_report_ambiguity() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "ark-code-latest");
+    assert_eq!(matched(&entry), ("provider-default", "-"));
+    assert_eq!(
+        entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"]
+    );
+    let row = catalog
+        .bundled_models("ark-code")
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == "ark-code-latest")
+        .unwrap();
+    assert_eq!(row.capabilities.context_window, Some(204_800));
+}
+
+/// Two providers selling one model under one name with one set of numbers are
+/// one model, not a conflict, and the API entry beside them settles it.
+#[test]
+fn two_rows_with_one_set_of_numbers_are_one_model() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "kimi-k3");
+    assert_eq!(matched(&entry).1, "kimi-k3");
+    let moonshot = catalog
+        .bundled_models("moonshot")
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == "kimi-k3")
+        .unwrap();
+    let mirror = catalog
+        .bundled_models("moonshot-ai")
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == "kimi-k3")
+        .unwrap();
+    assert_eq!(
+        (
+            moonshot.capabilities.context_window,
+            moonshot.capabilities.max_output_tokens
+        ),
+        (
+            mirror.capabilities.context_window,
+            mirror.capabilities.max_output_tokens
+        )
+    );
+}
+
+/// A plan's own provider keeps the plan's numbers even when the vendor's API
+/// entry disagrees, since the provider answers for the subscription it sells.
+#[test]
+fn a_plan_keeps_its_own_numbers_on_its_own_provider() {
+    let catalog = BundledCatalog::load().unwrap();
+    let plan = builtin(&catalog, "openai-codex", "gpt-6.1-sol");
+    assert_eq!(numbers(&plan).0, Some(258_400));
+    let api = catalog
+        .bundled_models("openai")
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == "gpt-6.1-sol")
+        .unwrap();
+    assert_eq!(api.capabilities.context_window, Some(1_050_000));
+}
+
+/// A provider's stored list can lag the bundle by a model. When it does, the
+/// provider still answers for that model from its own family before any other
+/// seller does: `openai-codex` keeps its own window for `gpt-5.5` rather than
+/// the vendor API entry the plan rule would otherwise prefer.
+#[test]
+fn a_providers_own_family_answers_before_another_seller() {
+    let catalog = BundledCatalog::load().unwrap();
+    let provider = ProviderProjection {
+        provider_id: "openai-codex".into(),
+        source: Some(ModelSource::Builtin),
+        models: catalog
+            .bundled_models("openai-codex")
+            .unwrap()
+            .iter()
+            .filter(|model| model.model_id != "gpt-5.5")
+            .cloned()
+            .collect(),
+        ..Default::default()
+    };
+    let entry = catalog
+        .project(&provider, &json!({ "id": "gpt-5.5" }))
+        .unwrap();
+    assert_eq!(matched(&entry), ("openai-codex", "gpt-5.5"));
+    assert_eq!(numbers(&entry).0, Some(258_400));
+}
+
+/// A vendor row is an answer where an aggregator row alone is not: the merge
+/// that would combine them arrives later, so a vendor's declaration wins now.
+#[test]
+fn a_plain_id_identifies_at_its_vendor() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "glm-5.2");
+    assert_eq!(matched(&entry), ("zai", "glm-5.2"));
+    let seller = catalog
+        .bundled_models("custom-provider")
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == "glm-5.2")
+        .unwrap();
+    assert_ne!(
+        seller
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.reasoning.as_ref())
+            .and_then(|reasoning| reasoning.effort_options.clone()),
+        catalog
+            .bundled_models("zai")
+            .unwrap()
+            .iter()
+            .find(|model| model.model_id == "glm-5.2")
+            .and_then(|model| model.metadata.as_ref())
+            .and_then(|metadata| metadata.reasoning.as_ref())
+            .and_then(|reasoning| reasoning.effort_options.clone())
+    );
+}
+
+/// A vendor the id names in its namespace segment wins over another vendor
+/// selling the same model, so `ark-code/ark-code-latest` answers with
+/// `ark-code` while the bare id stays ambiguous.
+#[test]
+fn a_namespaced_id_identifies_the_vendor_it_names() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "ark-code/ark-code-latest");
+    assert_eq!(matched(&entry), ("ark-code", "ark-code-latest"));
+    assert_eq!(numbers(&entry), (Some(204_800), Some(60_000)));
+    let bare = relay(&catalog, "ark-code-latest");
+    assert_eq!(matched(&bare), ("provider-default", "-"));
+}
+
+/// Step 4 reads the `custom-provider` rows by the same token and name rules,
+/// so a model that only that list carries resolves to a declared row and is
+/// not left for the merge.
+#[test]
+fn a_custom_provider_row_is_a_declaration() {
+    let catalog = BundledCatalog::load().unwrap();
+    for (input, model) in [
+        ("qwen3.8-omni-flash", "qwen3.8-omni-flash"),
+        ("Qwen3.8 Omni Flash", "qwen3.8-omni-flash"),
+    ] {
+        let entry = relay(&catalog, input);
+        assert_eq!(matched(&entry), ("custom-provider", model), "{input}");
+        assert_eq!(
+            entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
+            Some("custom-provider"),
+            "{input}"
+        );
+        assert!(entry.capabilities.missing_limits().is_empty(), "{input}");
+    }
+}
+
+/// Step 1 answers an aggregator's own house model on that aggregator's own
+/// provider: `openrouter` lists `openrouter/fusion` itself, so the row's own
+/// limits stand and no vendor row is consulted. The same id through a relay is
+/// identified by the vendor that names `fusion` and refused; that is the
+/// relay-only loss, not a broken step 1.
+#[test]
+fn an_aggregators_house_model_answers_on_its_own_provider() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = builtin(&catalog, "openrouter", "openrouter/fusion");
+    assert_eq!(matched(&entry), ("openrouter", "openrouter/fusion"));
+    assert_eq!(numbers(&entry), (Some(8_192), Some(8_192)));
+    assert_eq!(
+        entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
+        Some("provider-exact")
+    );
+    assert_eq!(
+        entry
+            .metadata
+            .as_ref()
+            .unwrap()
+            .identification
+            .as_ref()
+            .unwrap()
+            .rule,
+        "provider-exact"
+    );
+    assert!(entry.capabilities.missing_limits().is_empty());
+}
+
+/// An aggregator's own qualified id is its identity before any step drops the
+/// namespace: `openrouter/auto` is OpenRouter's router and not the bare `auto`
+/// a vendor sells, and `openrouter/fusion` is its text router and not Rev AI's
+/// audio transcription model.
+#[test]
+fn a_qualified_house_model_keeps_its_own_identity() {
+    let catalog = BundledCatalog::load().unwrap();
+    for id in ["openrouter/auto", "openrouter/fusion"] {
+        let entry = relay(&catalog, id);
+        let row = catalog
+            .bundled_models("openrouter")
+            .unwrap()
+            .iter()
+            .find(|row| row.model_id == id)
+            .unwrap();
+        let metadata = entry.metadata.as_ref().unwrap();
+        let answered = (
+            matched(&entry),
+            numbers(&entry),
+            entry.capabilities.modalities.clone(),
+            entry.capabilities.audio,
+            entry.capabilities.tool_calling,
+            metadata
+                .identification
+                .as_ref()
+                .map(|found| found.rule.as_str()),
+            metadata.match_strategy.as_deref(),
+        );
+        let expected = (
+            ("openrouter", id),
+            (
+                row.capabilities.context_window,
+                row.capabilities.max_output_tokens,
+            ),
+            row.capabilities.modalities.clone(),
+            row.capabilities.audio,
+            row.capabilities.tool_calling,
+            Some("qualified"),
+            Some("openrouter-exact"),
+        );
+        assert_eq!(
+            answered, expected,
+            "{id}: the relay answers with the row itself"
+        );
+    }
+}
+
+/// The prefix states what a relay glued onto every id it lists, so it may not
+/// take a qualified id away from the step that reads it whole: `openrouter/auto`
+/// is OpenRouter's router even on a relay whose prefix is `auto`, and the same
+/// statement that names `auto-kimi-k3` leaves this id its own numbers.
+#[test]
+fn a_qualified_house_model_survives_the_relays_prefix() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = prefixed_relay(&catalog, "openrouter/auto", Some("auto"));
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .expect("the qualified step reads the id the prefix would consume");
+    assert_eq!(
+        (
+            matched(&entry),
+            numbers(&entry),
+            identification.rule.as_str()
+        ),
+        (
+            ("openrouter", "openrouter/auto"),
+            (Some(8_192), Some(8_192)),
+            "qualified"
+        )
+    );
+}
+
+/// A namespace that names a known provider binds the id to that provider: when
+/// nothing under it names the model, another vendor may not claim the id by its
+/// final token, so the refusal names the rows that would have.
+#[test]
+fn a_namespaced_id_the_namespace_provider_does_not_name_is_refused() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "openai/gpt-image-2.5-flare");
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .map(|found| found.rule.as_str());
+    assert_eq!(
+        (matched(&entry), identification),
+        (("provider-default", "-"), Some("ambiguous")),
+        "the token `flare` is not an answer under the namespace `openai`"
+    );
+    assert_eq!(
+        entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"]
+    );
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "ambiguous");
+    let named: Vec<_> = identification
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.provider_id.as_str(), candidate.model_id.as_str()))
+        .collect();
+    assert_eq!(named, [("openai-codex", "gpt-image-2.5-flare")]);
+}
+
+/// The namespace binds every identification step, not only the token step: a
+/// canonical-id or display-name answer that names another provider is refused
+/// too, and the refusal names those rows. Both spellings of one id reach the
+/// canonical step, so both carry the same answer.
+#[test]
+fn the_namespace_refuses_canonical_and_display_name_answers_too() {
+    let catalog = BundledCatalog::load().unwrap();
+    for (id, refused) in [
+        (
+            "openrouter/daybreak-blue",
+            "openai/gpt-daybreak-blue-latest",
+        ),
+        ("openrouter/deepseek-v4.1-flash", "deepseek/deepseek-flash"),
+        (
+            "openai/GPT Image 2.5 Flare (2026-09-08)",
+            "openai-codex/gpt-image-2.5-flare-2026-09-08",
+        ),
+    ] {
+        let entry = relay(&catalog, id);
+        let identification = entry
+            .metadata
+            .as_ref()
+            .unwrap()
+            .identification
+            .as_ref()
+            .unwrap();
+        let named: Vec<_> = identification
+            .candidates
+            .iter()
+            .map(|candidate| format!("{}/{}", candidate.provider_id, candidate.model_id))
+            .collect();
+        assert_eq!(
+            (
+                matched(&entry),
+                identification.rule.as_str(),
+                named,
+                entry.capabilities.missing_limits(),
+            ),
+            (
+                ("provider-default", "-"),
+                "ambiguous",
+                vec![refused.to_owned()],
+                vec!["contextWindow".to_owned(), "maxOutputTokens".to_owned()],
+            ),
+            "{id}: the answer is not this namespace's row"
+        );
+    }
+}
+
+/// A merge answers for several sellers at once, so each adopted limit keeps the
+/// row it came from: `openai/gpt-oss-20b` takes its window from aihubmix and its
+/// output cap from qiniu, while `metadataSource` still names the row the entry
+/// is copied from.
+#[test]
+fn a_merged_limit_names_the_seller_it_came_from() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "openai/gpt-oss-20b");
+    let metadata = entry.metadata.as_ref().unwrap();
+    let identification = metadata.identification.as_ref().unwrap();
+    let filled: Vec<_> = identification
+        .filled
+        .iter()
+        .map(|limit| {
+            (
+                limit.field.as_str(),
+                limit.value,
+                limit.provider_id.as_str(),
+                limit.model_id.as_str(),
+                limit.rule.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        (
+            numbers(&entry),
+            filled,
+            metadata.metadata_source.as_deref(),
+            metadata.matched_model_id.as_deref()
+        ),
+        (
+            (Some(128_000), Some(4_096)),
+            vec![
+                ("contextWindow", 128_000, "aihubmix", "gpt-oss-20b", "merge"),
+                ("maxOutputTokens", 4_096, "qiniu", "gpt-oss-20b", "merge"),
+            ],
+            Some("openrouter"),
+            Some("openai/gpt-oss-20b"),
+        ),
+        "each adopted minimum names the row that declared it"
+    );
+    assert_eq!(identification.rule, "merge");
+}
+
+/// A limit the descriptor declares is the entry's own number, so the merge's
+/// record of an adopted minimum for that field is not a limit this entry
+/// inherited: `filled` lists only the ones it did. A value equal to the
+/// adopted minimum is still a declaration of its own.
+#[test]
+fn filled_lists_only_the_limits_the_descriptor_did_not_declare() {
+    let catalog = BundledCatalog::load().unwrap();
+    let provider = ProviderProjection {
+        provider_id: "custom_relay".into(),
+        source: Some(ModelSource::Custom),
+        ..Default::default()
+    };
+    for (descriptor, declared, filled) in [
+        (
+            json!({"id":"openai/gpt-oss-20b","limit":{"context":777,"output":333}}),
+            (Some(777), Some(333)),
+            vec![],
+        ),
+        (
+            json!({"id":"openai/gpt-oss-20b","limit":{"context":777}}),
+            (Some(777), Some(4_096)),
+            vec![("maxOutputTokens", 4_096, "qiniu")],
+        ),
+        (
+            json!({"id":"openai/gpt-oss-20b","limit":{"context":128_000}}),
+            (Some(128_000), Some(4_096)),
+            vec![("maxOutputTokens", 4_096, "qiniu")],
+        ),
+        (
+            json!({"id":"openai/gpt-oss-20b","limit":{"context":128_000,"output":4_096}}),
+            (Some(128_000), Some(4_096)),
+            vec![],
+        ),
+    ] {
+        let entry = catalog.project(&provider, &descriptor).unwrap();
+        let identification = entry
+            .metadata
+            .as_ref()
+            .unwrap()
+            .identification
+            .as_ref()
+            .unwrap();
+        let listed: Vec<_> = identification
+            .filled
+            .iter()
+            .map(|limit| {
+                (
+                    limit.field.as_str(),
+                    limit.value,
+                    limit.provider_id.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            (numbers(&entry), listed),
+            (declared, filled),
+            "{descriptor}: a declared limit has no filled record"
+        );
+    }
+}
+
+/// The same provenance on the list a relay serves: `effective_models` projects
+/// every row of a custom provider, and a row that declares neither limit takes
+/// both from the merge with the seller of each.
+#[test]
+fn a_merge_carries_the_sellers_through_the_effective_models() {
+    let catalog = BundledCatalog::load().unwrap();
+    let row: ModelEntry = serde_json::from_value(json!({
+        "modelId": "openai/gpt-oss-20b",
+        "displayName": "openai/gpt-oss-20b",
+        "status": "active",
+        "capabilities": {
+            "modalities": ["text"], "toolCalling": true, "streaming": true,
+            "structuredOutput": true, "vision": false, "audio": false,
+            "reasoning": false
+        }
+    }))
+    .unwrap();
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        models: vec![row.clone()],
+        ..Default::default()
+    };
+    let effective = catalog.effective_models(&provider, std::slice::from_ref(&row), &[]);
+    let identification = effective[0]
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    let filled: Vec<_> = identification
+        .filled
+        .iter()
+        .map(|limit| {
+            (
+                limit.field.as_str(),
+                limit.value,
+                limit.provider_id.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        (
+            (
+                effective[0].capabilities.context_window,
+                effective[0].capabilities.max_output_tokens
+            ),
+            identification.rule.as_str(),
+            filled,
+        ),
+        (
+            (Some(128_000), Some(4_096)),
+            "merge",
+            vec![
+                ("contextWindow", 128_000, "aihubmix"),
+                ("maxOutputTokens", 4_096, "qiniu"),
+            ],
+        )
+    );
+}
+
+/// Every aggregator row that names the same model with the same tag joins, and
+/// the merge takes the safe direction: the smallest window and the smallest
+/// output cap any joining row declares.
+#[test]
+fn an_aggregator_only_model_merges_the_minimum() {
+    let catalog = BundledCatalog::load().unwrap();
+    for (id, window, output) in [
+        ("openai/gpt-oss-20b", 128_000, 4_096),
+        ("meta/muse-glimmer-30b", 131_072, 16_384),
+        ("nvidia/nemotron-3-super-120b-a12b", 256_000, 32_000),
+    ] {
+        let sellers = seller_numbers(&catalog, id);
+        assert!(sellers.len() > 1, "{id}: sellers {sellers:?}");
+        let declaring: Vec<_> = sellers.iter().filter(|row| !row.3).collect();
+        assert!(
+            declaring.iter().any(|row| row.1 != window)
+                || declaring.iter().any(|row| row.2 != output),
+            "{id}: the minimum must differ from some row, else the test proves nothing"
+        );
+        for row in &declaring {
+            assert!(
+                window <= row.1,
+                "{id}: window {window} exceeds a row's {}",
+                row.1
+            );
+            assert!(
+                output <= row.2,
+                "{id}: output {output} exceeds a row's {}",
+                row.2
+            );
+        }
+        let entry = relay(&catalog, id);
+        assert_eq!(numbers(&entry), (Some(window), Some(output)), "{id}");
+        assert_eq!(
+            entry
+                .metadata
+                .as_ref()
+                .unwrap()
+                .identification
+                .as_ref()
+                .unwrap()
+                .rule,
+            "merge",
+            "{id}"
+        );
+        let (seller, answered) = matched(&entry);
+        assert_eq!(answered, id, "{id}: the merge answered a row that names it");
+        assert!(
+            sellers.iter().any(|row| row.0 == seller),
+            "{id}: the merge names the seller {seller}, which is not a joining row"
+        );
+    }
+}
+
+/// The efforts are the intersection over the rows that declare any, never the
+/// union: an option only some sellers accept is not offered.
+#[test]
+fn merged_efforts_are_the_intersection() {
+    let catalog = BundledCatalog::load().unwrap();
+    for (id, expected) in [
+        ("inception/mercury-2", ["low", "medium", "high"].as_slice()),
+        (
+            "meta/muse-glimmer-30b",
+            ["low", "medium", "high"].as_slice(),
+        ),
+        ("fireworks/ember-1", ["low", "high"].as_slice()),
+    ] {
+        let mut declared = declared_efforts(&catalog, id);
+        assert!(declared.len() > 1, "{id}: {declared:?}");
+        let union: Vec<String> = {
+            let mut all: Vec<String> = declared.iter().flatten().cloned().collect();
+            all.sort();
+            all.dedup();
+            all
+        };
+        let entry = relay(&catalog, id);
+        let mut merged = entry
+            .metadata
+            .as_ref()
+            .unwrap()
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.effort_options.clone())
+            .unwrap();
+        merged.sort();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        assert_eq!(merged, expected, "{id}");
+        assert!(merged.len() < union.len(), "{id}: the union is {union:?}");
+        for list in &mut declared {
+            list.sort();
+            assert!(
+                merged.iter().all(|effort| list.contains(effort)),
+                "{id}: {merged:?} is not inside {list:?}"
+            );
+        }
+    }
+}
+
+/// A row whose own id carries a tag joins only an input carrying that tag: the
+/// tagged input merges the tagged row and an untagged input never does.
+#[test]
+fn a_tagged_row_does_not_join_an_untagged_input() {
+    let catalog = BundledCatalog::load().unwrap();
+    let tagged = relay(&catalog, "mistralai/codestral-2508:batch");
+    let bare = relay(&catalog, "mistralai/codestral-2508");
+    assert_ne!(
+        numbers(&tagged),
+        numbers(&bare),
+        "the tagged row and the untagged rows declare different caps"
+    );
+    assert_eq!(numbers(&tagged), (Some(256_000), Some(204_800)));
+    let answered = tagged
+        .metadata
+        .as_ref()
+        .unwrap()
+        .matched_model_id
+        .clone()
+        .unwrap();
+    assert_eq!(answered, "mistralai/codestral-2508:batch");
+
+    let mut checked = 0;
+    for id in catalog
+        .providers()
+        .flat_map(|provider| provider.models.iter())
+        .map(|model| model.model_id.clone())
+        .filter(|id| !id.contains(':'))
+        .collect::<Vec<_>>()
+    {
+        let entry = relay(&catalog, &id);
+        let rule = entry
+            .metadata
+            .as_ref()
+            .unwrap()
+            .identification
+            .as_ref()
+            .map(|identification| identification.rule.clone());
+        if rule.as_deref() != Some("merge") {
+            continue;
+        }
+        checked += 1;
+        let answered = entry.metadata.as_ref().unwrap().matched_model_id.clone();
+        assert!(
+            answered.as_deref().is_none_or(|row| !row.contains(':')),
+            "{id}: an untagged input joined the tagged row {answered:?}"
+        );
+    }
+    assert!(
+        checked > 0,
+        "no untagged id merged, so the check proved nothing"
+    );
+}
+
+/// Two rows that declare one set of numbers are one model, so they settle a
+/// step instead of reporting an ambiguity even when the seller names differ.
+#[test]
+fn an_ambiguous_step_collapses_rows_that_agree() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "kimi-k3");
+    assert_ne!(
+        entry
+            .metadata
+            .as_ref()
+            .unwrap()
+            .identification
+            .as_ref()
+            .unwrap()
+            .rule,
+        "ambiguous"
+    );
+}
+
+/// A provider's placeholder pair is its default, not a declaration: the static
+/// path that serves it fills the two limits from the entry the id identifies,
+/// records where they came from, and leaves the row's own capabilities alone.
+#[test]
+fn a_placeholder_limit_is_not_a_declaration() {
+    let catalog = BundledCatalog::load().unwrap();
+    let row = catalog
+        .bundled_models("tokenflux")
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == "openai/gpt-5")
+        .expect("tokenflux lists openai/gpt-5")
+        .clone();
+    assert_eq!(numbers(&row), (Some(4_096), Some(4_096)));
+    let provider = ProviderProjection {
+        provider_id: "tokenflux".into(),
+        source: Some(ModelSource::Builtin),
+        models: catalog.bundled_models("tokenflux").unwrap().to_vec(),
+        ..Default::default()
+    };
+    let effective = catalog.effective_models(&provider, std::slice::from_ref(&row), &[]);
+    let filled = &effective[0];
+    let vendor = catalog
+        .bundled_models("openai")
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == "gpt-5")
+        .expect("openai lists gpt-5");
+    assert_eq!(numbers(filled), numbers(vendor));
+    assert_ne!(numbers(filled), numbers(&row));
+    assert!(
+        !filled.capabilities.tool_calling,
+        "the row keeps its own API"
+    );
+    let identification = filled
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "provider-exact");
+    assert_eq!(identification.filled.len(), 2, "{identification:?}");
+    assert!(
+        identification
+            .filled
+            .iter()
+            .all(|limit| limit.provider_id == "openai"),
+        "{identification:?}"
+    );
+    let fields: Vec<_> = identification
+        .filled
+        .iter()
+        .map(|limit| limit.field.as_str())
+        .collect();
+    assert_eq!(fields, ["contextWindow", "maxOutputTokens"]);
+}
+
+/// The outcome reaches `metadata.identification`, and an ambiguity carries the
+/// rows that disagree without becoming a projection error.
+#[test]
+fn the_identification_reaches_the_entry_and_names_an_ambiguity() {
+    use dim_app_server::model_catalog::ModelIdentification;
+
+    let catalog = BundledCatalog::load().unwrap();
+    let identified = relay(&catalog, "deepseek-v4.1-flash");
+    let identification: &ModelIdentification = identified
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "canonical");
+    assert!(identification.narrowed_by_display_name);
+    assert!(identification.candidates.is_empty());
+    assert!(identification.filled.is_empty());
+
+    let exact = relay(&catalog, "glm-5.2");
+    assert_eq!(
+        exact
+            .metadata
+            .as_ref()
+            .unwrap()
+            .identification
+            .as_ref()
+            .unwrap()
+            .rule,
+        "token"
+    );
+
+    let ambiguous = relay(&catalog, "ark-code-latest");
+    let identification = ambiguous
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "ambiguous");
+    let mut named: Vec<_> = identification
+        .candidates
+        .iter()
+        .map(|candidate| candidate.provider_id.as_str())
+        .collect();
+    named.sort();
+    assert_eq!(
+        named,
+        ["ark-agent-plan", "ark-code", "byteplus-coding-plan"]
+    );
+
+    let unmatched = relay(&catalog, "zzzz-nothing-names-this");
+    assert!(
+        unmatched
+            .metadata
+            .as_ref()
+            .unwrap()
+            .identification
+            .is_none(),
+        "nothing named the model, so there is no identification"
+    );
+}
+
+/// A relay whose ids carry its own prefix resolves the model under the
+/// stripped id: the strip happens once, at the head, so the numbers are the
+/// bare id's own and the step that named them is the token step.
+#[test]
+fn a_providers_glued_prefix_is_stripped_before_matching() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = prefixed_relay(&catalog, "auto-kimi-k3", Some("auto"));
+    assert_eq!(matched(&entry), ("moonshot", "kimi-k3"));
+    assert_eq!(numbers(&entry), (Some(1_048_576), Some(1_048_576)));
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "token");
+    // The strategy reports against the id the provider listed, not the
+    // stripped one, so the entry says how its own id was read.
+    assert_eq!(
+        entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
+        Some("moonshot-token")
+    );
+}
+
+/// The same provider without the statement is unidentified, so the field is
+/// what identifies rather than a guess about the id shape.
+#[test]
+fn a_prefixed_id_without_the_statement_is_unidentified() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "auto-kimi-k3");
+    assert_eq!(matched(&entry), ("provider-default", "-"));
+    assert_eq!(
+        entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"]
+    );
+    assert!(
+        entry.metadata.as_ref().unwrap().identification.is_none(),
+        "nothing named the model, so there is no identification"
+    );
+}
+
+/// Step 1 reads the whole id, so an exact row still wins with the prefix set,
+/// and an id the prefix does not head is left as it is.
+#[test]
+fn an_exact_row_still_wins_with_the_prefix_set() {
+    let catalog = BundledCatalog::load().unwrap();
+    // A stored list that carries the prefixed id itself, which is what step 1
+    // reads before any step breaks the id into tokens.
+    let provider = ProviderProjection {
+        provider_id: "moonshot".into(),
+        source: Some(ModelSource::Builtin),
+        models: vec![
+            catalog
+                .project(
+                    &ProviderProjection {
+                        provider_id: "moonshot".into(),
+                        source: Some(ModelSource::Custom),
+                        ..Default::default()
+                    },
+                    &json!({ "id": "auto-kimi-k3" }),
+                )
+                .unwrap(),
+        ],
+        glued_prefix: Some("auto".into()),
+        ..Default::default()
+    };
+    let entry = catalog
+        .project(&provider, &json!({ "id": "auto-kimi-k3" }))
+        .unwrap();
+    assert_eq!(
+        matched(&entry),
+        ("moonshot", "auto-kimi-k3"),
+        "the provider's own row answers before any step reads the prefix"
+    );
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "provider-exact");
+}
+
+/// The prefix is a token head, so `auto` and `auto-` are one statement, and a
+/// prefix that consumes the whole id leaves nothing to identify.
+#[test]
+fn the_prefix_is_normalised_and_must_leave_a_name() {
+    let catalog = BundledCatalog::load().unwrap();
+    for prefix in ["auto", "auto-", " AUTO "] {
+        let entry = prefixed_relay(&catalog, "auto-kimi-k3", Some(prefix));
+        assert_eq!(
+            matched(&entry),
+            ("moonshot", "kimi-k3"),
+            "the prefix {prefix:?} is the same statement"
+        );
+    }
+    let empty = prefixed_relay(&catalog, "auto-", Some("auto"));
+    assert_eq!(matched(&empty), ("provider-default", "-"));
+    assert!(
+        empty.metadata.as_ref().unwrap().identification.is_none(),
+        "a prefix that leaves no name identifies nothing"
+    );
+}
+
+/// The relay projection with the provider's own statement that a listed id
+/// stands for another model.
+fn aliased_relay(catalog: &BundledCatalog, id: &str, target: &str) -> ModelEntry {
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        model_aliases: BTreeMap::from([(id.to_owned(), target.to_owned())]),
+        ..Default::default()
+    };
+    catalog.project(&provider, &json!({ "id": id })).unwrap()
+}
+
+/// A provider's own statement that a listed id stands for another model is
+/// what that id resolves through: the target goes through the same steps, so
+/// the answer carries the target row's numbers and rule, and no second
+/// vocabulary is introduced for the fact that an alias was used.
+///
+/// A `provider/model` target answers through the token step on a relay, not
+/// through the qualified one: the qualified index keys a row by the id the row
+/// carries itself, so a target that no row spells whole is read by its tokens,
+/// with its namespace binding those tokens to that provider. The rule word is
+/// therefore `token`, and the strategy keeps the target's own provider.
+#[test]
+fn a_provider_alias_resolves_an_id_through_the_pipeline() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = aliased_relay(&catalog, "ark-code-latest", "ark-code/ark-code-latest");
+    assert_eq!(matched(&entry), ("ark-code", "ark-code-latest"));
+    assert_eq!(numbers(&entry), (Some(204_800), Some(60_000)));
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "token");
+    assert_eq!(
+        entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
+        Some("ark-code-token")
+    );
+}
+
+/// An alias on an id no rule can read answers with the target's own rule, not
+/// a rule of its own.
+#[test]
+fn an_alias_on_an_unreadable_id_takes_the_targets_rule() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = aliased_relay(&catalog, "my-deployment-gpt-4o", "gpt-5.5");
+    assert_eq!(matched(&entry), ("openai", "gpt-5.5"));
+    assert_eq!(numbers(&entry), (Some(1_050_000), Some(128_000)));
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "token");
+}
+
+/// An alias whose target is itself ambiguous returns the target's candidates:
+/// an alias names one model, and it may not choose a side of a disagreement.
+#[test]
+fn an_alias_onto_an_ambiguous_target_stays_ambiguous() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = aliased_relay(&catalog, "my-deployment-ark", "ark-code-latest");
+    assert_eq!(matched(&entry), ("provider-default", "-"));
+    assert_eq!(
+        entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"]
+    );
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "ambiguous");
+    let mut named: Vec<_> = identification
+        .candidates
+        .iter()
+        .map(|candidate| candidate.provider_id.as_str())
+        .collect();
+    named.sort();
+    assert_eq!(
+        named,
+        ["ark-agent-plan", "ark-code", "byteplus-coding-plan"]
+    );
+}
+
+/// Without the statement `ark-code-latest` keeps today's ambiguity and its
+/// three candidates, so the alias is the only change to the id, and an alias
+/// that names nothing leaves the id exactly as it was without one.
+#[test]
+fn an_unaliased_ambiguous_id_keeps_its_candidates_and_a_stale_alias_adds_nothing() {
+    let catalog = BundledCatalog::load().unwrap();
+    let entry = relay(&catalog, "ark-code-latest");
+    let identification = entry
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "ambiguous");
+    assert_eq!(identification.candidates.len(), 3);
+    let stale = aliased_relay(&catalog, "ark-code-latest", "zzzz-nothing-names-this");
+    let stale_identification = stale
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        (
+            stale_identification.rule.as_str(),
+            stale_identification.candidates.len()
+        ),
+        ("ambiguous", 3),
+        "a target that names nothing falls through to the merge as if there were no alias"
+    );
 }

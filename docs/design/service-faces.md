@@ -126,14 +126,24 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `sqliteStorage` | 连接与事务 | 数据面 `store` 的 Session 行部分（§5）；`sqliteStorage` 是提供方内部的 SQL 引擎（#1298） |
 | `timelineStore` | 连接与批次 | 同一 `store` 面的 Timeline 部分：`append`（同步受理）/`commits`、`closeCommits`（按分支序的完成通知）/`head`/`branches`/`readPage`/`readSegments`/`query`/`trace`/`batchEnd`/`saveSnapshot`/`latestSnapshot`；`TimelineStore` trait 是 binding（#1298） |
 | `toolHost` | `ToolDriver` | `execute` 数据面 |
-| `mcpSession` | 会话对象 | 每 server 的 id 操作 |
-| `backgroundExec` | 任务对象 | task id 操作 |
 | `approval`、`permission` | 决策状态 | `decide` 数据面 |
 | `inputQueue` | 队列状态 | `submit`/`withdraw` 数据面 |
 | `wait` | `WaitResult`、`CancellationToken` | `start`/`wait`/`result` 操作面 |
 | `promptSourcesBranch` | 分支 prompt 装配 | 按 #1292 确认公共操作与装配内部职责。 |
 
 这些行按当前对象形状分组。前四行的数据契约由 [resource and store data faces](resource-faces.md) 定义（#1295/#1297/#1298）。其余行按 #1292 逐批确定操作面。
+
+`mcpSession` 与 `backgroundExec` 的数据面以 id 加操作暴露：
+
+| 名字 | 数据面 | 所有者把什么留在内部 |
+| --- | --- | --- |
+| `mcpSession` | `state()`、`refresh()`、`widget(published)`、`call(server, tool, arguments)` | 连接代次、已发布工具、发现与重连 |
+| `backgroundExec` | `output(taskId)`、`outputPage(taskId, cursor, limit)`、`wait(taskId, timeoutMs)`、`stop(taskId)` | 任务表、活进程、输出采集与唤醒 |
+
+形状与错误由所有者文档定义：[MCP Apps](appserver/mcp-apps.md#44-the-mcpsession-data-face)（`mcpSession`）和
+[WorkspaceTools](../architecture/rust-agent/plugins/WorkspaceTools.md#data-face)（`backgroundExec`）。
+`backgroundExec.start` 需要活的进程对象，仍是 `exec` 工具的操作，不在数据面上；`backgroundExec.stop` 是 kill。
+这些名字在 catalog 里是 `data`，Rust 类型仍由部件在同一实例按类型键读取。
 
 `hostPlatform`、`fileStorage`、`sqliteStorage`、`timelineStore` 不按对象分类保留：数据面就是公开契约，`execHost`、`fsHost`、`store` 的操作就是它们的接口，旧名字是提供方和它的 Rust binding，调用方在进程内直接调这组操作，不再有第二套公开 API。凭据是操作内部用的能力，不是保留 `internal` 的理由。`hostPlatform`、`fileStorage` 的提供方在持有资源的那个 daemon（控制节点自己的插件，或 #1296 挂载的资源 leaf）；`store` 在持有 Session 状态的那个 daemon，SQLite 还是 PostgreSQL 只是实现（#1298，[resource and store data faces](resource-faces.md) §6）。
 
@@ -323,7 +333,7 @@ worktreeAssociations.associate {sessionId, repository, root, subtree} -> {}
   -- 路径按 §1 是 UTF-8 字符串；一次写入仍由 SessionStore 的原子事务保证
 ```
 
-- `agentConfig` 在 runtime 的 catalog 注册 shared instance；`SessionScope` 已经提供值，`get` 返回同一个快照。
+- `agentConfig` 在 runtime 的 catalog 注册 shared instance；`SessionScope` 已经提供值，`get` 返回同一个快照。 配置快照直接使用所有者的数据定义，接收端允许未知字段；公开类型名称的迁移见[插件配置类型兼容性说明](../release/README.md#plugin-configuration-type-compatibility)。
 - `skillsConfig`、`collaborationConfig` 的注册从 typed 改成 shared instance；值仍由 `install_with_config` 的 `session_value` 提供。
 - `sessionLanguage` 只把读做成面；值由 PromptSources 的 Session part 提供，branch 通过 `PromptSourcesBranch::language()` 读同一个 cell。写入不暴露，避免绕过 Session 记录和 Prompt 的采用。
 - `worktreeAssociations` 去掉 `AssociateWorktree` trait：端口持有所有者的写闭包，Rust 调用方和 wire 调用同一个 `associate`。SessionStore 绑定 `associate_worktree`；字符串转回 `PathBuf`，绝对性和子树包含仍由所有者校验。
