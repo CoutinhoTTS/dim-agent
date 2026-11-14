@@ -8143,18 +8143,11 @@ async fn a_slow_store_upgrade_reports_progress_and_keeps_the_opening_alive() {
     use dim_app_server::storage::set_upgrade_report_delay;
     use tokio_util::sync::CancellationToken;
 
-    /// Clears the delay even when an assertion fails.
-    struct Delay;
-    impl Drop for Delay {
-        fn drop(&mut self) {
-            set_upgrade_report_delay(None);
-        }
-    }
-
     let database = Database::new();
     drop(v13_store(&database.0));
 
-    let _delay = Delay;
+    // Clears the delay even when an assertion fails.
+    let _delay = std::mem::DropGuard::new((), |()| set_upgrade_report_delay(None));
     set_upgrade_report_delay(Some(Duration::from_millis(200)));
     let note = startup_note(&database.0);
     let path = database.0.clone();
