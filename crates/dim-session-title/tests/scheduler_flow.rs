@@ -12,7 +12,8 @@ use support::*;
 /// #1421: a launch-target job's Session is listable through the automation
 /// filter, carries the job's name as its manual title, and reports the
 /// `automation` origin on every read. SessionTitle is installed here, so the
-/// title is the one its own writer commits.
+/// title is the one its own writer commits, after the Session is published
+/// (SessionTitle.md §3.4): the filter lists the row before its title exists.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_launch_target_fires_and_the_catalog_lists_its_session() {
     let store = Store::new();
@@ -105,37 +106,44 @@ async fn a_launch_target_fires_and_the_catalog_lists_its_session() {
     assert_eq!(run["state"], "delivered", "{run}");
     let launched = run["session_id"].as_str().unwrap().to_owned();
 
-    let listed = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let page = client
-                .rpc(
-                    "session.catalog",
-                    json!({"withAutomationSessions":true,"limit":100}),
-                )
-                .await
-                .unwrap();
-            if page["sessions"]
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut last = None;
+    let row = loop {
+        // The bound covers the read itself, so a catalog read that never
+        // answers fails here rather than hanging the case.
+        let page = tokio::time::timeout_at(
+            deadline,
+            client.rpc(
+                "session.catalog",
+                json!({"withAutomationSessions":true,"limit":100}),
+            ),
+        )
+        .await;
+        let listed = page.as_ref().ok().and_then(|page| {
+            page.as_ref().unwrap()["sessions"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|row| row["sessionId"] == launched.as_str())
-            {
-                return page;
+                .find(|row| row["sessionId"] == launched.as_str())
+                .cloned()
+        });
+        if let Some(row) = listed {
+            if row["title"] == "Nightly build" {
+                break row;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            last = Some(row);
         }
-    })
-    .await
-    .expect("the automation filter lists the launched Session");
-    let row = listed["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["sessionId"] == launched.as_str())
-        .unwrap()
-        .clone();
+        if page.is_err() || tokio::time::Instant::now() >= deadline {
+            match last {
+                Some(row) => panic!(
+                    "the launched Session is listed but never showed the title its launch requested: {row}"
+                ),
+                None => panic!("the automation filter never listed the launched Session"),
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(row["origin"], "automation", "{row}");
-    assert_eq!(row["title"], "Nightly build", "{row}");
     assert_eq!(row["titleSource"], "manual", "{row}");
     assert_eq!(row["cwd"], json!(store.0), "{row}");
     let default = client
