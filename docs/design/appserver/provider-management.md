@@ -453,6 +453,15 @@ direction: the smallest window, the smallest output cap and the intersection of
 the effort choices. A provider default is not a declaration, so a row carrying
 the pair its provider writes across many of its rows declares no limit there.
 
+A row joins that merge only when its kind is the id's kind. A row that states
+no kind, because its raw `type` is absent or `model`, joins any id. An id that
+states `chat` takes the rows stating `chat`, and an id stating any other kind
+takes the rows stating exactly that kind, with no synonym. An id that states no
+kind takes the rows stating `chat` or none when any row of its name states
+`chat`, and otherwise every row of its name: it keeps the media rows it merged
+before and carries their `type`, which is what keeps a media model out of
+conversations. An id left with no joining row stays unidentified.
+
 A provider's record states a prefix its listed ids carry, and that prefix is
 stripped once, at the head of the id and case-insensitively, before the id is
 broken into the tokens every token and name step compares. The first step and
