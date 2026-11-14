@@ -1066,7 +1066,7 @@ fn percent_decode(text: &str) -> String {
         }
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy_owned(out)
 }
 
 fn origin_of(redirect_uri: &str) -> &str {

@@ -1523,7 +1523,7 @@ mod tests {
         let link = crate::ui::render::osc8::hyperlink("https://example.com/a", "docs link");
         let text = format!("see {link} and then {}", "word ".repeat(12));
         let bytes = drive(&mut screen, &mut emu, &frame(&[&text], &live, None));
-        let sent = String::from_utf8_lossy(&bytes).into_owned();
+        let sent = String::from_utf8_lossy_owned(bytes);
         assert!(sent.contains("\x1b]8;;https://example.com/a\x1b\\docs link\x1b]8;;\x1b\\"));
         let joined = emu.transcript().join("\n");
         assert_eq!(joined.matches("docs link").count(), 1);

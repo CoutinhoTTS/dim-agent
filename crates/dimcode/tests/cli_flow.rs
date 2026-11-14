@@ -1950,13 +1950,13 @@ fn exec_exits_zero_when_the_turn_completed_at_its_output_limit() {
         // to stdout and keeps stderr for the daemon notes.
         let (shown, other) = if json_mode {
             (
-                String::from_utf8_lossy(&output.stdout).into_owned(),
-                String::from_utf8_lossy(&output.stderr).into_owned(),
+                String::from_utf8_lossy_owned(output.stdout),
+                String::from_utf8_lossy_owned(output.stderr),
             )
         } else {
             (
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy_owned(output.stderr),
+                String::from_utf8_lossy_owned(output.stdout),
             )
         };
         if json_mode {

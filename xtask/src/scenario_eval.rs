@@ -2858,7 +2858,7 @@ async fn product_probe(
     dim_app_server::storage::export_timeline(database.to_path_buf(), &probe, &mut export)
         .await
         .map_err(|error| format!("the product probe Session's export failed: {error}"))?;
-    let export = String::from_utf8_lossy(&export).into_owned();
+    let export = String::from_utf8_lossy_owned(export);
     requested_tools(&export)
 }
 
@@ -4349,7 +4349,7 @@ async fn drive_once(
     .await
     {
         Ok(()) => {
-            let export = String::from_utf8_lossy(&export).into_owned();
+            let export = String::from_utf8_lossy_owned(export);
             let (turns, failed_turn) = turns_in_export(&export);
             driven.turns = turns;
             if let Some(error) = failed_turn
