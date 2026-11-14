@@ -1078,7 +1078,7 @@ names the declaring command below its rows.
 ```text
 Select a model
 > Provider / model          ZDR  ‹ high ›
-Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 ```
 
 ```text

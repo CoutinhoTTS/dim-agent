@@ -10,7 +10,7 @@
 //!   Third provider / model    —
 //!   Edit models
 //!   Subagent models: Agent choice
-//! Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+//! Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 //!
 //! Subagent models
 //!   Agent choice (default)
@@ -30,7 +30,8 @@
 //! with the model's other saved preferences. A model with no advertised effort
 //! ignores the arrows; one that advertises efforts draws `—` in the effort cell
 //! until one is chosen, saved or declared, bracketed while the row is focused.
-//! Typing in the filter keeps ←/→ for the cursor.
+//! Filtering keeps ←/→ for effort; Ctrl+B/F moves the
+//! filter cursor.
 //!
 //! Choosing a policy writes only `collaboration.set_model_policy`; the leader's
 //! model and the provider default are untouched.
@@ -48,7 +49,8 @@ use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use dim_agent_types::ModelId;
 
-const HINT: &str = "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close";
+const HINT: &str =
+    "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close";
 const POLICY_HINT: &str = "Enter select · Esc back";
 const EDIT_MODELS: &str = "__edit_models__";
 const SUBAGENT_MODELS: &str = "__subagent_models__";
@@ -297,7 +299,6 @@ impl ModelsPanel {
         if self.view == View::Models
             && key.mods.0 == 0
             && matches!(key.code, KeyCode::Left | KeyCode::Right)
-            && self.list.filter_is_empty()
         {
             return self.cycle(key.code == KeyCode::Right);
         }
@@ -991,12 +992,51 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_keeps_left_and_right_for_the_cursor() {
+    fn filtering_keeps_arrows_for_effort_and_control_keys_for_the_cursor() {
         let mut panel = panel();
-        panel.handle_key(key_of(KeyCode::Char('f')));
-        assert_eq!(panel.handle_key(key_of(KeyCode::Left)), Effect::None);
-        assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
-        assert!(drawn(&panel).contains("> f"));
+        let mut models = panel.models().to_vec();
+        models[0].efforts = vec!["low".into(), "medium".into(), "high".into()];
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models,
+            current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        panel.paste("flsh");
+        panel.handle_key(KeyEvent::new(KeyCode::Char('b'), Modifiers::CTRL));
+        panel.handle_key(KeyEvent::new(KeyCode::Char('b'), Modifiers::CTRL));
+        panel.handle_key(key_of(KeyCode::Char('a')));
+        panel.handle_key(KeyEvent::new(KeyCode::Char('f'), Modifiers::CTRL));
+        let screen = drawn(&panel);
+        assert!(screen.contains("> flash"), "{screen}");
+        assert!(!screen.contains("plain"), "{screen}");
+        assert!(screen.contains("Ctrl+B/F"), "{screen}");
+        let cursor = panel.cursor(80).expect("the filter has a cursor");
+        for (arrow, effort) in [
+            (KeyCode::Right, "medium"),
+            (KeyCode::Left, "low"),
+            (KeyCode::Left, "high"),
+        ] {
+            assert_eq!(panel.handle_key(key_of(arrow)), Effect::None);
+            let screen = drawn(&panel);
+            assert!(screen.contains(&format!("‹ {effort} ›")), "{screen}");
+            assert!(screen.contains("> flash"), "{screen}");
+            assert_eq!(panel.cursor(80), Some(cursor));
+        }
+        panel.handle_key(key_of(KeyCode::Delete));
+        let screen = drawn(&panel);
+        assert!(screen.contains("> flas"), "{screen}");
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel {
+                ref provider_id,
+                ref model_id,
+                ref reasoning_effort,
+                ..
+            } if provider_id == "dim" && model_id == "flash"
+                && reasoning_effort.as_deref() == Some("high")
+        ));
     }
 
     /// Enter carries the row's drawn text to the confirmation, so the notice
