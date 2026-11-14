@@ -5184,6 +5184,9 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     terminal.write(b"/agent profile-id\n");
     terminal.until("Session tools unchanged.");
     terminal.until("\n> ");
+    terminal.write(b"/agent a b\n");
+    terminal.until("Error: Usage: /agent [VALUE]");
+    terminal.until("\n> ");
     terminal.write(b"after configuration\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
