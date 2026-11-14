@@ -55,10 +55,12 @@ async function loadPolicies(catalog): Promise<Record<string, ProviderPolicy>> {
 
 /// The catalog's own namespace is the policy's, so a hand edit of one file
 /// without the other fails here. The catalog states it because the matcher
-/// reads it, and the policy states it because a sync writes it.
+/// reads it, and the policy states it because a sync writes it. Both values
+/// are already in the exact form the matcher compares, so they are compared as
+/// they are, never trimmed.
 function assertVendorNamespaceAgrees(provider, policy) {
-  const stated = normalizeString(provider.metadata.vendorNamespace)
-  const declared = normalizeString(policy.vendorNamespace)
+  const stated = provider.metadata.vendorNamespace
+  const declared = policy.vendorNamespace
   if (stated === declared) return
   throw new Error(`Provider ${provider.providerId}: the catalog states vendorNamespace ${stated ?? "none"}, and its policy states ${declared ?? "none"}`)
 }
@@ -93,8 +95,8 @@ function validatePolicy(id, policy) {
   if (policy.upstreamId !== undefined && normalizeString(policy.upstreamId) === undefined) {
     throw new Error(`Provider ${id}: upstreamId must be a non-empty string`)
   }
-  if (policy.vendorNamespace !== undefined && normalizeString(policy.vendorNamespace) === undefined) {
-    throw new Error(`Provider ${id}: vendorNamespace must be a non-empty string`)
+  if (policy.vendorNamespace !== undefined && !isNamespace(policy.vendorNamespace)) {
+    throw new Error(`Provider ${id}: vendorNamespace must be non-empty and contain no whitespace or "/"`)
   }
   for (const key of ["localModels", "mediaModels"]) {
     if (policy[key] !== undefined && stringArray(policy[key]) === undefined) {
@@ -785,11 +787,22 @@ function validateRole(id, metadata, models) {
 /// sync builds, so an upstream that starts naming canonical ids for such a
 /// provider is refused before anything is written.
 function validateVendorNamespace(id, metadata, models) {
+  if (metadata.vendorNamespace !== undefined && !isNamespace(metadata.vendorNamespace)) {
+    throw new Error(`Provider ${id}: metadata.vendorNamespace must be non-empty and contain no whitespace or "/"`)
+  }
   if (metadata.role !== "vendor") return
   if (!models.some((model) => canonicalNamespace(model) !== undefined)) return
-  if (normalizeString(metadata.vendorNamespace) === undefined) {
+  if (metadata.vendorNamespace === undefined) {
     throw new Error(`Provider ${id}: a vendor provider whose rows carry a canonical id needs a vendorNamespace`)
   }
+}
+
+/// The matcher compares a provider's namespace byte for byte with the part of
+/// a canonical id before its first `/`, so a namespace is valid only in that
+/// exact form: non-empty, with no whitespace and no `/`. A value a hand edit
+/// padded would pass a trimmed check here and still name no row at runtime.
+function isNamespace(value) {
+  return typeof value === "string" && /^[^\s/]+$/.test(value)
 }
 
 /// The namespace a row's `canonical_model_id` names.

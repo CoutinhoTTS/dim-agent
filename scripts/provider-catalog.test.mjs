@@ -447,6 +447,38 @@ test("a namespace the catalog and the policy state differently fails by name", a
     /Provider deepseek: the catalog states vendorNamespace another-vendor, and its policy states deepseek/);
 });
 
+test("a namespace the matcher could not compare as written is refused by name", async (t) => {
+  const { cwd, env } = await checkout(t);
+  const path = join(cwd, bundled);
+  const original = await readFile(path, "utf8");
+  const committed = JSON.parse(original);
+  const deepseek = committed.providers.find((provider) => provider.providerId === "deepseek");
+  const own = deepseek.metadata.vendorNamespace;
+  assert.ok(own !== undefined, "deepseek must state a namespace for this test");
+  const declared = await policies(cwd);
+
+  // The matcher compares the namespace byte for byte, so a padded value would
+  // pass a trimmed comparison and still name none of the provider's rows.
+  for (const written of [` ${own} `, `${own}/models`]) {
+    declared["deepseek"].vendorNamespace = written;
+    await writeFile(join(cwd, policy), JSON.stringify({ providers: declared }, null, 2));
+    const inPolicy = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
+    assert.equal(inPolicy.status, 1, `${JSON.stringify(written)} in the policy`);
+    assert.match(inPolicy.stderr, /Provider deepseek: vendorNamespace must be non-empty and contain no whitespace or "\/"/);
+
+    declared["deepseek"].vendorNamespace = own;
+    await writeFile(join(cwd, policy), JSON.stringify({ providers: declared }, null, 2));
+    deepseek.metadata.vendorNamespace = written;
+    await writeFile(path, JSON.stringify(committed, null, 2));
+    const inCatalog = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
+    assert.equal(inCatalog.status, 1, `${JSON.stringify(written)} in the catalog`);
+    assert.match(inCatalog.stderr, /Provider deepseek: metadata\.vendorNamespace must be non-empty and contain no whitespace or "\/"/);
+
+    deepseek.metadata.vendorNamespace = own;
+    await writeFile(path, original);
+  }
+});
+
 test("a sync writes the namespace its policy states and keeps a resold row", async (t) => {
   const { cwd, env, upstream } = await checkout(t);
   const path = join(cwd, bundled);
