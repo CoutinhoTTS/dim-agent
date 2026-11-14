@@ -318,12 +318,6 @@ fn two_starting_clients_replace_an_idle_daemon_once() {
         let first = spawn(&home);
         let second = spawn(&home);
         let (first, second) = (wait(first), wait(second));
-        daemon.join().unwrap();
-        assert_eq!(
-            shutdowns.load(Ordering::SeqCst),
-            1,
-            "iteration {iteration}: one client must decide the replacement"
-        );
         for (label, output) in [("first", &first), ("second", &second)] {
             assert!(
                 output.status.success(),
@@ -331,6 +325,12 @@ fn two_starting_clients_replace_an_idle_daemon_once() {
                 describe_client(&home, output)
             );
         }
+        daemon.join().unwrap();
+        assert_eq!(
+            shutdowns.load(Ordering::SeqCst),
+            1,
+            "iteration {iteration}: one client must decide the replacement"
+        );
         let log = fs::read_to_string(home.0.join("rust/daemon.log")).unwrap_or_default();
         assert!(
             !log.contains("another process owns the SQLite database"),
