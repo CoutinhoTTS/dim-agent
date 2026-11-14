@@ -291,6 +291,17 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 | 捆绑目录 | `metadataSource` 指向匹配的捆绑 Provider：条目仅在其 `metadata.raw` 声明处才有上限，其余取值在捆绑加载时删除；该 Provider 的 `contextWindowOverride`、`contextWindowFallback` 元数据仍是声明 | 匹配到的模型，或该 Provider 的全部模型 |
 | 用户 | 同一 `capabilityOverrideFields` 字段，写在描述覆盖或用户模型上：`models.edit` 为它编辑的每项上限写入，两个旧版导入器为导入时保留的每项值写入 | 覆盖所指的模型 |
 
+清单以同样的方式声明模型的推理档位，且它声明的第一个形状就是模型自己的列表：先取
+`reasoning_options` 中 `type` 为 `effort` 那一项的 `values`，否则取各项
+`supported_reasoning_levels` 的 `effort`，最后才是扁平的 `reasoning_levels` 列表。
+`reasoning_options` 仍在原处读取，即清单项的顶层或存储条目保留的 `raw` 旁；另两个形状按同样
+方式读取。每个取值去空白，非字符串与空串丢弃，重复值保留第一个，因此顺序即清单的顺序。某个
+已声明的形状取值全被丢弃即声明空列表：该模型不提供推理档位，识别出的行不补它，存储的描述保留
+`effortOptions: []`，使之后再次读取仍声明它。清单未声明任何形状、以及 `reasoning` 为 `false`
+的模型都保持原状：识别出的行仍只补未声明的列表，绝不补已声明的列表。`reasoning` 本身不变：
+未声明 `reasoning` 的清单仍仅凭档位声明 `supported: true`，与今天仅凭 `reasoning_options`
+声明时一致。
+
 先识别模型，再从识别指明的条目读取数字。识别在目录上进行，第一个只留下一个模型的步骤胜出：
 Provider 自有清单按精确 id；然后是整个限定 id，当它携带的命名空间正是持有该 id 那一行的
 Provider 时，聚合方自有的 house model 因此不会被其末段 token 偶然指名的无关行作答；然后是自有
