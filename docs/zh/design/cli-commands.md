@@ -767,6 +767,7 @@ Ctrl+R 读取该领域，并在提供方的 actions 含 `refresh` 时先发送 `
 Select a model
 > Ready / flash              ZDR  ‹ high ›  current
   Ready / plain              low
+  Ready / sonnet             —
   Edit models                Ready  ready
   Other / model-x
   Edit models                Other  other

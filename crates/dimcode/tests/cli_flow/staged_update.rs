@@ -311,7 +311,7 @@ fn an_interrupted_staged_update_keeps_the_installed_command() {
         }
         installed.release();
         let output = child.wait();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = String::from_utf8_lossy_owned(output.stderr);
         assert!(!output.status.success(), "{case}: {stderr}");
         if !dies {
             assert!(stderr.contains("Update interrupted"), "{case}: {stderr}");
@@ -366,7 +366,7 @@ fn an_update_that_installs_nothing_keeps_the_installed_command() {
             )
             .output()
             .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = String::from_utf8_lossy_owned(output.stderr);
         assert!(!output.status.success(), "{case}: {stderr}");
         assert!(!stderr.contains("Updated "), "{case}: {stderr}");
         assert!(
@@ -400,7 +400,7 @@ fn a_staged_update_switches_the_package_its_commands_and_the_global_config() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(stderr.contains("Updated dimcode-alpha"), "{stderr}");
     assert_eq!(installed.installed(), version);
@@ -453,7 +453,7 @@ fn a_staged_update_whose_new_command_fails_puts_the_previous_version_back() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(!stderr.contains("Updated "), "{stderr}");
     assert_eq!(
@@ -481,7 +481,7 @@ fn a_command_the_manager_renames_takes_the_name_of_its_link() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(
         installed.version("escape"),
@@ -517,7 +517,7 @@ fn a_command_another_package_owns_is_never_taken() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
         stderr.contains("shared-cli") && stderr.contains("other-cli"),
@@ -568,7 +568,7 @@ fn one_packages_staging_survives_the_others_update() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(installed.installed(), version, "{stderr}");
     assert_eq!(
@@ -609,7 +609,7 @@ fn one_packages_staging_survives_the_others_update() {
         .env("UPDATE_WAITING", installed.home.0.join("waiting"))
         .env("UPDATE_COMMAND", REPORTS_VERSION);
     let output = command.output().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
         stderr.contains("An earlier update left dimcode at"),
@@ -658,7 +658,7 @@ fn an_interruption_during_the_post_switch_check_puts_the_previous_version_back()
         "the flow must be able to interrupt the update while it checks"
     );
     let output = child.wait();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
         stderr.contains("interrupted while checking"),
@@ -696,7 +696,7 @@ fn an_alias_the_package_never_declared_survives_an_update() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(
         alias.is_symlink(),
@@ -723,7 +723,7 @@ fn a_declared_command_the_new_version_drops_is_retired() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(
         !installed.prefix.join("bin/dropped").exists(),
@@ -749,7 +749,7 @@ fn a_live_manifest_that_cannot_be_read_retires_nothing_and_the_update_goes_on() 
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(
         stderr.contains("Updated dimcode-alpha"),
@@ -836,7 +836,7 @@ fn an_interrupted_check_ends_every_process_it_started() {
         "the flow must be able to interrupt the update while it checks"
     );
     let output = child.wait();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(!stderr.contains("Updated "), "{stderr}");
     assert_eq!(

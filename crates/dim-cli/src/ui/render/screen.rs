@@ -283,7 +283,7 @@ impl Screen {
             viewport: Rect::new(0, self.viewport_top(), self.size.0, self.viewport_height),
             reset: false,
         };
-        let text = text.strip_suffix('\n').unwrap_or(text);
+        let text = text.trim_suffix('\n');
         let text = &scrub_keeping_newlines(text);
         let written = text.split('\n').count() as u16;
         let before = self.top;
@@ -308,7 +308,7 @@ impl Screen {
     /// once and wrapped by the terminal over the rows below it; only a row
     /// taller than the screen goes the erasing way.
     fn commit_in_place(&mut self, text: &str, out: &mut Vec<u8>) -> bool {
-        let text = text.strip_suffix('\n').unwrap_or(text);
+        let text = text.trim_suffix('\n');
         let text = scrub_keeping_newlines(text);
         let rows: Vec<&str> = text.split('\n').collect();
         let (cols, lines) = (self.size.0 as usize, self.size.1 as usize);
@@ -1508,7 +1508,7 @@ mod tests {
     #[test]
     fn oversized_live_region_keeps_the_bottom_rows_and_some_history() {
         let (mut screen, mut emu) = setup(true);
-        let live: Vec<String> = (0..20).map(|n| format!("row {n}")).collect();
+        let live: Vec<String> = Vec::from_fn(20, |n| format!("row {n}"));
         let refs: Vec<&str> = live.iter().map(String::as_str).collect();
         drive(&mut screen, &mut emu, &frame(&[], &refs, None));
         assert_eq!(screen.viewport_height(), SIZE.1 - MIN_HISTORY_ROWS);
@@ -1523,7 +1523,7 @@ mod tests {
         let link = crate::ui::render::osc8::hyperlink("https://example.com/a", "docs link");
         let text = format!("see {link} and then {}", "word ".repeat(12));
         let bytes = drive(&mut screen, &mut emu, &frame(&[&text], &live, None));
-        let sent = String::from_utf8_lossy(&bytes).into_owned();
+        let sent = String::from_utf8_lossy_owned(bytes);
         assert!(sent.contains("\x1b]8;;https://example.com/a\x1b\\docs link\x1b]8;;\x1b\\"));
         let joined = emu.transcript().join("\n");
         assert_eq!(joined.matches("docs link").count(), 1);

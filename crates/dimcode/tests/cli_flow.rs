@@ -1950,13 +1950,13 @@ fn exec_exits_zero_when_the_turn_completed_at_its_output_limit() {
         // to stdout and keeps stderr for the daemon notes.
         let (shown, other) = if json_mode {
             (
-                String::from_utf8_lossy(&output.stdout).into_owned(),
-                String::from_utf8_lossy(&output.stderr).into_owned(),
+                String::from_utf8_lossy_owned(output.stdout),
+                String::from_utf8_lossy_owned(output.stderr),
             )
         } else {
             (
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy_owned(output.stderr),
+                String::from_utf8_lossy_owned(output.stdout),
             )
         };
         if json_mode {
@@ -10483,14 +10483,15 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("Cancelled");
     terminal.write(b"\x1b[27u/tasks\r");
     terminal.until("Survey the crates");
-    terminal.write(b"\r");
+    terminal.write(b"\x1b[B\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
     terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
     terminal.write(b"\x1b[27ucontinue the leader\r");
-    terminal.until("agent result: Other agent completed normally.");
+    terminal.until("agent result · Check the docs · writer");
+    terminal.until("Other agent completed normally.");
     terminal.write(b"/tasks\r");
     terminal.until("Check the docs");
     home.kill(&terminal);

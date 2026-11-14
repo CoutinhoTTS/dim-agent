@@ -913,20 +913,15 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use url::Url;
 
-    struct Dns(&'static str);
-
-    impl Drop for Dns {
-        fn drop(&mut self) {
-            test_dns::remove(self.0);
-        }
-    }
-
-    fn dns(host: &'static str, ips: &[&str]) -> Dns {
+    fn dns(
+        host: &'static str,
+        ips: &[&str],
+    ) -> std::mem::DropGuard<&'static str, fn(&'static str)> {
         test_dns::insert(
             host,
             test_dns::Answer::Ips(ips.iter().map(|ip| ip.parse().unwrap()).collect()),
         );
-        Dns(host)
+        std::mem::DropGuard::new(host, test_dns::remove)
     }
 
     async fn read_head(socket: &mut TcpStream) -> (String, Vec<u8>) {
@@ -1220,7 +1215,7 @@ mod tests {
     #[tokio::test]
     async fn a_resolution_that_does_not_finish_hits_the_connect_deadline() {
         test_dns::insert("never.test", test_dns::Answer::Hang);
-        let _name = Dns("never.test");
+        let _name = std::mem::DropGuard::new("never.test", test_dns::remove);
         let started = std::time::Instant::now();
         let url = Url::parse("http://never.test/").unwrap();
         let err = match get(

@@ -65,16 +65,16 @@ test("a full sync of the committed model descriptors is idempotent", async (t) =
   await writeSelfUpstream(cwd, upstream, providers);
   execFileSync(process.execPath, [script, "--sync"], { cwd, env });
   // A `remote` provider with no committed default gets the one derived from its
-  // models. That is the release step's own change, so the first sync may write
-  // it; a second sync must then find nothing to do.
+  // models. That is the release step's own change, so the committed catalog
+  // carries every derived default, and a sync that derives a new one fails
+  // here, naming the providers that must be committed.
   const first = await readFile(path, "utf8");
   const settled = JSON.parse(first).providers
     .filter(({ providerId, metadata }) =>
       providers.find((old) => old.providerId === providerId).metadata.defaultModelId === undefined
       && metadata.defaultModelId !== undefined)
     .map(({ providerId }) => providerId);
-  assert.deepEqual(settled.sort(),
-    ["qwencloud", "qwencloud-coding-plan", "qwencloud-token-plan", "step-plan-intl", "tencent-hunyuan", "xiaomi-mimo"]);
+  assert.deepEqual(settled, []);
   const strip = (list) => list.map(({ providerId, metadata, ...rest }) => ({
     providerId,
     ...rest,

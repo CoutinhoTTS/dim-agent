@@ -465,7 +465,7 @@ impl HooksRuntime {
                     exit_two(handler.event, &stderr)
                 } else if status.success() {
                     HookResult::Success {
-                        stdout: String::from_utf8_lossy(&bytes).into_owned(),
+                        stdout: String::from_utf8_lossy_owned(bytes),
                     }
                 } else {
                     failed(format!("exited with {status}"), &stderr)

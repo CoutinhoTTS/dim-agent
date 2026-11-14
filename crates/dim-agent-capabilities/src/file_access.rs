@@ -715,9 +715,9 @@ fn metadata_text(path: &Path) -> Result<String, HostError> {
     Ok(text)
 }
 fn path_line(text: &str) -> Result<PathBuf, HostError> {
-    let text = text.strip_suffix('\n').unwrap_or(text);
+    let text = text.trim_suffix('\n');
     #[cfg(windows)]
-    let text = text.strip_suffix('\r').unwrap_or(text);
+    let text = text.trim_suffix('\r');
     if text.is_empty() || text.contains(['\n', '\r', '\0']) {
         return Err(HostError::failed(
             "Git path cannot be represented without ambiguity",

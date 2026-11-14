@@ -448,9 +448,9 @@ fn quote_only_marker(script: &str, reading: ShellReading) -> Option<BackgroundMa
             continue;
         }
         if ch == '\'' && !double {
-            single = !single;
+            single.toggle();
         } else if ch == '"' && !single {
-            double = !double;
+            double.toggle();
         } else if ch == '&' && !single && !double {
             let next = chars.get(i + 1).copied();
             let previous = i.checked_sub(1).map(|index| chars[index]);
@@ -1511,11 +1511,11 @@ fn tokenize_shell_command(command: &str) -> Vec<String> {
     let mut target = false;
     for ch in command.chars() {
         if ch == '\'' && !double {
-            single = !single;
+            single.toggle();
             continue;
         }
         if ch == '"' && !single {
-            double = !double;
+            double.toggle();
             continue;
         }
         if single || double {
@@ -1564,9 +1564,9 @@ fn has_unquoted_command_substitution(command: &str) -> bool {
             continue;
         }
         if ch == '\'' && !double {
-            single = !single;
+            single.toggle();
         } else if ch == '"' && !single {
-            double = !double;
+            double.toggle();
         } else if !single && (ch == '`' || (ch == '$' && chars.get(i + 1) == Some(&'('))) {
             return true;
         }
@@ -1664,7 +1664,7 @@ fn correct_windows_path(value: &str) -> String {
         if let Some(letter) = chars.next().filter(|letter| drive(*letter)) {
             let tail = chars.as_str();
             if tail.is_empty() || tail.starts_with('/') {
-                let tail = tail.strip_prefix('/').unwrap_or(tail);
+                let tail = tail.trim_prefix('/');
                 return format!(
                     "{}:\\{}",
                     letter.to_ascii_uppercase(),

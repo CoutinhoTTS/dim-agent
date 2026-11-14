@@ -3477,26 +3477,18 @@ async fn membership_lists_match_the_memory_store_for_every_value_type_and_size()
     for (path, list) in [
         (
             "data.tag",
-            (0..wide).map(|i| json!(format!("absent-{i}"))).collect(),
+            Vec::from_fn(wide, |i| json!(format!("absent-{i}"))),
         ),
         (
             "position.sequence",
-            (0..wide).map(|i| json!(9_000_000u64 + i as u64)).collect(),
+            Vec::from_fn(wide, |i| json!(9_000_000u64 + i as u64)),
         ),
-        (
-            "id",
-            (0..wide).map(|i| json!(format!("absent-{i}"))).collect(),
-        ),
+        ("id", Vec::from_fn(wide, |i| json!(format!("absent-{i}")))),
         (
             "kind",
-            (0..capped)
-                .map(|i| json!(format!("probe/absent-{i}")))
-                .collect(),
+            Vec::from_fn(capped, |i| json!(format!("probe/absent-{i}"))),
         ),
-        (
-            "id",
-            (0..capped).map(|i| json!(format!("absent-{i}"))).collect(),
-        ),
+        ("id", Vec::from_fn(capped, |i| json!(format!("absent-{i}")))),
     ] {
         cases.push(in_list(path, list));
     }
@@ -3507,7 +3499,7 @@ async fn membership_lists_match_the_memory_store_for_every_value_type_and_size()
                 "position.sequence" => json!(9_000_000u64 + index as u64),
                 _ => json!(format!("absent-{index}")),
             };
-            cases.push(in_list(path, (0..size).map(member).collect()));
+            cases.push(in_list(path, Vec::from_fn(size, member)));
         }
         // A known `kind` is what makes `position.sequence` a physical column.
         cases.push(QueryFilter::And {
@@ -3515,9 +3507,7 @@ async fn membership_lists_match_the_memory_store_for_every_value_type_and_size()
                 in_list("kind", vec![json!("probe/saved")]),
                 in_list(
                     "position.sequence",
-                    (0..size)
-                        .map(|index| json!(9_000_000u64 + index as u64))
-                        .collect(),
+                    Vec::from_fn(size, |index| json!(9_000_000u64 + index as u64)),
                 ),
             ],
         });

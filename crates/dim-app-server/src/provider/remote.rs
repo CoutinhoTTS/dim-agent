@@ -285,7 +285,7 @@ fn project(
         .filter(|id| !id.is_empty())
         .ok_or_else(|| failure("Invalid remote model ID"))?;
     let id = if driver == "gemini" {
-        id.strip_prefix("models/").unwrap_or(id)
+        id.trim_prefix("models/")
     } else {
         id
     };

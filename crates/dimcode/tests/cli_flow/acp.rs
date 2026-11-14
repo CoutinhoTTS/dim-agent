@@ -732,7 +732,7 @@ fn acp_stdio_bounds_in_flight_reads_and_releases_completed_requests() {
     let (release, delayed) = std::sync::mpsc::sync_channel(0);
     let daemon = home.daemon(move |wire| {
         wire.hello(METHODS);
-        let calls: Vec<_> = (0..128).map(|_| wire.read("session.list")).collect();
+        let calls: Vec<_> = Vec::from_fn(128, |_| wire.read("session.list"));
         waiting.send(()).unwrap();
         delayed.recv_timeout(PATIENCE).unwrap();
         for call in calls {
@@ -1228,17 +1228,20 @@ fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
             json!({"auth":{"terminal":false},"_meta":{"terminal-auth":true}}),
             true,
         ),
+        (json!({"auth":{"terminal":false}}), false),
         (json!({}), false),
         (json!({"terminal":true}), false),
         (json!({"_meta":{"terminal-auth":"true"}}), false),
     ] {
         let home = Home::new();
-        let daemon = home.daemon(|wire| {
+        let daemon = home.daemon(move |wire| {
         let mut methods = METHODS.to_vec(); methods.push("account.providers"); wire.hello(&methods);
         let providers = wire.read("account.providers");
         wire.reply(&providers,json!([{"providerId":"managed-fixture","displayName":"Fixture","loginMethods":["browser","device"]}]));
         let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
-        let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
+        if !terminal_available {
+            let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
+        }
         detached_eof(wire);
     });
         let mut peer = Peer::start(&home);
@@ -1249,18 +1252,32 @@ fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
         );
         let initialized = peer.response(1);
         let methods = initialized["result"]["authMethods"].as_array().unwrap();
-        let agent = methods
-            .iter()
-            .find(|method| method.get("type").is_none())
-            .unwrap()["id"]
-            .clone();
-        let terminal = methods.iter().find(|method| method["type"] == "terminal");
-        assert_eq!(terminal.is_some(), terminal_available, "{initialized}");
-        peer.send(2, "authenticate", json!({"methodId":agent}));
-        assert!(peer.response(2).get("error").is_none());
-        if let Some(terminal) = terminal {
-            peer.send(3, "authenticate", json!({"methodId":terminal["id"]}));
-            assert_eq!(peer.response(3)["error"]["code"], -32602);
+        assert_eq!(methods.len(), 1, "{initialized}");
+        let method = &methods[0];
+        let (flow, handler) = if terminal_available {
+            ("device", "terminal")
+        } else {
+            ("browser", "agent")
+        };
+        let id: Value = serde_json::from_str(method["id"].as_str().unwrap()).unwrap();
+        assert_eq!(id, json!(["dim", "managed-fixture", flow, handler]));
+        if terminal_available {
+            assert_eq!(method["type"], "terminal");
+            let args = method["args"].as_array().unwrap();
+            assert_eq!(
+                &args[args.len() - 2..],
+                &[json!("--auth-setup"), method["id"].clone()]
+            );
+        } else {
+            assert!(method.get("type").is_none());
+            assert!(method.get("args").is_none());
+        }
+        peer.send(2, "authenticate", json!({"methodId":method["id"]}));
+        let response = peer.response(2);
+        if terminal_available {
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+        } else {
+            assert_eq!(response["result"], json!({}), "{response}");
         }
         peer.close();
         daemon.join().unwrap();
