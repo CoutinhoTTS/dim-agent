@@ -406,6 +406,9 @@ fn a_plan_provider_is_marked_and_its_api_entry_is_not() {
 /// A catalog of exactly the providers a case states, built through the step
 /// the shipped file goes through: `from_value` drops every limit a row's
 /// `metadata.raw` does not declare, so a built row declares its limits there.
+///
+/// It answers "what does the matcher run over": a case's input, never its
+/// expected value, which `bundled` reads from the row the case names.
 fn catalog(providers: serde_json::Value) -> BundledCatalog {
     BundledCatalog::from_value(json!({ "providers": providers }))
         .expect("the case states the catalog its rule needs")
@@ -509,7 +512,13 @@ fn stored(model_id: &str) -> ModelEntry {
     .expect("a stored entry states its id and API")
 }
 
-/// One row of a catalog, as the catalog holds it.
+/// One row of a catalog, as the catalog holds it, read directly rather than
+/// through the matcher.
+///
+/// It answers "what does this row declare": a case's expected value, which the
+/// matcher's answer (`relay`, `builtin`) is compared against. It never builds
+/// a case's input, since an expectation read back from the rows a case already
+/// projected would only assert that the catalog agrees with itself.
 fn bundled(catalog: &BundledCatalog, provider_id: &str, model_id: &str) -> ModelEntry {
     catalog
         .bundled_models(provider_id)
