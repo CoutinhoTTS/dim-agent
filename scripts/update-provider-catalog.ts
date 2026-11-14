@@ -22,6 +22,7 @@ type ProviderPolicy = {
   mediaModels?: string[]
   keepBundledModels?: boolean
   failClosedUpstreamModels?: boolean
+  vendorNamespace?: string
 }
 
 /// Every bundled provider has a policy: `remote` ones are refreshed from
@@ -47,8 +48,19 @@ async function loadPolicies(catalog): Promise<Record<string, ProviderPolicy>> {
     if (provider.metadata.source !== expected) {
       throw new Error(`Provider ${provider.providerId}: metadata.source is ${provider.metadata.source ?? "absent"}, and its policy makes it ${expected}`)
     }
+    assertVendorNamespaceAgrees(provider, providers[provider.providerId])
   }
   return providers
+}
+
+/// The catalog's own namespace is the policy's, so a hand edit of one file
+/// without the other fails here. The catalog states it because the matcher
+/// reads it, and the policy states it because a sync writes it.
+function assertVendorNamespaceAgrees(provider, policy) {
+  const stated = normalizeString(provider.metadata.vendorNamespace)
+  const declared = normalizeString(policy.vendorNamespace)
+  if (stated === declared) return
+  throw new Error(`Provider ${provider.providerId}: the catalog states vendorNamespace ${stated ?? "none"}, and its policy states ${declared ?? "none"}`)
 }
 
 /// The `metadata.source` a policy authors. A provider is refreshed from the
@@ -81,6 +93,9 @@ function validatePolicy(id, policy) {
   if (policy.upstreamId !== undefined && normalizeString(policy.upstreamId) === undefined) {
     throw new Error(`Provider ${id}: upstreamId must be a non-empty string`)
   }
+  if (policy.vendorNamespace !== undefined && normalizeString(policy.vendorNamespace) === undefined) {
+    throw new Error(`Provider ${id}: vendorNamespace must be a non-empty string`)
+  }
   for (const key of ["localModels", "mediaModels"]) {
     if (policy[key] !== undefined && stringArray(policy[key]) === undefined) {
       throw new Error(`Provider ${id}: ${key} must be a non-empty string array`)
@@ -98,6 +113,7 @@ const POLICY_FIELDS = [
   "mediaModels",
   "keepBundledModels",
   "failClosedUpstreamModels",
+  "vendorNamespace",
 ]
 
 async function main() {
@@ -194,6 +210,9 @@ async function syncProvider(provider, policy: ProviderPolicy, reasoningOff, patc
   }
   const metadata = { ...provider.metadata, defaultModelId, raw }
   if (defaultModelId === undefined) delete metadata.defaultModelId
+  const vendorNamespace = normalizeString(policy.vendorNamespace)
+  if (vendorNamespace === undefined) delete metadata.vendorNamespace
+  else metadata.vendorNamespace = vendorNamespace
   const rows = carryCanonicalIds(id, [...models.values()], previous, kept)
   const result = { ...provider, models: applyReasoningOffOverrides(id, rows, reasoningOff).map(toCatalogModel), metadata }
   if (!policy.keepBaseUrl) {
@@ -759,6 +778,27 @@ function validateRole(id, metadata, models) {
   }
 }
 
+/// A row's canonical id names the vendor the model belongs to, so a `vendor`
+/// provider whose rows carry one states the namespace it serves. Without it
+/// the matcher cannot tell a resold row from a declaration, and reads every
+/// row as one. The check runs on the committed catalog and on the candidate a
+/// sync builds, so an upstream that starts naming canonical ids for such a
+/// provider is refused before anything is written.
+function validateVendorNamespace(id, metadata, models) {
+  if (metadata.role !== "vendor") return
+  if (!models.some((model) => canonicalNamespace(model) !== undefined)) return
+  if (normalizeString(metadata.vendorNamespace) === undefined) {
+    throw new Error(`Provider ${id}: a vendor provider whose rows carry a canonical id needs a vendorNamespace`)
+  }
+}
+
+/// The namespace a row's `canonical_model_id` names.
+function canonicalNamespace(model) {
+  const canonical = normalizeString(model?.metadata?.raw?.canonical_model_id)
+  const slash = canonical?.indexOf("/") ?? -1
+  return slash > 0 ? canonical.slice(0, slash) : undefined
+}
+
 /// A provider states whether its declarations are a subscription or coding
 /// plan rather than the vendor's API entry. The flag is read by the model-id
 /// matcher, which prefers the API entry when both sell one model, so it only
@@ -785,6 +825,7 @@ function validateCatalog(catalog) {
     if (!isRecord(metadata?.raw) || !Array.isArray(models)) throw new Error(`Provider ${id} requires raw metadata and a models array`)
     if (metadata.lookupOnly && metadata.customModels) throw new Error(`Provider ${id}: model ownership is ambiguous`)
     validateRole(id, metadata, models)
+    validateVendorNamespace(id, metadata, models)
     validatePlan(id, metadata, models)
     assertUniqueModelIds(models, id, "modelId")
     for (const { modelId, capabilities } of models) {
