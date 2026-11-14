@@ -10418,7 +10418,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("Cancelled");
     terminal.write(b"\x1b[27u/tasks\r");
     terminal.until("Survey the crates");
-    terminal.write(b"\r");
+    terminal.write(b"\x1b[B\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
