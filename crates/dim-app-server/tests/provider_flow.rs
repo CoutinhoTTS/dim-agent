@@ -18,11 +18,12 @@ use dim_agent_runtime::{Names, names::ServiceCatalog};
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
-    model_catalog::{BundledCatalog, ModelEntry, ModelStatus},
+    model_catalog::{BundledCatalog, ModelEntry, ModelStatus, ProviderRole},
     provider::{
         ConnectionInput, CreateProvider, CredentialUpdate, LegacyRow, ModelPreferences,
-        ProviderError, ProviderPlugin, ProviderService, StaticAuth, StaticProviderRecord,
-        StoredSelectionError, convert_legacy_provider, parse_static, stored_selection,
+        ProviderError, ProviderModel, ProviderPlugin, ProviderService, StaticAuth,
+        StaticProviderRecord, StoredSelectionError, convert_legacy_provider, parse_static,
+        stored_selection,
     },
     storage::SqliteStoragePlugin,
 };
@@ -8857,5 +8858,500 @@ async fn an_edited_merged_limit_stays_edited() {
         "{ID}: the other limit keeps its merged value"
     );
     root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// An endpoint that serves one listing body on every path, so a run of refreshes
+/// reads the same listing.
+async fn listing_server(body: Value) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{
+        http::{StatusCode, Uri},
+        routing::get,
+    };
+    let app = Router::new().route(
+        "/{*path}",
+        get(move |_: Uri| {
+            let body = body.clone();
+            async move { (StatusCode::OK, Json(body)) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, server)
+}
+
+fn temp_home(prefix: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    home.canonicalize().unwrap()
+}
+
+/// The Provider owner over a store of the test's own.
+async fn provider_root(home: &Path) -> (Ctx, Arc<ProviderService>) {
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.to_path_buf()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    (root, provider)
+}
+
+/// Points the empty-bundle builtin at a listing endpoint. Its bundle holds no
+/// row, so the record starts with an empty stored list and the refresh is what
+/// fills it.
+async fn listed_provider(
+    provider: &Arc<ProviderService>,
+    endpoint: &str,
+    cancel: &CancellationToken,
+) {
+    let view = provider
+        .management(Some(LISTED_PROVIDER.into()), cancel)
+        .await
+        .unwrap();
+    let updated = provider
+        .update(
+            LISTED_PROVIDER.into(),
+            view.providers[0].version.expect("the seeded record"),
+            serde_json::from_value(json!({
+                "baseUrl":endpoint,
+                "enabled":true,
+                "credential":{"action":"set","value":"listing-key"}
+            }))
+            .unwrap(),
+            cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&updated).unwrap()["modelsListed"],
+        json!("bundled"),
+        "{LISTED_PROVIDER}: the bundle declares its rows, so the connection write lists nothing"
+    );
+    assert!(
+        updated.models.as_ref().is_none_or(Vec::is_empty),
+        "{LISTED_PROVIDER}: the empty bundle leaves the stored list empty"
+    );
+}
+
+/// One stored model row, by id, read from the record's own JSON: the record
+/// owner keeps the field private to its module, and the store is where a refresh
+/// writes what discovery projected.
+fn stored_row(home: &Path, provider_id: &str, id: &str) -> Value {
+    let record: Value = serde_json::from_str(&stored_record_json(home, provider_id)).unwrap();
+    record["models"]
+        .as_array()
+        .expect("the record lists its models")
+        .iter()
+        .find(|row| row["modelId"] == json!(id))
+        .unwrap_or_else(|| panic!("{provider_id} stored {id}"))
+        .clone()
+}
+
+/// The bundled vendor row an id names, found by its exact id, so the expected
+/// provider, row, efforts and limits are the catalog's own values rather than
+/// literals.
+fn vendor_row(id: &str) -> (String, ModelEntry) {
+    let catalog = BundledCatalog::load().unwrap();
+    catalog
+        .providers()
+        .filter(|provider| catalog.role(&provider.provider_id) == Some(ProviderRole::Vendor))
+        .find_map(|provider| {
+            provider
+                .models
+                .iter()
+                .find(|row| row.model_id == id)
+                .map(|row| (provider.provider_id.clone(), row.clone()))
+        })
+        .unwrap_or_else(|| panic!("a vendor row names {id}"))
+}
+
+fn entry_efforts(row: &ModelEntry) -> Vec<String> {
+    row.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.reasoning.as_ref())
+        .map(|reasoning| reasoning.offered_efforts())
+        .unwrap_or_default()
+}
+
+fn entry_limits(row: &ModelEntry) -> (Option<u64>, Option<u64>) {
+    (
+        row.capabilities.context_window,
+        row.capabilities.max_output_tokens,
+    )
+}
+
+fn served<'a>(models: impl IntoIterator<Item = &'a ProviderModel>, id: &str) -> &'a ProviderModel {
+    models
+        .into_iter()
+        .find(|model| model.id == id)
+        .unwrap_or_else(|| panic!("{id} is served"))
+}
+
+fn served_rule(model: &ProviderModel) -> &str {
+    model
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.identification.as_ref())
+        .map(|found| found.rule.as_str())
+        .unwrap_or("-")
+}
+
+fn served_matched(model: &ProviderModel) -> (&str, &str) {
+    let metadata = model.metadata.as_ref().expect("the entry carries metadata");
+    (
+        metadata.matched_provider_id.as_deref().unwrap_or("-"),
+        metadata.matched_model_id.as_deref().unwrap_or("-"),
+    )
+}
+
+fn served_efforts(model: &ProviderModel) -> Vec<String> {
+    model
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.reasoning.as_ref())
+        .map(|reasoning| reasoning.offered_efforts())
+        .unwrap_or_default()
+}
+
+fn served_limits(model: &ProviderModel) -> (Option<u64>, Option<u64>) {
+    (
+        model.capabilities.context_window,
+        model.capabilities.max_output_tokens,
+    )
+}
+
+/// The rule and the row `provider.management` names, whose reply carries the
+/// `ModelEntry` rather than the served model.
+fn entry_answer(entry: &ModelEntry) -> (String, String, String) {
+    let metadata = entry.metadata.as_ref().expect("the entry carries metadata");
+    (
+        metadata
+            .identification
+            .as_ref()
+            .map(|found| found.rule.clone())
+            .unwrap_or_else(|| "-".into()),
+        metadata
+            .matched_provider_id
+            .clone()
+            .unwrap_or_else(|| "-".into()),
+        metadata
+            .matched_model_id
+            .clone()
+            .unwrap_or_else(|| "-".into()),
+    )
+}
+
+const LISTED_PROVIDER: &str = "ollama";
+const LISTED_ID: &str = "claude-opus-5-5";
+
+/// A listed id on a provider whose bundled entry is empty is identified against
+/// the catalog, never against the row an earlier listing wrote: on the refresh
+/// that stores it, on the next refresh, and on a later read.
+#[tokio::test]
+async fn a_listed_id_is_identified_against_the_catalog_on_a_refresh_and_a_read() {
+    let (endpoint, server) = listing_server(json!({"data":[{"id": LISTED_ID}]})).await;
+    let home = temp_home("provider-listed");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    listed_provider(&provider, &format!("{endpoint}/v1"), &cancel).await;
+    let (vendor_provider, vendor) = vendor_row(LISTED_ID);
+    let matched = (vendor_provider.as_str(), vendor.model_id.as_str());
+    let efforts = entry_efforts(&vendor);
+    assert!(
+        !efforts.is_empty(),
+        "{LISTED_ID}: the vendor row declares efforts, so the answer is visible"
+    );
+
+    // The first refresh stores the listing's row; the second is where that
+    // stored row used to answer for itself.
+    let first = provider
+        .refresh_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        served(&first.models, LISTED_ID).id,
+        LISTED_ID,
+        "the first refresh stores the listing"
+    );
+    let second = provider
+        .refresh_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap();
+
+    // What discovery wrote on the second refresh is the vendor's answer, so the
+    // row a later refresh reads carries no identity of its own. This is the
+    // discovery half of the answer: it reads only what `discover` projected.
+    let written = stored_row(&home, LISTED_PROVIDER, LISTED_ID);
+    let written = &written["metadata"];
+    assert_ne!(
+        written["identification"]["rule"],
+        json!("provider-exact"),
+        "{LISTED_ID}: discovery does not accept the stored row as a declaration"
+    );
+    assert_eq!(
+        written["matchedProviderId"],
+        json!(vendor_provider),
+        "{LISTED_ID}: discovery names the row that answered"
+    );
+    assert_eq!(
+        written["matchedModelId"],
+        json!(vendor.model_id),
+        "{LISTED_ID}"
+    );
+
+    // The read half: a later read of the stored list answers the same, not from
+    // the row the listing left.
+    let catalog = provider
+        .catalog_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let read = served(&catalog.models, LISTED_ID);
+    assert_ne!(
+        served_rule(read),
+        "provider-exact",
+        "{LISTED_ID}: a read does not accept the stored row as a declaration"
+    );
+    assert_eq!(served_matched(read), matched, "{LISTED_ID}");
+    assert_eq!(served_efforts(read), efforts, "{LISTED_ID}");
+    assert_eq!(served_limits(read), entry_limits(&vendor), "{LISTED_ID}");
+
+    // The refresh's own reply says the same.
+    let answered = served(&second.models, LISTED_ID);
+    assert_ne!(
+        served_rule(answered),
+        "provider-exact",
+        "{LISTED_ID}: a refresh does not accept the stored row as a declaration"
+    );
+    assert_eq!(served_matched(answered), matched, "{LISTED_ID}");
+    assert_eq!(
+        served_efforts(answered),
+        efforts,
+        "{LISTED_ID}: the answered row's efforts"
+    );
+    assert_eq!(
+        served_limits(answered),
+        entry_limits(&vendor),
+        "{LISTED_ID}"
+    );
+
+    // The picker reads provider.management, which answers the same.
+    let managed = provider
+        .management(Some(LISTED_PROVIDER.into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    let managed = managed
+        .models
+        .as_ref()
+        .expect("static management lists models")
+        .iter()
+        .find(|listed| listed.model.model_id == LISTED_ID)
+        .expect("management lists the id the provider serves");
+    let (rule, provider_id, model_id) = entry_answer(&managed.model);
+    assert_ne!(rule, "provider-exact", "{LISTED_ID}");
+    assert_eq!(
+        (provider_id.as_str(), model_id.as_str()),
+        matched,
+        "{LISTED_ID}"
+    );
+
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A builtin provider declares its bundled rows and the models the user added,
+/// so both still answer at step 1 for themselves.
+#[tokio::test]
+async fn a_builtin_bundle_and_a_user_model_still_answer_for_themselves() {
+    const BUNDLED: &str = "gpt-5.6";
+    const ADDED: &str = "my-declared-model";
+    let home = temp_home("provider-declared");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let view = provider
+        .management(Some("openai".into()), &cancel)
+        .await
+        .unwrap();
+    provider
+        .create_model(
+            "openai".into(),
+            view.providers[0].version.expect("the seeded record"),
+            model(ADDED, 4_096),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = provider
+        .catalog_for("openai".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    for (id, source) in [
+        (BUNDLED, "the bundled row"),
+        (ADDED, "the model the user added"),
+    ] {
+        let entry = served(&catalog.models, id);
+        assert_eq!(
+            served_rule(entry),
+            "provider-exact",
+            "{id}: {source} is a declaration, so step 1 answers it"
+        );
+        assert_eq!(
+            served_matched(entry),
+            ("openai", id),
+            "{id}: {source} answers for itself"
+        );
+    }
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A custom provider declares nothing at step 1, so every id it lists, including
+/// the one the user added, is identified by the later steps.
+#[tokio::test]
+async fn a_custom_providers_ids_are_identified_through_the_later_steps() {
+    const CUSTOM: &str = "00000000-0000-4000-8000-000000000071";
+    const ADDED: &str = "claude-sonnet-5-5";
+    let home = temp_home("provider-custom-identified");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let mut config = input(
+        CUSTOM,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("custom-key"),
+        "custom",
+        4_096,
+    );
+    config.models = vec![model(LISTED_ID, 4_096)];
+    let created = provider.create(config, &cancel).await.unwrap();
+    let (vendor_provider, vendor) = vendor_row(LISTED_ID);
+    let catalog = provider
+        .catalog_for(CUSTOM.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let listed = served(&catalog.models, LISTED_ID);
+    assert_ne!(
+        served_rule(listed),
+        "provider-exact",
+        "{LISTED_ID}: a custom provider declares nothing at step 1"
+    );
+    assert_eq!(
+        served_matched(listed),
+        (vendor_provider.as_str(), vendor.model_id.as_str()),
+        "{LISTED_ID}"
+    );
+    assert_eq!(
+        served_efforts(listed),
+        entry_efforts(&vendor),
+        "{LISTED_ID}"
+    );
+
+    let (added_provider, added_row) = vendor_row(ADDED);
+    let catalog = provider
+        .create_model(
+            CUSTOM.into(),
+            created.version.expect("the created record"),
+            model(ADDED, 4_096),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let added = served(&catalog.models, ADDED);
+    assert_ne!(
+        served_rule(added),
+        "provider-exact",
+        "{ADDED}: a model the user added to a custom provider runs the later steps"
+    );
+    assert_eq!(
+        served_matched(added),
+        (added_provider.as_str(), added_row.model_id.as_str()),
+        "{ADDED}"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A limit the user declared on a listed id keeps its value: the answering row
+/// supplies the limit the entry leaves undeclared, and the mark the edit writes
+/// keeps the one it declared, through a refresh too.
+#[tokio::test]
+async fn an_edited_limit_on_a_listed_id_survives_the_answer_and_a_refresh() {
+    let (endpoint, server) = listing_server(json!({"data":[{"id": LISTED_ID}]})).await;
+    let home = temp_home("provider-listed-edit");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    listed_provider(&provider, &format!("{endpoint}/v1"), &cancel).await;
+    let (_, vendor) = vendor_row(LISTED_ID);
+    let (window, output) = entry_limits(&vendor);
+    let declared = window.expect("the vendor row declares a window") + 1_000;
+
+    let catalog = provider
+        .refresh_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap();
+    let edited = provider
+        .update_model_config(
+            LISTED_PROVIDER.into(),
+            catalog.version,
+            LISTED_ID.into(),
+            serde_json::from_value(json!({ "contextWindow": declared })).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        served_limits(served(&edited.models, LISTED_ID)).0,
+        Some(declared),
+        "{LISTED_ID}: the edit is what the read serves"
+    );
+    let refreshed = provider
+        .refresh_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        served_limits(served(&refreshed.models, LISTED_ID)),
+        (Some(declared), output),
+        "{LISTED_ID}: the declared window stands and the answer supplies the other limit"
+    );
+    // The declaration is the user's, so it lives on the record beside the
+    // listing and the refresh replaces only the listing.
+    let record: Value = serde_json::from_str(&stored_record_json(&home, LISTED_PROVIDER)).unwrap();
+    let declared_row = record["modelConfigOverrides"]
+        .as_array()
+        .expect("the record lists its overrides")
+        .iter()
+        .find(|row| row["modelId"] == json!(LISTED_ID))
+        .expect("the edit is on the record");
+    assert_eq!(
+        declared_row["capabilities"]["contextWindow"],
+        json!(declared),
+        "{LISTED_ID}: the refresh keeps the declared value"
+    );
+    assert!(
+        declared_row["metadata"]["capabilityOverrideFields"]
+            .as_array()
+            .expect("the override marks what it declares")
+            .contains(&json!("contextWindow")),
+        "{LISTED_ID}: the declaration stays marked"
+    );
+    root.shutdown().await.unwrap();
+    server.abort();
     std::fs::remove_dir_all(home).unwrap();
 }

@@ -1069,7 +1069,7 @@ fn static_entries(
                 } else {
                     ModelSource::Custom
                 }),
-                models: models.clone(),
+                models: record.user_models.clone(),
                 glued_prefix: record.glued_prefix.clone(),
                 model_aliases: record.model_aliases.clone(),
                 ..Default::default()
