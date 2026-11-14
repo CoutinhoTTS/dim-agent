@@ -6374,14 +6374,14 @@ fn tui_agent_without_a_session_answers_the_no_session_notice_and_sends_nothing()
 }
 
 #[test]
-fn tui_effort_without_a_session_answers_the_no_session_notice_and_sends_nothing() {
+fn tui_valued_effort_at_home_without_a_model_says_what_to_do_and_sends_nothing() {
     let home = Home::new();
     let (quieted, quiet_done) = std::sync::mpsc::channel();
     let daemon = no_session_daemon(&home, quieted);
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("Ask anything...");
     terminal.write(b"/effort high\r");
-    terminal.until("Sign in with /login");
+    terminal.until("No model to configure");
     quiet_done.recv_timeout(PATIENCE).unwrap();
     home.kill(&terminal);
     terminal.wait();
