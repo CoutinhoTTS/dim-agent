@@ -184,7 +184,7 @@ impl Panel {
             KeyCode::Enter if self.busy.is_none() => match self.focus {
                 0 => self.note = t("Local generation makes zero model requests.").into(),
                 1 => {
-                    self.redact = !self.redact;
+                    self.redact.toggle();
                     return self.replan().map_or(Input::None, Input::Send);
                 }
                 2 => {

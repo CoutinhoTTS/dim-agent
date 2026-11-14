@@ -1260,7 +1260,7 @@ impl ForkAsk {
     fn handle_key(&mut self, key: KeyEvent) -> Effect {
         match key.code {
             KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
-                self.create = !self.create;
+                self.create.toggle();
                 Effect::None
             }
             KeyCode::Enter if self.create => Effect::Fork,
@@ -4507,7 +4507,7 @@ impl App {
                 self.open_settings(setting);
             }
             Setting::Notify => {
-                self.notify = !self.notify;
+                self.notify.toggle();
                 let key = crate::ui::notify::NOTIFY_KEY;
                 if let Some(error) = crate::ui::config::write(&self.home, key, self.notify.into()) {
                     self.set_notice(error);
@@ -4552,7 +4552,7 @@ impl App {
                 self.open_settings(setting);
             }
             Setting::Mouse => {
-                self.mouse = !self.mouse;
+                self.mouse.toggle();
                 let value = if self.mouse { "on" } else { "off" };
                 if let Some(error) = crate::ui::config::write(&self.home, MOUSE_KEY, value.into()) {
                     self.set_notice(error);
@@ -6870,7 +6870,7 @@ impl App {
                 detail,
                 ..
             }) => {
-                *expanded = !*expanded;
+                expanded.toggle();
                 if !*expanded && detail.is_some() {
                     *text = "".into();
                 }
@@ -6879,7 +6879,7 @@ impl App {
                 Block::Thinking { expanded, .. }
                 | Block::Hook { expanded, .. }
                 | Block::Error { expanded, .. },
-            ) => *expanded = !*expanded,
+            ) => expanded.toggle(),
             _ => return false,
         }
         self.mark_rewritten(id);
