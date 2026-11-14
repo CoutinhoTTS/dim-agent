@@ -526,7 +526,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     let body = response.text().await.unwrap();
     assert_eq!(status, 200, "{body}");
     let imported: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(imported["bytes"], 16);
+    assert_eq!(imported["bytes"], content.len());
     let file_id = imported["attachmentId"].as_str().unwrap();
     let file_url = format!("{upload_url}/{file_id}");
     assert_eq!(client.get(&file_url).send().await.unwrap().status(), 401);
