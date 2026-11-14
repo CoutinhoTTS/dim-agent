@@ -583,8 +583,11 @@ there is refused with `The next Session inherits its model; run the command ther
 while the bare forms still list the shown model's choices. Nothing is saved as a
 default at Home: neither a choice nor the dialog writes provider preferences.
 The held value is dropped once the Session exists, and by a `/models` pick at Home,
-because it was chosen for the model that pick replaced. A Home showing no model at
-all answers that there is nothing to configure and names `/login` and `/models`.
+because it was chosen for the model that pick replaced. Until then it stays held: a
+second value for the same member replaces the first and keeps the other member, and
+a first message whose creation fails leaves it held, so the next message's creation
+carries it. A Home showing no model at all answers that there is nothing to configure
+and names `/login` and `/models`.
 
 In both native TUI modes, bare `/effort` (alias `/reasoning`) opens an inline
 single-choice dialog in place of the composer, using the AskUser prompt's border
