@@ -2054,7 +2054,7 @@ fn attr<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 /// The element's body between its first line and `close`.
 fn element_body(text: &str, close: &str) -> String {
     let body = text.split_once('\n').map_or("", |(_, body)| body);
-    body.strip_suffix(close).unwrap_or(body).trim().to_owned()
+    body.trim_suffix(close).trim().to_owned()
 }
 
 /// A body on one transcript line: its whitespace collapsed.
@@ -2263,7 +2263,7 @@ pub(crate) fn failure_phrase(kind: ModelFailureKind, reason: Option<&str>) -> St
     let reason = reason
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
-        .map(|reason| reason.strip_suffix('.').unwrap_or(reason));
+        .map(|reason| reason.trim_suffix('.'));
     let meaning = crate::ui::i18n::t(kind.meaning());
     match reason {
         Some(reason) => format!("{meaning}: {reason}"),

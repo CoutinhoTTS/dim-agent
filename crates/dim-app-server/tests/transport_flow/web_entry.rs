@@ -48,7 +48,7 @@ pub(super) async fn http(address: &str, request: String) -> (u16, String, String
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).await.unwrap();
-    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let text = String::from_utf8_lossy_owned(bytes);
     let (head, body) = text.split_once("\r\n\r\n").unwrap();
     let status = head.split(' ').nth(1).unwrap().parse().unwrap();
     (status, head.to_owned(), body.to_owned())

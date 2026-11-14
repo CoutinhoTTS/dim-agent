@@ -197,9 +197,9 @@ fn an_orphan_tool_result_reads_its_arguments_only_after_expanding_details() {
         ]}));
         wire.2=true;
         let history=wire.read("session.history");assert_eq!(history["params"]["latestTurn"],true);
-        let events:Vec<_>=(0..100).map(|i|json!({"id":format!("result-{i}"),"sequence":100+i,"create_at":1000+i,"type":"step","name":"tool-result","data":{
+        let events:Vec<_>=Vec::from_fn(100,|i|json!({"id":format!("result-{i}"),"sequence":100+i,"create_at":1000+i,"type":"step","name":"tool-result","data":{
             "turn_id":"turn","request_id":"request","results":[{"call_id":format!("call-{i}"),"result":{"content":format!("result {i}")}}]
-        }})).collect();
+        }}));
         wire.reply(&history,json!({"events":events,"through":199,"nextAfter":199,"nextBefore":100,"done":true}));
         wire.no_context();
         let mut providers=false;

@@ -235,7 +235,7 @@ impl Composer {
     /// Returns whether the draft changed.
     pub fn quote(&mut self, text: &str) -> bool {
         let text = text.replace("\r\n", "\n");
-        let text = text.strip_suffix('\n').unwrap_or(&text);
+        let text = text.trim_suffix('\n');
         if self.shell.is_some() || text.is_empty() {
             return false;
         }
