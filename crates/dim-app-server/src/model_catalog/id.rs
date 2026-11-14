@@ -216,7 +216,10 @@ impl IdIndex {
         let mut rows = Vec::new();
         for (provider, catalog) in providers.iter().enumerate() {
             let role = catalog.metadata.as_ref().and_then(|metadata| metadata.role);
-            let role_is_vendor = role == Some(ProviderRole::Vendor);
+            let own_namespace = catalog
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.vendor_namespace.as_deref());
             let custom = catalog.provider_id == "custom-provider";
             // Every row is indexed: the qualified step reads every row's whole
             // id, steps 2 and 3 read vendor rows, step 4 the `custom-provider`
@@ -224,7 +227,8 @@ impl IdIndex {
             for (model, entry) in catalog.models.iter().enumerate() {
                 let model_tokens = split_id(&entry.model_id);
                 let position = rows.len();
-                if role_is_vendor {
+                let declaration = is_declaration(role, own_namespace, entry);
+                if declaration {
                     vendor_tokens
                         .entry(model_tokens.clone())
                         .or_default()
@@ -242,7 +246,7 @@ impl IdIndex {
                 rows.push(IndexedRow {
                     provider,
                     model,
-                    index: if role_is_vendor {
+                    index: if declaration {
                         Some(Index::Vendor)
                     } else if custom {
                         Some(Index::CustomProvider)
@@ -753,7 +757,44 @@ impl BundledCatalog {
 }
 
 fn row_is_vendor(catalog: &BundledCatalog, row: &Row<'_>) -> bool {
-    catalog.role(row.provider_id) == Some(ProviderRole::Vendor)
+    is_declaration(
+        catalog.role(row.provider_id),
+        catalog.vendor_namespace(row.provider_id),
+        row.entry,
+    )
+}
+
+/// Whether a row is its provider's own declaration rather than a resale.
+///
+/// The role is a provider-level fact: only a `vendor` provider declares
+/// anything. The row decides the rest, because the catalog states the
+/// contradiction per row: a row whose canonical id names a namespace other
+/// than the provider's own belongs to that vendor, and the matcher reads it
+/// only where it reads an aggregator row. A row that states no canonical id
+/// says nothing against the role, so the role's answer stands for it.
+fn is_declaration(
+    role: Option<ProviderRole>,
+    own_namespace: Option<&str>,
+    entry: &ModelEntry,
+) -> bool {
+    if role != Some(ProviderRole::Vendor) {
+        return false;
+    }
+    let Some(own) = own_namespace else {
+        return true;
+    };
+    canonical_namespace(entry).is_none_or(|named| named == own)
+}
+
+/// The namespace a row's canonical id names.
+fn canonical_namespace(entry: &ModelEntry) -> Option<&str> {
+    let canonical = entry
+        .metadata
+        .as_ref()?
+        .raw
+        .get("canonical_model_id")?
+        .as_str()?;
+    canonical.split_once('/').map(|(namespace, _)| namespace)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

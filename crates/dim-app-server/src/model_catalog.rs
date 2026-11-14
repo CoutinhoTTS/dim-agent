@@ -225,12 +225,21 @@ pub(crate) struct CatalogMetadata {
     role: Option<ProviderRole>,
     #[serde(default)]
     plan: bool,
+    /// The canonical namespace this provider's own models name, stated by its
+    /// sync policy so the rows of a vendor provider can be told apart.
+    vendor_namespace: Option<String>,
     pub(crate) raw: Option<CatalogRawMetadata>,
 }
 
 /// Whether a provider serves its own vendor's models or resells other
 /// vendors'. A provider whose model list comes from the user or the endpoint
 /// has no bundled models and declares none.
+///
+/// The role is a provider-level fact, and a row is this vendor's declaration
+/// only when its canonical id names the provider's own namespace or the row
+/// states none. A row of a vendor provider whose canonical id names another
+/// vendor is a resale, and the matcher reads it only where it reads an
+/// aggregator row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderRole {
@@ -388,6 +397,17 @@ impl BundledCatalog {
     /// subscription or coding plan rather than the vendor's API entry.
     pub fn is_plan(&self, provider_id: &str) -> Option<bool> {
         Some(self.provider(provider_id)?.metadata.as_ref()?.plan)
+    }
+
+    /// The canonical namespace `provider_id`'s own models name, as the
+    /// provider's sync policy stated it. `None` when the provider is not
+    /// bundled or states none.
+    pub fn vendor_namespace(&self, provider_id: &str) -> Option<&str> {
+        self.provider(provider_id)?
+            .metadata
+            .as_ref()?
+            .vendor_namespace
+            .as_deref()
     }
 
     pub fn project(

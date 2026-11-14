@@ -453,6 +453,16 @@ direction: the smallest window, the smallest output cap and the intersection of
 the effort choices. A provider default is not a declaration, so a row carrying
 the pair its provider writes across many of its rows declares no limit there.
 
+A vendor entry is a row of a provider whose role is `vendor`, when the row's
+canonical id names that provider's own namespace or the row states no canonical
+id. A row of a vendor provider whose canonical id names another vendor is a
+resale, and the steps above read it only as the merge reads an aggregator row. A
+provider's own namespace is `metadata.vendorNamespace`, which the sync writes
+from the provider's policy beside its role, and every vendor provider whose rows
+carry canonical ids states one. A plan row that resells another vendor's model,
+where upstream gives it no canonical id, has that id stated in the committed
+catalog, and the sync keeps it.
+
 A provider's record states a prefix its listed ids carry, and that prefix is
 stripped once, at the head of the id and case-insensitively, before the id is
 broken into the tokens every token and name step compares. The first step and
