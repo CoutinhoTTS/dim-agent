@@ -1222,17 +1222,20 @@ fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
             json!({"auth":{"terminal":false},"_meta":{"terminal-auth":true}}),
             true,
         ),
+        (json!({"auth":{"terminal":false}}), false),
         (json!({}), false),
         (json!({"terminal":true}), false),
         (json!({"_meta":{"terminal-auth":"true"}}), false),
     ] {
         let home = Home::new();
-        let daemon = home.daemon(|wire| {
+        let daemon = home.daemon(move |wire| {
         let mut methods = METHODS.to_vec(); methods.push("account.providers"); wire.hello(&methods);
         let providers = wire.read("account.providers");
         wire.reply(&providers,json!([{"providerId":"managed-fixture","displayName":"Fixture","loginMethods":["browser","device"]}]));
         let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
-        let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
+        if !terminal_available {
+            let status = wire.read("account.status"); wire.reply(&status,json!({"account":{"displayName":"fixture"}}));
+        }
         detached_eof(wire);
     });
         let mut peer = Peer::start(&home);
@@ -1243,18 +1246,32 @@ fn acp_stdio_discovers_managed_auth_without_starting_an_existing_login() {
         );
         let initialized = peer.response(1);
         let methods = initialized["result"]["authMethods"].as_array().unwrap();
-        let agent = methods
-            .iter()
-            .find(|method| method.get("type").is_none())
-            .unwrap()["id"]
-            .clone();
-        let terminal = methods.iter().find(|method| method["type"] == "terminal");
-        assert_eq!(terminal.is_some(), terminal_available, "{initialized}");
-        peer.send(2, "authenticate", json!({"methodId":agent}));
-        assert!(peer.response(2).get("error").is_none());
-        if let Some(terminal) = terminal {
-            peer.send(3, "authenticate", json!({"methodId":terminal["id"]}));
-            assert_eq!(peer.response(3)["error"]["code"], -32602);
+        assert_eq!(methods.len(), 1, "{initialized}");
+        let method = &methods[0];
+        let (flow, handler) = if terminal_available {
+            ("device", "terminal")
+        } else {
+            ("browser", "agent")
+        };
+        let id: Value = serde_json::from_str(method["id"].as_str().unwrap()).unwrap();
+        assert_eq!(id, json!(["dim", "managed-fixture", flow, handler]));
+        if terminal_available {
+            assert_eq!(method["type"], "terminal");
+            let args = method["args"].as_array().unwrap();
+            assert_eq!(
+                &args[args.len() - 2..],
+                &[json!("--auth-setup"), method["id"].clone()]
+            );
+        } else {
+            assert!(method.get("type").is_none());
+            assert!(method.get("args").is_none());
+        }
+        peer.send(2, "authenticate", json!({"methodId":method["id"]}));
+        let response = peer.response(2);
+        if terminal_available {
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+        } else {
+            assert_eq!(response["result"], json!({}), "{response}");
         }
         peer.close();
         daemon.join().unwrap();
@@ -2557,7 +2574,55 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
         default_mode,
         "Startup mode must not change the shared default"
     );
+    let mut manager = Peer::spawn(&mut command);
+    manager.initialize();
+    manager.send(2, "session/delete", json!({"sessionId":id}));
+    let active = manager.response(2);
+    assert_eq!(
+        active["error"]["data"]["nativeAppError"], "session_active",
+        "another connection must not delete an attached Session: {active}"
+    );
+    manager.close();
     peer.close();
+    let mut manager = Peer::spawn(&mut command);
+    manager.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    );
+    let initialized = manager.response(1);
+    assert!(
+        initialized["result"]["agentCapabilities"]["sessionCapabilities"]
+            .get("delete")
+            .is_some(),
+        "{initialized}"
+    );
+    manager.send(2, "session/list", json!({}));
+    let listed = manager.response(2);
+    assert!(
+        listed["result"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["sessionId"] == id),
+        "{listed}"
+    );
+    manager.send(3, "session/delete", json!({"sessionId":id}));
+    let deleted = manager.response(3);
+    assert_eq!(deleted["result"], json!({}), "{deleted}");
+    manager.send(4, "session/list", json!({}));
+    let listed = manager.response(4);
+    let sessions = listed["result"]["sessions"].as_array().unwrap();
+    assert!(sessions.iter().all(|session| session["sessionId"] != id));
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session["sessionId"] == other_id)
+    );
+    manager.send(5, "session/delete", json!({"sessionId":id}));
+    let missing = manager.response(5);
+    assert_eq!(missing["error"]["code"], -32002, "{missing}");
+    manager.close();
     let limited = home
         .command()
         .env_remove("RUST_LOG")
