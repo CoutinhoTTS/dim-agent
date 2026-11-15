@@ -284,7 +284,7 @@ managedSearch.search {query, count}
 
 - 取消是协议动作（调用方丢弃调用或发 bridge cancel），不是请求字段。
 - `ManagedProviders` 在 owner 内处理登录、凭据和租约。搜索调用迁到 `managedSearch` 后，批次按 §2.6 收敛旧登记（[#1398](https://github.com/arcships/dim/pull/1398)）。
-- Web 的搜索改调 `managedSearch`；Web 的 settings 仍走 `settings`。
+- Web 的搜索使用 `managedSearch`；进程内绑定直接调用同一类型化操作，wire 在边界解码与编码。绑定与 wire 共用取消行为，丢弃调用取消本次搜索，不取消调用方的父 token。Web 的 settings 仍走 `settings`。
 
 ### 4.7 `wakeups`
 
