@@ -53,6 +53,7 @@ Every public service is a data face. The contract is [service faces](docs/design
 
 ## Documentation
 
+- Before implementing a new or changed plugin, Capability or Timeline event protocol, use the [design template](docs/templates/design.md) to justify its Timeline-facing contract with assumptions, transitions and propositions, including precise-query recovery where applicable. Plugin-specific execution design remains in its own scope. Follow the [design argument guide](docs/design/capability-design-arguments.md); distinguish existing contracts from proposed semantic changes and record the scope of each proof or model check. Examples and passing implementation cases do not replace the design argument.
 - Cross-module flows live in higher-level documents; lower-level documents only describe their own inputs, outputs and error contracts.
 - Read the [foundation ADR](docs/adr/001-harness-foundation.md) for its decision and proposals requiring maintainer alignment. Do not use it as the source of implementation status; that lives in issues. Keep accepted decisions, current contracts and proposals distinct. A branch implementation does not supersede an issue's agreed design, and contributors must not be required to use APIs that do not exist yet.
 - A rule is stated once, at its layer ([ADR 006](docs/adr/006-plugin-contract.md) D1, D9): theory and contract rules do not restate a binding's spelling, and rule documents and ADRs carry no delivery status or history. Status and history live in issues.

@@ -9,6 +9,11 @@ are in [AGENTS.md](../../AGENTS.md).
 | Feature or plugin design | [design.md](design.md) | [Web](../design/plugins/Web.md) |
 | Contract | [contract.md](contract.md) | [Session access](../design/contracts/session-access.md) |
 
+For event-driven designs, use the [design argument guide](../design/capability-design-arguments.md)
+and its [worked WaitBranch argument](../design/examples/wait-argument.md). The example demonstrates
+a scoped argument, not a replacement Wait contract. The [document responsibility review](../design/capability-document-review.md)
+identifies existing contract sources and overlaps; it is not another runtime specification.
+
 Document type comes from the existing path; there is no manifest. Older examples still carry
 status lines from before ADR 008; do not copy those lines.
 
