@@ -43,16 +43,23 @@ pub struct UserStyle<'a> {
     pub surface: Option<&'a str>,
 }
 
-/// A user message: the bar on every row, the text in its colour. With a surface
-/// tint every row is padded to the content width so it reads as a band.
+/// A user message: the bar on every row, the text in its colour, and each
+/// `/skill:<name>` token as one highlighted unit. With a surface tint every row
+/// is padded to the content width so it reads as a band.
 pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<String> {
     use crate::ui::theme::ansi::{Paint, paint};
     let gutter = gutter_width(width);
     let content = width.saturating_sub(gutter).max(1);
+    let spans: Vec<(usize, usize)> = dim_agent_types::skill_token::tokens(text)
+        .map(|token| (token.start, token.end))
+        .collect();
+    let mut at = 0;
     wrap_cells(text, content)
         .into_iter()
         .map(|row| {
             let lead = gutter_mark(USER_MARK, gutter);
+            let row_at = at;
+            at += if row.is_empty() { 1 } else { row.len() };
             let body = match style.surface {
                 Some(_) => {
                     let used = display_width(&row);
@@ -72,7 +79,7 @@ pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<Strin
                     }
                 ),
                 paint(
-                    &body,
+                    &token_runs(&body, row_at, &spans),
                     Paint {
                         fg: Some(style.color),
                         bg: style.surface,
@@ -82,6 +89,30 @@ pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<Strin
             )
         })
         .collect()
+}
+
+/// `body`, the text of the row that starts at `row_at`, with every character
+/// inside a token span made bold, so a token reads as one highlighted unit.
+fn token_runs(body: &str, row_at: usize, spans: &[(usize, usize)]) -> String {
+    use crate::ui::theme::ansi::{Paint, paint};
+    let mut out = String::new();
+    let mut at = row_at;
+    for ch in body.chars() {
+        let inside = spans.iter().any(|(start, end)| *start <= at && at < *end);
+        let mut text = ch.to_string();
+        if inside {
+            text = paint(
+                &text,
+                Paint {
+                    bold: true,
+                    ..Paint::default()
+                },
+            );
+        }
+        out.push_str(&text);
+        at += ch.len_utf8();
+    }
+    out
 }
 
 /// Rows of running reasoning under its title and blank row: the newest
@@ -926,5 +957,48 @@ mod tests {
         };
         let rows = render_user("hi", 40, &banded);
         assert_eq!(display_width(&strip(&rows[0])), 40);
+    }
+
+    /// A `/skill:<name>` token is one highlighted unit: its characters carry
+    /// the bold attribute and the words around it do not, and the visible text
+    /// is unchanged.
+    #[test]
+    fn a_skill_token_draws_as_one_unit() {
+        let style = UserStyle {
+            color: "ansi:2",
+            surface: None,
+        };
+        let worn = render_user("run /skill:commit now", 60, &style).join("\n");
+        // The token is drawn one character per bold run, and the words around
+        // it carry none, so the bold runs spell exactly the token.
+        let bold: String = worn
+            .split("\x1b[1m")
+            .skip(1)
+            .filter_map(|run| {
+                run.chars()
+                    .find(|c| *c != '\x1b' && *c != '[' && !c.is_ascii_digit())
+            })
+            .collect();
+        assert_eq!(
+            bold, "/skill:commit",
+            "the whole token is highlighted and nothing else is"
+        );
+        let visible: String = {
+            let mut out = String::new();
+            let mut skip = false;
+            for c in worn.chars() {
+                match (skip, c) {
+                    (false, '\x1b') => skip = true,
+                    (true, 'm') => skip = false,
+                    (false, c) => out.push(c),
+                    _ => {}
+                }
+            }
+            out
+        };
+        assert!(
+            visible.contains("run /skill:commit now"),
+            "the visible text is as typed: {visible:?}"
+        );
     }
 }

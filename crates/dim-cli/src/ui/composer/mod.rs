@@ -386,7 +386,7 @@ impl Composer {
         true
     }
 
-    /// Skills the palette offers as `$skill:` mentions.
+    /// Skills the palette offers as `/skill:<name>` tokens.
     pub fn set_skills(&mut self, skills: Vec<palette::Skill>) {
         self.skills = skills;
     }
@@ -606,7 +606,9 @@ impl Composer {
                 format!("/{} ", command.name)
             }
             crate::ui::rows::Kind::Command(command) => format!("/{}", command.name),
-            crate::ui::rows::Kind::Skill(name) => format!("$skill: {name} "),
+            crate::ui::rows::Kind::Skill(name) => {
+                format!("{}{name} ", dim_agent_types::skill_token::PREFIX)
+            }
             crate::ui::rows::Kind::Heading | crate::ui::rows::Kind::Item => {
                 return Outcome::Handled;
             }
@@ -2353,7 +2355,7 @@ mod tests {
         }]);
         typed(&mut c, "/comm");
         assert_eq!(c.handle_key(key(KeyCode::Tab)), Outcome::Handled);
-        assert_eq!(c.text(), "$skill: commit ");
+        assert_eq!(c.text(), "/skill:commit ");
         assert!(!c.palette_open());
 
         let mut c = Composer::new(Vec::new());
@@ -2388,8 +2390,8 @@ mod tests {
         assert!(c.is_empty());
     }
 
-    /// Enter on a Skill row fills its marker and sends nothing; Tab fills
-    /// the same marker.
+    /// Enter on a Skill row fills its `/skill:<name>` token and sends nothing;
+    /// Tab fills the same token.
     #[test]
     fn a_skill_row_fills_the_marker_without_sending() {
         for code in [KeyCode::Enter, KeyCode::Tab] {
@@ -2402,7 +2404,7 @@ mod tests {
             }]);
             typed(&mut c, "/comm");
             assert_eq!(c.handle_key(key(code)), Outcome::Handled);
-            assert_eq!(c.text(), "$skill: commit ", "{code:?}");
+            assert_eq!(c.text(), "/skill:commit ", "{code:?}");
             assert!(!c.palette_open());
         }
     }

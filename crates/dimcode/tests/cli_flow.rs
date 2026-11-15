@@ -6618,6 +6618,7 @@ fn catalog_entry(name: &str, enabled: bool, shadowed_by: Option<&str>) -> Value 
         "filePath": format!("/home/.agents/skills/{name}/SKILL.md"),
         "enabled": enabled,
         "shadowedBy": shadowed_by,
+        "userInvocable": true,
     })
 }
 
@@ -6661,9 +6662,9 @@ fn tui_skill_rows_come_from_the_catalog_and_complete_without_sending() {
         // The enabled Skill is listed and its row completes the marker into
         // the draft; no message is sent.
         terminal.write(b"/comm");
-        terminal.until("$commit");
+        terminal.until("/skill:commit");
         terminal.raw(b"\r");
-        terminal.until("$skill: commit ");
+        terminal.until("/skill:commit ");
         terminal.write(b"\x03");
 
         // A disabled or shadowed Skill is not offered: Tab completes nothing.
