@@ -12,19 +12,20 @@ Both skills live in this repository and travel with its release workflow. Use th
 
 | Request | Skill | Result |
 | --- | --- | --- |
-| Choose the next alpha and prepare its version PR | [dim-release](../../.agents/skills/dim-release/SKILL.md) | Committed, consistent metadata and a PR into `main`; no tag/build/publication |
-| Build a GitHub draft or publish its npm packages | [dim-release](../../.agents/skills/dim-release/SKILL.md) | The authorized CI stage, using the immutable release version and original archives |
+| Prepare the release PR for the next alpha | [dim-release](../../.agents/skills/dim-release/SKILL.md) | The catalog sync and the version commit on one PR into `main`; no merge/tag/build/publication |
+| Dispatch a release from `main`, build its GitHub draft, or publish its npm packages | [dim-release](../../.agents/skills/dim-release/SKILL.md) | The authorized CI stage, using the version the merged PR committed and the original archives |
 | Choose the alpha route, or explicitly build/publish on a local Mac | [dim-alpha-release](../../skills/dim-alpha-release/SKILL.md) | CI by default; the local command only when that route is requested |
 
 Example agent requests:
 
 ```text
-Use $dim-release to prepare the next alpha version PR. Select an unused version,
-synchronize the metadata and run its consistency checks. Do not merge, tag,
-dispatch a build or publish.
+Use $dim-release to prepare the next alpha release PR. Select an unused version,
+sync the bundled catalog when it changed, commit the metadata, and run its
+consistency checks. Do not merge, dispatch a build, tag or publish.
 
-Use $dim-release to build a GitHub prerelease draft from the verified release
-commit on main. Inspect the artifacts and stop before publishing it or npm.
+Use $dim-release to dispatch and build a GitHub prerelease draft from main at
+the version the merged release PR committed. Inspect the artifacts and stop
+before publishing it or npm.
 
 Use $dim-release to publish the existing GitHub prerelease vX.Y.Z-alpha.N to npm.
 Use its original packages and the configured OIDC workflow; do not rebuild them.
@@ -37,11 +38,14 @@ If an agent does not list a skill, ask it to read the linked repository `SKILL.m
 
 ## Version preparation
 
-The version-PR route uses an explicit committed `X.Y.Z-alpha.N`. It does not select, bump or write back versions. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
+Every release starts from a release PR into `main` that commits the `X.Y.Z-alpha.N` the release will publish. The release PR selects that version and writes it into the product fields below, so `main` carries the released number at the commit the release builds and tags. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
 
-For the next alpha, inspect registry versions across `dimcode-alpha`, `dimcode-web`, the six platform packages and legacy `dimcode`, plus reserved remote tags/GitHub Releases and open release PRs. Continue an existing PR for the same preparation task; otherwise increment the highest reserved alpha numerically. A partial publication reserves its version too. Do not infer availability from the checkout's version or a dist-tag alone. Reuse the matching release version and original archives for a CI retry instead of allocating another number. Keep the existing legacy-beta compatibility guard.
+For the next alpha, inspect registry versions across `dimcode-alpha`, `dimcode-web`, the six platform packages and legacy `dimcode`, plus reserved remote tags/GitHub Releases and open release PRs. Continue an existing PR for the same preparation task; otherwise increment the highest reserved alpha numerically. A partial publication reserves its version too. Do not infer availability from the checkout's version or a dist-tag alone. Reuse the matching release version and original archives for a CI retry instead of allocating another number. Keep the existing legacy-beta compatibility guard. Two concurrent release PRs can choose the same number: the first tag wins, and the second must be re-prepared to the next alpha.
 
-Prepare a normal version PR from `origin/main`, synchronizing:
+The release PR has one or two commits, in this order:
+
+1. The bundled-catalog sync, when `node scripts/update-provider-catalog.ts --sync` produced a diff. The App Server embeds a checked-in provider catalog and nothing refreshes it during a build.
+2. The version commit, which synchronizes:
 
 | File | Fields |
 | --- | --- |
@@ -51,18 +55,22 @@ Prepare a normal version PR from `origin/main`, synchronizing:
 | `runtime/package.json` | `version` |
 | `runtime/package-lock.json` | Root `version` and `packages[""].version` |
 
-Explicitly versioned crates such as `dim-agent-types` keep their own version. The npm source template keeps the name `dimcode` and the `dim`/`dimcode` bins: collection selects `dimcode-alpha`/`dima` for an alpha. Do not change Node/Rutis versions or unrelated dependencies as part of the product bump. The skill provides executable consistency checks; metadata-only preparation needs no release build.
+Explicitly versioned crates such as `dim-agent-types` keep their own version. The npm source template keeps the name `dimcode` and the `dim`/`dimcode` bins: collection selects `dimcode-alpha`/`dima` for an alpha. Do not change Node/Rutis versions or unrelated dependencies as part of the product bump. Refresh `Cargo.lock` with `cargo metadata --format-version 1`, which resolves and rewrites the workspace versions; `--no-deps` skips resolution, leaves the lock stale, and then makes a `--locked` build fail. The skill provides executable consistency checks; metadata-only preparation needs no release build.
 
 ```text
-version PR -> required CI -> merge into main -> annotated vX.Y.Z-alpha.N tag
-           -> GitHub-hosted build -> inspect GitHub draft -> authorized publication
+release PR (catalog sync + version commit) -> required CI -> merge into main
+           -> dispatch release.yml from main -> preflight compares the allocated version
+              with the committed one -> build that main commit -> inspect GitHub draft
+           -> authorized publication
 ```
 
-The local Mac route differs: `publish-alpha.mjs` selects a version and temporarily updates these product fields, then restores them without committing. Do not use it to prepare a CI version PR. Source changes after tagging need a new version and tag; existing tags and published package bytes are immutable.
+The dispatch from `main` refuses before building unless the version it allocates equals the version committed on that `main` commit. It names two remedies: merge the release PR, or, for recovery, dispatch with `-f tag=vVERSION`. The check is unnecessary for an already-tagged or published version, because the allocator adds one to the highest alpha that is tagged or on npm.
+
+The local Mac route differs: `publish-alpha.mjs` selects a version and temporarily updates these product fields, then restores them without committing. Do not use it to prepare a CI release PR. Source changes after tagging need a new version and tag; existing tags and published package bytes are immutable.
 
 ## Upgrade compatibility
 
-The Timeline property-query change in [#1286](https://github.com/arcships/dim/pull/1286) breaks the plugin `timeline.query` request and reply shapes. Plugins using it require a host build containing #1286 and the matching `dimcode/plugin` declarations. Older released hosts do not implement this contract; the checkout's unchanged `0.1.0-alpha.18` version does not identify support. Migrate requests to `query`/`page` and replies to `result`/`next` using the [query contract](../design/timeline-property-query.md#2-查询接口). There is no legacy-shape fallback or independently negotiated query version. Upgrade the host and plugins together. The same change upgrades native storage to v36; older binaries refuse the upgraded store.
+The Timeline property-query change in [#1286](https://github.com/arcships/dim/pull/1286) breaks the plugin `timeline.query` request and reply shapes. Plugins using it require a host build containing #1286 and the matching `dimcode/plugin` declarations. Older released hosts do not implement this contract; a build's version label is the `vX.Y.Z-alpha.N` release it follows, and a build the release flow did not produce also names its commit, as `X.Y.Z-alpha.N-source+0123abcd`. Migrate requests to `query`/`page` and replies to `result`/`next` using the [query contract](../design/timeline-property-query.md#2-查询接口). There is no legacy-shape fallback or independently negotiated query version. Upgrade the host and plugins together. The same change upgrades native storage to v36; older binaries refuse the upgraded store.
 
 Before replacing an older CLI and daemon, stop that daemon with `dimcode daemon stop` from the new build. A client of another build replaces the daemon on its own only while the daemon is idle; while other clients use it, the client keeps a daemon of its own protocol and says so, while a daemon of an older protocol (v3 and above) is left for that explicit stop: the client starts no Session on it and says so. The replacement `dimcode daemon stop` refuses daemons without `daemon.shutdown.completed` and leaves them running. Forced shutdown does not certify storage or plugin cleanup.
 
@@ -217,19 +225,19 @@ Every `ci.yml` job runs on a persistent self-hosted runner, and a pull request's
 
 Accepting contributions from forks or outside collaborators requires moving their checks to ephemeral runners first.
 
-To prepare the next GitHub alpha prerelease from the current main commit, run:
+To release a merged release PR, dispatch the build from `main`:
 
 ```sh
 gh workflow run release.yml --ref main
 ```
 
-The preflight records the selected main SHA and both `dimcode-alpha` tags. It reads the Web and six native tarball manifests, verifies their registry integrity, source SHA and account-enabled native builds, and checks the wrapper's seven exact dependencies. Only a complete nightly for that SHA can be reused; an existing Git tag alone does not skip a build. A registry authentication, network or service error stops preflight rather than implying an absent version. Otherwise it increments the highest alpha across the registry packages and Git tags, including versions reserved for GitHub Releases awaiting npm publication. All six hosted targets and the Web assembly use that source SHA and stamp the allocated version into the build checkouts. After assembly, CI reserves an annotated `vX.Y.Z-alpha.N` tag on that commit and creates the GitHub prerelease draft.
+The preflight records the selected main SHA and both `dimcode-alpha` tags. It reads the Web and six native tarball manifests, verifies their registry integrity, source SHA and account-enabled native builds, and checks the wrapper's seven exact dependencies. Only a complete nightly for that SHA can be reused; an existing Git tag alone does not skip a build. A registry authentication, network or service error stops preflight rather than implying an absent version. Otherwise it increments the highest alpha across the registry packages and Git tags, including versions reserved for GitHub Releases awaiting npm publication. That number must equal the version committed on the dispatching `main` commit in `Cargo.toml`, `npm/package.json` and its exact optional dependencies, and both runtime files; a dispatch that disagrees stops with `Merge the release PR into main, then dispatch again` or, for recovery, `dispatch with -f tag=vVERSION`, and no checkout is stamped. All six hosted targets and the Web assembly then use that source SHA unchanged. After assembly, CI reserves an annotated `vX.Y.Z-alpha.N` tag on that commit and creates the GitHub prerelease draft.
 
 If a complete nightly already exists, a build-only invocation stops with instructions instead of claiming a verified skip. An explicitly authorized dispatch with `-f repair_nightly=true` calls the npm workflow to repair its wrapper tags, sync the mirror and run full acceptance without rebuilding. It reports that no new build is needed only after acceptance succeeds. This recovery uses registry packages and does not require a corresponding GitHub Release. Build-only requests do not authorize tag writes or mirror sync. The local Mac worktree, `mbx` and cleanup instructions do not apply to these disposable GitHub-hosted runners; their native builds retain the 15 GiB initial disk guard.
 
 To verify a release workflow change before merging, dispatch it from the feature branch with an existing alpha tag. This builds the tag with test OAuth client IDs, runs native version checks and collects all 17 attachments as run artifacts. Only a tag push or a dispatch from main can create the GitHub draft.
 
-An existing tag can also start its build on push or via `gh workflow run release.yml --ref main -f tag=vVERSION`. Its commit must be reachable from main. CI-generated alpha tags repeat the build-time stamp on recovery. Manually prepared tags must match the committed Cargo, npm wrapper and runtime versions. Every build checks out the resolved commit SHA. Six target jobs stage and pack their payloads. Assembly requires every target, matching toolchain/plugin provenance and valid artifact digests before creating a draft GitHub Release. Prerelease tags mark the draft as a prerelease. Release notes are generated from GitHub history and should be reviewed before publishing.
+An existing tag can also start its build on push or via `gh workflow run release.yml --ref main -f tag=vVERSION`. Its commit must be reachable from main. A `v*.*.*-alpha.*` tag push builds the tagged commit; when the tag's tree already carries that version, as it does after the release PR merged, nothing rewrites the checkout. Only a CI-created `Dim CI alpha` tag, which records a build-time stamp, repeats the stamp on recovery, and the two recovery dispatch routes keep that behaviour. Every build checks out the resolved commit SHA. Six target jobs stage and pack their payloads. Assembly requires every target, matching toolchain/plugin provenance and valid artifact digests before creating a draft GitHub Release. Prerelease tags mark the draft as a prerelease. Release notes are generated from GitHub history and should be reviewed before publishing.
 
 The draft receives seven native archives (six platforms and the Web workspace), eight original npm tarballs (six platform packages, `dimcode-web` and the wrapper), `release-manifest.json` and `SHA256SUMS`: seventeen attachments in total. `SHA256SUMS` covers the native archives; the manifest records digests for both native and npm archives. npm tarballs are not published to a registry by this workflow. Existing releases, including drafts, are rejected to avoid replacing attachments. If an upload leaves an incomplete draft, inspect it and remove that draft only when authorized before retrying; keep its tag.
 
@@ -237,7 +245,7 @@ All Actions artifacts, including the npm publication receipt, use `retention-day
 
 ## Local packaging
 
-One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock`, `npm/package.json`, its exact optional dependencies, runtime package/lock metadata, native version output and the release tag. Keep them synchronized before building. `0.1.0` is a development baseline; check existing npm versions before enabling registry publication. Every build command here sets `DIM_RELEASE_BUILD=1`, which makes the executable report the version above; a build without that mark reports the committed version marked `-source`, because the repository keeps the last released version.
+One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock`, `npm/package.json`, its exact optional dependencies, runtime package/lock metadata, native version output and the release tag. Keep them synchronized before building. `0.1.0` is a development baseline; check existing npm versions before enabling registry publication. Every build command here sets `DIM_RELEASE_BUILD=1`, which makes the executable report exactly the version above. A build without that mark is a source build: it reports the committed version, which the last merged release PR wrote, followed by `-source` and the short commit it was built from, as `X.Y.Z-alpha.N-source+0123abcd`. The commit comes from a build script at the final binary that reads `HEAD`; where git is unavailable the label stays `X.Y.Z-alpha.N-source`. The suffix is display only, so the channel, the default home and the installed package version never see it.
 
 ```sh
 DIM_RELEASE_BUILD=1 cargo build --release --locked -p dimcode
