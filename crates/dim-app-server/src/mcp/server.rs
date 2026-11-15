@@ -122,6 +122,12 @@ pub struct McpTool {
     /// the discovered tools without it.
     #[serde(skip)]
     pub ui: Option<ToolUi>,
+    /// `annotations.readOnlyHint == true`. It orders this tool's calls beside
+    /// other reads and changes nothing else: Approval still admits the call
+    /// under the definition's risk, so a server that mislabels a tool only
+    /// gives up ordering for its own calls.
+    #[serde(skip)]
+    pub read_only: bool,
 }
 
 /// Who may call a tool (MCP Apps D7). A tool without `visibility` is both.
@@ -763,6 +769,10 @@ impl McpServer {
                             .as_ref()
                             .and_then(|meta| meta.0.get("ui"))
                             .and_then(|ui| serde_json::from_value(ui.clone()).ok()),
+                        read_only: tool
+                            .annotations
+                            .as_ref()
+                            .is_some_and(|annotations| annotations.read_only_hint == Some(true)),
                     });
                 }
                 cursor = page.next_cursor;

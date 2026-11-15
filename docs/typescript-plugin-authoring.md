@@ -588,9 +588,15 @@ declared and does not fail the Session. Permission (its preset, `allowedTools`
 and `disallowedTools`) decides whether a declared tool's call runs; it never
 changes the declarations the model sees, so the prompt prefix stays stable.
 
-`register(declaration, execute)` refuses a declaration whose name is not a valid
+`register(declaration, execute, options?)` refuses a declaration whose name is not a valid
 tool name, is a host tool or is registered already, and one without a Permission
-risk. Permission recognises
+risk. The third argument is optional and carries `concurrency`: `'concurrent'`
+lets this tool's calls share a batch step with the calls around them, and any
+other value is refused. Omitting it means the tool's calls run alone, in the
+order the model wrote them, which is what a tool whose effects are not declared
+needs. The class orders execution only: it belongs to the bound handler, never
+appears in the declaration the model sees or in the persisted configuration, and
+grants no permission. Permission recognises
 `read_filesystem`, `write_filesystem`, `execute_process`, `network` and `session`.
 Any other string (including `read`) is unclassified: without a tool-specific policy
 override it is denied under read-only and requires approval under workspace-write. Use the exact category for the tool's

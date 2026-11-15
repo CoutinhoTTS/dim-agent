@@ -2819,3 +2819,109 @@ async fn background_exec_face_answers_as_the_typed_service() {
     restored.close().await.unwrap();
     harness.shutdown().await;
 }
+
+/// The text of every tool result of a batch, in call order.
+fn tool_texts(events: &[Arc<AgentEvent>]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => Some(data.results.clone()),
+            _ => None,
+        })
+        .flat_map(|results| results.into_iter())
+        .map(|result| match result.result.content {
+            ToolContent::Text(text) => text,
+            other => format!("{other:?}"),
+        })
+        .collect()
+}
+
+/// The file tools of one batch: a batch keeps the order the model wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_that_edits_then_reads_sees_the_edit() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let mut config = harness.config();
+    config.tools = Some(vec![
+        "read".into(),
+        "write".into(),
+        "edit".into(),
+        "exec".into(),
+    ]);
+    let session = harness.agent.create_session(config).await.unwrap();
+    let path = harness.cwd.join("batch-read.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let target = path.to_string_lossy().into_owned();
+    harness
+        .run(
+            &session,
+            &[
+                ("read", json!({"path": target})),
+                (
+                    "edit",
+                    json!({"path": target, "oldText": "before", "newText": "after"}),
+                ),
+                ("read", json!({"path": target})),
+            ],
+        )
+        .await;
+    let events = tokio::time::timeout(
+        Duration::from_secs(10),
+        until(&session, "the whole batch", |events| {
+            tool_texts(events).len() == 3
+        }),
+    )
+    .await
+    .expect("the batch settles");
+    let results = tool_texts(&events);
+    assert_eq!(results.len(), 3, "{results:?}");
+    assert!(results[0].contains("before"), "{results:?}");
+    assert!(results[1].contains("Edited"), "{results:?}");
+    assert!(
+        results[2].contains("after"),
+        "the second read sees the edit: {results:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "after\n");
+}
+
+/// A batch of a file edit and a command that reads that file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_that_edits_then_runs_a_command_sees_the_edit() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let mut config = harness.config();
+    config.tools = Some(vec!["read".into(), "edit".into(), "exec".into()]);
+    let session = harness.agent.create_session(config).await.unwrap();
+    let path = harness.cwd.join("batch-exec.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let target = path.to_string_lossy().into_owned();
+    harness
+        .run(
+            &session,
+            &[
+                // A prior read establishes the edit's text binding.
+                ("read", json!({"path": target})),
+                (
+                    "edit",
+                    json!({"path": target, "oldText": "before", "newText": "after"}),
+                ),
+                (
+                    "exec",
+                    json!({"command": format!("cat {target}"), "title": "cat"}),
+                ),
+            ],
+        )
+        .await;
+    let events = tokio::time::timeout(
+        Duration::from_secs(10),
+        until(&session, "the whole batch", |events| {
+            tool_texts(events).len() == 3
+        }),
+    )
+    .await
+    .expect("the batch settles");
+    let results = tool_texts(&events);
+    assert_eq!(results.len(), 3, "{results:?}");
+    assert!(
+        results[2].contains("after"),
+        "the command sees the edit: {results:?}"
+    );
+}

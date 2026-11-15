@@ -394,10 +394,19 @@ export interface ToolResult {
 }
 /** How a registered tool runs a call; `cancelled` settles when the call is cancelled. */
 export type ToolExecute = (call: ToolCall, cancelled: Promise<void>) => Promise<ToolResult>;
+/** What a registration says besides its declaration and its function. It is an
+ * execution property of the bound handler, not part of the persisted
+ * `ToolDefinition`. */
+export interface ToolRegistrationOptions {
+  /** `'concurrent'` lets this tool's calls share a step with the calls around
+   * them. Absent means the tool's calls run alone, in the order the model wrote
+   * them, which is what a tool whose effects are not declared needs. */
+  concurrency?: 'concurrent';
+}
 /** Session service `toolRegistry`: a Session row registers each of its tools,
  * which stays registered until the row unloads. The declaration must name its risk. */
 export interface ToolRegistry {
-  register(declaration: ToolDefinition, execute: ToolExecute): Promise<void>;
+  register(declaration: ToolDefinition, execute: ToolExecute, options?: ToolRegistrationOptions): Promise<void>;
 }
 
 /** One entry of the input guide: the markers it explains, its position among

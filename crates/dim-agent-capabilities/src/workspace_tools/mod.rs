@@ -22,6 +22,7 @@ use crate::{
     host_platform::HostPlatform,
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
+    tool_registry::ToolConcurrency,
 };
 use background::BackgroundExecPlugin;
 use dim_agent_runtime::{
@@ -170,6 +171,15 @@ fn host_error(error: AgentError) -> HostError {
     }
 }
 
+/// The ordering class of each workspace tool. Every name outside the three
+/// reads orders, including the ones this product does not mount today.
+fn tool_concurrency(name: &str) -> ToolConcurrency {
+    match name {
+        "read" | "glob" | "grep" => ToolConcurrency::Concurrent,
+        _ => ToolConcurrency::Exclusive,
+    }
+}
+
 impl WorkspaceTools {
     async fn run(
         &self,
@@ -252,6 +262,12 @@ impl ToolDriver for WorkspaceTools {
         definitions.push(exec::definition_for(&self.platform));
         definitions.push(exec::stop_definition());
         definitions
+    }
+    /// The reads share a step; everything else here orders. `read`, `glob` and
+    /// `grep` change nothing another call of the batch can observe, while
+    /// `write`, `edit`, `exec` and `exec_stop` change files or processes.
+    fn concurrency(&self, call: &ToolCall) -> ToolConcurrency {
+        tool_concurrency(&call.name)
     }
     fn resolve_write(
         &self,
@@ -566,5 +582,28 @@ impl DynPlugin for WorkspaceToolsPlugin {
             ctx.provide_at(self.host.clone(), Arc::new(ToolHost(tools)))?;
             Ok(Effect::Done)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_three_reads_share_a_step_and_every_other_tool_orders() {
+        for name in ["read", "glob", "grep"] {
+            assert_eq!(
+                tool_concurrency(name),
+                ToolConcurrency::Concurrent,
+                "{name} changes nothing another call of the batch can observe"
+            );
+        }
+        for name in ["write", "edit", "exec", "exec_stop", "unknown"] {
+            assert_eq!(
+                tool_concurrency(name),
+                ToolConcurrency::Exclusive,
+                "{name} changes state or is not declared"
+            );
+        }
     }
 }
