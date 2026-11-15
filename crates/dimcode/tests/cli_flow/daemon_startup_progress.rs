@@ -864,3 +864,107 @@ fn a_child_that_lost_the_store_is_reaped_and_a_successor_starts() {
     assert!(!stderr.contains("Another dimcode-server"), "{stderr}");
     assert!(!note.exists(), "the successor removed the note");
 }
+
+/// A server that has bound its endpoint, accepted the connection, and holds
+/// `hello` for longer than the transport's former fixed reply bound is still
+/// waited for while it reports startup progress: the handshake is a startup
+/// phase, not a request with a bound of its own (#1620). The App Server binds in
+/// `TransportPlugin::apply` and accepts only once its whole assembly has
+/// opened, so a slow start meets exactly this shape: the connect succeeds and
+/// the request gets no answer.
+#[test]
+fn a_bound_server_that_reports_progress_is_waited_for_before_hello() {
+    let home = Home::new();
+    let note = note_path(&home);
+    let hold = Duration::from_secs(6);
+    let released = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&released);
+    // It accepts, then answers `hello` only once the test has held it past the
+    // former bound, and serves the command afterwards.
+    let daemon = home.daemon(move |wire| {
+        let started = Instant::now();
+        while started.elapsed() < hold && !flag.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        wire.hello(&[]);
+        let catalog = wire.read("provider.catalog");
+        wire.reply(&catalog, json!({"catalog":null}));
+    });
+    // One note per 200 ms moves the startup bound past the point where a fixed
+    // reply bound would have given up.
+    let writing = {
+        let note = note.clone();
+        let flag = Arc::clone(&released);
+        thread::spawn(move || {
+            let mut counter = 0;
+            while !flag.load(Ordering::SeqCst) && counter < 100 {
+                counter += 1;
+                write_progress_note(&note, 424242, counter);
+                thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+    let started = Instant::now();
+    let output = home
+        .command()
+        .env("DIM_TEST_START_LOCK_TIMEOUT_MS", "1500")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+    released.store(true, Ordering::SeqCst);
+    writing.join().unwrap();
+    daemon.join().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a bound server that reports progress is waited for: {stderr}"
+    );
+    assert!(
+        !stderr.contains("deadline has elapsed"),
+        "the bare tokio text reached the user: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches(UPGRADING).count(),
+        1,
+        "the upgrade line is printed once: {stderr}"
+    );
+    assert!(
+        elapsed >= hold,
+        "the handshake was given up before the server answered: {elapsed:?}"
+    );
+}
+
+/// A server that accepts the connection and then reports nothing is reported
+/// with the phase it was waiting for and where to look, never tokio's own text
+/// (#1620).
+#[test]
+fn a_silent_server_names_what_the_hello_wait_was_for() {
+    let home = Home::new();
+    // It accepts the connection and answers no `hello`: no reply and no
+    // progress note, so the startup bound is the only thing that can end it.
+    // The connection stays open until the client has reported its failure.
+    let (keep, kept) = std::sync::mpsc::channel::<()>();
+    let daemon = home.daemon(move |wire| {
+        let _held = wire;
+        let _ = kept.recv_timeout(Duration::from_secs(30));
+    });
+    let output = home
+        .command()
+        .env("DIM_TEST_START_LOCK_TIMEOUT_MS", "1500")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    let _ = keep.send(());
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("deadline has elapsed"),
+        "the bare tokio text reached the user: {stderr}"
+    );
+    assert!(
+        stderr.contains("did not answer hello") && stderr.contains("daemon.log"),
+        "the error names the wait and where to look: {stderr}"
+    );
+}
