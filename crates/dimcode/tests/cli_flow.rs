@@ -3906,6 +3906,16 @@ impl Terminal {
             tail.find(expected).map(|index| index + expected.len())
         });
     }
+    /// Waits until the text the user reads has shown `expected`. A row an
+    /// attribute splits into runs, as a highlighted token is, does not hold
+    /// its own text contiguously, so a wait on what the row says reads the
+    /// transcript without its escape sequences.
+    fn until_plain(&mut self, expected: &str) {
+        let wanted = expected.to_owned();
+        self.wait_for(expected, move |tail| {
+            strip_ansi(tail).contains(&wanted).then_some(tail.len())
+        });
+    }
     /// Waits until the row labelled `label` shows `value`: a panel paints a
     /// row's value in the same write as its label, so the text that follows
     /// the label is the row's loaded state.
@@ -6664,7 +6674,7 @@ fn tui_skill_rows_come_from_the_catalog_and_complete_without_sending() {
         terminal.write(b"/comm");
         terminal.until("/skill:commit");
         terminal.raw(b"\r");
-        terminal.until("/skill:commit ");
+        terminal.until_plain("/skill:commit ");
         terminal.write(b"\x03");
 
         // A disabled or shadowed Skill is not offered: Tab completes nothing.
@@ -6729,13 +6739,13 @@ fn reloading_skills_changes_the_palette_rows() {
     // Before the rescan only the command matches; the new Skill is not known.
     terminal.write(b"/rel");
     terminal.until("/reload-skills");
-    assert!(!terminal.transcript.contains("$release"));
+    assert!(!terminal.transcript.contains("/skill:release"));
     terminal.write(b"\x03");
 
     terminal.write(b"/reload-skills\r");
     // The palette feed takes the rescan's list.
     terminal.write(b"/rel");
-    terminal.until("$release");
+    terminal.until("/skill:release");
     terminal.write(b"\x03");
 
     terminal.write(b"/exit\r");
@@ -6775,7 +6785,7 @@ fn a_daemon_without_skill_catalog_keeps_a_working_command_palette() {
     terminal.write(b"x");
     terminal.until("/rename x");
     terminal.write(b"\x03");
-    assert!(!terminal.transcript.contains("$skill"));
+    assert!(!terminal.transcript.contains("/skill:"));
     assert!(!terminal.transcript.contains("Unknown method"));
 
     terminal.write(b"/exit\r");
