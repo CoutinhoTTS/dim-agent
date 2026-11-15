@@ -1399,7 +1399,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("agentDirectory", "owner-api"),
         ("agentIndex", "owner-api"),
         ("agentLoop", "hot-path"),
-        ("approval", "object"),
         ("auxiliaryModelHost", "owner-api"),
         ("branchLine", "hot-path"),
         ("branchOpening", "hot-path"),
@@ -1423,7 +1422,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("hooksService", "host-resource"),
         ("hostPlatform", "object"),
         ("initialPromptConfiguration", "hot-path"),
-        ("inputQueue", "object"),
         ("loader", "owner-api"),
         ("loopState", "hot-path"),
         // Session creation calls it directly; no leaf needs the service.
@@ -1437,7 +1435,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("modelProvider", "hot-path"),
         ("modelSelectionHost", "legacy-no-consumer"),
         ("openAICodexOAuthService", "secret"),
-        ("permission", "object"),
         ("pluginFileTransactions", "host-resource"),
         ("prepareContextHost", "hot-path"),
         ("prepareModelHost", "hot-path"),
@@ -1465,12 +1462,10 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("timelineTreeControl", "owner-api"),
         ("toolBinding", "hot-path"),
         ("toolExecutor", "hot-path"),
-        ("toolHost", "object"),
         ("toolSourcesView", "owner-api"),
         ("toolchainSourceHost", "legacy-no-consumer"),
         ("uiExtensions", "control"),
         ("uiHost", "control"),
-        ("wait", "object"),
     ] {
         builder.internal_name(name, reason);
     }

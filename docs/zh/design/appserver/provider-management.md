@@ -291,8 +291,19 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 | 捆绑目录 | `metadataSource` 指向匹配的捆绑 Provider：条目仅在其 `metadata.raw` 声明处才有上限，其余取值在捆绑加载时删除；该 Provider 的 `contextWindowOverride`、`contextWindowFallback` 元数据仍是声明 | 匹配到的模型，或该 Provider 的全部模型 |
 | 用户 | 同一 `capabilityOverrideFields` 字段，写在描述覆盖或用户模型上：`models.edit` 为它编辑的每项上限写入，两个旧版导入器为导入时保留的每项值写入 | 覆盖所指的模型 |
 
+清单以同样的方式声明模型的推理档位，且它声明的第一个形状就是模型自己的列表：先取
+`reasoning_options` 中 `type` 为 `effort` 那一项的 `values`，否则取各项
+`supported_reasoning_levels` 的 `effort`，最后才是扁平的 `reasoning_levels` 列表。
+`reasoning_options` 仍在原处读取，即清单项的顶层或存储条目保留的 `raw` 旁；另两个形状按同样
+方式读取。每个取值去空白，非字符串与空串丢弃，重复值保留第一个，因此顺序即清单的顺序。某个
+已声明的形状取值全被丢弃即声明空列表：该模型不提供推理档位，识别出的行不补它，存储的描述保留
+`effortOptions: []`，使之后再次读取仍声明它。清单未声明任何形状、以及 `reasoning` 为 `false`
+的模型都保持原状：识别出的行仍只补未声明的列表，绝不补已声明的列表。`reasoning` 本身不变：
+未声明 `reasoning` 的清单仍仅凭档位声明 `supported: true`，与今天仅凭 `reasoning_options`
+声明时一致。
+
 先识别模型，再从识别指明的条目读取数字。识别在目录上进行，第一个只留下一个模型的步骤胜出：
-Provider 自有清单按精确 id；然后是整个限定 id，当它携带的命名空间正是持有该 id 那一行的
+Provider 的声明按精确 id；然后是整个限定 id，当它携带的命名空间正是持有该 id 那一行的
 Provider 时，聚合方自有的 house model 因此不会被其末段 token 偶然指名的无关行作答；然后是自有
 token 是 id 头部、尾部至多为日期、`latest`、tag 后缀或方括号上下文修饰的厂商条目；接着把厂商的
 上游规范 id 与显示名合看，显示名将多个规范命中收窄为一个，仍有分歧即歧义而非猜测；然后按同样
@@ -300,6 +311,25 @@ token 是 id 头部、尾部至多为日期、`latest`、tag 后缀或方括号�
 厂商条目、也没有 `custom-provider` 行、也没有别名指名的模型，合并自有 id 为同名同 tag 的聚合行，
 且只取安全方向：最小窗口、最小输出上限与 effort 选项的交集。Provider 默认值不是声明，携带其
 Provider 在大量行上写出的那一对数值的行在该处不声明任何上限。
+
+第一步的声明是 Provider 自己对某个 id 的说明，绝不是它的列举产出。捆绑 Provider 的声明是它的
+捆绑行与用户自行添加的模型；自定义 Provider 在这一步不声明任何东西。列举写出的行属于列举的产出，
+既不为它自己作答，也不为同级的另一个 id 作答：列表中的 id 在每次发现与每次读取时都对着目录识别，
+而不是对着更早的列举留下的那一行。用户声明的内容在两种 Provider 上都照旧生效，经由
+`capabilityOverrideFields` 与其余用户自有状态。
+
+厂商条目是 role 为 `vendor` 的 Provider 上的行，且该行的规范 id 命名该 Provider 自有的命名空间，
+或该行未声明规范 id。vendor Provider 上规范 id 指向另一家厂商的行是转售：读取厂商条目的各步骤
+跳过它，合并像读取聚合行那样读它。第一步仍会为所属 Provider 读取它，因为无论转售哪家的模型，
+捆绑行都是该 Provider 的声明。Provider 自有的命名空间是 `metadata.vendorNamespace`，由同步从该
+Provider 的策略写入，与 role 相邻；凡是行上携带规范 id 的 vendor Provider 都声明它。转售另一家
+厂商模型、而 upstream 未给出规范 id 的 plan 行，其规范 id 在已提交的 catalog 中声明，并由同步保持。
+
+只有 kind 与该 id 的 kind 相符的行才加入该合并。不声明 kind 的行，也就是 raw `type` 缺失或为
+`model` 的行，可加入任意 id。声明 `chat` 的 id 只取声明 `chat` 的行，声明其他 kind 的 id 只取
+声明同一 kind 的行，不做同义归并。不声明 kind 的 id，在其同名行中有任一声明 `chat` 时只取声明
+`chat` 或不声明 kind 的行，否则取该名的全部行：它因此保留原有合并的那些 media 行，并携带它们的
+`type`，正是这个 `type` 让 media 模型不进入对话。没有任何行加入的 id 保持未识别。
 
 Provider 记录声明其列出 id 携带的前缀。该前缀在 id 头部、不区分大小写地只去除一次，早于 id 被
 拆成各 token 与名称步骤所比的 token。第一步与限定 id 步骤读取整个 id，因此精确行与限定 id 不受该
@@ -724,7 +754,7 @@ catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，�
 ```text
 Select a model
 > Provider / model          ZDR  ‹ high ›
-Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 ```
 
 ```text

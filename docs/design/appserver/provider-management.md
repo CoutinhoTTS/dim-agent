@@ -435,10 +435,26 @@ already records:
 | Bundled catalog | `metadataSource` naming the matched bundled provider: an entry declares a limit only where its `metadata.raw` does, and the bundle drops every other limit when it is loaded; that provider's `contextWindowOverride` and `contextWindowFallback` metadata stay declarations | The models the lookup matches, or every model of the provider |
 | User | The same `capabilityOverrideFields` field on the descriptor override or user model: `models.edit` writes it for each limit it edits, and either legacy importer for an imported value it keeps | The model the override names |
 
+A listing declares a model's reasoning efforts the same way, and the first shape
+it states is the model's own list: the `values` of its `reasoning_options` entry
+of type `effort`, else the `effort` of each `supported_reasoning_levels` item,
+else the flat `reasoning_levels` list. `reasoning_options` is read where it
+already was, at the item's top level or beside the `raw` a stored entry keeps;
+the other two are read the same way. Each value is trimmed, a non-string or an
+empty one is dropped and the first of a repeated value is kept, so the order is
+the listing's. A stated shape whose values all drop declares an empty list: the
+model offers no effort choice, the identified row does not fill it, and the
+stored descriptor keeps `effortOptions: []` so a later read still declares it. A
+listing that states no shape and a model whose `reasoning` is `false` both keep
+what they had, so an identified row still fills an absent list and never a
+declared one. `reasoning` itself is unchanged: a listing that states no
+`reasoning` still declares `supported: true` from its levels alone, as it does
+from `reasoning_options` today.
+
 The model is identified first, and the numbers are read from the entry that
 identification named. Identification runs over the catalog, and the first step
-that leaves one model wins: the provider's own list by exact id; then the whole
-qualified id, when the namespace it carries names the provider whose row
+that leaves one model wins: the provider's declarations by exact id; then the
+whole qualified id, when the namespace it carries names the provider whose row
 carries that id, so an aggregator's own house model is never answered by the
 unrelated row its final token happens to name; then a vendor entry whose own
 tokens are the head of the id, its tail no more than a date, `latest`, a tag
@@ -452,6 +468,36 @@ rows whose own id names the same model with the same tag, taken in the safe
 direction: the smallest window, the smallest output cap and the intersection of
 the effort choices. A provider default is not a declaration, so a row carrying
 the pair its provider writes across many of its rows declares no limit there.
+
+A declaration at that first step is the provider's own statement about an id,
+never something its listing produced. A builtin provider's declarations are its
+bundled rows and the models the user added to it; a custom provider declares
+nothing there. A row a listing wrote is that listing's output, so it answers for
+neither itself nor a sibling id: a listed id is identified against the catalog
+on every discovery and every read, not against the row an earlier listing left.
+What the user stated keeps applying on either kind of provider, through
+`capabilityOverrideFields` and the other user-owned state.
+
+A vendor entry is a row of a provider whose role is `vendor`, when the row's
+canonical id names that provider's own namespace or the row states no canonical
+id. A row of a vendor provider whose canonical id names another vendor is a
+resale: the steps that read vendor entries pass it over, and the merge reads it
+as it reads an aggregator row. The first step still reads it for its own
+provider, since a bundled row is that provider's declaration whichever model it
+resells. A provider's own namespace is `metadata.vendorNamespace`, which the
+sync writes from the provider's policy beside its role, and every vendor
+provider whose rows carry canonical ids states one. A plan row that resells
+another vendor's model, where upstream gives it no canonical id, has that id
+stated in the committed catalog, and the sync keeps it.
+
+A row joins that merge only when its kind is the id's kind. A row that states
+no kind, because its raw `type` is absent or `model`, joins any id. An id that
+states `chat` takes the rows stating `chat`, and an id stating any other kind
+takes the rows stating exactly that kind, with no synonym. An id that states no
+kind takes the rows stating `chat` or none when any row of its name states
+`chat`, and otherwise every row of its name: it keeps the media rows it merged
+before and carries their `type`, which is what keeps a media model out of
+conversations. An id left with no joining row stays unidentified.
 
 A provider's record states a prefix its listed ids carry, and that prefix is
 stripped once, at the head of the id and case-insensitively, before the id is
@@ -1078,7 +1124,7 @@ names the declaring command below its rows.
 ```text
 Select a model
 > Provider / model          ZDR  ‹ high ›
-Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 ```
 
 ```text
