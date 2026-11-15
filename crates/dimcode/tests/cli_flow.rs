@@ -415,6 +415,7 @@ impl Wire {
             "session.create",
             "session.history",
             "session.history.latestTurn",
+            "session.input.pending.blockPresence",
             "provider.list",
         ];
         let empty_methods = !extra.contains(&"session.methods");
@@ -5455,7 +5456,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
                         "protocolVersion":4,"daemonProfile":{"kind":"product"},
-                        "features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list",
+                        "features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list",
                             "provider.catalog","provider.management"]}),
                     "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                     "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
@@ -5829,7 +5830,7 @@ fn repicking_the_current_model_keeps_the_effort() {
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
                     "protocolVersion":4,"daemonProfile":{"kind":"product"},
-                    "features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list",
+                    "features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list",
                         "provider.catalog","provider.management","provider.selection","provider.select"]}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                 "provider.catalog" => catalog.clone(),
@@ -6105,7 +6106,7 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -6268,7 +6269,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -6439,7 +6440,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -6497,7 +6498,7 @@ fn tui_at_mentions_pick_files_from_the_working_directory() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         // `/workspace` deliberately differs from the `--cwd project` this
         // flow launched with: `@` completes local paths against the selected
@@ -6784,7 +6785,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.catalog"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list","provider.catalog"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -7895,7 +7896,7 @@ fn tui_mcp_says_when_no_server_is_configured() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -7935,7 +7936,7 @@ fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -7996,7 +7997,7 @@ fn tui_mcp_enables_and_disables_a_project_server() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -8789,7 +8790,7 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
         let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","web.toggle"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","web.toggle"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -8858,7 +8859,7 @@ fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -9932,7 +9933,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","session.input.pending.blockPresence","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -10370,7 +10371,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list"]}));
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -11413,7 +11414,7 @@ fn resume_by_id_takes_its_model_from_the_attach_record() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"session"}));
         wire.reply(&attach, json!({"sessionId":"session","cwd":"/workspace",
@@ -11444,7 +11445,7 @@ fn resume_by_id_finds_the_model_in_the_catalog_when_the_attach_reply_is_empty() 
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
         let attach = wire.read("session.attach");
         assert_eq!(attach["params"], json!({"sessionId":"session"}));
         wire.reply(&attach, json!({}));
@@ -11483,7 +11484,7 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -11545,7 +11546,7 @@ fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -11606,7 +11607,7 @@ fn tui_draws_a_stop_hooks_follow_up_as_one_row() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -11675,7 +11676,7 @@ fn tui_names_a_one_line_hook_context_in_the_singular() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -11718,7 +11719,7 @@ fn tui_draws_an_operators_own_hook_marker_verbatim() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -11856,7 +11857,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.management","provider.create","provider.update","provider.probe"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.management","provider.create","provider.update","provider.probe"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -11936,7 +11937,7 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
             calls.send(request.clone()).unwrap();
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
                     "provider.list","provider.catalog","collaboration.model_policy",
                     "collaboration.set_model_policy"]}),
                 "session.create" => panic!("resuming must not create a Session"),
@@ -12042,7 +12043,7 @@ fn tui_models_picker_hides_edit_models_without_management_methods() {
             if wire.2 && wire.empty_state(&request) { continue; }
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
                     "provider.list","provider.catalog","provider.selection","provider.select"]}),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => attach_record(&request),
@@ -12101,7 +12102,7 @@ fn tui_models_picker_cycles_reasoning_effort() {
             calls.send(request.clone()).unwrap();
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
                     "provider.list","provider.catalog","provider.management","provider.selection","provider.select"]}),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => attach_record(&request),
@@ -12196,7 +12197,7 @@ fn tui_models_picker_writes_the_default_the_launch_workspace_reads() {
                 calls.send(request.clone()).unwrap();
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                        "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
+                        "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
                         "provider.list","provider.catalog","provider.selection","provider.select"]}),
                     "session.create" => panic!("resuming must not create a Session"),
                     "session.attach" => attach_record(&request),
@@ -12285,7 +12286,7 @@ fn tui_models_picker_draws_its_hint_in_the_interface_language() {
             if wire.2 && wire.empty_state(&request) { continue; }
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
                     "provider.list","provider.catalog","provider.selection","provider.select"]}),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => attach_record(&request),
@@ -12355,7 +12356,7 @@ fn tui_models_picker_refills_an_empty_provider_catalog() {
             if wire.2 && wire.empty_state(&request) { continue; }
             let answer = match request["method"].as_str().unwrap() {
                 "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
                     "provider.list","provider.catalog","provider.refresh"]})),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => Some(attach_record(&request)),
@@ -12503,7 +12504,7 @@ fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
             if wire.2 && wire.empty_state(&request) { continue; }
             let answer = match request["method"].as_str().unwrap() {
                 "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
                     "provider.list","provider.catalog","provider.refresh"]})),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => Some(attach_record(&request)),
@@ -12618,7 +12619,7 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
             };
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods",
+                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
                     "provider.list","provider.catalog"]}),
                 "session.create" => panic!("resuming must not create a Session"),
                 "session.attach" => {

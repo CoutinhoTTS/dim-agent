@@ -14,6 +14,8 @@ struct Params {
     branch_id: String,
     through: Option<u64>,
     after: Option<QueryCursor>,
+    #[serde(default)]
+    include_block_presence: bool,
 }
 
 pub(super) async fn read(
@@ -70,9 +72,15 @@ pub(super) async fn read(
                 ],
             }),
             select: QuerySelect::Fields {
-                fields: ["id", "position.sequence", "data.mode", "data.user"]
-                    .map(String::from)
-                    .to_vec(),
+                fields: [
+                    "id",
+                    "position.sequence",
+                    "data.mode",
+                    "data.user",
+                    "data.blocks[0].type",
+                ]
+                .map(String::from)
+                .to_vec(),
             },
             group_by: vec![],
             pick: None,
@@ -97,6 +105,7 @@ pub(super) async fn read(
             QueryValue::Value { value: sequence },
             mode,
             user,
+            first_block_type,
         ] = row.values.as_slice()
         else {
             unreachable!("input identity")
@@ -120,6 +129,9 @@ pub(super) async fn read(
             mode,
             user,
             applied: false,
+            has_raw_blocks: p
+                .include_block_presence
+                .then_some(matches!(first_block_type, QueryValue::Value { .. })),
         });
     }
     if !inputs.is_empty() {

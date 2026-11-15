@@ -1811,9 +1811,8 @@ impl App {
         }
     }
 
-    /// Withdraws every queued message, oldest first, for an interrupt. The
-    /// withdrawals reach the session before its stop, so no queued message
-    /// starts the next run.
+    /// Withdraws every user-queue message, oldest first, for an interrupt.
+    /// Hidden automatic inputs remain pending.
     fn recall_all_queued(&mut self) {
         for id in self.queued() {
             self.host.send(Command::InputControl {
