@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import type { DraftAttachments, FileCandidate, ModelId, PermissionPreset, PermissionPolicy } from "../../rpc/protocol"
 import { linkMentions, mentionTrigger, type FileMention, type MentionTrigger } from "../../mentions"
+import { SKILL_TOKEN_PREFIX, namesSkillToken, skillCommandQuery, startsWithSkillToken } from "../../skill-token"
 import { useModelsStore } from "../../stores/models"
 import { useSessionsStore } from "../../stores/sessions"
 import { useConnectionStore } from "../../stores/connection"
@@ -54,6 +55,8 @@ const props = withDefaults(defineProps<{
   openLines?: () => void
   /** Session commands the menu lists, each only when given. */
   sessionCommands?: SessionCommands
+  /** The Skills the menu offers by `/skill:<name>`, from `session.skills`; absent where the Session serves none. */
+  skills?: ReadonlyArray<{ name: string; description: string }>
 }>(), { attachments: true })
 const { t } = useI18n()
 const route = useRoute()
@@ -109,12 +112,32 @@ const availableCommands = computed(() => ([
   { category: "session", name: "new", available: true },
   { category: "session", name: "scheduled", available: connection.supports("schedule.list") },
 ] as const).filter((command) => command.available))
-const commandPrefix = computed(() => /^\/[a-z]*$/i.test(text.value) ? text.value.slice(1).toLowerCase() : undefined)
+const commandPrefix = computed(() => /^\/[a-z]*(?::[A-Za-z0-9_.-]*)?$/i.test(text.value) ? text.value.slice(1) : undefined)
+/** The Skills the menu offers: enabled, unshadowed and user-invocable is the caller's filter; a name the token cannot carry is left out here. */
+const offeredSkills = computed(() => (props.skills ?? []).filter((skill) => namesSkillToken(skill.name)))
+const skillMatches = computed(() => {
+  const prefix = commandPrefix.value
+  if (prefix === undefined) return []
+  const { name, skillsOnly } = skillCommandQuery(`/${prefix}`)
+  return offeredSkills.value.filter((skill) => skill.name.toLowerCase().startsWith(name) && (skillsOnly || name.length > 0))
+})
 const matches = computed(() => {
   const prefix = commandPrefix.value
-  return prefix === undefined ? [] : availableCommands.value.filter((command) => command.name.startsWith(prefix))
+  if (prefix === undefined) return []
+  const { name, skillsOnly } = skillCommandQuery(`/${prefix}`)
+  if (skillsOnly) return []
+  return availableCommands.value.filter((command) => command.name.startsWith(name))
 })
-const commandMode = computed(() => !composing.value && !dismissed.value && matches.value.length > 0)
+type MenuRow =
+  | { kind: "command"; key: string; category: string; name: string; description: string; command: (typeof availableCommands.value)[number] }
+  | { kind: "skill"; key: string; category: "skill"; name: string; description: string }
+
+/** One list the menu draws: commands first, then Skills, as the TUI orders them. */
+const menuRows = computed<MenuRow[]>(() => [
+  ...matches.value.map((command) => ({ kind: "command" as const, key: `/command/${command.name}`, category: command.category, name: `/${command.name}`, description: t(`composer.command.${command.name}`), command })),
+  ...skillMatches.value.map((skill) => ({ kind: "skill" as const, key: `/skill/${skill.name}`, category: "skill" as const, name: `${SKILL_TOKEN_PREFIX}${skill.name}`, description: skill.description })),
+])
+const commandMode = computed(() => !composing.value && !dismissed.value && menuRows.value.length > 0)
 const menuOpen = computed(() => focused.value && commandMode.value)
 
 watch(text, () => {
@@ -242,8 +265,9 @@ function acceptCandidate(candidate: FileCandidate): void {
 async function submit(): Promise<void> {
   if (!canSend.value || composing.value) return
   if (commandMode.value) {
-    const command = matches.value[activeIndex.value]
-    if (command !== undefined) await runCommand(command.name)
+    const row = menuRows.value[activeIndex.value]
+    if (row?.kind === "skill") completeSkill(row.name.slice(SKILL_TOKEN_PREFIX.length))
+    else if (row !== undefined) await runCommand(row.command.name)
     return
   }
   const message = text.value
@@ -331,6 +355,18 @@ async function onModel(model: ModelId): Promise<void> {
   }
 }
 
+/** Fills `/skill:<name> ` into the draft and sends nothing; the token is part of the message. */
+function completeSkill(name: string): void {
+  text.value = `${SKILL_TOKEN_PREFIX}${name} `
+  dismissed.value = true
+  void nextTick(() => {
+    resize()
+    const element = field.value
+    element?.focus()
+    element?.setSelectionRange(text.value.length, text.value.length)
+  })
+}
+
 async function runCommand(name: typeof availableCommands.value[number]["name"]): Promise<void> {
   if (composing.value) return
   error.value = ""
@@ -383,7 +419,7 @@ function onKeydown(event: KeyboardEvent): void {
   }
   if (menuOpen.value && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
     event.preventDefault()
-    activeIndex.value = (activeIndex.value + (event.key === "ArrowDown" ? 1 : -1) + matches.value.length) % matches.value.length
+    activeIndex.value = (activeIndex.value + (event.key === "ArrowDown" ? 1 : -1) + menuRows.value.length) % menuRows.value.length
     return
   }
   if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
@@ -422,9 +458,9 @@ defineExpose({ focus: () => field.value?.focus(), quote })
       </div>
       <div v-if="menuOpen" :id="menuId" class="command-menu" role="listbox" :aria-label="t('composer.commands')">
         <button
-          v-for="(command, index) in matches"
+          v-for="(row, index) in menuRows"
           :id="`${menuId}-${index}`"
-          :key="command.name"
+          :key="row.key"
           type="button"
           role="option"
           class="command-menu-item command-item"
@@ -432,11 +468,11 @@ defineExpose({ focus: () => field.value?.focus(), quote })
           :data-highlighted="index === activeIndex ? '' : undefined"
           @mousedown.prevent
           @mouseenter="activeIndex = index"
-          @click.stop="runCommand(command.name)"
+          @click.stop="row.kind === 'skill' ? completeSkill(row.name.slice(SKILL_TOKEN_PREFIX.length)) : runCommand(row.command.name)"
         >
-          <span class="command-category">{{ index === 0 || matches[index - 1]?.category !== command.category ? t(`composer.category.${command.category}`) : '' }}</span>
-          <span class="command-name">/{{ command.name }}<span v-if="command.name === 'branch'" class="command-argument"> &lt;prompt&gt;</span><span v-else-if="command.name === 'goal' || command.name === 'loop' || command.name === 'effort'" class="command-argument"> [args]</span></span>
-          <span class="command-description">{{ t(`composer.command.${command.name}`) }}</span>
+          <span class="command-category">{{ index === 0 || menuRows[index - 1]?.category !== row.category ? t(`composer.category.${row.category}`) : '' }}</span>
+          <span class="command-name">{{ row.name }}<template v-if="row.kind === 'command'"><span v-if="row.command.name === 'branch'" class="command-argument"> &lt;prompt&gt;</span><span v-else-if="row.command.name === 'goal' || row.command.name === 'loop' || row.command.name === 'effort'" class="command-argument"> [args]</span></template></span>
+          <span class="command-description">{{ row.description }}</span>
         </button>
         <p class="command-keys">{{ t("composer.commandKeys") }}</p>
       </div>

@@ -512,3 +512,42 @@ test("image submission uploads the File before sending only its durable referenc
   assert.equal(uploads.length, 1, "retrying a draft reuses its accepted file identity")
   assert.equal(calls[1].params.user.content[1].source.fileId, "image-1")
 })
+
+test("the /skill: namespace offers Skills, fills the token, and sends it as a message", async (t) => {
+  const skills = [{ name: "commit", description: "Writes commit messages" }, { name: "deploy", description: "Ships a build" }]
+  const { root, submissions } = mount(t, "main", [], ComposerPanel, {}, { skills })
+  const field = all(root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props["onUpdate:modelValue"]("/skill:")
+  await flush()
+  const labels = all(root).filter((element) => element.type === "button").map(text)
+  const offered = labels.filter((label) => label.includes("/skill:"))
+  assert.equal(offered.length, 2, `the namespace narrows the menu to Skills: ${labels}`)
+  assert.ok(offered[0].includes("/skill:commit") && offered[1].includes("/skill:deploy"), offered.join("|"))
+  assert.equal(labels.some((label) => label.includes("/compact")), false, "no command row joins them")
+
+  field.props["onUpdate:modelValue"]("/skill:dep")
+  await flush()
+  const deploy = all(root).find((element) => element.type === "button" && text(element).includes("/skill:deploy"))
+  click(deploy)
+  await flush()
+  assert.deepEqual(submissions, [], "filling is not sending")
+
+  const sent = []
+  const typed = mount(t, "main", [], ComposerPanel, {}, { skills, send: async (message) => { sent.push(message) } })
+  const typedField = all(typed.root).find((element) => element.type === "textarea")
+  typedField.props.onFocus()
+  typedField.props["onUpdate:modelValue"]("/skill:deploy ")
+  await flush()
+  typedField.props.onKeydown({ key: "Enter", preventDefault() {}, stopPropagation() {} })
+  await flush()
+  assert.deepEqual(sent, ["/skill:deploy "], "a /skill: draft is a message, never a command")
+})
+
+test("a user message draws each /skill: token as one chip", async (t) => {
+  const { root } = mount(t, "main", [], ComposerPanel, {}, {})
+  assert.ok(root)
+  const { skillTokens } = await import("../src/skill-token.ts")
+  const parts = skillTokens("please /skill:commit it")
+  assert.deepEqual(parts.map((part) => part.name), ["commit"])
+})

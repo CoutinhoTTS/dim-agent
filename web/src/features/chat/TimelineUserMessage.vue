@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "vue-i18n"
 import { copyText } from "../../clipboard"
+import { skillTokens } from "../../skill-token"
 import { formatTimelineTimestamp } from "./timeline-time"
 
 const props = defineProps<{ text: string; sessionId?: string; images?: import("../../rpc/protocol").ImageBlock[]; skills?: string[]; hooks?: number; at: number; quotable: boolean; branchable: boolean }>()
@@ -12,6 +13,19 @@ const overflows = ref(false)
 const expanded = ref(false)
 const copied = ref(false)
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
+
+/** The message as it is drawn: its words, with each `/skill:<name>` token as one chip. */
+const parts = computed(() => {
+  const parts: Array<{ text: string; skill: boolean }> = []
+  let at = 0
+  for (const token of skillTokens(props.text)) {
+    if (token.start > at) parts.push({ text: props.text.slice(at, token.start), skill: false })
+    parts.push({ text: props.text.slice(token.start, token.end), skill: true })
+    at = token.end
+  }
+  if (at < props.text.length) parts.push({ text: props.text.slice(at), skill: false })
+  return parts
+})
 
 const sentTime = computed(() => formatTimelineTimestamp(new Date(props.at), locale.value))
 
@@ -37,7 +51,7 @@ async function copy(): Promise<void> {
       <img v-for="image in images" :key="image.source.fileId" :src="`/api/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(image.source.fileId)}`" alt="Image attachment" loading="lazy" class="max-h-64 max-w-full rounded-lg" />
     </div>
     <div class="user-bubble">
-      <div ref="content" class="user-bubble-content" :class="{ 'is-clipped': overflows && !expanded }">{{ text }}</div>
+      <div ref="content" class="user-bubble-content" :class="{ 'is-clipped': overflows && !expanded }"><span v-for="(part, index) in parts" :key="index" :class="{ 'skill-chip': part.skill }">{{ part.text }}</span></div>
       <UButton v-if="overflows" class="user-bubble-expand" color="neutral" variant="ghost" size="xs" :aria-expanded="expanded" @click="expanded = !expanded">
         <UIcon name="i-lucide-chevron-down" class="size-3.5 user-expand-icon" :class="{ 'is-expanded': expanded }" aria-hidden="true" />
         <span>{{ expanded ? t("message.collapse") : t("message.expand") }}</span>
@@ -74,6 +88,7 @@ async function copy(): Promise<void> {
 .user-actions { display: flex; height: var(--control-sm); align-items: center; gap: var(--space-1); color: var(--muted-foreground); opacity: 0; transition: opacity var(--duration-hover) ease; }
 .user-message:hover .user-actions, .user-message:focus-within .user-actions { opacity: 1; }
 .user-skill, .user-hook { color: var(--muted-foreground); font-size: var(--text-xs); }
+.skill-chip { padding: 0 0.25em; border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-foreground); font-weight: var(--weight-ui-medium, 600); }
 .user-sent-time { margin-right: var(--space-1); white-space: nowrap; }
 .is-copied { color: var(--success); }
 @media (hover: none) { .user-actions { opacity: 1; } }
