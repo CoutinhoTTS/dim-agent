@@ -19,6 +19,50 @@ request; interruption cancels it. InputQueue's write admission remains authorita
 Clients install the inventory independently of transcript history and consume later facts above
 its cutoff. Applied inputs remain pending until consumed; they cannot be treated as withdrawable.
 
+## Block-presence extension
+
+`session.input.pending` accepts optional `includeBlockPresence` (default false).
+When true, each returned input also carries required boolean `hasRawBlocks`, derived
+from whether its stored `input/message.blocks` is nonempty. The read projects only
+the presence of a first raw block, not its body, marker or source-specific meaning.
+Candidate selection, pagination, ordering and applied-state lookup stay unchanged.
+There is no new persisted field or input format.
+
+The App Server advertises `session.input.pending.blockPresence` in its negotiated
+features. Clients request the extension only when advertised. Without the request,
+the reply keeps its existing shape, including for inputs with raw blocks; existing
+clients that reject unknown fields remain compatible. A client that needs this
+distinction must report an unsupported daemon rather than interpret absent
+information as an operator input.
+
+The CLI uses this structural information for its user-only
+[Queue](cli-commands.md#queued-messages). Live events carry the same information in
+`input/message.blocks`. The distinction affects neither pending membership nor
+input execution, and does not remove automatic inputs from the read or transcript.
+Source raw blocks follow [session access A.2](contracts/session-access.md#a2-source-input-conventions);
+operator submit-check context remains inside user content, as specified by
+[Hooks A.6.2](plugins/Hooks.md#a62-submit-check-at-the-operator-input-entries).
+
+### Rule check
+
+This extends the existing stateless InputMethods read, not the InputQueue
+Capability's decisions. Its dependencies remain the `treeCommands` and
+`sessionMethods` data faces documented by [InputQueue](../architecture/rust-agent/plugins/InputQueue.md#inputmethods).
+It writes no facts, owns no background work, and retains no state between calls.
+Principles §4 rules 1–3, 5–6 and 9 require no new mechanism here: there is no
+write, handoff, `before`, batch or context injection. Rules 4, 7 and 8 are met by
+projecting generic structural data through the existing named query service,
+without parsing a producer's marker or changing infrastructure. Under §1 and
+ADR 002 D1–D5, the read remains Session-scoped, uses its declared dependencies,
+adds no wiring or configuration, and returns only language-neutral data.
+
+### Requirements raised to mechanism owners
+
+None. Existing Timeline field projection can read the first block's type without
+loading its body. The read owner supplies the requested presence bit; the CLI
+owns what that bit means for its Queue. No service, event, storage format,
+assembly or lifecycle change is required.
+
 ## Turn identity read
 
 Loop owns `session.turn.get`, registered by its Session part `LoopMethods` with declared

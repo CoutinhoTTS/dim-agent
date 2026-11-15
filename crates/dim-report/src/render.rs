@@ -1,7 +1,10 @@
 use crate::evidence::{CapturedError, Missing, Snapshot, TimelineEvidence};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use dim_agent_capabilities::methods::{RpcError, reply};
-use dim_app_server::protocol::{PROTOCOL_VERSION, SERVER_VERSION};
+use dim_agent_capabilities::{
+    build,
+    methods::{RpcError, reply},
+};
+use dim_app_server::protocol::PROTOCOL_VERSION;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -34,9 +37,13 @@ struct Evidence {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProcessDiagnostics {
-    product_version: &'static str,
+    product_version: String,
     protocol_version: u32,
     platform: &'static str,
+    /// The client's own label, when it differs from the daemon's: a report
+    /// that hides it cannot show a client running another build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_version: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -97,15 +104,21 @@ pub(super) fn review(
             (Some(evidence), None)
         }
     };
+    let identity = build::current();
+    let client_version = snapshot
+        .client_version
+        .clone()
+        .filter(|client| *client != identity);
     (
         Reviewed {
             evidence: Evidence {
                 captured_error,
                 timeline,
                 process: ProcessDiagnostics {
-                    product_version: SERVER_VERSION,
+                    product_version: identity,
                     protocol_version: PROTOCOL_VERSION,
                     platform: std::env::consts::OS,
+                    client_version,
                 },
             },
             unavailable,
@@ -136,6 +149,9 @@ impl Reviewed {
             self.evidence.process.platform,
         )
         .expect("writing to a string");
+        if let Some(client) = &self.evidence.process.client_version {
+            writeln!(body, "- Client {client}").expect("writing to a string");
+        }
         if let Some(code) = self
             .evidence
             .captured_error

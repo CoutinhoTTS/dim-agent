@@ -46,7 +46,18 @@ fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
     );
 }
 
+/// The commit this source build was made from, which `build.rs` reads at build
+/// time. A release build gets nothing here, so its output cannot change.
+const GIT_COMMIT: Option<&str> = match option_env!("DIM_GIT_COMMIT") {
+    Some(commit) if !commit.is_empty() => Some(commit),
+    _ => None,
+};
+
 fn main() {
+    // Both roles this executable serves read one installed identity: the CLI's
+    // `--version`, the daemon's report `Dim` line and its MCP client
+    // declaration, so a log, a report and a screenshot name one commit.
+    dim_agent_capabilities::build::install(GIT_COMMIT);
     #[cfg(target_os = "linux")]
     unsafe {
         unsafe extern "C" {

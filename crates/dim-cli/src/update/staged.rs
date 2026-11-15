@@ -42,7 +42,7 @@ pub(super) async fn update(
 ) -> Result<Vec<String>, String> {
     if install.store_format.is_some() {
         let live = manifest_version(&package_at(&install.directory, &install.package))?;
-        if live != crate::version::VERSION {
+        if live != dim_agent_capabilities::build::VERSION {
             return Err(
                 "The installed version changed during startup. Run the command again.".to_owned(),
             );
@@ -196,7 +196,7 @@ struct Command {
 /// channel and has the platform package an installation needs.
 fn staged_version(install: &Install, staged: &Path) -> Result<String, String> {
     let version = manifest_version(staged).map_err(incomplete)?;
-    let current = crate::version::VERSION;
+    let current = dim_agent_capabilities::build::VERSION;
     let channel = super::channel(current);
     if super::channel(&version) != channel || !super::newer(current, &version) {
         return Err(format!(

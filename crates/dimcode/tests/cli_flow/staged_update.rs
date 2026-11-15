@@ -1059,19 +1059,11 @@ fn an_interrupted_check_ends_every_process_it_started() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()),
     );
-    let deadline = Instant::now() + HANG_GUARD;
-    while !started.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the checked command never started its own child"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    let started: i32 = fs::read_to_string(&started)
-        .unwrap()
-        .trim()
-        .parse()
-        .unwrap();
+    let started = recorded_pid(
+        &started,
+        "the pid the checked command's child records",
+        HANG_GUARD,
+    );
     assert_eq!(
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) },
         0,

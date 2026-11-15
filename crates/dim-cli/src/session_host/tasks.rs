@@ -378,6 +378,18 @@ impl Worker {
             }
             let method = inventory::METHODS[history.inventory_index];
             let mut params = json!({"sessionId":self.session_id,"branchId":branch_id});
+            if method == "session.input.pending" {
+                if !self
+                    .client
+                    .supports(&["session.input.pending.blockPresence"])
+                {
+                    return Err(
+                        "This daemon cannot distinguish user queue inputs; update the daemon"
+                            .into(),
+                    );
+                }
+                params["includeBlockPresence"] = json!(true);
+            }
             if method != "session.goal.get" {
                 params["through"] = json!(history.window.through.unwrap());
             }

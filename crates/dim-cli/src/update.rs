@@ -286,7 +286,7 @@ fn upgrade_tag(version: &str, release: bool) -> Option<&str> {
 /// A newer version on the channel of `current` the user has not skipped, or
 /// `None` when there is none or the registry did not answer in time.
 pub async fn available(home: &Path, current: &str) -> Option<Offer> {
-    let tag = upgrade_tag(current, crate::version::RELEASE)?;
+    let tag = upgrade_tag(current, dim_agent_capabilities::build::RELEASE)?;
     let package = package().ok()?;
     let version = channel_version(&package, tag).await.ok()?;
     if !newer(current, &version) || skipped(home).as_deref() == Some(version.as_str()) {
@@ -333,7 +333,7 @@ pub(crate) async fn recover_startup(
 ) -> crate::Result<i32> {
     use std::os::unix::process::CommandExt;
 
-    if !crate::version::RELEASE
+    if !dim_agent_capabilities::build::RELEASE
         || !enabled()
         || !std::io::stderr().is_terminal()
         || std::env::var_os(crate::client::STARTUP_RETRY).is_some()
@@ -341,7 +341,7 @@ pub(crate) async fn recover_startup(
         return Err(Box::new(store.clone()));
     }
     let package = package()?;
-    let current = crate::version::VERSION;
+    let current = dim_agent_capabilities::build::VERSION;
     let tag = channel(current);
     let executable = std::env::current_exe()?;
     let Some(mut installation) = installer(&executable, &package, tag) else {
@@ -398,7 +398,7 @@ fn entry_point(package: &str) -> &str {
 /// layouts return a manual command without installing anything.
 pub async fn run(legacy_exited: bool) -> crate::Result<i32> {
     let package = package()?;
-    let current = crate::version::VERSION;
+    let current = dim_agent_capabilities::build::VERSION;
     let tag = channel(current);
     let executable = std::env::current_exe()?;
     let installation = installer(&executable, &package, tag).ok_or_else(|| {

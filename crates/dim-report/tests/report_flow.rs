@@ -114,6 +114,85 @@ fn report_builder() -> AgentBuilder {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_report_names_the_daemons_build_and_a_client_of_another_one() {
+    let home = report_home();
+    let mut builder = report_builder();
+    defaults::mock_hosts(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            platform_home: Some(home.path().into()),
+            unix_path: Some(home.path().join("server.sock")),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut owner = connect(&server).await;
+    let label = dim_agent_capabilities::build::current();
+    let generated = async |client: &mut Client, claimed: &str| {
+        let observed = json!({
+            "operation":"session_read", "code":"session_closed",
+            "observedAt":"2026-11-10T00:00:00Z", "clientVersion":claimed,
+        });
+        let prepared = client
+            .rpc(
+                "report.prepare",
+                json!({"error":{"kind":"observed","observed":observed}}),
+            )
+            .await
+            .unwrap();
+        client
+            .rpc(
+                "report.generate",
+                json!({"reportId":prepared["reportId"], "planId":prepared["plan"]["planId"]}),
+            )
+            .await
+            .unwrap()
+    };
+
+    let report = generated(&mut owner, &label).await;
+    assert!(
+        report["body"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("- Dim {label} (protocol 4)\n")),
+        "the Dim line names the label this build reports: {}",
+        report["body"]
+    );
+    let diagnostics = archive(&report);
+    assert_eq!(
+        diagnostics["evidence"]["process"]["productVersion"],
+        json!(label)
+    );
+    assert!(
+        diagnostics["evidence"]["process"]
+            .get("clientVersion")
+            .is_none(),
+        "a client of this build adds no line"
+    );
+
+    let report = generated(&mut owner, "0.0.0-alpha.1-source+ffffffff").await;
+    assert!(
+        report["body"]
+            .as_str()
+            .unwrap()
+            .contains("- Client 0.0.0-alpha.1-source+ffffffff\n"),
+        "a report reveals a client running another build: {}",
+        report["body"]
+    );
+    let diagnostics = archive(&report);
+    assert_eq!(
+        diagnostics["evidence"]["process"]["clientVersion"],
+        json!("0.0.0-alpha.1-source+ffffffff")
+    );
+
+    drop(owner);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn report_rpc_captures_a_session_without_an_error_at_a_fixed_cutoff() {
     let home = report_home();
     let mut builder = report_builder();
