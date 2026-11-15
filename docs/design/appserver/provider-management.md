@@ -134,14 +134,18 @@ reaches the same candidate and no row states that name itself. Every other row o
 the group appends its id instead, so a label two rows carry apart names neither of
 them; a row whose listing states no origin has no candidate and appends its id.
 Every computed name is built from trimmed parts, the appended id included, so two
-ids that differ only in space reach one name. A name still taken after that gains
-a counter. That counter is the only part a listing order can decide, and only
-rows sharing an id reach it, so reordering the same rows names each of them the
-same. The name is computed when the reply is
-built and never stored: every descriptor and every persisted field keeps the name
-the provider or the user stated, so saving an edit never writes a suffix back and
-a suffix disappears with its duplicate. This holds for every provider, a custom
-one whose two rows state one name included.
+ids that differ only in space reach one name. An appended id whose name no other
+row reaches and no row states is kept as it stands, and every name so kept —
+label or id — is reserved before any counter is assigned, so a counter never takes
+a name another row publishes itself. A name still taken after that gains a
+counter, the rows left taking theirs in one canonical order: by their id name,
+then their id, then their stated name. That counter is the only part a listing
+order can decide, and with that order only rows sharing an id and a stated name
+reach it, so reordering the same rows names each of them the same. The name is
+computed when the reply is built and never stored: every descriptor and every
+persisted field keeps the name the provider or the user stated, so saving an edit
+never writes a suffix back and a suffix disappears with its duplicate. This holds
+for every provider, a custom one whose two rows state one name included.
 
 Without an ID, management returns all known entries, including signed-out accounts.
 With an ID, it returns that entry or a typed error. It is the sole edit-view read:
