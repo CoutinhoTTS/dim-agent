@@ -12,7 +12,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "带附件的消息会留在队列中；使用 /queue 对其执行 steer 或删除"
         }
-        "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now" => {
+        "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now" => {
             "/queue · Shift+← 编辑最后一条 · 草稿为空时按 {key} steer · Ctrl+Enter 立即发送"
         }
         "steer or delete queued messages" => "对队列消息执行 steer 或删除",
@@ -569,6 +569,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
             "Ctrl+Enter 中断并立即发送：草稿与所有暂存消息合成一条发出"
         }
+        "Send now failed: {error}; the draft was kept" => "立即发送失败：{error}；草稿已保留",
+        "Send now cancelled; the draft was kept" => "已取消立即发送；草稿保留",
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 清空，连按两次退出 · 草稿为空时 Ctrl+D 退出"
         }

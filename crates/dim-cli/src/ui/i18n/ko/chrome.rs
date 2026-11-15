@@ -13,7 +13,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "첨부 파일이 있는 메시지는 대기열에 남습니다. /queue에서 steer하거나 삭제하세요"
         }
-        "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now" => {
+        "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now" => {
             "/queue · Shift+← 마지막 편집 · 초안이 비어 있으면 {key}로 steer · Ctrl+Enter로 즉시 전송"
         }
         "+{count} more · {hint}" => "+{count}개 더 · {hint}",
@@ -519,6 +519,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
             "Ctrl+Enter로 중단 후 즉시 전송: 초안과 보류 중인 모든 메시지를 하나로 보냅니다"
+        }
+        "Send now failed: {error}; the draft was kept" => {
+            "즉시 전송 실패: {error}. 초안은 유지되었습니다"
+        }
+        "Send now cancelled; the draft was kept" => {
+            "즉시 전송이 취소되었습니다. 초안은 유지되었습니다"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 지우기, 두 번 누르면 종료 · 빈 초안에서 Ctrl+D 종료"

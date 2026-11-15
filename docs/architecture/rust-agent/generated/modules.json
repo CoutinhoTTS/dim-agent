@@ -39446,6 +39446,7 @@
         "path Command::StopWorkflow",
         "path Command::Submit",
         "path Command::SubmitDraft",
+        "path Command::SubmitNow",
         "path Command::Suggest",
         "path Command::SuggestionRespond",
         "path Command::TaskHistory",
@@ -39562,6 +39563,7 @@
         "path Update::Skills",
         "path Update::Snapshot",
         "path Update::StartupFailed",
+        "path Update::Stopped",
         "path Update::SuggestionCleared",
         "path Update::SuggestionMethods",
         "path Update::SuggestionOffer",
@@ -42443,7 +42445,8 @@
       "from": "dim_cli::ui::keys::tests",
       "to": "dim_cli::model::session",
       "references": [
-        "path SubmitMode::Queue"
+        "path SubmitMode::Queue",
+        "path SubmitMode::Steer"
       ]
     },
     {
@@ -47359,6 +47362,7 @@
         "path Command::StopTasks",
         "path Command::StopWorkflow",
         "path Command::SubmitDraft",
+        "path Command::SubmitNow",
         "path Command::Suggest",
         "path Command::SuggestionRespond",
         "path Command::TaskHistory",
@@ -47449,6 +47453,7 @@
         "path Update::Skills",
         "path Update::Snapshot",
         "path Update::StartupFailed",
+        "path Update::Stopped",
         "path Update::SubmitNotSent",
         "path Update::SuggestionCleared",
         "path Update::SuggestionMethods",
@@ -48482,6 +48487,7 @@
         "path Command::Runtime",
         "path Command::Stop",
         "path Command::Submit",
+        "path Command::SubmitNow",
         "path DIM_OAUTH_ID",
         "path ManagementAction::Add",
         "path ManagementAction::List",
@@ -48499,6 +48505,8 @@
         "path PromptField::Summary",
         "path PromptSetting",
         "path SessionPort",
+        "path SubmitMode::Queue",
+        "path SubmitMode::Steer",
         "path SuggestionSetting",
         "path SwitchKind::Forked",
         "path SwitchKind::New",
@@ -48523,6 +48531,7 @@
         "path Update::Skills",
         "path Update::Snapshot",
         "path Update::StartupFailed",
+        "path Update::Stopped",
         "path Update::SuggestionMethods",
         "path Update::SuggestionOffer",
         "path Update::SuggestionSetting",
@@ -48729,6 +48738,13 @@
         "path Setting::Permission",
         "path Setting::ThinkingDetails",
         "path Setting::ToolDetails"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::shell",
+      "references": [
+        "path crate::ui::shell::Running::new"
       ]
     },
     {

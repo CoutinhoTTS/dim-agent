@@ -13,7 +13,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "添付ファイル付きのメッセージはキューに残ります。/queue で steer または削除してください"
         }
-        "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now" => {
+        "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now" => {
             "/queue · Shift+← 最後を編集 · 下書きが空なら {key} で steer · Ctrl+Enter で即送信"
         }
         "+{count} more · {hint}" => "+{count} 件 · {hint}",
@@ -538,6 +538,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
             "Ctrl+Enter で中断して即送信：下書きと保留中の全メッセージを 1 通にまとめます"
         }
+        "Send now failed: {error}; the draft was kept" => {
+            "即時送信に失敗しました: {error}。下書きは残しました"
+        }
+        "Send now cancelled; the draft was kept" => "即時送信を取り消しました。下書きは残しました",
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C クリア、2 回で終了 · 空なら Ctrl+D で終了"
         }

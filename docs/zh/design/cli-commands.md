@@ -146,7 +146,8 @@ stop 到达会话，提交只在 stop 回复后才发出，因为在最后一次
 开启运行。已离开队列的消息不会重发。若 stop 失败，合并后的草稿留在输入框并给出提示，
 不丢失任何已输入内容。它与 `Enter` 遵守同样的限定：shell 命令在跑且草稿是 shell 行时只提示
 `已有 shell 命令在运行`，不发送任何东西；草稿为空且没有暂存消息时什么也不做。在它请求的
-stop 仍在结算期间，`Enter` 和 `Ctrl+Enter` 都不发送，同一草稿不会提交两次。
+stop 仍在结算期间，`Enter` 和 `Ctrl+Enter` 都不发送，同一草稿不会提交两次；此时 `Esc`
+只取消提交并保留草稿，因为它请求的 stop 已经发出。
 
 不支持 kitty 键盘协议或 xterm modifyOtherKeys 的终端无法区分 `Ctrl+Enter` 和 `Enter`，
 在那里它按默认模式提交，两键路线仍是先 `Esc` 再 `Enter`。
@@ -180,7 +181,7 @@ shell 运行拦截，再是 steer 最早的排队消息，只有在没有排队�
   › fix the failing test
 ┌─ Queue (1) ───────────────────────────────────────────────────────┐
 │ › Held · then update the design note                              │
-│ /queue manage · Shift+← edit last · empty draft: Ctrl+S steer     │
+│ /queue · Shift+← edit last · empty: Ctrl+S steer · Ctrl+Enter …   │
 └───────────────────────────────────────────────────────────────────┘
 ```
 

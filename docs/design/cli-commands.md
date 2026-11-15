@@ -314,7 +314,8 @@ lost. It takes the guards `Enter` has: with a shell command running and a shell
 line in the draft it shows `A shell command is already running` and sends
 nothing, and with an empty draft and nothing held it does nothing. While the
 stop it asked for is still settling, `Enter` and `Ctrl+Enter` send nothing, so
-one draft is never submitted twice.
+one draft is never submitted twice; `Esc` there calls off only the submit and
+keeps the draft, because the stop it asked for has already gone.
 
 A terminal without the kitty keyboard protocol or xterm modifyOtherKeys cannot
 tell `Ctrl+Enter` from `Enter`, so there it submits in the default mode and `Esc`
@@ -395,7 +396,7 @@ history outside the panel.
   › fix the failing test
 ┌─ Queue (1) ───────────────────────────────────────────────────────┐
 │ › Held · then update the design note                              │
-│ /queue manage · Shift+← edit last · empty draft: Ctrl+S steer     │
+│ /queue · Shift+← edit last · empty: Ctrl+S steer · Ctrl+Enter …   │
 └───────────────────────────────────────────────────────────────────┘
 ```
 

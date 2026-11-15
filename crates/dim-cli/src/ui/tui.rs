@@ -1183,6 +1183,9 @@ struct App {
     git_checked: Instant,
     /// The shell-mode command running, at most one.
     shell: Option<crate::ui::shell::Running>,
+    /// A Ctrl+Enter whose withdrawals and stop are out: the draft it merged
+    /// waits for the stop's reply, and no key submits anything until then.
+    send_now_pending: bool,
     /// A Ctrl+V clipboard read in progress.
     clipboard: Option<ClipboardRead>,
     /// A pasted image path being read and scaled off the interface thread.
@@ -1515,6 +1518,7 @@ impl App {
             session_id: String::new(),
             initial: None,
             unsent: None,
+            send_now_pending: false,
             permission_policy: dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
@@ -1823,6 +1827,29 @@ impl App {
         }
     }
 
+    /// Submits the draft a settled stop made ready, as a new message: the run
+    /// is idle now, so the submit starts its own turn and takes whatever
+    /// withdrawn messages joined the draft in the meantime.
+    fn submit_send_now(&mut self) {
+        let outcome = self.composer.submit();
+        self.dispatch_composer(outcome, SubmitMode::Queue);
+    }
+
+    /// Ctrl+Enter: withdraws every held message into the draft, stops the run
+    /// and submits the combined draft once the stop's reply says the turn has
+    /// settled. Withdrawals reach the worker before the stop in the same
+    /// command queue, and each one's `Withdrawn` update is published before
+    /// the next command runs, so the draft holds every recalled message by the
+    /// time the stop replies.
+    fn send_now(&mut self) {
+        if self.send_now_pending {
+            return;
+        }
+        self.recall_all_queued();
+        self.send_now_pending = true;
+        self.host.send(Command::SubmitNow);
+    }
+
     fn withdraw(&mut self, id: String) {
         if self.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot
@@ -2095,6 +2122,24 @@ impl App {
             Update::Withdrawn(input) => {
                 self.dismiss_suggestion();
                 self.composer.restore(input);
+            }
+            Update::Stopped { error } => {
+                if !std::mem::replace(&mut self.send_now_pending, false) {
+                    if let Some(error) = error {
+                        self.notices.push(error);
+                    }
+                    return;
+                }
+                // The stop failed, so the combined draft stays in the
+                // composer with the reason: nothing typed is lost.
+                if let Some(error) = error {
+                    self.notices.push(tf(
+                        "Send now failed: {error}; the draft was kept",
+                        &[("error", &crate::sanitize::safe_line(&error))],
+                    ));
+                    return;
+                }
+                self.submit_send_now();
             }
             Update::Exported { format, path } => self.notices.push(tf(
                 "Exported {format}: {path}",
@@ -3065,6 +3110,37 @@ impl App {
     /// A key for the composer: the palette, the shortcuts around it and the
     /// draft editor, with what a submit, a command or a shell line does.
     fn composer_key(&mut self, key: KeyEvent) -> Outcome {
+        let ctrl = key.mods.contains(Modifiers::CTRL);
+        // Ctrl+Enter is Enter with Ctrl, which every Enter arm below excludes.
+        // A picker or an idle draft takes it as Enter itself; during a run it
+        // is the send-now gesture, under the guards Enter has. While a stop it
+        // asked for is still settling, neither key submits.
+        let ctrl_enter = key.code == KeyCode::Enter && ctrl;
+        let picker = self.composer.palette_open() || self.composer.mention_open();
+        if self.send_now_pending && key.code == KeyCode::Enter {
+            return Outcome::Continue;
+        }
+        if ctrl_enter && !picker {
+            if self.shell.is_some()
+                && (self.composer.shell().is_some()
+                    || self.composer.text().trim_start().starts_with('!'))
+            {
+                self.set_notice(t("A shell command is already running"));
+                return Outcome::Continue;
+            }
+            if self.composer.is_empty() && self.queued().is_empty() {
+                return Outcome::Continue;
+            }
+            if self.running() {
+                self.send_now();
+                return Outcome::Continue;
+            }
+        }
+        let key = if ctrl_enter {
+            KeyEvent::new(KeyCode::Enter, Modifiers::NONE)
+        } else {
+            key
+        };
         let (key, mode) = if self.submits_in_alternate_mode(&key) {
             (
                 KeyEvent::new(KeyCode::Enter, Modifiers::NONE),
@@ -3137,7 +3213,12 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Esc if !self.composer.palette_open() && !self.composer.mention_open() => {
-                if self.snapshot.as_mut().and_then(|s| s.side.take()).is_some() {
+                if self.send_now_pending {
+                    // The stop already went, so the run still ends; only the
+                    // submit is called off, and the draft stays as typed.
+                    self.send_now_pending = false;
+                    self.set_notice(t("Send now cancelled; the draft was kept"));
+                } else if self.snapshot.as_mut().and_then(|s| s.side.take()).is_some() {
                     self.host.send(Command::CloseSide);
                 } else if self.line_draft.take().is_some() {
                     self.composer.clear();
@@ -7850,8 +7931,7 @@ const QUEUE_ROWS: usize = 5;
 
 /// The queue strip's hint, and its form when messages are not shown. Every
 /// `/name` it can draw is a command in the table.
-const QUEUE_HINT: &str =
-    "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now";
+const QUEUE_HINT: &str = "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now";
 const QUEUE_HINT_MORE: &str = "+{count} more · {hint}";
 
 /// The queue, drawn in a titled border above the composer: the next message
@@ -15606,6 +15686,7 @@ mod tests {
                 Command::Submit(text, mode) => format!("submit:{}:{}", mode.as_str(), text),
                 Command::InputControl { input_id, action } => format!("{action}:{input_id}"),
                 Command::Stop => "stop".into(),
+                Command::SubmitNow => "submit-now".into(),
                 _ => "other".into(),
             })
             .collect()
@@ -15788,7 +15869,7 @@ mod tests {
                 app.frame((110, 30))
                     .live
                     .join("\n")
-                    .contains("empty draft: Ctrl+S steer"),
+                    .contains(&tf(QUEUE_HINT, &[("key", "Ctrl+S")])),
                 "a saved queue steers an empty draft with Ctrl+S"
             );
             app.run_command("keys", "");
@@ -15919,6 +16000,164 @@ mod tests {
             }],
         }));
         assert_eq!(app.composer.text(), "first\nsecond");
+    }
+
+    /// Ctrl+Enter is Esc then Enter as one key: the withdrawals go first, then
+    /// one stop, and the combined draft is submitted only after the stop's
+    /// reply, oldest held message first.
+    #[test]
+    fn ctrl_enter_withdraws_stops_and_submits_once_the_stop_settled() {
+        let ctrl_enter = InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        for (fullscreen, parts) in [(false, false), (true, false), (true, true)] {
+            let (mut app, sent, home) =
+                session_with_queue(true, &[("a", "first"), ("b", "second")]);
+            app.fullscreen = fullscreen;
+            app.composer.set_accepts_images(true);
+            typed(&mut app, "and then");
+            if parts {
+                let path = home.path().join("screen.png");
+                wide_png(&path, 32);
+                let plan = app.composer.plan_files(&[path]).unwrap();
+                app.composer
+                    .attach_image(
+                        crate::ui::composer::read_planned(&plan)
+                            .unwrap()
+                            .remove(0)
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+            app.handle(ctrl_enter.clone());
+            assert_eq!(
+                describe(&sent.borrow()),
+                ["withdraw:a", "withdraw:b", "submit-now"],
+                "the withdrawals reach the session before the stop, and the\n                 submit waits for its reply"
+            );
+
+            for (id, text) in [("first", "a"), ("second", "b")] {
+                let _ = text;
+                app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+                    content: vec![dim_agent_types::ContentBlock::Text { text: id.into() }],
+                }));
+            }
+            let expected = if parts {
+                "and then [Image]\nfirst\nsecond"
+            } else {
+                "and then\nfirst\nsecond"
+            };
+            assert_eq!(app.composer.text(), expected);
+            assert!(
+                sent.borrow()
+                    .iter()
+                    .all(|command| !matches!(command, Command::Submit(..))),
+                "nothing is submitted while the stop settles"
+            );
+            press(&mut app, KeyCode::Enter);
+            app.handle(ctrl_enter.clone());
+            assert!(
+                sent.borrow()
+                    .iter()
+                    .all(|command| !matches!(command, Command::Submit(..))),
+                "Enter and Ctrl+Enter send nothing while the stop settles"
+            );
+
+            app.apply(Update::Stopped { error: None });
+            let sent_now = sent.borrow();
+            let submitted = &sent_now[3..];
+            assert_eq!(
+                submitted.len(),
+                1,
+                "exactly one submit: {:?}",
+                describe(&sent_now)
+            );
+            if parts {
+                assert!(
+                    matches!(
+                        submitted,
+                        [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                            if matches!(parts.first(), Some(DraftPart::Text(text)) if text.starts_with("and then"))
+                                && parts.iter().any(|part| matches!(part, DraftPart::Block(_)))
+                    ),
+                    "the draft keeps its parts: {}",
+                    describe(submitted).join(", ")
+                );
+            } else {
+                assert_eq!(
+                    describe(submitted),
+                    ["submit:queue:and then\nfirst\nsecond"],
+                    "the oldest held message comes first"
+                );
+            }
+            drop(sent_now);
+            assert!(app.composer.is_empty());
+        }
+    }
+
+    /// A stop that fails submits nothing and leaves the combined draft in the
+    /// composer with a notice, so nothing typed is lost.
+    #[test]
+    fn a_failed_stop_keeps_the_combined_draft() {
+        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first")]);
+        typed(&mut app, "and then");
+        app.handle(InputEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            Modifiers::CTRL,
+        )));
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        app.apply(Update::Stopped {
+            error: Some("the run would not stop".into()),
+        });
+        assert!(
+            sent.borrow()
+                .iter()
+                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            "no submit follows a failed stop"
+        );
+        assert_eq!(app.composer.text(), "and then\nfirst");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.contains("the run would not stop")),
+            "the failure is reported: {:?}",
+            app.notices
+        );
+    }
+
+    /// Ctrl+Enter takes the guards Enter has: a running shell command with a
+    /// shell line sends nothing, and an empty draft with nothing held is a
+    /// no-op. Idle, it submits like Enter.
+    #[test]
+    fn ctrl_enter_keeps_the_guards_enter_has() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        app.shell = Some(crate::ui::shell::Running::new("cargo test".into(), false));
+        typed(&mut app, "!ls");
+        app.handle(ctrl_enter());
+        assert!(sent.borrow().is_empty(), "a running shell command holds it");
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("A shell command is already running")
+        );
+
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        app.handle(ctrl_enter());
+        assert!(
+            sent.borrow().is_empty(),
+            "an empty draft has nothing to send"
+        );
+
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        typed(&mut app, "idle draft");
+        app.handle(ctrl_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit:queue:idle draft"],
+            "idle, Ctrl+Enter submits as Enter does"
+        );
     }
 
     /// Shift+Left takes the newest queued message back, and its text enters

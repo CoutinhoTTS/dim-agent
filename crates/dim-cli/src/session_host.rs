@@ -1391,6 +1391,22 @@ impl Worker {
                 let result = self.client.rpc("session.stop", params).await;
                 self.report_failure(result);
             }
+            Command::SubmitNow => {
+                let params = json!({
+                    "sessionId": self.session_id,
+                    "branchId": self.focus,
+                    "reason": crate::model::view::INTERRUPT_REASON,
+                });
+                // `session.stop` replies once the turn has settled, so its
+                // reply is the point the held draft may start a run.
+                let error = self
+                    .client
+                    .rpc("session.stop", params)
+                    .await
+                    .err()
+                    .map(|error| error.to_string());
+                self.send(Update::Stopped { error });
+            }
             Command::RetryApproval {
                 request_id,
                 branch_id,

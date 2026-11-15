@@ -13,7 +13,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Nachrichten mit Anhängen bleiben in der Warteschlange; mit /queue steuern oder löschen"
         }
-        "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now" => {
+        "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now" => {
             "/queue · Shift+← letzte bearbeiten · bei leerem Entwurf mit {key} steuern · Ctrl+Enter sendet sofort"
         }
         "+{count} more · {hint}" => "+{count} weitere · {hint}",
@@ -573,6 +573,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
             "Ctrl+Enter sofort senden: Entwurf und alle zurückgehaltenen Nachrichten als eine Nachricht"
+        }
+        "Send now failed: {error}; the draft was kept" => {
+            "Sofort senden fehlgeschlagen: {error}; der Entwurf bleibt erhalten"
+        }
+        "Send now cancelled; the draft was kept" => {
+            "Sofort senden abgebrochen; der Entwurf bleibt erhalten"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C leeren, zweimal beenden · Ctrl+D beendet bei leerem Entwurf"
