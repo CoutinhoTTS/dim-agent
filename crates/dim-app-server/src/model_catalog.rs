@@ -31,6 +31,7 @@ pub enum ProjectionError {
     InvalidLimits,
 }
 
+/// The kind of provider record a projection stands for.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelSource {
     Builtin,
@@ -187,6 +188,11 @@ pub struct RateLimit {
 #[derive(Clone, Debug, Default)]
 pub struct ProviderProjection {
     pub provider_id: String,
+    /// The kind of provider this projection reads for, not where any model in
+    /// `models` came from. Only `Custom` changes what the matcher reads: a
+    /// custom provider declares nothing, so step 1 never answers for it, while
+    /// any other provider declares its bundled rows and the models the user
+    /// added.
     pub source: Option<ModelSource>,
     pub models: Vec<ModelEntry>,
     pub context_window_override: Option<u64>,
