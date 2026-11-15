@@ -10,7 +10,7 @@ import { nuxtUiTestPlugin } from "./helpers/nuxt-ui.mjs"
 globalThis.Document = class {}
 globalThis.ShadowRoot = class {}
 
-const components = /\/(ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt)\.vue$/
+const components = /\/(ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt|TimelineUserMessage)\.vue$/
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("../../stores/") || (context.parentURL?.endsWith("/stores/chat.ts") && ["./connection", "./sessions", "./ui"].includes(specifier))) {
@@ -19,7 +19,7 @@ registerHooks({
       const source = `export const ${name}=()=>globalThis.chatInputStores.${store}; export const workspaceName=x=>x`
       return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true }
     }
-    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const createI18n=()=>({global:{t:key=>key,locale:{value:\"en\"},setLocaleMessage(){},availableLocales:[]}});export const useI18n=()=>({t:key=>key})", shortCircuit: true }
+    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const createI18n=()=>({global:{t:key=>key,locale:{value:\"en\"},setLocaleMessage(){},availableLocales:[]}});export const useI18n=()=>({t:key=>key,locale:{value:'en'}})", shortCircuit: true }
     if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>({params:{}});export const useRouter=()=>({push:async to=>globalThis.chatInputNavigations.push(to)});export const RouterLink={render:()=>null}", shortCircuit: true }
     if (specifier.endsWith(".vue") && !components.test(specifier)) return { url: "data:text/javascript,export default {render:()=>null}", shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
@@ -38,6 +38,7 @@ registerHooks({
 const { default: ChatPage } = await import("../src/features/chat/ChatPage.vue")
 const { default: LineConversation } = await import("../src/features/lines/LineConversation.vue")
 const { default: ComposerPanel } = await import("../src/features/chat/ComposerPanel.vue")
+const { default: TimelineUserMessage } = await import("../src/features/chat/TimelineUserMessage.vue")
 const { useChatStore } = await import("../src/stores/chat.ts")
 const { readNotification } = await import("../src/rpc/read.ts")
 const { RpcError } = await import("../src/rpc/client.ts")
@@ -544,10 +545,33 @@ test("the /skill: namespace offers Skills, fills the token, and sends it as a me
   assert.deepEqual(sent, ["/skill:deploy "], "a /skill: draft is a message, never a command")
 })
 
+test("the input draws each /skill: token as one chip, typed or filled", async (t) => {
+  const chips = (root) => all(root)
+    .filter((element) => element.props.class === "skill-chip")
+    .map(text)
+  const skills = [{ name: "commit", description: "Writes commit messages" }]
+
+  const typed = mount(t, "main", [], ComposerPanel, {}, { skills })
+  const field = all(typed.root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props["onUpdate:modelValue"]("please /skill:commit it")
+  await flush()
+  assert.deepEqual(chips(typed.root), ["/skill:commit"], "a typed token is one chip, and the words around it are not")
+
+  const filled = mount(t, "main", [], ComposerPanel, {}, { skills })
+  const filledField = all(filled.root).find((element) => element.type === "textarea")
+  filledField.props.onFocus()
+  filledField.props["onUpdate:modelValue"]("/skill:")
+  await flush()
+  const row = all(filled.root).find((element) => element.type === "button" && text(element).includes("/skill:commit"))
+  click(row)
+  await flush()
+  assert.deepEqual(chips(filled.root), ["/skill:commit"], "a filled token is the same chip before it is sent")
+})
+
 test("a user message draws each /skill: token as one chip", async (t) => {
-  const { root } = mount(t, "main", [], ComposerPanel, {}, {})
-  assert.ok(root)
-  const { skillTokens } = await import("../src/skill-token.ts")
-  const parts = skillTokens("please /skill:commit it")
-  assert.deepEqual(parts.map((part) => part.name), ["commit"])
+  const { root } = mount(t, "main", [], TimelineUserMessage, {}, { text: "please /skill:commit it", at: 0, quotable: false, branchable: false })
+  const chips = all(root).filter((element) => element.props.class === "skill-chip").map(text)
+  assert.deepEqual(chips, ["/skill:commit"], "the token is one chip and the words around it are not")
+  assert.ok(text(root).includes("please /skill:commit it"), "the chip keeps the typed text")
 })

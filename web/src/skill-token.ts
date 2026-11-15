@@ -52,6 +52,23 @@ export function skillTokens(text: string): SkillToken[] {
 }
 
 /**
+ * A draft split into what the composer draws: its words, with each
+ * `/skill:<name>` token marked, so the input can draw the token as one chip
+ * above the textarea that holds the same text.
+ */
+export function skillSegments(text: string): Array<{ text: string; skill: boolean }> {
+  const segments: Array<{ text: string; skill: boolean }> = []
+  let at = 0
+  for (const token of skillTokens(text)) {
+    if (token.start > at) segments.push({ text: text.slice(at, token.start), skill: false })
+    segments.push({ text: text.slice(token.start, token.end), skill: true })
+    at = token.end
+  }
+  if (at < text.length) segments.push({ text: text.slice(at), skill: false })
+  return segments
+}
+
+/**
  * A draft that begins with `/skill:`, which is sent as a message and never run
  * as a command, so the composer does not treat it as a command prefix.
  */

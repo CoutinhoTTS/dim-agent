@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "vue-i18n"
 import { copyText } from "../../clipboard"
-import { skillTokens } from "../../skill-token"
+import { skillSegments } from "../../skill-token"
 import { formatTimelineTimestamp } from "./timeline-time"
 
 const props = defineProps<{ text: string; sessionId?: string; images?: import("../../rpc/protocol").ImageBlock[]; skills?: string[]; hooks?: number; at: number; quotable: boolean; branchable: boolean }>()
@@ -15,17 +15,7 @@ const copied = ref(false)
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
 
 /** The message as it is drawn: its words, with each `/skill:<name>` token as one chip. */
-const parts = computed(() => {
-  const parts: Array<{ text: string; skill: boolean }> = []
-  let at = 0
-  for (const token of skillTokens(props.text)) {
-    if (token.start > at) parts.push({ text: props.text.slice(at, token.start), skill: false })
-    parts.push({ text: props.text.slice(token.start, token.end), skill: true })
-    at = token.end
-  }
-  if (at < props.text.length) parts.push({ text: props.text.slice(at), skill: false })
-  return parts
-})
+const parts = computed(() => skillSegments(props.text))
 
 const sentTime = computed(() => formatTimelineTimestamp(new Date(props.at), locale.value))
 

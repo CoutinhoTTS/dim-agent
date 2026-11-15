@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { namesSkillToken, skillTokens, startsWithSkillToken } from "./skill-token.ts"
+import { namesSkillToken, skillSegments, skillTokens, startsWithSkillToken } from "./skill-token.ts"
 
 const names = (text) => skillTokens(text).map((token) => token.name)
 
@@ -40,4 +40,14 @@ test("only a draft that begins with the token is a message, never a command", ()
   assert.ok(startsWithSkillToken("/skill:commit fix it"))
   assert.ok(!startsWithSkillToken("please /skill:commit"))
   assert.ok(!startsWithSkillToken("/skill"))
+})
+
+test("a draft splits into its words with each token marked", () => {
+  const segments = (text) => skillSegments(text).map((segment) => [segment.text, segment.skill])
+  assert.deepEqual(segments("/skill:commit please"), [["/skill:commit", true], [" please", false]])
+  assert.deepEqual(segments("run /skill:commit"), [["run ", false], ["/skill:commit", true]])
+  assert.deepEqual(segments("/skill:alpha then /skill:beta"), [["/skill:alpha", true], [" then ", false], ["/skill:beta", true]])
+  assert.deepEqual(segments("plain words"), [["plain words", false]])
+  assert.deepEqual(segments(""), [], "an empty draft draws nothing")
+  assert.deepEqual(segments("/skill:a/skill:b"), [["/skill:a", true], ["/skill:b", false]], "a token never starts inside a word")
 })

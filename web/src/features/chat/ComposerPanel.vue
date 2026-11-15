@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import type { DraftAttachments, FileCandidate, ModelId, PermissionPreset, PermissionPolicy } from "../../rpc/protocol"
 import { linkMentions, mentionTrigger, type FileMention, type MentionTrigger } from "../../mentions"
-import { SKILL_TOKEN_PREFIX, namesSkillToken, skillCommandQuery, startsWithSkillToken } from "../../skill-token"
+import { SKILL_TOKEN_PREFIX, namesSkillToken, skillCommandQuery, skillSegments, startsWithSkillToken } from "../../skill-token"
 import { useModelsStore } from "../../stores/models"
 import { useSessionsStore } from "../../stores/sessions"
 import { useConnectionStore } from "../../stores/connection"
@@ -66,6 +66,7 @@ const models = useModelsStore()
 const sessions = useSessionsStore()
 const connection = useConnectionStore()
 const field = ref<HTMLTextAreaElement>()
+const highlightBody = ref<HTMLElement>()
 const modelMenu = ref<InstanceType<typeof ComposerModelMenu>>()
 const permissionMenu = ref<InstanceType<typeof ComposerPermissionMenu>>()
 const menuId = useId()
@@ -77,6 +78,8 @@ const error = ref("")
 const composing = ref(false)
 const focused = ref(false)
 const dismissed = ref(false)
+/** The draft's words, with each `/skill:<name>` token marked for the highlight layer. */
+const highlight = computed(() => skillSegments(text.value))
 /** The files inserted into the draft; each sends as a Markdown link to its path. */
 const fileMentions = ref<FileMention[]>([])
 const mention = ref<MentionTrigger | undefined>()
@@ -153,6 +156,21 @@ function resize(): void {
   if (element === undefined) return
   element.style.height = "auto"
   element.style.height = `${Math.min(element.scrollHeight, 300)}px`
+  followScroll()
+}
+
+/**
+ * Keeps the highlight layer on the draft while the textarea scrolls or resizes:
+ * its body takes the textarea's content width, so both wrap at the same column
+ * whether or not a scrollbar is shown, and moves by the textarea's own scroll
+ * offset. The font comes from the same custom properties, so nothing drifts.
+ */
+function followScroll(): void {
+  const element = field.value
+  const body = highlightBody.value
+  if (element === undefined || body === undefined) return
+  body.style.width = `${element.clientWidth}px`
+  body.style.transform = `translateY(${-element.scrollTop}px)`
 }
 
 function readImage(file: File): { url: string; file: File } {
@@ -493,26 +511,30 @@ defineExpose({ focus: () => field.value?.focus(), quote })
         </button>
         <p class="command-keys">{{ t("composer.mentionKeys") }}</p>
       </div>
-      <textarea
-        ref="field"
-        v-model="text"
-        class="composer-input"
-        rows="2"
-        :placeholder="placeholder ?? t('composer.sendMessage')"
-        :aria-label="placeholder ?? t('composer.sendMessage')"
-        :aria-controls="menuOpen ? menuId : mentionShown ? mentionMenuId : undefined"
-        :aria-expanded="menuOpen || mentionShown"
-        :aria-activedescendant="menuOpen ? `${menuId}-${activeIndex}` : undefined"
-        @input="resize(); updateMention()"
-        @keydown="onKeydown"
-        @keyup="updateMention"
-        @click="updateMention"
-        @paste="onPaste"
-        @focus="focused = true"
-        @blur="focused = false"
-        @compositionstart="composing = true"
-        @compositionend="composing = false"
-      />
+      <div class="composer-field">
+        <div class="composer-highlight" aria-hidden="true"><div ref="highlightBody" class="composer-highlight-body"><span v-for="(part, index) in highlight" :key="index" :class="{ 'skill-chip': part.skill }">{{ part.text }}</span></div></div>
+        <textarea
+          ref="field"
+          v-model="text"
+          class="composer-input"
+          rows="2"
+          :placeholder="placeholder ?? t('composer.sendMessage')"
+          :aria-label="placeholder ?? t('composer.sendMessage')"
+          :aria-controls="menuOpen ? menuId : mentionShown ? mentionMenuId : undefined"
+          :aria-expanded="menuOpen || mentionShown"
+          :aria-activedescendant="menuOpen ? `${menuId}-${activeIndex}` : undefined"
+          @input="resize(); updateMention()"
+          @keydown="onKeydown"
+          @keyup="updateMention"
+          @click="updateMention"
+          @scroll="followScroll"
+          @paste="onPaste"
+          @focus="focused = true"
+          @blur="focused = false"
+          @compositionstart="composing = true"
+          @compositionend="composing = false"
+        />
+      </div>
       <footer class="composer-toolbar">
         <div class="composer-tool-group">
           <ComposerPermissionMenu v-if="permission && variant !== 'panel'" ref="permissionMenu" :policy="permission.policy" @select="permission.select" />
@@ -542,8 +564,15 @@ defineExpose({ focus: () => field.value?.focus(), quote })
 </template>
 
 <style scoped>
-.composer-input { display: block; width: 100%; min-height: 60px; max-height: 300px; resize: none; padding: 0; border: 0; background: transparent; color: var(--foreground); font: var(--text-base)/var(--leading-relaxed) var(--font-sans); outline: none; }
+.composer-field { position: relative; }
+/* The highlight layer sits under the textarea and paints the same text in the same box, so a chip lands on the characters the textarea holds. It keeps the textarea's own font, size, line height, padding, wrapping and scroll: a token changes only its background, never its weight or padding, because either would move the glyphs off the characters above them. */
+.composer-highlight { position: absolute; inset: 0; overflow: hidden; font: var(--text-base)/var(--leading-relaxed) var(--font-sans); white-space: pre-wrap; overflow-wrap: break-word; color: transparent; pointer-events: none; }
+.composer-highlight .skill-chip { border-radius: var(--radius-sm); background: var(--accent); }
+.composer-highlight-body { transform: translateY(0); }
+/* The textarea keeps the caret, the selection and IME composition; its own text is transparent, so what shows through is the layer behind it. Its scroller drives the layer's offset. */
+.composer-input { display: block; position: relative; width: 100%; min-height: 60px; max-height: 300px; resize: none; padding: 0; border: 0; background: transparent; color: transparent; caret-color: var(--foreground); font: var(--text-base)/var(--leading-relaxed) var(--font-sans); outline: none; overflow-y: auto; }
 .composer-input::placeholder { color: var(--muted-foreground); }
+.composer-input::selection { color: transparent; background: color-mix(in oklab, var(--accent) 40%, transparent); }
 .composer-panel[data-variant="panel"] { padding: var(--space-2) var(--space-3) var(--space-3); }
 .composer-panel[data-variant="panel"] .composer-input { min-height: 48px; }
 .command-menu { position: absolute; z-index: var(--z-popover); bottom: calc(100% + var(--space-2)); left: 0; width: 100%; max-width: none; max-height: min(320px, 50dvh); overflow-y: auto; padding: var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--card); color: var(--card-foreground); box-shadow: var(--shadow-pop); transform-origin: bottom left; --popover-enter-y: 4px; }
