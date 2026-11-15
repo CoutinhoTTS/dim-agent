@@ -1196,6 +1196,358 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The efforts a served model offers, as a picker reads them.
+fn served_efforts(
+    metadata: Option<&dim_app_server::model_catalog::ModelMetadata>,
+) -> Option<Vec<String>> {
+    metadata
+        .and_then(|metadata| metadata.reasoning.as_ref())
+        .and_then(|reasoning| reasoning.effort_options.clone())
+}
+
+/// The effort list one bundled row declares for `id`.
+fn bundled_efforts(catalog: &BundledCatalog, provider_id: &str, id: &str) -> Vec<String> {
+    catalog
+        .bundled_models(provider_id)
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == id)
+        .and_then(|model| served_efforts(model.metadata.as_ref()))
+        .unwrap()
+}
+
+const LISTED: &str = "00000000-0000-4000-8000-000000000022";
+
+/// One served listing and the Provider that listed it, closed by the case.
+struct ServedListing {
+    provider: Arc<ProviderService>,
+    catalog: dim_app_server::provider::ProviderCatalog,
+    root: Ctx,
+    server: tokio::task::JoinHandle<()>,
+    home: PathBuf,
+    cancel: CancellationToken,
+}
+
+impl ServedListing {
+    /// Serves `models` at `/v1/models`, refreshes the Provider, and keeps the
+    /// catalog the refresh wrote.
+    async fn refreshed(models: Value) -> Self {
+        use axum::{
+            http::{StatusCode, Uri},
+            routing::get,
+        };
+        use tokio::sync::{mpsc, oneshot};
+        type Exchange = (Uri, oneshot::Sender<(StatusCode, Json<Value>)>);
+        let (send, mut requests) = mpsc::channel::<Exchange>(8);
+        let app = Router::new().route(
+            "/{*path}",
+            get(move |uri: Uri| {
+                let send = send.clone();
+                async move {
+                    let (reply, response) = oneshot::channel();
+                    send.send((uri, reply)).await.unwrap();
+                    response
+                        .await
+                        .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let home = std::env::temp_dir().join(format!("provider-efforts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let root = Ctx::root().unwrap();
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
+        root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+        root.plugin(ManagedProvidersPlugin);
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+        root.plugin(dim_agent_aimux::AimuxPlugin);
+        let view = root.plugin(provider_part(ProviderPlugin::new));
+        tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
+            .await
+            .unwrap();
+        let provider = root.get::<ProviderService>().unwrap();
+        let cancel = CancellationToken::new();
+        provider
+            .create(
+                input(
+                    LISTED,
+                    &format!("{base}/v1"),
+                    StaticAuth::Bearer,
+                    Some("efforts-key"),
+                    "efforts",
+                    1000,
+                ),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let refresh = {
+            let provider = provider.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move { provider.refresh_for(LISTED.into(), &cancel).await })
+        };
+        requests
+            .recv()
+            .await
+            .unwrap()
+            .1
+            .send((StatusCode::OK, Json(json!({ "data": models }))))
+            .unwrap();
+        let catalog = refresh.await.unwrap().unwrap();
+        Self {
+            provider,
+            catalog,
+            root,
+            server,
+            home,
+            cancel,
+        }
+    }
+
+    /// The efforts `id` offers, as the refresh reply reports them.
+    fn served(&self, id: &str) -> Option<Vec<String>> {
+        served_efforts(
+            self.catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap()
+                .metadata
+                .as_ref(),
+        )
+    }
+
+    /// The same, as `provider.management` reports them from the stored record.
+    async fn read_back(&self, id: &str) -> Option<Vec<String>> {
+        let management = self
+            .provider
+            .management(Some(LISTED.into()), &self.cancel)
+            .await
+            .unwrap();
+        let models = management.providers[0].models.as_ref().unwrap();
+        served_efforts(
+            models
+                .iter()
+                .find(|model| model.model.model_id == id)
+                .unwrap()
+                .model
+                .metadata
+                .as_ref(),
+        )
+    }
+
+    async fn close(self) {
+        self.root.shutdown().await.unwrap();
+        self.server.abort();
+        std::fs::remove_dir_all(self.home).unwrap();
+    }
+}
+
+/// A listing's `reasoning_levels` is the model's effort list, in the listing's
+/// order, even where its id identifies at a bundled row that declares a
+/// different one: `gpt-5.5` identifies at `openai`, whose row declares
+/// `effortOptions` without `max`.
+#[tokio::test]
+async fn a_listings_reasoning_levels_become_the_models_efforts() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5.5","reasoning":true,"reasoning_levels":["low","medium","high","xhigh","max"]},
+        {"id":"devin/swe-2","reasoning":true,"reasoning_levels":[" medium ",7,"","high","medium"]}
+    ]))
+    .await;
+    let named = listing
+        .catalog
+        .models
+        .iter()
+        .find(|model| model.id == "gpt-5.5")
+        .unwrap()
+        .metadata
+        .clone()
+        .unwrap();
+    assert_eq!(
+        (
+            named.matched_provider_id.as_deref(),
+            named.matched_model_id.as_deref()
+        ),
+        (Some("openai"), Some("gpt-5.5")),
+        "the row the listing's id identifies"
+    );
+    let bundled = BundledCatalog::load().unwrap();
+    assert_ne!(
+        bundled_efforts(&bundled, "openai", "gpt-5.5"),
+        ["low", "medium", "high", "xhigh", "max"].map(str::to_owned),
+        "the identified row declares a different list"
+    );
+    assert_eq!(
+        listing.served("gpt-5.5").unwrap(),
+        ["low", "medium", "high", "xhigh", "max"].map(str::to_owned)
+    );
+    // Trimmed, a non-string and an empty string dropped, a repeated value kept
+    // once in its first position.
+    assert_eq!(
+        listing.served("devin/swe-2").unwrap(),
+        ["medium", "high"].map(str::to_owned)
+    );
+    listing.close().await;
+}
+
+/// A listing's `supported_reasoning_levels` is the model's effort list the
+/// same way, from each item's `effort`.
+#[tokio::test]
+async fn a_listings_supported_reasoning_levels_become_the_models_efforts() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5-mini","reasoning":true,
+         "supported_reasoning_levels":[{"effort":"minimal"},{"effort":"low"},{"effort":"high"}]}
+    ]))
+    .await;
+    let bundled = BundledCatalog::load().unwrap();
+    assert_ne!(
+        bundled_efforts(&bundled, "openai", "gpt-5-mini"),
+        ["minimal", "low", "high"].map(str::to_owned),
+        "the identified row declares a different list"
+    );
+    assert_eq!(
+        listing.served("gpt-5-mini").unwrap(),
+        ["minimal", "low", "high"].map(str::to_owned)
+    );
+    listing.close().await;
+}
+
+/// A listing that states several shapes is read in the order the document
+/// names: `reasoning_options` first, as it was already read, then
+/// `supported_reasoning_levels` before `reasoning_levels`.
+#[tokio::test]
+async fn supported_reasoning_levels_win_over_reasoning_levels() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5.4-mini","reasoning":true,"reasoning_levels":["low"],
+         "supported_reasoning_levels":[{"effort":" medium "},{"effort":"max"},{"effort":"medium"},{"effort":""}]},
+        {"id":"gpt-5.4","reasoning":true,"reasoning_levels":["low"],
+         "supported_reasoning_levels":[{"effort":"medium"}],
+         "reasoning_options":[{"type":"effort","values":["high"]},{"type":"level","values":["low"]}]}
+    ]))
+    .await;
+    assert_eq!(
+        listing.served("gpt-5.4-mini").unwrap(),
+        ["medium", "max"].map(str::to_owned)
+    );
+    assert_eq!(
+        listing.served("gpt-5.4").unwrap(),
+        ["high"].map(str::to_owned),
+        "reasoning_options is read first, as it was before"
+    );
+    listing.close().await;
+}
+
+/// An explicitly empty list is a declaration: the model offers no effort
+/// choice, and the row it identifies at does not fill one. The stored record
+/// keeps the empty list, so the declaration survives a later read.
+#[tokio::test]
+async fn an_empty_declared_list_is_not_filled_from_the_identified_row() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5-nano","reasoning":true,"reasoning_levels":[]}
+    ]))
+    .await;
+    let bundled = BundledCatalog::load().unwrap();
+    assert!(
+        !bundled_efforts(&bundled, "openai", "gpt-5-nano").is_empty(),
+        "the identified row declares a list, which must not fill a declared empty one"
+    );
+    assert_eq!(listing.served("gpt-5-nano"), Some(Vec::new()));
+    let stored: Value = serde_json::from_str(&stored_record_json(&listing.home, LISTED)).unwrap();
+    assert_eq!(
+        stored["models"][0]["metadata"]["reasoning"]["effortOptions"],
+        json!([]),
+        "the stored record states the empty list"
+    );
+    assert_eq!(
+        listing.read_back("gpt-5-nano").await,
+        Some(Vec::new()),
+        "the second read still declares no effort"
+    );
+    listing.close().await;
+}
+
+/// A listing that declares no effort keeps today's behaviour: the identified
+/// row's list fills the descriptor, on the refresh reply and on a later read
+/// of the stored entry. The fill's limits are pinned with the bundled rows
+/// that supply them by `a_bundled_match_declares_both_limits_and_an_unmatched_descriptor_has_none`
+/// for the numbers and by `an_undeclared_model_limit_is_refused_until_a_source_declares_it`
+/// for the limits; no existing test pins the efforts alone.
+#[tokio::test]
+async fn an_undeclared_list_keeps_the_identified_rows_efforts() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5.4","reasoning":true},
+        {"id":"gpt-5.2","reasoning":false,"reasoning_levels":["low","high"]}
+    ]))
+    .await;
+    let bundled = BundledCatalog::load().unwrap();
+    let row = bundled_efforts(&bundled, "openai", "gpt-5.4");
+    assert!(!row.is_empty());
+    assert_eq!(listing.served("gpt-5.4").unwrap(), row);
+    assert_eq!(
+        listing.read_back("gpt-5.4").await.unwrap(),
+        row,
+        "the stored entry carries the fill too"
+    );
+    assert_eq!(
+        listing.served("gpt-5.2"),
+        None,
+        "declared levels never give a model that says it does not reason any"
+    );
+    listing.close().await;
+}
+
+/// A saved effort is validated against the model's declared list, so a level
+/// only the listing states is accepted. The rejection of an undeclared level
+/// is pinned by `public_static_provider_selection_resolution_execution_and_lifecycle_flow`.
+#[tokio::test]
+async fn a_saved_effort_is_validated_against_the_listings_levels() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5.5","reasoning":true,"reasoning_levels":["low","medium","high","xhigh","max"]}
+    ]))
+    .await;
+    let saved = listing
+        .provider
+        .update_preferences(
+            LISTED.into(),
+            listing.catalog.version,
+            "gpt-5.5".into(),
+            serde_json::from_value(json!({"reasoningEffort":{"action":"set","value":"max"}}))
+                .unwrap(),
+            &listing.cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        saved.preferences["gpt-5.5"].reasoning_effort.as_deref(),
+        Some("max"),
+        "a level only the listing states is accepted"
+    );
+    let refused = listing
+        .provider
+        .update_preferences(
+            LISTED.into(),
+            saved.version.unwrap(),
+            "gpt-5.5".into(),
+            serde_json::from_value(json!({"reasoningEffort":{"action":"set","value":"none"}}))
+                .unwrap(),
+            &listing.cancel,
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(ProviderError::InvalidConfig(_))),
+        "a level only the identified row states is refused: {refused:?}"
+    );
+    listing.close().await;
+}
+
 #[tokio::test]
 async fn a_declared_output_limit_at_or_above_the_window_adopts_a_derived_allowance() {
     use axum::http::StatusCode;

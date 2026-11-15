@@ -850,12 +850,7 @@ fn descriptor_entry(
             .get("metadata")
             .and_then(|metadata| metadata.get("reasoning"))
     });
-    let reasoning_options = input.get("reasoning_options").or_else(|| {
-        input
-            .get("raw")
-            .and_then(|raw| raw.get("reasoning_options"))
-    });
-    let reasoning = project_reasoning(reasoning_value, reasoning_options)?;
+    let reasoning = project_reasoning(reasoning_value, declared_efforts(input))?;
     let mut caps = CatalogCapabilities::default();
     if let Some(v) = capabilities {
         apply_capabilities(&mut caps, v);
@@ -1290,20 +1285,56 @@ fn inherit_reasoning(current: &mut ModelReasoning, fallback: &ModelReasoning) {
     );
 }
 
+/// The efforts a descriptor declares, from the first shape it states: the
+/// `reasoning_options` entry of type `effort`, the `effort` of each
+/// `supported_reasoning_levels` item, or the flat `reasoning_levels` list.
+///
+/// Each shape is read at the descriptor's top level and under `raw`, where the
+/// projection keeps the listing item it came from. A stated shape whose values
+/// all drop is a declaration of an empty list — the model offers no effort
+/// choice — so it is returned as one and the identified row does not fill it.
+/// A descriptor that states none of the three returns `None`.
+fn declared_efforts(input: &Map<String, Value>) -> Option<Vec<String>> {
+    let stated = |key: &str| {
+        input
+            .get(key)
+            .or_else(|| input.get("raw").and_then(|raw| raw.get(key)))
+            .and_then(Value::as_array)
+    };
+    if let Some(values) = stated("reasoning_options")
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| option.get("type").and_then(Value::as_str) == Some("effort"))
+        })
+        .and_then(|effort| effort.get("values"))
+        .and_then(Value::as_array)
+    {
+        return Some(effort_values(values.iter()));
+    }
+    if let Some(levels) = stated("supported_reasoning_levels") {
+        return Some(effort_values(
+            levels.iter().filter_map(|level| level.get("effort")),
+        ));
+    }
+    stated("reasoning_levels").map(|levels| effort_values(levels.iter()))
+}
+
+/// The stated strings, trimmed, non-empty and unique, in their stated order.
+fn effort_values<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && seen.insert(*value))
+        .map(str::to_owned)
+        .collect()
+}
+
 fn project_reasoning(
     value: Option<&Value>,
-    options: Option<&Value>,
+    options: Option<Vec<String>>,
 ) -> Result<Option<ModelReasoning>, ProjectionError> {
-    let options = options
-        .and_then(Value::as_array)
-        .and_then(|a| {
-            a.iter()
-                .find(|x| x.get("type").and_then(Value::as_str) == Some("effort"))
-        })
-        .and_then(|x| x.get("values"))
-        .and_then(Value::as_array)
-        .map(|values| strings(values))
-        .filter(|values| !values.is_empty());
     Ok(match value {
         Some(Value::Bool(v)) => Some(ModelReasoning {
             supported: *v,
