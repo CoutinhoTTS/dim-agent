@@ -372,7 +372,6 @@ pub(crate) async fn recover_startup(
             .directory
             .join("bin")
             .join(entry_point(&package));
-        installation.version = version;
         installation.store_format = Some(store.format);
         run_install(installation, tag, false).await?;
         eprintln!("Restarting {}...", entry_point(&package));

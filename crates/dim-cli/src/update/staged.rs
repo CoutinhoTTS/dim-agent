@@ -217,10 +217,11 @@ fn incomplete(error: String) -> String {
     format!("The package manager reported success but the staged package is incomplete: {error}")
 }
 
-/// What only a newer-store startup recovery asks of the staged tree: the exact
-/// release it resolved, the launcher it restarts, and a payload that declares
-/// the store format the running binary refused. A user-initiated update stages
-/// by channel tag and checks none of these.
+/// What only a newer-store startup recovery asks of the staged tree: the
+/// launcher it restarts and a payload that declares support for the store
+/// format the running binary refused. A user-initiated update checks neither.
+/// The version the payload declares is the one that was installed, so the
+/// declaration is bound to it rather than to a version resolved beforehand.
 fn verify_recovery(
     install: &Install,
     staged: &Path,
@@ -233,12 +234,6 @@ fn verify_recovery(
     let launcher = super::entry_point(&install.package);
     if !new.iter().any(|command| command.name == launcher) {
         return Err(incomplete(format!("missing the {launcher} command")));
-    }
-    if version != install.version {
-        return Err(format!(
-            "The staged release is {version}, expected {}",
-            install.version
-        ));
     }
     verify_store_format(staged, version, format)
 }
