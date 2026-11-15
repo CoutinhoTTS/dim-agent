@@ -74,6 +74,11 @@ impl std::fmt::Debug for DimFetch {
 #[async_trait::async_trait]
 impl Fetch for DimFetch {
     async fn fetch(&self, request: FetchRequest) -> Result<FetchResponse, FetchError> {
+        if request.body.len() > 64 * 1024 * 1024 {
+            return Err(FetchError::Other(
+                "Model request exceeds the 64 MiB encoded request limit".into(),
+            ));
+        }
         let mut request = with_connection_query(request, &self.query);
         // The transport's request timeout covers the response body, as the
         // connection's timeout did before the upgrade; a wrapper future here
@@ -478,6 +483,7 @@ pub(crate) struct AimuxDriver {
     generation: CancellationToken,
     tasks: TaskTracker,
     streams: Mutex<Vec<Weak<Mutex<Option<ModelStream>>>>>,
+    requests: tokio::sync::Semaphore,
 }
 impl AimuxDriver {
     pub fn with_files(
@@ -496,6 +502,7 @@ impl AimuxDriver {
             generation,
             tasks: TaskTracker::new(),
             streams: Mutex::new(Vec::new()),
+            requests: tokio::sync::Semaphore::new(4),
         }))
     }
     pub async fn close(&self) {
@@ -582,6 +589,14 @@ impl ModelDriver for AimuxDriver {
                     "openai-codex requires the OpenAI Responses protocol",
                 ));
             }
+            let _request_permit = tokio::select! {
+                biased;
+                _ = self.generation.cancelled() => return Err(HostError::classified(
+                    HostErrorKind::OwnerClosed, "Aimux owner is closed",
+                )),
+                _ = cancel.cancelled() => return Err(HostError::Cancelled("Model invocation cancelled".into())),
+                permit = self.requests.acquire() => permit.map_err(|_| HostError::failed("Model request capacity is closed"))?,
+            };
             let request = tokio::select! {
                 biased;
                 _ = self.generation.cancelled() => return Err(HostError::classified(

@@ -245,6 +245,20 @@ pub fn run_with(
         ))?;
         return Ok(());
     }
+    if matches!(
+        argv.first().map(String::as_str),
+        Some("--backup" | "--restore")
+    ) {
+        let [operation, source, destination] = argv.as_slice() else {
+            return Err("Use --backup DATABASE ARCHIVE or --restore ARCHIVE DIRECTORY".into());
+        };
+        if operation == "--backup" {
+            crate::storage::backup_store(source.into(), destination.into())?;
+        } else {
+            crate::storage::restore_store(source.into(), destination.into())?;
+        }
+        return Ok(());
+    }
     if argv.first().map(String::as_str) == Some("--vacuum") {
         let [flag, database] = &argv[1..] else {
             return Err("Use --vacuum --database PATH".into());

@@ -4,6 +4,75 @@ use dim_agent_capabilities::{host::SessionFilesHost, methods::SessionMethods};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
+pub(super) struct Staging {
+    path: PathBuf,
+    _lock: std::fs::File,
+    _temporary: Option<tempfile::TempDir>,
+}
+impl Staging {
+    pub(super) fn open(database: Option<PathBuf>) -> Result<Self, RpcError> {
+        let temporary = if database.is_none() {
+            Some(tempfile::tempdir().map_err(|e| RpcError::invalid(e.to_string()))?)
+        } else {
+            None
+        };
+        let path = match database {
+            Some(database) => {
+                let mut path = database.into_os_string();
+                path.push(".web-uploads");
+                PathBuf::from(path)
+            }
+            None => temporary
+                .as_ref()
+                .expect("temporary staging")
+                .path()
+                .to_owned(),
+        };
+        let open = || -> std::io::Result<std::fs::File> {
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            if !std::fs::symlink_metadata(&path)?.is_dir() {
+                return Err(std::io::Error::other("Upload staging is not a directory"));
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+            }
+            let lock = options.open(path.join("lock"))?;
+            lock.try_lock().map_err(std::io::Error::other)?;
+            for entry in std::fs::read_dir(&path)? {
+                let entry = entry?;
+                if entry.file_name().to_string_lossy().starts_with("upload-") {
+                    if entry.file_type()?.is_dir() {
+                        std::fs::remove_dir_all(entry.path())?;
+                    } else {
+                        std::fs::remove_file(entry.path())?;
+                    }
+                }
+            }
+            Ok(lock)
+        };
+        let lock = open().map_err(|e| RpcError::invalid(e.to_string()))?;
+        Ok(Self {
+            path,
+            _lock: lock,
+            _temporary: temporary,
+        })
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct UploadOptions {
     #[serde(default)]
@@ -59,7 +128,10 @@ async fn receive(
 ) -> Result<serde_json::Value, RpcError> {
     let index = site.hub.with_rpc(|rpc| rpc.index.clone())?;
     let usage = index.acquire(&session).await?;
-    let directory = tempfile::tempdir().map_err(|e| RpcError::invalid(e.to_string()))?;
+    let directory = tempfile::Builder::new()
+        .prefix("upload-")
+        .tempdir_in(&site.staging.path)
+        .map_err(|e| RpcError::invalid(e.to_string()))?;
     let path = directory.path().join("upload");
     let field = multipart
         .next_field()
@@ -202,4 +274,213 @@ pub(super) async fn download(
         Body::from_stream(stream),
     )
         .into_response()
+}
+
+async fn management(
+    site: &Site,
+    method: &str,
+    params: serde_json::Value,
+    cancel: CancellationToken,
+) -> Result<serde_json::Value, RpcError> {
+    let table = site.hub.with_rpc(|rpc| rpc.management.clone())?;
+    let provider = table
+        .provider(method)
+        .ok_or_else(RpcError::unknown_method)?;
+    let accepted = provider.accept(method.into(), params, None, cancel, |_| {})?;
+    let result = accepted.reply.await.map_err(|_| RpcError::interrupted())?;
+    let _ = accepted.settled.await;
+    result
+}
+
+pub(super) async fn modality(
+    State(site): State<Arc<Site>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    if !site.authenticated(&headers) {
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Web authentication required",
+        );
+    }
+    if !site.origin_allowed(&headers) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "origin_denied",
+            "Origin is not allowed",
+        );
+    }
+    let Ok(_permit) = site.uploads.try_acquire() else {
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "uploads_busy",
+            "Upload concurrency limit reached",
+        );
+    };
+    let cancel = site.stopping.child_token();
+    let _guard = cancel.clone().drop_guard();
+    let receive = async {
+        let directory = tempfile::Builder::new()
+            .prefix("upload-")
+            .tempdir_in(&site.staging.path)
+            .map_err(|e| RpcError::invalid(e.to_string()))?;
+        let field = multipart
+            .next_field()
+            .await
+            .map_err(|e| RpcError::invalid(e.to_string()))?
+            .ok_or_else(|| RpcError::invalid("A request field is required"))?;
+        if field.name() != Some("request") {
+            return Err(RpcError::invalid("The first field must be request"));
+        }
+        let mut request_bytes = Vec::new();
+        let mut field = field;
+        while let Some(chunk) = field
+            .chunk()
+            .await
+            .map_err(|e| RpcError::invalid(e.to_string()))?
+        {
+            if request_bytes.len() + chunk.len() > 64 * 1024 {
+                return Err(RpcError::invalid("Task request exceeds 64 KiB"));
+            }
+            request_bytes.extend_from_slice(&chunk);
+        }
+        drop(field);
+        let mut request: serde_json::Value =
+            serde_json::from_slice(&request_bytes).map_err(|e| RpcError::invalid(e.to_string()))?;
+        let params = request
+            .as_object_mut()
+            .ok_or_else(|| RpcError::invalid("Task request must be an object"))?;
+        if params.contains_key("files") {
+            return Err(RpcError::invalid("Supply files as multipart fields"));
+        }
+        let mut files = Vec::new();
+        let mut bytes = 0usize;
+        while let Some(mut field) = multipart
+            .next_field()
+            .await
+            .map_err(|e| RpcError::invalid(e.to_string()))?
+        {
+            if field.name() != Some("file") || files.len() >= 20 {
+                return Err(RpcError::invalid("Supply at most 20 file fields"));
+            }
+            let name = field
+                .file_name()
+                .ok_or_else(|| RpcError::invalid("A file name is required"))?
+                .to_owned();
+            let media = field
+                .content_type()
+                .ok_or_else(|| RpcError::invalid("A file media type is required"))?
+                .to_owned();
+            let path = directory.path().join(files.len().to_string());
+            let mut target = tokio::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .await
+                .map_err(|e| RpcError::invalid(e.to_string()))?;
+            while let Some(chunk) = tokio::time::timeout(Duration::from_secs(30), field.chunk())
+                .await
+                .map_err(|_| RpcError::invalid("Upload timed out"))?
+                .map_err(|e| RpcError::invalid(e.to_string()))?
+            {
+                bytes += chunk.len();
+                if bytes > 100 * 1024 * 1024 {
+                    return Err(RpcError::invalid("Task inputs exceed 100 MiB"));
+                }
+                target
+                    .write_all(&chunk)
+                    .await
+                    .map_err(|e| RpcError::invalid(e.to_string()))?;
+            }
+            target
+                .flush()
+                .await
+                .map_err(|e| RpcError::invalid(e.to_string()))?;
+            files.push(json!({"name":name,"media_type":media,"node_path":path}));
+        }
+        params.insert("files".into(), files.into());
+        management(&site, "modality.task.submit", request, cancel.clone()).await
+    };
+    let result = tokio::select! {
+        _ = cancel.cancelled() => Err(RpcError::interrupted()),
+        result = tokio::time::timeout(Duration::from_secs(120), receive) => result.unwrap_or_else(|_| Err(RpcError::invalid("Upload timed out"))),
+    };
+    match result {
+        Ok(reply) => axum::Json(reply).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, axum::Json(error)).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct TaskResultInput {
+    task_id: String,
+    name: String,
+}
+
+pub(super) async fn attach_result(
+    State(site): State<Arc<Site>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+    axum::Json(input): axum::Json<TaskResultInput>,
+) -> Response {
+    if !site.authenticated(&headers) {
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Web authentication required",
+        );
+    }
+    if !site.origin_allowed(&headers) {
+        return error(
+            StatusCode::FORBIDDEN,
+            "origin_denied",
+            "Origin is not allowed",
+        );
+    }
+    let Ok(_permit) = site.uploads.try_acquire() else {
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "uploads_busy",
+            "Upload concurrency limit reached",
+        );
+    };
+    let cancel = site.stopping.child_token();
+    let _guard = cancel.clone().drop_guard();
+    let result = async {
+        let source = management(
+            &site,
+            "modality.task.export",
+            json!({"task_id":input.task_id,"name":input.name}),
+            cancel.clone(),
+        )
+        .await?;
+        let source: dim_agent_types::TaskFileSource =
+            serde_json::from_value(source).map_err(|error| RpcError::invalid(error.to_string()))?;
+        let index = site.hub.with_rpc(|rpc| rpc.index.clone())?;
+        let usage = index.acquire(&session).await?;
+        let methods = usage
+            .session
+            .session_service::<SessionMethods>()
+            .map_err(RpcError::from)?;
+        let provider = methods
+            .provider("attachment.import")
+            .ok_or_else(RpcError::unknown_method)?;
+        let accepted = provider.accept(
+            "attachment.import".into(),
+            json!({"sessionId":session,"path":source.path,"image":source.image}),
+            None,
+            cancel.clone(),
+            |_| {},
+        )?;
+        let result = accepted.reply.await.map_err(|_| RpcError::interrupted())?;
+        let _ = accepted.settled.await;
+        result
+    }
+    .await;
+    match result {
+        Ok(reply) => axum::Json(reply).into_response(),
+        Err(error) => (StatusCode::BAD_REQUEST, axum::Json(error)).into_response(),
+    }
 }

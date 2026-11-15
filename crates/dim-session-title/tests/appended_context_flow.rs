@@ -83,15 +83,7 @@ async fn start_with(
     mpsc::UnboundedReceiver<Request>,
 ) {
     let store = Box::new(Store::new());
-    if use_hook {
-        let command = hook(&store.0);
-        std::fs::write(
-            store.0.join("hooks.json"),
-            json!({"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":command}]}]}})
-                .to_string(),
-        )
-        .unwrap();
-    }
+    let hook_command = use_hook.then(|| hook(&store.0));
     let (sent, requests) = mpsc::unbounded_channel::<Request>();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -119,6 +111,11 @@ async fn start_with(
     .await
     .unwrap();
     let mut client = client(&server).await;
+    if let Some(command) = hook_command {
+        let catalog = client.rpc("hooks.catalog", json!({})).await.unwrap();
+        client.rpc("hooks.save", json!({"expectedRevision":catalog["userRevision"],"document":{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":command}]}]}}})).await.unwrap();
+    }
+
     client.rpc("provider.create", json!({"providerId":PROVIDER,"displayName":"Title fixture",
         "connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},
         "models":[{"modelId":"main","displayName":"Main","status":"active",
@@ -428,14 +425,10 @@ async fn history(client: &mut Client, id: &str) -> Vec<Value> {
 async fn an_image_only_input_takes_the_context_and_neither_reader_uses_it() {
     let (store, server, mut client, mut requests) = start_with(true).await;
     let id = session(&mut client, &store.0).await;
-    submit_content(
-        &mut client,
-        &id,
-        json!([{"type":"image","source":{"type":"url","mediaType":"image/png",
-            "url":"https://example.com/image.png"}}]),
-    )
-    .await
-    .expect("an image-only input is valid");
+    let image = import_image(&mut client, &id, &store.0).await;
+    submit_content(&mut client, &id, json!([{"type":"image","source":image}]))
+        .await
+        .expect("an image-only input is valid");
     let events = history(&mut client, &id).await;
     let user = events
         .iter()
@@ -444,7 +437,7 @@ async fn an_image_only_input_takes_the_context_and_neither_reader_uses_it() {
         .find(|content| content[0]["type"] == "image")
         .unwrap_or_else(|| panic!("the image input is in history: {events:#?}"));
     assert!(
-        matches!(&user[1], Value::Object(block) if block["text"]
+        matches!(user.get(1), Some(Value::Object(block)) if block["text"]
         .as_str()
         .is_some_and(|text| text.starts_with("<dim-hooks kind=\"prompt-submit\">"))),
         "{user:?}"

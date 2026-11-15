@@ -1,5 +1,19 @@
 # Rust 会话存储格式
 
+## v50: native image migration
+
+Startup converts retained inline images in adopted inputs, tool results, compaction
+replacements and recorded model requests into immutable Session files. Traces use
+the same conversion. Identical accepted bytes share an identity, with ownership
+recorded for every containing Session. URL images become the unavailable-image
+text placeholder at their original position.
+
+File publication precedes the single SQLite upgrade commit. A failed upgrade rolls
+back facts, ownership and the format marker; unowned files are reclaimed by the
+Session file sweep. The conversion rebuilds request content addresses and the text
+index and invalidates derived recovery snapshots. The accepted image bytes are
+preserved. Older daemons reject v50 at admission.
+
 ## v49: durable image references
 
 Image sources in inputs, tool results and model request content may contain

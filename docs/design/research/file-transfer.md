@@ -1,13 +1,13 @@
 # 文件与图片传输设计
 
-状态：提案。确认后由各 owner 更新自己的契约，再实施。
+本设计定义文件接收、持久引用与模型请求的交接规则；各插件的接口由对应 owner 契约定义。
 
 ## 1. 决策
 
 1. Web API 通过标准 HTTP 文件上传接收浏览器文件，流式保存到受控暂存目录。
 2. App Server 的附件入口调用 Session files，按已授权的源文件路径导入。Session files 决定最终路径，文件服务执行有界复制及原子落盘，SessionStore 发布文件归属。
-3. 本地 CLI 使用同节点文件导入；插件调用所属文件 owner 的路径操作。跨节点文件传送在文件服务边界完成，业务方法传递所属节点可解释的文件位置。
-4. 消息、历史和内部模型请求使用持久文件引用；最终模型执行节点读取图片并按供应商协议编码。
+3. 本地 CLI 和插件按源文件路径调用所属文件 owner 的导入操作。
+4. 消息、历史和内部模型请求使用持久文件引用；最终模型执行边界读取图片并按供应商协议编码。
 5. 文件接收、导入、内容引用、模型切换和恢复作为一个完整交付，统一验收后启用新格式。
 
 ## 2. 接口边界与文件导入
@@ -25,7 +25,7 @@ flowchart TB
         Transport["Transport plugin<br/>本地客户端连接与协议收发"]
         Rpc["Rpc plugin<br/>调用来源校验、Session 方法路由"]
         Store["SessionStore plugin<br/>sessionFiles：源路径导入、目标路径生成、持久归属"]
-        FS["FileStorage plugin<br/>文件节点上的固定读取、有界复制、原子落盘"]
+        FS["FileStorage plugin<br/>固定源文件读取、有界复制、原子落盘"]
     end
     subgraph Session[Session scope]
         Attachments["Attachments plugin<br/>附件导入入口、名称与内容规则"]
@@ -52,9 +52,9 @@ flowchart TB
         Context["ContextPreparation plugin<br/>有效上下文、压缩切点、请求配置"]
         Model["ModelProvider plugin<br/>按能力生成图片或占位视图、预算验证、调用结算"]
     end
-    Aimux["Aimux plugin · process<br/>最终模型执行节点：读图、协议封装、供应商请求"]
+    Aimux["Aimux plugin · process<br/>最终模型执行边界：读图、协议封装、供应商请求"]
     Store["SessionStore plugin · process<br/>sessionFiles：引用归属与文件定位"]
-    FS["FileStorage plugin · 文件节点<br/>有界读取"]
+    FS["FileStorage plugin · process<br/>有界读取"]
     Provider[外部模型供应商]
     Client --> Rpc
     Rpc -->|经 Session / branch 输入入口| Input
@@ -64,7 +64,7 @@ flowchart TB
     Loop -->|模型调用事实| Model
     Model -->|modelHost：带引用的请求| Aimux
     Aimux -->|sessionFiles 授权读取| Store
-    Store -->|解析至文件节点| FS
+    Store -->|定位文件| FS
     Aimux -->|目标供应商格式| Provider
 ```
 
@@ -74,10 +74,10 @@ flowchart TB
 | Web HTTP 上传 | `multipart/form-data`，每请求一个文件，目标 Session | 已保存文件的引用及元数据 | 鉴权、请求大小与并发限制、流式暂存、调用导入、清理暂存 |
 | App Server 附件方法 | 已授权来源路径、文件名、目标 Session | 持久文件引用及元数据 | 校验调用来源及源文件访问资格，调用 Session files |
 | Session files 导入 | 源文件位置、文件名、目标 Session | `fileId`、最终路径、字节数与媒体信息 | 校验 Session、生成目标路径、组织导入、提交所有权 |
-| FileStorage / fsHost | 来源节点中的源路径、目标路径及权限 | 写入结果 | 打开并固定源文件、有界复制、临时文件、原子替换、落盘与取消 |
+| FileStorage | 已授权的源路径、目标路径及权限 | 写入结果 | 打开并固定源文件、有界复制、临时文件、原子替换、落盘与取消 |
 | App Server 消息提交 | 消息内容及图片引用 | 输入接收结果 | 校验引用归属，执行输入采用流程 |
 
-以上为目标操作语义；方法名称与 wire 字段由对应 owner 契约定义。Session 文件契约见 [Session files](../appserver/session-files.md)，文件服务契约见 [resource faces](../resource-faces.md)，公开操作遵循[数据面契约](../service-faces.md)。
+以上为目标操作语义；方法名称与 wire 字段由对应 owner 契约定义。Session 文件契约见 [Session files](../appserver/session-files.md)，文件操作契约见 [FileStorage](../../architecture/rust-agent/plugins/FileStorage.md)，公开操作遵循[数据面契约](../service-faces.md)。
 
 ### Web 流程
 
@@ -98,7 +98,7 @@ flowchart TB
 - HTTP 入口持有本次暂存文件的访问资格；源路径在服务器内部交给导入操作。
 - Web 预览使用 object URL，完成后可切换到鉴权资源读取地址。
 
-### 同节点文件导入
+### 按路径导入文件
 
 Session files 增加按路径导入操作，完成以下步骤：
 
@@ -108,15 +108,9 @@ Session files 增加按路径导入操作，完成以下步骤：
 4. SessionStore 确认 Session 存在且 pending 写入仍归本次执行所有，提交文件归属。
 5. 返回持久引用及最终文件信息；失败按 pending 文件回收规则清理。
 
-源路径定位接收方文件节点上的文件；目标路径由 Session files 生成。调用方的普通源文件在导入后继续由调用方管理，Web 暂存文件由 Web 上传任务清理。
+源路径定位 App Server 可访问且已获授权的文件；目标路径由 Session files 生成。调用方的普通源文件在导入后继续由调用方管理，Web 暂存文件由 Web 上传任务清理。
 
 本地 CLI 的文件路径经受信任本地入口授权后导入。剪贴板图像先按图片策略形成临时文件，再走同一导入流程。导入过程中从固定的读取对象生成接受内容，之后模型读取的是已导入的不可变文件。
-
-### 跨节点文件来源
-
-文件位置由节点身份及该节点上的路径解释，路由遵循资源节点契约。源与目标位于同节点时调用本地复制；位于不同节点时，文件服务通过有界读取和写入完成搬运，再由 Session files 提交归属。Web 临时路径用于其所属节点上的导入。
-
-跨节点写入能力由 fsHost owner 定义操作、取消与清理契约；Session files 的业务输入始终是来源位置与导入参数。Rust 绑定与跨语言绑定执行同一 owner 逻辑。
 
 ### 文件身份与预算
 
@@ -141,7 +135,7 @@ Session files 增加按路径导入操作，完成以下步骤：
                   |
        本次模型能力对应的请求视图
                   |
-       最终模型节点读取与协议封装
+       最终模型执行边界读取与协议封装
 ```
 
 上下文准备负责有效内容选择，ModelProvider 负责本次模型视图，aimux 负责供应商协议封装。
@@ -178,12 +172,12 @@ Session files 增加按路径导入操作，完成以下步骤：
 1. 固定有效上下文和请求配置。
 2. 按模型能力生成带引用的请求视图或占位文字。
 3. 校验上下文预算。
-4. 最终模型节点读取图片，执行既定图片处理。
+4. 最终模型执行边界读取图片，执行既定图片处理。
 5. 校验供应商图片与请求字节预算，封装并发送。
 
 图片计数沿用 [ContextCompaction](../plugins/ContextCompaction.md) 的算法身份及图片贡献规则。占位后按文字校验；模型、工具、上下文窗口或请求视图变化后，重新验证预算依据。
 
-文件与网络读取均在提交锁外的 owner 自持任务中执行。内部 ModelHost、PrepareModelHost 请求通过引用跨节点传输。
+文件与网络读取均在提交锁外的 owner 自持任务中执行。内部模型请求携带文件引用。
 
 每次图片处理从不可变的接受内容开始，使用本次请求确定的处理策略。
 
@@ -214,10 +208,10 @@ Session files 增加按路径导入操作，完成以下步骤：
 
 | 所有者 | 修改逻辑 |
 | --- | --- |
-| FileStorage / fsHost | 固定源读取、有界复制、原子写入；同节点路径导入与跨节点文件搬运 |
+| FileStorage | 固定源读取、有界复制、原子写入；按路径导入 |
 | 内容类型 owner | 定义统一持久图片引用，更新输入、工具结果和模型请求的共享类型 |
 | ModelProvider | 根据本次能力快照处理引用或占位，校验请求预算 |
-| Aimux | 在最终执行节点读取图片，分别封装用户图片和工具结果图片，按目标协议处理续接数据 |
+| Aimux | 在最终执行边界读取图片，分别封装用户图片和工具结果图片，按目标协议处理续接数据 |
 
 ### 下游接入
 
@@ -228,9 +222,9 @@ Session files 增加按路径导入操作，完成以下步骤：
 | CLI / dim-client | 本地图片及剪贴板图片按路径导入，草稿保存引用 | 文件参数、粘贴、TUI 提交、取消及临时文件清理 |
 | ACP 输入 | 外部图像解码落文件并导入，消息使用引用 | ACP prompt 含多图及混合文本 |
 | ACP 输出 | 在协议输出边界读取引用并编码为 ACP 图片内容 | Session 加载、历史回放；图片位置与顺序 |
-| WorkspaceTools read / ToolHost | 生成图片后建立持久文件归属，工具结果返回引用 | 本地与远端工具图片；图文混合结果 |
+| WorkspaceTools read / ToolHost | 生成图片后建立持久文件归属，工具结果返回引用 | 工具图片；图文混合结果 |
 | MCP 工具边界 | 将外部图片结果保存并绑定本次 Session，再返回引用 | 截图等 MCP 图片工具、共享服务下的 Session 隔离 |
-| Modality / ModalityAimux / OCR 调用链 | 文件来源接入所属 owner，执行节点取得可读取文件，产物转聊天时导入 Session | 图像/音频/视频文件输入、OCR 文件输入及任务产物 |
+| Modality / ModalityAimux / OCR 调用链 | 文件来源接入所属 owner，执行器读取任务文件，产物转聊天时导入 Session | 图像/音频/视频文件输入、OCR 文件输入及任务产物 |
 | TypeScript / 插件绑定 | 同步共享类型、声明生成及边界解码器 | Rust 与 Node 调用的输入、回复和错误一致 |
 | 存储迁移与恢复入口 | 将保留历史转换为统一内容类型，持久化文件及所有权 | 迁移后重启、fork、删除原 Session、冷恢复 |
 
@@ -251,13 +245,13 @@ Session files 增加按路径导入操作，完成以下步骤：
 
 图片在进入 Dim 的工具结果边界保存，引用写入 `ToolResult.content`。保留文本、块顺序、tool_use_id、is_error 和 structuredContent。
 
-MCP 对端只支持 inline Base64 时，在外部边界解码并保存，内部结果使用文件引用。远端工具在 ToolHost 回复前建立可授权的持久引用。
+MCP 对端只支持 inline Base64 时，在外部边界解码并保存，内部结果使用文件引用。工具结果发布前建立 Session 文件归属。
 
 供应商要求将工具图片移到后续 user 消息时，由协议适配器在本次请求中封装，并保持工具调用与结果配对。
 
 ### Modality
 
-遵循 [Modality](../plugins/Modality.md) 的任务、文件和取消契约。浏览器文件经 HTTP 上传形成可导入来源；本地与远端文件按所属节点路径接入任务文件 owner。
+遵循 [Modality](../plugins/Modality.md) 的任务、文件和取消契约。浏览器文件经 HTTP 上传形成可导入来源；本地文件按路径接入任务文件 owner。
 
 Modality 产物进入聊天前，必须获得不随任务清理失效的 Session 文件归属。超过 Session 限额时明确拒绝，或按既定策略产生符合限制的派生文件。
 
@@ -278,7 +272,7 @@ Modality 产物进入聊天前，必须获得不随任务清理失效的 Session
 1. owner 契约、共享引用类型、版本与文件备份格式。
 2. 文件服务按路径复制、Session files 导入与文件生命周期。
 3. Web HTTP 上传、本地 CLI 导入、ACP/工具结果及 Modality 的文件来源接入。
-4. 上下文投影、远端模型读取及供应商封装。
+4. 上下文投影、模型边界读取及供应商封装。
 5. 恢复、兼容性、模型切换与资源预算验收。
 
 必需验收：
@@ -288,7 +282,7 @@ Modality 产物进入聊天前，必须获得不随任务清理失效的 Session
 - 视觉 A → 文本 B → 视觉 A/C，用户图片与工具图片保持身份、顺序及工具因果关系。
 - 请求执行中切换模型、刷新凭据或变更路由，每个请求使用其固定配置。
 - 压缩后切回视觉仅发送有效上下文内的图片；fork 后删除原 Session，图片仍可读。
-- 远端 ToolHost → 控制节点 → 远端 ModelHost 的内部消息保持引用，最终供应商收到正确图片。
+- ToolHost → 已保存工具结果 → ModelHost 的内部消息保持引用，最终供应商收到正确图片。
 - 跨 Session 引用、临时离线、永久缺失和损坏返回对应错误。
 - 新格式备份恢复到全新 home 后可继续请求；旧格式可读，旧程序明确拒绝不支持的新格式。
 - 上传与复制内存受缓冲大小及并发预算约束；上传期间 stop/cancel 保持响应；模型解码与最终编码内存单独测量。
@@ -311,7 +305,7 @@ Modality 产物进入聊天前，必须获得不随任务清理失效的 Session
 
 | Owner | 必须落实的契约 | 生命周期影响 |
 | --- | --- | --- |
-| Session files / fsHost | 来源路径导入、固定读取、有界复制、原子写入及授权读取；跨节点搬运契约 | 未完成清理，完成后持久可读 |
+| Session files / FileStorage | 来源路径导入、固定读取、有界复制、原子写入及授权读取 | 未完成清理，完成后持久可读 |
 | 内容与存储 | 引用 schema、格式版本、所有权及备份闭包 | 新格式拒绝不兼容读取；fork/delete/reload 保持引用完整 |
 | ModelProvider / ModelHost | 引用输入、声明式文件读取依赖、模型图片预算与错误 | 锁外读取；取消释放资源；本次请求配置固定 |
 | ContextPolicy / ContextUsage | 引用图片计数与请求视图验证 | 保持压缩切点；算法语义变化时更换身份 |

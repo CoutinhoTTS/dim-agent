@@ -201,7 +201,12 @@ impl WebEntry {
         let address = listener.local_addr().map_err(io_error)?;
         let bootstrap = new_token();
         let stop = hub.closing().child_token();
+        let database = hub.with_rpc(|rpc| rpc.config.database_path.clone())?;
+        let staging = tokio::task::spawn_blocking(move || uploads::Staging::open(database))
+            .await
+            .map_err(|error| RpcError::invalid(error.to_string()))??;
         let site = Arc::new(Site {
+            staging,
             hub: hub.clone(),
             stopping: stop.clone(),
             assets,
@@ -213,6 +218,15 @@ impl WebEntry {
         });
         let router = Router::new()
             .route("/api/health", get(health))
+            .route(
+                "/api/modality/tasks",
+                post(uploads::modality)
+                    .layer(axum::extract::DefaultBodyLimit::max(101 * 1024 * 1024)),
+            )
+            .route(
+                "/api/sessions/{session_id}/modality-results",
+                post(uploads::attach_result),
+            )
             .route(
                 "/api/sessions/{session_id}/files",
                 post(uploads::upload).layer(axum::extract::DefaultBodyLimit::max(17 * 1024 * 1024)),
@@ -402,6 +416,7 @@ impl Assets {
 }
 
 struct Site {
+    staging: uploads::Staging,
     stopping: CancellationToken,
     uploads: tokio::sync::Semaphore,
     hub: Arc<ConnectionHub>,

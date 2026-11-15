@@ -1255,6 +1255,7 @@ impl DynPlugin for ModalityPlugin {
                     wait,
                     MethodDecl::new("modality.task.cancel", true, Interruption::Report),
                     MethodDecl::new("modality.task.result", false, Interruption::Report),
+                    MethodDecl::new("modality.task.export", false, Interruption::Report),
                     open,
                     MethodDecl::new("modality.realtime.send", true, Interruption::Report),
                     MethodDecl::new("modality.realtime.close", true, Interruption::Report),
@@ -1385,6 +1386,9 @@ impl DynPlugin for ModalityPlugin {
                             "modality.task.cancel" => {
                                 let request: TaskCancel = params(value)?;
                                 reply(tasks.cancel(request, &stopping).await?)
+                            }
+                            "modality.task.export" => {
+                                reply(tasks.export(params::<engine::TaskExport>(value)?).await?)
                             }
                             "modality.task.result" => {
                                 let request: TaskResultQuery = params(value)?;

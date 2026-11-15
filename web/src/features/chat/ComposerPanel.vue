@@ -68,6 +68,7 @@ const permissionMenu = ref<InstanceType<typeof ComposerPermissionMenu>>()
 const menuId = useId()
 const text = ref("")
 const sending = ref(false)
+const uploadProgress = ref<number>()
 const changingModel = ref(false)
 const error = ref("")
 const composing = ref(false)
@@ -292,7 +293,7 @@ async function submit(): Promise<void> {
       const sentMentions = fileMentions.value
       const sentImages = images.value
       const sentPastes = pastes.value
-      await props.send(linkMentions(message, sentMentions), { images: sentImages.map((image) => image.file), pastes: sentPastes.map((paste) => paste.text) })
+      await props.send(linkMentions(message, sentMentions), { images: sentImages.map((image) => image.file), pastes: sentPastes.map((paste) => paste.text), onProgress: (percent) => { uploadProgress.value = percent } })
       fileMentions.value = fileMentions.value.filter((mention) => !sentMentions.includes(mention))
       sentImages.forEach((image) => URL.revokeObjectURL(image.url))
       images.value = images.value.filter((image) => !sentImages.includes(image))
@@ -305,6 +306,7 @@ async function submit(): Promise<void> {
     error.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     sending.value = false
+    uploadProgress.value = undefined
   }
 }
 
@@ -480,6 +482,7 @@ defineExpose({ focus: () => field.value?.focus(), quote })
           <ComposerPermissionMenu v-if="permission && variant !== 'panel'" ref="permissionMenu" :policy="permission.policy" @select="permission.select" />
         </div>
         <div class="composer-run-group">
+          <progress v-if="uploadProgress !== undefined" :value="uploadProgress" max="100" aria-label="File upload" />
           <ComposerModelMenu v-if="variant !== 'panel'" ref="modelMenu" :model="model" :selectable="modelSelectable" :disabled="changingModel" @select="onModel" />
           <UTooltip :text="showStop ? t('composer.stopResponse') : t('composer.send')">
             <UButton

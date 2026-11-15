@@ -268,7 +268,9 @@ for (const branchId of ["main", "worker"]) {
     const send = button(root, "composer.send")
     assert.equal(send.props.disabled, false)
     await click(send)
-    assert.deepEqual(submissions, [{ sessionId: "session", branch: branchId, value: "", attachments: { images: [image], pastes: [paste] } }])
+    const { onProgress, ...attachments } = submissions[0].attachments
+    assert.equal(typeof onProgress, "function")
+    assert.deepEqual({ ...submissions[0], attachments }, { sessionId: "session", branch: branchId, value: "", attachments: { images: [image], pastes: [paste] } })
   })
 }
 
@@ -469,7 +471,20 @@ test("image submission uploads the File before sending only its durable referenc
     calls.push({ method, params }); return read({})
   } } } }
   const previousFetch = globalThis.fetch
-  t.after(() => { globalThis.fetch = previousFetch })
+  const previousXHR = globalThis.XMLHttpRequest
+  t.after(() => { globalThis.fetch = previousFetch; globalThis.XMLHttpRequest = previousXHR })
+  globalThis.XMLHttpRequest = class {
+    upload = {}
+    open(method, url) { this.method = method; this.url = url }
+    async send(body) {
+      this.upload.onprogress({ lengthComputable: true, loaded: 5, total: 10 })
+      const response = await globalThis.fetch(this.url, { method: this.method, body })
+      this.status = response.status
+      this.responseText = await response.text()
+      this.upload.onprogress({ lengthComputable: true, loaded: 10, total: 10 })
+      this.onload()
+    }
+  }
   globalThis.fetch = async (url, request) => {
     assert.equal(calls.length, 0)
     uploads.push({ url, request })
@@ -482,12 +497,18 @@ test("image submission uploads the File before sending only its durable referenc
   const chat = useChatStore()
   t.after(() => chat.$dispose())
   const image = new File(["image bytes"], "screen.png", { type: "image/png" })
-  await chat.submit("session", "main", "look", { images: [image], pastes: [] })
+  const progress = []
+  await chat.submit("session", "main", "look", { images: [image], pastes: [], onProgress: value => progress.push(value) })
+  assert(progress.includes(50))
+  assert.equal(progress.at(-1), 100)
   assert.equal(uploads[0].url, "/api/sessions/session/files?image=true")
   assert.equal(calls[0].method, "session.submit")
   assert.deepEqual(calls[0].params.user.content, [{ type: "text", text: "look" },
     { type: "image", source: { type: "file", mediaType: "image/png", fileId: "image-1" } }])
   globalThis.fetch = async () => new Response("failed", { status: 500 })
-  await assert.rejects(chat.submit("session", "main", "again", { images: [image], pastes: [] }), /upload failed/)
+  await assert.rejects(chat.submit("session", "main", "again", { images: [new File(["new bytes"], "new.png")], pastes: [] }), /upload failed/)
   assert.equal(calls.length, 1)
+  await chat.submit("session", "main", "retry", { images: [image], pastes: [] })
+  assert.equal(uploads.length, 1, "retrying a draft reuses its accepted file identity")
+  assert.equal(calls[1].params.user.content[1].source.fileId, "image-1")
 })

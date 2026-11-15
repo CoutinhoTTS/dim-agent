@@ -2439,6 +2439,7 @@
       "unexpandedMacros": [
         "eprintln",
         "format",
+        "matches",
         "println",
         "tokio::pin",
         "tokio::select",
@@ -3425,6 +3426,15 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::backup",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/backup.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::catalog",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -3506,6 +3516,16 @@
       "parent": "dim_app_server::storage",
       "file": "crates/dim-app-server/src/storage/identities.rs",
       "unexpandedMacros": [
+        "params"
+      ]
+    },
+    {
+      "id": "dim_app_server::storage::image_upgrade",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/image_upgrade.rs",
+      "unexpandedMacros": [
+        "format",
         "params"
       ]
     },
@@ -24719,6 +24739,14 @@
     },
     {
       "from": "dim_app_server::cli",
+      "to": "dim_app_server::storage::backup",
+      "references": [
+        "path crate::storage::backup_store",
+        "path crate::storage::restore_store"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
       "to": "dim_app_server::storage::export",
       "references": [
         "path crate::storage::export_timeline"
@@ -32031,6 +32059,15 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::backup",
+      "references": [
+        "mod backup",
+        "use backup::backup_store",
+        "use backup::restore_store"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::catalog",
       "references": [
         "mod catalog",
@@ -32068,6 +32105,13 @@
       "references": [
         "mod identities",
         "use identities::initialize_session_output_id_index"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::image_upgrade",
+      "references": [
+        "mod image_upgrade"
       ]
     },
     {
@@ -32170,6 +32214,32 @@
       "to": "dim_app_server::storage::timeline",
       "references": [
         "path super::timeline::Row"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::backup",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::backup",
+      "to": "dim_app_server::storage::files",
+      "references": [
+        "path super::files::valid_name"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::backup",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path STORE_FORMAT",
+        "path error",
+        "path super::sqlite::validate_backup_schema",
+        "use super::STORE_FORMAT",
+        "use super::sqlite::error"
       ]
     },
     {
@@ -32688,6 +32758,109 @@
       ]
     },
     {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "path dim_agent_capabilities::images::base64_len"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock",
+        "path ContentBlock::Image",
+        "path ContentBlock::Text",
+        "path ImageSource",
+        "path ImageSourceType::Base64",
+        "path ImageSourceType::File",
+        "path ImageSourceType::Url",
+        "path Message",
+        "path MessageContent::Parts",
+        "path MessagePart",
+        "path MessagePart::Image",
+        "path MessagePart::Text",
+        "path MessagePart::ToolResult",
+        "path ToolContent",
+        "path ToolContent::Blocks",
+        "path content"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ContextCompactionResult::Completed",
+        "path EventKind",
+        "path EventKind::ContextCompaction",
+        "path EventKind::ContextPrepare",
+        "path EventKind::ExecEnded",
+        "path EventKind::InputMessage",
+        "path EventKind::ModelCall",
+        "path EventKind::ModelContent",
+        "path EventKind::ToolCompleted",
+        "path EventKind::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_agent_types::input",
+      "references": [
+        "path input"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path kind"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_app_server::storage::codec",
+      "references": [
+        "path codec::Reader::default",
+        "path codec::drafts",
+        "path codec::encode",
+        "path codec::encode_list",
+        "path codec::request",
+        "use super::codec"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error",
+        "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_app_server::storage::text",
+      "references": [
+        "path super::text::backfill"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path Row",
+        "path Row::Event",
+        "use super::timeline::Row"
+      ]
+    },
+    {
       "from": "dim_app_server::storage::members",
       "to": "dim_agent_runtime::error",
       "references": [
@@ -33066,6 +33239,13 @@
       "references": [
         "path super::identities::SCHEMA",
         "path super::identities::backfill"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::storage::image_upgrade",
+      "references": [
+        "path super::image_upgrade::upgrade"
       ]
     },
     {
@@ -34152,6 +34332,7 @@
       "references": [
         "path RpcError",
         "path RpcError::app",
+        "path RpcError::invalid",
         "use dim_agent_capabilities::methods::RpcError"
       ]
     },
@@ -34209,7 +34390,11 @@
       "to": "dim_app_server::web_entry::uploads",
       "references": [
         "mod uploads",
+        "path uploads::Staging",
+        "path uploads::Staging::open",
+        "path uploads::attach_result",
         "path uploads::download",
+        "path uploads::modality",
         "path uploads::upload"
       ]
     },
@@ -34273,6 +34458,13 @@
         "path RpcError::unknown_method",
         "path SessionMethods",
         "use dim_agent_capabilities::methods::SessionMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::web_entry::uploads",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::TaskFileSource"
       ]
     },
     {
@@ -35439,6 +35631,7 @@
       "from": "dim_cli::composer",
       "to": "dim_cli::images",
       "references": [
+        "path crate::images::import",
         "path images",
         "path images::Attached",
         "path images::Item::Image",
@@ -37519,7 +37712,6 @@
       "to": "dim_cli::modality::media",
       "references": [
         "path file_name",
-        "use super::media::MAX_INLINE_BYTES",
         "use super::media::file_name",
         "use super::media::input"
       ]
@@ -39687,6 +39879,7 @@
         "path Update::Compacted",
         "path Update::Context",
         "path Update::Deleted",
+        "path Update::DraftNotSent",
         "path Update::EffortChoices",
         "path Update::Exported",
         "path Update::Failed",
@@ -47560,6 +47753,7 @@
         "path Update::Compacted",
         "path Update::Context",
         "path Update::Deleted",
+        "path Update::DraftNotSent",
         "path Update::EffortChoices",
         "path Update::Exported",
         "path Update::Failed",
@@ -48653,6 +48847,7 @@
         "path SwitchKind::New",
         "path SwitchKind::Resumed",
         "path Update",
+        "path Update::DraftNotSent",
         "path Update::EffortChoices",
         "path Update::Failed",
         "path Update::Isolation",
@@ -51658,6 +51853,7 @@
         "path TaskSubmit",
         "path TaskWait",
         "path engine::Shared::new",
+        "path engine::TaskExport",
         "path not_found",
         "path unavailable",
         "use engine::ArtifactHook",
@@ -51824,6 +52020,13 @@
     },
     {
       "from": "dim_modality::engine",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::TaskFileSource"
+      ]
+    },
+    {
+      "from": "dim_modality::engine",
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
@@ -51926,24 +52129,23 @@
         "path Write::Discarded",
         "path Write::Written",
         "path task",
+        "path task::Digest::default",
         "path task::FORMAT_VERSION",
         "path task::HostTarget",
         "path task::OCR_CACHE_DIR",
         "path task::TASKS_DIR",
         "path task::create",
-        "path task::hex",
         "path task::input_dir_name",
+        "path task::input_name",
         "path task::load",
         "path task::remove_result",
         "path task::remove_task",
         "path task::remove_work",
         "path task::result_dir_name",
         "path task::result_name",
-        "path task::sha256",
         "path task::task_dir",
         "path task::work_name",
         "path task::write",
-        "path task::write_input",
         "path task::write_result",
         "use crate::task",
         "use crate::task::Executor",
@@ -54027,6 +54229,10 @@
     {
       "module": "dim_cli::session_host",
       "path": "BufReader::new"
+    },
+    {
+      "module": "dim_cli::session_host",
+      "path": "ContentBlock::Image"
     },
     {
       "module": "dim_cli::session_host",

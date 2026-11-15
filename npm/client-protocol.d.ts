@@ -101,7 +101,7 @@ export type UserInput = { content: Array<Record<string, unknown>> }
 export type ImageBlock = { type: "image"; source: { type: "file"; mediaType: string; fileId: string } }
 
 /** Local files and pasted text held until the message is accepted. */
-export type DraftAttachments = { images: File[]; pastes: string[] }
+export type DraftAttachments = { images: File[]; pastes: string[]; onProgress?: (percent: number) => void }
 
 /** A file or directory the `@` mention picker offers: its path under the workspace and its absolute path. */
 export type FileCandidate = { relativePath: string; absolutePath: string; dir: boolean }

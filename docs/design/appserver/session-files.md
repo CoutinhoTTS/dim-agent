@@ -780,3 +780,22 @@ impl FileStorage {
         -> Result<()>;
 }
 ```
+
+## File backup and restore
+
+`dim-app-server --backup DATABASE ARCHIVE` exports a closed current-format store
+into a new directory. It takes the database admission lease, snapshots SQLite,
+and streams every committed locally owned Session file into the archive. Missing
+files, ambiguous file directories and unavailable resource nodes fail the export.
+Ownership includes forked Sessions and compressed history.
+
+The archive's `manifest.json` has version 1, the native format, a database
+SHA-256/byte count, and one `{id, name, digest: {bytes, sha256}}` entry per file.
+`database.sqlite` and `files/<id>/<name>` carry the content. The manifest is written
+last; the completed private staging directory is published atomically.
+
+`dim-app-server --restore ARCHIVE DIRECTORY` requires a new destination. It verifies
+manifest version, database integrity, the complete ownership set, safe file names,
+byte counts and SHA-256 before publishing `DIRECTORY/dimcode.sqlite` and its Session
+files. A missing, duplicated or damaged file aborts restoration before a Session
+can open. The Rust storage bindings are `backup_store` and `restore_store`.

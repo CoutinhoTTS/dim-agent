@@ -63,9 +63,12 @@ impl Connection {
                 return Err(RpcError::invalid("At most 20 images may be submitted"));
             }
             for block in &user.content {
-                if let ContentBlock::Image { source } = block
-                    && source.source_type == dim_agent_types::ImageSourceType::File
-                {
+                if let ContentBlock::Image { source } = block {
+                    if source.source_type != dim_agent_types::ImageSourceType::File {
+                        return Err(RpcError::invalid(
+                            "Import images before submitting their file references",
+                        ));
+                    }
                     let file_id = source
                         .file_id
                         .clone()

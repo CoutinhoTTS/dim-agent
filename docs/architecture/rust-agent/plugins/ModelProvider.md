@@ -20,6 +20,13 @@ The adapter selects replacements before copying content. An unchanged request
 keeps its Arc without cloning text, thinking, tool arguments or result blocks.
 When images change, only those messages are copied; other messages stay shared.
 
+The final Aimux boundary reads immutable accepted bytes without decoding or
+rescaling them again. A request permits at most 32 MiB of encoded image data,
+including user and tool-result images, and 64 MiB of final HTTP body. Exceeding
+these limits fails before sending the request. Each Aimux generation admits
+four concurrent request preparations and sends; waiting is cancellable and
+owner shutdown releases the waiters. Provider-specific limits still apply.
+
 ## Dependencies
 
 | Service | Purpose |

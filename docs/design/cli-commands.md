@@ -3333,3 +3333,15 @@ live output
 While the initial transcript window is loading or a frame is queued to the terminal writer, the event loop rechecks at the frame interval. Once loading and writing finish and no frame is owed, the existing idle polling interval applies. This bounds a queued frame's extra scheduling delay without increasing steady idle polling.
 
 The CLI checks its newly spawned daemon after 5 ms, then backs off to 10/20/40/50 ms while opening. Existing startup deadlines and progress handling are unchanged. It does not impose an initial 50 ms delay on an already ready daemon.
+
+### Attachment import recovery
+
+When importing an image or storing pasted text fails before message submission,
+the TUI appends the original draft back to the composer, preserving block order,
+image bytes and pasted-text tokens. Text entered during the attempt is retained.
+The failure is displayed and resubmission requires the user to send again.
+
+```text
+[text] [image] [paste] → Send → import fails
+[editable draft restored] + error notice → edit or retry
+```

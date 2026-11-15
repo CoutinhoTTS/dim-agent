@@ -2855,6 +2855,10 @@ impl App {
                 self.failure = Some(message);
                 self.run_started = None;
             }
+            Update::DraftNotSent { parts, message } => {
+                self.notices.push(message);
+                self.composer.restore_draft(parts);
+            }
             Update::SubmitNotSent(message) => {
                 self.notices.push(message);
                 self.restore_unsent();
@@ -15820,6 +15824,38 @@ mod tests {
             }],
         }));
         assert_eq!(app.composer.text(), "second");
+    }
+
+    #[test]
+    fn failed_attachment_import_restores_a_retryable_draft() {
+        use dim_agent_types::{ContentBlock, ImageSource, ImageSourceType};
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        app.composer.set_accepts_images(true);
+        let parts = vec![
+            DraftPart::Text("look ".into()),
+            DraftPart::Block(ContentBlock::Image {
+                source: ImageSource {
+                    source_type: ImageSourceType::Base64,
+                    media_type: "image/png".into(),
+                    data: Some("aW1hZ2U=".into()),
+                    url: None,
+                    file_id: None,
+                },
+            }),
+            DraftPart::Paste("pasted text\n".repeat(600)),
+        ];
+        app.apply(Update::DraftNotSent {
+            parts: parts.clone(),
+            message: "Import unavailable".into(),
+        });
+        assert!(
+            sent.borrow().is_empty(),
+            "restoring never submits automatically"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            matches!(sent.borrow().as_slice(), [Command::SubmitDraft(restored, _)] if restored == &parts)
+        );
     }
 
     /// A withdrawn message returns as the operator's own words: a block the

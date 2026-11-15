@@ -244,3 +244,11 @@ impl Message {
         }
     }
 }
+
+/// An owner-authorized source for importing a task result into a Session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskFileSource {
+    pub path: String,
+    pub image: bool,
+}

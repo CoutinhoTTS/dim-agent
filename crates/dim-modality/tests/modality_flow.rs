@@ -2511,9 +2511,9 @@ async fn submission_boundaries_refuse_invalid_inputs() {
                 "node_path": node_path.to_str().unwrap()}]}),
     )
     .await;
-    let canonical = std::fs::canonicalize(&node_path).unwrap();
     let meta = &task["params"]["files"][0];
-    assert_eq!(meta["node_path"], canonical.to_str().unwrap());
+    assert!(meta.get("node_path").is_none());
+    std::fs::remove_file(&node_path).unwrap();
     assert_eq!(meta["bytes"], 10);
     assert_eq!(meta["sha256"], sha256(b"node bytes"));
     assert_eq!(
@@ -2522,9 +2522,11 @@ async fn submission_boundaries_refuse_invalid_inputs() {
     );
     let job = fixture.job(task["task_id"].as_str().unwrap()).unwrap();
     assert_eq!(
-        job.files[0].path, canonical,
-        "the executor reads the canonical path; Modality never copies it"
+        std::fs::read(&job.files[0].path).unwrap(),
+        b"node bytes",
+        "the task owns its input after the caller removes the source"
     );
+    std::fs::write(&node_path, b"node bytes").unwrap();
 
     let relative = client
         .rpc(
@@ -3919,7 +3921,7 @@ async fn an_unload_during_submit_keeps_a_handle_for_the_next_generation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
+async fn node_path_is_bounded_before_reading_and_imported() {
     let fixture = Arc::new(FixtureAdapter::default());
     let (server, home) = start(Some(fixture.clone()), "dm-node-path").await;
     let mut client = Client::new_version(&server, false, 3).await;
@@ -3954,8 +3956,6 @@ async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
     );
     assert_eq!(count(), before, "an over-size node_path writes nothing");
 
-    // A `node_path` that goes through a linked directory is accepted; the
-    // record and the job both carry the canonical path.
     let real = home.join("real");
     std::fs::create_dir_all(&real).unwrap();
     let file = real.join("image.png");
@@ -3970,11 +3970,7 @@ async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
                 "node_path": through.to_str().unwrap()}]}),
     )
     .await;
-    let canonical = std::fs::canonicalize(&file).unwrap();
-    assert_eq!(
-        task["params"]["files"][0]["node_path"],
-        canonical.to_str().unwrap()
-    );
+    assert!(task["params"]["files"][0].get("node_path").is_none());
     assert_eq!(
         task["params"]["files"][0]["sha256"],
         sha256(b"through a linked directory")
@@ -3984,7 +3980,10 @@ async fn node_path_is_bounded_before_reading_and_recorded_canonical() {
         "succeeded"
     );
     let job = fixture.job(task["task_id"].as_str().unwrap()).unwrap();
-    assert_eq!(job.files[0].path, canonical);
+    assert_eq!(
+        std::fs::read(&job.files[0].path).unwrap(),
+        b"through a linked directory"
+    );
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
@@ -4031,7 +4030,6 @@ async fn params_files_is_reserved_for_the_validated_metadata() {
 
     // A real submission records exactly the validated metadata.
     let inline = b"reserved inline bytes".to_vec();
-    let canonical = std::fs::canonicalize(&node_file).unwrap();
     let task = submit_task(
         &mut client,
         json!({"category": "image", "operation": "generate", "params": {"prompt": "m"},
@@ -4051,7 +4049,7 @@ async fn params_files_is_reserved_for_the_validated_metadata() {
     assert_eq!(files[1]["name"], "n.png");
     assert_eq!(files[1]["bytes"], 10);
     assert_eq!(files[1]["sha256"], sha256(b"node bytes"));
-    assert_eq!(files[1]["node_path"], canonical.to_str().unwrap());
+    assert!(files[1].get("node_path").is_none());
     wait_terminal(&mut client, task["task_id"].as_str().unwrap()).await;
 
     // No files: the record carries an empty array.
@@ -4732,7 +4730,7 @@ async fn ocr_takes_one_input_file() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_vanished_input_fails_invalid_input() {
+async fn queued_ocr_keeps_its_input_after_the_source_is_removed() {
     let home = home("dm-ocr");
     let helper = fake_helper(&home);
     let server = start_with_helper(home.clone(), helper).await;
@@ -4765,8 +4763,11 @@ async fn a_vanished_input_fails_invalid_input() {
         assert_ok(&reply);
     }
     let done = wait_terminal(&mut client, &task_id).await;
-    assert_eq!(state_of(&done), "failed", "{done}");
-    assert_eq!(done["error"]["code"], "invalid_input", "{done}");
+    assert_eq!(state_of(&done), "succeeded", "{done}");
+    assert!(done["error"].is_null());
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5810,4 +5811,180 @@ async fn a_cancel_during_the_start_time_describe_settles_cancelled() {
         .expect("the cancel waited on the pending describe");
     assert_eq!(state_of(&done), "cancelled", "{done}");
     wait_for_count(|| fixture.dropped(), 1, "the cancelled describe").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn browser_task_files_are_owned_and_chat_results_survive_task_retention() {
+    async fn http(
+        address: &str,
+        path: &str,
+        content_type: &str,
+        cookie: &str,
+        body: &str,
+    ) -> (u16, String, String) {
+        use tokio::io::AsyncReadExt;
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: http://{address}\r\nCookie: {cookie}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).await.unwrap();
+        let response = String::from_utf8(bytes).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        (
+            head.split(' ').nth(1).unwrap().parse().unwrap(),
+            head.into(),
+            body.into(),
+        )
+    }
+    let home = home("dm-web-files");
+    let assets = home.join("web");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(
+        assets.join("index.html"),
+        "<!doctype html><title>Dim</title>",
+    )
+    .unwrap();
+    std::fs::write(
+        assets.join("dimcode-web.json"),
+        r#"{"version":"0.0.1","protocolVersion":4,"sourceCommit":"fixture"}"#,
+    )
+    .unwrap();
+    let fixture = Arc::new(FixtureAdapter::default());
+    let image = STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR42mP4zwAE/xkgFAAb8gP9PpddpAAAAABJRU5ErkJggg==").unwrap();
+    fixture.set_behavior(Behavior {
+        files: vec![("result.png".into(), "image/png".into(), image.clone())],
+        ..Default::default()
+    });
+    let clock = FixedClock::new(Utc::now());
+    let server = launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("native")),
+            web_assets: Some(assets),
+            ..Default::default()
+        },
+        Some(InstallOptions {
+            clock: clock.clone(),
+            ..Default::default()
+        }),
+        |builder| {
+            let fixture = fixture.clone();
+            builder.plugin(move |_| Ok(Box::new(FixturePlugin(fixture.clone()))));
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    create_task_provider(&mut client).await;
+    let opened = client.rpc("web.open", json!({"port":0})).await;
+    assert_ok(&opened);
+    let address = opened["result"]["address"].as_str().unwrap();
+    let token = opened["result"]["url"]
+        .as_str()
+        .unwrap()
+        .split_once("#bootstrap=")
+        .unwrap()
+        .1;
+    let (status, head, _) = http(
+        address,
+        "/api/auth/exchange",
+        "application/json",
+        "",
+        &json!({"token":token}).to_string(),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let cookie = head
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let request = json!({"category":"image","operation":"generate","params":{"prompt":"a cat"}});
+    let body = format!(
+        "--files\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{request}\r\n--files\r\nContent-Disposition: form-data; name=\"file\"; filename=\"input.png\"\r\nContent-Type: image/png\r\n\r\naccepted input\r\n--files--\r\n"
+    );
+    assert_eq!(
+        http(
+            address,
+            "/api/modality/tasks",
+            "multipart/form-data; boundary=files",
+            "",
+            &body
+        )
+        .await
+        .0,
+        401
+    );
+    let (status, _, body) = http(
+        address,
+        "/api/modality/tasks",
+        "multipart/form-data; boundary=files",
+        cookie,
+        &body,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let submitted: Value = serde_json::from_str(&body).unwrap();
+    let task_id = submitted["task"]["task_id"].as_str().unwrap();
+    assert_eq!(
+        state_of(&wait_terminal(&mut client, task_id).await),
+        "succeeded"
+    );
+    let job = fixture.job(task_id).unwrap();
+    assert_eq!(
+        std::fs::read(&job.files[0].path).unwrap(),
+        b"accepted input"
+    );
+    let staged = home.join("native/dimcode.sqlite.web-uploads");
+    assert!(!std::fs::read_dir(staged).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("upload-")
+    }));
+    let created = client.rpc("session.create", json!({"cwd":home})).await;
+    assert_ok(&created);
+    let session = created["result"]["sessionId"].as_str().unwrap();
+    let (status, _, body) = http(
+        address,
+        &format!("/api/sessions/{session}/modality-results"),
+        "application/json",
+        cookie,
+        &json!({"task_id":task_id,"name":"result.png"}).to_string(),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let attachment: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(attachment["image"]["type"], "file");
+    server.shutdown();
+    server.join().await.unwrap();
+    *clock.0.lock().unwrap() += chrono::Duration::days(31);
+    let server = start_in_with_clock(home.clone(), Some(fixture), clock).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    let missing = client
+        .rpc("modality.task.status", json!({"task_id":task_id}))
+        .await;
+    assert_eq!(app_error(&missing), "not_found");
+    let read = client
+        .rpc(
+            "attachment.read",
+            json!({"sessionId":session,"fileId":attachment["attachmentId"],"offset":0}),
+        )
+        .await;
+    assert_ok(&read);
+    assert_eq!(
+        STANDARD
+            .decode(read["result"]["data"].as_str().unwrap())
+            .unwrap(),
+        image
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }

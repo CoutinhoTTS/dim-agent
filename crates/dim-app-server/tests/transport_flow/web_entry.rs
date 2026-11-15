@@ -472,6 +472,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         "skills.installations",
         "modality.capabilities",
         "modality.configure",
+        "modality.task.result",
     ] {
         assert!(features.contains(&json!(method)), "{method}");
     }
@@ -483,7 +484,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         "ui.shutdown",
         "provider.import_legacy",
         "modality.task.submit",
-        "modality.task.result",
+        "modality.task.export",
         "schedule.unreviewed",
     ] {
         assert!(!features.contains(&json!(method)), "{method}");
@@ -769,8 +770,8 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
             json!({"category":"image","operation":"generate","params":{}}),
         ),
         (
-            "modality.task.result",
-            json!({"taskId":"mt_x","name":"out","offset":0,"length":1}),
+            "modality.task.export",
+            json!({"task_id":"mt_x","name":"out"}),
         ),
     ] {
         assert_eq!(

@@ -97,7 +97,7 @@ fn storage_failure(failure: FileStorageError) -> SessionFileError {
 /// `[A-Za-z0-9._-]{1,64}` without a leading dot, never FileStorage's account
 /// file or marker in any letter case: `auth.json` would switch replacement to
 /// the account-marker protocol.
-fn valid_name(name: &str) -> bool {
+pub(super) fn valid_name(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && !name.starts_with('.')
         && name

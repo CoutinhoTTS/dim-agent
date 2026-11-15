@@ -2027,7 +2027,13 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
         configuration("adopted-model").capability_snapshot
     );
     assert_eq!(call.request.config, initial_config);
-    assert_eq!(call.request.metadata, initial_metadata);
+    assert_eq!(
+        call.request.metadata,
+        Some(RequestMetadata {
+            session_id: Some("restored-prompt".into()),
+            ..initial_metadata.clone().unwrap_or_default()
+        })
+    );
     assert_eq!(
         call.request.system.as_deref(),
         Some(&SystemPrompt::Text("adopted system".into()))
@@ -2097,7 +2103,13 @@ async fn restoring_a_session_keeps_its_adopted_system_and_model() {
                 selection.config.as_ref(),
             )
         );
-        assert_eq!(request.metadata, selection.metadata);
+        assert_eq!(
+            request.metadata,
+            Some(RequestMetadata {
+                session_id: Some("restored-prompt".into()),
+                ..selection.metadata.clone().unwrap_or_default()
+            })
+        );
         assert_eq!(request.tools.as_deref(), tools.as_ref());
     }
     agent.close().await.unwrap();

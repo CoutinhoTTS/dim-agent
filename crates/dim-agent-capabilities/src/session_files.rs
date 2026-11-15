@@ -46,16 +46,11 @@ pub async fn image(
             ));
         }
     }
-    let scaled = tokio::task::spawn_blocking(move || {
-        crate::images::scale_image(std::io::Cursor::new(bytes))
-    })
-    .await
-    .map_err(|e| HostError::classified(HostErrorKind::InvalidRequest, format!("{e:?}")))?
-    .map_err(|e| HostError::classified(HostErrorKind::InvalidRequest, format!("{e:?}")))?;
+
     Ok(ImageSource {
         source_type: ImageSourceType::Base64,
-        media_type: scaled.media_type.into(),
-        data: Some(STANDARD.encode(scaled.bytes)),
+        media_type: source.media_type.clone(),
+        data: Some(STANDARD.encode(bytes)),
         url: None,
         file_id: None,
     })
@@ -68,6 +63,29 @@ pub async fn materialize(
     cancel: &CancellationToken,
 ) -> Result<Arc<ModelRequest>, HostError> {
     let mut changed = None;
+    let mut image_bytes = request
+        .messages
+        .iter()
+        .flat_map(|message| match &message.content {
+            MessageContent::Parts(parts) => parts.as_slice(),
+            _ => &[],
+        })
+        .map(|part| match part {
+            MessagePart::Image { source } => source.data.as_ref().map_or(0, String::len),
+            MessagePart::ToolResult {
+                content: ToolContent::Blocks(blocks),
+                ..
+            } => blocks
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Image { source } => source.data.as_ref().map_or(0, String::len),
+                    _ => 0,
+                })
+                .sum(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    check_image_budget(image_bytes)?;
     for (index, message) in request.messages.iter().enumerate() {
         let MessageContent::Parts(parts) = &message.content else {
             continue;
@@ -84,6 +102,8 @@ pub async fn materialize(
             match part {
                 MessagePart::Image { source } if source.source_type == ImageSourceType::File => {
                     *source = resolve(request, files, source, cancel).await?;
+                    image_bytes += source.data.as_ref().map_or(0, String::len);
+                    check_image_budget(image_bytes)?;
                 }
                 MessagePart::ToolResult {
                     content: ToolContent::Blocks(blocks),
@@ -94,6 +114,8 @@ pub async fn materialize(
                             && source.source_type == ImageSourceType::File
                         {
                             *source = resolve(request, files, source, cancel).await?;
+                            image_bytes += source.data.as_ref().map_or(0, String::len);
+                            check_image_budget(image_bytes)?;
                         }
                     }
                 }
@@ -113,6 +135,16 @@ pub async fn materialize(
             Ok(Arc::new(copy))
         }
     }
+}
+
+fn check_image_budget(bytes: usize) -> Result<(), HostError> {
+    if bytes > 32 * 1024 * 1024 {
+        return Err(HostError::classified(
+            HostErrorKind::InvalidRequest,
+            "Model request images exceed 32 MiB of encoded data",
+        ));
+    }
+    Ok(())
 }
 
 async fn resolve(
