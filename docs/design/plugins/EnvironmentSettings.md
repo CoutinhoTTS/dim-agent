@@ -106,7 +106,7 @@ A read failure is not a value. The design does not append `unknown` or a fabrica
 | `BranchLifecycle` | Wait for publication before appending; stop when the branch closes |
 | Process bus (`SettingsChanged`) | Wake on a committed write |
 
-Service faces follow the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services): the execution source's process `executionSettingsHost` is `internal(legacy-no-consumer)`; `timeline` and `branchLifecycle` are data faces. This Rust projection is not a leaf-ready foreign part.
+Service faces follow the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services): the execution source's process `executionSettingsHost` is a data face with asynchronous `read({})`; `timeline` and `branchLifecycle` are data faces. This Rust projection is not a leaf-ready foreign part.
 
 No `PromptRegistry`, no `ConfigureControl`, no prompt source, no version.
 

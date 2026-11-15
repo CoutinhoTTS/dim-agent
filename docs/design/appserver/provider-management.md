@@ -680,8 +680,8 @@ ModelCapabilities, reasoning?, serviceTier?}` — not a new model type: it alrea
 carries the model and provider identifiers and the declared capabilities, and it
 is the descriptor execution adopts. A selectable model always declares both
 limits (§3.5), so the existing `capability_snapshot` conversion always succeeds.
-The caller passes its cancellation token; cancelling it cancels the read and
-returns `Cancelled`.
+Abandoning the call cancels its owner read; dropping the reply is not a successful
+read. Errors use the public codes stated below.
 
 **Second operation: `selectableForModality`.** The same port carries one more
 process read, for non-conversational uses (Modality §9.2): operation
@@ -777,7 +777,11 @@ client protocol and `PROTOCOL_VERSION`; persistence and its format; Timeline,
 Dispatcher, callbacks, Session and branch parts; and the driver, route and
 non-chat rules. The read adds no state, cache, notification, crate or module.
 
-**Rust binding.** The port is `SelectableModelsHost` in
+**Rust binding.** The binding takes a `CancellationToken`; cancelling it abandons
+the dispatched wait and returns `ModelPortError::Cancelled`. The face maps the
+owner's `HostError` into the public `ModelPortError` codes at its boundary.
+
+The port is `SelectableModelsHost` in
 `crates/dim-agent-capabilities/src/host.rs` beside `ModelSelectionHost`. Its two
 reads are the operations §3.6 states: the port type holds the owner's closures,
 its dispatcher writes the wire shape, and a Rust reader calls the same

@@ -435,8 +435,8 @@ Session 保留已采用的能力快照。模型变为未声明的 Session 仍可
 `ModelCapabilitySnapshot`——`{target: {providerId, modelId}, capabilities:
 ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：它已经携带 provider/model
 标识与已声明能力，就是执行时采用的那份描述。可选模型一定声明了两项上限（§3.5），因此既有
-`capability_snapshot` 转换不会失败。调用方传入自己的取消 token；取消它即取消本次读取并返回
-`Cancelled`。
+`capability_snapshot` 转换不会失败。放弃调用会取消 owner 的本次读取；丢弃回复不表示读取成功。
+错误使用下文列出的公开错误码。
 
 **第二个操作：`selectableForModality`。** 同一端口还提供一次面向非对话用途的进程读取
 （Modality §9.2）：操作 `selectableForModality`，异步，请求 `{}`，回复
@@ -500,7 +500,11 @@ leader 的模型，同样不自留规则（[Collaboration](../plugins/Collaborat
 Dispatcher、before 回调、Session 与分支部件；driver、路由和非 chat 规则。读取不增加状态、
 缓存、通知、crate 或模块。
 
-**Rust 绑定。** 端口是 `crates/dim-agent-capabilities/src/host.rs` 中的
+**Rust 绑定。** 绑定接收 `CancellationToken`；取消它会放弃 dispatcher 的等待并返回
+`ModelPortError::Cancelled`。数据面在边界将 owner 的 `HostError` 映射为公开的
+`ModelPortError` 错误码。
+
+端口是 `crates/dim-agent-capabilities/src/host.rs` 中的
 `SelectableModelsHost`，位于 `ModelSelectionHost` 旁。它的两个读取就是 §3.6 列出的操作：
 端口类型持有 owner 的闭包，dispatcher 写出 wire 形状，Rust 读取方通过绑定调用同样的操作。
 Provider 在 `ProviderPlugin::apply` 中用 `provide_selectable_models` 提供该端口；catalog 以
