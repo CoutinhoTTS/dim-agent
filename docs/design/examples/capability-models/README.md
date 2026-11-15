@@ -62,7 +62,7 @@
 | 12a BackgroundExec | started 有 Session hold；先释放进程后 ended；turn stop 不关闭后台任务；wake 有明确 ended 身份 | [ExecLifecycle](ExecLifecycle.tla)：`Start/Release/End/Wake/StopTurn` 对应 start/supervisor/consume；检查 hold、因果、释放及 stop 边界 |
 | 12b BackgroundExec | 宿主崩溃留下未结束任务或未发通知，新代可补齐；fork 不认领继承资源 | 同模型 `RecoverHistory=TRUE`，`Crash/Restore/Recover/Fork` 对应 rebuild/unposted_filter；条件活性 `RecoveredSettled/RecoveredWoken`。仅一次 crash；恢复写入成功和任务公平执行是前提 |
 | 13a ShellSession | 正常关闭先释放资源再结算；新 PTY 实例不能当作原工作仍运行 | 同一 ExecLifecycle 的 live 路径；PTY marker/generation、命令队列串行是插件内部协议，保留 minimal_execution 流程证据，不由 exec 事实模型证明 |
-| 13b ShellSession | 宿主 crash 后未结束任务与未发 wake 是否补齐 | `ExecLifecycle-Shell.cfg`、`ExecLifecycle-ShellWake.cfg` 把 RecoverHistory 设为 FALSE，分别得到反例。依据是该 profile 没有相应恢复入口，不是人为删除已有实现；见 [#1633](https://github.com/arcships/dim/issues/1633) |
+| 13b ShellSession | 宿主 crash 后未结束任务与未发 wake 是否补齐 | `ExecLifecycle-Shell.cfg`、`ExecLifecycle-ShellWake.cfg` 把 RecoverHistory 设为 FALSE，分别得到反例。依据是该 profile 没有相应恢复入口，不是人为删除已有实现；见 [#1633](https://github.com/arcships/dim/issues/1633)；[修复配置及验证](shell-recovery-results.md)单独记录 |
 | 14 FileReads | 重载不恢复 I/O 绑定；只有后续成功 compaction 且 retain_from 越过建立位置才使依据失效 | [FileReads](FileReads.tla)：`Read/Compact/WriteCheck/Reload` 对应 established/in_context；`NoRestoredBinding/NoCompactedWrite/CompactionNeedsSuccessfulCut`。绑定不是权限、锁或文件 CAS |
 | 15a TreeTimeline | reservation 先登记；父关闭能取消构建；结果必须关联已接纳创建 | [TreeLifecycle](TreeLifecycle.tla)：`Reserve/Build/CloseRoot` 对应 TimelineTree 的 reservation/create/close；`ResultRequiresReservation/PublicationRequiresResult/NoPublicationAfterClose` |
 | 15b TreeTimeline | 子节点先结束；恢复由 Session owner 处理，不在 branch 再执行一次创建 | 同模型 `End/RestoreOwner`；`NoOrphanOpenChild/ChildrenEndFirst`。两个节点的父子链不是任意深树的归纳证明，end 工具等待回合结束由宿主生命周期前提提供 |
@@ -119,7 +119,7 @@ Preparation 的 Release 表示 prepare 返回、准备局部工作不再展开�
 5. 未找到生产路径的 context/scope 端到端运行流程，以及 ShellSession 宿主 crash 的真实复现。
 
 前面的 22 项有分项分析和局部边界模型实验；原审计列出的场景已在[逐项对应及边界](coverage-completion.md)中承接，不能因此认定实际需求或代码路径已穷尽。
-特别是 Shell 两个恢复性质目前**不成立于模型**，不属于“验证通过”，也没有在本附件里偷偷修运行时。
+Shell 两个恢复反例保留为旧配置的历史证据；新增的[修复配置验证](shell-recovery-results.md)对应单独的运行时修复，不改写原记录。
 
 ## 重跑
 
