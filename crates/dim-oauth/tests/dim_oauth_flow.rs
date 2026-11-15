@@ -1270,7 +1270,8 @@ async fn managed_media_model_leases_for_modality_and_chat_refuses_it() {
     let connection = root
         .get::<ModalityConnectionHost>()
         .unwrap()
-        .connection(
+        .0
+        .resolve_for_modality(
             ModalityTarget {
                 target: ModelId {
                     provider_id: PROVIDER.into(),
@@ -1372,7 +1373,8 @@ async fn a_stored_unavailable_media_model_is_excluded_from_every_use() {
     let refused = root
         .get::<ModalityConnectionHost>()
         .unwrap()
-        .connection(
+        .0
+        .resolve_for_modality(
             ModalityTarget {
                 target: ModelId {
                     provider_id: PROVIDER.into(),

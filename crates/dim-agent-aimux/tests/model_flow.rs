@@ -306,7 +306,8 @@ async fn the_configured_profile_resolves_no_modality_connection() {
     );
     let modality = host.root().get::<ModalityConnectionHost>().unwrap();
     let refused = modality
-        .connection(
+        .0
+        .resolve_for_modality(
             ModalityTarget {
                 target: ModelId {
                     provider_id: "local".into(),
@@ -331,7 +332,8 @@ async fn the_configured_profile_resolves_no_modality_connection() {
         "Model does not declare the image.generate operation"
     );
     let unknown = modality
-        .connection(
+        .0
+        .resolve_for_modality(
             ModalityTarget {
                 target: ModelId {
                     provider_id: "local".into(),

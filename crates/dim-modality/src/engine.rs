@@ -728,7 +728,8 @@ impl Shared {
             target: provider,
             operation: format!("{}.{}", record.category, record.operation),
         };
-        host.connection(target, cancel.child_token())
+        host.0
+            .resolve_for_modality(target, cancel.child_token())
             .await
             .map_err(|error| error.to_string())
     }

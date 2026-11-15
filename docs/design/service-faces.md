@@ -97,7 +97,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `collaborationConfig` | `collaborationConfig.get()` | 形状见 §4.8。 |
 | `worktreeAssociations` | `worktreeAssociations.associate` | 形状见 §4.8。 |
 
-同一批还包括宿主端口改成数据面（§4.10）：`executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost`、`modelSelectionHost`、`modalityConnectionHost` 从 `legacy-no-consumer` 变成 `data`。这六项不改名字、不新增 catalog 行。`modalityConnectionHost` 的凭据仍留在 owner：面只给路由事实，请求由 owner 发（§4.10）。
+宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost` 和 `modelSelectionHost`。名字不变，不新增 catalog 行。
 
 ### 3.3 所有者 API，已有数据兄弟
 
@@ -212,6 +212,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
+| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 按 [#1613](https://github.com/arcships/dim/issues/1613) 定义操作面；凭据连接不直接序列化 |
 | `collaborationSession` | session | CollaborationSession | legacy-no-consumer | 按 #1292 定义操作面 |
 
 ## 4. 批次契约（#1292）
@@ -364,9 +365,9 @@ eventSubscriptions.list {sessionId} -> reply
 
 `reservedMethods` 的 owner 是 App Server 的根值：它从 `process_value`（每个 Agent 一份）改为进程根上的一份，因为 shared 名字的 isolate 只覆盖 dispatcher key，而 `process_value` 的按 Agent 隔离覆盖的是类型 key；一份进程值对所有 Session 表等价，且只有一个 dispatcher。
 
-### 4.10 宿主端口：`executionSettingsHost` 等六个
+### 4.10 宿主端口：`executionSettingsHost` 等五个
 
-这六个名字的内容本来就是数据（§3.7），没有 leaf 消费者时留在宿主；这一批把它们做成数据面，名字不变。每个名字只有一份定义：五个读取端口持有 owner 的闭包，Rust 绑定调用同模块的 dispatcher；modality 端口的 Rust 绑定和 dispatcher 都直接调用同一个 `ModalityRequests` owner 方法，不写第二份业务逻辑。异步操作的回复是 `cancellable_future`：丢弃等待就取消这次调用，owner 看到的 token 随之取消（`drop_guard`），所以一次被放弃的读不会在宿主里跑下去。
+这五个读取端口持有 owner 的闭包，Rust 绑定调用同模块的 dispatcher，不写第二份业务逻辑。异步回复是 `cancellable_future`：丢弃等待会取消 owner 的 token，owner 的生命周期仍约束其工作。
 
 ```text
 executionSettingsHost.read({}) -> {sandbox, network}
@@ -379,19 +380,13 @@ selectableModelsHost.selectableModels({}) -> {models: [ModelCapabilitySnapshot]}
 selectableModelsHost.selectableForModality({}) -> {models: [ModalityModelSnapshot]}
 modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
   -> error {code: cancelled | owner_closed | invalid_request | model_unavailable | failed, message}
-modalityConnectionHost.resolveModalityConnection({target, operation})
-  -> {protocol, model, baseUrl?, realtime?}
-modalityConnectionHost.modalityRequest({target, operation, method, url, headers?: [name: string, value: string][], body?})
-  -> {status, headers: [name: string, value: string][], body?}
-  -> error {code: cancelled | owner_closed | invalid_request | model_unavailable | failed, message}
 ```
 
 - 每个 operation 只收一个请求对象；没有输入的写 `{}`（`provider-management.md` §3.6 的形状），多一个参数或未知字段都是 `invalid_request`。
 - 取消是协议动作：调用方丢弃等待，或被取消的绑定调用不再进入 owner；owner 自己的生命周期仍然约束它启动的 worker。
 - 回复就是 owner 的类型：`ExecutionSettings`、`PromptSuggestionSettings`、`ModelCapabilitySnapshot`、`ModalityModelSnapshot`、`ModelSelection` 都是 serde camelCase 数据。`InstalledToolchain` 的 `PathBuf` 换成 UTF-8 字符串（`{bin, root}`）：某个 runtime 的目录不是 UTF-8 时只跳过那一项，其余照常给子进程用；`cwd` 的请求方向同理，`ModelSelectionRequest::at` 是 Rust 调用方换字段的唯一一处。
-- `modalityConnectionHost` 是操作面，不是 `internal`：`resolveModalityConnection` 只给路由事实（protocol、model、baseUrl、realtime），**没有** header、bearer、api key 或 Bedrock 凭据；`modalityRequest` 由 owner 把这次请求连同连接的 header 与凭据发出去，回报 `{status, headers, body}`。凭据因此只在 owner 里，调用方无论哪种语言都拿不到，也不需要“按名字把 secret 交出去”的授权模型。`body` 是 base64（跨界的字节）。Rust 适配器另有同进程的 `connection`（含解析后的连接），供现有可信媒体适配器（包括 realtime 的 WS 握手）使用；它不经过 face，也不序列化。
 - 提供方仍是原来的部件（App Server 的 `ExecutionSettings`、`ToolchainSource`、`PromptSuggestionSettings`、`Provider`，以及 aimux 的 `ConfiguredModels`）：`provide` 一次给出类型键上的绑定和 `host_key(name)` 上的 face；没有适配层，也没有第二份业务逻辑。
-- 测试：`host_port_faces.rs` 逐个比对“Rust binding 的结果 == wire 的结果”，钉住 `{}` 请求、字段拼写和错误码，用持有 token 的 owner worker 证明丢弃等待会取消 owner 的读，并用一个持有连接的 modality owner 证明 `resolveModalityConnection` 的回复没有凭据字段、`modalityRequest` 能把调用方的请求送到 owner 并拿到 data 回复；`provider_flow.rs`、`managed_oauth_flow.rs`、`dim-modality` 与 aimux 的 flow 用真实 Provider 装配跑同样的读。
+- 测试：`host_port_faces.rs` 比对 Rust binding 与 wire 的结果、请求形状、错误与取消；`provider_flow.rs` 等既有流程验证真实 owner 的读取。
 
 ## 5. 验证
 

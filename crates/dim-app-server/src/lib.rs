@@ -1353,7 +1353,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<provider::ProviderService>(catalog, None);
     register::<AuxiliaryModelHost>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<SelectableModelsHost>());
-    catalog.register_shared(dim_agent_runtime::names::name_of::<ModalityConnectionHost>());
+    register::<ModalityConnectionHost>(catalog, None);
     register::<mcp::McpService>(catalog, None);
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
@@ -1422,6 +1422,7 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("mcpAuth", "secret"),
         ("mcpService", "host-resource"),
         ("mentionIndex", "host-resource"),
+        ("modalityConnectionHost", "legacy-no-consumer"),
         ("modelHost", "owner-api"),
         ("modelProvider", "hot-path"),
         ("openAICodexOAuthService", "secret"),

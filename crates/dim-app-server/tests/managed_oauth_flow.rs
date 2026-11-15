@@ -1063,7 +1063,8 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
             let image = root
                 .get::<ModalityConnectionHost>()
                 .unwrap()
-                .connection(
+                .0
+                .resolve_for_modality(
                     ModalityTarget {
                         target: ModelId {
                             provider_id: id.into(),

@@ -508,7 +508,7 @@ Dispatcher、before 回调、Session 与分支部件；driver、路由和非 cha
 `SelectableModelsHost`，位于 `ModelSelectionHost` 旁。它的两个读取就是 §3.6 列出的操作：
 端口类型持有 owner 的闭包，dispatcher 写出 wire 形状，Rust 读取方通过绑定调用同样的操作。
 Provider 在 `ProviderPlugin::apply` 中用 `provide_selectable_models` 提供该端口；catalog 以
-shared 名注册它（[服务面 §4.10](../../../design/service-faces.md#410-宿主端口executionsettingshost-等六个)）。
+shared 名注册它（[服务面 §4.10](../../../design/service-faces.md#410-宿主端口executionsettingshost-等五个)）。
 
 owner 实现是 `ProviderService::selectable_models` 与
 `ProviderService::selectable_modality_models`，`ProductResolver` 转调两者；配置式模型配置
@@ -521,22 +521,15 @@ owner 实现是 `ProviderService::selectable_models` 与
 `selectableModelsHost`，方法即 §3.6 列出的那些；该面委托同一次 owner 读取，两种语言的
 消费方得到执行会选的同一批模型。
 
-**连接合同：`resolveModalityConnection` 与 `modalityRequest`。** 同一个 owner 解析非对话调用，
-作为 `ProviderConnectionResolver` 旁边的进程数据面；调用方无需读取 Provider 记录。
+**连接合同。** Provider 为可信进程内适配器解析一次非对话连接。这是
+`ProviderConnectionResolver` 旁的原生端口，不是管理方法或按名字提供的数据面。
+输入是模型身份与操作，回复包含本次连接及其协议、模型和实时声明。解析后的连接含有凭据，
+只在本次适配器调用期间留在进程内。
 
-- `resolveModalityConnection` 异步接受 `{target: {providerId, modelId}, operation}`，
-  回复 `{protocol, model, baseUrl?, realtime?}`，不包含任何 header、bearer、API key 或 Bedrock 凭据。
-- `modalityRequest` 异步接受 `{target, operation, method, url, headers?, body?}`，
-  `body` 为 base64，回复 `{status, headers, body?}`。请求与回复的 `headers` 均为
-  `[name, value]` 字符串对组成的数组；请求省略该字段时为空数组。owner 为目标重新解析连接，使用其代理与超时。
-  只有解析后的 scheme、host、有效端口相同才附加 owner 头与凭据；拒绝 URL userinfo 与非 HTTP(S) URL。
-  调用方不得设置 Host、认证、Cookie 或与 owner 头同名（忽略大小写）的头，其他内容头可以使用。
-  跨来源下载不携带 owner 头；重定向及 HTTP 拒绝作为数据返回，不跟随或重试。
-  取消覆盖发送与响应体读取，传输错误不包含 URL 或凭据。
-
-两个操作共用连接解析：静态或托管记录的读取、目录构建、选择与凭据租约都由 owner 完成。
-对话路径的临时启动连接与已采用能力快照不适用。现有可信的进程内 Rust 媒体适配器使用解析后的连接，
-包括自行完成实时 WebSocket 握手；这些适配器不使用 `modalityRequest`，该连接不经过数据面，也不序列化。
+两个原生连接端口复用 owner 的记录读取、目录选择和凭据租约。一次 modality 调用只解析一次，
+路由事实与凭据来自同一次解析；对话路径的临时启动连接与已采用快照不适用。
+这个端口不另增 HTTP 执行器，媒体协议与传输行为仍由现有适配器负责。
+跨语言操作契约由 [#1613](https://github.com/arcships/dim/issues/1613) 跟踪。
 
 **规则。** 它应用 `selectableForModality` 读取的同一组规则——provider、账号、模型、路由、
 凭据与状态——并要求模型目录条目在其 `metadata.raw.modalityCapabilities` 中声明 `operation`。
@@ -558,16 +551,16 @@ base URL 之后。
 **凭据规则与生命周期。** 连接只活在那一次调用中。Provider 从不持久化它，从不把它返回给
 客户端，也从不写进任务记录、结果、诊断或错误。它的 `Debug` 打印模型、路由、base URL、头名
 以及是否存在凭据，从不打印头的值、bearer 或 key；`ModelConnection` 当前未实现 `Debug`，
-因此没有其他连接会格式化凭据。托管连接保留供可信进程内调用方使用的恢复 handle，但 `modalityRequest` 与现有媒体适配器
-都不调用托管凭据恢复；媒体拒绝会返回调用方，该端口不提供自动刷新与重试。
+因此没有其他连接会格式化凭据。托管连接保留供可信进程内调用方使用的恢复 handle，但现有媒体适配器
+不调用托管凭据恢复；媒体拒绝会返回调用方，该端口不提供自动刷新与重试。
 对话恢复路径独立，不构成非对话调用的重试保证。
 
-**Rust binding。** 面是 `dim-agent-capabilities` 中的 `modalityConnectionHost`：端口类型
-持有 owner 的 `ModalityRequests`（endpoint、request，以及同进程的解析后连接），其 dispatcher
-服务 `resolveModalityConnection` 与 `modalityRequest`，Rust 适配器通过绑定调用同样的操作。
-Provider 在 `ProviderPlugin::apply` 用 `provide_modality_connections` 提供它，配置式模型配置
-从模型文件提供它，其条目未声明任何操作，因此对每个 target 都以声明拒绝作答。catalog 以
-shared 名注册它（[服务面 §4.10](../../../design/service-faces.md#410-宿主端口executionsettingshost-等六个)）。
+**Rust binding。** `ModalityConnectionHost` 持有 `Arc<dyn ResolveModalityConnection>`。
+`resolve_for_modality(target, cancel)` 返回 `ModalityConnection { resolved, protocol,
+model, realtime }`；`resolved` 是 `ResolvedModelConnection`，适用时包含恢复 handle。
+`ProviderPlugin::apply` 提供类型化端口；配置式模型配置实现同一个 trait，其条目未声明
+modality 操作，因此逐操作拒绝。catalog 名字没有 dispatcher。
+调用方将 `CancellationToken` 传入现有原生解析路径。
 
 ### 3.7 已存选择的离线校验
 
@@ -874,7 +867,7 @@ RPC 流程覆盖 CAS 与丢失 create 回复后的恢复。Desktop UI 验收归�
 | §4.5 | 自有模型/选择/偏好/路由同事务；既有采用原子性不变 |
 | §4.6 | 管理数据不进模型上下文，配置只沿现有采用路径 |
 | §4.7 | 账号沿公开方法，Modality 经 §3.6 的 core host 端口读取可选模型，Migration 使用 §3.7 由 Provider 拥有的判断，不跨写其他 owner 引用 |
-| §4.8 | 下述错误数据需求使用方法 owner 的通用字段；§5 复用 metadata 和 v19 顶层 JSON；§3.6 的读取是数据面（[服务面 §4.10](../../../design/service-faces.md#410-宿主端口executionsettingshost-等六个)），非 Rust 消费方按名调用；§3.7 不增加需求 |
+| §4.8 | 下述错误数据需求使用方法 owner 的通用字段；§5 复用 metadata 和 v19 顶层 JSON；§3.6 的读取是数据面（[服务面 §4.10](../../../design/service-faces.md#410-宿主端口executionsettingshost-等五个)），非 Rust 消费方按名调用；§3.7 不增加需求 |
 | §4.9 | 不加 Timeline 事件或进程推送通知 |
 | §1 | 扩展现有进程 Provider，不增 Capability/接线插件 |
 | ADR 002 D1 | 进程记录归 Provider，已采用分支状态归原 owner，草稿归客户端 |
