@@ -160,7 +160,7 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         env:
           DIM_RELEASE_BUILD: '1'
-        run: cargo test --locked -p dimcode --test cli_flow staged_update::recovery::
+        run: cargo test --locked -p dimcode --test cli_flow "staged_update::recovery::"
       - name: Verify public Node bindings
         if: needs.changes.outputs.node == 'true'
         shell: bash
