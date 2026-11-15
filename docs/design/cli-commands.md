@@ -1792,12 +1792,15 @@ skipped versions. This runs before the TUI takes over and uses stderr. Other
 installations, external servers, noninteractive commands, and other startup
 failures use the normal error path.
 
-The CLI stages the newer version resolved from its current channel. The existing
-[update command](#update-dialog) owns the installation lock, legacy-consumer
+The CLI stages the newer version its current channel tag resolves to, as the
+[update command](#update-dialog) does, so npm resolves the version against the
+same registry configuration it installs from; `DIMCODE_NPM_REGISTRY` stays the
+selector for the availability check alone and need not name that registry. The
+existing update command owns the installation lock, legacy-consumer
 confirmation, progress, and cancellation. Before switching, the updater checks
-the staged host platform's release manifest for the exact version and the
-store's format. A missing declaration or unsupported format stops recovery
-before replacing the live installation.
+the staged host platform's release manifest for the version it actually staged
+and the store's format. A missing declaration or unsupported format stops
+recovery before replacing the live installation.
 
 After a verified switch, the CLI runs the installed launcher with the same
 arguments and working directory. The new invocation opens the same home and
