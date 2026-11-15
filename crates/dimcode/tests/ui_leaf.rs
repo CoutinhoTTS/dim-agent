@@ -102,7 +102,7 @@ impl Pty {
                 }
             }
         }
-        String::from_utf8_lossy(&output).into_owned()
+        String::from_utf8_lossy_owned(output)
     }
 
     fn read_until(&self, needle: &str) -> String {

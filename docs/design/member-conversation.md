@@ -77,11 +77,47 @@ cards to leader facts and any leader-side activity the provider publishes.
 +----------------------------------------------------------------+
 ```
 
-The detail is a modal read-only view using the existing conversation row
+In the scrollback TUI the detail is a modal read-only view using the existing conversation row
 renderers, wrapping, scrolling, theme and localization. It opens at the tail;
 Up/Down, PageUp/PageDown and Home/End navigate the conversation. The existing
 minimum-size screen applies. Sanitize externally supplied text before styling;
 keep the identity, state and key hints within the overlay's width.
+
+The fullscreen TUI shows the member the way it shows a line: the member's
+conversation takes the whole transcript area, drawn by the fullscreen transcript
+renderer at the Tool details and Thinking details settings, with its disclosures
+and scrolling, and the leader's transcript is hidden while it is shown. A
+boundary row names the task title, the agent and `read-only`. The composer is
+replaced by a read-only bar: its title names the agent, the observed model and
+the state from §4; its body says the view is read-only and lists the keys the
+view accepts, `Esc` first. `x stop agent` is listed only while the member can be
+stopped and is gone once the delegation is terminal or the Session closed; `x`
+then does nothing. The bar truncates at the terminal width and keeps `Esc back`.
+
+```text
+ ─────────── Task alpha · alpha · read-only ───────────
+ ┃ MEMBER_TASK alpha
+ ▸ ✓ Explored 2 files
+ alpha done.
+
+╭─ alpha · local / mock-model ───────────────────── Running ─╮
+│ Read-only: you can watch this agent or stop it.            │
+│ Esc back · x stop agent · ↑↓ PgUp PgDn scroll · Home/End   │
+╰────────────────────────────────────────────────────────────╯
+```
+
+`Esc` returns to the surface the view was opened from: the task list, or the
+leader transcript at the position it had. The member Session ID is not drawn in
+the body; the delegation's own outcome is the bar's state, and its result text
+is not appended again under the member's own final reply.
+
+A completed delegation's result in the leader transcript is one row headed
+`agent result · <task title> · <agent>`, its text drawn by the assistant
+Markdown renderer. The preview ends after six non-blank rendered rows, then
+`… N more lines` counts every remaining rendered row, including blank rows.
+Scrollback has no expand for it; fullscreen marks a longer result with a
+disclosure that shows the whole result. Failed and cancelled results remain one
+status line with their reason.
 
 Enter and typed text in the detail never submit input. Esc is consumed by the
 detail and returns to the task list; it must not fall through to the leader's
@@ -267,10 +303,18 @@ Temporary profile names already exist on the leader's request. For an existing
 native Agent, read the public Agent list after identities are known and share that
 result across cards; it is read again only when a card names a native Agent the
 last read did not cover. A missing entry/read error shows the Agent ID rather than
-an invented name; the delivered Session ID remains available in detail. Do not
-read Agent records or private Collaboration state. A provider card uses its
+an invented name; the delivered Session ID remains available in detail. A completed
+card still receives the result of its pending name lookup. Completion stops its
+name refresh only once that lookup succeeds, misses the Agent or fails; it does
+not start another lookup. Do not read Agent records or private Collaboration
+state. A provider card uses its
 leader-side target/delivered Agent identity; `agent.list` is not assumed to
 expose that provider's configuration or model.
+
+```text
+Completed card: Agent ID -- existing name read settles --+--> Agent name
+                                                       +--> ID (missing/error)
+```
 
 Apply §1's member-kind boundary before building any observation or control
 target, including `/tasks` and its stop-all capture. A provider member's opaque

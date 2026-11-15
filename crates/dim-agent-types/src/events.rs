@@ -705,7 +705,7 @@ impl ModelFailureKind {
         let reason = reason
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
-            .map(|reason| reason.strip_suffix('.').unwrap_or(reason));
+            .map(|reason| reason.trim_suffix('.'));
         match reason {
             Some(reason) => format!("{}: {reason}. {}", self.meaning(), self.action()),
             None => format!("{}. {}", self.meaning(), self.action()),

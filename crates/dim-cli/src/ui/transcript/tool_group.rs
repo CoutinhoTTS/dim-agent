@@ -906,7 +906,7 @@ fn classify(call: Call<'_>) -> Item<'_> {
             let output = call.exit_code.filter(|code| *code != 0).and_then(|code| {
                 let note = format!("Command exited with code {code}.");
                 call.result
-                    .map(|text| text.strip_suffix(note.as_str()).unwrap_or(text).trim_end())
+                    .map(|text| text.trim_suffix(note.as_str()).trim_end())
             });
             let read_only = if call.background() {
                 None

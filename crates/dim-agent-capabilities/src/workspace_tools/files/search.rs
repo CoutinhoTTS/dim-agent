@@ -306,8 +306,7 @@ fn refused_scope(path: &Path) -> SearchError {
 }
 
 fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
+    path.trim_prefix(root)
         .components()
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
@@ -1196,7 +1195,7 @@ impl FileSearch<'_> {
         }
         let lines: Vec<&str> = text
             .split('\n')
-            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .map(|line| line.trim_suffix('\r'))
             .collect();
         let (before, after) = (self.request.before as u64, self.request.after as u64);
         let mut last_output = 0u64;
@@ -1316,8 +1315,8 @@ impl FileSink<'_> {
         Ok(())
     }
     fn line_text(bytes: &[u8]) -> String {
-        let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
-        let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+        let bytes = bytes.trim_suffix(b"\n");
+        let bytes = bytes.trim_suffix(b"\r");
         String::from_utf8_lossy(bytes).into_owned()
     }
     fn after_of_last(&self, line: u64) -> Option<usize> {
