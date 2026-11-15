@@ -282,7 +282,7 @@ fn upgrade_tag(version: &str, release: bool) -> Option<&str> {
 /// A newer version on the channel of `current` the user has not skipped, or
 /// `None` when there is none or the registry did not answer in time.
 pub async fn available(home: &Path, current: &str) -> Option<Offer> {
-    let tag = upgrade_tag(current, crate::version::RELEASE)?;
+    let tag = upgrade_tag(current, dim_agent_capabilities::build::RELEASE)?;
     let package = package().ok()?;
     let client = reqwest::Client::builder().timeout(TIMEOUT).build().ok()?;
     let tags: serde_json::Value = client
@@ -322,7 +322,7 @@ pub async fn available(home: &Path, current: &str) -> Option<Offer> {
 /// layouts return a manual command without installing anything.
 pub async fn run(legacy_exited: bool) -> crate::Result<i32> {
     let package = package()?;
-    let current = crate::version::VERSION;
+    let current = dim_agent_capabilities::build::VERSION;
     let tag = channel(current);
     let executable = std::env::current_exe()?;
     let installation = installer(&executable, &package, tag).ok_or_else(|| {

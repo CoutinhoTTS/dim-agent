@@ -185,7 +185,7 @@ struct Command {
 /// channel and has the platform package an installation needs.
 fn staged_version(install: &Install, staged: &Path) -> Result<String, String> {
     let version = manifest_version(staged).map_err(incomplete)?;
-    let current = crate::version::VERSION;
+    let current = dim_agent_capabilities::build::VERSION;
     let channel = super::channel(current);
     if super::channel(&version) != channel || !super::newer(current, &version) {
         return Err(format!(
