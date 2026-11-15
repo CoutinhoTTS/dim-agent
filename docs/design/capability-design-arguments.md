@@ -139,6 +139,9 @@ investigation and delivery progress in the issue/PR. Tool references:
 [Lean proof validation](https://lean-lang.org/doc/reference/latest/ValidatingProofs/).
 No design is required to use all tools. Choose evidence for the proposition, not a tool checklist.
 
+Ground environment assumptions in the selected profile, caller and event-producer contracts,
+lifecycle ownership and existing integration flows. Record missing evidence; an isolated model
+cannot establish that its inputs represent actual use.
 Start with the owner's externally observable promises and map each to an argument, a dependency
 or an explicit gap; do not choose the coverage solely from what is easy to model.
 Map the design's actions and observation points to implementation entry points. Translate relevant

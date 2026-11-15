@@ -4,6 +4,8 @@ Scope: connect Wait's Timeline obligations to observable implementation behavior
 Issue: [#1615](https://github.com/arcships/dim/issues/1615).
 
 The [Wait owner document](../../architecture/rust-agent/plugins/Wait.md) remains the contract.
+The [usage-context review](wait-usage-context.md) grounds the environment in actual callers,
+producers and complete flows, and distinguishes broader test traces from reachable product traces.
 This extends the [recovery argument](wait-argument.md) with a coverage inventory and a concrete
 implementation experiment. It does not make the Boolean projection a complete Wait model.
 
