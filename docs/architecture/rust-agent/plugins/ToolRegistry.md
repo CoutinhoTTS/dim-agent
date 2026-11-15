@@ -32,15 +32,25 @@ with the flow test that asserts it.
 
 ## Handler contract
 
-A handler is `ToolHandler`. Besides `execute`, it answers two optional
-questions, both defaulted so a handler that needs neither writes neither:
-`resolve_write` resolves a filesystem write's target without effects, and
-`risk` names the risk Approval admits the call under. `claim(call, caller)`
+A handler is `ToolHandler`. Besides `execute`, it answers three optional
+questions, all defaulted so a handler that needs none writes none:
+`resolve_write` resolves a filesystem write's target without effects, `risk`
+names the risk Approval admits the call under, and `concurrency` says whether
+the call may run beside the other calls of its batch. `claim(call, caller)`
 returns what a handler must register before its call is published; its guard
 releases on drop, and `ToolClaim::dispatch` consumes it to run the call as
 resolved and approved. The
 publish and release order is [ToolExecution](ToolExecution.md) and
 [Questions §2.1](../../../design/plugins/Questions.md#21-the-claim-before-the-fact).
+
+`concurrency` decides order only. It defaults to `Exclusive`, so a handler that
+says nothing keeps the order the model wrote, and a `Concurrent` answer lets a
+call share its step with the calls around it
+([ToolExecution](ToolExecution.md#scheduling)). It is an execution property of
+the bound handler: it is not a field of `ToolDefinition`, so it is neither a
+field of a model request's declaration nor a key of a persisted configuration.
+A host tool names its class per call through `ToolDriver::concurrency`, because
+one driver serves every host tool of a Session.
 
 ## Events and lifetime
 

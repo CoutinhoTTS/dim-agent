@@ -9,7 +9,7 @@ use crate::{
     branch_input::append_own,
     host::ToolExecutionContext,
     settings::{SettingsChanged, settings_changes},
-    tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
+    tool_registry::{ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{BranchLifecycle, BranchPhase, Names, PartRegistry, PartScope, Timeline};
 use dim_agent_types::*;
@@ -137,6 +137,10 @@ impl SettingsHandler {
     }
 }
 impl ToolHandler for SettingsHandler {
+    /// Both operations read the user's settings.
+    fn concurrency(&self, _: &ToolCall) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
     fn execute(
         &self,
         call: ToolCall,

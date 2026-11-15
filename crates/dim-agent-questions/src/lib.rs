@@ -18,7 +18,7 @@ use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params},
     timeline_tree::TreeCommands,
-    tool_registry::{ToolClaim, ToolContribution, ToolHandler, ToolRegistry, definition},
+    tool_registry::{ToolClaim, ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, Names, SessionConfig};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
@@ -447,6 +447,11 @@ impl Questions {
 
 struct AskUser(Arc<Questions>);
 impl ToolHandler for AskUser {
+    /// A question registers a waiter and waits for the answer; it changes
+    /// nothing another call of the batch can observe.
+    fn concurrency(&self, _: &ToolCall) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
     fn claim(&self, call: &ToolCall, context: &ToolExecutionContext) -> Option<Box<dyn ToolClaim>> {
         self.0.claimed(call, context)
     }
