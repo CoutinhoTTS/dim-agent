@@ -2363,6 +2363,26 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_types::skill_token",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types",
+      "file": "crates/dim-agent-types/src/skill_token.rs",
+      "unexpandedMacros": [
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_agent_types::skill_token::tests",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types::skill_token",
+      "file": "crates/dim-agent-types/src/skill_token.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic"
+      ]
+    },
+    {
       "id": "dim_agent_types::tool",
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
@@ -16971,6 +16991,13 @@
     },
     {
       "from": "dim_agent_capabilities::skills::session",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -22823,6 +22850,13 @@
     },
     {
       "from": "dim_agent_types",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "mod skill_token"
+      ]
+    },
+    {
+      "from": "dim_agent_types",
       "to": "dim_agent_types::tool",
       "references": [
         "mod tool"
@@ -23107,6 +23141,24 @@
       "to": "dim_agent_types",
       "references": [
         "path crate::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_agent_types::skill_token",
+      "to": "dim_agent_types::skill_token::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_types::skill_token::tests",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path Token",
+        "path tokens",
+        "use super::Token",
+        "use super::names_a_token",
+        "use super::tokens"
       ]
     },
     {
@@ -54011,6 +54063,10 @@
     {
       "module": "dim_agent_types::safe_integer",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_agent_types::skill_token",
+      "path": "char::is_whitespace"
     },
     {
       "module": "dim_agent_types::tool",

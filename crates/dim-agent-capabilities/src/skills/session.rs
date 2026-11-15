@@ -359,9 +359,9 @@ fn skill_text(skill: &SkillDefinition) -> String {
     parts.join("\n")
 }
 
-/// The `skills` submit check (Hooks A.6.2): an operator's `$skill: <name>`
-/// references load those Skills with the same input, before the model sees
-/// it.
+/// The `skills` submit check (Hooks A.6.2): an operator's `/skill:<name>`
+/// tokens load those Skills with the same input, before the model sees it.
+/// `$skill: <name>` still loads, for inputs and habits from before the token.
 struct SkillSubmitCheck {
     skills: Arc<SessionSkills>,
     /// The part's lifetime: a stopped or reloading part adds nothing.
@@ -481,19 +481,27 @@ fn referenced(content: &[ContentBlock]) -> Vec<String> {
     names
 }
 
-/// Pushes the Skill names `text` references: `$skill:`, optional spaces, then
-/// the run of non-whitespace characters that follows, matched exactly.
+/// Pushes the Skill names `text` references, in the order they appear: every
+/// `/skill:<name>` token ([`dim_agent_types::skill_token`]), and the
+/// compatibility marker `$skill:`, optional spaces and the run of
+/// non-whitespace characters that follows, matched exactly.
 fn references(text: &str, names: &mut Vec<String>) {
+    let mut found: Vec<(usize, &str)> = dim_agent_types::skill_token::tokens(text)
+        .map(|token| (token.start, token.name))
+        .collect();
     let mut from = 0;
     while let Some(at) = text[from..].find("$skill:") {
-        let after = from + at + "$skill:".len();
+        let start = from + at;
+        let after = start + "$skill:".len();
         let rest = text[after..].trim_start();
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         if end > 0 {
-            names.push(rest[..end].to_owned());
+            found.push((start, &rest[..end]));
         }
         from = after + (text[after..].len() - rest.len()) + end;
     }
+    found.sort_by_key(|(start, _)| *start);
+    names.extend(found.into_iter().map(|(_, name)| name.to_owned()));
 }
 
 struct SkillTool {

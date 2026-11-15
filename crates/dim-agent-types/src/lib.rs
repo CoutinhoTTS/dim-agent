@@ -14,6 +14,7 @@ mod permission;
 mod profile;
 mod prompt;
 mod question;
+pub mod skill_token;
 mod tool;
 pub mod v1;
 
