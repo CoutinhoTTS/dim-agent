@@ -13,8 +13,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Les messages avec pièces jointes restent en file ; utilisez /queue pour orienter ou les supprimer"
         }
-        "/queue manage · Shift+← edit last · empty draft: {key} steer" => {
-            "/queue gérer · Shift+← modifier le dernier · brouillon vide : {key} pour orienter"
+        "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now" => {
+            "/queue · Shift+← modifier le dernier · brouillon vide : {key} pour orienter · Ctrl+Enter envoie aussitôt"
         }
         "+{count} more · {hint}" => "+{count} de plus · {hint}",
         "steer or delete queued messages" => "orienter avec les messages en file ou les supprimer",
@@ -560,6 +560,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Shift+← edit last queued" => {
             "Ctrl+O ou Ctrl+P commandes · Esc interrompre, les messages en file reviennent · Shift+← modifier la dernière en file"
+        }
+        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
+            "Ctrl+Enter interrompt et envoie aussitôt : le brouillon et tous les messages retenus en un seul"
+        }
+        "Send now failed: {error}; the draft was kept" => {
+            "Échec de l’envoi immédiat : {error} ; le brouillon est conservé"
+        }
+        "Send now cancelled; the draft was kept" => {
+            "Envoi immédiat annulé ; le brouillon est conservé"
+        }
+        "Send now is still stopping the run; the draft was kept" => {
+            "L'envoi immédiat arrête encore l'exécution ; le brouillon est conservé"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "L'envoi immédiat arrête l'exécution ; collez à nouveau quand le brouillon est envoyé"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "L'envoi immédiat attend l'insertion avant d'envoyer"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C effacer, deux fois pour quitter · Ctrl+D quitter si brouillon vide"

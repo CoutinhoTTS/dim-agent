@@ -13,8 +13,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Nachrichten mit Anhängen bleiben in der Warteschlange; mit /queue steuern oder löschen"
         }
-        "/queue manage · Shift+← edit last · empty draft: {key} steer" => {
-            "/queue verwalten · Shift+← letzte bearbeiten · bei leerem Entwurf mit {key} steuern"
+        "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now" => {
+            "/queue · Shift+← letzte bearbeiten · bei leerem Entwurf mit {key} steuern · Ctrl+Enter sendet sofort"
         }
         "+{count} more · {hint}" => "+{count} weitere · {hint}",
         "steer or delete queued messages" => {
@@ -570,6 +570,24 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Shift+← edit last queued" => {
             "Ctrl+O/Ctrl+P Befehle · Esc unterbrechen, eingereihte Nachrichten kommen zurück · Shift+← letzte eingereihte bearbeiten"
+        }
+        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
+            "Ctrl+Enter sofort senden: Entwurf und alle zurückgehaltenen Nachrichten als eine Nachricht"
+        }
+        "Send now failed: {error}; the draft was kept" => {
+            "Sofort senden fehlgeschlagen: {error}; der Entwurf bleibt erhalten"
+        }
+        "Send now cancelled; the draft was kept" => {
+            "Sofort senden abgebrochen; der Entwurf bleibt erhalten"
+        }
+        "Send now is still stopping the run; the draft was kept" => {
+            "Sofort senden hält den Lauf noch an; der Entwurf bleibt erhalten"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "Sofort senden hält den Lauf an; füge wieder ein, wenn der Entwurf gesendet ist"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "Sofort senden wartet auf das Einfügen, bevor es sendet"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C leeren, zweimal beenden · Ctrl+D beendet bei leerem Entwurf"

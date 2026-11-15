@@ -104,6 +104,51 @@ pub fn tf_in(locale: Locale, english: &'static str, args: &[(&str, &str)]) -> St
 mod tests {
     use super::*;
 
+    /// The send-mode strings: the queue strip's hint, the two submit-mode
+    /// notices and the two send-now notices, in every locale with their
+    /// placeholders kept.
+    #[test]
+    fn every_locale_translates_the_send_mode_strings() {
+        let previous = active();
+        for (locale, code, _) in LOCALES {
+            if locale == Locale::En {
+                continue;
+            }
+            for key in [
+                "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now",
+                "Message queued",
+                "Ctrl+Enter interrupt and send now: the draft and every held message, as one message",
+                "Send now failed: {error}; the draft was kept",
+                "Send now cancelled; the draft was kept",
+                "Send now is still stopping the run; the draft was kept",
+                "Send now is stopping the run; paste again when the draft is sent",
+                "Send now is waiting for the insertion before sending",
+            ] {
+                let translated = table(locale, key);
+                assert!(translated.is_some(), "{code} lacks {key:?}");
+                assert_ne!(translated.unwrap(), key, "{code} copies {key:?}");
+            }
+            set(locale);
+            assert!(
+                tf(
+                    "Send now failed: {error}; the draft was kept",
+                    &[("error", "fixture-error")]
+                )
+                .contains("fixture-error"),
+                "{code} drops the error"
+            );
+            assert!(
+                tf(
+                    "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now",
+                    &[("key", "Ctrl+S")]
+                )
+                .contains("Ctrl+S"),
+                "{code} drops the key"
+            );
+        }
+        set(previous);
+    }
+
     #[test]
     fn every_locale_translates_the_prompt_suggestion_strings() {
         let previous = active();

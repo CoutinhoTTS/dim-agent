@@ -612,6 +612,24 @@ impl FullScreen {
         }
     }
 
+    /// Scrolls so block `id` starts at the top when that block is taller than
+    /// the viewport, and leaves the view alone otherwise. A followed viewport
+    /// shows the end of a tall block and cuts the rows it opens with, which
+    /// for a report is the heading that says what it is.
+    pub fn show_tall_block(&mut self, id: usize, doc: &dyn Document) {
+        self.sync(doc);
+        let Some(index) = id
+            .checked_sub(self.base)
+            .filter(|index| index + 1 < self.starts.len())
+        else {
+            return;
+        };
+        let start = self.starts[index];
+        if self.starts[index + 1].saturating_sub(start) > self.view_rows {
+            self.pin(start.min(self.max_top()));
+        }
+    }
+
     /// The picked message's text.
     pub fn focused_text(&self, doc: &dyn Document) -> Option<String> {
         if self.focus_card.is_some() || self.focus_tool.is_some() {
