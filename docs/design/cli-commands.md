@@ -257,12 +257,14 @@ Fullscreen, 8 rows                           Scrollback, 8 rows
 In scrollback and fullscreen TUI, `/settings` → Interface → Default send mode
 chooses how `Enter` submits a message draft during a run. `Ctrl+S` sends that
 draft in the other mode. Enter, Left/Right or Space toggles the setting, saves
-it in the CLI home, and applies it immediately. The default is `queue`.
+it in the CLI home, and applies it immediately. The default is `steer`: only a
+saved `queue` queues, so a user who saved `queue` keeps it and nothing is
+migrated, while a missing or unknown saved value means `steer`.
 
 ```text
 Settings
   Interface
-> Default send mode    queue
+> Default send mode    steer
 
 Running with a draft    Enter    Ctrl+S
 queue                   queue    steer
@@ -284,12 +286,39 @@ Shift+Left          —                            empty draft: recall the newes
                                                  message only if one text block
 Esc                 keep the draft               interrupt; every held message
                                                  returns to the draft, oldest first
+Ctrl+Enter          submit, as Enter             interrupt and send now: every held
+                                                 message returns to the draft, the
+                                                 run stops, and that draft goes as
+                                                 one new message once the stop has
+                                                 settled
 Ctrl+S              —                            send draft in the other mode;
                                                  empty: steer oldest queued message
                                                  in queue mode only
 Up / Down           input history                input history
 Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
 ```
+
+A submit during a run says where the message went. A queued draft shows
+`Message queued`. A steered draft needs no such notice: its message row enters
+the transcript as soon as the input is applied, marked pending until the model
+consumes it, so the user already sees the message in the running turn.
+
+`Ctrl+Enter` is `Esc` then `Enter` as one key. It withdraws every held message
+oldest first, stops the run, and submits the combined draft — the returned
+messages followed by what was typed — as one new message. Its withdrawals reach
+the session before the stop, and its submit is sent only after the stop's reply,
+because an input written before the last interrupt does not start a run after
+it. A message that already left the queue is not sent again. If the stop fails,
+the combined draft stays in the composer with a notice, so nothing typed is
+lost. It takes the guards `Enter` has: with a shell command running and a shell
+line in the draft it shows `A shell command is already running` and sends
+nothing, and with an empty draft and nothing held it does nothing. While the
+stop it asked for is still settling, `Enter` and `Ctrl+Enter` send nothing, so
+one draft is never submitted twice.
+
+A terminal without the kitty keyboard protocol or xterm modifyOtherKeys cannot
+tell `Ctrl+Enter` from `Enter`, so there it submits in the default mode and `Esc`
+then `Enter` remains the two-key route.
 
 Enter on an empty composer opens `/tasks` only after the earlier branches have
 had their say: the shell-run guard in either mode, then the steer of the oldest
@@ -309,7 +338,8 @@ in both modes: one task per row, not a horizontal list of labels.
   every held message, including its image blocks and stored paste/file links.
   A message that already left the queue is not put back or sent again.
 - Withdrawals of an interrupt are sent before the stop, so the run does not start the
-  next queued message.
+  next queued message. `Ctrl+Enter` keeps that order and adds the wait for the stop's
+  reply before it submits.
 - `Ctrl+C` clears the draft. `Esc` never clears it.
 
 ### Queued messages
