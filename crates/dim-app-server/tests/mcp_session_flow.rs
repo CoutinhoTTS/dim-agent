@@ -297,16 +297,15 @@ async fn rpc(
             }
             if name.starts_with("peek/") {
                 let inside = remote.peek_inflight.fetch_add(1, Ordering::SeqCst) + 1;
-                let _left = ObservePeak { remote: remote.clone() };
+                let _left = ObservePeak {
+                    remote: remote.clone(),
+                };
                 remote.peek_peak.fetch_max(inside, Ordering::SeqCst);
                 if name == "peek/a" || name == "peek/b" {
                     // Only the two hinted reads can be inside together, so a
                     // barrier of two either opens or the test times out.
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(3),
-                        remote.peek_pair.wait(),
-                    )
-                    .await;
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(3), remote.peek_pair.wait()).await;
                 }
                 json!({"content":[{"type":"text","text":"peeked"}]})
             } else if body["params"]["name"] == "chart" {
@@ -1185,7 +1184,8 @@ async fn hinted_mcp_tools_of_one_batch_overlap_and_an_unhinted_one_runs_alone() 
     // `peek/a` and `peek/b` declare `readOnlyHint`, so they share one step and
     // the server's barrier of two opens. An unhinted call would run alone, and
     // the barrier would time out.
-    env.turn(&session, Action::Batch(vec!["peek/a", "peek/b"])).await;
+    env.turn(&session, Action::Batch(vec!["peek/a", "peek/b"]))
+        .await;
     let settled = results(&session).await;
     let last = settled.last().unwrap();
     assert!(last.contains("peeked"), "{last}");
@@ -1205,11 +1205,8 @@ async fn an_unhinted_mcp_tool_orders_its_calls_beside_the_hinted_ones() {
     ready(&session).await;
     // `peek/c` declares no hint and `peek/d` declares `readOnlyHint: false`,
     // so each is alone in its step and never meets the other in the server.
-    env.turn(
-        &session,
-        Action::Batch(vec!["peek/c", "peek/d", "peek/a"]),
-    )
-    .await;
+    env.turn(&session, Action::Batch(vec!["peek/c", "peek/d", "peek/a"]))
+        .await;
     let settled = results(&session).await;
     assert!(settled.last().unwrap().contains("peeked"));
     assert_eq!(

@@ -1367,8 +1367,10 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/tool_executor.rs",
       "unexpandedMacros": [
+        "debug_assert_eq",
         "format",
         "matches",
+        "tokio::select",
         "tracing::info_span",
         "unreachable",
         "vec"
@@ -1383,6 +1385,16 @@
         "tokio::select",
         "unreachable",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::tool_executor::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::tool_executor",
+      "file": "crates/dim-agent-capabilities/src/tool_executor.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
       ]
     },
     {
@@ -17519,6 +17531,27 @@
     },
     {
       "from": "dim_agent_capabilities::tool_executor",
+      "to": "dim_agent_capabilities::tool_executor::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_executor",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolClaim",
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
+        "path ToolConcurrency::Exclusive",
+        "path ToolContribution",
+        "use crate::tool_registry::ToolClaim",
+        "use crate::tool_registry::ToolConcurrency",
+        "use crate::tool_registry::ToolContribution"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_executor",
       "to": "dim_agent_runtime::config",
       "references": [
         "path TimelineIdentity",
@@ -17721,6 +17754,23 @@
       "references": [
         "path ToolUseData",
         "use dim_agent_types::ToolUseData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_executor::tests",
+      "to": "dim_agent_capabilities::tool_executor",
+      "references": [
+        "path Settled",
+        "path Turn",
+        "path Turn::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_executor::tests",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Exclusive"
       ]
     },
     {
@@ -28513,6 +28563,9 @@
       "from": "dim_app_server::mcp::session",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
+        "path ToolConcurrency::Exclusive",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolProvider",
@@ -28520,6 +28573,7 @@
         "path ToolRegistry",
         "path ToolSourceSet",
         "path tool_provider_changes",
+        "use dim_agent_capabilities::tool_registry::ToolConcurrency",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolProvider",

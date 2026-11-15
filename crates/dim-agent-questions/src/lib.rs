@@ -18,7 +18,9 @@ use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params},
     timeline_tree::TreeCommands,
-    tool_registry::{ToolClaim, ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry, definition},
+    tool_registry::{
+        ToolClaim, ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry, definition,
+    },
 };
 use dim_agent_runtime::{AgentBuilder, CAPABILITY_RELOADING, Names, SessionConfig};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
