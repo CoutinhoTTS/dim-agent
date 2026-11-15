@@ -282,7 +282,7 @@ Tab                 pick an earlier message      pick an earlier message
                     (fullscreen)                 (fullscreen)
 Shift+Left          —                            empty draft: recall the newest held
                                                  message only if one text block
-Esc                 keep the draft               interrupt; every held message
+Esc                 keep the draft               interrupt; every held user message
                                                  returns to the draft, oldest first
 Ctrl+S              —                            send draft in the other mode;
                                                  empty: steer oldest queued message
@@ -306,16 +306,39 @@ in both modes: one task per row, not a horizontal list of labels.
 - Taking a message back, and interrupting, withdraw the message through
   `session.input.withdraw`. Its content enters the draft only after the withdrawal
   is deleted. Shift+Left accepts only a single text block; interrupt restores
-  every held message, including its image blocks and stored paste/file links.
+  every held user-queue message, including its image blocks and stored paste/file links.
   A message that already left the queue is not put back or sent again.
 - Withdrawals of an interrupt are sent before the stop, so the run does not start the
-  next queued message.
+  next user-queue message.
 - `Ctrl+C` clears the draft. `Esc` never clears it.
 
 ### Queued messages
 
+Queue is the operator's message-management surface, not the branch's internal
+input queue. It includes only held inputs with user content and no source raw
+blocks. Automation inputs, including scheduled jobs, wakeups and loop rounds,
+remain internally pending but are absent from the strip, `/queue`, their counts
+and their empty-state decisions. User text is never parsed to classify its source;
+pasting a scheduler marker remains a user message. Hook and Skill context appended
+inside user content does not hide the user's message.
+
+This same selection governs every user-queue action: oldest-message steer,
+newest-message recall, panel steer/delete, and interrupt-time withdrawal and draft
+restoration. Hidden automatic inputs cannot be selected by these actions. An
+interrupt still stops the current turn, but does not withdraw hidden automatic
+inputs. Their execution, ordering and transcript lifecycle remain the input
+owners' responsibility. A request for an input outside the user queue does nothing.
+
+Live events and restored inventory use the same structural distinction. The
+inventory requires the negotiated [block-presence extension](input-state-read.md#block-presence-extension);
+an unsupported daemon is reported as needing an upgrade, not treated as an empty
+queue or assumed to hold only user messages. Restoring an input already present in
+the transcript window replaces its pending state by input identity, rather than
+adding a second queue entry. No second source list or history scan is maintained
+by the client.
+
 `/queue` requires an attached Session and opens only the shown line's held
-messages in both terminal modes, labelled `Held`. Applied messages remain in
+operator messages in both terminal modes, labelled `Held`. Applied messages remain in
 the transcript, not the queue panel or strip. Up/Down selects a row,
 Enter steers it and `x` deletes it through the existing withdrawal operation.
 Only held messages can change; `notHeld` is a notice, not a failed run. Esc
@@ -340,7 +363,7 @@ starts a run.
 Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
 text draft replaces their attachments. Esc interrupt instead withdraws all held
-messages before stopping, restoring their operator content to the draft, oldest
+user-queue messages before stopping, restoring their operator content to the draft, oldest
 first, so they cannot start a new run automatically. A text block after the first
 that opens one of the runtime's own markers is context a capability appended
 rather than the operator's words, by the same rule the title and the catalog
@@ -352,7 +375,7 @@ Steering always uses the owner's full held input.
 
 ### Queue strip
 
-The strip and `/queue` show only held messages from the existing unconsumed
+The strip and `/queue` show only held operator messages from the existing unconsumed
 input projection, oldest first; the strip count excludes applied messages.
 During a run, `Shift+Left` on an empty draft recalls the newest
 held message subject to the attachment rule above. The strip shows the shortcut
@@ -369,7 +392,18 @@ history outside the panel.
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-A queued message the strip does not show adds its count to the hint. The strip shows at most five messages and keeps the height it reached while the queue drains.
+A user-queue message beyond the strip's visible rows adds its count to the hint.
+The strip shows at most five messages and keeps the height it reached while the
+user queue drains. Hidden automation inputs reserve no rows and add no count.
+
+```text
+Internal pending: [scheduled delivery, user message, wakeup]
+┌─ Queue (1) ────────────────────────────────┐
+│ › Held · user message                     │
+└───────────────────────────────────────────┘
+Internal pending: [scheduled delivery, wakeup]
+                  (no Queue strip)
+```
 
 After a stop, an unread applied message remains in the transcript without a
 queue strip when nothing is held:
@@ -1247,7 +1281,7 @@ Select a model
   Manual: no models · add a model with provider.models.create
   Edit models                Manual  manual
   Subagent models: Agent choice
-Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 ```
 
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
@@ -1257,8 +1291,10 @@ Enter also writes the default a new Session in this folder reads ([provider mana
 §4](appserver/provider-management.md#4-client-integration)).
 
 Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
-modes; explicit-value forms and the line client keep their command behavior. The selection
-contract is owned by [model configuration](model-configuration.md#scrollback-interaction).
+modes; explicit-value forms and the line client keep their command behavior. At Home the
+picker and the explicit-value forms act on the footer's preview, the model the first
+message's Session adopts. The selection contract is owned by [model
+configuration](model-configuration.md#scrollback-interaction).
 
 ### The Workflow area
 

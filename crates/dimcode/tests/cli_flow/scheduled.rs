@@ -3,6 +3,140 @@
 use super::*;
 use std::sync::mpsc;
 
+#[test]
+fn user_queue_reports_a_daemon_without_block_presence() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.2 = true;
+        let hello = wire.read("hello");
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
+            "protocolVersion":4,"daemonProfile":{"kind":"product"},
+            "features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.hold();
+    });
+    let mut terminal = Terminal::resume_tui(home.command());
+    terminal.until("update the daemon");
+    let shown = strip_ansi(&terminal.transcript);
+    assert!(!shown.contains("No queued messages."), "{shown}");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn automatic_inputs_stay_out_of_the_user_queue_after_resume_and_live_delivery() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (stopped, stop_received) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.methods"]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["running"] = json!(true);
+            wire.reply(&attach, record);
+            let mut ready = false;
+            let mut context = false;
+            let mut accounts = false;
+            while !ready || !context || !accounts {
+                let request = wire.read_any();
+                match request["method"].as_str().unwrap() {
+                    "session.methods" => wire.reply(&request, json!({"methods":[
+                        {"name":"session.input.pending","mutating":false},
+                        {"name":"session.turn.get","mutating":false}
+                    ]})),
+                    "session.history" => wire.reply(&request, json!({"events":[
+                        {"id":"oldest","sequence":3,"create_at":1,"type":"input","name":"message",
+                         "data":{"user":{"content":[{"type":"text","text":"oldest"}]},"mode":"queue"}}
+                    ],"through":8,"nextAfter":8,"done":true})),
+                    "session.input.pending" => {
+                        assert_eq!(request["params"]["includeBlockPresence"], true);
+                        wire.reply(&request, json!({"branchId":"main","through":8,"next":null,"inputs":[
+                            {"inputId":"scheduled","sequence":2,"mode":"queue","applied":false,
+                             "hasRawBlocks":true,"user":{"content":[{"type":"text","text":"AUTOMATIC RESTORED"}]}},
+                            {"inputId":"oldest","sequence":3,"mode":"queue","applied":false,
+                             "hasRawBlocks":false,"user":{"content":[{"type":"text","text":"oldest"}]}}
+                        ]}));
+                    }
+                    "session.turn.get" => {
+                        ready = true;
+                        wire.reply(&request, json!({"branchId":"main","through":8,
+                            "turn":{"turnId":"turn","sequence":1,"ended":false},"output":null}));
+                    }
+                    "session.context.usage" => {
+                        context = true;
+                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                            "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}}));
+                    }
+                    "account.providers" => { accounts = true; wire.reply(&request, json!([])); }
+                    method => panic!("unexpected opening request: {method}"),
+                }
+            }
+            let text = "<dim-scheduler>typed by user</dim-scheduler>";
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], text);
+            wire.reply(&submit, json!({"event":{}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main",
+                "event":{"id":text,"sequence":10,"create_at":1,"type":"input","name":"message",
+                "data":{"user":{"content":[{"type":"text","text":text},
+                    {"type":"text","text":"<dim-hooks kind=\"prompt-submit\">extra context</dim-hooks>"}]},"mode":"queue"}}}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main",
+                "event":{"id":"wakeup","sequence":11,"create_at":1,"type":"input","name":"message",
+                "data":{"blocks":[{"type":"raw","text":"<dim-scheduler kind=\"wakeup\">wake</dim-scheduler>"}],
+                    "user":{"content":[{"type":"text","text":"AUTOMATIC LIVE"}]},"mode":"queue"}}}));
+            let recall = wire.read("session.input.withdraw");
+            assert_eq!(recall["params"]["inputId"], "<dim-scheduler>typed by user</dim-scheduler>");
+            assert!(recall["params"].get("steer").is_none());
+            wire.reply(&recall, json!({"status":"deleted","sequence":12}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main",
+                "event":{"id":"deleted","sequence":12,"create_at":1,"type":"input","name":"deleted",
+                "data":{"input_id":"<dim-scheduler>typed by user</dim-scheduler>"}}}));
+            let steer = wire.read("session.input.withdraw");
+            assert_eq!(steer["params"]["inputId"], "oldest");
+            assert_eq!(steer["params"]["steer"]["content"][0]["text"], "oldest");
+            wire.reply(&steer, json!({"status":"deleted","sequence":13}));
+            wire.notice("session.event", json!({"sessionId":"session","branchId":"main",
+                "event":{"id":"steered","sequence":13,"create_at":1,"type":"input","name":"deleted",
+                "data":{"input_id":"oldest"}}}));
+            let stop = wire.read("session.stop");
+            wire.reply(&stop, json!({"sequence":14}));
+            wire.notice("session.state", json!({"sessionId":"session","branchId":"main","running":false}));
+            stopped.send(()).unwrap();
+            wire.2 = true;
+            wire.hold();
+        });
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("Queue (1)");
+        terminal.write(b"<dim-scheduler>typed by user</dim-scheduler>\r");
+        terminal.until("Queue (2)");
+        let recall_start = terminal.transcript.len();
+        terminal.write(b"\x1b[1;2D");
+        terminal.until("Queue (1)");
+        assert!(strip_ansi(&terminal.transcript[recall_start..]).contains("typed by user"));
+        terminal.write(b"\x15\x13");
+        terminal.write(b"/queue\r");
+        terminal.until("No queued messages.");
+        terminal.write(b"\x1b");
+        terminal.until("\x1b[?2026l");
+        terminal.write(b"\x1b");
+        stop_received.recv_timeout(PATIENCE).unwrap();
+        let shown = strip_ansi(&terminal.transcript);
+        assert!(!shown.contains("AUTOMATIC"), "{shown}");
+        assert!(!shown.contains("Queue (3)"), "{shown}");
+        assert!(!shown.contains("extra context"), "{shown}");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
 fn hello(wire: &mut Wire) {
     wire.hello(&[
         "schedule.list",

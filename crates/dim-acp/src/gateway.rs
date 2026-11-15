@@ -89,6 +89,11 @@ pub(crate) enum Work {
         id: String,
         result: Result<Value, Error>,
     },
+    Command {
+        id: String,
+        command_id: uuid::Uuid,
+        result: Result<Option<String>, Error>,
+    },
     Recovered {
         id: String,
         result: Box<Result<RecoveredSession, Error>>,
@@ -219,10 +224,17 @@ struct MemberInteraction {
     route: String,
     request: String,
 }
+struct Command {
+    id: uuid::Uuid,
+    reply: Responder,
+    compact: bool,
+    cancelled: CancellationToken,
+}
 struct Session {
     cwd: String,
     projection: Projection,
     prompt: Option<Prompt>,
+    command: Option<Command>,
     config: Config,
     configuring: bool,
     config_revision: u64,
@@ -634,6 +646,7 @@ impl Gateway {
                     }
                     Some(Slot::Ready(session)) => {
                         if session.prompt.is_some()
+                            || session.command.is_some()
                             || session.removing
                             || session.stopping
                             || session.configuring
@@ -641,7 +654,9 @@ impl Gateway {
                             return reply.respond_with_error(busy());
                         }
                         if !replay && session.cwd == cwd && !self.mcp.supported() {
-                            return reply.respond(session.config.response());
+                            let response = session.config.response();
+                            self.commands(&id)?;
+                            return reply.respond(response);
                         }
                         let added = match self.mcp.plan(&id, servers) {
                             Ok(added) => added,
@@ -818,8 +833,41 @@ impl Gateway {
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };
-                if session.prompt.is_some() || session.removing || session.stopping {
+                if session.prompt.is_some()
+                    || session.command.is_some()
+                    || session.removing
+                    || session.stopping
+                {
                     return reply.respond_with_error(busy());
+                }
+                if let Some((name, words)) = crate::commands::parse(&request.prompt) {
+                    if session.configuring {
+                        return reply.respond_with_error(busy());
+                    }
+                    let name = name.to_owned();
+                    let words = words.to_owned();
+                    let config = session.config.clone();
+                    let command_id = uuid::Uuid::new_v4();
+                    let cancelled = CancellationToken::new();
+                    session.command = Some(Command {
+                        id: command_id,
+                        reply,
+                        compact: name == "compact"
+                            && words.is_empty()
+                            && config.methods.contains("session.context.compact"),
+                        cancelled: cancelled.clone(),
+                    });
+                    self.spawn(async move {
+                        let result =
+                            crate::commands::run(&rpc, &id, &config, &name, &words, &cancelled)
+                                .await;
+                        Work::Command {
+                            id,
+                            command_id,
+                            result,
+                        }
+                    });
+                    return Ok(());
                 }
                 let parts = match crate::content::parse(
                     request.prompt,
@@ -946,7 +994,11 @@ impl Gateway {
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };
-                if session.configuring || session.removing || session.stopping {
+                if session.configuring
+                    || session.removing
+                    || session.stopping
+                    || session.command.is_some()
+                {
                     return reply.respond_with_error(busy());
                 }
                 session.configuring = true;
@@ -1062,6 +1114,12 @@ impl Gateway {
         };
         if session.removing || session.stopping {
             return Ok(());
+        }
+        if let Some(command) = &mut session.command {
+            command.cancelled.cancel();
+            if !command.compact {
+                return Ok(());
+            }
         }
         if let Some(prompt) = &mut session.prompt {
             prompt.cancelled = true;
@@ -1268,6 +1326,7 @@ impl Gateway {
                             cwd: loading.cwd,
                             projection: Projection::default(),
                             prompt: None,
+                            command: None,
                             config: prepared.config,
                             configuring: false,
                             config_revision: 0,
@@ -1350,6 +1409,7 @@ impl Gateway {
                         let state = session.config.response();
                         self.sessions
                             .insert(id.clone(), Slot::Ready(Box::new(session)));
+                        self.commands(&id)?;
                         if prepared.title_revision > 0 {
                             self.title(&id, prepared.title, prepared.title_revision)?;
                         }
@@ -1545,10 +1605,14 @@ impl Gateway {
                 Ok(_) => {
                     self.mcp.forget(&id);
                     self.release_interactions(&id);
-                    if let Some(Slot::Ready(mut session)) = self.sessions.remove(&id)
-                        && let Some(prompt) = session.prompt.take()
-                    {
-                        prompt.reply.respond(json!({"stopReason":"cancelled"}))?;
+                    if let Some(Slot::Ready(mut session)) = self.sessions.remove(&id) {
+                        if let Some(command) = session.command.take() {
+                            command.cancelled.cancel();
+                            command.reply.respond(json!({"stopReason":"cancelled"}))?;
+                        }
+                        if let Some(prompt) = session.prompt.take() {
+                            prompt.reply.respond(json!({"stopReason":"cancelled"}))?;
+                        }
                     }
                     reply.respond(json!({}))?;
                 }
@@ -1624,6 +1688,7 @@ impl Gateway {
                         }
                     }
                 }
+                self.commands(&id)?;
             }
             Work::Answer { key, method, args } => {
                 if let Some(interaction) = self.interactions.get(&key)
@@ -1636,6 +1701,51 @@ impl Gateway {
                         let _ = rpc.call(method, args).await;
                     });
                 }
+            }
+            Work::Command {
+                id,
+                command_id,
+                result,
+            } => {
+                let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
+                    return Ok(());
+                };
+                if !session
+                    .command
+                    .as_ref()
+                    .is_some_and(|command| command.id == command_id)
+                {
+                    return Ok(());
+                }
+                let command = session.command.take().unwrap();
+                let mut cancelled = command.cancelled.is_cancelled();
+                let text = match result {
+                    Ok(text) => text,
+                    Err(error)
+                        if error.code == agent_client_protocol::ErrorCode::RequestCancelled =>
+                    {
+                        cancelled = true;
+                        None
+                    }
+                    Err(error) => match error
+                        .data
+                        .as_ref()
+                        .and_then(|data| data["nativeAppError"].as_str())
+                    {
+                        Some("compaction_cancelled") => {
+                            cancelled = true;
+                            None
+                        }
+                        Some("compaction_failed") => None,
+                        _ => Some(format!("Command failed: {}", error.message)),
+                    },
+                };
+                if let Some(text) = text {
+                    self.update(&id, json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}))?;
+                }
+                command
+                    .reply
+                    .respond(json!({"stopReason":if cancelled {"cancelled"} else {"end_turn"}}))?;
             }
             Work::Usage { id, result } => {
                 if let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) {
@@ -1803,6 +1913,7 @@ impl Gateway {
                             }
                         }
                         self.title(&id, title, title_revision)?;
+                        self.commands(&id)?;
                         if let Some(Slot::Ready(session)) = self.sessions.get(&id) {
                             self.update(&id,json!({"sessionUpdate":"config_option_update","configOptions":session.config.options(),"_meta":{"dim/history":{"through":prepared.through,"before":prepared.before,"complete":prepared.before.is_none(),"replace":true}}}))?;
                         }
@@ -1887,6 +1998,10 @@ impl Gateway {
             self.mcp.forget(&closed.session_id);
             match self.sessions.remove(&closed.session_id) {
                 Some(Slot::Ready(mut session)) => {
+                    if let Some(command) = session.command.take() {
+                        command.cancelled.cancel();
+                        command.reply.respond(json!({"stopReason":"cancelled"}))?;
+                    }
                     if let Some(prompt) = session.prompt.take() {
                         if !prompt.cancelled
                             && let Some(reason) = closed.reason
@@ -2083,6 +2198,10 @@ impl Gateway {
         for (id, slot) in &mut self.sessions {
             match slot {
                 Slot::Ready(session) => {
+                    if let Some(command) = session.command.take() {
+                        command.cancelled.cancel();
+                        command.reply.respond_with_error(rpc::unavailable())?;
+                    }
                     for snapshot in session.subagents.disconnected(id) {
                         if self.subagent_events {
                             self.outbox
@@ -2175,6 +2294,10 @@ impl Gateway {
             session.stopping = false;
             session.removing = false;
             session.configuring = false;
+            if let Some(command) = session.command.take() {
+                command.cancelled.cancel();
+                command.reply.respond_with_error(rpc::unavailable())?;
+            }
             session.usage_pending = false;
             session.recovery = Some(Vec::new());
             for snapshot in session.subagents.disconnected(&id) {
@@ -2382,6 +2505,7 @@ impl Gateway {
                 &notice.session_id,
                 json!({"sessionUpdate":"config_option_update","configOptions":options}),
             )?;
+            self.commands(&notice.session_id)?;
         }
         if let Some(mode) = mode_update {
             self.update(
@@ -2461,6 +2585,13 @@ impl Gateway {
                 }
             });
         }
+    }
+
+    fn commands(&self, id: &str) -> Result<(), Error> {
+        if let Some(Slot::Ready(session)) = self.sessions.get(id) {
+            self.update(id, json!({"sessionUpdate":"available_commands_update","availableCommands":crate::commands::available(&session.config)}))?;
+        }
+        Ok(())
     }
 
     fn usage(&mut self, id: &str) {

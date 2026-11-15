@@ -195,7 +195,9 @@ annotate their tools. Restricting it later is a policy change to this decision, 
 A server registers widget tools only when its client declares support, so the daemon's MCP client
 declares `io.modelcontextprotocol/ui` with `text/html;profile=mcp-app` in `initialize`. The
 declaration is process-wide, not per Session: a connection exists before and independently of who
-views the Session, and a Session can gain a widget-capable viewer later.
+views the Session, and a Session can gain a widget-capable viewer later. The `clientInfo` it sends
+names the daemon build's display label in `version` and keeps the package name in `name`, so a
+server's log identifies the commit the daemon runs.
 
 The cost is that a server may now attach a `resourceUri` to tools of a Session no client renders views
 for. Nothing else changes for that Session: a widget tool keeps meaningful text content, which is each
@@ -557,6 +559,7 @@ Flow level, in `crates/dim-app-server/tests`, reusing the Node MCP fixtures unde
 | `transport_flow/product_protocol.rs` | The wire contract: both methods are advertised in `hello.features`, refused with `local_transport_required` on a bare WebSocket, and answer the error codes of §4.3; a Session namespace equal to `session.mcp.app.widget`, `session.mcp.app.call`, or containing or lying inside either, is refused at registration because both are exact built-ins; a view's call leaves no `tool/call`, `tool/start` or `tool/result` fact and does not enter the next turn's context; a `read-only` Session's view call is not refused by the daemon |
 | `transport_flow/web_entry.rs` | The authenticated loopback web entry is served both names, so a view's request reaches its refusal instead of `local_transport_required` |
 | `mcp_http_flow.rs` (Node, ignored) | The official SDK's tool `_meta.ui`, its `ui://` document with `_meta.ui`, and a result's `_meta` reach the daemon, so the descriptor and the document a mount read resolves are the specification's own |
+| `mcp_http_flow.rs` | `the_mcp_client_declares_the_build_the_process_reports`: the fixture server receives `clientInfo.version` equal to the label this process reports, under the unchanged package name |
 
 `mcp_session_flow.rs` also calls the `mcpSession` face against the typed service:
 `mcp_session_face_answers_as_the_typed_service` compares state, the mounted document, the call

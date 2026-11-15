@@ -79,7 +79,7 @@ impl ProviderService {
             } else {
                 ModelSource::Custom
             }),
-            models: record.models.clone(),
+            models: record.user_models.clone(),
             ..Default::default()
         };
         let mut models = Vec::new();

@@ -787,6 +787,7 @@ async fn run_connection(
                                             "session.branch.get",
                                             "session.turn.get",
                                             "session.turn.get.inputId",
+                                            "session.input.pending.blockPresence",
                                             "session.submit",
                                             "session.stop",
                                             "session.keys",

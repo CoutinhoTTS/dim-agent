@@ -216,7 +216,10 @@ impl IdIndex {
         let mut rows = Vec::new();
         for (provider, catalog) in providers.iter().enumerate() {
             let role = catalog.metadata.as_ref().and_then(|metadata| metadata.role);
-            let role_is_vendor = role == Some(ProviderRole::Vendor);
+            let own_namespace = catalog
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.vendor_namespace.as_deref());
             let custom = catalog.provider_id == "custom-provider";
             // Every row is indexed: the qualified step reads every row's whole
             // id, steps 2 and 3 read vendor rows, step 4 the `custom-provider`
@@ -224,7 +227,8 @@ impl IdIndex {
             for (model, entry) in catalog.models.iter().enumerate() {
                 let model_tokens = split_id(&entry.model_id);
                 let position = rows.len();
-                if role_is_vendor {
+                let declaration = is_declaration(role, own_namespace, entry);
+                if declaration {
                     vendor_tokens
                         .entry(model_tokens.clone())
                         .or_default()
@@ -242,7 +246,7 @@ impl IdIndex {
                 rows.push(IndexedRow {
                     provider,
                     model,
-                    index: if role_is_vendor {
+                    index: if declaration {
                         Some(Index::Vendor)
                     } else if custom {
                         Some(Index::CustomProvider)
@@ -334,16 +338,22 @@ impl BundledCatalog {
         &self,
         provider: &ProviderProjection,
         id: &str,
+        kind: Option<&str>,
     ) -> Result<Option<Lookup>, Vec<Candidate>> {
-        match self.identify_steps(provider, id) {
+        match self.identify_steps(provider, id, kind) {
             Outcome::One(found) => Ok(Some(*found)),
             Outcome::Ambiguous(candidates) => Err(candidates),
             Outcome::None => Ok(None),
         }
     }
 
-    fn identify_steps(&self, provider: &ProviderProjection, id: &str) -> Outcome {
-        self.identify_with_alias(provider, id, true)
+    fn identify_steps(
+        &self,
+        provider: &ProviderProjection,
+        id: &str,
+        kind: Option<&str>,
+    ) -> Outcome {
+        self.identify_with_alias(provider, id, kind, true)
     }
 
     /// The step list, with the alias step present or excluded. A target the
@@ -354,7 +364,13 @@ impl BundledCatalog {
     /// leaves the refusal open to the alias step and then stands: the rules can
     /// read the id to a disagreement, which is the case an alias exists for,
     /// but no later step may answer over a refusal the first one made.
-    fn identify_with_alias(&self, provider: &ProviderProjection, id: &str, alias: bool) -> Outcome {
+    fn identify_with_alias(
+        &self,
+        provider: &ProviderProjection,
+        id: &str,
+        kind: Option<&str>,
+        alias: bool,
+    ) -> Outcome {
         if let Some((provider_id, entry)) = self.own_row(provider, id) {
             let strategy = Rule::ProviderExact.strategy(&provider_id, &entry.model_id, id);
             return self.one(provider_id, entry, strategy, Rule::ProviderExact);
@@ -374,14 +390,14 @@ impl BundledCatalog {
             return found;
         }
         if alias {
-            match self.identify_alias(provider, id) {
+            match self.identify_alias(provider, id, kind) {
                 Outcome::None => {}
                 found => return found,
             }
         }
         match (found, query) {
             (Outcome::Ambiguous(candidates), _) => Outcome::Ambiguous(candidates),
-            (_, Some(query)) => self.merge_rows(id, &query),
+            (_, Some(query)) => self.merge_rows(id, &query, kind),
             (_, None) => Outcome::None,
         }
     }
@@ -427,11 +443,16 @@ impl BundledCatalog {
     /// letting the alias choose a side; and a target that names nothing falls
     /// through to the refusal or the merge the id had without the alias, so a
     /// stale alias never makes an id worse than it is.
-    fn identify_alias(&self, provider: &ProviderProjection, id: &str) -> Outcome {
+    fn identify_alias(
+        &self,
+        provider: &ProviderProjection,
+        id: &str,
+        kind: Option<&str>,
+    ) -> Outcome {
         let Some(target) = provider.model_aliases.get(id.trim()) else {
             return Outcome::None;
         };
-        self.identify_with_alias(provider, target, false)
+        self.identify_with_alias(provider, target, kind, false)
     }
 
     /// Step 2: the whole qualified id, before any step drops its namespace
@@ -475,20 +496,28 @@ impl BundledCatalog {
         )
     }
 
-    /// Step 1: the projection's own list, by exact id. The row answers with
-    /// all its own fields, which describe the provider's own API.
+    /// Step 1: what the provider declares for this id, by exact id. A builtin
+    /// provider's declarations are its bundled rows and the models the user
+    /// added, which the projection carries; a custom provider declares nothing,
+    /// so step 1 never answers for it.
     fn own_row(&self, provider: &ProviderProjection, id: &str) -> Option<(String, ModelEntry)> {
         if provider.source == Some(ModelSource::Custom) {
             return None;
         }
-        let entry = provider.models.iter().find(|model| model.model_id == id)?;
         // The bundled entry is the declaration for a builtin provider's model,
-        // so a stored copy that lacks a limit is supplied from it.
+        // so the model the user added to it is read through the bundle when the
+        // two name the same id.
         let entry = self
             .bundled_models(&provider.provider_id)
             .and_then(|models| models.iter().find(|bundled| bundled.model_id == id))
             .cloned()
-            .unwrap_or_else(|| entry.clone());
+            .or_else(|| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.model_id == id)
+                    .cloned()
+            })?;
         Some((provider.provider_id.clone(), entry))
     }
 
@@ -753,7 +782,47 @@ impl BundledCatalog {
 }
 
 fn row_is_vendor(catalog: &BundledCatalog, row: &Row<'_>) -> bool {
-    catalog.role(row.provider_id) == Some(ProviderRole::Vendor)
+    is_declaration(
+        catalog.role(row.provider_id),
+        catalog.vendor_namespace(row.provider_id),
+        row.entry,
+    )
+}
+
+/// Whether a row is its provider's own declaration rather than a resale.
+///
+/// The role is a provider-level fact: only a `vendor` provider declares
+/// anything. The row decides the rest, because the catalog states the
+/// contradiction per row: a row whose canonical id names a namespace other
+/// than the provider's own belongs to that vendor: the steps that read vendor
+/// rows pass it over, and the merge reads it as it reads an aggregator row.
+/// Step 1 reads a provider's bundled rows whatever they resell, so this
+/// predicate decides only what the later steps index. A row that states no
+/// canonical id says nothing against the role, so the role's answer stands
+/// for it.
+fn is_declaration(
+    role: Option<ProviderRole>,
+    own_namespace: Option<&str>,
+    entry: &ModelEntry,
+) -> bool {
+    if role != Some(ProviderRole::Vendor) {
+        return false;
+    }
+    let Some(own) = own_namespace else {
+        return true;
+    };
+    canonical_namespace(entry).is_none_or(|named| named == own)
+}
+
+/// The namespace a row's canonical id names.
+fn canonical_namespace(entry: &ModelEntry) -> Option<&str> {
+    let canonical = entry
+        .metadata
+        .as_ref()?
+        .raw
+        .get("canonical_model_id")?
+        .as_str()?;
+    canonical.split_once('/').map(|(namespace, _)| namespace)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -882,8 +951,13 @@ fn collapse(rows: Vec<Row<'_>>) -> Vec<Vec<Row<'_>>> {
 impl BundledCatalog {
     /// The bundled row an id names. Identification runs first; the merge
     /// serves an id that no step named.
-    pub(super) fn lookup(&self, provider: &ProviderProjection, id: &str) -> Option<Lookup> {
-        match self.identify(provider, id) {
+    pub(super) fn lookup(
+        &self,
+        provider: &ProviderProjection,
+        id: &str,
+        kind: Option<&str>,
+    ) -> Option<Lookup> {
+        match self.identify(provider, id, kind) {
             Ok(Some(found)) => Some(found),
             // Several rows claim the id and disagree, so none may supply
             // numbers; the merge is not allowed to answer something weaker
@@ -897,10 +971,12 @@ impl BundledCatalog {
     /// window, the smallest output cap and the intersection of the efforts.
     /// A row whose pair is its provider's default contributes to neither
     /// minimum, but it still answers when it is the only row.
-    fn merge_rows(&self, id: &str, query: &Query) -> Outcome {
+    ///
+    /// The rows of that name are then kept by `joinable`, which is what stops a
+    /// media row from answering a chat id.
+    fn merge_rows(&self, id: &str, query: &Query, kind: Option<&str>) -> Outcome {
         let input_tag = id.rsplit_once(':').map(|(_, tag)| tag.to_lowercase());
-        let mut joining: Vec<Row<'_>> = Vec::new();
-        let mut declaring: Vec<Row<'_>> = Vec::new();
+        let mut named: Vec<Row<'_>> = Vec::new();
         for row in &self.ids.rows {
             let provider_id = self.providers[row.provider].provider_id.as_str();
             let entry = &self.providers[row.provider].models[row.model];
@@ -912,20 +988,13 @@ impl BundledCatalog {
             ) {
                 continue;
             }
-            let row = Row {
+            named.push(Row {
                 provider_id,
                 entry,
                 tokens: &row.tokens,
-            };
-            joining.push(row);
-            // A provider's placeholder pair is its default, not a declaration,
-            // so the row contributes nothing to the minimum; neither does a row
-            // that declares no limit at all.
-            if !is_placeholder(provider_id, entry) && entry.capabilities.missing_limits().is_empty()
-            {
-                declaring.push(row);
-            }
+            });
         }
+        let (joining, declaring) = joinable(named, kind);
         if joining.is_empty() {
             return Outcome::None;
         }
@@ -1004,6 +1073,47 @@ fn same_model_with_tag(
     row_tokens.len() < input.len()
         && input[..row_tokens.len()] == *row_tokens
         && tail_allowed(&input[row_tokens.len()..])
+}
+
+/// The rows of one name that join the merge, and which of them declare a
+/// limit. A joining row is kept when:
+///
+/// 1. the row states no kind: it joins any id;
+/// 2. the id states `chat`, and the row states `chat`;
+/// 3. the id states another kind `K`, and the row states exactly `K`;
+/// 4. the id states no kind: when any named row states `chat` only the rows
+///    stating `chat` or none are kept, and otherwise every named row is.
+///
+/// So an id that states no kind keeps the rows it merged before, media rows of
+/// several kinds included, and it takes its `type` from the first of them;
+/// that inherited kind is what keeps a media model out of conversations. An id
+/// stating a kind takes no row of another one, and an id left with no joining
+/// row stays unidentified.
+fn joinable<'a>(named: Vec<Row<'a>>, id_kind: Option<&str>) -> (Vec<Row<'a>>, Vec<Row<'a>>) {
+    let kind = |row: &Row<'a>| entry_kind(row.entry);
+    let kept: Vec<Row<'a>> = match id_kind {
+        Some(id_kind) => named
+            .into_iter()
+            .filter(|row| kind(row).is_none_or(|row_kind| row_kind == id_kind))
+            .collect(),
+        None if named.iter().any(|row| kind(row).as_deref() == Some("chat")) => named
+            .into_iter()
+            .filter(|row| kind(row).is_none_or(|row_kind| row_kind == "chat"))
+            .collect(),
+        None => named,
+    };
+    // A provider's placeholder pair is its default, not a declaration, so the
+    // row contributes nothing to the minimum; neither does a row that declares
+    // no limit at all.
+    let declaring = kept
+        .iter()
+        .filter(|row| {
+            !is_placeholder(row.provider_id, row.entry)
+                && row.entry.capabilities.missing_limits().is_empty()
+        })
+        .copied()
+        .collect();
+    (kept, declaring)
 }
 
 /// The efforts every row that declares any agrees on, in the first row's

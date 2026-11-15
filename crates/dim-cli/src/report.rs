@@ -55,7 +55,7 @@ impl Captured {
             "operation": self.operation,
             "code": self.code,
             "observedAt": self.observed_at,
-            "clientVersion": crate::version::VERSION,
+            "clientVersion": dim_agent_capabilities::build::current(),
         });
         json!({"error":{"kind":"observed","observed":observed}})
     }
