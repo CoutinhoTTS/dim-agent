@@ -1708,6 +1708,24 @@ impl App {
         self.failure.is_none() && self.snapshot.as_ref().is_some_and(|s| s.running)
     }
 
+    /// A clipboard or image read that has not landed in the draft yet. Sending
+    /// before it does would submit without the paste or attachment, and the
+    /// read would then land in a new draft.
+    fn insertion_pending(&self) -> bool {
+        self.clipboard.is_some() || self.image_read.is_some()
+    }
+
+    /// Refuses a key that would send while an insertion is outstanding, with
+    /// the notice that names what is being inserted.
+    fn refuse_while_inserting(&mut self) {
+        let notice = if self.clipboard.is_some() {
+            t("Wait for clipboard insertion before sending")
+        } else {
+            t("Wait for the image insertion before sending")
+        };
+        self.set_notice(notice);
+    }
+
     /// Whether the user's attention is free for an offer: an empty composer,
     /// no prompt or panel, no question or approval waiting and no goal
     /// driving the Session.
@@ -3137,6 +3155,10 @@ impl App {
                 return Outcome::Continue;
             }
             if self.running() {
+                if self.insertion_pending() {
+                    self.refuse_while_inserting();
+                    return Outcome::Continue;
+                }
                 self.send_now();
                 return Outcome::Continue;
             }
@@ -3200,18 +3222,18 @@ impl App {
                 self.read_clipboard();
                 return Outcome::Continue;
             }
-            KeyCode::Enter if key.mods.0 == 0 && self.clipboard.is_some() => {
+            KeyCode::Enter if key.mods.0 == 0 && self.insertion_pending() => {
                 if self.composer.mention_key(key).is_some() {
                     return Outcome::Continue;
                 }
-                self.set_notice(t("Wait for clipboard insertion before sending"));
-                return Outcome::Continue;
-            }
-            KeyCode::Enter if key.mods.0 == 0 && self.image_read.is_some() => {
-                self.set_notice(t("Wait for the image insertion before sending"));
+                self.refuse_while_inserting();
                 return Outcome::Continue;
             }
             KeyCode::Char('s') if ctrl => {
+                if self.insertion_pending() {
+                    self.refuse_while_inserting();
+                    return Outcome::Continue;
+                }
                 if self.default_send_mode == SubmitMode::Queue {
                     self.steer();
                 }
@@ -15967,6 +15989,87 @@ mod tests {
         assert!(
             rows.contains("Application keys"),
             "the report's heading is drawn: {rows}"
+        );
+    }
+
+    /// Ctrl+Enter waits for a clipboard or image read the way Enter does: a
+    /// stop that settles first would submit without the paste or attachment.
+    /// Once the read lands, the one submitted message carries it.
+    #[test]
+    fn send_now_waits_for_a_pending_insertion() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        for image in [false, true] {
+            let (mut app, sent, home) = session_with_queue(true, &[("a", "first")]);
+            app.fullscreen = false;
+            app.composer.set_accepts_images(true);
+            let (clipboard_send, clipboard_receive) = std::sync::mpsc::channel();
+            let (image_send, image_receive) = std::sync::mpsc::channel();
+            let path = home.path().join("screen.png");
+            wide_png(&path, 32);
+            let plan = app.composer.plan_files(&[path]).unwrap();
+            let images = crate::ui::composer::read_planned(&plan).unwrap();
+            if image {
+                app.image_read = Some(ImageRead {
+                    plan,
+                    receive: image_receive,
+                });
+            } else {
+                app.clipboard = Some(ClipboardRead::Native(clipboard_receive));
+            }
+            typed(&mut app, "look");
+
+            app.handle(ctrl_enter());
+            assert!(
+                sent.borrow().is_empty(),
+                "send now must not withdraw or stop before the insertion lands"
+            );
+            let notice = if image {
+                "Wait for the image insertion before sending"
+            } else {
+                "Wait for clipboard insertion before sending"
+            };
+            assert_eq!(
+                app.notice.as_ref().map(|(text, _)| text.as_str()),
+                Some(notice)
+            );
+
+            if image {
+                image_send.send(Ok(images)).unwrap();
+            } else {
+                clipboard_send
+                    .send(Ok(crate::clipboard::Source::Text(" at this".into())))
+                    .unwrap();
+            }
+            app.tick();
+            app.handle(ctrl_enter());
+            assert_eq!(
+                describe(&sent.borrow()),
+                ["withdraw:a", "submit-now"],
+                "the gesture goes once the insertion is in"
+            );
+        }
+    }
+
+    /// Ctrl+S submits in the other mode during a run, so it takes the same
+    /// pending-insertion guard Enter does; the alternate-key normalization
+    /// must not bypass it.
+    #[test]
+    fn ctrl_s_waits_for_a_pending_insertion_too() {
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        let (_send, receive) = std::sync::mpsc::channel();
+        app.clipboard = Some(ClipboardRead::Native(receive));
+        typed(&mut app, "look");
+        app.handle(InputEvent::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            Modifiers::CTRL,
+        )));
+        assert!(
+            sent.borrow().is_empty(),
+            "Ctrl+S must not submit while the clipboard is being read"
+        );
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Wait for clipboard insertion before sending")
         );
     }
 
