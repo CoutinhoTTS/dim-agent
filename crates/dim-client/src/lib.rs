@@ -9,7 +9,9 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{collections::VecDeque, io, path::PathBuf, time::Duration};
+#[cfg(windows)]
+use std::time::Duration;
+use std::{collections::VecDeque, io, path::PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -336,9 +338,36 @@ impl Client {
 
     /// Negotiates the configured RPC version, checks the host's explicit model
     /// profile and returns the server version.
+    ///
+    /// The reply carries no bound of its own: a server that is bound but not yet
+    /// open answers nothing until its startup finishes, and how long that may
+    /// take is the caller's startup contract, not this transport's. A caller
+    /// without one bounds this call itself, as a reconnect inside its own
+    /// deadline does.
     pub async fn hello(&mut self) -> Result<String> {
+        let id = self.greet().await?;
+        let reply = self.response(id).await?;
+        self.complete_hello(reply)
+    }
+
+    /// Sends `hello` and returns the request identity, so a caller with a wait
+    /// of its own takes the reply through [`Client::response`] and checks it
+    /// with [`Client::complete_hello`].
+    pub async fn greet(&mut self) -> Result<u64> {
         let version = self.config.protocol_version;
-        let hello: Hello = tokio::time::timeout(Duration::from_secs(5), self.typed("hello", json!({"protocolVersion":version,"clientKind":self.config.client_kind,"clientName":self.config.client_name}))).await??;
+        self.send(
+            "hello",
+            json!({"protocolVersion":version,"clientKind":self.config.client_kind,"clientName":self.config.client_name}),
+        )
+        .await
+    }
+
+    /// Checks a `hello` reply taken after [`Client::greet`] and records what it
+    /// negotiates.
+    pub fn complete_hello(&mut self, value: Value) -> Result<String> {
+        let version = self.config.protocol_version;
+        let hello: Hello =
+            serde_json::from_value(value).map_err(|_| "Invalid hello response".to_owned())?;
         if hello.protocol_version != version
             || hello.instance_id.is_empty()
             || hello.server_version.is_empty()
