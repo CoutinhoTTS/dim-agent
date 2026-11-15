@@ -139,9 +139,14 @@ investigation and delivery progress in the issue/PR. Tool references:
 [Lean proof validation](https://lean-lang.org/doc/reference/latest/ValidatingProofs/).
 No design is required to use all tools. Choose evidence for the proposition, not a tool checklist.
 
+Start with the owner's externally observable promises and map each to an argument, a dependency
+or an explicit gap; do not choose the coverage solely from what is easy to model.
 Map the design's actions and observation points to implementation entry points. Translate relevant
 counterexamples into existing flow tests. Code review checks whether locks, awaits, queries and
 effects preserve the modeled boundaries; model correctness alone does not establish that mapping.
 
 The [WaitBranch example](examples/wait-argument.md) gives a scoped mathematical argument and
 executable model of recovery/consumption. Its assumptions and excluded behaviors are part of the claim.
+
+The [Wait contract experiment](examples/wait-contract-experiment.md) demonstrates a coverage
+inventory and a history-based oracle compared with actual public service results.

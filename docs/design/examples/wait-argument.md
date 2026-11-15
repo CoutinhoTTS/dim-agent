@@ -149,3 +149,6 @@ This models one branch Capability under its existing contract. No new service, e
 side effect, persistence or assembly behavior is introduced. Placement and dependency rules remain
 with Wait; query and delivery rules remain with their mechanism owners. There is no mechanism
 requirement. The model's D and b exist only to express P3, not as proposed production state.
+
+The [contract coverage and implementation experiment](wait-contract-experiment.md) extends this
+projection with notification obligations and real Timeline/Wait service observations.
