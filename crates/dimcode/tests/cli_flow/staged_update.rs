@@ -465,6 +465,62 @@ printf 'Replacement launcher started\n'
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_store_this_build_cannot_read_never_recovers() {
+    if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
+        return;
+    }
+    let installed = Installed::new(CURRENT, &["dima"]);
+    installed.mock_npm();
+    installed.release();
+    fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
+    let home = Home::new();
+    let database = home.0.join("rust/dimcode.sqlite");
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 14));
+             INSERT INTO agent_store_format VALUES (14);",
+        )
+        .unwrap();
+    let original = fs::read(&database).unwrap();
+    let mut command = Command::new(&installed.updater);
+    command
+        .arg("--home")
+        .arg(&home.0)
+        .args(["tui", "-p", "original message"])
+        .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
+        .env_remove("DIMCODE_AUTOUPDATE")
+        .env_remove("DIMCODE_UPDATE_CHECK")
+        .env_remove("DIMCODE_STARTUP_RETRY")
+        .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
+        .env("DIMCODE_NPM_REGISTRY", "http://127.0.0.1:1")
+        .env("UPDATE_ARGS", installed.home.0.join("install-args"))
+        .env("UPDATE_GATE", installed.home.0.join("gate"))
+        .env("UPDATE_WAITING", installed.home.0.join("waiting"));
+    let mut terminal = Terminal::launch_tui(command);
+    let status = terminal.wait();
+    let output = strip_ansi(&terminal.transcript);
+    assert!(!status.success(), "{output}");
+    assert!(
+        output.contains("Store format: v14 (no longer read by this daemon)"),
+        "{output}"
+    );
+    assert!(
+        output.contains("This daemon cannot read the store. Existing data was preserved."),
+        "{output}"
+    );
+    assert!(
+        !output.contains("Checking dimcode-alpha"),
+        "a store this build cannot read must not start a recovery: {output}"
+    );
+    assert!(!output.contains("store-newer"), "{output}");
+    assert_eq!(installed.installed(), CURRENT);
+    assert_eq!(fs::read(&database).unwrap(), original);
+    assert!(!installed.staging().exists());
+}
+
 #[test]
 fn an_interrupted_staged_update_keeps_the_installed_command() {
     for dies in [true, false] {
