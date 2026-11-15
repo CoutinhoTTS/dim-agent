@@ -512,7 +512,9 @@ async fn enablement_changes_the_list_and_loading() {
 /// `disable-model-invocation` keeps a Skill out of the model's list and makes
 /// the `skill` tool refuse it; `user-invocable: false` keeps it out of the
 /// operator's list and loads nothing, while the tool still loads it. A value
-/// that is neither true nor false is an invalid manifest, as a missing field is
+/// that is neither true nor false is an invalid manifest, as a missing field is,
+/// and so is a number, which a restriction written with one would otherwise
+/// widen to both invocations; a null or an empty value is the default
 /// ([Skills §9](../../../docs/design/plugins/Skills.md#9-references-load-with-the-operators-input)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn invocation_flags_narrow_who_may_load_a_skill() {
@@ -529,6 +531,18 @@ async fn invocation_flags_narrow_who_may_load_a_skill() {
     dirs.write(
         &layout.project.join("broken/SKILL.md"),
         "---\nname: broken\ndescription: Bad flag\ndisable-model-invocation: yes\n---\nBROKEN-BODY\n",
+    );
+    dirs.write(
+        &layout.project.join("numeric-model/SKILL.md"),
+        "---\nname: numeric-model\ndescription: Number as a flag\ndisable-model-invocation: 1\n---\nNUMERIC-MODEL-BODY\n",
+    );
+    dirs.write(
+        &layout.project.join("numeric-user/SKILL.md"),
+        "---\nname: numeric-user\ndescription: Number as a flag\nuser-invocable: 0\n---\nNUMERIC-USER-BODY\n",
+    );
+    dirs.write(
+        &layout.project.join("null-flags/SKILL.md"),
+        "---\nname: null-flags\ndescription: No flag at all\ndisable-model-invocation: null\nuser-invocable: ~\n---\nNULL-FLAGS-BODY\n",
     );
     let env = env(&dirs, Options::default()).await;
     let session = env.session(&layout.cwd, "").await.unwrap();
@@ -549,14 +563,30 @@ async fn invocation_flags_narrow_who_may_load_a_skill() {
         !listed.contains("broken"),
         "a malformed flag is an invalid manifest: {listed}"
     );
+    assert!(
+        !listed.contains("numeric-model") && !listed.contains("numeric-user"),
+        "a number where a flag belongs is an invalid manifest: {listed}"
+    );
+    assert!(
+        listed.contains("null-flags"),
+        "a null flag is the default, which allows the invocation: {listed}"
+    );
 
     let refused = result_text(&load(&env, &session, "model-only").await);
     assert!(refused.contains("operator-only"), "{refused}");
     assert!(result_text(&load(&env, &session, "user-only").await).contains("USER-ONLY-BODY"));
+    assert!(result_text(&load(&env, &session, "null-flags").await).contains("NULL-FLAGS-BODY"));
     assert_eq!(
         result_text(&load(&env, &session, "broken").await),
         "Unknown skill: broken"
     );
+    for name in ["numeric-model", "numeric-user"] {
+        assert_eq!(
+            result_text(&load(&env, &session, name).await),
+            format!("Unknown skill: {name}"),
+            "a number is no invocation flag, so the Skill loads for no one"
+        );
+    }
 
     let model = session.service::<SkillsBranch>("main").unwrap().session();
     let summaries = model.list().unwrap();
@@ -568,13 +598,22 @@ async fn invocation_flags_narrow_who_may_load_a_skill() {
     };
     assert!(!invocable("user-only"), "the palettes leave it out");
     assert!(invocable("model-only"), "the operator still invokes it");
+    assert!(
+        !invocable("numeric-user"),
+        "a number is no `user-invocable`, so no palette offers the Skill"
+    );
+    assert!(invocable("null-flags"), "a null flag allows the invocation");
 
     let view = model.current().unwrap();
-    let broken = view
-        .list
-        .as_deref()
-        .is_some_and(|list| list.contains("broken"));
-    assert!(!broken, "an invalid manifest is not in the catalog");
+    let in_view = |name: &str| view.list.as_deref().is_some_and(|list| list.contains(name));
+    assert!(
+        !in_view("broken"),
+        "an invalid manifest is not in the catalog"
+    );
+    assert!(
+        !in_view("numeric-model") && !in_view("numeric-user"),
+        "a number keeps the Skill out of the catalog"
+    );
 
     let catalog = env.catalog().query(Some(&layout.cwd)).await.unwrap();
     let issue = catalog
@@ -586,6 +625,17 @@ async fn invocation_flags_narrow_who_may_load_a_skill() {
         format!("{issue:?}").contains("disable-model-invocation"),
         "{issue:?}"
     );
+    for (file, flag) in [
+        ("numeric-model/SKILL.md", "disable-model-invocation"),
+        ("numeric-user/SKILL.md", "user-invocable"),
+    ] {
+        let issue = catalog
+            .issues
+            .iter()
+            .find(|issue| matches!(issue, SkillIssue::InvalidManifest { path, .. } if path.ends_with(file)))
+            .unwrap_or_else(|| panic!("the number in {file} is reported: {catalog:?}"));
+        assert!(format!("{issue:?}").contains(flag), "{issue:?}");
+    }
     env.agent.close().await.unwrap();
 }
 

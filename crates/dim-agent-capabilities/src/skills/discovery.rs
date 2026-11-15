@@ -173,21 +173,24 @@ fn parse_skill(
     })
 }
 
-/// A frontmatter flag as written, or `None` when it is absent or empty. A value
-/// that is neither `true` nor `false` is an invalid manifest, like a missing
-/// `name`: the frontmatter is the author's declaration and no default fills a
-/// misspelling. An empty value is `null` in YAML and leaves the caller's
-/// default in place.
+/// A frontmatter flag as written, or `None` when it is absent or empty: `null`,
+/// `~`, a missing key and an empty value all mean the default. A number is not
+/// a flag, and neither is a string or a list: reading it as `false` would
+/// silently turn a mistyped restriction into its opposite, so the manifest is
+/// invalid, like one with no `name`. The frontmatter is the author's
+/// declaration and no default fills a misspelling.
 fn flag(
     data: &BTreeMap<String, Yaml>,
     key: &str,
     invalid: &impl Fn(&str) -> SkillIssue,
 ) -> Result<Option<bool>, SkillIssue> {
     match data.get(key) {
-        None | Some(Yaml::Other) => Ok(None),
+        None | Some(Yaml::Null) => Ok(None),
         Some(Yaml::Bool(value)) => Ok(Some(*value)),
         Some(Yaml::Str(value)) if value.trim().is_empty() => Ok(None),
-        Some(Yaml::Str(_) | Yaml::List(_)) => Err(invalid(&format!("{key} must be true or false"))),
+        Some(Yaml::Str(_) | Yaml::List(_) | Yaml::Number) => {
+            Err(invalid(&format!("{key} must be true or false")))
+        }
     }
 }
 
@@ -230,8 +233,10 @@ enum Yaml {
     List(Vec<String>),
     /// `true` or `false`, told apart from the other non-string scalars.
     Bool(bool),
-    /// A number, `null` or `~`: a scalar no field reads as text.
-    Other,
+    /// `null` or `~`: no value, which every field reads as the default.
+    Null,
+    /// A number, which no field reads as text or as a flag.
+    Number,
 }
 
 /// Mirrors TS `parseSkillFile` over `parseFrontmatter`: a closed, non-empty
@@ -359,7 +364,7 @@ fn parse_scalar(raw: &str) -> Yaml {
     match raw {
         "true" => return Yaml::Bool(true),
         "false" => return Yaml::Bool(false),
-        "null" | "~" => return Yaml::Other,
+        "null" | "~" => return Yaml::Null,
         _ => {}
     }
     let unquoted = unquote(raw);
@@ -367,7 +372,7 @@ fn parse_scalar(raw: &str) -> Yaml {
         return Yaml::Str(unquoted.to_owned());
     }
     if raw.parse::<f64>().is_ok_and(|number| !number.is_nan()) {
-        return Yaml::Other;
+        return Yaml::Number;
     }
     Yaml::Str(raw.to_owned())
 }

@@ -491,7 +491,11 @@ round trip, and no AgentLoop change. The design is:
 
   A value that is neither `true` nor `false` is an invalid manifest, reported as a `skills.catalog`
   issue and kept out of the catalog exactly as a missing `name` or `description` is: the existing
-  frontmatter error handling applies, and no default fills the gap.
+  frontmatter error handling applies, and no default fills the gap. A number is such a value: the
+  frontmatter parser keeps it apart from a string, so `disable-model-invocation: 1` and
+  `user-invocable: 0` are refused rather than read as the default, which would silently widen a
+  mistyped restriction to both invocations. An absent key, `null`, `~` and an empty value are the
+  default, because they declare nothing.
 - **One block per Skill.** The block is `<dim-skill name="{name}">`, the exact text the `skill`
   tool returns, and `</dim-skill>`. The name is escaped with the attribute escaping every
   `<dim-…>` marker uses, and one function renders the loaded text for both the tool result and
