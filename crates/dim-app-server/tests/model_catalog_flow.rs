@@ -55,7 +55,7 @@ fn a_bundled_match_declares_both_limits_and_an_unmatched_descriptor_has_none() {
     assert_eq!(numbers(&matched), numbers(&row));
     assert!(matched.capabilities.missing_limits().is_empty());
     let id = "zzzz-private-descriptor";
-    assert!(catalog.fallback(&Default::default(), id).is_none());
+    assert!(catalog.fallback(&Default::default(), id, None).is_none());
     let unmatched = catalog.project(&provider, &json!({ "id": id })).unwrap();
     assert_eq!(
         unmatched.capabilities.missing_limits(),
@@ -690,6 +690,49 @@ fn with_tool_calling(mut row: serde_json::Value, tool_calling: bool) -> serde_js
     row
 }
 
+/// The same row, stating the kind of model it describes.
+fn with_kind(mut row: serde_json::Value, kind: &str) -> serde_json::Value {
+    row["metadata"]["raw"]["type"] = json!(kind);
+    row
+}
+
+/// One row of a kind other than chat: the kind stated in its raw `type`, and a
+/// placeholder pair its provider writes across its rows.
+fn media_row(
+    model_id: &str,
+    display_name: &str,
+    kind: &str,
+    window: u64,
+    output: u64,
+) -> serde_json::Value {
+    let mut row = with_raw(
+        row(model_id, display_name, window, output),
+        json!({ "type": kind }),
+    );
+    row["metadata"]["reasoning"] = json!({ "supported": false });
+    row
+}
+
+/// One entry of a provider's stored list, as a provider that states its own
+/// kind, its pair and a reasoning toggle saved it.
+fn chat_row(model_id: &str, display_name: &str, window: u64, output: u64) -> ModelEntry {
+    serde_json::from_value(json!({
+        "modelId": model_id,
+        "displayName": display_name,
+        "status": "active",
+        "capabilities": {
+            "modalities": ["text"], "toolCalling": true, "streaming": true,
+            "structuredOutput": true, "vision": false, "audio": false,
+            "reasoning": true, "contextWindow": window, "maxOutputTokens": output,
+        },
+        "metadata": {
+            "reasoning": { "supported": true, "effortOptions": ["low", "high"] },
+            "raw": { "type": "chat" },
+        },
+    }))
+    .expect("a listed chat row states its id, pair, kind and efforts")
+}
+
 /// The namespace a row's canonical id names, as the matcher reads it.
 fn canonical_namespace(model: &ModelEntry) -> Option<&str> {
     model
@@ -803,6 +846,19 @@ fn prefixed_relay(catalog: &BundledCatalog, id: &str, prefix: Option<&str>) -> M
         ..Default::default()
     };
     catalog.project(&provider, &json!({ "id": id })).unwrap()
+}
+
+/// The same projection, for a listed id that states its own kind: the kind it
+/// carries is the one the merge joins rows of.
+fn kinded_relay(catalog: &BundledCatalog, id: &str, kind: &str) -> ModelEntry {
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        ..Default::default()
+    };
+    catalog
+        .project(&provider, &json!({ "id": id, "raw": { "type": kind } }))
+        .unwrap()
 }
 
 /// Projects one id through a builtin provider's own bundled list.
@@ -1915,6 +1971,424 @@ fn a_tagged_row_does_not_join_an_untagged_input() {
             numbers(&bundled(&catalog, "reseller-a", "acme/precision-8b")).1,
         ),
         "the untagged input takes the untagged rows' minimum"
+    );
+}
+
+/// A listed chat id whose only joining rows are media rows is answered by
+/// none of them. The entry keeps the name, the window, the output cap and the
+/// reasoning toggle the listing declared, and reports no identification at
+/// all, so the picker says nothing named the model instead of naming a video
+/// row as the model it was taken to be.
+#[test]
+fn a_chat_id_joins_no_row_of_another_kind() {
+    let catalog = catalog(json!([
+        aggregator(
+            "video-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "video-generation",
+                8_192,
+                8_192,
+            )]),
+        ),
+        aggregator(
+            "image-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "image-generation",
+                8_192,
+                8_192,
+            )]),
+        ),
+    ]));
+    let declared = chat_row("acme-omni-3", "Acme Omni 3", 1_000_000, 128_000);
+    let declared_efforts = efforts(&declared).expect("the listing states its efforts");
+    let declared_numbers = numbers(&declared);
+    for reseller in ["video-reseller", "image-reseller"] {
+        let joining = bundled(&catalog, reseller, "acme-omni-3");
+        assert_eq!(
+            numbers(&joining),
+            (Some(8_192), Some(8_192)),
+            "{reseller}'s placeholder pair is what a kind-blind merge would adopt"
+        );
+    }
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        models: vec![declared.clone()],
+        ..Default::default()
+    };
+    let effective = catalog.effective_models(&provider, std::slice::from_ref(&declared), &[]);
+    let entry = &effective[0];
+    assert!(
+        entry.metadata.as_ref().unwrap().identification.is_none(),
+        "no step named the model, so the entry reports no identification"
+    );
+    assert_eq!(
+        (entry.display_name.as_str(), numbers(entry)),
+        (declared.display_name.as_str(), declared_numbers),
+        "the entry keeps the name and the pair its own listing declared"
+    );
+    assert_eq!(
+        efforts(entry),
+        Some(declared_efforts),
+        "the entry keeps the efforts its own listing declared"
+    );
+    assert!(
+        entry.capabilities.reasoning,
+        "a media row that declares reasoning unsupported never turns it off"
+    );
+    assert_eq!(
+        matched(entry),
+        ("provider-default", "-"),
+        "neither media row is named as the model this id was taken to be"
+    );
+}
+
+/// A chat id beside a chat row and a media row of the same name merges with
+/// the chat row alone: the numbers are the chat row's, and the media row's
+/// placeholder pair takes no part in the minimum.
+#[test]
+fn a_chat_id_joins_the_chat_row_beside_a_media_row_of_the_same_name() {
+    let catalog = catalog(json!([
+        aggregator(
+            "chat-reseller",
+            json!([with_efforts(
+                with_kind(row("acme-omni-3", "Acme Omni 3", 200_000, 64_000), "chat"),
+                &["low", "high"],
+            )]),
+        ),
+        aggregator(
+            "video-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "video-generation",
+                8_192,
+                8_192,
+            )]),
+        ),
+    ]));
+    let entry = kinded_relay(&catalog, "acme-omni-3", "chat");
+    let chat = bundled(&catalog, "chat-reseller", "acme-omni-3");
+    let media = bundled(&catalog, "video-reseller", "acme-omni-3");
+    assert!(
+        numbers(&media).0 < numbers(&chat).0,
+        "the media row's pair is the smaller one, so a kind-blind join would take it"
+    );
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        (numbers(&entry), efforts(&entry)),
+        (numbers(&chat), efforts(&chat)),
+        "the merge is the chat row's own numbers and efforts"
+    );
+    assert_eq!(matched(&entry), ("chat-reseller", "acme-omni-3"));
+    assert_eq!(
+        adopted(&entry),
+        [
+            ("contextWindow", 200_000, "chat-reseller"),
+            ("maxOutputTokens", 64_000, "chat-reseller"),
+        ],
+        "the media row supplies no limit"
+    );
+}
+
+/// A row whose `raw.type` is `"model"` names the JSON object rather than a
+/// kind, so it joins a chat id as a row stating the chat kind does; a row that
+/// states no type at all joins one too.
+#[test]
+fn a_row_stating_no_kind_of_its_own_joins_a_chat_id() {
+    let catalog = catalog(json!([
+        aggregator(
+            "kinds-reseller",
+            json!([with_raw(
+                row("acme-omni-3", "Acme Omni 3", 128_000, 8_000),
+                json!({ "type": "model" }),
+            )]),
+        ),
+        aggregator(
+            "bare-reseller",
+            json!([row("acme-omni-3", "Acme Omni 3", 64_000, 16_000)]),
+        ),
+    ]));
+    let entry = kinded_relay(&catalog, "acme-omni-3", "chat");
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        numbers(&entry),
+        (
+            numbers(&bundled(&catalog, "bare-reseller", "acme-omni-3")).0,
+            numbers(&bundled(&catalog, "kinds-reseller", "acme-omni-3")).1,
+        ),
+        "both rows join, so both minima are taken"
+    );
+    assert_eq!(
+        adopted(&entry),
+        [
+            ("contextWindow", 64_000, "bare-reseller"),
+            ("maxOutputTokens", 8_000, "kinds-reseller"),
+        ],
+        "a row stating `model` and a row stating no kind both supply a limit"
+    );
+}
+
+/// The kind rule holds on both paths the id's kind travels through here: a
+/// media id joins a row of its own kind and refuses a chat row, and a chat id
+/// takes the chat row. `effective_models` reads a stored row's kind and
+/// `project` reads a listed descriptor's, which are the two paths the kind
+/// reaches identification through.
+///
+/// `identify_entry` is the third caller of that chain and is `pub(crate)`, so
+/// an integration test cannot reach it; its stored-row case is the one
+/// `effective_models` states here, because both read the kind from the entry
+/// they are handed.
+#[test]
+fn a_media_id_joins_only_a_row_of_its_own_kind_on_every_path() {
+    let catalog = catalog(json!([
+        aggregator(
+            "media-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "image-generation",
+                8_192,
+                4_096,
+            )]),
+        ),
+        aggregator(
+            "chat-reseller",
+            json!([row("acme-omni-3", "Acme Omni 3", 200_000, 64_000)]),
+        ),
+    ]));
+    let media = bundled(&catalog, "media-reseller", "acme-omni-3");
+    let chat = bundled(&catalog, "chat-reseller", "acme-omni-3");
+    assert!(
+        numbers(&media).0 < numbers(&chat).0,
+        "a kind-blind merge would take the media row's smaller window"
+    );
+    let projection = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        models: vec![media.clone()],
+        ..Default::default()
+    };
+
+    let effective = catalog.effective_models(&projection, std::slice::from_ref(&media), &[]);
+    assert_eq!(
+        (rule(&effective[0]), numbers(&effective[0])),
+        ("merge", numbers(&media)),
+        "an image-generation id merges the row of its own kind"
+    );
+    assert_eq!(
+        adopted(&effective[0]),
+        [
+            ("contextWindow", 8_192, "media-reseller"),
+            ("maxOutputTokens", 4_096, "media-reseller"),
+        ],
+        "the chat row supplies nothing to a media id"
+    );
+
+    let listed = |kind: &str| {
+        catalog
+            .project(
+                &ProviderProjection {
+                    provider_id: "my-gateway".into(),
+                    source: Some(ModelSource::Custom),
+                    ..Default::default()
+                },
+                &json!({ "id": "acme-omni-3", "raw": { "type": kind } }),
+            )
+            .unwrap()
+    };
+    let image = listed("image-generation");
+    assert_eq!(
+        (rule(&image), numbers(&image)),
+        ("merge", numbers(&media)),
+        "a listed image-generation id takes the media row"
+    );
+    let chatted = listed("chat");
+    assert_eq!(
+        (rule(&chatted), numbers(&chatted)),
+        ("merge", numbers(&chat)),
+        "a listed chat id takes the chat row the media row does not outrank"
+    );
+}
+
+/// An id that states no kind keeps every row of its name, so a media model a
+/// relay lists without a `type` still merges and still carries the media kind
+/// it inherited. That inherited `type` is what keeps it out of conversations.
+#[test]
+fn a_no_kind_id_keeps_a_media_row_of_one_kind() {
+    let catalog = catalog(json!([aggregator(
+        "image-reseller",
+        json!([media_row(
+            "acme-omni-3",
+            "Acme Omni 3",
+            "image-generation",
+            32_768,
+            4_096,
+        )]),
+    )]));
+    let entry = relay(&catalog, "acme-omni-3");
+    let row = bundled(&catalog, "image-reseller", "acme-omni-3");
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        entry.metadata.as_ref().unwrap().raw.get("type"),
+        row.metadata.as_ref().unwrap().raw.get("type"),
+        "the entry carries the media kind it inherited from the row"
+    );
+    assert_eq!(numbers(&entry), numbers(&row));
+}
+
+/// A no-kind id beside a chat row and a media row of the same name merges with
+/// the chat row only: the numbers are the chat row's and the media row's pair
+/// is not in the minimum.
+#[test]
+fn a_no_kind_id_beside_a_chat_row_takes_only_the_chat_row() {
+    let catalog = catalog(json!([
+        aggregator(
+            "chat-reseller",
+            json!([with_kind(
+                row("acme-omni-3", "Acme Omni 3", 200_000, 64_000),
+                "chat",
+            )]),
+        ),
+        aggregator(
+            "video-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "video-generation",
+                8_192,
+                8_192,
+            )]),
+        ),
+    ]));
+    let entry = relay(&catalog, "acme-omni-3");
+    let chat = bundled(&catalog, "chat-reseller", "acme-omni-3");
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        numbers(&entry),
+        numbers(&chat),
+        "the chat row is the only row the merge reads"
+    );
+    assert_eq!(matched(&entry), ("chat-reseller", "acme-omni-3"));
+    assert_eq!(
+        adopted(&entry),
+        [
+            ("contextWindow", 200_000, "chat-reseller"),
+            ("maxOutputTokens", 64_000, "chat-reseller"),
+        ],
+        "the media row's smaller pair is not in the minimum"
+    );
+    assert_eq!(
+        entry.metadata.as_ref().unwrap().raw.get("type"),
+        chat.metadata.as_ref().unwrap().raw.get("type"),
+        "the entry carries the chat row's `type`"
+    );
+}
+
+/// A no-kind id whose only joining rows are media rows of two different kinds
+/// still merges both, which is what a listing that states no kind does today.
+#[test]
+fn a_no_kind_id_keeps_media_rows_of_two_kinds() {
+    let catalog = catalog(json!([
+        aggregator(
+            "video-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "video-generation",
+                128_000,
+                16_384,
+            )]),
+        ),
+        aggregator(
+            "audio-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "audio",
+                64_000,
+                32_768,
+            )]),
+        ),
+    ]));
+    let entry = relay(&catalog, "acme-omni-3");
+    let video = bundled(&catalog, "video-reseller", "acme-omni-3");
+    let audio = bundled(&catalog, "audio-reseller", "acme-omni-3");
+    assert_ne!(
+        numbers(&video),
+        numbers(&audio),
+        "the two rows declare different pairs, so each minimum names one row"
+    );
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        numbers(&entry),
+        (
+            numbers(&audio).0.min(numbers(&video).0),
+            numbers(&audio).1.min(numbers(&video).1),
+        ),
+        "both rows join, so the smaller window and the smaller cap are taken"
+    );
+}
+
+/// A listed chat id whose only joining rows are media rows stays unidentified
+/// on the projection path too, and the projection says so rather than naming
+/// the row it refused.
+#[test]
+fn a_chat_id_naming_only_media_rows_stays_unidentified_on_a_projection() {
+    let catalog = catalog(json!([aggregator(
+        "video-reseller",
+        json!([media_row(
+            "acme-omni-3",
+            "Acme Omni 3",
+            "video-generation",
+            8_192,
+            8_192,
+        )]),
+    ),]));
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        ..Default::default()
+    };
+    let entry = catalog
+        .project(
+            &provider,
+            &json!({
+                "id": "acme-omni-3",
+                "raw": { "type": "chat" },
+                "limit": { "context": 1_000_000, "output": 128_000 },
+                "reasoning": { "supported": true },
+            }),
+        )
+        .unwrap();
+    let metadata = entry.metadata.as_ref().unwrap();
+    assert!(metadata.identification.is_none(), "no step named the model");
+    assert_eq!(
+        (
+            metadata.matched_provider_id.as_deref(),
+            metadata.matched_model_id.as_deref(),
+            metadata.match_strategy.as_deref(),
+        ),
+        (None, None, Some("provider-default")),
+        "a refused merge leaves no matched row and no merge strategy"
+    );
+    assert_eq!(
+        numbers(&entry),
+        (Some(1_000_000), Some(128_000)),
+        "the projection keeps the pair the descriptor declared"
+    );
+    assert_eq!(
+        metadata.metadata_source.as_deref(),
+        Some("provider-default"),
+        "no media row supplies the entry's metadata"
+    );
+    assert_eq!(
+        entry.display_name, "acme-omni-3",
+        "the media row's display name is not adopted"
     );
 }
 
