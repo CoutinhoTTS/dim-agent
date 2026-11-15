@@ -1858,6 +1858,22 @@ ignores the progress kind and falls back to the generic messages above.
 Development documentation continues to use `./dev` and its isolated home; the
 terminal note itself names a compatible build or `--home PATH`.
 
+The daemon binds its endpoint early in its assembly and opens it only once the
+whole assembly is ready, so a client that connects in between has a socket that
+accepts and answers nothing. That wait is a startup phase, not a request
+handshake with a bound of its own: `hello` carries none, and the client takes
+the reply under the inactivity bound of the phase it is in, which a progress
+counter moves forward by the bound itself (10 s for a connect and the spawn
+wait, the shutdown plus startup plus margin for the start-lock wait). An
+upgrade therefore extends the handshake the same way it extends the spawn, and
+every action that connects, `daemon stop` included, is bounded like the phase
+it is in. `Client::greet` sends `hello` and `Client::complete_hello` checks the
+reply, so a caller with a wait takes the reply itself, and `Client::hello` is
+for a caller with none, such as the ACP gateway's reconnect, which bounds a
+whole attempt inside its own deadline. When the bound does expire, the client
+names the phase it was in and `<native home>/daemon.log`; tokio's own
+`deadline has elapsed` never reaches the user from this path.
+
 ```text
 $ dima
 Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.

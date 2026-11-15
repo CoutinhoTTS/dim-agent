@@ -4105,7 +4105,9 @@
         "format",
         "json",
         "matches",
-        "println"
+        "println",
+        "tokio::pin",
+        "tokio::select"
       ]
     },
     {
