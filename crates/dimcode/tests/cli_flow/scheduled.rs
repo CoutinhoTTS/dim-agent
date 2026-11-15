@@ -30,7 +30,7 @@ fn user_queue_reports_a_daemon_without_block_presence() {
 #[test]
 fn automatic_inputs_stay_out_of_the_user_queue_after_resume_and_live_delivery() {
     for fullscreen in [false, true] {
-        let home = Home::new();
+        let home = Home::queued();
         let (stopped, stop_received) = mpsc::channel();
         let daemon = home.daemon(move |wire| {
             wire.hello(&["session.methods"]);
@@ -2047,4 +2047,100 @@ fn tui_scheduled_panel_says_when_the_daemon_cannot_manage_it() {
     terminal.until("Bye!");
     assert!(terminal.wait().success());
     daemon.join().unwrap();
+}
+
+/// A held input with source raw blocks, such as a scheduled delivery, is
+/// outside the user queue, so neither send now nor `Esc` then `Enter`
+/// withdraws it. The test pins that the two keys agree: each stops the run and
+/// submits only the typed draft, and the automatic input stays pending.
+#[test]
+fn a_held_scheduled_input_is_left_by_send_now_and_by_escape_then_enter() {
+    let mut seen = Vec::new();
+    for (label, escape_first) in [("send now", false), ("escape then enter", true)] {
+        let home = Home::queued();
+        let (done, checked) = mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.methods"]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["running"] = json!(true);
+            wire.reply(&attach, record);
+            let mut ready = false;
+            let mut context = false;
+            let mut accounts = false;
+            while !ready || !context || !accounts {
+                let request = wire.read_any();
+                match request["method"].as_str().unwrap() {
+                    "session.methods" => wire.reply(&request, json!({"methods":[
+                        {"name":"session.input.pending","mutating":false},
+                        {"name":"session.turn.get","mutating":false}
+                    ]})),
+                    "session.history" => wire.reply(&request, json!({"events":[],
+                        "through":8,"nextAfter":8,"done":true})),
+                    "session.input.pending" => {
+                        assert_eq!(request["params"]["includeBlockPresence"], true);
+                        wire.reply(&request, json!({"branchId":"main","through":8,"next":null,
+                            "inputs":[
+                                {"inputId":"scheduled","sequence":2,"mode":"queue","applied":false,
+                                 "hasRawBlocks":true,
+                                 "user":{"content":[{"type":"text","text":"AUTOMATIC"}]}}
+                            ]}));
+                    }
+                    "session.turn.get" => {
+                        ready = true;
+                        wire.reply(&request, json!({"branchId":"main","through":8,
+                            "turn":{"turnId":"turn","sequence":1,"ended":false},"output":null}));
+                    }
+                    "session.context.usage" => {
+                        context = true;
+                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                            "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}}));
+                    }
+                    "account.providers" => { accounts = true; wire.reply(&request, json!([])); }
+                    method => panic!("unexpected opening request: {method}"),
+                }
+            }
+            // Past the opening the polls answer themselves, so only the
+            // operator's own commands are left to read.
+            wire.2 = true;
+            let submit = loop {
+                let request = wire.read_any();
+                match request["method"].as_str().expect("a method") {
+                    "session.stop" => wire.reply(&request, json!({"sequence":9})),
+                    "session.submit" => break request,
+                    "session.input.withdraw" => panic!(
+                        "a held scheduled input is outside the user queue: {request}"
+                    ),
+                    method => panic!("unexpected command: {method}"),
+                }
+            };
+            assert_eq!(
+                submit["params"]["text"], "typed",
+                "only the typed draft is sent; the automatic input keeps its place"
+            );
+            assert_eq!(submit["params"]["mode"], "queue");
+            wire.reply(&submit, json!({"event":{}}));
+            done.send(()).unwrap();
+            wire.hold();
+        });
+        let mut terminal = Terminal::resume_tui(home.command());
+        terminal.until("test / model");
+        terminal.write(b"typed");
+        terminal.until("typed");
+        if escape_first {
+            terminal.write(b"\x1b");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            terminal.write(b"\r");
+        } else {
+            terminal.write(b"\x1b[13;5u");
+        }
+        checked.recv_timeout(PATIENCE).unwrap();
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+        let shown = strip_ansi(&terminal.transcript);
+        assert!(!shown.contains("AUTOMATIC"), "{label}: {shown}");
+        seen.push(label);
+    }
+    assert_eq!(seen, ["send now", "escape then enter"]);
 }

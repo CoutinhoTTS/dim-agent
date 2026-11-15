@@ -40,6 +40,14 @@ pub(super) async fn update(
     install: &Install,
     cancel: &CancellationToken,
 ) -> Result<Vec<String>, String> {
+    if install.recovery.is_some() {
+        let live = manifest_version(&package_at(&install.directory, &install.package))?;
+        if live != dim_agent_capabilities::build::VERSION {
+            return Err(
+                "The installed version changed during startup. Run the command again.".to_owned(),
+            );
+        }
+    }
     let kept = install.directory.join(STAGING);
     let root = kept.join(&install.package);
     clear(install, &root)?;
@@ -129,6 +137,9 @@ async fn replace(install: &Install, staging: &Path, cancel: &CancellationToken) 
         Ok(new) => new,
         Err(error) => return Outcome::Failed(error),
     };
+    if let Err(error) = verify_recovery(install, &staged, &version, &new) {
+        return Outcome::Failed(error);
+    }
     if let Err(error) = check_ownership(install, &new) {
         return Outcome::Failed(error);
     }
@@ -204,6 +215,34 @@ fn staged_version(install: &Install, staged: &Path) -> Result<String, String> {
 /// The one wording every incomplete staged tree reports.
 fn incomplete(error: String) -> String {
     format!("The package manager reported success but the staged package is incomplete: {error}")
+}
+
+/// What only a newer-store startup recovery asks of the staged tree: the
+/// launcher it restarts, a payload that declares support for the store format
+/// the running binary refused, and a release the user did not skip. A
+/// user-initiated update asks for none of them. The version the payload
+/// declares is the one the manager installed, so every check is bound to the
+/// staged tree rather than to a version resolved beforehand: the tag the
+/// manager resolves can name a different release than the registry did.
+fn verify_recovery(
+    install: &Install,
+    staged: &Path,
+    version: &str,
+    new: &[Command],
+) -> Result<(), String> {
+    let Some(recovery) = &install.recovery else {
+        return Ok(());
+    };
+    if recovery.skipped.as_deref() == Some(version) {
+        return Err(format!(
+            "{version} is marked as skipped; the installation is unchanged"
+        ));
+    }
+    let launcher = super::entry_point(&install.package);
+    if !new.iter().any(|command| command.name == launcher) {
+        return Err(incomplete(format!("missing the {launcher} command")));
+    }
+    verify_store_format(staged, version, recovery.store_format)
 }
 
 /// The version a package's `package.json` declares.
@@ -394,6 +433,51 @@ fn live_commands(prefix: &Path, package: &str) -> Vec<String> {
             single(&path).map(str::to_owned)
         })
         .collect()
+}
+
+fn verify_store_format(staged: &Path, version: &str, format: u32) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ReleaseManifest {
+        schema_version: u32,
+        version: String,
+        platform: String,
+        store_formats: Vec<u32>,
+    }
+
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        os => os,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        arch => arch,
+    };
+    let platform = format!("{platform}-{arch}");
+    let payload = staged
+        .join("node_modules")
+        .join(format!("dimcode-{platform}"));
+    let declaration = std::fs::read(payload.join("release-manifest.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ReleaseManifest>(&bytes).ok())
+        .filter(|manifest| {
+            manifest.schema_version == 1
+                && manifest.version == version
+                && manifest.platform == platform
+                && payload.join("bin/dimcode").is_file()
+        });
+    let Some(declaration) = declaration else {
+        return Err(format!(
+            "{version} does not declare support for native store v{format}."
+        ));
+    };
+    if !declaration.store_formats.contains(&format) {
+        return Err(format!(
+            "{version} does not support native store v{format}."
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a platform package, which holds the binary behind an entry point,
@@ -799,6 +883,7 @@ fn notes(notes: Vec<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::update::{Manager, Recovery};
     use serde_json::json;
 
     fn declared(manifest: serde_json::Value) -> Vec<String> {
@@ -815,6 +900,87 @@ mod tests {
         let mut commands = declared(manifest);
         commands.sort();
         commands
+    }
+
+    /// A staged tree a recovery proof reads: a platform package declaring
+    /// `store_formats`, and the launcher the manager linked.
+    fn staged_payload(staged: &Path, version: &str, store_formats: &[u32]) -> Vec<Command> {
+        let platform = match std::env::consts::OS {
+            "macos" => "darwin",
+            os => os,
+        };
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "x64",
+            arch => arch,
+        };
+        let platform = format!("{platform}-{arch}");
+        let payload = staged
+            .join("node_modules")
+            .join(format!("dimcode-{platform}"));
+        std::fs::create_dir_all(payload.join("bin")).unwrap();
+        std::fs::write(payload.join("bin/dimcode"), "").unwrap();
+        std::fs::write(
+            payload.join("release-manifest.json"),
+            json!({
+                "schemaVersion": 1, "platform": platform, "version": version,
+                "storeFormats": store_formats
+            })
+            .to_string(),
+        )
+        .unwrap();
+        vec![Command {
+            name: "dima".to_owned(),
+            file: "bin/dimcode.mjs".to_owned(),
+        }]
+    }
+
+    fn recovery_install(directory: &Path, store_format: u32, skipped: Option<&str>) -> Install {
+        Install {
+            version: "0.1.0-alpha.1".to_owned(),
+            program: directory.join("npm"),
+            manager: Manager::Staged,
+            directory: directory.to_path_buf(),
+            package: "dimcode-alpha".to_owned(),
+            recovery: Some(Recovery {
+                store_format,
+                skipped: skipped.map(str::to_owned),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_recovery_refuses_the_release_the_user_skipped() {
+        let directory = tempfile::tempdir().unwrap();
+        let staged = directory.path().join("staged");
+        let version = "0.1.0-alpha.2";
+        let format = 49;
+        let commands = staged_payload(&staged, version, &[format]);
+        let refused = verify_recovery(
+            &recovery_install(directory.path(), format, Some(version)),
+            &staged,
+            version,
+            &commands,
+        )
+        .unwrap_err();
+        assert!(
+            refused.contains(&format!("{version} is marked as skipped")),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("the installation is unchanged"),
+            "{refused}"
+        );
+        assert_eq!(
+            verify_recovery(
+                &recovery_install(directory.path(), format, Some("0.1.0-alpha.1")),
+                &staged,
+                version,
+                &commands,
+            ),
+            Ok(()),
+            "a skipped version newer than the staged one must not refuse it"
+        );
     }
 
     #[test]

@@ -33,6 +33,19 @@ pub struct Offer {
     pub manual: String,
 }
 
+/// What only a newer-store startup recovery asks of the staged tree.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recovery {
+    /// The native store format the running binary refused to read and the
+    /// staged release must declare support for.
+    pub store_format: u32,
+    /// The version the user skipped, which the recovery must never install:
+    /// the tag the manager resolves can name it even when the registry
+    /// answered a newer one.
+    pub skipped: Option<String>,
+}
+
 /// An install of a version with the package manager this copy came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Install {
@@ -44,6 +57,10 @@ pub struct Install {
     /// The package this copy was installed from, which names the directory the
     /// manager installs it into and the commands that start it.
     pub package: String,
+    /// Set only by a newer-store startup recovery; a user-initiated update
+    /// leaves it `None` and so ignores skips by design.
+    #[cfg(unix)]
+    recovery: Option<Recovery>,
 }
 
 /// How the manager installs the new version.
@@ -259,6 +276,8 @@ fn installer(exe: &Path, package: &str, version: &str) -> Option<Install> {
         manager,
         directory,
         package: package.to_owned(),
+        #[cfg(unix)]
+        recovery: None,
     })
 }
 
@@ -284,37 +303,116 @@ fn upgrade_tag(version: &str, release: bool) -> Option<&str> {
 pub async fn available(home: &Path, current: &str) -> Option<Offer> {
     let tag = upgrade_tag(current, dim_agent_capabilities::build::RELEASE)?;
     let package = package().ok()?;
-    let client = reqwest::Client::builder().timeout(TIMEOUT).build().ok()?;
-    let tags: serde_json::Value = client
-        .get(format!("{}/-/package/{package}/dist-tags", registry()))
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    let version = tags.get(tag)?.as_str()?;
-    if !newer(current, version) || skipped(home).as_deref() == Some(version) {
+    let version = channel_version(&package, tag).await.ok()?;
+    if !newer(current, &version) || skipped(home).as_deref() == Some(version.as_str()) {
         return None;
     }
     let exe = std::env::current_exe().ok()?;
-    let manual = if installer(&exe, &package, version).is_some() {
-        let command = if package == ALPHA_PACKAGE {
-            ALPHA_COMMAND
-        } else {
-            PACKAGE
-        };
-        format!("{command} update")
+    let manual = if installer(&exe, &package, &version).is_some() {
+        format!("{} update", entry_point(&package))
     } else {
         manual(&package, current)
     };
     Some(Offer {
         current: current.to_owned(),
-        version: version.to_owned(),
+        version,
         manual,
     })
+}
+
+async fn channel_version(package: &str, tag: &str) -> crate::Result<String> {
+    let client = reqwest::Client::builder().timeout(TIMEOUT).build()?;
+    let tags: serde_json::Value = client
+        .get(format!("{}/-/package/{package}/dist-tags", registry()))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let version = tags
+        .get(tag)
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| {
+            release(version).is_some()
+                && channel(version) == tag
+                && (!version.contains('-') || prerelease(version).is_some())
+        })
+        .ok_or_else(|| format!("The registry has no valid {tag} version of {package}"))?;
+    Ok(version.to_owned())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) async fn recover_startup(
+    home: &Path,
+    store: &crate::client::NewerStore,
+) -> crate::Result<i32> {
+    use std::os::unix::process::CommandExt;
+
+    if !dim_agent_capabilities::build::RELEASE
+        || !enabled()
+        || !std::io::stderr().is_terminal()
+        || std::env::var_os(crate::client::STARTUP_RETRY).is_some()
+    {
+        return Err(Box::new(store.clone()));
+    }
+    let package = package()?;
+    let current = dim_agent_capabilities::build::VERSION;
+    let tag = channel(current);
+    let executable = std::env::current_exe()?;
+    let Some(mut installation) = installer(&executable, &package, tag) else {
+        return Err(Box::new(store.clone()));
+    };
+    if installation.manager != Manager::Staged
+        || !executable.starts_with(
+            installation
+                .directory
+                .join("lib/node_modules")
+                .join(&package),
+        )
+    {
+        return Err(Box::new(store.clone()));
+    }
+
+    eprintln!("{}", crate::sanitize::safe(&store.diagnostic));
+    eprintln!("Checking {package} on the {tag} channel...");
+    let skipped = skipped(home);
+    let result: crate::Result<i32> = async {
+        let version = channel_version(&package, tag).await?;
+        if !newer(current, &version) {
+            return Err(format!("The {tag} channel has no release newer than {current}").into());
+        }
+        // A shortcut that avoids staging a release already known to be skipped.
+        // The manager resolves the tag again on its own registry, so only the
+        // check against the staged version below decides what gets installed.
+        if skipped.as_deref() == Some(version.as_str()) {
+            return Err(format!("{version} is marked as skipped").into());
+        }
+        let launcher = installation
+            .directory
+            .join("bin")
+            .join(entry_point(&package));
+        installation.recovery = Some(Recovery {
+            store_format: store.format,
+            skipped,
+        });
+        run_install(installation, tag, false).await?;
+        eprintln!("Restarting {}...", entry_point(&package));
+        let error = std::process::Command::new(&launcher)
+            .args(std::env::args_os().skip(1))
+            .env(crate::client::STARTUP_RETRY, "1")
+            .exec();
+        Err(format!("Cannot restart {}: {error}", launcher.display()).into())
+    }
+    .await;
+    result.map_err(|error| format!("Startup update failed: {error}").into())
+}
+
+fn entry_point(package: &str) -> &str {
+    if package == ALPHA_PACKAGE {
+        ALPHA_COMMAND
+    } else {
+        PACKAGE
+    }
 }
 
 /// Updates this installation's package on its current channel, independently
@@ -331,6 +429,12 @@ pub async fn run(legacy_exited: bool) -> crate::Result<i32> {
             manual(&package, current)
         )
     })?;
+    run_install(installation, tag, legacy_exited).await?;
+    Ok(0)
+}
+
+async fn run_install(installation: Install, tag: &str, legacy_exited: bool) -> crate::Result<()> {
+    let package = installation.package.clone();
     let mut signals = crate::plugins::Signals::listen()?;
     let mut stderr = std::io::stderr();
     let interactive = stderr.is_terminal();
@@ -389,7 +493,7 @@ pub async fn run(legacy_exited: bool) -> crate::Result<i32> {
     for warning in warnings {
         writeln!(stderr, "{warning}")?;
     }
-    Ok(0)
+    Ok(())
 }
 
 const LOCK_FILE: &str = ".dimcode-update.lock";
@@ -517,7 +621,10 @@ fn lease(install: &Install, legacy_exited: bool) -> Result<std::fs::File, String
     let baseline = install.directory.join(BASELINE_FILE);
     if !baseline.exists() {
         if !legacy_exited {
-            return Err("Older versions do not register as users of this installation, so an idle installation cannot be confirmed. Exit every client and stop every server, then run `dimcode update --confirm-legacy-exited`".to_owned());
+            let command = entry_point(&install.package);
+            return Err(format!(
+                "Older versions do not register as users of this installation, so an idle installation cannot be confirmed. Exit every client and stop every server, then run `{command} update --confirm-legacy-exited`"
+            ));
         }
         std::fs::write(&baseline, b"")
             .map_err(|error| format!("Cannot record {}: {error}", baseline.display()))?;

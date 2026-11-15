@@ -12,8 +12,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "带附件的消息会留在队列中；使用 /queue 对其执行 steer 或删除"
         }
-        "/queue manage · Shift+← edit last · empty draft: {key} steer" => {
-            "/queue 管理 · Shift+← 编辑最后一条 · 草稿为空时按 {key} steer"
+        "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now" => {
+            "/queue · Shift+← 编辑最后一条 · 草稿为空时按 {key} steer · Ctrl+Enter 立即发送"
         }
         "steer or delete queued messages" => "对队列消息执行 steer 或删除",
         "export this conversation" => "导出此对话",
@@ -565,6 +565,20 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Empty draft: {keys} steer first queued" => "草稿为空时按 {keys} steer 第一条排队消息",
         "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Shift+← edit last queued" => {
             "Ctrl+O 或 Ctrl+P 命令 · Esc 中断，排队消息回到输入框 · Shift+← 编辑最后一条排队消息"
+        }
+        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
+            "Ctrl+Enter 中断并立即发送：草稿与所有暂存消息合成一条发出"
+        }
+        "Send now failed: {error}; the draft was kept" => "立即发送失败：{error}；草稿已保留",
+        "Send now cancelled; the draft was kept" => "已取消立即发送；草稿保留",
+        "Send now is still stopping the run; the draft was kept" => {
+            "立即发送仍在停止运行；草稿已保留"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "立即发送正在停止运行；草稿发出后再粘贴"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "立即发送正在等待插入内容后再发送"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 清空，连按两次退出 · 草稿为空时 Ctrl+D 退出"

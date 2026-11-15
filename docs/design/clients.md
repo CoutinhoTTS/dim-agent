@@ -274,7 +274,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 
 | Capability | CLI | Web | Source |
 | --- | --- | --- | --- |
-| Send, queue (`Enter` while running), automatic sending, steer (`Ctrl+S`, or `Enter` on an empty draft), interrupt | done | send and stop: done; queue: later phase | InputQueue (S1) |
+| Send, steer (`Enter` while running, the default), queue (`Ctrl+S`), automatic sending, steer an empty draft (`Enter`), interrupt, interrupt and send now (`Ctrl+Enter`) | done | send and stop: done; queue: later phase | InputQueue (S1) |
 | Lines: tree, switch, create, send, stop, approvals, end | done | done (right-side Lines panel) | [Timeline branches](timeline-branches.md) §14, [Web workspace](web-workspace.md#41-lines-and-branch) |
 | `/queue` panel and queue deletion | done in both terminal UIs | — | [CLI commands](cli-commands.md#queued-messages) |
 | Retrieve a queued message for editing | done; images and multi-block messages remain queued with a notice | — | [CLI commands](cli-commands.md#queued-messages) |
