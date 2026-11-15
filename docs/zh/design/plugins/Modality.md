@@ -274,7 +274,7 @@ sequenceDiagram
 | 不门控 Modality 的按任务适配器查找 | 运行时/装配，[#861](https://github.com/arcships/dim/issues/861) | [§9.1](#91-按任务适配器查找) |
 | Provider 提供可选模型及其声明能力的只读契约 | Provider，[#790](https://github.com/arcships/dim/issues/790) | [§9.2](#92-provider-只读契约) |
 | Provider 的非对话连接 | Provider，[#799](https://github.com/arcships/dim/issues/799) | [§9.3](#93-provider-非对话连接) |
-| `modality.image.understand` 的 Session 图像理解使用方 | Agent/Prompt 所有者，[#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-图像理解使用方) |
+| `modality.image.understand` 的 Session 图像理解使用方 | Modality 提供目标读取；Agent/Prompt 所有者拥有使用方，[#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-图像理解使用方) |
 
 Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列在 [overview 附录 B.2](../overview.md#b2-app-server-进程插件)。
 
@@ -310,7 +310,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 - **现有机制。** `read` 把图像块返回给 Session 模型，`session.model.update` 与 Prompt 采纳的配置选择该模型。Session 路径到进程所有者默认值之间没有输入路径或类型化查找。在浏览器里选择正是该需求要排除的仅浏览器默认值。
 - **需要的能力。** Session 图像理解路径经 Modality 的 `modality.image.understand` 默认值（显式 → 默认值 → 自动）解析其模型，或等价的类型化交接。机制属于 Agent/Prompt。
 - **顺序影响。** 每次读取或附件时；无 Timeline 事件；在该需求落地前已有 Session 保持其行为；不重载。
-- **所有者/issue。** Agent/Prompt 所有者，[#798](https://github.com/arcships/dim/issues/798)。
+- **所有者/issue。** Modality 提供 `modalityTargets`；Agent/Prompt 所有者拥有使用方，[#798](https://github.com/arcships/dim/issues/798)。
 
 ## 附录 A. 接口细节
 

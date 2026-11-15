@@ -62,20 +62,27 @@ Modality: the modality.image.understand target
 A configured default that is no longer selectable fails the call with its reason; the tool never
 substitutes another model. Cancellation is not a result code: the call returns the host's
 cancellation after it releases the request, as any other tool call
-([principles §4 rule 3](../../architecture/rust-agent/principles.md)).
+([ToolRegistry](../../architecture/rust-agent/plugins/ToolRegistry.md)).
 
 An answer whose `stop_reason` is `MaxTokens` is returned with the text it produced and an
 explicit incomplete marker; it is not reused.
 
 **Admission.** The tool declares risk `session`, so it runs under every preset without a
-per-call approval ([ADR 003](../../adr/003-approval-scope.md)). The consent is the
-configuration: the image entered the Session by the user's own action, and the model that
-receives it is the `modality.image.understand` default the user set. Declaring `network`
-instead would deny the call under read-only and ask on every call under workspace-write, which
-treats a configured setting as an ad-hoc decision on each image. The consequence is stated
-because it is real: the image leaves for whichever provider serves the configured default,
-which need not be the Session's model. The Modality page already shows the effective model for
-the operation, and this design adds no second place to choose it.
+per-call approval ([ADR 003](../../adr/003-approval-scope.md)). The consent is a setting, and
+the setting covers the whole operation rather than one path: Modality's snapshot names the
+effective model and the reason it is that model, for a default the user persisted and for
+automatic resolution when none is persisted. So the image goes to whichever provider serves the
+effective target, and this design adds no second place to choose it.
+
+That holds for both paths into the tool, and the two are not equal. An attached image enters by
+the user's own action; an image the model `read` from the workspace enters because the model
+called `read`, under the read permission the Session already grants, and the tool then sends it
+to the effective understanding target. With no persisted default, resolution is automatic and
+may pick a provider and account the user never named for images; clearing a default restores
+that, which the issue requires. Declaring `network` instead would deny the call under read-only
+and ask on every call under workspace-write, treating a configured setting as an ad-hoc decision
+on each image. A deployment that must not send `read` images to an unchosen provider restricts
+the tool through Permission rather than through this design.
 
 ## 3. References
 
@@ -132,8 +139,8 @@ owner changes its own document.
 
 **M1 Modality: the operation target read.**
 
-- **Problem.** A Session part must learn which model `modality.image.understand` resolves to now; the only surfaces Modality offers are management methods served to clients.
-- **Existing mechanisms, and why they fail.** `modality.capabilities` is a management method, and a part is not a client. `modalityTasks` is the task surface and refuses `understand` by design (Modality decision 6). Provider's `selectableModels`/`selectableForModality` enumerate what execution accepts, but neither applies Modality's persisted default nor its explicit → default → automatic precedence, so a consumer using them would decide with a second rule.
+- **Problem.** A Session part must learn which model `modality.image.understand` resolves to now. Modality's process surfaces are the task methods (`modalityTasks`) and the adapter copies (`modalityAdapter`); none of them answers "which model would this operation use now", and `modality.capabilities` is a management method served to clients, which a part is not.
+- **Existing mechanisms, and why they fail.** `modality.capabilities` is a management method, and a part is not a client. `modalityTasks` is the task surface and refuses `understand` by design (Modality decision 6). Provider's `selectableModels` enumerates what execution accepts for chat, and `selectableForModality` widens that to models execution rejects for chat; neither applies Modality's persisted default or its explicit → default → automatic precedence, so a consumer using them would decide with a second rule.
 - **Needed capability.** One process service, `modalityTargets`: for `<category>.<operation>`, the target it resolves to now, or the reason it is unavailable, with the same precedence and reason vocabulary as the snapshot. Read per call; no task, no credential, no gate, no reload.
 - **Ordering impact.** Per tool call. Modality stays Active when an adapter or model is absent.
 - **Owner and issue.** Modality, [#798](https://github.com/arcships/dim/issues/798) §9.4.
@@ -144,7 +151,7 @@ owner changes its own document.
 - **Existing mechanisms, and why they fail.** ModelProvider's per-request rule ([Attachments](Attachments.md) A.1) sends an image when the request's model accepts images and a text placeholder otherwise. Neither branch can carry a resolved understanding target, and `read` returns image blocks the same way.
 - **Needed capability.** Every image block in a request becomes the reference text (§3): user content from any writer, and tool results. History, the Timeline and the adopted input stay unchanged, so the decision remains per request. Attachments A.1's vision/placeholder table becomes this one rule, and the `read` section states the same outcome for its results.
 - **Ordering impact.** Per request; no event; no reload.
-- **Owner and issue.** Attachments and WorkspaceTools, [#798](https://github.com/arcships/dim/issues/798).
+- **Owner and issue.** The request rule is ModelProvider's, implemented in `model_provider/images.rs`; Attachments owns A.1's statement of it and WorkspaceTools owns the `read` statement. [#798](https://github.com/arcships/dim/issues/798).
 
 **M3 Prompt: the entry.**
 
@@ -164,8 +171,9 @@ whose resolved target is still the model this call resolves to.
 
 The index is derived from committed tool facts of that branch — the calls and their results —
 and is rebuilt lazily, never persisted and never shared across Sessions. Failed, cancelled or
-incomplete calls are not reused. Identical calls running at the same time in one branch are
-coalesced into one provider call.
+incomplete calls are not reused. Identical calls running at the same time in one branch share
+one provider call; it lives until the last of them leaves, so one caller cancelling or dropping
+its call does not cancel work another caller still waits for.
 
 There is no exactly-once guarantee: a crash or a lost reply before the result commits can cost
 another paid call.
@@ -174,7 +182,7 @@ another paid call.
 
 No new event type. A call is an ordinary `step/tool-call` and its result, written by Loop like
 any other tool, so the answer enters context through the existing tool-result boundary
-([principles §4 rule 10](../../architecture/rust-agent/principles.md)). Nothing else is
+([principles §4 rule 6](../../architecture/rust-agent/principles.md)). Nothing else is
 written, and the part keeps no state that is not rebuildable from those facts.
 
 ## 8. Rule check
@@ -189,7 +197,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 No business meaning in core | No core change: the tool is registered through `toolRegistry`, and the reference rule stays in ModelProvider as Attachments already owns it. |
 | §4.5 Atomic batches | The design writes no event itself; Loop's ordinary tool-call batch covers the call and its result. |
 | §4.6 Context only from handed-off events | The answer reaches the model only as a tool result; no injection during request preparation. |
-| §4.7 Public events and services only | The part uses `toolRegistry`, the Session's Timeline store for the calling branch, the declared `auxiliaryModel` host and Modality's M1 read. |
+| §4.7 Public events and services only | The part uses `toolRegistry`, the owning branch's event query (`branch.query`, [plugin contract §5.4](../plugin-contract.md#54-the-branch-facade)) to resolve a reference, the declared `auxiliaryModel` host and Modality's M1 read. |
 | §4.8 Requirements to mechanism owners | §5, M1 and M2. No new runtime or rutis mechanism. |
 | §4.9 Only facts later decisions use enter the Timeline | Only the ordinary tool facts enter; the digest index is derived and discarded. |
 | §1 Capability and App Server boundary | A Session Capability in its own crate; the App Server only installs it. |

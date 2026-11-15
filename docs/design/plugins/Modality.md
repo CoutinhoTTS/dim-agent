@@ -277,7 +277,7 @@ Rules: [principles §4 rule 8](../../architecture/rust-agent/principles.md). Eac
 | Per-task adapter lookup without gating Modality | runtime/assembly, [#861](https://github.com/arcships/dim/issues/861) | [§9.1](#91-per-task-adapter-lookup) |
 | Provider read-only contract for selectable models and declared capabilities | Provider, [#790](https://github.com/arcships/dim/issues/790) | [§9.2](#92-provider-read-only-contract) |
 | Provider non-conversational connection | Provider, [#799](https://github.com/arcships/dim/issues/799) | [§9.3](#93-provider-non-conversational-connection) |
-| Session image-understanding consumer of `modality.image.understand` | Agent/Prompt owner, [#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-image-understanding-consumer) |
+| Session image-understanding consumer of `modality.image.understand` | Modality provides the target read; Agent/Prompt owns the consumer, [#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-image-understanding-consumer) |
 
 The Settings business source and the `pluginFiles` supplement are changes to other plugins, listed in [overview Appendix B.2](../overview.md#b2-app-server-process-plugins).
 
@@ -311,9 +311,9 @@ The Settings business source and the `pluginFiles` supplement are changes to oth
 
 - **Problem.** Modality resolves `modality.image.understand`, but the Session image-understanding path (attachments and `read`) sends images to the Session's adopted model; nothing reads the Modality default. Until this requirement lands, the understanding row can resolve and display only.
 - **Existing mechanisms.** `read` returns image blocks to the Session model, and `session.model.update` plus Prompt's adopted configuration choose that model. There is no input path or typed lookup from the Session path to a process owner's default. Choosing in the browser would be the browser-only default the requirement excludes.
-- **Needed capability.** The Session image-understanding path resolves its model through Modality's `modality.image.understand` default (explicit → default → automatic), or an equivalent typed handoff. The handoff is one typed read: the process service `modalityTargets` answers the target one operation resolves to now, or the reason it is unavailable, with `modality.capabilities`' own precedence and reason vocabulary, per call, without gating or reloading Modality and without returning a credential. The consumer is [ImageUnderstanding](ImageUnderstanding.md); the mechanism belongs to Agent/Prompt.
+- **Needed capability.** The Session image-understanding path resolves its model through Modality's `modality.image.understand` default (explicit → default → automatic), or an equivalent typed handoff. The handoff is one typed read: the process service `modalityTargets` answers the target one operation resolves to now, or the reason it is unavailable, with `modality.capabilities`' own precedence and reason vocabulary, per call, without gating or reloading Modality and without returning a credential. Modality owns and provides that read (its process service, its scope); the consumer is [ImageUnderstanding](ImageUnderstanding.md), which owns the tool and its request.
 - **Ordering impact.** Per tool call; no new event type (ordinary tool-call and tool-result facts); existing Sessions keep their behavior until the requirement lands; no reload.
-- **Owner/issue.** Agent/Prompt owner, [#798](https://github.com/arcships/dim/issues/798).
+- **Owner/issue.** Modality provides `modalityTargets`; the Agent/Prompt owner owns the consumer, [#798](https://github.com/arcships/dim/issues/798).
 
 ## Appendix A. Interface details
 
