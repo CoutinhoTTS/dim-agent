@@ -469,6 +469,12 @@ round trip, and no AgentLoop change. The design is:
   transcript never repeats its prefix as prose. `dim-agent-types` is the crate the server and
   every client already share as values; the web mirrors the same grammar in
   `web/src/skill-token.ts`, with a test that pins the same cases.
+- **A drawn token is one unit wherever it was typed.** The spans are byte ranges of the text the
+  operator typed, so a surface marks the characters whose source byte lies in a token rather than
+  counting bytes per row: a wrapping that drops a break, expands a tab or joins a CRLF must not
+  move the highlight off the characters. A surface that already maps a byte range onto what it
+  paints uses that mapping directly; one that wraps the text itself carries each drawn
+  character's source byte out of the wrap and shares that one wrap with the plain rows.
 - **`$skill: <name>` keeps loading.** Inputs and habits from before this token keep working, so
   the parser accepts the old marker too: `$skill:`, optional spaces, then the run of
   non-whitespace characters that follows, matched exactly. No client writes it any more and the

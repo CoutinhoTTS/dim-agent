@@ -140,29 +140,79 @@ pub fn expand_tabs(text: &str) -> std::borrow::Cow<'_, str> {
 /// Wraps `text` into rows of at most `width` cells, breaking only between
 /// grapheme clusters. A cluster wider than the row stays alone on its row.
 pub fn wrap_cells(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
+    wrap_with_source(text, width)
+        .into_iter()
+        .map(|row| row.text)
+        .collect()
+}
+
+/// One row of a wrapped text and, for each character it draws, the byte of the
+/// source it came from. Wrapping expands a tab, normalises a CRLF and drops the
+/// break after a row, so the row's characters no longer line up with the
+/// source: a caller that styles what it draws keeps its source spans here.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Wrapped {
+    pub text: String,
+    /// One source byte per character of `text`, in order.
+    pub source: Vec<usize>,
+}
+
+impl Wrapped {
+    /// One flag per character of `text`: whether the byte it came from is
+    /// inside one of `spans`. A tab's spaces all report the tab, so they are
+    /// covered together with it.
+    pub fn covered(&self, spans: &[(usize, usize)]) -> Vec<bool> {
+        self.source
+            .iter()
+            .map(|at| spans.iter().any(|(start, end)| start <= at && at < end))
+            .collect()
     }
-    let normalized = expand_tabs(text).replace("\r\n", "\n").replace('\r', "\n");
+}
+/// `wrap_cells` with each row's source bytes kept: a tab becomes the spaces to
+/// the next tab stop of its line, a CRLF or CR is one break, and every drawn
+/// character remembers where it came from.
+pub fn wrap_with_source(text: &str, width: usize) -> Vec<Wrapped> {
+    if width == 0 {
+        return vec![Wrapped::default()];
+    }
     let mut rows = Vec::new();
-    for line in normalized.split('\n') {
-        if line.is_empty() {
-            rows.push(String::new());
+    let mut row = Wrapped::default();
+    let mut used = 0;
+    let mut column = 0;
+    for (at, cluster) in text.grapheme_indices(true) {
+        if matches!(cluster, "\r\n" | "\r" | "\n") {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+            column = 0;
             continue;
         }
-        let mut row = String::new();
-        let mut row_width = 0;
-        for cluster in line.graphemes(true) {
-            let cell = display_width(cluster);
-            if !row.is_empty() && row_width + cell > width {
+        if cluster == "\t" {
+            let spaces = TAB_STOP - column % TAB_STOP;
+            if !row.text.is_empty() && used + spaces > width {
                 rows.push(std::mem::take(&mut row));
-                row_width = 0;
+                used = 0;
             }
-            row.push_str(cluster);
-            row_width += cell;
+            for _ in 0..spaces {
+                row.text.push(' ');
+                row.source.push(at);
+            }
+            used += spaces;
+            column += spaces;
+            continue;
         }
-        rows.push(row);
+        let cell = display_width(cluster);
+        if !row.text.is_empty() && used + cell > width {
+            rows.push(std::mem::take(&mut row));
+            used = 0;
+        }
+        for (offset, ch) in cluster.char_indices() {
+            row.text.push(ch);
+            row.source.push(at + offset);
+        }
+        used += cell;
+        column += cell;
     }
+    rows.push(row);
     rows
 }
 
