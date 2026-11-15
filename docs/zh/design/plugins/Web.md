@@ -460,6 +460,7 @@ Characters: <start>-<end> of <total>
 | HTML 转文本 | 扫描器，不是浏览器。后面出现 `>` 的 `<` 即开始一个标签，正文里单独的 `<` 也算。script、style 与导航在这次扫描之前用正则去掉。 |
 | 内容编码 | 解码 `gzip`、`deflate` 与 `identity`。`br` 与其他编码以 `connect_failed` 失败。不完整的 gzip、带 zlib 封装的 deflate 或原始 deflate 流均以 `connect_failed` 失败；若已经达到下载上限，则返回截断后的正文并带 `download_limited`。服务器省略 zlib 封装时回退为原始 deflate。 |
 | User-Agent | `dim-web/` 加上 `dim-app-server` 的包版本 |
+| 传输 | `web/network.rs` 自己建连：自建 TCP/TLS、两种 scheme 都自建 `CONNECT`、统一的连接时限与固定后的地址。中间不夹请求库，因为那会改变代理看到的内容，以及地址检查与连接的关系；见 [ADR 024](../../adr/024-web-fetch-transport.md) |
 
 ## 附录 G. Rust 绑定
 

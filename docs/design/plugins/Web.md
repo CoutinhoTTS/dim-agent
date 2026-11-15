@@ -459,6 +459,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 | HTML to text | A scanner, not a browser. A `<` followed later by `>` starts a tag, including a bare `<` in prose. Script, style and navigation are removed by regular expressions before that scan. |
 | Content encoding | `gzip`, `deflate` and `identity` are decoded. `br` and any other encoding fail as `connect_failed`. An incomplete gzip, zlib-wrapped deflate or raw deflate stream fails with `connect_failed`, unless the download limit was already reached, in which case the capped body is returned with `download_limited`. Raw deflate is the fallback for servers that omit the zlib wrapper. |
 | User-Agent | `dim-web/` plus the `dim-app-server` package version |
+| Transport | `web/network.rs` owns the connection: its own TCP/TLS, its own `CONNECT` for both schemes, one connect deadline and the pinned address. No request library sits in between, because that would change what the proxy sees and how the address check relates to the connect; see [ADR 024](../../adr/024-web-fetch-transport.md) |
 
 ## Appendix G. Rust binding
 
