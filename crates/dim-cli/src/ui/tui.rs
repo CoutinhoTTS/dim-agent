@@ -16103,6 +16103,63 @@ mod tests {
         );
     }
 
+    /// A recalled message keeps its own layout, an inline image included: the
+    /// send-now path lays one message's parts out as Esc does, and only puts a
+    /// newline between two messages.
+    #[test]
+    fn send_now_keeps_an_inline_image_on_its_line() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        for draft in ["", "and then"] {
+            let (mut app, sent, home) = session_with_queue(true, &[("a", "inline")]);
+            app.composer.set_accepts_images(true);
+            let path = home.path().join("screen.png");
+            wide_png(&path, 32);
+            let image =
+                crate::ui::composer::read_planned(&app.composer.plan_files(&[path]).unwrap())
+                    .unwrap()
+                    .remove(0)
+                    .unwrap();
+            typed(&mut app, draft);
+            app.handle(ctrl_enter());
+            app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+                content: vec![
+                    dim_agent_types::ContentBlock::Text {
+                        text: "see ".into(),
+                    },
+                    image.block(),
+                    dim_agent_types::ContentBlock::Text {
+                        text: " here".into(),
+                    },
+                ],
+            }));
+            let expected = if draft.is_empty() {
+                "see [Image] here"
+            } else {
+                "see [Image] here\nand then"
+            };
+            assert_eq!(
+                app.composer.text(),
+                expected,
+                "the image stays inline in the recalled message"
+            );
+            app.apply(Update::Stopped { error: None });
+            let sent_now = sent.borrow();
+            assert!(
+                matches!(
+                    &sent_now[2..],
+                    [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                        if matches!(
+                            parts.as_slice(),
+                            [DraftPart::Text(see), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. }), DraftPart::Text(here)]
+                                if see == "see " && here == if draft.is_empty() { " here" } else { " here\nand then" }
+                        )
+                ),
+                "the submitted message is the text, the image, then the text: {}",
+                describe(&sent_now).join(", ")
+            );
+        }
+    }
+
     /// A Ctrl+Enter re-arms a cancelled send-now even when the turn's settled
     /// snapshot has already arrived: the stop's reply is still on its way.
     #[test]

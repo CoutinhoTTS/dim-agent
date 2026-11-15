@@ -41460,6 +41460,20 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::ContentBlock::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::attachments",
       "references": [
         "path crate::attachments::pasted_entries"
@@ -41514,7 +41528,8 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path crate::ui::i18n::active",
-        "path crate::ui::i18n::set"
+        "path crate::ui::i18n::set",
+        "path t"
       ]
     },
     {

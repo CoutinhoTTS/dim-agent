@@ -228,33 +228,40 @@ impl Composer {
     }
 
     /// Inserts withdrawn operator content at byte `at`, in front of the draft
-    /// from there on, and returns the offset just past what it inserted. A
-    /// non-empty draft keeps its own line after it, so recalled messages keep
-    /// queue order ahead of the draft that was typed. Runtime blocks are left
-    /// out as [`Self::restore`] leaves them; images stay atomic.
+    /// from there on, and returns the offset just past what it inserted.
     ///
-    /// Each inserted row is separated from what the draft already holds at
-    /// `at`, the way [`Self::restore`] separates two recalled messages: the
-    /// text before `at` decides, so a message that inserts nothing adds no
-    /// newline, and one whose rows follow each other without text (an image)
-    /// adds none of its own.
+    /// The blocks inside the message are laid out exactly as [`Self::restore`]
+    /// lays them out: a newline only between two adjacent text blocks, and an
+    /// image inline where it stands. The separators sit around the message as a
+    /// whole, so one message never splits into lines of its own parts: a
+    /// newline before it when the draft holds text at `at` that does not end a
+    /// line, and the newline before the typed draft after it. Runtime blocks
+    /// are left out as [`Self::restore`] leaves them, so a message of only
+    /// those inserts nothing and adds no separator.
     pub fn restore_at(&mut self, at: usize, input: dim_agent_types::UserInput) -> usize {
         self.shell = None;
         let mut at = at.min(self.area.text().len());
         let followed = at < self.area.text().len();
-        let mut rows = false;
+        let mut inserted = false;
+        let mut previous_text = false;
         for (index, block) in input.content.into_iter().enumerate() {
             match block {
                 dim_agent_types::ContentBlock::Text { text } => {
                     if dim_agent_types::markup::runtime_context(index, &text) {
                         continue;
                     }
-                    at = self.separate_at(at, &mut rows);
+                    at = self.open_message(at, &mut inserted);
+                    if previous_text {
+                        self.area.insert_str_at(at, "\n");
+                        at += 1;
+                    }
                     self.area.insert_str_at(at, &text);
                     at += text.len();
+                    previous_text = true;
                 }
                 block @ dim_agent_types::ContentBlock::Image { .. } => {
-                    at = self.separate_at(at, &mut rows);
+                    at = self.open_message(at, &mut inserted);
+                    previous_text = false;
                     let buffer = "[Image]".to_owned();
                     let id = self.area.replace_range_with_element(
                         at..at,
@@ -275,20 +282,24 @@ impl Composer {
                 }
             }
         }
-        if followed && rows {
-            at = self.separate_at(at, &mut rows);
+        if inserted && followed {
+            self.area.insert_str_at(at, "\n");
+            at += 1;
         }
         self.area.set_cursor(self.area.text().len());
         self.renumber();
         at
     }
 
-    /// The offset a row goes in at, adding a newline first when the draft holds
-    /// text before `at` that does not already end a line. `rows` records that
-    /// something was inserted, so a message of only runtime blocks separates
-    /// nothing.
-    fn separate_at(&mut self, at: usize, rows: &mut bool) -> usize {
-        *rows = true;
+    /// The offset the message's first row goes in at: one newline before the
+    /// message when the draft already holds text at `at` that does not end a
+    /// line. `inserted` records that the message put something there, so one
+    /// made of only runtime blocks separates nothing.
+    fn open_message(&mut self, at: usize, inserted: &mut bool) -> usize {
+        if *inserted {
+            return at;
+        }
+        *inserted = true;
         if at == 0 || self.area.text()[..at].ends_with('\n') {
             return at;
         }
@@ -1364,6 +1375,71 @@ mod tests {
                 .unwrap();
         }
         gif
+    }
+
+    /// One message's parts stay on one line the way `restore` lays them out:
+    /// a newline only between two adjacent text blocks, and an image inline
+    /// where it stands. The two paths cannot drift: a send-now recall and an
+    /// Esc recall of the same message must read the same.
+    #[test]
+    fn restore_at_lays_out_a_message_as_restore_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&image, png.into_inner()).unwrap();
+
+        let mut source = Composer::new(Vec::new());
+        typed(&mut source, "see");
+        attach(&mut source, &[image]).unwrap();
+        typed(&mut source, " here");
+        let Outcome::SubmitDraft { parts, .. } = source.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a draft");
+        };
+        let message = || dim_agent_types::UserInput {
+            content: parts
+                .iter()
+                .map(|part| match part {
+                    DraftPart::Text(text) => {
+                        dim_agent_types::ContentBlock::Text { text: text.clone() }
+                    }
+                    DraftPart::Block(block) => block.clone(),
+                    DraftPart::Paste(text) => {
+                        dim_agent_types::ContentBlock::Text { text: text.clone() }
+                    }
+                })
+                .collect(),
+        };
+
+        let mut appended = Composer::new(Vec::new());
+        appended.restore(message());
+        let mut inserted = Composer::new(Vec::new());
+        inserted.restore_at(0, message());
+
+        assert_eq!(
+            inserted.text(),
+            "see [Image] here",
+            "the image stays inline, as restore keeps it"
+        );
+        assert_eq!(
+            inserted.text(),
+            appended.text(),
+            "a send-now recall reads as an Esc recall does"
+        );
+        let of = |c: &Composer| {
+            c.tokens
+                .iter()
+                .map(|t| (t.label.clone(), t.block.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            of(&inserted),
+            of(&appended),
+            "both paths give the same image tokens"
+        );
+        assert!(!of(&inserted).is_empty(), "the image is a token");
     }
 
     /// The transcript row a message made of these parts shows.
