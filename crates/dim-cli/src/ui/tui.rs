@@ -16035,6 +16035,71 @@ mod tests {
         );
     }
 
+    /// With no draft typed, the recalled messages still keep their own lines:
+    /// the composer was empty, so nothing else separates them.
+    #[test]
+    fn send_now_keeps_recalled_messages_apart_on_an_empty_draft() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first"), ("b", "second")]);
+        app.handle(ctrl_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["withdraw:a", "withdraw:b", "submit-now"]
+        );
+        for text in ["first", "second"] {
+            app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+                content: vec![dim_agent_types::ContentBlock::Text { text: text.into() }],
+            }));
+        }
+        assert_eq!(app.composer.text(), "first\nsecond");
+        app.apply(Update::Stopped { error: None });
+        assert_eq!(
+            describe(&sent.borrow()[3..]),
+            ["submit:queue:first\nsecond"],
+            "the two recalled messages stay on their own lines"
+        );
+    }
+
+    /// An image-only recalled message follows the text with no blank line
+    /// between them, and leaves none behind.
+    #[test]
+    fn send_now_puts_an_image_only_message_after_the_text_without_a_gap() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, home) = session_with_queue(true, &[("a", "first"), ("b", "image")]);
+        app.composer.set_accepts_images(true);
+        app.handle(ctrl_enter());
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        let path = home.path().join("screen.png");
+        wide_png(&path, 32);
+        let image = crate::ui::composer::read_planned(&app.composer.plan_files(&[path]).unwrap())
+            .unwrap()
+            .remove(0)
+            .unwrap();
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![image.block()],
+        }));
+        assert_eq!(
+            app.composer.text(),
+            "first\n[Image]",
+            "the image follows the text on the next line, with no blank line"
+        );
+        app.apply(Update::Stopped { error: None });
+        let sent_now = sent.borrow();
+        assert!(
+            matches!(
+                &sent_now[3..],
+                [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                    if matches!(parts.as_slice(), [DraftPart::Text(text), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })] if text == "first\n")
+            ),
+            "the message is the text then the image, with no blank text: {}",
+            describe(&sent_now).join(", ")
+        );
+    }
+
     /// Esc calls off the submit of the stop it asked for, and a Ctrl+Enter
     /// after it re-arms that submit rather than asking for a second stop. The
     /// one reply still on its way then decides for the gesture the user last
