@@ -7,7 +7,7 @@
 //! success without writing anything fails before the switch rather than after
 //! it.
 
-use super::{Install, Recovery, run_manager};
+use super::{Install, run_manager};
 use dim_agent_capabilities::host_platform::ProcessTree;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -883,7 +883,7 @@ fn notes(notes: Vec<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::Manager;
+    use crate::update::{Manager, Recovery};
     use serde_json::json;
 
     fn declared(manifest: serde_json::Value) -> Vec<String> {
@@ -967,7 +967,10 @@ mod tests {
             refused.contains(&format!("{version} is marked as skipped")),
             "{refused}"
         );
-        assert!(refused.contains("the installation is unchanged"), "{refused}");
+        assert!(
+            refused.contains("the installation is unchanged"),
+            "{refused}"
+        );
         assert_eq!(
             verify_recovery(
                 &recovery_install(directory.path(), format, Some("0.1.0-alpha.1")),

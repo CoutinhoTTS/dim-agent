@@ -6714,7 +6714,10 @@
       "file": "crates/dim-cli/src/update/staged.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "format",
+        "json",
+        "vec"
       ]
     },
     {
@@ -49136,9 +49139,22 @@
     },
     {
       "from": "dim_cli::update::staged::tests",
+      "to": "dim_cli::update",
+      "references": [
+        "path Install",
+        "path Manager::Staged",
+        "path Recovery",
+        "use crate::update::Manager",
+        "use crate::update::Recovery"
+      ]
+    },
+    {
+      "from": "dim_cli::update::staged::tests",
       "to": "dim_cli::update::staged",
       "references": [
-        "path normalized_commands"
+        "path Command",
+        "path normalized_commands",
+        "path verify_recovery"
       ]
     },
     {

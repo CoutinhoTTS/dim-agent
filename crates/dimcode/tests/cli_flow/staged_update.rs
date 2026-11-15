@@ -290,357 +290,6 @@ rm -rf "$retired"
 echo 'Installed package'
 "#;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[test]
-fn a_newer_store_recovers_only_with_a_compatible_staged_release() {
-    if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
-        return;
-    }
-    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "darwin-arm64",
-        ("macos", "x86_64") => "darwin-x64",
-        ("linux", "aarch64") => "linux-arm64",
-        ("linux", "x86_64") => "linux-x64",
-        _ => return,
-    };
-    let version = next_version();
-    let format = dim_app_server::storage::STORE_FORMAT;
-    let future = format + 1;
-    for (baseline, declared, retry, second_failure) in [
-        (true, Some(future), false, false),
-        (true, Some(format), false, false),
-        (true, None, false, false),
-        (false, Some(future), false, false),
-        (true, Some(future), true, false),
-        (true, Some(future), false, true),
-    ] {
-        let installed = Installed::new(CURRENT, &["dima"]);
-        installed.mock_npm();
-        installed.release();
-        if baseline {
-            fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
-        }
-        let home = Home::new();
-        let database = home.0.join("rust/dimcode.sqlite");
-        rusqlite::Connection::open(&database)
-            .unwrap()
-            .execute_batch(&format!(
-                "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {future}));
-                 INSERT INTO agent_store_format VALUES ({future});"
-            ))
-            .unwrap();
-        let original = fs::read(&database).unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let registry = format!("http://{}", listener.local_addr().unwrap());
-        let reply = json!({ "alpha": version }).to_string();
-        let registry = if retry {
-            drop(listener);
-            registry
-        } else {
-            thread::spawn(move || {
-                let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
-                let mut request = String::new();
-                BufReader::new(&stream).read_line(&mut request).unwrap();
-                assert!(request.starts_with("GET /-/package/dimcode-alpha/dist-tags "));
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                    reply.len()
-                )
-                .unwrap();
-            });
-            registry
-        };
-        let cwd = home.0.join("workspace with spaces");
-        fs::create_dir(&cwd).unwrap();
-        let launcher = r#"#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'dimcode %s\n' "$UPDATE_VERSION"; exit 0; fi
-printf '%s\n' "$DIMCODE_STARTUP_RETRY" "$PWD" "$@" > "$RECOVERY_RESTART"
-if [ "$RECOVERY_SECOND_FAILURE" = 1 ]; then exec "$RECOVERY_UPDATER" "$@"; fi
-printf 'Replacement launcher started\n'
-"#;
-        let marker = home.0.join("restart");
-        let mut command = Command::new(&installed.updater);
-        command
-            .current_dir(&cwd)
-            .arg("--home")
-            .arg(&home.0)
-            .args(["tui", "-p", "original message"])
-            .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
-            .env_remove("DIMCODE_AUTOUPDATE")
-            .env_remove("DIMCODE_UPDATE_CHECK")
-            .env_remove("DIMCODE_STARTUP_RETRY")
-            .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
-            .env("DIMCODE_NPM_REGISTRY", registry)
-            .env("NO_PROXY", "127.0.0.1")
-            .env("RECOVERY_RESTART", &marker)
-            .env(
-                "RECOVERY_SECOND_FAILURE",
-                if second_failure { "1" } else { "0" },
-            )
-            .env("RECOVERY_UPDATER", &installed.updater)
-            .env("UPDATE_NATIVE", "")
-            .env("UPDATE_PLATFORM_PACKAGE", format!("dimcode-{platform}"))
-            .env("UPDATE_VERSION", &version)
-            .env("UPDATE_ARGS", installed.home.0.join("install-args"))
-            .env("UPDATE_GATE", installed.home.0.join("gate"))
-            .env("UPDATE_WAITING", installed.home.0.join("waiting"))
-            .env(
-                "UPDATE_PACKAGE_JSON",
-                package_json(&version, &[("dima", "bin/dimcode.mjs")]),
-            )
-            .env("UPDATE_BINS", "dima=bin/dimcode.mjs")
-            .env("UPDATE_COMMAND", launcher)
-            .env(
-                "UPDATE_RELEASE_MANIFEST",
-                declared.map_or_else(String::new, |declared| {
-                    json!({
-                        "schemaVersion": 1, "platform": platform, "version": version,
-                        "storeFormats": [declared]
-                    })
-                    .to_string()
-                }),
-            );
-        if retry {
-            command.env("DIMCODE_STARTUP_RETRY", "1");
-        }
-        if second_failure {
-            command.env("UPDATE_NATIVE", &installed.updater);
-        }
-        let mut terminal = Terminal::launch_tui(command);
-        let status = terminal.wait();
-        let output = strip_ansi(&terminal.transcript);
-        assert!(
-            output.contains(&format!("Store format: v{future}")),
-            "{output}"
-        );
-        assert!(!output.contains("store-newer"), "{output}");
-        assert_eq!(fs::read(&database).unwrap(), original);
-        assert!(!installed.staging().exists());
-        let switched = baseline && declared == Some(future) && !retry;
-        assert_eq!(status.success(), switched && !second_failure, "{output}");
-        if switched {
-            assert_eq!(installed.recorded().last().unwrap(), "dimcode-alpha@alpha");
-            assert_eq!(
-                output.matches("Checking dimcode-alpha").count(),
-                1,
-                "{output}"
-            );
-            if !second_failure {
-                assert!(output.contains("Replacement launcher started"), "{output}");
-            }
-            assert_eq!(
-                fs::read_to_string(marker).unwrap(),
-                format!(
-                    "1\n{}\n--home\n{}\ntui\n-p\noriginal message\n",
-                    fs::canonicalize(cwd).unwrap().display(),
-                    home.0.display()
-                )
-            );
-        } else {
-            assert_eq!(installed.installed(), CURRENT);
-            assert!(!marker.exists());
-            if retry {
-                assert!(!output.contains("Checking dimcode-alpha"), "{output}");
-            } else if !baseline {
-                assert!(
-                    output.contains("dima update --confirm-legacy-exited"),
-                    "{output}"
-                );
-            } else if declared.is_some() {
-                assert!(
-                    output.contains(&format!(
-                        "{version} does not support native store v{future}"
-                    )),
-                    "{output}"
-                );
-            } else {
-                assert!(
-                    output.contains(&format!(
-                        "{version} does not declare support for native store v{future}"
-                    )),
-                    "{output}"
-                );
-            }
-        }
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[test]
-fn a_store_this_build_cannot_read_never_recovers() {
-    if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
-        return;
-    }
-    let installed = Installed::new(CURRENT, &["dima"]);
-    installed.mock_npm();
-    installed.release();
-    fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
-    let home = Home::new();
-    let database = home.0.join("rust/dimcode.sqlite");
-    rusqlite::Connection::open(&database)
-        .unwrap()
-        .execute_batch(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 14));
-             INSERT INTO agent_store_format VALUES (14);",
-        )
-        .unwrap();
-    let original = fs::read(&database).unwrap();
-    let mut command = Command::new(&installed.updater);
-    command
-        .arg("--home")
-        .arg(&home.0)
-        .args(["tui", "-p", "original message"])
-        .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
-        .env_remove("DIMCODE_AUTOUPDATE")
-        .env_remove("DIMCODE_UPDATE_CHECK")
-        .env_remove("DIMCODE_STARTUP_RETRY")
-        .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
-        .env("DIMCODE_NPM_REGISTRY", "http://127.0.0.1:1")
-        .env("UPDATE_ARGS", installed.home.0.join("install-args"))
-        .env("UPDATE_GATE", installed.home.0.join("gate"))
-        .env("UPDATE_WAITING", installed.home.0.join("waiting"));
-    let mut terminal = Terminal::launch_tui(command);
-    let status = terminal.wait();
-    let output = strip_ansi(&terminal.transcript);
-    assert!(!status.success(), "{output}");
-    assert!(
-        output.contains("Store format: v14 (no longer read by this daemon)"),
-        "{output}"
-    );
-    assert!(
-        output.contains("This daemon cannot read the store. Existing data was preserved."),
-        "{output}"
-    );
-    assert!(
-        !output.contains("Checking dimcode-alpha"),
-        "a store this build cannot read must not start a recovery: {output}"
-    );
-    assert!(!output.contains("store-newer"), "{output}");
-    assert_eq!(installed.installed(), CURRENT);
-    assert_eq!(fs::read(&database).unwrap(), original);
-    assert!(!installed.staging().exists());
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-#[test]
-fn a_recovery_never_installs_the_skipped_release() {
-    if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
-        return;
-    }
-    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "darwin-arm64",
-        ("macos", "x86_64") => "darwin-x64",
-        ("linux", "aarch64") => "linux-arm64",
-        ("linux", "x86_64") => "linux-x64",
-        _ => return,
-    };
-    // The lookup registry answers a version above the skipped one, and the
-    // manager's own registry resolves the channel tag to the skipped one.
-    let skipped = next_version();
-    let looked_up = bump(&skipped);
-    let format = dim_app_server::storage::STORE_FORMAT;
-    let future = format + 1;
-    let installed = Installed::new(CURRENT, &["dima"]);
-    installed.mock_npm();
-    installed.release();
-    fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
-    let home = Home::new();
-    fs::write(
-        home.0.join("upgrade-skip.json"),
-        json!({ "version": skipped }).to_string(),
-    )
-    .unwrap();
-    let database = home.0.join("rust/dimcode.sqlite");
-    rusqlite::Connection::open(&database)
-        .unwrap()
-        .execute_batch(&format!(
-            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {future}));
-             INSERT INTO agent_store_format VALUES ({future});"
-        ))
-        .unwrap();
-    let original = fs::read(&database).unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let registry = format!("http://{}", listener.local_addr().unwrap());
-    let reply = json!({ "alpha": looked_up }).to_string();
-    thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
-        let mut request = String::new();
-        BufReader::new(&stream).read_line(&mut request).unwrap();
-        assert!(request.starts_with("GET /-/package/dimcode-alpha/dist-tags "));
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-            reply.len()
-        )
-        .unwrap();
-    });
-    let launcher = r#"#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'dimcode %s\n' "$UPDATE_VERSION"; exit 0; fi
-printf '%s\n' "$@" > "$RECOVERY_RESTART"
-printf 'Replacement launcher started\n'
-"#;
-    let marker = home.0.join("restart");
-    let mut command = Command::new(&installed.updater);
-    command
-        .arg("--home")
-        .arg(&home.0)
-        .args(["tui", "-p", "original message"])
-        .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
-        .env_remove("DIMCODE_AUTOUPDATE")
-        .env_remove("DIMCODE_UPDATE_CHECK")
-        .env_remove("DIMCODE_STARTUP_RETRY")
-        .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
-        .env("DIMCODE_NPM_REGISTRY", registry)
-        .env("NO_PROXY", "127.0.0.1")
-        .env("RECOVERY_RESTART", &marker)
-        .env("UPDATE_NATIVE", "")
-        .env("UPDATE_PLATFORM_PACKAGE", format!("dimcode-{platform}"))
-        .env("UPDATE_VERSION", &skipped)
-        .env("UPDATE_ARGS", installed.home.0.join("install-args"))
-        .env("UPDATE_GATE", installed.home.0.join("gate"))
-        .env("UPDATE_WAITING", installed.home.0.join("waiting"))
-        .env(
-            "UPDATE_PACKAGE_JSON",
-            package_json(&skipped, &[("dima", "bin/dimcode.mjs")]),
-        )
-        .env("UPDATE_BINS", "dima=bin/dimcode.mjs")
-        .env("UPDATE_COMMAND", launcher)
-        .env(
-            "UPDATE_RELEASE_MANIFEST",
-            json!({
-                "schemaVersion": 1, "platform": platform, "version": skipped,
-                "storeFormats": [future]
-            })
-            .to_string(),
-        );
-    let mut terminal = Terminal::launch_tui(command);
-    let status = terminal.wait();
-    let output = strip_ansi(&terminal.transcript);
-    assert!(
-        output.contains(&format!("Store format: v{future}")),
-        "{output}"
-    );
-    assert!(!status.success(), "{output}");
-    assert!(
-        output.contains(&format!("{skipped} is marked as skipped")),
-        "the recovery must report the skip: {output}"
-    );
-    assert_eq!(
-        installed.installed(),
-        CURRENT,
-        "the skipped release must never be installed: {output}"
-    );
-    assert!(!marker.exists(), "nothing may restart: {output}");
-    assert_eq!(fs::read(&database).unwrap(), original);
-    assert!(
-        !installed.staging().exists(),
-        "a refused recovery must clear its staging directory: {output}"
-    );
-}
-
 #[test]
 fn an_interrupted_staged_update_keeps_the_installed_command() {
     for dies in [true, false] {
@@ -1213,4 +862,360 @@ fn an_interrupted_check_ends_every_process_it_started() {
         !marker.exists(),
         "nothing the check started may write after the update exited: {stderr}"
     );
+}
+
+/// These pass trivially unless the build is release-stamped; the CI step runs them.
+mod recovery {
+    use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_newer_store_recovers_only_with_a_compatible_staged_release() {
+        if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
+            return;
+        }
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => "darwin-arm64",
+            ("macos", "x86_64") => "darwin-x64",
+            ("linux", "aarch64") => "linux-arm64",
+            ("linux", "x86_64") => "linux-x64",
+            _ => return,
+        };
+        let version = next_version();
+        let format = dim_app_server::storage::STORE_FORMAT;
+        let future = format + 1;
+        for (baseline, declared, retry, second_failure) in [
+            (true, Some(future), false, false),
+            (true, Some(format), false, false),
+            (true, None, false, false),
+            (false, Some(future), false, false),
+            (true, Some(future), true, false),
+            (true, Some(future), false, true),
+        ] {
+            let installed = Installed::new(CURRENT, &["dima"]);
+            installed.mock_npm();
+            installed.release();
+            if baseline {
+                fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
+            }
+            let home = Home::new();
+            let database = home.0.join("rust/dimcode.sqlite");
+            rusqlite::Connection::open(&database)
+                .unwrap()
+                .execute_batch(&format!(
+                    "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {future}));
+                     INSERT INTO agent_store_format VALUES ({future});"
+                ))
+                .unwrap();
+            let original = fs::read(&database).unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let registry = format!("http://{}", listener.local_addr().unwrap());
+            let reply = json!({ "alpha": version }).to_string();
+            let registry = if retry {
+                drop(listener);
+                registry
+            } else {
+                thread::spawn(move || {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+                    let mut request = String::new();
+                    BufReader::new(&stream).read_line(&mut request).unwrap();
+                    assert!(request.starts_with("GET /-/package/dimcode-alpha/dist-tags "));
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    )
+                    .unwrap();
+                });
+                registry
+            };
+            let cwd = home.0.join("workspace with spaces");
+            fs::create_dir(&cwd).unwrap();
+            let launcher = r#"#!/bin/sh
+    if [ "$1" = "--version" ]; then printf 'dimcode %s\n' "$UPDATE_VERSION"; exit 0; fi
+    printf '%s\n' "$DIMCODE_STARTUP_RETRY" "$PWD" "$@" > "$RECOVERY_RESTART"
+    if [ "$RECOVERY_SECOND_FAILURE" = 1 ]; then exec "$RECOVERY_UPDATER" "$@"; fi
+    printf 'Replacement launcher started\n'
+    "#;
+            let marker = home.0.join("restart");
+            let mut command = Command::new(&installed.updater);
+            command
+                .current_dir(&cwd)
+                .arg("--home")
+                .arg(&home.0)
+                .args(["tui", "-p", "original message"])
+                .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
+                .env_remove("DIMCODE_AUTOUPDATE")
+                .env_remove("DIMCODE_UPDATE_CHECK")
+                .env_remove("DIMCODE_STARTUP_RETRY")
+                .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
+                .env("DIMCODE_NPM_REGISTRY", registry)
+                .env("NO_PROXY", "127.0.0.1")
+                .env("RECOVERY_RESTART", &marker)
+                .env(
+                    "RECOVERY_SECOND_FAILURE",
+                    if second_failure { "1" } else { "0" },
+                )
+                .env("RECOVERY_UPDATER", &installed.updater)
+                .env("UPDATE_NATIVE", "")
+                .env("UPDATE_PLATFORM_PACKAGE", format!("dimcode-{platform}"))
+                .env("UPDATE_VERSION", &version)
+                .env("UPDATE_ARGS", installed.home.0.join("install-args"))
+                .env("UPDATE_GATE", installed.home.0.join("gate"))
+                .env("UPDATE_WAITING", installed.home.0.join("waiting"))
+                .env(
+                    "UPDATE_PACKAGE_JSON",
+                    package_json(&version, &[("dima", "bin/dimcode.mjs")]),
+                )
+                .env("UPDATE_BINS", "dima=bin/dimcode.mjs")
+                .env("UPDATE_COMMAND", launcher)
+                .env(
+                    "UPDATE_RELEASE_MANIFEST",
+                    declared.map_or_else(String::new, |declared| {
+                        json!({
+                            "schemaVersion": 1, "platform": platform, "version": version,
+                            "storeFormats": [declared]
+                        })
+                        .to_string()
+                    }),
+                );
+            if retry {
+                command.env("DIMCODE_STARTUP_RETRY", "1");
+            }
+            if second_failure {
+                command.env("UPDATE_NATIVE", &installed.updater);
+            }
+            let mut terminal = Terminal::launch_tui(command);
+            let status = terminal.wait();
+            let output = strip_ansi(&terminal.transcript);
+            assert!(
+                output.contains(&format!("Store format: v{future}")),
+                "{output}"
+            );
+            assert!(!output.contains("store-newer"), "{output}");
+            assert_eq!(fs::read(&database).unwrap(), original);
+            assert!(!installed.staging().exists());
+            let switched = baseline && declared == Some(future) && !retry;
+            assert_eq!(status.success(), switched && !second_failure, "{output}");
+            if switched {
+                assert_eq!(installed.recorded().last().unwrap(), "dimcode-alpha@alpha");
+                assert_eq!(
+                    output.matches("Checking dimcode-alpha").count(),
+                    1,
+                    "{output}"
+                );
+                if !second_failure {
+                    assert!(output.contains("Replacement launcher started"), "{output}");
+                }
+                assert_eq!(
+                    fs::read_to_string(marker).unwrap(),
+                    format!(
+                        "1\n{}\n--home\n{}\ntui\n-p\noriginal message\n",
+                        fs::canonicalize(cwd).unwrap().display(),
+                        home.0.display()
+                    )
+                );
+            } else {
+                assert_eq!(installed.installed(), CURRENT);
+                assert!(!marker.exists());
+                if retry {
+                    assert!(!output.contains("Checking dimcode-alpha"), "{output}");
+                } else if !baseline {
+                    assert!(
+                        output.contains("dima update --confirm-legacy-exited"),
+                        "{output}"
+                    );
+                } else if declared.is_some() {
+                    assert!(
+                        output.contains(&format!(
+                            "{version} does not support native store v{future}"
+                        )),
+                        "{output}"
+                    );
+                } else {
+                    assert!(
+                        output.contains(&format!(
+                            "{version} does not declare support for native store v{future}"
+                        )),
+                        "{output}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_store_this_build_cannot_read_never_recovers() {
+        if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
+            return;
+        }
+        let installed = Installed::new(CURRENT, &["dima"]);
+        installed.mock_npm();
+        installed.release();
+        fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
+        let home = Home::new();
+        let database = home.0.join("rust/dimcode.sqlite");
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 14));
+                 INSERT INTO agent_store_format VALUES (14);",
+            )
+            .unwrap();
+        let original = fs::read(&database).unwrap();
+        let mut command = Command::new(&installed.updater);
+        command
+            .arg("--home")
+            .arg(&home.0)
+            .args(["tui", "-p", "original message"])
+            .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
+            .env_remove("DIMCODE_AUTOUPDATE")
+            .env_remove("DIMCODE_UPDATE_CHECK")
+            .env_remove("DIMCODE_STARTUP_RETRY")
+            .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
+            .env("DIMCODE_NPM_REGISTRY", "http://127.0.0.1:1")
+            .env("UPDATE_ARGS", installed.home.0.join("install-args"))
+            .env("UPDATE_GATE", installed.home.0.join("gate"))
+            .env("UPDATE_WAITING", installed.home.0.join("waiting"));
+        let mut terminal = Terminal::launch_tui(command);
+        let status = terminal.wait();
+        let output = strip_ansi(&terminal.transcript);
+        assert!(!status.success(), "{output}");
+        assert!(
+            output.contains("Store format: v14 (no longer read by this daemon)"),
+            "{output}"
+        );
+        assert!(
+            output.contains("This daemon cannot read the store. Existing data was preserved."),
+            "{output}"
+        );
+        assert!(
+            !output.contains("Checking dimcode-alpha"),
+            "a store this build cannot read must not start a recovery: {output}"
+        );
+        assert!(!output.contains("store-newer"), "{output}");
+        assert_eq!(installed.installed(), CURRENT);
+        assert_eq!(fs::read(&database).unwrap(), original);
+        assert!(!installed.staging().exists());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_recovery_never_installs_the_skipped_release() {
+        if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
+            return;
+        }
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => "darwin-arm64",
+            ("macos", "x86_64") => "darwin-x64",
+            ("linux", "aarch64") => "linux-arm64",
+            ("linux", "x86_64") => "linux-x64",
+            _ => return,
+        };
+        // The lookup registry answers a version above the skipped one, and the
+        // manager's own registry resolves the channel tag to the skipped one.
+        let skipped = next_version();
+        let looked_up = bump(&skipped);
+        let format = dim_app_server::storage::STORE_FORMAT;
+        let future = format + 1;
+        let installed = Installed::new(CURRENT, &["dima"]);
+        installed.mock_npm();
+        installed.release();
+        fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
+        let home = Home::new();
+        fs::write(
+            home.0.join("upgrade-skip.json"),
+            json!({ "version": skipped }).to_string(),
+        )
+        .unwrap();
+        let database = home.0.join("rust/dimcode.sqlite");
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {future}));
+                 INSERT INTO agent_store_format VALUES ({future});"
+            ))
+            .unwrap();
+        let original = fs::read(&database).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let registry = format!("http://{}", listener.local_addr().unwrap());
+        let reply = json!({ "alpha": looked_up }).to_string();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            assert!(request.starts_with("GET /-/package/dimcode-alpha/dist-tags "));
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        });
+        let launcher = r#"#!/bin/sh
+    if [ "$1" = "--version" ]; then printf 'dimcode %s\n' "$UPDATE_VERSION"; exit 0; fi
+    printf '%s\n' "$@" > "$RECOVERY_RESTART"
+    printf 'Replacement launcher started\n'
+    "#;
+        let marker = home.0.join("restart");
+        let mut command = Command::new(&installed.updater);
+        command
+            .arg("--home")
+            .arg(&home.0)
+            .args(["tui", "-p", "original message"])
+            .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
+            .env_remove("DIMCODE_AUTOUPDATE")
+            .env_remove("DIMCODE_UPDATE_CHECK")
+            .env_remove("DIMCODE_STARTUP_RETRY")
+            .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
+            .env("DIMCODE_NPM_REGISTRY", registry)
+            .env("NO_PROXY", "127.0.0.1")
+            .env("RECOVERY_RESTART", &marker)
+            .env("UPDATE_NATIVE", "")
+            .env("UPDATE_PLATFORM_PACKAGE", format!("dimcode-{platform}"))
+            .env("UPDATE_VERSION", &skipped)
+            .env("UPDATE_ARGS", installed.home.0.join("install-args"))
+            .env("UPDATE_GATE", installed.home.0.join("gate"))
+            .env("UPDATE_WAITING", installed.home.0.join("waiting"))
+            .env(
+                "UPDATE_PACKAGE_JSON",
+                package_json(&skipped, &[("dima", "bin/dimcode.mjs")]),
+            )
+            .env("UPDATE_BINS", "dima=bin/dimcode.mjs")
+            .env("UPDATE_COMMAND", launcher)
+            .env(
+                "UPDATE_RELEASE_MANIFEST",
+                json!({
+                    "schemaVersion": 1, "platform": platform, "version": skipped,
+                    "storeFormats": [future]
+                })
+                .to_string(),
+            );
+        let mut terminal = Terminal::launch_tui(command);
+        let status = terminal.wait();
+        let output = strip_ansi(&terminal.transcript);
+        assert!(
+            output.contains(&format!("Store format: v{future}")),
+            "{output}"
+        );
+        assert!(!status.success(), "{output}");
+        assert!(
+            output.contains(&format!("{skipped} is marked as skipped")),
+            "the recovery must report the skip: {output}"
+        );
+        assert_eq!(
+            installed.installed(),
+            CURRENT,
+            "the skipped release must never be installed: {output}"
+        );
+        assert!(!marker.exists(), "nothing may restart: {output}");
+        assert_eq!(fs::read(&database).unwrap(), original);
+        assert!(
+            !installed.staging().exists(),
+            "a refused recovery must clear its staging directory: {output}"
+        );
+    }
 }
