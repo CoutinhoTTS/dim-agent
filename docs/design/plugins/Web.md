@@ -190,7 +190,7 @@ No Session methods, `managementMethods` or CLI subcommand: protected client conf
 
 The process row `web` is registered with the App Server when a home exists. Its apply registers the Settings source `web` (user file `web.json`, no project file) and the Session part `Web` with `partRegistry`. Each Session mounts that part. The part injects `settings`, `toolRegistry` and `managedProviders`. Its apply registers cleanup and the two tools, and performs no I/O until a call. The Rust spelling is Appendix G.
 
-The source schema the row registers, with `userOnly` paths `/searchService`, `/allowPrivateHosts` and `/proxyDns`:
+The source schema the row registers, with `userOnly` paths `/searchService`, `/allowPrivateHosts`, `/blockPrivateAddresses` and `/proxyDns`:
 
 ```json
 {
@@ -212,15 +212,16 @@ The source schema the row registers, with `userOnly` paths `/searchService`, `/a
       "items": { "type": "string" },
       "default": []
     },
+    "blockPrivateAddresses": { "type": "boolean", "default": false },
     "proxy": { "type": "string", "format": "uri", "writeOnly": true },
-    "proxyDns": { "type": "boolean", "default": false }
+    "proxyDns": { "type": "boolean", "default": true }
   }
 }
 ```
 
 Execution follows the tool handler with the call's cancellation token. Every call reads the user-scoped `web` source. A read failure, or a stored document that does not deserialize into the web document, fails the call with `settings_unavailable` and opens no connection. Web does not substitute defaults for that document. When an API-key adapter is configured, the key is `searchService.apiKey`. When `searchService` is absent or `{"kind":"dim-oauth"}`, `web_search` calls `managedProviders` and does not read OAuth tokens.
 
-Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy, or `proxyDns: true` without a proxy, fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values. Web's proxy settings apply to fetches and directly configured search adapters; account-backed search follows the managed provider contract.
+Settings treats `format: "uri"` as an annotation. Web parses `searchService.endpoint` and `proxy` when constructing an HTTP request, rather than revalidating the Settings document. An unparsable endpoint fails `web_search` with `search_unavailable`. An unparsable proxy fails `web_search` with `search_unavailable` or `web_fetch` with `connect_failed`. No connection is attempted, no direct-connection fallback is used, and diagnostics omit configuration values. Web's proxy settings apply to fetches and directly configured search adapters; account-backed search follows the managed provider contract.
 
 The initial source is the user file `web.json`, read at user scope, with no projectFile or implicit user/project merge (A16). Clients write private-host exceptions; Web has no configuration-writing tool. The App Server registers the built-in Web row whenever a product home exists; Web requires no package installation. [PluginManager acceptance item 5](PluginManager.md#appendix-c-acceptance-m1) governs its on/off state: `plugin.disable {"name":"web"}` withdraws its tools from the next turn of an open Session; `plugin.enable {"name":"web"}` restores them there and in new Sessions. The state survives a restart. Explicit `plugin.reload` returns `not_reloadable`.
 
@@ -405,7 +406,7 @@ Every error is an error `ToolResult` (`isError: true`) with content `web_fetch f
 | `http_status` | Non-2xx final status |
 | `too_many_redirects` | More than 5 same-host hops |
 | `unsupported_content_type` | Type not in A.3 |
-| `search_unavailable` | No usable service or signed-in account, endpoint/proxy unparsable, enabled proxy DNS without a proxy for a direct adapter, adapter unusable, or a required API key missing |
+| `search_unavailable` | No usable service or signed-in account, endpoint/proxy unparsable, adapter unusable, or a required API key missing |
 | `search_failed` | Service error or invalid data; message shortened and stripped of secrets |
 | `settings_unavailable` | The `web` source could not be read, or the stored document does not match the web document |
 | `cancelled` | Call cancelled |
@@ -416,18 +417,18 @@ Recovery: Web holds no durable work; reload and restart lose only the cache.
 
 Flow tests through public interfaces: tool calls in a test Session, a local HTTP server reachable only through a test `allowPrivateHosts` entry, a fake search adapter.
 
-1. Without a service `web_search` returns `search_unavailable`; configuring one makes the next call succeed with no reload; removing it fails the next call. Schema-valid but unparsable endpoint/proxy values, and enabled proxy DNS without a proxy, produce the errors in §6.1 without opening a connection or falling back to a direct connection.
+1. Without a service `web_search` returns `search_unavailable`; configuring one makes the next call succeed with no reload; removing it fails the next call. Schema-valid but unparsable endpoint/proxy values produce the errors in §6.1 without opening a connection or falling back to a direct connection.
 2. `web_search` format, domain filters, zero results, service error.
 3. `web_fetch` HTML header and Markdown; `start_char` pagination to the end; `max_chars`; download limit notice.
 4. Plain text, JSON, unsupported type, 404, empty page.
 5. Same-host redirects up to 5; sixth fails; cross-host redirect returns the notice.
-6. With proxy DNS disabled, loopback, private, link-local, IPv4-mapped IPv6, `localhost` and a private-resolving hostname blocked; DNS rebinding test not connected, both directly and with `proxy` (the test proxy receives only `CONNECT <validated IP>:<port>`, with SNI and `Host` set to the hostname).
+6. With `blockPrivateAddresses: true`, loopback, private, link-local, IPv4-mapped IPv6, `localhost` and a private-resolving hostname fail with `blocked_address` and open no connection, directly and through `proxy`. With the policy off the same targets connect.
 7. Permission: read-only denies, workspace-write asks, FullAccess allows.
 8. Interrupt before dispatch, during approval and during a slow response (socket closed, one result).
 9. Restart settlement repeats no request.
 10. Non-interactive Session declares both tools.
 11. Diagnostics and results never contain the API key.
-12. Enabling proxy DNS through `settings.update` makes the next uncached fetch and direct search-adapter request use `CONNECT <hostname>:<port>` without reload or local target DNS, even when that name has a Fake-IP answer or cannot resolve locally. The URL host remains the HTTP `Host` and HTTPS certificate/SNI identity. With no `allowPrivateHosts` exception, fetch a hostname that the fixture proxy resolves to a loopback test server. The proxy receives `CONNECT <hostname>:<port>` and Web returns the test server's response. Disabling proxy DNS restores local validation. Literal private, benchmark and IPv4-mapped IPs, plus localhost names, remain blocked without an applicable exception; proxy refusal and cancellation settle without a direct retry. These tests use a disposable home and a fixture proxy, never system DNS or proxy configuration.
+12. Enabling proxy DNS through `settings.update` makes the next uncached fetch and direct search-adapter request resolve at the proxy: `CONNECT <hostname>:<port>` for `https`, an absolute-form request line for `http`, with no local target DNS even when the name has a Fake-IP answer or cannot resolve locally, and without a reload. The URL host remains the HTTP `Host` and the certificate/SNI identity. With no `allowPrivateHosts` exception, fetch a hostname that the fixture proxy resolves to a loopback test server and get its response. Disabling proxy DNS restores local resolution and pins the checked address. Proxy refusal and cancellation settle without a direct retry. These tests use a disposable home and a fixture proxy, never system DNS or proxy configuration.
 
 ## Appendix E. Assumptions
 

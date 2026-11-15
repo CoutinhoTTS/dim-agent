@@ -347,7 +347,7 @@ impl Policy {
             });
         }
         let allowed_host = hosts.contains(host);
-        if !allowed_host && (host == "localhost" || host.ends_with(".localhost")) {
+        if block_private && !allowed_host && (host == "localhost" || host.ends_with(".localhost")) {
             return Err(WebError::new(
                 "blocked_address",
                 "Localhost names are blocked.",

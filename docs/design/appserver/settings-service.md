@@ -152,7 +152,7 @@ A declaration, as the owner's code holds it:
       },
       "additionalProperties": false
     },
-    "userOnly": ["/searchService", "/allowPrivateHosts", "/blockPrivateAddresses"]
+    "userOnly": ["/searchService", "/allowPrivateHosts", "/blockPrivateAddresses", "/proxyDns"]
 }
 ```
 

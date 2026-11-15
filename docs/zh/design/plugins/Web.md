@@ -406,7 +406,7 @@ Fake-IP DNS 答案就是普通地址。经代理且 `proxyDns: true` 时它根�
 | `http_status` | 最终状态非 2xx |
 | `too_many_redirects` | 同主机跳转超过 5 次 |
 | `unsupported_content_type` | 类型不在 A.3 中 |
-| `search_unavailable` | 无可用服务或已登录账号、端点或 `proxy` 配置值无法解析、直接适配器启用代理 DNS 却未配置代理、适配器不可用或缺少所需的 API 密钥 |
+| `search_unavailable` | 无可用服务或已登录账号、端点或 `proxy` 配置值无法解析、适配器不可用或缺少所需的 API 密钥 |
 | `search_failed` | 服务错误或数据无效；消息经缩短并去除秘密 |
 | `settings_unavailable` | `web` 来源无法读取，或已存文档与 web 文档不符 |
 | `cancelled` | 调用被取消 |
@@ -417,18 +417,18 @@ Fake-IP DNS 答案就是普通地址。经代理且 `proxyDns: true` 时它根�
 
 经公开接口的流程测试：测试 Session 中的工具调用、一个只能通过测试用 `allowPrivateHosts` 条目访问的本地 HTTP 服务器、一个伪造的搜索适配器。
 
-1. 无服务时 `web_search` 返回 `search_unavailable`；配置一个服务后下一次调用无需重载即成功；移除后下一次调用失败。对 schema 合法但无法解析的端点或代理，以及启用代理 DNS 却未配置代理的情况，按 §6.1 返回错误，不建立连接或回退为直连。
+1. 无服务时 `web_search` 返回 `search_unavailable`；配置一个服务后下一次调用无需重载即成功；移除后下一次调用失败。对 schema 合法但无法解析的端点或代理，按 §6.1 返回错误，不建立连接或回退为直连。
 2. `web_search` 格式、域名过滤、零结果、服务错误。
 3. `web_fetch` 的 HTML 头部与 Markdown；`start_char` 分页至结尾；`max_chars`；下载上限提示。
 4. 纯文本、JSON、不支持的类型、404、空页面。
 5. 同主机重定向至多 5 次；第六次失败；跨主机重定向返回提示。
-6. 关闭代理 DNS 时，回环、私有、链路本地、IPv4 映射 IPv6、`localhost` 以及解析到私有地址的主机名均被封禁；DNS 重绑定测试未建立连接，直连和使用 `proxy` 都要测（测试代理只收到 `CONNECT <已校验 IP>:<端口>`，SNI 和 `Host` 为主机名）。
+6. `blockPrivateAddresses: true` 时，回环、私有、链路本地、IPv4 映射 IPv6、`localhost` 以及解析到私有地址的主机名都以 `blocked_address` 失败且不建立连接，直连和使用 `proxy` 都要测；策略关闭时同样的目标可以连接。
 7. Permission：read-only 拒绝，workspace-write 询问，FullAccess 允许。
 8. 派发前、审批期间与慢响应期间中断（socket 关闭，一个结果）。
 9. 重启结算不重复任何请求。
 10. 非交互 Session 声明两个工具。
 11. 诊断与结果从不包含 API 密钥。
-12. 经 `settings.update` 启用代理 DNS 后，下一次未命中缓存的抓取与直接搜索适配器请求无需重载即使用 `CONNECT <主机名>:<端口>`，不查询本机目标 DNS，即使该名称返回 Fake-IP 或在本机无法解析。URL 主机仍为 HTTP `Host` 与 HTTPS 证书/SNI 身份。在没有 `allowPrivateHosts` 例外的情况下，抓取测试代理解析到回环测试服务器的主机名。代理收到 `CONNECT <主机名>:<端口>`，Web 返回测试服务器的响应。关闭代理 DNS 后恢复本机校验。没有适用例外时，字面私有 IP、基准测试 IP、IPv4 映射 IP 与 localhost 名称均仍被拦截；代理拒绝与取消均结算，不直连重试。这些测试使用临时 home 与测试代理，不修改系统 DNS 或代理配置。
+12. 经 `settings.update` 启用代理 DNS 后，下一次未命中缓存的抓取与直接搜索适配器请求由代理解析：`https` 用 `CONNECT <主机名>:<端口>`，`http` 用 absolute-form 请求行，不查询本机目标 DNS，即使该名称返回 Fake-IP 或在本机无法解析，且无需重载。URL 主机仍为 HTTP `Host` 与证书/SNI 身份。在没有 `allowPrivateHosts` 例外的情况下，抓取测试代理能解析到回环测试服务器的主机名并返回其响应。关闭代理 DNS 后恢复本机解析并固定已检查的地址。代理拒绝与取消均结算，不直连重试。这些测试使用临时 home 与测试代理，不修改系统 DNS 或代理配置。
 
 ## 附录 E. 假设
 
