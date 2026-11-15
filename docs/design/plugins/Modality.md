@@ -225,6 +225,7 @@ No model-visible effect. Modality offers no tool, prompt source, input or Timeli
 | `modality.task.submit/status/list/wait/cancel/result` | Management methods | Task lifecycle; chunked binary result retrieval |
 | `modality.realtime.open/send/close`, `modality.realtime.event`, `modality.realtime.ended` | Management methods and connection-bound notifications | Realtime sessions |
 | `modalityTasks` | Process service, no key | Same operations as the task methods, for other process plugins |
+| `modalityTargets` | Process service, no key | One operation's resolved target for a process consumer, or the reason it is unavailable (§9.4); no task, no credential |
 | `modalityAdapter` | Process service, key adapter name; after [#861](https://github.com/arcships/dim/issues/861) resolved per task by name; the image slice reads the single process service per call (§9.1) | Provider-executed categories |
 | `ocrHelper` | Process service, no key, provided by a plugin's process row; Modality reads it per call (§9.1) | The description of the `local/pp-ocr` target: executable, args, read paths (A.2.1) |
 | `modality` settings document | Business configuration (Settings source, schema declared by Modality, written through Settings typed operations) | Operation defaults, limits; read at use time |
@@ -310,8 +311,8 @@ The Settings business source and the `pluginFiles` supplement are changes to oth
 
 - **Problem.** Modality resolves `modality.image.understand`, but the Session image-understanding path (attachments and `read`) sends images to the Session's adopted model; nothing reads the Modality default. Until this requirement lands, the understanding row can resolve and display only.
 - **Existing mechanisms.** `read` returns image blocks to the Session model, and `session.model.update` plus Prompt's adopted configuration choose that model. There is no input path or typed lookup from the Session path to a process owner's default. Choosing in the browser would be the browser-only default the requirement excludes.
-- **Needed capability.** The Session image-understanding path resolves its model through Modality's `modality.image.understand` default (explicit → default → automatic), or an equivalent typed handoff. The mechanism belongs to Agent/Prompt.
-- **Ordering impact.** Per read or attachment; no Timeline event; existing Sessions keep their behavior until the requirement lands; no reload.
+- **Needed capability.** The Session image-understanding path resolves its model through Modality's `modality.image.understand` default (explicit → default → automatic), or an equivalent typed handoff. The handoff is one typed read: the process service `modalityTargets` answers the target one operation resolves to now, or the reason it is unavailable, with `modality.capabilities`' own precedence and reason vocabulary, per call, without gating or reloading Modality and without returning a credential. The consumer is [ImageUnderstanding](ImageUnderstanding.md); the mechanism belongs to Agent/Prompt.
+- **Ordering impact.** Per tool call; no new event type (ordinary tool-call and tool-result facts); existing Sessions keep their behavior until the requirement lands; no reload.
 - **Owner/issue.** Agent/Prompt owner, [#798](https://github.com/arcships/dim/issues/798).
 
 ## Appendix A. Interface details
