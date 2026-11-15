@@ -1039,6 +1039,58 @@ pub fn stored_selection(
 ) -> Result<StoredSelection, StoredSelectionError>;
 ```
 
+### 3.8 Media execution for adapters
+
+Provider resolves a model's connection for one non-conversational call, and Modality passes it to
+its adapter for that call ([Modality A.2](../plugins/Modality.md#a2-adapters-and-ocr)). That
+connection is not a public contract and is not exposed as a data face.
+
+**Why the connection cannot be a face.** Its reply carries credential material for one call, and
+`ResolvedModelConnection` is resolved for one final request and never serialized
+(`dim-agent-capabilities` `host.rs`).
+[Service faces §2.2](../service-faces.md#22-migration-marker) keeps secret values with the owner
+and exposes operations that use them, so the only shape that could cross is an operation — the
+request executed on the adapter's behalf — not the connection.
+
+**Decision: no such operation now.** `modalityConnectionHost`'s classification is
+`internal(secret)`, not `legacy-no-consumer`: what it returns is credential material that must not
+cross, not data waiting for a dispatcher. The catalog still reports `legacy-no-consumer` until the
+classification line changes with the implementation this decision calls for. The sixth migration
+of [#1292](https://github.com/arcships/dim/issues/1292) ends here rather than in a data face, and
+media adapters execute in-process (`dim-modality-aimux`) through this native path. No media
+operation, signing, retry, redirect, upload, download or streaming behavior changes.
+
+**Why a `modalityRequest` executor is a different contract.** It would be a new HTTP executor, not
+an existing operation serialized, and it cannot preserve what the native path does today
+([#1613](https://github.com/arcships/dim/issues/1613)):
+
+| Existing behavior | What an operation must match |
+| --- | --- |
+| One resolution per adapter call | Resolve once per call; keep the call's target fixed for its retries; later calls see updated configuration without mixing snapshots |
+| Streaming downloads to files with a 2 GiB limit (`dim-modality-aimux`) | Stream to a file; never buffer a whole reply into base64 |
+| WebSocket realtime open/send/receive/close | A connection-scoped protocol, not one request and reply |
+| Vendor route and credential routing, including the fal image routes and query parameters | The same route selection and credential handling the catalog declares |
+| Redirects and per-vendor error mapping | The same rules the connection query applies now |
+| Cancellation and release at every step | Cancels owner work; dropping the call settles it and keeps the caller's token |
+
+`modalityRequest` as proposed in [#1399](https://github.com/arcships/dim/pull/1399) also accepted
+Bedrock routes without SigV4 signing, while every bundled media adapter refuses a Bedrock
+connection. Media support on Bedrock would be a new feature, not a serialization of an existing
+one.
+
+**Acceptance, if the operation is built later.** The maintainer confirms the operation's shape,
+ownership and coverage before implementation; existing media operations and their limits are
+preserved or a scope change is stated; one resolution per call lifetime with no mixed snapshots;
+Rust and an actual foreign-runtime flow exercise the same request, reply, cancellation and error
+contract; tests cover the affected flow boundaries, including credential confinement, vendor
+routes, query parameters, redirects, download streaming and realtime cleanup; file transfer
+agrees with [#1564](https://github.com/arcships/dim/issues/1564) and its active changes rather than
+adding a second upload implementation.
+
+**Consumer consequence.** Modality's adapters are process services, so a foreign-language adapter
+serves no media operation until such an operation exists. Modality states that in its own document;
+this page defines nothing about how an adapter declares or runs its work.
+
 ## 4. Client integration
 
 ```text

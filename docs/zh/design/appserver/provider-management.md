@@ -692,6 +692,31 @@ pub fn stored_selection(
 ) -> Result<StoredSelection, StoredSelectionError>;
 ```
 
+### 3.8 适配器的媒体执行
+
+Provider 为一次非对话调用解析模型的连接，Modality 在该调用中把连接交给适配器（[Modality A.2](../plugins/Modality.md#a2-适配器与-ocr)）。该连接不是公开合同，也不作为 data face 暴露。
+
+**连接为何不能是面。** 它的返回值包含仅限这一次调用的凭据材料，`ResolvedModelConnection` 为一次最终请求解析且从不序列化（`dim-agent-capabilities` `host.rs`）。[服务面 §2.2](../../../design/service-faces.md#22-migration-marker) 要求秘密值留在所有者内部、公开方法暴露使用它们的操作，因此能跨语言的只有**操作**——代适配器执行的那次请求——而不是连接。
+
+**决定：现在不提供该操作。** `modalityConnectionHost` 的分类是 `internal(secret)`，不是 `legacy-no-consumer`：它返回的是不得跨语言的凭据材料，而不是等待 dispatcher 的数据；在实现本决定所指的分类改动之前，目录仍报 `legacy-no-consumer`。[#1292](https://github.com/arcships/dim/issues/1292) 的第六批迁移到此为止，不落为 data face；媒体适配器在进程内（`dim-modality-aimux`）经由这条原生路径执行。本决定不改变任何媒体操作、签名、重试、重定向、上传、下载或流式行为。
+
+**为何 `modalityRequest` 执行器是另一份合同。** 它是新的 HTTP 执行器，而不是既有操作的序列化，无法保留原生路径今天的行为（[#1613](https://github.com/arcships/dim/issues/1613)）：
+
+| 既有行为 | 操作必须做到 |
+| --- | --- |
+| 每次适配器调用一次解析 | 每次调用解析一次；该调用及其重试固定同一目标；后续调用看到更新后的配置且不混用快照 |
+| 流式下载到文件，2 GiB 上限（`dim-modality-aimux`） | 流式写入文件；不得把整个响应缓冲成 base64 |
+| WebSocket realtime open/send/receive/close | 连接级协议，而不是一次请求/应答 |
+| 厂商路由与凭据路由，包括 fal 图像路由与查询参数 | 与目录声明相同的路由选择与凭据处理 |
+| 重定向与厂商错误映射 | 与当前连接查询相同的规则 |
+| 每一步的取消与释放 | 取消所有者工作；丢弃调用即结算，且保留调用方的 token |
+
+[#1399](https://github.com/arcships/dim/pull/1399) 中提出的 `modalityRequest` 还接受 Bedrock 路由却不做 SigV4 签名，而所有内置媒体适配器都拒绝 Bedrock 连接。Bedrock 上的媒体支持是新增特性，不是既有操作的序列化。
+
+**若日后实现该操作的验收。** 实现前由维护者确认操作形状、所有权与覆盖面；既有媒体操作及其上限保持不变，或明确声明范围变更；每次调用生命周期内只解析一次且不混用快照；Rust 与真实外部运行时流程覆盖相同的请求、应答、取消与错误合同；测试覆盖受影响的流程边界，包括凭据隔离、厂商路由、查询参数、重定向、下载流与 realtime 清理；文件传输与 [#1564](https://github.com/arcships/dim/issues/1564) 及其进行中的改动保持一致，不另立上传实现。
+
+**对使用方的影响。** Modality 的适配器是进程服务，因此在存在该操作之前，外部语言适配器不提供任何媒体操作。Modality 在自己的文档中说明这一点；本页不定义适配器如何声明或运行其工作。
+
 ## 4. 客户端集成
 
 ```text
