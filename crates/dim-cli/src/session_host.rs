@@ -13,7 +13,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use dim_agent_types::{ApprovalCallData, ApprovalDecision, ModelId};
+use dim_agent_types::{ApprovalCallData, ApprovalDecision, ModelId, ModelPreferences};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -298,6 +298,12 @@ struct Worker {
     shell_stops: Vec<u64>,
     /// The model the session adopted, for the preference commands.
     model: Option<Configuration>,
+    /// The model Home previews, which the first message's Session adopts.
+    preview: Option<Configuration>,
+    /// The preference Home chose for that model: the members it named, which
+    /// the server applies over the model's saved values. Dropped once Home
+    /// shows another model or the Session starts.
+    pending: Option<(ModelId, ModelPreferences)>,
     model_session: Option<String>,
     /// The MCP sign-in waiting for its callback.
     mcp_attempt: Option<McpAttempt>,
@@ -709,6 +715,8 @@ impl Worker {
             ui_id: None,
             shell_stops: Vec::new(),
             model: None,
+            preview: None,
+            pending: None,
             mcp_attempt: None,
             mcp_callbacks: unbounded_channel(),
             mcp_required: Default::default(),
@@ -788,12 +796,14 @@ impl Worker {
             self.client.typed("session.model.preview", params).await
         })
         .await??;
-        self.send(Update::Ready(Configuration {
+        let configuration = Configuration {
             provider_id: preview.model.provider_id,
             model_id: preview.model.model_id,
             capability_snapshot: None,
             model_preferences: preview.model_preferences,
-        }));
+        };
+        self.preview = Some(configuration.clone());
+        self.send(Update::Ready(configuration));
         Ok(())
     }
 
@@ -812,6 +822,24 @@ impl Worker {
             crate::add_creation_worktree(&self.client, &self.options, &mut params)?;
             params
         };
+        // A choice made at Home came after the launch flag, so it replaces
+        // that flag's member and leaves the rest of the creation's
+        // preferences alone. `modelFromSession` denies the member entirely.
+        let from_session =
+            self.model_session.is_some() && self.client.offers("session.create.modelFromSession");
+        if let (false, Some((_, pending))) = (from_session, &self.pending) {
+            let mut preferences = params["modelPreferences"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            if let Some(effort) = &pending.reasoning_effort {
+                preferences.insert("reasoningEffort".into(), json!(effort));
+            }
+            if let Some(tier) = &pending.service_tier {
+                preferences.insert("serviceTier".into(), json!(tier));
+            }
+            params["modelPreferences"] = serde_json::Value::Object(preferences);
+        }
         let mut target = if initial {
             self.options
                 .provider
@@ -957,6 +985,8 @@ impl Worker {
         self.register_ui().await?;
         self.mcp_required.clear();
         self.model = Some(configuration.clone());
+        self.preview = None;
+        self.pending = None;
         self.discover_branch("main");
         if self.client.offers("session.history.display.transcript") {
             self.task_history.get_mut("main").unwrap().window.through = Some(attached.sequence);
@@ -2025,8 +2055,12 @@ impl Worker {
             }
             Command::SetLocale(language) => crate::management::use_language(language),
             Command::Configure(text) => {
-                if self.session_id.is_empty() && configure::needs_session(&text) {
-                    self.report(NO_SESSION.to_owned(), true);
+                if self.session_id.is_empty() {
+                    if configure::needs_session(&text) {
+                        self.report(NO_SESSION.to_owned(), true);
+                    } else {
+                        self.configure_home(&text).await;
+                    }
                     return Ok(());
                 }
                 let model = self.model.clone();
@@ -3804,6 +3838,121 @@ impl Worker {
         Ok(())
     }
 
+    /// `/effort`, `/reasoning` and `/fast` at Home: the configuration
+    /// commands act on the model the footer shows, which is the one the first
+    /// message's Session adopts. A value is held as that model's pending
+    /// `modelPreferences` member for `start_session`; it sends no RPC and
+    /// writes no default. Bare `/agent` lists profiles, which names no
+    /// Session, so it keeps the ordinary path.
+    async fn configure_home(&mut self, text: &str) {
+        let command = text.split_whitespace().next().unwrap_or_default();
+        let bare_effort = matches!(text, "/effort" | "/reasoning");
+        if command == "/agent" {
+            match configure::run(&mut self.client, "", None, text).await {
+                Ok(report) => self.report(report.lines.join("\n"), false),
+                Err(error) => self.report(error.to_string(), true),
+            }
+            return;
+        }
+        let shown = self.model.clone().or_else(|| self.preview.clone());
+        let Some(shown) = shown else {
+            // Home shows no model, so the dialog says what to do instead of
+            // waiting for choices that cannot come.
+            if bare_effort {
+                self.send(Update::EffortChoices(Err(configure::NO_MODEL.into())));
+            } else {
+                self.report(configure::NO_MODEL.to_owned(), true);
+            }
+            return;
+        };
+        let result = configure::preference(&mut self.client, &shown, text).await;
+        if bare_effort {
+            self.send(Update::EffortChoices(
+                result
+                    .map(|preference| match preference {
+                        configure::Preference::List {
+                            effort: Some(effort),
+                            ..
+                        } => effort,
+                        configure::Preference::List { effort: None, .. }
+                        | configure::Preference::Apply { .. } => {
+                            unreachable!("bare /effort lists choices")
+                        }
+                    })
+                    .map_err(|error| error.to_string()),
+            ));
+            return;
+        }
+        let preferences = match result {
+            Ok(configure::Preference::List { line, .. }) => return self.report(line, false),
+            Ok(configure::Preference::Apply { preferences, value }) => {
+                // `/new` after a Session inherits that Session's model
+                // through `modelFromSession`, which a creation's preferences
+                // cannot accompany: the choice would silently never arrive.
+                if self.model_session.is_some()
+                    && self.client.offers("session.create.modelFromSession")
+                {
+                    self.report(
+                        "The next Session inherits its model; run the command there.".into(),
+                        true,
+                    );
+                    return;
+                }
+                self.report(
+                    format!(
+                        "{} for the first Session: {value}",
+                        if command == "/fast" {
+                            "Service tier"
+                        } else {
+                            "Reasoning effort"
+                        }
+                    ),
+                    false,
+                );
+                preferences
+            }
+            Err(error) => return self.report(error.to_string(), true),
+        };
+        // The other member keeps what the shown model already carries: the
+        // saved value the preview reported, else the choice Home made before.
+        let held = self
+            .pending
+            .as_ref()
+            .filter(|(pending, _)| {
+                pending.provider_id == shown.provider_id && pending.model_id == shown.model_id
+            })
+            .map(|(_, held)| held);
+        let saved = shown.model_preferences.as_ref();
+        let preferences = ModelPreferences {
+            reasoning_effort: preferences.reasoning_effort.or_else(|| {
+                held.and_then(|held| held.reasoning_effort.clone())
+                    .or_else(|| saved.and_then(|saved| saved.reasoning_effort.clone()))
+            }),
+            service_tier: preferences.service_tier.or_else(|| {
+                held.and_then(|held| held.service_tier.clone())
+                    .or_else(|| saved.and_then(|saved| saved.service_tier.clone()))
+            }),
+        };
+        self.pending = Some((
+            ModelId {
+                provider_id: shown.provider_id.clone(),
+                model_id: shown.model_id.clone(),
+            },
+            preferences.clone(),
+        ));
+        let configuration = Configuration {
+            model_preferences: Some(preferences),
+            ..shown
+        };
+        self.preview = Some(configuration.clone());
+        // Home's shown model may be the one `/models` picked, which the first
+        // creation reads; its label draws the pending choice too.
+        if self.model.is_some() {
+            self.model = Some(configuration.clone());
+        }
+        self.send(Update::Ready(configuration));
+    }
+
     /// Switches the session's model, or at home the one the first message
     /// starts a session on, then makes it the default for new ones.
     /// A cycled `reasoning_effort` is saved first, so the server reads it when
@@ -3826,6 +3975,10 @@ impl Worker {
         }
         let model = if self.session_id.is_empty() {
             self.model_session = None;
+            // `/models` at Home may have saved an effort for the model it
+            // picked; that value is the new model's saved one, and the choice
+            // Home held belonged to the model it replaced.
+            self.pending = None;
             let model = ModelId {
                 provider_id,
                 model_id,
@@ -3838,6 +3991,7 @@ impl Worker {
                 model_preferences: None,
             };
             self.model = Some(configuration.clone());
+            self.preview = Some(configuration.clone());
             self.send(Update::Ready(configuration));
             self.send(features);
             model

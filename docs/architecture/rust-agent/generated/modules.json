@@ -35262,6 +35262,14 @@
     },
     {
       "from": "dim_cli::configure",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelPreferences",
+        "use dim_agent_types::ModelPreferences"
+      ]
+    },
+    {
+      "from": "dim_cli::configure",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -39120,9 +39128,11 @@
       "from": "dim_cli::session_host",
       "to": "dim_agent_types::model",
       "references": [
+        "path ModelPreferences",
         "path dim_agent_types::CatalogCapabilities",
         "path dim_agent_types::ModelPreferences",
-        "path dim_agent_types::ModelReasoning"
+        "path dim_agent_types::ModelReasoning",
+        "use dim_agent_types::ModelPreferences"
       ]
     },
     {
@@ -39189,7 +39199,11 @@
       "to": "dim_cli::configure",
       "references": [
         "path configure",
+        "path configure::NO_MODEL",
+        "path configure::Preference::Apply",
+        "path configure::Preference::List",
         "path configure::needs_session",
+        "path configure::preference",
         "path configure::run",
         "use crate::configure"
       ]
