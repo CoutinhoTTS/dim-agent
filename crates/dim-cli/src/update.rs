@@ -33,6 +33,19 @@ pub struct Offer {
     pub manual: String,
 }
 
+/// What only a newer-store startup recovery asks of the staged tree.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recovery {
+    /// The native store format the running binary refused to read and the
+    /// staged release must declare support for.
+    pub store_format: u32,
+    /// The version the user skipped, which the recovery must never install:
+    /// the tag the manager resolves can name it even when the registry
+    /// answered a newer one.
+    pub skipped: Option<String>,
+}
+
 /// An install of a version with the package manager this copy came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Install {
@@ -44,8 +57,10 @@ pub struct Install {
     /// The package this copy was installed from, which names the directory the
     /// manager installs it into and the commands that start it.
     pub package: String,
+    /// Set only by a newer-store startup recovery; a user-initiated update
+    /// leaves it `None` and so ignores skips by design.
     #[cfg(unix)]
-    store_format: Option<u32>,
+    recovery: Option<Recovery>,
 }
 
 /// How the manager installs the new version.
@@ -262,7 +277,7 @@ fn installer(exe: &Path, package: &str, version: &str) -> Option<Install> {
         directory,
         package: package.to_owned(),
         #[cfg(unix)]
-        store_format: None,
+        recovery: None,
     })
 }
 
@@ -360,19 +375,26 @@ pub(crate) async fn recover_startup(
 
     eprintln!("{}", crate::sanitize::safe(&store.diagnostic));
     eprintln!("Checking {package} on the {tag} channel...");
+    let skipped = skipped(home);
     let result: crate::Result<i32> = async {
         let version = channel_version(&package, tag).await?;
         if !newer(current, &version) {
             return Err(format!("The {tag} channel has no release newer than {current}").into());
         }
-        if skipped(home).as_deref() == Some(version.as_str()) {
+        // A shortcut that avoids staging a release already known to be skipped.
+        // The manager resolves the tag again on its own registry, so only the
+        // check against the staged version below decides what gets installed.
+        if skipped.as_deref() == Some(version.as_str()) {
             return Err(format!("{version} is marked as skipped").into());
         }
         let launcher = installation
             .directory
             .join("bin")
             .join(entry_point(&package));
-        installation.store_format = Some(store.format);
+        installation.recovery = Some(Recovery {
+            store_format: store.format,
+            skipped,
+        });
         run_install(installation, tag, false).await?;
         eprintln!("Restarting {}...", entry_point(&package));
         let error = std::process::Command::new(&launcher)

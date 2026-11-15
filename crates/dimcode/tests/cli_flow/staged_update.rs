@@ -12,7 +12,12 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
 /// A version the update may install: one above the current number.
 fn next_version() -> String {
-    let (head, tail) = CURRENT.rsplit_once('.').unwrap();
+    bump(CURRENT)
+}
+
+/// `version` with its last component's number raised by one.
+fn bump(version: &str) -> String {
+    let (head, tail) = version.rsplit_once('.').unwrap();
     format!("{head}.{}", tail.parse::<u64>().unwrap() + 1)
 }
 
@@ -516,6 +521,124 @@ fn a_store_this_build_cannot_read_never_recovers() {
     assert_eq!(installed.installed(), CURRENT);
     assert_eq!(fs::read(&database).unwrap(), original);
     assert!(!installed.staging().exists());
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_recovery_never_installs_the_skipped_release() {
+    if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
+        return;
+    }
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "darwin-arm64",
+        ("macos", "x86_64") => "darwin-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("linux", "x86_64") => "linux-x64",
+        _ => return,
+    };
+    // The lookup registry answers a version above the skipped one, and the
+    // manager's own registry resolves the channel tag to the skipped one.
+    let skipped = next_version();
+    let looked_up = bump(&skipped);
+    let format = dim_app_server::storage::STORE_FORMAT;
+    let future = format + 1;
+    let installed = Installed::new(CURRENT, &["dima"]);
+    installed.mock_npm();
+    installed.release();
+    fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
+    let home = Home::new();
+    fs::write(
+        home.0.join("upgrade-skip.json"),
+        json!({ "version": skipped }).to_string(),
+    )
+    .unwrap();
+    let database = home.0.join("rust/dimcode.sqlite");
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {future}));
+             INSERT INTO agent_store_format VALUES ({future});"
+        ))
+        .unwrap();
+    let original = fs::read(&database).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let registry = format!("http://{}", listener.local_addr().unwrap());
+    let reply = json!({ "alpha": looked_up }).to_string();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+        let mut request = String::new();
+        BufReader::new(&stream).read_line(&mut request).unwrap();
+        assert!(request.starts_with("GET /-/package/dimcode-alpha/dist-tags "));
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+            reply.len()
+        )
+        .unwrap();
+    });
+    let launcher = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'dimcode %s\n' "$UPDATE_VERSION"; exit 0; fi
+printf '%s\n' "$@" > "$RECOVERY_RESTART"
+printf 'Replacement launcher started\n'
+"#;
+    let marker = home.0.join("restart");
+    let mut command = Command::new(&installed.updater);
+    command
+        .arg("--home")
+        .arg(&home.0)
+        .args(["tui", "-p", "original message"])
+        .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
+        .env_remove("DIMCODE_AUTOUPDATE")
+        .env_remove("DIMCODE_UPDATE_CHECK")
+        .env_remove("DIMCODE_STARTUP_RETRY")
+        .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
+        .env("DIMCODE_NPM_REGISTRY", registry)
+        .env("NO_PROXY", "127.0.0.1")
+        .env("RECOVERY_RESTART", &marker)
+        .env("UPDATE_NATIVE", "")
+        .env("UPDATE_PLATFORM_PACKAGE", format!("dimcode-{platform}"))
+        .env("UPDATE_VERSION", &skipped)
+        .env("UPDATE_ARGS", installed.home.0.join("install-args"))
+        .env("UPDATE_GATE", installed.home.0.join("gate"))
+        .env("UPDATE_WAITING", installed.home.0.join("waiting"))
+        .env(
+            "UPDATE_PACKAGE_JSON",
+            package_json(&skipped, &[("dima", "bin/dimcode.mjs")]),
+        )
+        .env("UPDATE_BINS", "dima=bin/dimcode.mjs")
+        .env("UPDATE_COMMAND", launcher)
+        .env(
+            "UPDATE_RELEASE_MANIFEST",
+            json!({
+                "schemaVersion": 1, "platform": platform, "version": skipped,
+                "storeFormats": [future]
+            })
+            .to_string(),
+        );
+    let mut terminal = Terminal::launch_tui(command);
+    let status = terminal.wait();
+    let output = strip_ansi(&terminal.transcript);
+    assert!(
+        output.contains(&format!("Store format: v{future}")),
+        "{output}"
+    );
+    assert!(!status.success(), "{output}");
+    assert!(
+        output.contains(&format!("{skipped} is marked as skipped")),
+        "the recovery must report the skip: {output}"
+    );
+    assert_eq!(
+        installed.installed(),
+        CURRENT,
+        "the skipped release must never be installed: {output}"
+    );
+    assert!(!marker.exists(), "nothing may restart: {output}");
+    assert_eq!(fs::read(&database).unwrap(), original);
+    assert!(
+        !installed.staging().exists(),
+        "a refused recovery must clear its staging directory: {output}"
+    );
 }
 
 #[test]
