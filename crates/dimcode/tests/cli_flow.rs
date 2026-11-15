@@ -106,6 +106,18 @@ impl Home {
     fn at(path: PathBuf) -> Self {
         Self(path, Arc::new(AtomicBool::new(false)))
     }
+    /// A home whose saved send mode is `queue`, for the flows that pin the
+    /// queue route: the TUI's default is now steer, so an unsaved value would
+    /// steer instead.
+    fn queued() -> Self {
+        let home = Self::new();
+        fs::write(
+            home.0.join("config.json"),
+            r#"{"locale":"en","tuiDefaultSendMode":"queue"}"#,
+        )
+        .unwrap();
+        home
+    }
     /// Ends the CLI itself, as the last step of a flow. From here on a closed
     /// connection is the end the flow expects; before it, `Wire` fails on one.
     fn kill(&self, terminal: &Terminal) {
@@ -9754,7 +9766,7 @@ fn tui_rapid_queue_controls_settle_each_held_input_once() {
     for fullscreen in [false, true] {
         for shortcut in ["enter", "ctrl-s", "panel", "delete", "recall", "not-held"] {
             let steering = !matches!(shortcut, "delete" | "recall");
-            let home = Home::new();
+            let home = Home::queued();
             let daemon = home.daemon(move |wire| {
                 wire.hello(&[]);
                 let attach = wire.read("session.attach");
@@ -9842,7 +9854,7 @@ fn tui_rapid_queue_controls_settle_each_held_input_once() {
             }
             if matches!(shortcut, "panel" | "delete") {
                 terminal.write(b"\x1b");
-                terminal.until("/queue manage");
+                terminal.until("/queue · Shift+← edit last");
             }
             terminal.until_anywhere("already left the queue");
             if shortcut == "recall" {
@@ -9947,7 +9959,7 @@ fn tui_queue_recall_refuses_attachments_and_steering_preserves_all_content() {
 
 #[test]
 fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
-    let home = Home::new();
+    let home = Home::queued();
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
@@ -10068,8 +10080,66 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
 }
 
 #[test]
-fn tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress() {
+fn tui_ctrl_enter_interrupts_the_run_and_starts_a_new_one_with_the_draft() {
     let home = Home::new();
+    let (done, checked) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.notice(
+            "session.state",
+            json!({"sessionId":"session","branchId":"main","running":true}),
+        );
+        let held = wire.read("session.submit");
+        assert_eq!(held["params"]["text"], "held one");
+        assert_eq!(held["params"]["mode"], "queue");
+        wire.reply(&held, json!({"event":{}}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"in-held","sequence":9,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"held one"}]},"mode":"queue"}}}));
+        let withdraw = wire.read("session.input.withdraw");
+        assert_eq!(withdraw["params"]["inputId"], "in-held");
+        assert!(withdraw["params"].get("steer").is_none());
+        wire.reply(&withdraw, json!({"status":"deleted","sequence":10}));
+        wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-held","sequence":10,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"in-held"}}}));
+        let stop = wire.read("session.stop");
+        wire.reply(&stop, json!({"sequence":11}));
+        let sent = wire.read("session.submit");
+        let text = sent["params"]["text"].as_str().expect("text submit");
+        assert_eq!(
+            text, "held one\nnow",
+            "the held message, then the draft that was typed"
+        );
+        assert_eq!(sent["params"]["mode"], "queue");
+        wire.reply(&sent, json!({"event":{}}));
+        done.send(()).unwrap();
+        wire.hold();
+    });
+    let mut command = home.command();
+    command.arg("--fullscreen");
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"held one\r");
+    terminal.until("Queue (1)");
+    terminal.write(b"now");
+    terminal.until("now");
+    terminal.write(b"\x1b[13;5u");
+    checked.recv_timeout(PATIENCE).unwrap();
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress() {
+    let home = Home::queued();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
         let attach = wire.read("session.attach");

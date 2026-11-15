@@ -13,8 +13,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "添付ファイル付きのメッセージはキューに残ります。/queue で steer または削除してください"
         }
-        "/queue manage · Shift+← edit last · empty draft: {key} steer" => {
-            "/queue 管理 · Shift+← 最後を編集 · 下書きが空なら {key} で steer"
+        "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now" => {
+            "/queue · Shift+← 最後を編集 · 下書きが空なら {key} で steer · Ctrl+Enter で即送信"
         }
         "+{count} more · {hint}" => "+{count} 件 · {hint}",
         "steer or delete queued messages" => "キューのメッセージを steer または削除",
@@ -534,6 +534,22 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Empty draft: {keys} steer first queued" => "下書きが空なら {keys} でキューの先頭を steer",
         "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Shift+← edit last queued" => {
             "Ctrl+O/Ctrl+P コマンド · Esc 中断、キューのメッセージは入力欄へ戻る · Shift+← 最後のキューを編集"
+        }
+        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
+            "Ctrl+Enter で中断して即送信：下書きと保留中の全メッセージを 1 通にまとめます"
+        }
+        "Send now failed: {error}; the draft was kept" => {
+            "即時送信に失敗しました: {error}。下書きは残しました"
+        }
+        "Send now cancelled; the draft was kept" => "即時送信を取り消しました。下書きは残しました",
+        "Send now is still stopping the run; the draft was kept" => {
+            "送信即時はまだ実行を停止中です。下書きは保持されました"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "送信即時は実行を停止中です。下書きの送信後に貼り付けてください"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "送信即時は挿入を待ってから送信します"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C クリア、2 回で終了 · 空なら Ctrl+D で終了"

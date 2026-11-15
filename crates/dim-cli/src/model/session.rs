@@ -214,6 +214,9 @@ pub enum Command {
         input_id: String,
         action: &'static str,
     },
+    /// Interrupt the run and reply once it has settled, so the interface can
+    /// submit the draft it held back (Ctrl+Enter).
+    SubmitNow,
     /// Stop a background command on its originating branch (`/tasks`).
     StopTask {
         session_id: String,
@@ -1230,6 +1233,11 @@ pub enum Update {
     /// A queued input the TUI withdrew (`Command::InputControl` with action
     /// `withdraw`) is deleted: its complete content goes back into the draft.
     Withdrawn(dim_agent_types::UserInput),
+    /// The stop a Ctrl+Enter asked for settled: the interface submits the
+    /// draft it held back, or keeps it when `error` says the stop failed.
+    Stopped {
+        error: Option<String>,
+    },
     Exported {
         format: crate::export::Format,
         path: std::path::PathBuf,

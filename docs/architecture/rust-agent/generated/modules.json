@@ -6692,6 +6692,7 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/tui.rs",
       "unexpandedMacros": [
+        "debug_assert",
         "eprintln",
         "format",
         "matches",
@@ -39787,6 +39788,7 @@
         "path Command::StopWorkflow",
         "path Command::Submit",
         "path Command::SubmitDraft",
+        "path Command::SubmitNow",
         "path Command::Suggest",
         "path Command::SuggestionRespond",
         "path Command::TaskHistory",
@@ -39903,6 +39905,7 @@
         "path Update::Skills",
         "path Update::Snapshot",
         "path Update::StartupFailed",
+        "path Update::Stopped",
         "path Update::SuggestionCleared",
         "path Update::SuggestionMethods",
         "path Update::SuggestionOffer",
@@ -41339,6 +41342,7 @@
       "to": "dim_cli::ui::commands",
       "references": [
         "path crate::ui::commands::COMMANDS",
+        "path crate::ui::commands::Command",
         "path crate::ui::commands::Context",
         "path crate::ui::commands::Context::default"
       ]
@@ -41741,6 +41745,20 @@
     },
     {
       "from": "dim_cli::ui::composer::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::ContentBlock::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
       "to": "dim_cli::attachments",
       "references": [
         "path crate::attachments::pasted_entries"
@@ -41795,7 +41813,8 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path crate::ui::i18n::active",
-        "path crate::ui::i18n::set"
+        "path crate::ui::i18n::set",
+        "path t"
       ]
     },
     {
@@ -42784,7 +42803,8 @@
       "from": "dim_cli::ui::keys::tests",
       "to": "dim_cli::model::session",
       "references": [
-        "path SubmitMode::Queue"
+        "path SubmitMode::Queue",
+        "path SubmitMode::Steer"
       ]
     },
     {
@@ -47520,6 +47540,20 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::ContentBlock::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_agent_types::goal",
       "references": [
         "path crate::goal::Status::Active",
@@ -47707,6 +47741,7 @@
         "path Command::StopTasks",
         "path Command::StopWorkflow",
         "path Command::SubmitDraft",
+        "path Command::SubmitNow",
         "path Command::Suggest",
         "path Command::SuggestionRespond",
         "path Command::TaskHistory",
@@ -47725,6 +47760,9 @@
         "path DeleteOutcome::NothingRemoved",
         "path DeleteOutcome::Unsupported",
         "path DeleteReply",
+        "path DraftPart::Block",
+        "path DraftPart::Paste",
+        "path DraftPart::Text",
         "path ManagementAction",
         "path ManagementAction::Add",
         "path ManagementAction::List",
@@ -47797,6 +47835,7 @@
         "path Update::Skills",
         "path Update::Snapshot",
         "path Update::StartupFailed",
+        "path Update::Stopped",
         "path Update::SubmitNotSent",
         "path Update::SuggestionCleared",
         "path Update::SuggestionMethods",
@@ -48823,6 +48862,7 @@
         "path Command::Runtime",
         "path Command::Stop",
         "path Command::Submit",
+        "path Command::SubmitNow",
         "path DIM_OAUTH_ID",
         "path ManagementAction::Add",
         "path ManagementAction::List",
@@ -48840,6 +48880,8 @@
         "path PromptField::Summary",
         "path PromptSetting",
         "path SessionPort",
+        "path SubmitMode::Queue",
+        "path SubmitMode::Steer",
         "path SuggestionSetting",
         "path SwitchKind::Forked",
         "path SwitchKind::New",
@@ -48864,6 +48906,7 @@
         "path Update::Skills",
         "path Update::Snapshot",
         "path Update::StartupFailed",
+        "path Update::Stopped",
         "path Update::SuggestionMethods",
         "path Update::SuggestionOffer",
         "path Update::SuggestionSetting",
@@ -49020,7 +49063,8 @@
       "to": "dim_cli::ui::render::fullscreen",
       "references": [
         "path FullScreen",
-        "path FullScreen::new"
+        "path FullScreen::new",
+        "path crate::ui::render::fullscreen::FullScreen::new"
       ]
     },
     {
@@ -49074,6 +49118,13 @@
     },
     {
       "from": "dim_cli::ui::tui::tests",
+      "to": "dim_cli::ui::shell",
+      "references": [
+        "path crate::ui::shell::Running::new"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::tasks_panel",
       "references": [
         "path TasksPanel::new"
@@ -49098,11 +49149,14 @@
         "path KeyCode::Right",
         "path KeyCode::Tab",
         "path KeyCode::Up",
+        "path KeyEvent",
         "path KeyEvent::new",
+        "path Modifiers",
         "path Modifiers::ALT",
         "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "path Modifiers::SHIFT",
+        "path Modifiers::SUPER",
         "path crate::ui::terminal::KeyEvent::new",
         "path crate::ui::terminal::Modifiers::NONE"
       ]
@@ -49181,6 +49235,7 @@
         "path QUEUE_HINT_MORE",
         "path TASK_FADE",
         "path WebOpened",
+        "path apply_jump",
         "path banner",
         "path chunk",
         "path live_panel_rows",
@@ -54613,6 +54668,26 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "RuntimeSource::System"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "State::Draft"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "State::Hidden"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "State::NoRow"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "State::Picker"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "State::Row"
     },
     {
       "module": "dim_cli::ui::tui::tests",
