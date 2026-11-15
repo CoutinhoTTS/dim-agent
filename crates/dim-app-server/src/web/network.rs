@@ -54,41 +54,97 @@ pub struct Diagnostic {
 
 pub struct NetworkConfig {
     allow_private_hosts: Vec<String>,
+    block_private_addresses: bool,
     proxy: Option<(Url, bool)>,
 }
 
 impl NetworkConfig {
     pub fn new(
         allow_private_hosts: Vec<String>,
+        block_private_addresses: bool,
         proxy: Option<&str>,
         proxy_dns: bool,
     ) -> Result<Self, WebError> {
         let proxy = match proxy {
-            Some(value) => {
-                let url = parse_url(value).map_err(|_| {
-                    WebError::new("connect_failed", "The configured proxy is unusable.")
-                })?;
-                if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
-                    return Err(WebError::new(
-                        "connect_failed",
-                        "The configured proxy is unusable.",
-                    ));
-                }
-                Some((url, proxy_dns))
-            }
-            None if proxy_dns => {
-                return Err(WebError::new(
-                    "connect_failed",
-                    "Proxy DNS requires a configured proxy.",
-                ));
-            }
-            None => None,
+            Some(value) => Some((parse_proxy(value)?, proxy_dns)),
+            None => system_proxy()
+                .and_then(|value| parse_proxy(&value).ok().map(|url| (url, proxy_dns))),
         };
         Ok(Self {
             allow_private_hosts,
+            block_private_addresses,
             proxy,
         })
     }
+}
+
+fn parse_proxy(value: &str) -> Result<Url, WebError> {
+    let url = parse_url(value)
+        .map_err(|_| WebError::new("connect_failed", "The configured proxy is unusable."))?;
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(WebError::new(
+            "connect_failed",
+            "The configured proxy is unusable.",
+        ));
+    }
+    Ok(url)
+}
+
+/// The proxy the running desktop session already uses, when the host is
+/// configured to route through one. The process environment wins; a desktop
+/// setting is the fallback. `DIM_WEB_SYSTEM_PROXY=off` disables both.
+fn system_proxy() -> Option<String> {
+    if let Ok(value) = std::env::var("DIM_WEB_SYSTEM_PROXY")
+        && matches!(value.as_str(), "off" | "none" | "0")
+    {
+        return None;
+    }
+    for name in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            let value = value.to_string_lossy().trim().to_owned();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    static DESKTOP: OnceLock<Option<String>> = OnceLock::new();
+    DESKTOP.get_or_init(desktop_proxy).clone()
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_proxy() -> Option<String> {
+    let read = |schema: &str, key: &str| {
+        let output = std::process::Command::new("gsettings")
+            .args(["get", schema, key])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    if read("org.gnome.system.proxy", "mode")?.trim_matches('\'') != "manual" {
+        return None;
+    }
+    let host = read("org.gnome.system.proxy.http", "host")?;
+    let host = host.trim_matches('\'');
+    if host.is_empty() {
+        return None;
+    }
+    let port: u16 = read("org.gnome.system.proxy.http", "port")?.parse().ok()?;
+    Some(format!("http://{host}:{port}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn desktop_proxy() -> Option<String> {
+    None
 }
 
 pub fn hostname(url: &Url) -> String {
@@ -266,6 +322,7 @@ fn is_public_ip(ip: IpAddr) -> bool {
 }
 
 struct Policy {
+    block_private: bool,
     allowed_host: bool,
     ranges: Vec<Cidr>,
 }
@@ -274,6 +331,7 @@ impl Policy {
     fn new(
         host: &str,
         entries: &[String],
+        block_private: bool,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> Result<Self, WebError> {
         let mut hosts = HashSet::new();
@@ -306,12 +364,16 @@ impl Policy {
             ));
         }
         Ok(Self {
+            block_private,
             allowed_host,
             ranges,
         })
     }
 
     fn check(&self, addresses: &[IpAddr], hostname: bool) -> Result<(), WebError> {
+        if !self.block_private {
+            return Ok(());
+        }
         for &address in addresses {
             let eff = effective_ip(address);
             let permitted = self.allowed_host
@@ -324,7 +386,7 @@ impl Policy {
                     return Err(WebError::new(
                         "blocked_address",
                         if hostname {
-                            "Reserved benchmark addresses are blocked. If using Fake-IP DNS, enable proxyDns with a trusted proxy, use real-address DNS answers, or configure an explicit trusted-host exception. See docs/design/plugins/Web.md (Address policy)."
+                            "Reserved benchmark addresses are blocked. A Fake-IP resolver needs a session or configured proxy so the proxy resolves hostnames, an allowPrivateHosts exception, or blockPrivateAddresses off. See docs/design/plugins/Web.md (Address policy)."
                         } else {
                             "Reserved benchmark addresses are blocked. Proxy DNS applies only to hostname targets. See docs/design/plugins/Web.md (Address policy)."
                         },
@@ -748,7 +810,12 @@ pub async fn get(
     headers: &HashMap<String, String>,
 ) -> Result<Response, WebError> {
     let host = hostname(url);
-    let policy = Policy::new(&host, &config.allow_private_hosts, diagnostics)?;
+    let policy = Policy::new(
+        &host,
+        &config.allow_private_hosts,
+        config.block_private_addresses,
+        diagnostics,
+    )?;
     let port = url
         .port_or_known_default()
         .ok_or_else(|| WebError::new("invalid_input", "Expected an absolute HTTP or HTTPS URL."))?;
@@ -913,6 +980,12 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use url::Url;
 
+    /// The library tests never fall back to the host's own proxy.
+    fn no_system_proxy() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe { std::env::set_var("DIM_WEB_SYSTEM_PROXY", "off") });
+    }
+
     fn dns(
         host: &'static str,
         ips: &[&str],
@@ -942,7 +1015,8 @@ mod tests {
     }
 
     fn config(host: &str, proxy: Option<&str>) -> NetworkConfig {
-        NetworkConfig::new(vec![host.to_owned()], proxy, false).unwrap()
+        no_system_proxy();
+        NetworkConfig::new(vec![host.to_owned()], true, proxy, false).unwrap()
     }
 
     async fn origin() -> (
@@ -1043,7 +1117,8 @@ mod tests {
             targets.clone(),
             stop.clone(),
         );
-        let blocked = NetworkConfig::new(Vec::new(), Some(&proxy_base), false).unwrap();
+        no_system_proxy();
+        let blocked = NetworkConfig::new(Vec::new(), true, Some(&proxy_base), false).unwrap();
         let _name = dns("private.test", &["8.8.8.8", "10.0.0.1"]);
         let url = Url::parse("http://private.test/secret").unwrap();
         let mut diagnostics = Vec::new();
@@ -1083,7 +1158,7 @@ mod tests {
         };
         assert_eq!(err.code, "blocked_address", "{err}");
         assert!(err.message.contains("benchmark"), "{err}");
-        assert!(err.message.contains("enable proxyDns"), "{err}");
+        assert!(err.message.contains("blockPrivateAddresses"), "{err}");
         assert!(targets.lock().unwrap().is_empty(), "{targets:?}");
         stop.cancel();
         task.await.unwrap();
@@ -1198,7 +1273,7 @@ mod tests {
         let url = Url::parse("https://fake-tls.test/").unwrap();
         let Err(err) = get(
             &url,
-            &NetworkConfig::new(Vec::new(), Some(&proxy_base), true).unwrap(),
+            &NetworkConfig::new(Vec::new(), true, Some(&proxy_base), true).unwrap(),
             &CancellationToken::new(),
             &mut Vec::new(),
             &HashMap::new(),
@@ -1218,9 +1293,10 @@ mod tests {
         let _name = std::mem::DropGuard::new("never.test", test_dns::remove);
         let started = std::time::Instant::now();
         let url = Url::parse("http://never.test/").unwrap();
+        no_system_proxy();
         let err = match get(
             &url,
-            &NetworkConfig::new(Vec::new(), None, false).unwrap(),
+            &NetworkConfig::new(Vec::new(), true, None, false).unwrap(),
             &CancellationToken::new(),
             &mut Vec::new(),
             &HashMap::new(),

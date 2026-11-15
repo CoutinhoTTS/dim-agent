@@ -31,17 +31,35 @@ const CACHE_LIMIT: usize = 50 * 1024 * 1024;
 const CACHE_TTL_MS: u64 = 15 * 60_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebDocument {
     #[serde(default)]
     pub allow_private_hosts: Vec<String>,
+    #[serde(default)]
+    pub block_private_addresses: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub proxy_dns: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_service: Option<SearchServiceConfig>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for WebDocument {
+    fn default() -> Self {
+        Self {
+            allow_private_hosts: Vec::new(),
+            block_private_addresses: false,
+            proxy: None,
+            proxy_dns: true,
+            search_service: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,6 +108,10 @@ pub fn source_declaration() -> SourceDeclaration {
                     },
                     "default": []
                 },
+                "blockPrivateAddresses": {
+                    "type": "boolean",
+                    "default": false
+                },
                 "proxy": {
                     "type": "string",
                     "format": "uri",
@@ -97,13 +119,14 @@ pub fn source_declaration() -> SourceDeclaration {
                 },
                 "proxyDns": {
                     "type": "boolean",
-                    "default": false
+                    "default": true
                 }
             }
         }),
         user_only: vec![
             "/searchService".into(),
             "/allowPrivateHosts".into(),
+            "/blockPrivateAddresses".into(),
             "/proxyDns".into(),
         ],
     }
@@ -450,6 +473,7 @@ impl SessionState {
         let count = parse_integer(args.get("max_chars"), 20_000, 1_000, 50_000)? as usize;
         let config = NetworkConfig::new(
             document.allow_private_hosts.clone(),
+            document.block_private_addresses,
             document.proxy.as_deref(),
             document.proxy_dns,
         )?;
@@ -741,6 +765,7 @@ impl SessionState {
             })?;
             let config = NetworkConfig::new(
                 document.allow_private_hosts.clone(),
+                document.block_private_addresses,
                 document.proxy.as_deref(),
                 document.proxy_dns,
             )

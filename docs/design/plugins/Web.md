@@ -333,24 +333,27 @@ The title is independently limited to 500 Unicode scalar values in both result f
 
 | Rule | Content |
 | --- | --- |
-| Resolution | With `proxyDns: false` (default), Web resolves the hostname, validates every resolved address and tries only validated addresses in DNS order until connected or the shared connect deadline expires (pinned), directly or through `proxy`, so DNS rebinding between check and connect is impossible |
-| Blocked by default | For hostnames resolved by Web (`proxyDns: false`) and literal IPs in either mode, Web blocks loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges, IPv4-mapped and IPv4-compatible IPv6 forms of these |
-| Literal IPs | Allowed only when public by the same rules or covered by `allowPrivateHosts`, including with `proxyDns: true`; a literal IP never delegates resolution |
-| Ports | Any port on a public address (A12) |
+| Resolution | Web resolves the hostname and tries the resolved addresses in DNS order until connected or the shared connect deadline expires (pinned), directly or through `proxy` |
+| Policy default | Off: `web_fetch` reaches whatever the host can route to, so a local proxy, a TUN device or a Fake-IP answer needs no exception. `blockPrivateAddresses: true` turns the policy below back on |
+| Blocked with `blockPrivateAddresses: true` | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges including the benchmark range `198.18.0.0/15`, and the IPv4-mapped and IPv4-compatible IPv6 forms of these |
+| Literal IPs | Checked by the same rules only when the policy is on; a literal IP never delegates resolution |
+| Ports | Any port (A12) |
 | Exceptions | `allowPrivateHosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
-| Proxy | With `proxyDns: false`, Web resolves and validates as above, then sends an HTTP `CONNECT <validated IP>:<port>` to the proxy for both `http` and `https`. With `proxyDns: true`, a hostname URL instead uses `CONNECT <hostname>:<port>` without local target DNS resolution. A literal IP still undergoes the address check and uses an IP target. Both modes share the existing connect deadline and cancellation; a refused tunnel fails with `connect_failed` (A15), without direct fallback |
-| Proxy DNS trust | `proxyDns` requires an explicit `proxy` and is disabled by default. When enabled, the proxy alone resolves hostname targets and enforces policy on the resulting addresses. A hostname may reach private or metadata addresses if the proxy permits them. Web still rejects `localhost` and `*.localhost` in either mode unless explicitly allowed by hostname. CIDR exceptions apply only to addresses Web checks |
+| Proxy | The target is `proxy` when set, otherwise the session's own proxy: `HTTPS_PROXY`, `ALL_PROXY` or `HTTP_PROXY` from the environment, then the desktop setting (GNOME `org.gnome.system.proxy` in `manual` mode). `DIM_WEB_SYSTEM_PROXY=off` disables both fallbacks |
+| Proxy DNS | With `proxyDns: true` (default), a hostname URL uses `CONNECT <hostname>:<port>` and the proxy alone resolves the target. With `false`, Web resolves and validates locally and sends `CONNECT <address>:<port>`. Both modes share the connect deadline and cancellation; a refused tunnel fails with `connect_failed` (A15), without direct fallback. Without any proxy the flag has no effect |
+| Proxy DNS trust | With `proxyDns`, the proxy alone resolves hostname targets, so a hostname may reach private or metadata addresses if the proxy permits it. Web still rejects `localhost` and `*.localhost` when the policy is on, unless explicitly allowed by hostname. CIDR exceptions apply only to addresses Web checks |
 
-Fake-IP DNS answers remain subject to the default address policy: reserved ranges are not automatically trusted. With `proxyDns: true`, Web avoids the local target DNS answer entirely, so Fake-IP ranges need no special cases or per-site exceptions. Without this opt-in, use real-address DNS answers or an explicit trusted-host exception in `allowPrivateHosts`. Neither a search endpoint nor `proxy` alone enables proxy DNS.
+Fake-IP DNS answers are ordinary addresses while the policy is off. Turning `blockPrivateAddresses` on restores the reserved-range blocks; with `proxyDns: true` Web never sees the local answer, because the proxy resolves, so a Fake-IP range then needs no exception either.
 
 ### A.5 Business configuration (Settings source `web`)
 
 | Field | Type | Default |
 | --- | --- | --- |
 | `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` or absent; user-only | absent (uses `dim-oauth` via `managedProviders` when signed in; otherwise `web_search` returns `search_unavailable`) |
-| `allowPrivateHosts` | string[] | `[]` |
-| `proxy` | string (URL) | absent |
-| `proxyDns` | boolean; user-only; requires `proxy` when enabled | `false` |
+| `allowPrivateHosts` | string[]; user-only | `[]` |
+| `blockPrivateAddresses` | boolean; user-only | `false` |
+| `proxy` | string (URL); user-only; absent means the session's own proxy (A.4) | absent |
+| `proxyDns` | boolean; user-only | `true` |
 
 Read at each call and used as delivered: Settings validates the document against the schema Web declares and applies its defaults on write and when reading a persisted file, and Web does not validate it again. Web has no tool that writes configuration, so the document is written only through the client methods (S8b). A change is a data update with notification, never a reload. The row's structural on/off state belongs to PluginManager (§6). Built-in adapter ids are an implementation choice (A13). The API key is `searchService.apiKey` (§1).
 
