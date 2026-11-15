@@ -2190,6 +2190,50 @@ async fn node_session_typescript_accepts_type_array_schemas_and_names_a_refused_
     server.join().await.unwrap();
 }
 
+/// The registration's third argument carries the ordering class, and an
+/// unknown value is refused at the boundary rather than silently ignored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_typescript_takes_the_ordering_class_as_a_registration_option() {
+    let mut parts = fixture();
+    parts.rows[0]["config"] = json!({"concurrency": true});
+    let (server, _requests, _, mut recorded) = start_recording(ServerConfig {
+        session_typescript: Some(parts),
+        ..Default::default()
+    })
+    .await;
+    plugin_active(&server, &fixture().rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let session = new_session(
+        &mut client,
+        json!(["ts_shared", "ts_alone", "ts_unknown", "echo"]),
+    )
+    .await;
+    when_served(
+        &mut client,
+        "session.typescript.status",
+        json!({"sessionId": session}),
+    )
+    .await;
+    submit(&mut client, &session, r#"tool:echo {"text":"offered"}"#).await;
+    let offered = recorded.recv().await.unwrap();
+    let mut names: Vec<&str> = offered.iter().map(|tool| tool.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["echo", "ts_alone", "ts_shared"], "{offered:?}");
+    let status = client
+        .rpc("session.typescript.status", json!({"sessionId": session}))
+        .await;
+    assert!(
+        status["result"]["refused"]
+            .as_str()
+            .is_some_and(|refused| refused.contains("ts_unknown")
+                && refused.contains("unknown tool concurrency")),
+        "{status}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// #207: Session creation does not wait for TypeScript parts, so a published
 /// Session can hold a Failed part. A part that failed before registering its
 /// namespace never held it, so the namespace answers the non-retryable
