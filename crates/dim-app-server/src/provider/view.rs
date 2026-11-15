@@ -102,6 +102,12 @@ pub struct ManagementModel {
     /// The model this entry's id stands for, when the provider says so.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// The name `provider.catalog` publishes for this row, when it differs from
+    /// `model.displayName`: a client that picks models from this read shows
+    /// what the catalog shows, and an absent field means the display name is
+    /// already the one to show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_name: Option<String>,
 }
 
 impl ProviderService {
@@ -194,6 +200,8 @@ impl ProviderService {
                 } else if overridden {
                     actions.push("reset");
                 }
+                let catalog_name =
+                    (effective.name != model.display_name).then_some(effective.name);
                 ManagementModel {
                     enabled: !record.disabled_model_ids.contains(&model.model_id),
                     endpoint_override: record.endpoint_overrides.get(&model.model_id).copied(),
@@ -210,6 +218,7 @@ impl ProviderService {
                     missing_limits: effective.missing_limits,
                     unavailable_reason: effective.unavailable_reason,
                     actions,
+                    catalog_name,
                 }
             })
             .collect();
@@ -290,10 +299,12 @@ impl ProviderService {
         let version = record.as_ref().map(|record| record.version);
         let (models, preferences) = match record {
             Some(record) => {
-                let models = record
-                    .effective_models(bundled)
+                let effective = record.effective_models(bundled);
+                let names = naming::unique(effective.iter().map(|model| &model.entry));
+                let models = effective
                     .into_iter()
-                    .map(|effective| {
+                    .zip(names)
+                    .map(|(effective, name)| {
                         // The account itself can be unavailable, a fact the
                         // record does not hold; that reason stands on top of
                         // the one the effective limits derive.
@@ -317,6 +328,8 @@ impl ProviderService {
                             .disabled_model_ids
                             .contains(&effective.entry.model_id);
                         let alias = record.model_aliases.get(&effective.entry.model_id).cloned();
+                        let catalog_name =
+                            (name != effective.entry.display_name).then_some(name);
                         ManagementModel {
                             enabled,
                             model: effective.entry,
@@ -331,6 +344,7 @@ impl ProviderService {
                             actions,
                             endpoint_override: None,
                             alias,
+                            catalog_name,
                         }
                     })
                     .collect();

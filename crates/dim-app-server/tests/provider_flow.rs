@@ -9859,3 +9859,123 @@ async fn a_disabled_row_still_counts_as_a_duplicate() {
     );
     gateway.close().await;
 }
+
+/// `provider.management` names its rows what `provider.catalog` names them, in
+/// `catalogName`, and keeps the name the provider or the user stated on the
+/// descriptor it edits.
+#[tokio::test]
+async fn a_management_row_carries_the_name_the_catalog_publishes() {
+    let gateway = Gateway::serving(gateway_listing()).await;
+    let catalog = gateway.refreshed().await;
+    let view = gateway
+        .provider
+        .management(Some(GATEWAY.into()), &gateway.cancel)
+        .await
+        .unwrap();
+    let view = serde_json::to_value(&view).unwrap();
+    let rows = view["providers"][0]["models"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["model"]["modelId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "auto/glm-5.3",
+            "siliconflow/glm-5.3",
+            "volcengine/glm-5.3",
+            "zhipu/glm-5.3",
+        ]
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["catalogName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        Gateway::names(&catalog),
+        "a client that picks from provider.management reads what the catalog reads"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["model"]["displayName"] == json!("GLM-5.3")),
+        "the editable name is the one the provider stated: {view}"
+    );
+    gateway.close().await;
+}
+
+/// A provider without duplicates carries no `catalogName`: an absent field is
+/// the display name already being the one to show.
+#[tokio::test]
+async fn a_management_row_without_a_duplicate_carries_no_catalog_name() {
+    let gateway = Gateway::serving(json!({"data":[
+        {"id":"first","display_name":"First","context_window":200000,"max_output_tokens":128000},
+        {"id":"second","display_name":"Second","context_window":200000,"max_output_tokens":128000},
+    ]}))
+    .await;
+    gateway.refreshed().await;
+    let view = gateway
+        .provider
+        .management(Some(GATEWAY.into()), &gateway.cancel)
+        .await
+        .unwrap();
+    let view = serde_json::to_value(&view).unwrap();
+    assert!(
+        view["providers"][0]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("catalogName").is_none()),
+        "nothing collides, so no row states a name of its own: {view}"
+    );
+    gateway.close().await;
+}
+
+/// A rename through management stores the name alone. The suffix a collision
+/// would add is computed on read, so it never reaches the record.
+#[tokio::test]
+async fn a_rename_through_management_stores_no_suffix() {
+    let gateway = Gateway::serving(gateway_listing()).await;
+    let catalog = gateway.refreshed().await;
+    let renamed = gateway
+        .provider
+        .update_model_config(
+            GATEWAY.into(),
+            catalog.version,
+            "zhipu/glm-5.3".into(),
+            serde_json::from_value(json!({"displayName": "GLM-5.3 (Zhipu)"})).unwrap(),
+            &gateway.cancel,
+        )
+        .await
+        .unwrap();
+    let record: Value =
+        serde_json::from_str(&stored_record_json(&gateway.home, GATEWAY)).unwrap();
+    let overrides = record["modelConfigOverrides"].as_array().unwrap();
+    let stored = overrides
+        .iter()
+        .find(|row| row["modelId"] == json!("zhipu/glm-5.3"))
+        .expect("the edit is stored as an override");
+    assert_eq!(
+        stored["displayName"],
+        json!("GLM-5.3 (Zhipu)"),
+        "the write stores the name as typed"
+    );
+    assert_eq!(
+        record["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(overrides)
+            .map(|row| row["displayName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["GLM-5.3", "GLM-5.3", "GLM-5.3", "GLM-5.3", "GLM-5.3 (Zhipu)"],
+        "no computed name reaches the record"
+    );
+    assert_eq!(
+        served(&renamed.models, "zhipu/glm-5.3").name,
+        "GLM-5.3 (Zhipu)",
+        "a name the write made unique publishes as it stands"
+    );
+    assert_eq!(
+        served(&renamed.models, "auto/glm-5.3").name,
+        "GLM-5.3 · routing group",
+        "a rename does not reach the other rows"
+    );
+    gateway.close().await;
+}
