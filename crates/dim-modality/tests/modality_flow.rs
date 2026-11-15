@@ -4649,12 +4649,16 @@ async fn cancel_stops_a_running_helper() {
     let mut client = Client::new_version(&server, false, 3).await;
     let task = submit_task(&mut client, ocr_submit("hang.png", "text")).await;
     let task_id = task["task_id"].as_str().unwrap().to_owned();
-    // The helper records its pid inside its work directory before sleeping.
+    // The helper records its pid inside its work directory before sleeping,
+    // through a redirection that creates the file before `echo` fills it in.
     let pid_file = home.join("modality/tasks").join(&task_id).join("work/pid");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let pid = loop {
-        if let Ok(pid) = std::fs::read_to_string(&pid_file) {
-            break pid.trim().to_owned();
+        if let Ok(text) = std::fs::read_to_string(&pid_file)
+            && let Some(line) = text.strip_suffix('\n')
+            && !line.is_empty()
+        {
+            break line.to_owned();
         }
         assert!(
             std::time::Instant::now() < deadline,
