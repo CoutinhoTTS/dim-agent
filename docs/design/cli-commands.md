@@ -1247,7 +1247,7 @@ Select a model
   Manual: no models · add a model with provider.models.create
   Edit models                Manual  manual
   Subagent models: Agent choice
-Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 ```
 
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
@@ -1257,8 +1257,10 @@ Enter also writes the default a new Session in this folder reads ([provider mana
 §4](appserver/provider-management.md#4-client-integration)).
 
 Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
-modes; explicit-value forms and the line client keep their command behavior. The selection
-contract is owned by [model configuration](model-configuration.md#scrollback-interaction).
+modes; explicit-value forms and the line client keep their command behavior. At Home the
+picker and the explicit-value forms act on the footer's preview, the model the first
+message's Session adopts. The selection contract is owned by [model
+configuration](model-configuration.md#scrollback-interaction).
 
 ### The Workflow area
 

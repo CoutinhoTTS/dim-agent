@@ -734,7 +734,9 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/host.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "tokio::pin",
+        "tokio::select"
       ]
     },
     {
@@ -4825,7 +4827,9 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "json"
+        "format",
+        "json",
+        "panic"
       ]
     },
     {
@@ -13345,6 +13349,14 @@
     },
     {
       "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path TimelineIdentity",
+        "use dim_agent_runtime::TimelineIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::contracts",
       "references": [
         "path InputSnapshot",
@@ -14168,11 +14180,15 @@
       "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path CancelledFn",
         "path HostError",
         "path HostError::Cancelled",
         "path HostFuture",
+        "path call_until_cancelled",
+        "use crate::host::CancelledFn",
         "use crate::host::HostError",
-        "use crate::host::HostFuture"
+        "use crate::host::HostFuture",
+        "use crate::host::call_until_cancelled"
       ]
     },
     {
@@ -17733,14 +17749,18 @@
       "from": "dim_agent_capabilities::wait",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path CancelledFn",
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path ToolExecutionContext",
+        "path call_until_cancelled",
+        "use crate::host::CancelledFn",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
-        "use crate::host::ToolExecutionContext"
+        "use crate::host::ToolExecutionContext",
+        "use crate::host::call_until_cancelled"
       ]
     },
     {
@@ -28837,6 +28857,7 @@
         "path ModelEntry",
         "path ModelSource::Custom",
         "path ProviderProjection",
+        "path ProviderRole",
         "path ProviderRole::Vendor"
       ]
     },
@@ -31152,10 +31173,38 @@
     },
     {
       "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::approval",
+      "references": [
+        "path dim_agent_capabilities::approval::Approval"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path dim_agent_capabilities::host::ToolHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::input_queue",
+      "references": [
+        "path dim_agent_capabilities::input_queue::InputQueue"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path SessionMethods",
         "use dim_agent_capabilities::methods::SessionMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path dim_agent_capabilities::permission::Permission"
       ]
     },
     {
@@ -31179,6 +31228,13 @@
       "references": [
         "path ToolRegistry",
         "use dim_agent_capabilities::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::wait",
+      "references": [
+        "path dim_agent_capabilities::wait::Wait"
       ]
     },
     {
@@ -35262,6 +35318,14 @@
     },
     {
       "from": "dim_cli::configure",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelPreferences",
+        "use dim_agent_types::ModelPreferences"
+      ]
+    },
+    {
+      "from": "dim_cli::configure",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -39120,9 +39184,11 @@
       "from": "dim_cli::session_host",
       "to": "dim_agent_types::model",
       "references": [
+        "path ModelPreferences",
         "path dim_agent_types::CatalogCapabilities",
         "path dim_agent_types::ModelPreferences",
-        "path dim_agent_types::ModelReasoning"
+        "path dim_agent_types::ModelReasoning",
+        "use dim_agent_types::ModelPreferences"
       ]
     },
     {
@@ -39189,7 +39255,11 @@
       "to": "dim_cli::configure",
       "references": [
         "path configure",
+        "path configure::NO_MODEL",
+        "path configure::Preference::Apply",
+        "path configure::Preference::List",
         "path configure::needs_session",
+        "path configure::preference",
         "path configure::run",
         "use crate::configure"
       ]
@@ -40030,9 +40100,14 @@
       "references": [
         "path EarlierRead::None",
         "path EarlierRead::Reading",
+        "path Notice::State",
         "path Observation",
         "path Pending",
+        "path Pending::Attach",
+        "path Pending::Detach",
         "path Pending::Goal",
+        "path Pending::History",
+        "path Pending::Methods",
         "path Pending::Turn"
       ]
     },
@@ -40040,6 +40115,7 @@
       "from": "dim_cli::session_host::member::tests",
       "to": "dim_client",
       "references": [
+        "path Message::Notice",
         "path Message::Response",
         "use crate::client::Message"
       ]
@@ -43248,10 +43324,14 @@
       "references": [
         "path KeyCode",
         "path KeyCode::Char",
+        "path KeyCode::Delete",
         "path KeyCode::Down",
         "path KeyCode::Enter",
+        "path KeyCode::Left",
+        "path KeyCode::Right",
         "path KeyEvent",
         "path KeyEvent::new",
+        "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "use crate::ui::terminal::Modifiers"
       ]

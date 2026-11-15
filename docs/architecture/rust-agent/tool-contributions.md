@@ -35,7 +35,7 @@ Session 能力向本 Session 的 `ToolRegistry` 注册模型可调用的工具�
 
 | 工具来源 | 提供方式 |
 | --- | --- |
-| 宿主工具 | `ToolHost`（产品根由 `WorkspaceToolsPlugin` 提供；审批在执行时由分支 ToolExecutor 经 Approval 准入，不包装 ToolHost） |
+| 宿主工具 | `ToolHost`（产品根由 `WorkspaceToolsPlugin` 提供，数据面 `toolHost.execute` 见 §2.1；审批在执行时由分支 ToolExecutor 经 Approval 准入，不包装 ToolHost） |
 | Session 能力工具 | 本文的 `ToolContribution`，由部件注册；`branch`、`wait`、`skill`、`ask_user`、`agent` 分别由 `BranchTool`、`Wait`、`Skills`、`Questions`、`CollaborationSession` 以同一方式注册 |
 
 ## 2. 结构
@@ -89,6 +89,27 @@ impl ToolRegistry {
 
 工具处理器在 `execute` 之外还有两个可选问题，都有默认实现：`resolve_write` 在不产生效果的前提下解析写入目标，`risk` 给出 Approval 准入这次调用所用的风险类别。`claim(call, caller)` 返回处理器在调用被发布前要登记的东西：守卫释放即撤回，`ToolClaim::dispatch` 消费它来跑这次调用。发布与释放顺序见
 [Questions §2.1](../../design/plugins/Questions.md#21-the-claim-before-the-fact)。
+
+### 2.1 宿主工具的 `toolHost` 数据面
+
+宿主工具的实现是 Session 的 `ToolHost`，`ToolDriver` 是实现而不是第二个契约；同一操作按名暴露给其他语言
+（[服务面 §3.4](../../design/service-faces.md#34-对象句柄拆成操作加-id)）：
+
+```text
+toolHost.execute(call: ToolCall, caller: ToolExecutionContext, cancelled: () => void | Promise<void>)
+  call   = {id, name, input}
+  caller = {turnId, requestId, branchId}
+  -> ToolResult
+  -> error {code, message}
+```
+
+`definitions` 不进数据面：宿主工具的声明由 ToolRegistry 在 Session 内读取，随工具采用进入模型配置。
+`cancelled` 完成时取消这次调用的 token。桥调用方须在放弃调用前触发取消；仅丢弃桥返回值不会取消工作。直接丢弃 Rust 调用 future 会取消它。
+数据面是直接调用驱动的执行入口，只委托 `ToolDriver::execute`；它不调用 `resolve_write`、Permission 或 Approval。
+调用方负责准入。模型决定的工具调用必须经分支 [ToolExecutor](plugins/ToolExecution.md#toolexecutor) 的既有流程解析写入目标、判定风险并经 Approval 准入后才执行。
+`caller` 只标识执行上下文，不是授权凭据；持有此面的受信任插件不能把直接调用当作已经过模型工具审批。
+配置启用与模型决策的授权边界见 [ADR 003](../../adr/003-approval-scope.md)，服务部署的可达性见[服务面 §2.1](../../design/service-faces.md#21-目标)。
+各宿主绑定（`WorkspaceTools`、`ShellSession`、嵌入方自己的 `ToolHost`）给出同一个原始执行面。
 
 ## 3. 依赖方向
 

@@ -403,6 +403,177 @@ fn a_plan_provider_is_marked_and_its_api_entry_is_not() {
     }
 }
 
+/// The ids the shipped catalog answers where the catalog's own metadata says
+/// they belong: a model a plan resells at the vendor row that declares it, a
+/// model only the user's list declares at that declaration, a vendor's own id
+/// at its vendor, and Qwen's own rows on the provider that serves them.
+#[test]
+fn the_resold_models_identify_where_the_catalog_says_they_belong() {
+    let catalog = BundledCatalog::load().unwrap();
+    for (id, provider, model) in [
+        ("deepseek-v4.1-flash", "deepseek", "deepseek-flash"),
+        ("kimi-k2.5", "custom-provider", "kimi-k2.5"),
+        ("glm-5.2", "zai", "glm-5.2"),
+        ("qwen3.8-max", "qwencloud", "qwen3.8-max"),
+        ("qwen3.7-plus", "qwencloud", "qwen3.7-plus"),
+    ] {
+        let entry = relay(&catalog, id);
+        assert_eq!(matched(&entry), (provider, model), "{id}");
+        let row = bundled(&catalog, provider, model);
+        assert!(
+            row.capabilities.missing_limits().is_empty(),
+            "{id}: {provider} declares no limit for {model}"
+        );
+        assert_eq!(numbers(&entry), numbers(&row), "{id}");
+    }
+}
+
+/// Every vendor provider whose rows name a canonical id states the namespace
+/// its own models name, and no row that names another vendor answers as its
+/// provider's declaration: such a row is the merge's, not the vendor's.
+#[test]
+fn a_vendor_provider_answers_only_for_the_namespace_it_states() {
+    use dim_app_server::model_catalog::ProviderRole;
+    let catalog = BundledCatalog::load().unwrap();
+    let mut declaring = 0;
+    let mut resold = 0;
+    for provider in catalog.providers() {
+        let Some(own) = catalog.vendor_namespace(&provider.provider_id) else {
+            continue;
+        };
+        let names = provider
+            .models
+            .iter()
+            .any(|model| canonical_namespace(model).is_some());
+        if names {
+            declaring += 1;
+        }
+        for model in &provider.models {
+            let Some(named) = canonical_namespace(model) else {
+                continue;
+            };
+            if named == own {
+                continue;
+            }
+            resold += 1;
+            let entry = relay(&catalog, &model.model_id);
+            let answered_by_its_provider =
+                matched(&entry) == (provider.provider_id.as_str(), model.model_id.as_str());
+            assert!(
+                !answered_by_its_provider
+                    || !["token", "qualified", "canonical"].contains(&rule(&entry)),
+                "{}/{} names {named} and answered by the {} step",
+                provider.provider_id,
+                model.model_id,
+                rule(&entry)
+            );
+        }
+    }
+    assert!(
+        declaring > 0,
+        "no vendor provider states a namespace, so nothing is covered"
+    );
+    assert!(resold > 0, "no row resells another vendor's model");
+    let vendors: Vec<_> = catalog
+        .providers()
+        .filter(|provider| {
+            catalog.role(&provider.provider_id) == Some(ProviderRole::Vendor)
+                && provider
+                    .models
+                    .iter()
+                    .any(|model| canonical_namespace(model).is_some())
+        })
+        .map(|provider| provider.provider_id.as_str())
+        .collect();
+    for vendor in vendors {
+        assert!(
+            catalog.vendor_namespace(vendor).is_some(),
+            "{vendor} declares canonical ids but states no namespace"
+        );
+    }
+}
+
+/// Every plan row the catalog leaves without a canonical id, on a plan provider
+/// that states a namespace, names no other vendor's model: no vendor declares
+/// the same id, and no row of the catalog states another vendor's canonical id
+/// for it. Such a row would be a resale the merge reads, so the committed
+/// catalog owes it the canonical id.
+///
+/// Ids are compared exactly, by their last path segment, case-insensitively. A
+/// vendor provider's own namespace is the one it states, and an aggregator
+/// states none, so only the canonical id a row states can tie it to a vendor. A
+/// plan provider that states no namespace is skipped: `openai-codex`,
+/// `grok-build` and `step-plan` have no canonical rows and resell nothing, so
+/// the catalog has nothing to compare them against.
+#[test]
+fn a_plan_row_without_a_canonical_id_names_no_other_vendor() {
+    use dim_app_server::model_catalog::ProviderRole;
+    let catalog = BundledCatalog::load().unwrap();
+    let mut checked = 0;
+    for provider in catalog.providers() {
+        if catalog.role(&provider.provider_id) != Some(ProviderRole::Vendor)
+            || catalog.is_plan(&provider.provider_id) != Some(true)
+        {
+            continue;
+        }
+        let Some(own) = catalog.vendor_namespace(&provider.provider_id) else {
+            continue;
+        };
+        for model in &provider.models {
+            if canonical_namespace(model).is_some() {
+                continue;
+            }
+            checked += 1;
+            let segment = last_segment(&model.model_id);
+            let mut ties = Vec::new();
+            for other in catalog.providers() {
+                let states = catalog.vendor_namespace(&other.provider_id);
+                for row in &other.models {
+                    if let Some(namespace) = states {
+                        let declares = namespace != own
+                            && canonical_namespace(row).is_none_or(|named| named == namespace)
+                            && last_segment(&row.model_id).eq_ignore_ascii_case(segment);
+                        if declares {
+                            ties.push(format!(
+                                "`{provider_id}/{row_model}` declares it as {namespace}'s",
+                                provider_id = other.provider_id,
+                                row_model = row.model_id,
+                            ));
+                        }
+                    }
+                    let canonical = row
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.raw.get("canonical_model_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|canonical| {
+                            canonical.split_once('/').is_some_and(|(it, _)| it != own)
+                                && last_segment(canonical).eq_ignore_ascii_case(segment)
+                        });
+                    if let Some(canonical) = canonical {
+                        ties.push(format!(
+                            "`{provider_id}/{row_model}` states `{canonical}`",
+                            provider_id = other.provider_id,
+                            row_model = row.model_id,
+                        ));
+                    }
+                }
+            }
+            assert!(
+                ties.is_empty(),
+                "{}/{} states no canonical id but is another vendor's model, and its provider's own namespace is {own}: {}",
+                provider.provider_id,
+                model.model_id,
+                ties.join("; ")
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "no plan provider that states a namespace lists a row without a canonical id"
+    );
+}
+
 /// A catalog of exactly the providers a case states, built through the step
 /// the shipped file goes through: `from_value` drops every limit a row's
 /// `metadata.raw` does not declare, so a built row declares its limits there.
@@ -417,6 +588,28 @@ fn catalog(providers: serde_json::Value) -> BundledCatalog {
 /// A provider serving its own vendor's models.
 fn vendor(provider_id: &str, models: serde_json::Value) -> serde_json::Value {
     provider(provider_id, "vendor", false, models)
+}
+
+/// The same provider, stating the canonical namespace its own models name.
+fn namespaced_vendor(
+    provider_id: &str,
+    vendor_namespace: &str,
+    models: serde_json::Value,
+) -> serde_json::Value {
+    let mut provider = provider(provider_id, "vendor", false, models);
+    provider["metadata"]["vendorNamespace"] = json!(vendor_namespace);
+    provider
+}
+
+/// A vendor selling a subscription beside its API entry, stating its namespace.
+fn namespaced_plan_provider(
+    provider_id: &str,
+    vendor_namespace: &str,
+    models: serde_json::Value,
+) -> serde_json::Value {
+    let mut provider = provider(provider_id, "vendor", true, models);
+    provider["metadata"]["vendorNamespace"] = json!(vendor_namespace);
+    provider
 }
 
 /// A provider reselling other vendors' models.
@@ -495,6 +688,23 @@ fn with_efforts(mut row: serde_json::Value, efforts: &[&str]) -> serde_json::Val
 fn with_tool_calling(mut row: serde_json::Value, tool_calling: bool) -> serde_json::Value {
     row["capabilities"]["toolCalling"] = json!(tool_calling);
     row
+}
+
+/// The namespace a row's canonical id names, as the matcher reads it.
+fn canonical_namespace(model: &ModelEntry) -> Option<&str> {
+    model
+        .metadata
+        .as_ref()?
+        .raw
+        .get("canonical_model_id")?
+        .as_str()?
+        .split_once('/')
+        .map(|(namespace, _)| namespace)
+}
+
+/// An id's last path segment, which is the part two ids name a model by.
+fn last_segment(id: &str) -> &str {
+    id.rsplit_once('/').map_or(id, |(_, segment)| segment)
 }
 
 /// One entry of a provider's stored list, as that provider saved it.
@@ -841,10 +1051,10 @@ fn a_plan_keeps_its_own_numbers_on_its_own_provider() {
     assert_ne!(numbers(&api), numbers(&plan));
 }
 
-/// A provider's stored list can lag the bundle by a model. When it does, the
-/// provider still answers for that model from its own family before any other
-/// seller does: the plan keeps its own window for `acme-5.5` rather than the
-/// vendor API entry the plan rule would otherwise prefer.
+/// A provider answers for its own family before another seller does, and the
+/// token step is what makes it once step 1 names nothing: the id is a dated
+/// form no row spells, so the plan keeps its own window for `acme-5.5` rather
+/// than the vendor API entry the plan rule would otherwise prefer.
 #[test]
 fn a_providers_own_family_answers_before_another_seller() {
     let catalog = catalog(json!([
@@ -860,17 +1070,11 @@ fn a_providers_own_family_answers_before_another_seller() {
     let provider = ProviderProjection {
         provider_id: "acme-plan".into(),
         source: Some(ModelSource::Builtin),
-        models: catalog
-            .bundled_models("acme-plan")
-            .unwrap()
-            .iter()
-            .filter(|model| model.model_id != "acme-5.5")
-            .cloned()
-            .collect(),
+        models: catalog.bundled_models("acme-plan").unwrap().to_vec(),
         ..Default::default()
     };
     let entry = catalog
-        .project(&provider, &json!({ "id": "acme-5.5" }))
+        .project(&provider, &json!({ "id": "acme-5.5-20250801" }))
         .unwrap();
     assert_eq!(matched(&entry), ("acme-plan", "acme-5.5"));
     assert_eq!(
@@ -881,6 +1085,7 @@ fn a_providers_own_family_answers_before_another_seller() {
         numbers(&entry),
         numbers(&bundled(&catalog, "acme", "acme-5.5"))
     );
+    assert_eq!(rule(&entry), "token");
 }
 
 /// A vendor row is an answer where an aggregator row alone is not: the merge
@@ -974,6 +1179,239 @@ fn a_custom_provider_row_is_a_declaration() {
         );
         assert!(entry.capabilities.missing_limits().is_empty(), "{input}");
     }
+}
+
+/// A vendor provider's foreign-canonical row is not its declaration, while its
+/// own row still is: the id the foreign row names is answered by the vendor
+/// that model belongs to, and the id the own row names is answered here.
+#[test]
+fn a_foreign_canonical_row_is_not_a_declaration() {
+    let own = row("acme-5", "Acme 5", 400_000, 128_000);
+    let catalog = catalog(json!([
+        namespaced_vendor(
+            "acme-plan",
+            "acme",
+            json!([
+                with_canonical(
+                    row("acme-own", "Acme Own", 200_000, 64_000),
+                    "acme/acme-own"
+                ),
+                with_canonical(
+                    row("globus-5", "Globus 5", 100_000, 32_000),
+                    "globus/globus-5",
+                ),
+            ]),
+        ),
+        namespaced_vendor("acme", "acme", json!([own.clone()])),
+        namespaced_vendor(
+            "globus",
+            "globus",
+            json!([row("globus-5", "Globus 5", 300_000, 96_000)]),
+        ),
+    ]));
+    let foreign = relay(&catalog, "globus-5");
+    assert_eq!(
+        matched(&foreign),
+        ("globus", "globus-5"),
+        "the plan's resold row does not answer for the vendor that owns it"
+    );
+    assert_eq!(
+        numbers(&foreign),
+        numbers(&bundled(&catalog, "globus", "globus-5"))
+    );
+    let own_id = relay(&catalog, "acme-own");
+    assert_eq!(
+        matched(&own_id),
+        ("acme-plan", "acme-own"),
+        "the plan's own row is still its declaration"
+    );
+    assert_eq!(rule(&own_id), "token");
+}
+
+/// A foreign-canonical row of a vendor provider joins the merge exactly as an
+/// aggregator row does, so an id only that row names still gets its numbers and
+/// the smallest pair wins.
+#[test]
+fn a_foreign_canonical_row_still_joins_the_merge() {
+    let catalog = catalog(json!([
+        namespaced_vendor(
+            "acme-plan",
+            "acme",
+            json!([with_canonical(
+                row("globus-5", "Globus 5", 100_000, 32_000),
+                "globus/globus-5",
+            )]),
+        ),
+        aggregator(
+            "reseller",
+            json!([row("globus-5", "Globus 5", 200_000, 16_000)]),
+        ),
+    ]));
+    let entry = relay(&catalog, "globus-5");
+    assert_eq!(identification(&entry).rule, "merge");
+    let merged = (
+        numbers(&bundled(&catalog, "acme-plan", "globus-5")).0,
+        numbers(&bundled(&catalog, "reseller", "globus-5")).1,
+    );
+    assert_eq!(numbers(&entry), merged);
+    assert_eq!(
+        adopted(&entry),
+        [
+            ("contextWindow", merged.0.unwrap(), "acme-plan"),
+            ("maxOutputTokens", merged.1.unwrap(), "reseller"),
+        ]
+    );
+}
+
+/// A vendor-provider row that states no canonical id stays a declaration: the
+/// catalog says nothing against the role for it, so the role's answer stands.
+#[test]
+fn a_row_without_a_canonical_id_stays_a_declaration() {
+    let catalog = catalog(json!([
+        namespaced_plan_provider(
+            "acme-plan",
+            "acme",
+            json!([
+                row("acme-5", "Acme 5", 258_400, 128_000),
+                with_canonical(
+                    row("acme-5-pro", "Acme 5 Pro", 1_000_000, 128_000),
+                    "acme/acme-5-pro"
+                ),
+            ]),
+        ),
+        namespaced_vendor(
+            "acme",
+            "acme",
+            json!([row("acme-5", "Acme 5", 1_050_000, 128_000)]),
+        ),
+    ]));
+    let on_the_plan = builtin(&catalog, "acme-plan", "acme-5");
+    assert_eq!(matched(&on_the_plan), ("acme-plan", "acme-5"));
+    assert_eq!(
+        numbers(&on_the_plan),
+        numbers(&bundled(&catalog, "acme-plan", "acme-5"))
+    );
+    assert_eq!(rule(&on_the_plan), "provider-exact");
+    let on_a_relay = relay(&catalog, "acme-5");
+    assert_eq!(
+        matched(&on_a_relay),
+        ("acme", "acme-5"),
+        "the API entry still answers a bare id over the plan"
+    );
+    assert_eq!(
+        numbers(&on_a_relay),
+        numbers(&bundled(&catalog, "acme", "acme-5"))
+    );
+}
+
+/// A plan row whose canonical id names another vendor stops answering a bare id
+/// ahead of that vendor's row: with the id stated, the plan's row leaves the
+/// vendor index and the vendor's own canonical id answers instead.
+#[test]
+fn a_stated_resale_stops_answering_ahead_of_its_vendor() {
+    let build = |canonical: Option<&str>| {
+        let plan = match canonical {
+            Some(canonical) => {
+                with_canonical(row("globus-5", "Globus 5", 262_144, 32_768), canonical)
+            }
+            None => row("globus-5", "Globus 5", 262_144, 32_768),
+        };
+        catalog(json!([
+            namespaced_plan_provider("acme-coding-plan", "acme", json!([plan])),
+            namespaced_vendor(
+                "globus",
+                "globus",
+                json!([with_canonical(
+                    row("globus-5-2026-01", "Globus 5", 1_048_576, 384_000),
+                    "globus/globus-5"
+                )]),
+            ),
+        ]))
+    };
+    let unstated = build(None);
+    let answered = relay(&unstated, "globus-5");
+    assert_eq!(
+        matched(&answered),
+        ("acme-coding-plan", "globus-5"),
+        "without the canonical id the plan's row answers the bare id by token"
+    );
+    assert_eq!(rule(&answered), "token");
+
+    let stated = build(Some("globus/globus-5"));
+    let restored = relay(&stated, "globus-5");
+    assert_eq!(matched(&restored), ("globus", "globus-5-2026-01"));
+    assert_eq!(rule(&restored), "canonical");
+    assert_eq!(
+        numbers(&restored),
+        numbers(&bundled(&stated, "globus", "globus-5-2026-01")),
+        "the vendor's own numbers answer, not the plan's"
+    );
+}
+
+/// A plan row that resells another vendor's model stops answering ahead of the
+/// `custom-provider` declaration too: the declaration is what the user wrote,
+/// and the resold row is only the merge's.
+#[test]
+fn a_stated_resale_stops_answering_ahead_of_the_declaration() {
+    let build = |canonical: Option<&str>| {
+        let plan = match canonical {
+            Some(canonical) => {
+                with_canonical(row("globus-5", "Globus 5", 262_144, 32_768), canonical)
+            }
+            None => row("globus-5", "Globus 5", 262_144, 32_768),
+        };
+        catalog(json!([
+            namespaced_plan_provider("acme-coding-plan", "acme", json!([plan])),
+            aggregator(
+                "custom-provider",
+                json!([row("globus-5", "Globus 5", 262_144, 262_144)]),
+            ),
+        ]))
+    };
+    let unstated = build(None);
+    assert_eq!(
+        matched(&relay(&unstated, "globus-5")),
+        ("acme-coding-plan", "globus-5"),
+        "without the canonical id the plan's row answers over the declaration"
+    );
+
+    let stated = build(Some("globus/globus-5"));
+    let declared = relay(&stated, "globus-5");
+    assert_eq!(matched(&declared), ("custom-provider", "globus-5"));
+    assert_eq!(rule(&declared), "custom-provider");
+    assert_eq!(
+        numbers(&declared),
+        numbers(&bundled(&stated, "custom-provider", "globus-5"))
+    );
+}
+
+/// A row states its own namespace because its canonical id names the vendor
+/// that model belongs to, so a provider's own plan row that repeats the
+/// provider's namespace stays its declaration: the row is what decides, not the
+/// provider's list of canonical ids.
+#[test]
+fn a_plan_row_naming_its_own_namespace_stays_a_declaration() {
+    let catalog = catalog(json!([
+        namespaced_plan_provider(
+            "acme-plan",
+            "acme",
+            json!([with_canonical(
+                row("acme-5", "Acme 5", 258_400, 128_000),
+                "acme/acme-5"
+            )]),
+        ),
+        aggregator(
+            "custom-provider",
+            json!([row("acme-5", "Acme 5", 262_144, 262_144)]),
+        ),
+    ]));
+    let answered = relay(&catalog, "acme-5");
+    assert_eq!(matched(&answered), ("acme-plan", "acme-5"));
+    assert_eq!(rule(&answered), "token");
+    assert_eq!(
+        numbers(&answered),
+        numbers(&bundled(&catalog, "acme-plan", "acme-5"))
+    );
 }
 
 /// Step 1 answers an aggregator's own house model on that aggregator's own
@@ -1660,8 +2098,8 @@ fn a_prefixed_id_without_the_statement_is_unidentified() {
 #[test]
 fn an_exact_row_still_wins_with_the_prefix_set() {
     let catalog = prefix_catalog();
-    // A stored list that carries the prefixed id itself, which is what step 1
-    // reads before any step breaks the id into tokens.
+    // The bundle carries only `acme-k3`, so step 1 has no `auto-acme-k3` row
+    // to read and answers from the model this provider added itself.
     let provider = ProviderProjection {
         provider_id: "acme".into(),
         source: Some(ModelSource::Builtin),

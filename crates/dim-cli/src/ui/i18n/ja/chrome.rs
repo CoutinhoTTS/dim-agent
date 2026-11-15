@@ -352,8 +352,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "終了",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選択して既定に設定 · ←/→ 推論強度 · Ctrl+X 保存消去 · Esc 消去/閉じる"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 選択して既定に設定 · ←/→ 推論強度 · Ctrl+B/F カーソル · Ctrl+X 保存消去 · Esc 消去/閉じる"
         }
         "Default for new sessions in {folder}: {model}" => {
             "新規セッションの {folder} での既定モデル：{model}"
