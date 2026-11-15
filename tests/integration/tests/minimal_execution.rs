@@ -307,6 +307,17 @@ async fn local_events(session: &Session) -> Vec<Arc<AgentEvent>> {
     branch_events(session, "main", ..).await.unwrap()
 }
 
+/// Ceiling on [`until_settled`] polls, twice the old 30 s bound.
+const MAX_SETTLE_POLLS: u32 = 3000;
+/// Consecutive polls without a single new output byte before
+/// [`until_settled`] gives up: 10 s of a shell that writes nothing.
+const SETTLE_IDLE_POLLS: u32 = 500;
+/// The seconds [`SETTLE_IDLE_POLLS`] and [`MAX_SETTLE_POLLS`] stand for, for
+/// the two failure messages: at 20 ms a poll they must stay in step with the
+/// poll counts above, because each message states what its exit observed.
+const SETTLE_IDLE_SECS: u32 = SETTLE_IDLE_POLLS / 50;
+const SETTLE_CEILING_SECS: u32 = MAX_SETTLE_POLLS / 50;
+
 async fn until(
     session: &Session,
     what: &str,
@@ -323,6 +334,68 @@ async fn until(
         "timed out waiting for {what}: {:#?}",
         local_events(session).await
     );
+}
+
+/// Waits for `done` while the shell still consumes the burst it was given.
+///
+/// A burst produces no timeline events until it settles, so `until` alone
+/// cannot tell a slow consumer from a stuck one, and a runner that needs
+/// longer than its bound fails what a faster one passes. This budget runs
+/// down only while no task log grows: a consumer that has stopped reading
+/// writes nothing and exhausts it, while one that is merely slow keeps
+/// refreshing it. The bound is therefore about progress, not about how fast
+/// the machine reads 2.7 MB.
+///
+/// It gives up two ways, and says which one: after
+/// [`SETTLE_IDLE_SECS`] without a new byte, or at the
+/// [`SETTLE_CEILING_SECS`] ceiling. The two say different things about the
+/// shell, so they must not share a message; at the ceiling, output may well
+/// still have been arriving.
+async fn until_settled(
+    session: &Session,
+    what: &str,
+    done: impl Fn(&[Arc<AgentEvent>]) -> bool,
+) -> Vec<Arc<AgentEvent>> {
+    let mut seen = 0;
+    let mut idle = 0;
+    for _ in 0..MAX_SETTLE_POLLS {
+        let events = local_events(session).await;
+        if done(&events) {
+            return events;
+        }
+        let written = exec_output_bytes(&events);
+        if written > seen {
+            seen = written;
+            idle = 0;
+        } else {
+            idle += 1;
+            if idle >= SETTLE_IDLE_POLLS {
+                panic!(
+                    "timed out waiting for {what}: no new shell output for \
+                     {SETTLE_IDLE_SECS} s: {:#?}",
+                    local_events(session).await
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!(
+        "timed out waiting for {what}: the shell was still writing output at \
+         the {SETTLE_CEILING_SECS} s ceiling after {seen} bytes: {:#?}",
+        local_events(session).await
+    );
+}
+
+/// Bytes written so far across every task log the branch started.
+fn exec_output_bytes(events: &[Arc<AgentEvent>]) -> u64 {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ExecStarted(data) => Some(data.output_path.as_str()),
+            _ => None,
+        })
+        .map(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
+        .sum()
 }
 
 fn results(events: &[Arc<AgentEvent>]) -> Vec<ToolResult> {
@@ -985,7 +1058,7 @@ async fn occupying_task_settles_when_the_output_bursts_past_the_retained_window(
             )],
         )
         .await;
-    let events = until(&session, "exec wake", |events| {
+    let events = until_settled(&session, "exec wake", |events| {
         !notifications(events).is_empty()
     })
     .await;
@@ -1045,7 +1118,7 @@ async fn an_occupying_burst_settles_while_a_background_job_runs() {
         text(&results(&events)[1])
     );
 
-    let events = until(&session, "both ends", |events| ended(events).len() == 2).await;
+    let events = until_settled(&session, "both ends", |events| ended(events).len() == 2).await;
     let ends = ended(&events);
     for (task, expected) in [(&job, "done"), (&occupying, "400100\n")] {
         let (_, end) = ends
