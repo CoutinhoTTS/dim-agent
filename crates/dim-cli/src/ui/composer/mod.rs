@@ -1234,6 +1234,7 @@ impl Composer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         (&self.area).render_ref(area, &mut buffer, &mut self.state);
+        self.highlight_tokens(area, &mut buffer);
         let cursor = self
             .area
             .cursor_pos_with_state(area, self.state)
@@ -1276,6 +1277,25 @@ impl Composer {
             ));
         }
         (rows, cursor)
+    }
+
+    /// Makes every `/skill:<name>` token in the draft one highlighted unit, as
+    /// the transcript draws it: the textarea maps each token's bytes onto the
+    /// cells it paints, so a wrapped, scrolled or tabbed draft keeps them on
+    /// the right characters.
+    fn highlight_tokens(&self, area: Rect, buffer: &mut Buffer) {
+        for token in dim_agent_types::skill_token::tokens(self.area.text()) {
+            for span in self
+                .area
+                .screen_spans_of_range(token.start..token.end, area, self.state)
+            {
+                for x in span.x..span.x.saturating_add(span.width) {
+                    if let Some(cell) = buffer.cell_mut((x, span.y)) {
+                        cell.modifier.insert(Modifier::BOLD);
+                    }
+                }
+            }
+        }
     }
 
     /// The argument still to type after a command that takes one, as
@@ -2499,5 +2519,87 @@ mod tests {
         let (rows, cursor) = c.render_rows(40, MAX_INPUT_ROWS, &theme.palette);
         assert_eq!(rows.len(), MAX_INPUT_ROWS);
         assert!((cursor.1 as usize) < rows.len());
+    }
+
+    /// A `/skill:<name>` token in the draft is one highlighted unit, whether it
+    /// is typed or filled from the palette, mid-sentence or wrapped.
+    #[test]
+    fn a_skill_token_in_the_draft_draws_as_one_unit() {
+        let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
+        let palette = theme.palette;
+        let skills = vec![palette::Skill {
+            name: "commit".into(),
+            description: "Writes commit messages".into(),
+            display_name: None,
+            display_description: None,
+        }];
+
+        let mut typed_token = Composer::new(Vec::new());
+        typed(&mut typed_token, "/skill:commit please");
+        let mut filled = Composer::new(Vec::new());
+        filled.set_skills(skills.clone());
+        typed(&mut filled, "/comm");
+        assert_eq!(filled.handle_key(key(KeyCode::Tab)), Outcome::Handled);
+        let mut mid_sentence = Composer::new(Vec::new());
+        typed(&mut mid_sentence, "run /skill:commit now");
+        let mut wrapped = Composer::new(Vec::new());
+        typed(&mut wrapped, "one two three /skill:commit");
+
+        let drawn: Vec<(String, String)> = [
+            (&mut typed_token, 60),
+            (&mut filled, 60),
+            (&mut mid_sentence, 60),
+            (&mut wrapped, 14),
+        ]
+        .into_iter()
+        .map(|(c, width)| {
+            let (rows, _) = c.render_rows(width, MAX_INPUT_ROWS, &palette);
+            drawn_token(&rows)
+        })
+        .collect();
+        let bold: Vec<&str> = drawn.iter().map(|(_, bold)| bold.as_str()).collect();
+        assert_eq!(
+            bold, ["/skill:commit"; 4],
+            "a typed, filled, mid-sentence and wrapped token each stay whole: {drawn:?}"
+        );
+        let glyphs = |text: &str| {
+            text.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        };
+        assert_eq!(
+            glyphs(&drawn[3].0),
+            glyphs("one two three /skill:commit"),
+            "a wrap drops the space it broke at and no character of the token: {drawn:?}"
+        );
+    }
+
+    /// The characters the input rows draw, and the ones among them drawn bold.
+    fn drawn_token(rows: &[String]) -> (String, String) {
+        let mut visible = String::new();
+        let mut bold = String::new();
+        for row in rows {
+            let mut marked = false;
+            let mut chars = row.chars();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    let mut codes = String::new();
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                        codes.push(c);
+                    }
+                    marked = codes.split(['[', ';']).any(|code| code == "1");
+                    continue;
+                }
+                visible.push(c);
+                if marked {
+                    bold.push(c);
+                }
+            }
+            visible.push('\n');
+        }
+        (visible, bold)
     }
 }
