@@ -5,6 +5,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, read
   rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { buildPlatform, checkArchitecture } from './native-binary.mjs';
+import { readStoreFormats } from './store-formats.mjs';
 
 const [binaryDirectory, destination, version, sourceCommit, ...rest] = process.argv.slice(2);
 const usage = 'Usage: node scripts/stage-release.mjs BIN_DIR DESTINATION VERSION SOURCE_COMMIT --plugins DIR --rust-notices FILE [--account]';
@@ -30,12 +31,7 @@ const productVersion = readFileSync(path.join(repo, 'Cargo.toml'), 'utf8').match
 assert.equal(version, productVersion, 'Version must match Cargo workspace');
 assert.equal(version, JSON.parse(readFileSync(path.join(repo, 'npm/package.json'))).version, 'Version must match npm wrapper');
 const storage = readFileSync(path.join(repo, 'crates/dim-app-server/src/storage/sqlite.rs'), 'utf8');
-const [, upgradeCount, upgrades] = storage.match(/^const UPGRADES: \[\(u32, &\[&str\]\); (\d+)\] = \[\n([\s\S]+?)^\];/m);
-const storeFormats = [...upgrades.matchAll(/^    \(\s*(\d+),/gm)].map(([, format]) => Number(format));
-assert.equal(storeFormats.length, Number(upgradeCount), 'Could not read every native store upgrade step');
-storeFormats.push(Number(storage.match(/^pub const FORMAT: u32 = (\d+);$/m)[1]));
-assert(storeFormats.every((format, index) => Number.isSafeInteger(format) && format > (storeFormats[index - 1] ?? 0)),
-  'Native store formats must be strictly increasing');
+const storeFormats = readStoreFormats(storage);
 const output = path.resolve(destination);
 assert(!existsSync(output), 'Destination already exists');
 const digest = (data) => createHash('sha256').update(data).digest('hex');
