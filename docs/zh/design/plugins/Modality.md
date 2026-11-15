@@ -223,6 +223,7 @@ sequenceDiagram
 | `modality.task.submit/status/list/wait/cancel/result` | 管理方法 | 任务生命周期；分块二进制结果取回 |
 | `modality.realtime.open/send/close`、`modality.realtime.event`、`modality.realtime.ended` | 管理方法及绑定连接的通知 | 实时会话 |
 | `modalityTasks` | 进程服务，无 key | 与任务方法相同的操作，供其他进程插件使用 |
+| `modalityTargets` | 进程服务，无 key | 向进程使用方回答某个操作当前解析到的目标，或它不可用的原因（§9.4）；无任务、无凭据 |
 | `modalityAdapter` | 进程服务，key 为适配器名；[#861](https://github.com/arcships/dim/issues/861) 落地后按任务按名解析，图像切片在此之前每次调用读取单个进程服务（§9.1） | 由提供方执行的类别 |
 | `ocrHelper` | 进程服务，无 key，由插件的进程行提供；Modality 每次调用时读取（§9.1） | `local/pp-ocr` 目标的描述：可执行文件、参数、可读路径（A.2.1） |
 | `modality` 设置文档 | 业务配置（Settings 来源，schema 由 Modality 声明，经 Settings 类型化操作写入） | 操作默认值、上限；使用时读取 |
@@ -274,7 +275,7 @@ sequenceDiagram
 | 不门控 Modality 的按任务适配器查找 | 运行时/装配，[#861](https://github.com/arcships/dim/issues/861) | [§9.1](#91-按任务适配器查找) |
 | Provider 提供可选模型及其声明能力的只读契约 | Provider，[#790](https://github.com/arcships/dim/issues/790) | [§9.2](#92-provider-只读契约) |
 | Provider 的非对话连接 | Provider，[#799](https://github.com/arcships/dim/issues/799) | [§9.3](#93-provider-非对话连接) |
-| `modality.image.understand` 的 Session 图像理解使用方 | Agent/Prompt 所有者，[#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-图像理解使用方) |
+| `modality.image.understand` 的 Session 图像理解使用方 | Modality 提供目标读取；Agent/Prompt 所有者拥有使用方，[#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-图像理解使用方) |
 
 Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列在 [overview 附录 B.2](../overview.md#b2-app-server-进程插件)。
 
@@ -308,9 +309,9 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 
 - **问题。** Modality 解析 `modality.image.understand`，但 Session 的图像理解路径（附件与 `read`）把图像发给 Session 采纳的模型；没有任何东西读取 Modality 的默认值。在该需求落地前，理解这一行只能解析与显示。
 - **现有机制。** `read` 把图像块返回给 Session 模型，`session.model.update` 与 Prompt 采纳的配置选择该模型。Session 路径到进程所有者默认值之间没有输入路径或类型化查找。在浏览器里选择正是该需求要排除的仅浏览器默认值。
-- **需要的能力。** Session 图像理解路径经 Modality 的 `modality.image.understand` 默认值（显式 → 默认值 → 自动）解析其模型，或等价的类型化交接。机制属于 Agent/Prompt。
-- **顺序影响。** 每次读取或附件时；无 Timeline 事件；在该需求落地前已有 Session 保持其行为；不重载。
-- **所有者/issue。** Agent/Prompt 所有者，[#798](https://github.com/arcships/dim/issues/798)。
+- **需要的能力。** Session 图像理解路径经 Modality 的 `modality.image.understand` 默认值（显式 → 默认值 → 自动）解析其模型，或等价的类型化交接。该交接是一次类型化读取：进程服务 `modalityTargets` 回答某个操作当前解析到的目标，或它不可用的原因，采用与 `modality.capabilities` 相同的优先级与原因措辞，按调用读取，既不门控也不重载 Modality，也不返回凭据。Modality 拥有并提供这次读取（它是 Modality 作用域的进程服务）；使用方是 [ImageUnderstanding](../../../design/plugins/ImageUnderstanding.md)，它拥有工具及其请求。
+- **顺序影响。** 每次工具调用；不新增事件类型（普通工具调用与结果事实）；在该需求落地前已有 Session 保持其行为；不重载。
+- **所有者/issue。** Modality 提供 `modalityTargets`；Agent/Prompt 所有者拥有使用方，[#798](https://github.com/arcships/dim/issues/798)。
 
 ## 附录 A. 接口细节
 
