@@ -46,6 +46,18 @@ pub fn tool_provider_changes(session: InstanceId) -> String {
     format!("dim/tools/{session}/provider-changed")
 }
 
+/// Whether a call may run beside the other calls of its batch.
+///
+/// The class decides execution order only: a `Concurrent` call shares its
+/// step with the calls around it, and an `Exclusive` call runs alone, after
+/// every call of an earlier step settled. It never grants permission, and it
+/// never reaches a model request or a persisted declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolConcurrency {
+    Concurrent,
+    Exclusive,
+}
+
 pub trait ToolHandler: Send + Sync + 'static {
     /// Resolve a filesystem write's target without effects before admission.
     fn resolve_write(&self, call: ToolCall, _: CancellationToken) -> HostFuture<'_, ToolCall> {
@@ -55,6 +67,14 @@ pub trait ToolHandler: Send + Sync + 'static {
     /// definition's risk.
     fn risk(&self, _: &ToolCall) -> Option<&'static str> {
         None
+    }
+    /// Whether this call may run beside other calls of its batch.
+    ///
+    /// The default is [`ToolConcurrency::Exclusive`]: a handler that says
+    /// nothing keeps the order the model wrote it in, which is what a call
+    /// whose effects nobody declared needs.
+    fn concurrency(&self, _: &ToolCall) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
     }
     /// Takes whatever a client must be able to reach once the call is
     /// published, before Loop publishes it. The default takes nothing: a
@@ -551,6 +571,7 @@ impl ToolRegistry {
         ctx: &Ctx,
         declaration: serde_json::Value,
         execute: Reference,
+        concurrency: ToolConcurrency,
     ) -> Result<(), Error> {
         let definition = foreign_definition(declaration)?;
         self.register(
@@ -562,9 +583,34 @@ impl ToolRegistry {
                     generation: ctx.cancellation_token(),
                     session_id: self.session_id.clone(),
                     config: self.config.clone(),
+                    concurrency,
                 }),
             },
         )
+    }
+}
+
+/// The ordering class a foreign registration asked for. It is a registration
+/// option rather than a declaration field: the class is a property of the
+/// bound handler, and `ToolDefinition` is persisted in the adopted
+/// configuration, so a key there would change a stored shape.
+fn foreign_concurrency(options: Option<serde_json::Value>) -> Result<ToolConcurrency, Error> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Options {
+        concurrency: Option<String>,
+    }
+    let Some(options) = options else {
+        return Ok(ToolConcurrency::Exclusive);
+    };
+    let options: Options = serde_json::from_value(options)
+        .map_err(|error| invalid(format!("invalid tool registration options: {error}")))?;
+    match options.concurrency.as_deref() {
+        None => Ok(ToolConcurrency::Exclusive),
+        Some("concurrent") => Ok(ToolConcurrency::Concurrent),
+        Some(other) => Err(invalid(format!(
+            "unknown tool concurrency `{other}`; the declared values are `concurrent`"
+        ))),
     }
 }
 
@@ -616,6 +662,9 @@ impl ToolHandler for HostTool {
     fn resolve_write(&self, call: ToolCall, cancel: CancellationToken) -> HostFuture<'_, ToolCall> {
         self.0.0.resolve_write(call, cancel)
     }
+    fn concurrency(&self, call: &ToolCall) -> ToolConcurrency {
+        self.0.0.concurrency(call)
+    }
     fn execute(
         &self,
         call: ToolCall,
@@ -635,8 +684,12 @@ struct ForeignTool {
     generation: CancellationToken,
     session_id: String,
     config: Arc<SessionConfig>,
+    concurrency: ToolConcurrency,
 }
 impl ToolHandler for ForeignTool {
+    fn concurrency(&self, _: &ToolCall) -> ToolConcurrency {
+        self.concurrency
+    }
     fn execute(
         &self,
         call: ToolCall,
@@ -682,8 +735,8 @@ impl ToolHandler for ForeignTool {
     }
 }
 
-/// `toolRegistry` for other languages: `register(declaration, execute)`
-/// registers a tool for as long as the calling row is loaded.
+/// `toolRegistry` for other languages: `register(declaration, execute,
+/// options?)` registers a tool for as long as the calling row is loaded.
 struct ForeignRegistry(Arc<ToolRegistry>);
 impl HostDispatch for ForeignRegistry {
     fn methods(&self) -> Option<serde_json::Value> {
@@ -707,15 +760,15 @@ impl HostDispatch for ForeignRegistry {
             Value::Undefined => Vec::new(),
             args => args.list()?,
         };
-        if args.len() > 2 {
+        if args.len() > 3 {
             return Err(BridgeError::Value(format!(
-                "expected at most 2 arguments, received {}",
+                "expected at most 3 arguments, received {}",
                 args.len()
             )));
         }
-        args.resize(2, Value::Undefined);
+        args.resize(3, Value::Undefined);
         let mut args = args.into_iter();
-        let declaration = args.next().expect("two arguments").json()?;
+        let declaration = args.next().expect("three arguments").json()?;
         let Some(Value::Reference(execute)) = args.next().filter(
             |execute| matches!(execute, Value::Reference(reference) if reference.is_function()),
         ) else {
@@ -723,11 +776,18 @@ impl HostDispatch for ForeignRegistry {
                 "register needs the tool's declaration and its execute function".into(),
             ));
         };
-        let registered = self
-            .0
-            .register_foreign(&caller, declaration, execute)
-            .map(|()| Value::Undefined)
-            .map_err(|error| BridgeError::Value(error.to_string()));
+        let options = match args.next().expect("three arguments") {
+            Value::Undefined => None,
+            options => Some(options.json()?),
+        };
+        let registered = foreign_concurrency(options)
+            .map_err(|error| BridgeError::Value(error.to_string()))
+            .and_then(|concurrency| {
+                self.0
+                    .register_foreign(&caller, declaration, execute, concurrency)
+                    .map_err(|error| BridgeError::Value(error.to_string()))
+            })
+            .map(|()| Value::Undefined);
         Ok(Value::future(async move { registered }))
     }
 }
@@ -922,5 +982,34 @@ mod tests {
     fn an_excluded_tool_is_absent_from_an_explicit_mount() {
         let registry = registry(Some(vec!["codemode".into()]), vec!["codemode".into()]);
         assert!(registry.definitions().is_empty());
+    }
+
+    #[test]
+    fn a_handler_that_says_nothing_is_exclusive() {
+        let call = ToolCall {
+            id: "call".into(),
+            name: "codemode".into(),
+            input: JsonObject::new(),
+        };
+        assert_eq!(Noop.concurrency(&call), ToolConcurrency::Exclusive);
+    }
+
+    #[test]
+    fn a_registration_option_names_the_class_and_an_unknown_one_is_refused() {
+        assert_eq!(
+            foreign_concurrency(None).unwrap(),
+            ToolConcurrency::Exclusive
+        );
+        assert_eq!(
+            foreign_concurrency(Some(json!({}))).unwrap(),
+            ToolConcurrency::Exclusive
+        );
+        assert_eq!(
+            foreign_concurrency(Some(json!({ "concurrency": "concurrent" }))).unwrap(),
+            ToolConcurrency::Concurrent
+        );
+        assert!(foreign_concurrency(Some(json!({ "concurrency": "parallel" }))).is_err());
+        assert!(foreign_concurrency(Some(json!({ "concurrency": 1 }))).is_err());
+        assert!(foreign_concurrency(Some(json!({ "other": true }))).is_err());
     }
 }
