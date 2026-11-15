@@ -3185,7 +3185,10 @@ impl App {
             if self.composer.is_empty() && self.queued().is_empty() {
                 return Outcome::Continue;
             }
-            if self.running() {
+            // A stop in flight is re-armed whatever the run shows: its reply is
+            // still on its way, and the turn's settled snapshot can arrive
+            // before it does.
+            if self.send_now.is_some() || self.running() {
                 if self.insertion_pending() {
                     self.refuse_while_inserting();
                     return Outcome::Continue;
@@ -16097,6 +16100,35 @@ mod tests {
             ),
             "the message is the text then the image, with no blank text: {}",
             describe(&sent_now).join(", ")
+        );
+    }
+
+    /// A Ctrl+Enter re-arms a cancelled send-now even when the turn's settled
+    /// snapshot has already arrived: the stop's reply is still on its way.
+    #[test]
+    fn ctrl_enter_rearms_a_send_now_after_the_run_shows_as_ended() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "draft");
+        app.handle(ctrl_enter());
+        press(&mut app, KeyCode::Esc);
+        let mut settled = app.snapshot.as_ref().unwrap().clone();
+        settled.running = false;
+        settled.main_running = false;
+        app.apply(Update::Snapshot(Box::new(settled)));
+        assert!(!app.running(), "the run shows as ended");
+        app.handle(ctrl_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit-now"],
+            "the retry re-arms the stop in flight instead of sending another"
+        );
+        app.apply(Update::Stopped { error: None });
+        let sent_now = sent.borrow();
+        assert_eq!(
+            describe(&sent_now[1..]),
+            ["submit:queue:draft"],
+            "the re-armed gesture submits once the stop replied"
         );
     }
 
