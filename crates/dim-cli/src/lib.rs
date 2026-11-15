@@ -42,7 +42,6 @@ mod session_host;
 mod ui;
 mod update;
 mod usage;
-mod version;
 mod web_install;
 mod wire;
 mod worktree_command;
@@ -60,14 +59,6 @@ type Result<T> = std::result::Result<T, Error>;
 /// App Server.
 pub fn hold_installation() -> std::result::Result<(), String> {
     update::hold_installation()
-}
-
-/// Hands this build the commit the final binary crate read at build time. The
-/// binary calls this once before it runs the CLI, so nothing in this crate reads
-/// git or its environment, and a new commit does not recompile it. A release
-/// build ignores the value: `current()` reports the version alone.
-pub fn install_git_commit(commit: Option<&'static str>) {
-    version::install(commit);
 }
 
 /// Runs the CLI with the process arguments and returns its exit code. The
@@ -444,7 +435,7 @@ fn prepare() -> Result<Option<Options>> {
         return Ok(None);
     }
     if matches!(options.action, Action::Version) {
-        println!("dimcode {}", version::current());
+        println!("dimcode {}", dim_agent_capabilities::build::current());
         return Ok(None);
     }
     if matches!(options.action, Action::McpLogin(_)) && !std::io::stdin().is_terminal() {
@@ -520,7 +511,7 @@ async fn run_acp(
             writer: Box::new(tokio::io::stdout()),
         },
         agent_id,
-        version::current(),
+        dim_agent_capabilities::build::current(),
     );
     let directory = options
         .directory
@@ -620,14 +611,14 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         return open_tui(root, &options, initial, locale).await;
     }
     if matches!(options.action, Action::WebInstall) {
-        if !version::RELEASE {
+        if !dim_agent_capabilities::build::RELEASE {
             return Err("A build from source has no published Web workspace; set DIMCODE_WEB_ASSETS to a frontend built from this source, or build the App Server with the embedded-web feature".into());
         }
         let executable = std::env::current_exe().unwrap_or_default();
         let assets = client::web_assets(&executable, &options.home);
         return web_install::install(
             &options.home,
-            version::VERSION,
+            dim_agent_capabilities::build::VERSION,
             &update::registry(),
             assets,
             &mut std::io::stdout(),

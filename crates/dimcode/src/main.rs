@@ -54,7 +54,10 @@ const GIT_COMMIT: Option<&str> = match option_env!("DIM_GIT_COMMIT") {
 };
 
 fn main() {
-    dim_cli::install_git_commit(GIT_COMMIT);
+    // Both roles this executable serves read one installed identity: the CLI's
+    // `--version`, the daemon's report `Dim` line and its MCP client
+    // declaration, so a log, a report and a screenshot name one commit.
+    dim_agent_capabilities::build::install(GIT_COMMIT);
     #[cfg(target_os = "linux")]
     unsafe {
         unsafe extern "C" {

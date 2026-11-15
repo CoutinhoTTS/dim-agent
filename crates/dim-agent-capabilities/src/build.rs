@@ -1,7 +1,7 @@
-//! What this build reports as its version: the version the release flow set for
-//! it, or the committed version marked `-source` and naming the commit it was
-//! built from. The label is for display only and must never be ordered or
-//! compared as a version.
+//! The label this build reports as its identity: the version the release flow
+//! set for it, or the committed version marked `-source` and naming the commit
+//! it was built from. Display only: it must never be ordered or compared as a
+//! version, which is what [`VERSION`] is for.
 
 use std::sync::OnceLock;
 
@@ -26,9 +26,10 @@ const SOURCE: &str = "-source";
 static COMMIT: OnceLock<Option<&'static str>> = OnceLock::new();
 
 /// Hands this build the commit the final binary crate read at build time. The
-/// binary calls this once before it runs the CLI, so nothing here reads git or
-/// the environment, and a new commit never recompiles this crate. The first
-/// call wins.
+/// binary calls this once before it serves either role, so every label in the
+/// process — the client's, the daemon's reports and its MCP identity — names
+/// the commit it runs. Nothing here reads git or the environment, so a new
+/// commit never recompiles this crate. The first call wins.
 pub fn install(commit: Option<&'static str>) {
     let _ = COMMIT.set(commit);
 }

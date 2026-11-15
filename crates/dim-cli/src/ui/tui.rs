@@ -8108,7 +8108,7 @@ fn pad_block(rows: &[String]) -> String {
 }
 
 fn banner(cols: usize, p: &Palette, branch: &str) -> String {
-    let version = crate::version::current();
+    let version = dim_agent_capabilities::build::current();
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| t("Not available").into());
@@ -15218,7 +15218,10 @@ mod tests {
                 }
             }
             if cols >= 29 {
-                assert!(welcome.contains(&crate::version::current()), "{welcome}");
+                assert!(
+                    welcome.contains(&dim_agent_capabilities::build::current()),
+                    "{welcome}"
+                );
                 assert!(web.contains(t("DIM Web is ready")), "{web}");
             }
         }

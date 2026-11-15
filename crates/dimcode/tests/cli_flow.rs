@@ -48,6 +48,8 @@ mod protocol_version;
 mod question;
 #[path = "cli_flow/realtime.rs"]
 mod realtime;
+#[path = "cli_flow/report.rs"]
+mod report;
 #[path = "cli_flow/scheduled.rs"]
 mod scheduled;
 #[path = "cli_flow/server.rs"]
