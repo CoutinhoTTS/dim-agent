@@ -156,7 +156,10 @@ daemon rejects the new request form normally; the client does not retry with a
 guessed complete selection.
 
 `/effort VALUE`, alias `/reasoning VALUE`, sends `reasoningEffort` without a target.
-The `/models` picker cycles a model's advertised efforts with ←/→. Enter saves a
+The `/models` picker cycles a model's advertised efforts with ←/→ and draws the
+effort the row would send: the cycled one, then the saved one, then the entry's
+declared default, and `—` when the row advertises efforts and has none of the
+three. A row advertising no effort draws no cell. Enter saves a
 cycled effort as that model's `reasoningEffort`, then adopts the model with its
 saved preferences — the server reads the value just saved, which is why the save
 completes before the adoption is sent. Enter also writes the default the next Session in the launch

@@ -315,8 +315,21 @@ pub struct BundledCatalog {
 }
 
 impl BundledCatalog {
+    /// The catalog the bundled files describe, as every projection reads it.
     pub fn load() -> Result<Self, ProjectionError> {
-        let mut file: CatalogFile = serde_json::from_str(CATALOG)?;
+        Self::from_value(serde_json::from_str(CATALOG)?)
+    }
+
+    /// The same catalog `load` builds, from a parsed catalog file. A caller
+    /// that states its own rows gets exactly the projection the shipped file
+    /// gets: a row keeps only the limits its `metadata.raw` declares (#522),
+    /// and the reasoning-off table is read from the bundled overrides.
+    ///
+    /// The input is the parsed file rather than `CatalogFile` because that
+    /// type is an implementation detail of this module; a `Value` is what the
+    /// file parses to, and what a caller outside the module can state.
+    pub fn from_value(value: Value) -> Result<Self, ProjectionError> {
+        let mut file: CatalogFile = serde_json::from_value(value)?;
         // #522: a bundled entry keeps only the limits its metadata.raw declares.
         for provider in &mut file.providers {
             for model in &mut provider.models {

@@ -1240,6 +1240,7 @@ picker, and Esc there closes the area to the prompt, not back to the picker.
 Select a model
 > Ready / flash              ZDR  ‹ high ›  current
   Ready / plain              low
+  Ready / sonnet             —
   Edit models                Ready  ready
   Other / model-x
   Edit models                Other  other
