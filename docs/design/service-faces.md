@@ -219,9 +219,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `sessionSkills` | session | Skills | host-resource |
 | `skillsBranch` | branch | SkillsBranch | host-resource |
 | `managedProviders` | process | ManagedProviders | secret |
-| `modalityConnectionHost` | process | Provider | secret |
-
-`modalityConnectionHost` 返回的是一次调用的凭据材料（`ResolvedModelConnection` 为一次最终请求解析且从不序列化），按 §2.2 秘密值留在所有者内部，因此这一项终态就是 `secret`，不会再有操作面：[#1613](https://github.com/arcships/dim/issues/1613) 决定了媒体执行暂不对外提供，[Provider 管理 §3.8](appserver/provider-management.md#38-media-execution-for-adapters) 陈述该契约。
 
 ### 3.7 待迁移的数据内容
 原因 `legacy-no-consumer`：内容是数据，但还没有转成 data face。没有 leaf 消费者不是保留 internal 的理由；这些名字按批次迁移，`legacy-no-consumer` 只是迁移状态，不是永久分类。
@@ -233,6 +230,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | legacy-no-consumer | 按 #1292 定义操作面 |
 | `selectableModelsHost` | process | Provider | legacy-no-consumer | 按 #1292 定义操作面 |
 | `modelSelectionHost` | process | Provider | legacy-no-consumer | 按 #1292 定义操作面 |
+| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 作为 Provider 的 typed binding 从目录移出：它返回一次调用的凭据材料，不落为 data face（[#1613](https://github.com/arcships/dim/issues/1613)，[Provider 管理 §3.8](appserver/provider-management.md#38-media-execution-for-adapters)） |
 | `collaborationSession` | session | CollaborationSession | legacy-no-consumer | 按 #1292 定义操作面 |
 
 ## 4. 批次契约（#1292）

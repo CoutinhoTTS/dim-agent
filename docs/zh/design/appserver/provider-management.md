@@ -698,7 +698,7 @@ Provider 为一次非对话调用解析模型的连接，Modality 在该调用�
 
 **连接为何不能是面。** 它的返回值包含仅限这一次调用的凭据材料，`ResolvedModelConnection` 为一次最终请求解析且从不序列化（`dim-agent-capabilities` `host.rs`）。[服务面 §2.2](../../../design/service-faces.md#22-migration-marker) 要求秘密值留在所有者内部、公开方法暴露使用它们的操作，因此能跨语言的只有**操作**——代适配器执行的那次请求——而不是连接。
 
-**决定：现在不提供该操作。** `modalityConnectionHost` 的分类是 `internal(secret)`，不是 `legacy-no-consumer`：它返回的是不得跨语言的凭据材料，而不是等待 dispatcher 的数据；该行由[服务面 §3.6](../../../design/service-faces.md#36-入口凭据与宿主资源)陈述。[#1292](https://github.com/arcships/dim/issues/1292) 的第六批迁移到此为止，不落为 data face；媒体适配器在进程内（`dim-modality-aimux`）经由这条原生路径执行。本决定不改变任何媒体操作、签名、重试、重定向、上传、下载或流式行为。
+**决定：现在不提供该操作。** 该连接是 Provider 的私有 typed binding，不是公开服务：它返回的是一次调用的凭据材料，因此既不会成为 data face，也不作为目录中的名字保留。[服务面 §2.6](../../../design/service-faces.md#26-migration-rule) 已规定角色为 typed binding 的名字从目录移出，[§3.7](../../../design/service-faces.md#37-待迁移的数据内容) 把这一项的下一步写成该移出，而不是操作面。[#1292](https://github.com/arcships/dim/issues/1292) 的第六批迁移到此为止，不落为 data face；媒体适配器在进程内（`dim-modality-aimux`）经由这条原生路径执行。本决定不改变任何媒体操作、签名、重试、重定向、上传、下载或流式行为。
 
 **为何 `modalityRequest` 执行器是另一份合同。** 它是新的 HTTP 执行器，而不是既有操作的序列化，无法保留原生路径今天的行为（[#1613](https://github.com/arcships/dim/issues/1613)）：
 
