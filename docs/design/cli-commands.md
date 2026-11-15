@@ -257,12 +257,14 @@ Fullscreen, 8 rows                           Scrollback, 8 rows
 In scrollback and fullscreen TUI, `/settings` → Interface → Default send mode
 chooses how `Enter` submits a message draft during a run. `Ctrl+S` sends that
 draft in the other mode. Enter, Left/Right or Space toggles the setting, saves
-it in the CLI home, and applies it immediately. The default is `queue`.
+it in the CLI home, and applies it immediately. The default is `steer`: only a
+saved `queue` queues, so a user who saved `queue` keeps it and nothing is
+migrated, while a missing or unknown saved value means `steer`.
 
 ```text
 Settings
   Interface
-> Default send mode    queue
+> Default send mode    steer
 
 Running with a draft    Enter    Ctrl+S
 queue                   queue    steer
@@ -284,12 +286,60 @@ Shift+Left          —                            empty draft: recall the newes
                                                  message only if one text block
 Esc                 keep the draft               interrupt; every held user message
                                                  returns to the draft, oldest first
+Ctrl+Enter          submit, as Enter             interrupt and send now: every held
+                                                 message returns to the draft, the
+                                                 run stops, and that draft goes as
+                                                 one new message once the stop has
+                                                 settled
 Ctrl+S              —                            send draft in the other mode;
                                                  empty: steer oldest queued message
                                                  in queue mode only
 Up / Down           input history                input history
 Home / End          scroll (fullscreen, empty)   scroll (fullscreen, empty)
 ```
+
+A submit during a run says where the message went. A queued draft shows
+`Message queued`. A steered draft needs no such notice: its message row enters
+the transcript as soon as the input is applied, marked pending until the model
+consumes it, so the user already sees the message in the running turn.
+
+`Ctrl+Enter` is `Esc` then `Enter` as one key. It withdraws every held user
+message oldest first, stops the run, and submits the combined draft — the
+returned messages followed by what was typed — as one new message. A held
+automatic input, such as a scheduled delivery, is outside the user queue for
+both keys: neither withdraws it, so it stays pending while the typed draft goes
+out alone. Its withdrawals reach the session before the stop, and its submit is
+sent only after the stop's reply,
+because an input written before the last interrupt does not start a run after
+it. A message that already left the queue is not sent again. If the stop fails,
+the combined draft stays in the composer with a notice, so nothing typed is
+lost. It takes the guards `Enter` has: with a shell command running and a shell
+line in the draft it shows `A shell command is already running` and sends
+nothing, and with an empty draft and nothing held it does nothing; while a
+clipboard or image read has not landed in the draft it asks for the wait and
+sends neither the withdrawals nor the stop. While the stop it asked for is
+still settling, every key the composer would send the draft with waits and
+keeps it, whatever its modifiers and whether the command palette or the file
+picker is open, and so does `Ctrl+S`, which steers the oldest held message:
+none of them sends anything or changes the text and its attachments, so one
+draft is never submitted twice; `Esc` there calls off only the submit and
+keeps the draft, because the stop it asked for has already gone.
+At most one stop is in flight: a `Ctrl+Enter` after that cancellation asks for
+no second stop and re-arms the submit instead, so the one reply still on its
+way decides the outcome. A clipboard or image paste waits for the send to
+finish and says so, because a read started after the stop was asked for cannot
+be ordered against its reply; typed text joins the draft as usual, and so does
+a bracketed text paste, which inserts at once.
+
+A terminal without the kitty keyboard protocol or xterm modifyOtherKeys cannot
+tell `Ctrl+Enter` from `Enter`, so there it submits in the default mode and `Esc`
+then `Enter` remains the two-key route.
+
+The default send mode is a TUI setting: an ACP client decides for itself how it
+holds a message typed during a run, and reaches interrupt and send now with
+`session/cancel` followed by a new `session/prompt`
+([AcpGateway §4.2](plugins/AcpGateway.md#42-prompt-and-cancellation)). The Web
+composer is #1601.
 
 Enter on an empty composer opens `/tasks` only after the earlier branches have
 had their say: the shell-run guard in either mode, then the steer of the oldest
@@ -308,8 +358,9 @@ in both modes: one task per row, not a horizontal list of labels.
   is deleted. Shift+Left accepts only a single text block; interrupt restores
   every held user-queue message, including its image blocks and stored paste/file links.
   A message that already left the queue is not put back or sent again.
-- Withdrawals of an interrupt are sent before the stop, so the run does not start the
-  next user-queue message.
+- Withdrawals of an interrupt, and of `Ctrl+Enter`, are sent before the stop, so the
+  run does not start the next user-queue message. `Ctrl+Enter` keeps that order and
+  adds the wait for the stop's reply before it submits.
 - `Ctrl+C` clears the draft. `Esc` never clears it.
 
 ### Queued messages
@@ -388,7 +439,7 @@ history outside the panel.
   › fix the failing test
 ┌─ Queue (1) ───────────────────────────────────────────────────────┐
 │ › Held · then update the design note                              │
-│ /queue manage · Shift+← edit last · empty draft: Ctrl+S steer     │
+│ /queue · Shift+← edit last · empty: Ctrl+S steer · Ctrl+Enter …   │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1761,7 +1812,9 @@ current user and offer no group or other permissions). On Unix that mode is the
 note's protection, since the daemon writes it 0600; on Windows the client checks
 only the regular file, its size and the header, and the private home's inherited
 ACL is the boundary. It requires the
-`dimcode-startup-failure v1 pid=<child pid>` header, removes control characters
+`dimcode-startup-failure v1 pid=<child pid>` header, removes the trailing
+`store-newer found=<marker> supported=<format>` line when the note carries one,
+removes control characters
 other than newline and tab from the body, and returns it as the command's error
 followed by `Details: <native home>/daemon.log`. The storage gate writes the
 note on a diagnosed incompatibility and names the store, its marker, the
@@ -1775,7 +1828,7 @@ matching note the embedded server reports the existing
 the flag must name a standalone `dim-app-server` binary. The failed launch
 removes the note after reading; a successful connection removes any note. The
 CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
-the store, and exits 1.
+the store. A failed startup exits 1 unless it enters the recovery below.
 
 While a store format upgrade runs, the daemon writes the same note as a progress
 kind, `dimcode-startup-progress v1 pid=<pid>` with
@@ -1815,6 +1868,48 @@ quote expansion. Missing paths and unsupported formats print usage and return
 to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
+
+#### Update recovery for a newer store
+
+An interactive TUI launch can recover when its own embedded daemon identifies
+a newer store in the [startup note](appserver/native-storage-format.md#启动不兼容诊断).
+On macOS and Linux, a released npm global installation displays the store
+diagnostic and checks its channel once, honoring automatic-update settings and
+skipped versions. This runs before the TUI takes over and uses stderr, and only
+where stderr is a terminal, so a headless launch keeps the diagnostic and says
+nothing about an update it did not run. Other installations, external servers,
+noninteractive commands, and other startup failures use the normal error path.
+
+`DIMCODE_STARTUP_RETRY` is the loop guard: the recovered invocation sets it, so
+an environment that already carries the variable disables recovery and keeps the
+diagnostic rather than restarting in a loop.
+
+The CLI stages the newer version its current channel tag resolves to, as the
+[update command](#update-dialog) does, so npm resolves the version against the
+same registry configuration it installs from; `DIMCODE_NPM_REGISTRY` stays the
+selector for the availability check alone and need not name that registry. The
+existing update command owns the installation lock, legacy-consumer
+confirmation, progress, and cancellation. Before switching, the updater checks
+the staged host platform's release manifest for the version it actually staged
+and the store's format. A missing declaration or unsupported format stops
+recovery before replacing the live installation.
+
+After a verified switch, the CLI runs the installed launcher with the same
+arguments and working directory. The new invocation opens the same home and
+must complete normal daemon startup and handshake to enter the TUI. An
+environment marker prevents a second recovery in that invocation. Failed
+lookup, installation, or restart reports the cause. The storage gate still
+decides whether the daemon can open the store.
+
+```text
+$ dima
+Cannot open native store <home>/rust/dimcode.sqlite.
+  Store format: v46
+  Daemon format: v38
+  ...
+Checking dimcode-alpha on the alpha channel...
+Error: Startup update failed: 0.1.0-alpha.23 does not declare support for native store v46.
+```
 
 ### The `/resume` picker
 

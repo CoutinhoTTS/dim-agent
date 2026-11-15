@@ -718,6 +718,22 @@ mod tests {
         );
     }
 
+    /// Ctrl+Enter under both modern encodings, and the legacy byte that a
+    /// terminal without either sends for it: the same as plain Enter.
+    #[test]
+    fn ctrl_enter_decodes_as_enter_with_ctrl_under_both_encodings() {
+        let mut d = Decoder::new();
+        assert_eq!(
+            keys(d.feed(b"\x1b[13;5u")),
+            vec![(KeyCode::Enter, Modifiers::CTRL.0)]
+        );
+        assert_eq!(
+            keys(d.feed(b"\x1b[27;5;13~")),
+            vec![(KeyCode::Enter, Modifiers::CTRL.0)]
+        );
+        assert_eq!(keys(d.feed(b"\r")), vec![(KeyCode::Enter, 0)]);
+    }
+
     #[test]
     fn alt_prefix_and_lone_escape() {
         let mut d = Decoder::new();

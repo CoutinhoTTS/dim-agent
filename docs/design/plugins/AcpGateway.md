@@ -84,6 +84,8 @@ Cancellation respects the handover from InputQueue to Loop: try the existing wit
 
 The gateway's own cancel must end the prompt with ACP `cancelled` even if cancellation exposes an underlying error. A Hooks `input_blocked` rejection from `session.submit` is shown as the message and ends with `refusal`; Hooks is not implemented by this gateway.
 
+A prompt that arrives while the Session already has an unanswered prompt is refused with `session_busy`; the gateway neither queues it nor steers it into the running turn. Holding a message the operator types during a run is therefore the client's own choice. The [TUI's run keys](../cli-commands.md#run-keys-and-queue) reach the two actions in their own way, and over ACP the same pair is `session/cancel`, waiting for the running prompt's `cancelled` response, then a new `session/prompt`. The gateway does not steer a second prompt because ACP v1 does not define a prompt that arrives mid-turn, and because each prompt's response is the end of its own turn: two prompts steered into one turn would share a single end and could not each carry an honest stop reason. This is revisited once the protocol defines mid-turn delivery.
+
 ### 4.3 Approvals and questions
 
 Native approval requests from every branch become ACP permission requests. Answers use `approval.respond`; current native policy and first-answer ordering remain authoritative. Resolved/cancelled notices retire local waiters. Always options are not offered.

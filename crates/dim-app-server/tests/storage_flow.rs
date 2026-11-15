@@ -4279,6 +4279,12 @@ fn a_newer_store_leaves_an_actionable_startup_note() {
     let note = read_startup_note(&database.0);
     assert!(note.contains(&format!("Store format: v{future}")), "{note}");
     assert!(
+        note.ends_with(&format!(
+            "store-newer found={future} supported={STORE_FORMAT}"
+        )),
+        "{note}"
+    );
+    assert!(
         note.contains(&format!("Daemon format: v{STORE_FORMAT}")),
         "{note}"
     );
@@ -8183,18 +8189,21 @@ async fn a_slow_store_upgrade_reports_progress_and_keeps_the_opening_alive() {
     set_upgrade_report_delay(Some(Duration::from_millis(200)));
     let note = startup_note(&database.0);
     let path = database.0.clone();
+    let inactivity_timeout = Duration::from_secs(5);
     let waiting = tokio::spawn(async move {
         let root = rutis::Ctx::root().unwrap();
         let view = root.plugin(dim_app_server::storage::SqliteStoragePlugin::new(path));
+        let started = Instant::now();
         let result = dim_agent_runtime::wait_active(
             &root,
             std::slice::from_ref(&view),
-            Duration::from_millis(1_000),
+            inactivity_timeout,
             &CancellationToken::new(),
         )
         .await;
+        let elapsed = started.elapsed();
         root.shutdown().await.unwrap();
-        result
+        (result, elapsed)
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut seen = None;
@@ -8216,10 +8225,12 @@ async fn a_slow_store_upgrade_reports_progress_and_keeps_the_opening_alive() {
         )),
         "{seen}"
     );
-    waiting
-        .await
-        .unwrap()
-        .expect("reported progress keeps the opening inside its inactivity bound");
+    let (result, elapsed) = waiting.await.unwrap();
+    result.expect("reported progress keeps the opening inside its inactivity bound");
+    assert!(
+        elapsed > inactivity_timeout,
+        "the upgrade must outlast the inactivity bound to exercise progress renewal: {elapsed:?}"
+    );
     assert!(
         !note.exists(),
         "a successful open removes the progress note"

@@ -2340,12 +2340,10 @@ async fn node_workflow_runs_only_when_enabled_and_its_settings_follow_it() {
     // the agent: never returned, never written through the tool.
     let read = json!({"source": "web", "scope": "user"});
     let current = call(&mut client, "settings.read", read.clone()).await;
-    assert_eq!(
-        current["result"]["document"]["proxyDns"], false,
-        "{current}"
-    );
+    assert_eq!(current["result"]["document"]["proxyDns"], true, "{current}");
     let secret = "dim-test-secret-key";
-    let document = json!({"allowPrivateHosts": [], "proxy": "http://user:pass@127.0.0.1:9", "proxyDns": false,
+    let document = json!({"allowPrivateHosts": [], "blockPrivateAddresses": false,
+        "proxy": "http://user:pass@127.0.0.1:9", "proxyDns": false,
         "searchService": {"kind": "brave", "apiKey": secret}});
     assert_ok(
         &call(

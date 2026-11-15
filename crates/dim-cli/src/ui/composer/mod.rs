@@ -84,6 +84,14 @@ impl Shell {
     }
 }
 
+/// An Enter that opens a new line in the draft rather than submitting it:
+/// `Shift+Enter` and `Alt+Enter`. Every other Enter goes on to submit, however
+/// else it is modified.
+fn newline_key(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Enter
+        && (key.mods.contains(Modifiers::SHIFT) || key.mods.contains(Modifiers::ALT))
+}
+
 /// What a key did.
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
@@ -265,6 +273,86 @@ impl Composer {
         self.renumber();
     }
 
+    /// Inserts withdrawn operator content at byte `at`, in front of the draft
+    /// from there on, and returns the offset just past what it inserted.
+    ///
+    /// The blocks inside the message are laid out exactly as [`Self::restore`]
+    /// lays them out: a newline only between two adjacent text blocks, and an
+    /// image inline where it stands. The separators sit around the message as a
+    /// whole, so one message never splits into lines of its own parts: a
+    /// newline before it when the draft holds text at `at` that does not end a
+    /// line, and the newline before the typed draft after it. Runtime blocks
+    /// are left out as [`Self::restore`] leaves them, so a message of only
+    /// those inserts nothing and adds no separator.
+    pub fn restore_at(&mut self, at: usize, input: dim_agent_types::UserInput) -> usize {
+        self.shell = None;
+        let mut at = at.min(self.area.text().len());
+        let followed = at < self.area.text().len();
+        let mut inserted = false;
+        let mut previous_text = false;
+        for (index, block) in input.content.into_iter().enumerate() {
+            match block {
+                dim_agent_types::ContentBlock::Text { text } => {
+                    if dim_agent_types::markup::runtime_context(index, &text) {
+                        continue;
+                    }
+                    at = self.open_message(at, &mut inserted);
+                    if previous_text {
+                        self.area.insert_str_at(at, "\n");
+                        at += 1;
+                    }
+                    self.area.insert_str_at(at, &text);
+                    at += text.len();
+                    previous_text = true;
+                }
+                block @ dim_agent_types::ContentBlock::Image { .. } => {
+                    at = self.open_message(at, &mut inserted);
+                    previous_text = false;
+                    let buffer = "[Image]".to_owned();
+                    let id = self.area.replace_range_with_element(
+                        at..at,
+                        &buffer,
+                        TOKEN_KIND,
+                        Some(token_line(&buffer)),
+                    );
+                    at += buffer.len();
+                    self.tokens.push(Token {
+                        id,
+                        label: buffer.clone(),
+                        buffer,
+                        content: String::new(),
+                        block: Some(block),
+                        file: None,
+                        details: String::new(),
+                    });
+                }
+            }
+        }
+        if inserted && followed {
+            self.area.insert_str_at(at, "\n");
+            at += 1;
+        }
+        self.area.set_cursor(self.area.text().len());
+        self.renumber();
+        at
+    }
+
+    /// The offset the message's first row goes in at: one newline before the
+    /// message when the draft already holds text at `at` that does not end a
+    /// line. `inserted` records that the message put something there, so one
+    /// made of only runtime blocks separates nothing.
+    fn open_message(&mut self, at: usize, inserted: &mut bool) -> usize {
+        if *inserted {
+            return at;
+        }
+        *inserted = true;
+        if at == 0 || self.area.text()[..at].ends_with('\n') {
+            return at;
+        }
+        self.area.insert_str_at(at, "\n");
+        at + 1
+    }
+
     /// Appends `text` to the draft as a Markdown quote and a blank line,
     /// keeping what is already there; the cursor goes to the end. The
     /// format is the one the Web composer writes (member-conversation
@@ -355,7 +443,7 @@ impl Composer {
         self.command_query().is_some()
     }
 
-    fn palette_rows(&self) -> Vec<crate::ui::rows::Row> {
+    pub(crate) fn palette_rows(&self) -> Vec<crate::ui::rows::Row> {
         palette::rows_for(
             self.command_query().unwrap_or(""),
             self.context,
@@ -395,9 +483,7 @@ impl Composer {
             }
         }
         match key.code {
-            KeyCode::Enter
-                if key.mods.contains(Modifiers::SHIFT) || key.mods.contains(Modifiers::ALT) =>
-            {
+            KeyCode::Enter if newline_key(&key) => {
                 self.insert_newline();
                 return Outcome::Handled;
             }
@@ -431,13 +517,7 @@ impl Composer {
 
     fn palette_key(&mut self, key: KeyEvent) -> Option<Outcome> {
         let query = self.command_query()?.to_owned();
-        if key.code == KeyCode::Enter
-            && crate::ui::commands::COMMANDS.iter().any(|command| {
-                command.slash
-                    && !command.listed(self.context)
-                    && (command.name == query || command.aliases.contains(&query.as_str()))
-            })
-        {
+        if key.code == KeyCode::Enter && self.exact_hidden(&query) {
             return Some(self.submit());
         }
         self.palette.set_query(&query);
@@ -463,26 +543,8 @@ impl Composer {
             }
             KeyCode::Enter => {
                 let row = rows.get(self.palette.current(&rows))?;
-                if !row.selectable() {
-                    return Some(Outcome::Handled);
-                }
-                match &row.kind {
-                    crate::ui::rows::Kind::Command(command)
-                        if command.requires_exact_name
-                            && query != command.name
-                            && !command.aliases.contains(&query.as_str()) =>
-                    {
-                        Some(self.complete_row(row))
-                    }
-                    crate::ui::rows::Kind::Command(command)
-                        if command.argument.is_some() || command.name == "goal" =>
-                    {
-                        let filled = format!("/{} ", command.name);
-                        self.clear();
-                        self.area.insert_str(&filled);
-                        Some(Outcome::Handled)
-                    }
-                    crate::ui::rows::Kind::Command(command) => {
+                match Self::row_command(row, &query) {
+                    Some(command) => {
                         let name = command.name.to_owned();
                         self.clear();
                         Some(Outcome::Command {
@@ -490,10 +552,7 @@ impl Composer {
                             args: String::new(),
                         })
                     }
-                    crate::ui::rows::Kind::Skill(_) => Some(self.complete_row(row)),
-                    crate::ui::rows::Kind::Heading | crate::ui::rows::Kind::Item => {
-                        Some(Outcome::Handled)
-                    }
+                    None => Some(self.complete_row(row)),
                 }
             }
             KeyCode::Tab => {
@@ -505,6 +564,35 @@ impl Composer {
             }
             _ => None,
         }
+    }
+
+    /// Whether the draft names a hidden command exactly, which Enter runs
+    /// without the menu listing it.
+    fn exact_hidden(&self, query: &str) -> bool {
+        crate::ui::commands::COMMANDS.iter().any(|command| {
+            command.slash
+                && !command.listed(self.context)
+                && (command.name == query || command.aliases.contains(&query))
+        })
+    }
+
+    /// The command a palette row's Enter runs, clearing the draft as the draft
+    /// it names would; `None` for the rows Enter fills into the draft instead.
+    fn row_command(
+        row: &crate::ui::rows::Row,
+        query: &str,
+    ) -> Option<&'static crate::ui::commands::Command> {
+        let crate::ui::rows::Kind::Command(command) = &row.kind else {
+            return None;
+        };
+        if command.requires_exact_name && query != command.name && !command.aliases.contains(&query)
+        {
+            return None;
+        }
+        if command.argument.is_some() || command.name == "goal" {
+            return None;
+        }
+        Some(command)
     }
 
     /// Fills the draft with the selected row: a command's name, its name and a
@@ -645,6 +733,49 @@ impl Composer {
             width,
             p,
         ))
+    }
+
+    /// Whether `handle_key` here ends in `submit()`. The palette's Enter does,
+    /// since the draft is then the command it runs: the command the draft names
+    /// exactly, the selected command row, or the draft itself when no row is
+    /// selected. The file picker's Enter does once no file matches; with a
+    /// match it inserts the file instead. Any other Enter submits unless it is
+    /// a newline.
+    /// Whether Enter here acts on the draft as a submit does: it sends the
+    /// draft, or runs the command the draft names, clearing the draft either
+    /// way. The palette decides by the same helpers `handle_key` uses: the
+    /// command the draft names exactly, then the selected row, then the draft
+    /// itself when no row is selected. The file picker's Enter fills the file
+    /// in while one matches, and otherwise submits the draft. Every other Enter
+    /// submits unless it opens a new line. The interface asks this before it
+    /// lets a key reach the composer, so a key that would cost the draft is the
+    /// one it refuses.
+    pub fn submits(&mut self, key: &KeyEvent) -> bool {
+        if key.code != KeyCode::Enter {
+            return false;
+        }
+        if self.palette_open() {
+            let query = self.command_query().unwrap_or_default().to_owned();
+            if self.exact_hidden(&query) {
+                return true;
+            }
+            self.palette.set_query(&query);
+            let rows = self.palette_rows();
+            return match rows.get(self.palette.current(&rows)) {
+                // No row matches, so `palette_key`'s `?` leaves the draft to the
+                // editor, which submits it or opens a new line.
+                None => !newline_key(key),
+                Some(row) => Self::row_command(row, &query).is_some(),
+            };
+        }
+        if self.mention_open()
+            && key.mods.0 == 0
+            && let Some(trigger) = self.mention()
+            && !self.mention_candidates(&trigger.query).is_empty()
+        {
+            return false;
+        }
+        !newline_key(key)
     }
 
     /// What Enter makes of the draft; the invocation's first message
@@ -1333,6 +1464,71 @@ mod tests {
                 .unwrap();
         }
         gif
+    }
+
+    /// One message's parts stay on one line the way `restore` lays them out:
+    /// a newline only between two adjacent text blocks, and an image inline
+    /// where it stands. The two paths cannot drift: a send-now recall and an
+    /// Esc recall of the same message must read the same.
+    #[test]
+    fn restore_at_lays_out_a_message_as_restore_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("shot.png");
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&image, png.into_inner()).unwrap();
+
+        let mut source = Composer::new(Vec::new());
+        typed(&mut source, "see");
+        attach(&mut source, &[image]).unwrap();
+        typed(&mut source, " here");
+        let Outcome::SubmitDraft { parts, .. } = source.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a draft");
+        };
+        let message = || dim_agent_types::UserInput {
+            content: parts
+                .iter()
+                .map(|part| match part {
+                    DraftPart::Text(text) => {
+                        dim_agent_types::ContentBlock::Text { text: text.clone() }
+                    }
+                    DraftPart::Block(block) => block.clone(),
+                    DraftPart::Paste(text) => {
+                        dim_agent_types::ContentBlock::Text { text: text.clone() }
+                    }
+                })
+                .collect(),
+        };
+
+        let mut appended = Composer::new(Vec::new());
+        appended.restore(message());
+        let mut inserted = Composer::new(Vec::new());
+        inserted.restore_at(0, message());
+
+        assert_eq!(
+            inserted.text(),
+            "see [Image] here",
+            "the image stays inline, as restore keeps it"
+        );
+        assert_eq!(
+            inserted.text(),
+            appended.text(),
+            "a send-now recall reads as an Esc recall does"
+        );
+        let of = |c: &Composer| {
+            c.tokens
+                .iter()
+                .map(|t| (t.label.clone(), t.block.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            of(&inserted),
+            of(&appended),
+            "both paths give the same image tokens"
+        );
+        assert!(!of(&inserted).is_empty(), "the image is a token");
     }
 
     /// The transcript row a message made of these parts shows.

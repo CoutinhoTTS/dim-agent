@@ -55,6 +55,43 @@ async fn scheduled_inputs(client: &mut dim_client::Client, session_id: &str) -> 
         .collect()
 }
 
+/// The runtime context a branch writes for itself, each an `input/message`
+/// that carries blocks and no user content.
+const RUNTIME_CONTEXT: [&str; 2] = ["dim/environment/clients", "dim/settings/execution"];
+
+/// Waits until the branch has written every `RUNTIME_CONTEXT` snapshot. A
+/// turn's request consumes only the inputs written before it starts, so a
+/// snapshot the branch writes later stays pending for as long as the turn
+/// runs. Waiting here keeps them ahead of the turn whose queue this test
+/// reads.
+async fn runtime_context_written(client: &mut dim_client::Client, session_id: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let events = branch_events(client, session_id).await;
+            let written = RUNTIME_CONTEXT.iter().all(|source| {
+                let marker = format!("<dim-state source=\"{source}\"");
+                events.iter().any(|event| {
+                    event["type"] == "input"
+                        && event["name"] == "message"
+                        && event["data"]["blocks"].as_array().is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block["text"]
+                                    .as_str()
+                                    .is_some_and(|text| text.starts_with(marker.as_str()))
+                            })
+                        })
+                })
+            });
+            if written {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the branch writes its runtime context");
+}
+
 /// The job's delivery with `run_id`, once it is no longer `delivering`.
 async fn settled(client: &mut dim_client::Client, job_id: &str, run_id: &str) -> Value {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -226,6 +263,7 @@ async fn pending_block_presence_distinguishes_a_delivery_without_changing_its_ex
     let mut client = support::connect(&server).await;
     assert!(client.supports(&["session.input.pending.blockPresence"]));
     let session = create_session(&mut client, home.path(), true).await;
+    runtime_context_written(&mut client, &session).await;
     client
         .rpc(
             "session.submit",

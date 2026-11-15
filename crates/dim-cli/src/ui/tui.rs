@@ -139,6 +139,10 @@ enum Jump {
     Block(usize),
     /// Scroll so this block id is at the top (after a page loads above it).
     Show(usize),
+    /// Scroll to the top of this block id when it is taller than the viewport,
+    /// so a long report opens at its heading instead of scrolled past it
+    /// (`/keys`).
+    ShowTall(usize),
 }
 
 /// The card id of fullscreen's load-more row: no line or delegation id.
@@ -160,6 +164,7 @@ fn apply_jump(full: &mut FullScreen, app: &App, jump: Jump) {
         Jump::Pick => full.focus_older(app),
         Jump::Block(id) => full.pick_block(id, app),
         Jump::Show(id) => full.show_block(id, app),
+        Jump::ShowTall(id) => full.show_tall_block(id, app),
     }
 }
 
@@ -1183,6 +1188,9 @@ struct App {
     git_checked: Instant,
     /// The shell-mode command running, at most one.
     shell: Option<crate::ui::shell::Running>,
+    /// A Ctrl+Enter whose withdrawals and stop are out: the draft it merged
+    /// waits for the stop's reply, and no plain Enter submits until then.
+    send_now: Option<SendNow>,
     /// A Ctrl+V clipboard read in progress.
     clipboard: Option<ClipboardRead>,
     /// A pasted image path being read and scaled off the interface thread.
@@ -1404,6 +1412,17 @@ enum ClipboardRead {
     Terminal(crate::clipboard::terminal::Read),
 }
 
+/// A Ctrl+Enter that has withdrawn the queue and asked for a stop. At most one
+/// is in flight: its reply decides for the gesture the user last meant.
+struct SendNow {
+    /// Esc called off the submit. The stop still settles, and its reply
+    /// releases the gesture without submitting anything.
+    submit_cancelled: bool,
+    /// Where the next recalled message goes: past the ones already recalled,
+    /// so they keep queue order ahead of the draft that was typed.
+    at: usize,
+}
+
 /// A pasted group whose image paths a thread is reading; the tokens go in
 /// at the cursor when its result arrives.
 struct ImageRead {
@@ -1463,11 +1482,11 @@ impl App {
             tool_detail: saved_tool_detail(&home),
             thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
             default_send_mode: if crate::ui::config::read(&home, DEFAULT_SEND_MODE_KEY)
-                .is_some_and(|value| value == SubmitMode::Steer.as_str())
+                .is_some_and(|value| value == SubmitMode::Queue.as_str())
             {
-                SubmitMode::Steer
-            } else {
                 SubmitMode::Queue
+            } else {
+                SubmitMode::Steer
             },
             tool_choices: HashMap::new(),
             tail_groups: Vec::new(),
@@ -1515,6 +1534,7 @@ impl App {
             session_id: String::new(),
             initial: None,
             unsent: None,
+            send_now: None,
             permission_policy: dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
@@ -1699,6 +1719,39 @@ impl App {
         self.failure.is_none() && self.snapshot.as_ref().is_some_and(|s| s.running)
     }
 
+    /// Refuses to start a clipboard or image read while a send-now is settling,
+    /// with the notice that says why. A read started after the stop was asked
+    /// for cannot be ordered against the stop's reply, so the message a settled
+    /// stop sends must be exactly what the composer held when it settled.
+    /// Returns whether a read was refused.
+    fn insertion_refused(&mut self) -> bool {
+        if self.send_now.is_none() {
+            return false;
+        }
+        self.set_notice(t(
+            "Send now is stopping the run; paste again when the draft is sent",
+        ));
+        true
+    }
+
+    /// A clipboard or image read that has not landed in the draft yet. Sending
+    /// before it does would submit without the paste or attachment, and the
+    /// read would then land in a new draft.
+    fn insertion_pending(&self) -> bool {
+        self.clipboard.is_some() || self.image_read.is_some()
+    }
+
+    /// Refuses a key that would send while an insertion is outstanding, with
+    /// the notice that names what is being inserted.
+    fn refuse_while_inserting(&mut self) {
+        let notice = if self.clipboard.is_some() {
+            t("Wait for clipboard insertion before sending")
+        } else {
+            t("Wait for the image insertion before sending")
+        };
+        self.set_notice(notice);
+    }
+
     /// Whether the user's attention is free for an offer: an empty composer,
     /// no prompt or panel, no question or approval waiting and no goal
     /// driving the Session.
@@ -1794,6 +1847,16 @@ impl App {
         }
     }
 
+    /// Whether `key` is a send key that a settling send-now must refuse: every
+    /// key the composer would submit a message with, whatever its modifiers and
+    /// whether the palette or the file picker is open, and Ctrl+S, whose `steer`
+    /// branch sends the oldest held message. Each of these would act on the
+    /// draft while the stop it asked for is still out.
+    fn settling_key_refused(&mut self, key: &KeyEvent) -> bool {
+        self.composer.submits(key)
+            || key.code == KeyCode::Char('s') && key.mods.contains(Modifiers::CTRL)
+    }
+
     fn submits_in_alternate_mode(&self, key: &KeyEvent) -> bool {
         key.code == KeyCode::Char('s')
             && key.mods.contains(Modifiers::CTRL)
@@ -1820,6 +1883,34 @@ impl App {
                 action: "withdraw",
             });
         }
+    }
+
+    /// Submits the draft a settled stop made ready, as a new message: the run
+    /// is idle now, so the submit starts its own turn and takes whatever
+    /// withdrawn messages joined the draft in the meantime.
+    fn submit_send_now(&mut self) {
+        let outcome = self.composer.submit();
+        self.dispatch_composer(outcome, SubmitMode::Queue);
+    }
+
+    /// Ctrl+Enter: withdraws every held message into the draft, stops the run
+    /// and submits the combined draft once the stop's reply says the turn has
+    /// settled. Withdrawals reach the worker before the stop in the same
+    /// command queue, and each one's `Withdrawn` update is published before
+    /// the next command runs, so the draft holds every recalled message by the
+    /// time the stop replies.
+    fn send_now(&mut self) {
+        if let Some(pending) = &mut self.send_now {
+            pending.submit_cancelled = false;
+            self.notice = None;
+            return;
+        }
+        self.send_now = Some(SendNow {
+            submit_cancelled: false,
+            at: 0,
+        });
+        self.recall_all_queued();
+        self.host.send(Command::SubmitNow);
     }
 
     fn withdraw(&mut self, id: String) {
@@ -2093,7 +2184,49 @@ impl App {
         match update {
             Update::Withdrawn(input) => {
                 self.dismiss_suggestion();
-                self.composer.restore(input);
+                match &mut self.send_now {
+                    // Recalled messages keep queue order ahead of the draft
+                    // that was typed when Ctrl+Enter was pressed.
+                    Some(pending) => pending.at = self.composer.restore_at(pending.at, input),
+                    None => self.composer.restore(input),
+                }
+            }
+            Update::Stopped { error } => {
+                // A reply with no gesture waiting for it settles nothing.
+                let Some(pending) = self.send_now.take() else {
+                    if let Some(error) = error {
+                        self.notices.push(error);
+                    }
+                    return;
+                };
+                if pending.submit_cancelled {
+                    if let Some(error) = error {
+                        self.notices.push(error);
+                    }
+                    return;
+                }
+                // The stop failed, so the combined draft stays in the
+                // composer with the reason: nothing typed is lost.
+                if let Some(error) = error {
+                    self.notices.push(tf(
+                        "Send now failed: {error}; the draft was kept",
+                        &[("error", &crate::sanitize::safe_line(&error))],
+                    ));
+                    return;
+                }
+                // No read can start while the gesture is pending, so nothing
+                // is outstanding here. Should one ever be, the draft stays
+                // whole: the submit is dropped rather than sent without the
+                // paste, and the gesture ends so the key is not wedged.
+                debug_assert!(
+                    !self.insertion_pending(),
+                    "a read started while a send-now was settling"
+                );
+                if self.insertion_pending() {
+                    self.set_notice(t("Send now is waiting for the insertion before sending"));
+                    return;
+                }
+                self.submit_send_now();
             }
             Update::Exported { format, path } => self.notices.push(tf(
                 "Exported {format}: {path}",
@@ -3068,6 +3201,41 @@ impl App {
     /// A key for the composer: the palette, the shortcuts around it and the
     /// draft editor, with what a submit, a command or a shell line does.
     fn composer_key(&mut self, key: KeyEvent) -> Outcome {
+        let ctrl = key.mods.contains(Modifiers::CTRL);
+        // Ctrl+Enter is Enter with Ctrl, which every Enter arm below excludes.
+        // A picker or an idle draft takes it as Enter itself; during a run it
+        // is the send-now gesture, under the guards Enter has. While a stop it
+        // asked for is still settling, neither key submits.
+        let ctrl_enter = key.code == KeyCode::Enter && ctrl;
+        let picker = self.composer.palette_open() || self.composer.mention_open();
+        if ctrl_enter && !picker {
+            if self.shell.is_some()
+                && (self.composer.shell().is_some()
+                    || self.composer.text().trim_start().starts_with('!'))
+            {
+                self.set_notice(t("A shell command is already running"));
+                return Outcome::Continue;
+            }
+            if self.composer.is_empty() && self.queued().is_empty() {
+                return Outcome::Continue;
+            }
+            // A stop in flight is re-armed whatever the run shows: its reply is
+            // still on its way, and the turn's settled snapshot can arrive
+            // before it does.
+            if self.send_now.is_some() || self.running() {
+                if self.insertion_pending() {
+                    self.refuse_while_inserting();
+                    return Outcome::Continue;
+                }
+                self.send_now();
+                return Outcome::Continue;
+            }
+        }
+        let key = if ctrl_enter {
+            KeyEvent::new(KeyCode::Enter, Modifiers::NONE)
+        } else {
+            key
+        };
         let (key, mode) = if self.submits_in_alternate_mode(&key) {
             (
                 KeyEvent::new(KeyCode::Enter, Modifiers::NONE),
@@ -3079,6 +3247,16 @@ impl App {
             (key, SubmitMode::Queue)
         };
         let ctrl = key.mods.contains(Modifiers::CTRL);
+        // A stop this gesture asked for is still settling, so nothing may make
+        // the composer act on the draft: `Composer::submit` clears it before it
+        // reports the submit, and a refusal afterwards would lose the text and
+        // its attachments. Every key that ends in a submit or a steer is
+        // refused here, after the alternate-key normalization, and the draft is
+        // left as it is; the gesture's own Ctrl+Enter was taken above.
+        if self.send_now.is_some() && self.settling_key_refused(&key) {
+            self.set_notice(t("Send now is still stopping the run; the draft was kept"));
+            return Outcome::Continue;
+        }
         if self.suggestion.is_some()
             && self.composer.is_empty()
             && self.prompt.is_none()
@@ -3122,25 +3300,31 @@ impl App {
                 self.read_clipboard();
                 return Outcome::Continue;
             }
-            KeyCode::Enter if key.mods.0 == 0 && self.clipboard.is_some() => {
+            KeyCode::Enter if key.mods.0 == 0 && self.insertion_pending() => {
                 if self.composer.mention_key(key).is_some() {
                     return Outcome::Continue;
                 }
-                self.set_notice(t("Wait for clipboard insertion before sending"));
-                return Outcome::Continue;
-            }
-            KeyCode::Enter if key.mods.0 == 0 && self.image_read.is_some() => {
-                self.set_notice(t("Wait for the image insertion before sending"));
+                self.refuse_while_inserting();
                 return Outcome::Continue;
             }
             KeyCode::Char('s') if ctrl => {
+                if self.insertion_pending() {
+                    self.refuse_while_inserting();
+                    return Outcome::Continue;
+                }
                 if self.default_send_mode == SubmitMode::Queue {
                     self.steer();
                 }
                 return Outcome::Continue;
             }
             KeyCode::Esc if !self.composer.palette_open() && !self.composer.mention_open() => {
-                if self.snapshot.as_mut().and_then(|s| s.side.take()).is_some() {
+                if let Some(pending) = &mut self.send_now {
+                    // The stop already went, so the run still ends; only its
+                    // submit is called off, and the draft stays as typed. The
+                    // gesture waits for the reply it already has coming.
+                    pending.submit_cancelled = true;
+                    self.set_notice(t("Send now cancelled; the draft was kept"));
+                } else if self.snapshot.as_mut().and_then(|s| s.side.take()).is_some() {
                     self.host.send(Command::CloseSide);
                 } else if self.line_draft.take().is_some() {
                     self.composer.clear();
@@ -3199,9 +3383,53 @@ impl App {
         Outcome::Continue
     }
 
+    /// Puts a submit the composer already cleared back into the draft, with
+    /// the blocks it carried. `Composer::restore` is the same path a withdrawn
+    /// input uses, so an image goes back as an image token, and a paste or a
+    /// file link goes back as its text.
+    fn restore_outcome(&mut self, outcome: ComposerOutcome) {
+        let content = match outcome {
+            ComposerOutcome::Submit(text) => {
+                vec![dim_agent_types::ContentBlock::Text { text }]
+            }
+            ComposerOutcome::SubmitDraft { parts, .. } => parts
+                .into_iter()
+                .map(|part| match part {
+                    DraftPart::Text(text) | DraftPart::Paste(text) => {
+                        dim_agent_types::ContentBlock::Text { text }
+                    }
+                    DraftPart::Block(block) => block,
+                })
+                .collect(),
+            _ => return,
+        };
+        self.composer
+            .restore(dim_agent_types::UserInput { content });
+    }
+
     /// What a composer outcome does, the same for Enter and for the
     /// invocation's first message.
     fn dispatch_composer(&mut self, outcome: ComposerOutcome, mode: SubmitMode) -> Outcome {
+        // Every send key is refused before the composer acts (see
+        // `settling_key_refused`), so an outcome that already cleared the draft
+        // cannot arrive here while a gesture settles. If one ever does, the
+        // draft is put back rather than dropped: a refused submit must never
+        // cost the operator their text or attachments.
+        if self.send_now.is_some()
+            && self.line_draft.is_none()
+            && matches!(
+                outcome,
+                ComposerOutcome::Submit(_) | ComposerOutcome::SubmitDraft { .. }
+            )
+        {
+            debug_assert!(
+                false,
+                "a send key reached the composer while a send-now was settling"
+            );
+            self.restore_outcome(outcome);
+            self.set_notice(t("Send now is still stopping the run; the draft was kept"));
+            return Outcome::Continue;
+        }
         match outcome {
             ComposerOutcome::Submit(text) if self.line_draft.is_some() => {
                 self.open_line(&text);
@@ -3321,6 +3549,9 @@ impl App {
     /// interface thread; their tokens go in at the cursor when the read
     /// returns, so the frame never waits for a decode.
     fn attach_paths(&mut self, paths: &[std::path::PathBuf]) {
+        if self.insertion_refused() {
+            return;
+        }
         if self.image_read.is_some() {
             self.set_notice(t(
                 "An image is still being inserted; paste again when it is in",
@@ -3368,6 +3599,9 @@ impl App {
     /// the terminal for its clipboard when the native one is out of reach.
     fn read_clipboard(&mut self) {
         if self.clipboard.is_some() {
+            return;
+        }
+        if self.insertion_refused() {
             return;
         }
         if self.image_read.is_some() {
@@ -5505,8 +5739,14 @@ impl App {
                 &self.markdown,
                 self.fullscreen,
             ));
+            let id = self.dropped + self.history.len();
             self.record(block);
             frame.commits.push(text);
+            // A report taller than the viewport opens at its first row:
+            // a followed view shows the end of it and cuts the heading.
+            if self.fullscreen && self.jump.is_none() {
+                self.jump = Some(Jump::ShowTall(id));
+            }
         }
         for run in std::mem::take(&mut self.shell_runs) {
             let block = Block::Shell(run);
@@ -7853,7 +8093,7 @@ const QUEUE_ROWS: usize = 5;
 
 /// The queue strip's hint, and its form when messages are not shown. Every
 /// `/name` it can draw is a command in the table.
-const QUEUE_HINT: &str = "/queue manage · Shift+← edit last · empty draft: {key} steer";
+const QUEUE_HINT: &str = "/queue · Shift+← edit last · empty: {key} steer · Ctrl+Enter send now";
 const QUEUE_HINT_MORE: &str = "+{count} more · {hint}";
 
 /// The queue, drawn in a titled border above the composer: the next message
@@ -15611,6 +15851,7 @@ mod tests {
                 Command::Submit(text, mode) => format!("submit:{}:{}", mode.as_str(), text),
                 Command::InputControl { input_id, action } => format!("{action}:{input_id}"),
                 Command::Stop => "stop".into(),
+                Command::SubmitNow => "submit-now".into(),
                 _ => "other".into(),
             })
             .collect()
@@ -15643,6 +15884,127 @@ mod tests {
         }
     }
 
+    /// A steered message reaches the transcript the moment its input is
+    /// applied, while the run goes on: the operator already sees it inside
+    /// the running turn, so a steer submit needs no notice. A queued one
+    /// waits for the turn to end and only then enters.
+    #[test]
+    fn a_steered_message_shows_in_the_running_turn_without_a_notice() {
+        use crate::projection::Projection;
+        use serde_json::json;
+
+        let event = |value: serde_json::Value| -> crate::wire::Event {
+            serde_json::from_value(value).unwrap()
+        };
+        let mut projection = Projection::default();
+        projection.set_running(true);
+        projection.apply(
+            "main",
+            &event(json!({
+                "id": "steered", "sequence": 9, "create_at": 1000,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": [{"type": "text", "text": "steer this"}]}, "mode": "steer"},
+            })),
+        );
+        projection.apply(
+            "main",
+            &event(json!({
+                "id": "steer-ok", "sequence": 10, "create_at": 1000,
+                "type": "input", "name": "applied",
+                "data": {"input_id": "steered", "mode": "steer"},
+            })),
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            ["steer this"],
+            "a steered message is a transcript row while the turn runs"
+        );
+        assert!(rows[0].pending, "the model has not consumed it yet");
+
+        let mut drawn = Drawn::new((72, 20), Some(0), false);
+        show(&mut drawn, rows);
+        assert!(
+            drawn.transcript().contains("steer this"),
+            "the frame shows the steered message at once: {}",
+            drawn.transcript()
+        );
+
+        let mut queued = Projection::default();
+        queued.set_running(true);
+        queued.apply(
+            "main",
+            &event(json!({
+                "id": "held", "sequence": 11, "create_at": 1000,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": [{"type": "text", "text": "hold this"}]}, "mode": "queue"},
+            })),
+        );
+        assert!(
+            queued.snapshot().rows.is_empty(),
+            "a queued message waits for the turn to end, so the notice tells the operator where it went"
+        );
+        assert!(queued.snapshot().queued[0].held);
+    }
+
+    /// Unset means steer; only a saved `queue` queues, and an unknown value
+    /// reads as steer, so a user who saved `queue` keeps it with no migration.
+    #[test]
+    fn the_default_send_mode_is_steer_unless_queue_was_saved() {
+        for (saved, expected) in [
+            (None, SubmitMode::Steer),
+            (Some("queue"), SubmitMode::Queue),
+            (Some("steer"), SubmitMode::Steer),
+            (Some("Queue"), SubmitMode::Steer),
+            (Some("unknown"), SubmitMode::Steer),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            if let Some(value) = saved {
+                assert_eq!(
+                    crate::ui::config::write(home.path(), DEFAULT_SEND_MODE_KEY, value.into()),
+                    None
+                );
+            }
+            let theme = test_theme();
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut app = App::new(
+                Box::new(Recorder(sent.clone())),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            assert_eq!(app.default_send_mode, expected, "saved {saved:?}");
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                projection_id: 7,
+                focus: "main".into(),
+                running: true,
+                main_running: true,
+                ..ViewSnapshot::default()
+            })));
+            typed(&mut app, "follow up");
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(
+                describe(&sent.take()),
+                [format!("submit:{}:follow up", expected.as_str())],
+                "saved {saved:?}"
+            );
+
+            app.open_settings(Setting::DefaultSendMode);
+            let row = app
+                .frame((110, 40))
+                .live
+                .into_iter()
+                .find(|row| row.contains("Default send mode"))
+                .unwrap_or_else(|| panic!("no settings row: saved {saved:?}"));
+            assert!(
+                row.contains(expected.as_str()),
+                "the row shows the value in force, saved {saved:?}: {row}"
+            );
+        }
+    }
+
     #[test]
     fn default_send_mode_switches_draft_keys_and_survives_reopen() {
         let ctrl_s = InputEvent::Key(KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL));
@@ -15657,11 +16019,12 @@ mod tests {
             typed(&mut app, "me");
             assert!(sent.borrow().is_empty(), "Alt+Enter must insert a newline");
             press(&mut app, KeyCode::Enter);
-            typed(&mut app, "steer me");
+            typed(&mut app, "queue me");
             app.handle(ctrl_s.clone());
             assert_eq!(
                 describe(&sent.take()),
-                ["submit:queue:queue\nme", "submit:steer:steer me"]
+                ["submit:steer:queue\nme", "submit:queue:queue me"],
+                "unset means steer, and Ctrl+S sends the other mode"
             );
 
             app.open_settings(Setting::DefaultSendMode);
@@ -15671,30 +16034,27 @@ mod tests {
                 app.frame((110, 30))
                     .live
                     .join("\n")
-                    .contains("empty draft: Enter steer")
+                    .contains(&tf(QUEUE_HINT, &[("key", "Ctrl+S")])),
+                "a saved queue steers an empty draft with Ctrl+S"
             );
             app.run_command("keys", "");
             assert!(matches!(
                 app.reports.last(),
-                Some(Block::Status { text, .. }) if text.contains("Enter steer · Ctrl+S queue")
+                Some(Block::Status { text, .. }) if text.contains("Enter queue · Ctrl+S steer")
             ));
-            app.handle(ctrl_s.clone());
-            assert!(
-                sent.borrow().is_empty(),
-                "Ctrl+S needs a draft in steer mode"
-            );
             press(&mut app, KeyCode::Enter);
-            typed(&mut app, "steer by default");
+            typed(&mut app, "queue by default");
             press(&mut app, KeyCode::Enter);
-            typed(&mut app, "queue this one");
+            typed(&mut app, "steer this one");
             app.handle(ctrl_s.clone());
             assert_eq!(
                 describe(&sent.take()),
                 [
                     "steer:a",
-                    "submit:steer:steer by default",
-                    "submit:queue:queue this one"
-                ]
+                    "submit:queue:queue by default",
+                    "submit:steer:steer this one"
+                ],
+                "queue mode steers the oldest queued from an empty draft, queues a draft\n                 and steers the same draft back with Ctrl+S"
             );
 
             let theme = test_theme();
@@ -15713,9 +16073,750 @@ mod tests {
             press(&mut reopened, KeyCode::Enter);
             assert_eq!(
                 describe(&sent.take()),
-                ["submit:queue:idle", "submit:steer:running"]
+                ["submit:queue:idle", "submit:queue:running"],
+                "the saved queue applies to both an idle and a running draft"
             );
         }
+    }
+
+    /// `/keys` fills an ordinary terminal, and a followed view draws the end of
+    /// a tall block, which cuts the heading that says what the report is: the
+    /// report asks the view for its first row.
+    #[test]
+    fn a_tall_report_opens_at_its_heading() {
+        let mut drawn = Drawn::new((80, 24), None, true);
+        drawn.app.fullscreen = true;
+        drawn.app.run_command("keys", "");
+        drawn.draw();
+        let id = drawn.app.dropped + drawn.app.history.len() - 1;
+        assert!(
+            matches!(&drawn.app.history[id - drawn.app.dropped], Block::Status { text, .. }
+                if text.starts_with("Application keys")),
+            "the report opens with its heading"
+        );
+        assert_eq!(
+            drawn.app.jump,
+            Some(Jump::ShowTall(id)),
+            "a tall report asks the view for its first row"
+        );
+    }
+
+    /// The jump the frame landed moves a followed view to the tall report's
+    /// first row, so the heading is drawn instead of the last rows.
+    #[test]
+    fn a_tall_report_opens_at_its_heading_in_the_view() {
+        let mut drawn = Drawn::new((80, 24), None, true);
+        drawn.app.fullscreen = true;
+        drawn.app.run_command("keys", "");
+        let mut full = crate::ui::render::fullscreen::FullScreen::new((80, 24), false);
+        let frame = drawn.app.frame((80, 24));
+        full.render(&frame, (80, 24), &drawn.app.palette, &drawn.app);
+        let jump = drawn.app.jump.take().expect("the report's jump");
+        apply_jump(&mut full, &drawn.app, jump);
+        let frame = drawn.app.frame((80, 24));
+        let bytes = full.render(&frame, (80, 24), &drawn.app.palette, &drawn.app);
+        let mut emu = crate::ui::render::testterm::Emu::new(80, 24);
+        emu.feed(&bytes);
+        let rows = emu.rows_text().join("\n");
+        assert!(
+            rows.contains("Application keys"),
+            "the report's heading is drawn: {rows}"
+        );
+    }
+
+    /// With no draft typed, the recalled messages still keep their own lines:
+    /// the composer was empty, so nothing else separates them.
+    #[test]
+    fn send_now_keeps_recalled_messages_apart_on_an_empty_draft() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first"), ("b", "second")]);
+        app.handle(ctrl_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["withdraw:a", "withdraw:b", "submit-now"]
+        );
+        for text in ["first", "second"] {
+            app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+                content: vec![dim_agent_types::ContentBlock::Text { text: text.into() }],
+            }));
+        }
+        assert_eq!(app.composer.text(), "first\nsecond");
+        app.apply(Update::Stopped { error: None });
+        assert_eq!(
+            describe(&sent.borrow()[3..]),
+            ["submit:queue:first\nsecond"],
+            "the two recalled messages stay on their own lines"
+        );
+    }
+
+    /// An image-only recalled message follows the text with no blank line
+    /// between them, and leaves none behind.
+    #[test]
+    fn send_now_puts_an_image_only_message_after_the_text_without_a_gap() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, home) = session_with_queue(true, &[("a", "first"), ("b", "image")]);
+        app.composer.set_accepts_images(true);
+        app.handle(ctrl_enter());
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        let path = home.path().join("screen.png");
+        wide_png(&path, 32);
+        let image = crate::ui::composer::read_planned(&app.composer.plan_files(&[path]).unwrap())
+            .unwrap()
+            .remove(0)
+            .unwrap();
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![image.block()],
+        }));
+        assert_eq!(
+            app.composer.text(),
+            "first\n[Image]",
+            "the image follows the text on the next line, with no blank line"
+        );
+        app.apply(Update::Stopped { error: None });
+        let sent_now = sent.borrow();
+        assert!(
+            matches!(
+                &sent_now[3..],
+                [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                    if matches!(parts.as_slice(), [DraftPart::Text(text), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })] if text == "first\n")
+            ),
+            "the message is the text then the image, with no blank text: {}",
+            describe(&sent_now).join(", ")
+        );
+    }
+
+    /// Every send key is refused before the composer acts while a send-now
+    /// settles, so Ctrl+S cannot clear the draft and lose it. The draft keeps
+    /// its text and its image, and the stop's reply sends it once.
+    #[test]
+    fn a_send_key_keeps_the_draft_while_a_send_now_settles() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let ctrl_s = || InputEvent::Key(KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL));
+        for (mode, label) in [
+            (SubmitMode::Steer, "steer: Ctrl+S submits"),
+            (SubmitMode::Queue, "queue: Ctrl+S steers"),
+        ] {
+            let (mut app, sent, home) = session_with_queue(true, &[("a", "first")]);
+            app.default_send_mode = mode;
+            app.composer.set_accepts_images(true);
+            typed(&mut app, "and then");
+            let path = home.path().join("screen.png");
+            wide_png(&path, 32);
+            let image =
+                crate::ui::composer::read_planned(&app.composer.plan_files(&[path]).unwrap())
+                    .unwrap()
+                    .remove(0)
+                    .unwrap();
+            app.composer.attach_image(image).unwrap();
+            let before = app.composer.text().to_owned();
+
+            app.handle(ctrl_enter());
+            let during = sent.borrow().len();
+            app.handle(ctrl_s());
+            assert_eq!(
+                sent.borrow().len(),
+                during,
+                "{label}: Ctrl+S sends nothing while the stop settles: {}",
+                describe(&sent.borrow()).join(", ")
+            );
+            assert_eq!(app.composer.text(), before, "{label}: the text is kept");
+            assert_eq!(
+                app.composer.text(),
+                before,
+                "{label}: the image marker is still in the draft"
+            );
+            let notice = app.notice.as_ref().map(|(text, _)| text.as_str());
+            assert!(
+                notice.is_some_and(|text| text.contains("still stopping the run")),
+                "{label}: the refused key says why: {notice:?}"
+            );
+
+            app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+                content: vec![dim_agent_types::ContentBlock::Text {
+                    text: "first".into(),
+                }],
+            }));
+            app.apply(Update::Stopped { error: None });
+            let sent_now = sent.borrow();
+            let submitted = &sent_now[2..];
+            assert_eq!(
+                submitted.len(),
+                1,
+                "{label}: exactly one submit: {}",
+                describe(&sent_now).join(", ")
+            );
+            assert!(
+                matches!(
+                    submitted,
+                    [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                        if matches!(
+                            parts.as_slice(),
+                            [DraftPart::Text(all), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })]
+                                if all == "first\nand then "
+                        )
+                ),
+                "{label}: the recalled text, the draft and its image: {}",
+                describe(submitted).join(", ")
+            );
+        }
+    }
+
+    /// The palette's Enter and the file picker's Enter decide by the same
+    /// helpers `handle_key` uses, so a pending send-now refuses every key the
+    /// composer would submit with, SUPER+Enter included: the modifier holds no
+    /// newline, so the editor submits. The draft keeps its text and its image,
+    /// nothing panics, and the stop's reply sends it once.
+    #[test]
+    fn a_modified_enter_keeps_the_draft_while_a_send_now_settles() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let super_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::SUPER));
+        let (mut app, sent, home) = session_with_queue(true, &[("a", "first")]);
+        app.composer.set_accepts_images(true);
+        typed(&mut app, "and then");
+        let path = home.path().join("screen.png");
+        wide_png(&path, 32);
+        let image = crate::ui::composer::read_planned(&app.composer.plan_files(&[path]).unwrap())
+            .unwrap()
+            .remove(0)
+            .unwrap();
+        app.composer.attach_image(image).unwrap();
+        let before = app.composer.text().to_owned();
+
+        app.handle(ctrl_enter());
+        let during = describe(&sent.borrow());
+        app.handle(super_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            during,
+            "SUPER+Enter sends nothing while the stop settles"
+        );
+        assert_eq!(app.composer.text(), before, "the text and image are kept");
+        let notice = app.notice.as_ref().map(|(text, _)| text.as_str());
+        assert!(
+            notice.is_some_and(|text| text.contains("still stopping the run")),
+            "the refused key says why: {notice:?}"
+        );
+
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        app.apply(Update::Stopped { error: None });
+        let sent_now = sent.borrow();
+        assert!(
+            matches!(
+                &sent_now[2..],
+                [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                    if matches!(
+                        parts.as_slice(),
+                        [DraftPart::Text(all), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })]
+                            if all == "first\nand then "
+                    )
+            ),
+            "one submit carries the recalled message, the text and its image: {}",
+            describe(&sent_now).join(", ")
+        );
+    }
+
+    /// The composer owns which keys act on the draft as a submit does, and the
+    /// send-now guard asks it instead of reading the key's modifiers itself.
+    /// The matrix pins the two together: over five composer states and every
+    /// Enter the interface routes to the composer, `submits` is true exactly
+    /// when `handle_key` takes the draft out of it, and a pending send-now
+    /// refuses exactly those keys and leaves the rest as they were.
+    #[test]
+    fn the_send_guard_refuses_exactly_the_keys_the_composer_submits_with() {
+        #[derive(Clone, Copy, Debug)]
+        enum State {
+            Draft,
+            Hidden,
+            Row,
+            NoRow,
+            Picker,
+        }
+
+        let states = [
+            State::Draft,
+            State::Hidden,
+            State::Row,
+            State::NoRow,
+            State::Picker,
+        ];
+        let state = |state: State| {
+            let (mut app, sent, home) = session_with_queue(true, &[]);
+            match state {
+                State::Draft => typed(&mut app, "draft"),
+                State::Hidden => app.composer.set_draft("/fast"),
+                State::Row => app.composer.set_draft("/"),
+                State::NoRow => app.composer.set_draft("/zzz"),
+                State::Picker => app.composer.set_draft("look @/"),
+            }
+            (app, sent, home)
+        };
+        let modifiers = [
+            (Modifiers::SHIFT, "SHIFT"),
+            (Modifiers::ALT, "ALT"),
+            (Modifiers::CTRL, "CTRL"),
+            (Modifiers::SUPER, "SUPER"),
+        ];
+        let label = |mods: Modifiers| {
+            let held: Vec<&str> = modifiers
+                .iter()
+                .filter(|(bit, _)| mods.contains(*bit))
+                .map(|(_, name)| *name)
+                .collect();
+            if held.is_empty() {
+                "none".to_owned()
+            } else {
+                held.join("+")
+            }
+        };
+        let mut enters = Vec::new();
+        for bits in 0..16u8 {
+            let mods = Modifiers(bits);
+            // Plain Ctrl+Enter is the send-now gesture, which the interface
+            // takes before any key reaches the composer.
+            if mods == Modifiers::CTRL {
+                continue;
+            }
+            enters.push((
+                format!("Enter {}", label(mods)),
+                KeyEvent::new(KeyCode::Enter, mods),
+            ));
+        }
+        let ctrl_s = (
+            "Ctrl+S".to_owned(),
+            KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL),
+        );
+        let ctrl_j = (
+            "Ctrl+J".to_owned(),
+            KeyEvent::new(KeyCode::Char('j'), Modifiers::CTRL),
+        );
+        let mut checks = 0;
+        let per_state = enters.len()
+            + 2
+            + enters
+                .iter()
+                .filter(|(_, key)| !key.mods.contains(Modifiers::CTRL))
+                .count()
+            + 2;
+
+        for which in states {
+            let mut keys = enters.clone();
+            keys.push(ctrl_s.clone());
+            keys.push(ctrl_j.clone());
+            for (name, key) in &keys {
+                let (mut app, _sent, _home) = state(which);
+                if matches!(which, State::NoRow) {
+                    // Enter only falls through to the editor when no row matches,
+                    // so the state must have none; a draft that did match would
+                    // make the case prove nothing.
+                    assert!(
+                        app.composer.palette_open() && app.composer.palette_rows().is_empty(),
+                        "{which:?}: the palette is open with no row, so the palette \
+                         leaves Enter to the editor"
+                    );
+                }
+                let submits = app.composer.submits(key);
+                let acts = matches!(
+                    app.composer.handle_key(*key),
+                    ComposerOutcome::Submit(_)
+                        | ComposerOutcome::SubmitDraft { .. }
+                        | ComposerOutcome::Command { .. }
+                );
+                assert_eq!(
+                    submits,
+                    acts,
+                    "{which:?}: `submits` says {submits} for {name}, which {}",
+                    if acts {
+                        "takes the draft out of the composer"
+                    } else {
+                        "leaves it there"
+                    }
+                );
+                checks += 1;
+            }
+
+            // Every Enter holding Ctrl but the gesture itself is taken by the
+            // interface before the composer sees it or normalized to plain
+            // Enter, so the pending half covers only the keys the interface
+            // routes to the composer; Ctrl+S is a send key in its own right,
+            // refused whatever the draft holds.
+            let pending_keys: Vec<(String, KeyEvent)> = enters
+                .iter()
+                .filter(|(_, key)| !key.mods.contains(Modifiers::CTRL))
+                .cloned()
+                .chain(std::iter::once(ctrl_j.clone()))
+                .collect();
+            for (name, key) in pending_keys.iter().chain(std::iter::once(&ctrl_s)) {
+                let (mut fresh, _sent, _home) = state(which);
+                let submits = fresh.composer.submits(key);
+                fresh.composer.handle_key(*key);
+                let expected = fresh.composer.text().to_owned();
+
+                let (mut app, sent, _home) = state(State::Draft);
+                app.handle(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    Modifiers::CTRL,
+                )));
+                assert!(app.send_now.is_some(), "{which:?}: the gesture is pending");
+                match which {
+                    State::Draft => {}
+                    State::Hidden => app.composer.set_draft("/fast"),
+                    State::Row => app.composer.set_draft("/"),
+                    State::NoRow => app.composer.set_draft("/zzz"),
+                    State::Picker => app.composer.set_draft("look @/"),
+                }
+                let during = describe(&sent.borrow());
+                let before = app.composer.text().to_owned();
+                let is_send_key = submits || key.code == KeyCode::Char('s');
+                app.handle(InputEvent::Key(*key));
+                checks += 1;
+                if is_send_key {
+                    assert_eq!(
+                        describe(&sent.borrow()),
+                        during,
+                        "{which:?}, {name}: a send key sends nothing while the stop settles"
+                    );
+                    assert_eq!(
+                        app.composer.text(),
+                        before,
+                        "{which:?}, {name}: a send key keeps the draft whole"
+                    );
+                } else {
+                    assert_eq!(
+                        app.composer.text(),
+                        expected,
+                        "{which:?}, {name}: a key that sends nothing still does its job"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            checks,
+            states.len() * per_state,
+            "the matrix covers every state and key"
+        );
+    }
+
+    /// A paste cannot start while a send-now settles: the submitted message is
+    /// exactly what the composer held when the stop settled.
+    #[test]
+    fn no_paste_starts_while_a_send_now_settles() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let ctrl_v = || InputEvent::Key(KeyEvent::new(KeyCode::Char('v'), Modifiers::CTRL));
+        for image in [false, true] {
+            let (mut app, sent, home) = session_with_queue(true, &[]);
+            app.composer.set_accepts_images(true);
+            typed(&mut app, "draft");
+            app.handle(ctrl_enter());
+            if image {
+                let path = home.path().join("late.png");
+                wide_png(&path, 32);
+                app.paste(path.to_string_lossy().into_owned());
+                assert!(
+                    app.image_read.is_none(),
+                    "an image read must not start during the gesture"
+                );
+            } else {
+                app.read_clipboard();
+                assert!(
+                    app.clipboard.is_none(),
+                    "a clipboard read must not start during the gesture"
+                );
+            }
+            let notice = app.notice.as_ref().map(|(text, _)| text.as_str());
+            assert!(
+                notice.is_some_and(|text| text.contains("paste again when the draft is sent")),
+                "the refused paste says why: {notice:?}"
+            );
+
+            app.apply(Update::Stopped { error: None });
+            assert_eq!(
+                describe(&sent.borrow()[1..]),
+                ["submit:queue:draft"],
+                "the submit carries the draft as it was"
+            );
+
+            // The gesture is over, so a paste works again.
+            app.handle(ctrl_v());
+            assert!(
+                app.clipboard.is_some(),
+                "Ctrl+V starts a read again once the draft is sent"
+            );
+        }
+    }
+
+    /// A recalled message keeps its own layout, an inline image included: the
+    /// send-now path lays one message's parts out as Esc does, and only puts a
+    /// newline between two messages.
+    #[test]
+    fn send_now_keeps_an_inline_image_on_its_line() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        for draft in ["", "and then"] {
+            let (mut app, sent, home) = session_with_queue(true, &[("a", "inline")]);
+            app.composer.set_accepts_images(true);
+            let path = home.path().join("screen.png");
+            wide_png(&path, 32);
+            let image =
+                crate::ui::composer::read_planned(&app.composer.plan_files(&[path]).unwrap())
+                    .unwrap()
+                    .remove(0)
+                    .unwrap();
+            typed(&mut app, draft);
+            app.handle(ctrl_enter());
+            app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+                content: vec![
+                    dim_agent_types::ContentBlock::Text {
+                        text: "see ".into(),
+                    },
+                    image.block(),
+                    dim_agent_types::ContentBlock::Text {
+                        text: " here".into(),
+                    },
+                ],
+            }));
+            let expected = if draft.is_empty() {
+                "see [Image] here"
+            } else {
+                "see [Image] here\nand then"
+            };
+            assert_eq!(
+                app.composer.text(),
+                expected,
+                "the image stays inline in the recalled message"
+            );
+            app.apply(Update::Stopped { error: None });
+            let sent_now = sent.borrow();
+            assert!(
+                matches!(
+                    &sent_now[2..],
+                    [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                        if matches!(
+                            parts.as_slice(),
+                            [DraftPart::Text(see), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. }), DraftPart::Text(here)]
+                                if see == "see " && here == if draft.is_empty() { " here" } else { " here\nand then" }
+                        )
+                ),
+                "the submitted message is the text, the image, then the text: {}",
+                describe(&sent_now).join(", ")
+            );
+        }
+    }
+
+    /// A Ctrl+Enter re-arms a cancelled send-now even when the turn's settled
+    /// snapshot has already arrived: the stop's reply is still on its way.
+    #[test]
+    fn ctrl_enter_rearms_a_send_now_after_the_run_shows_as_ended() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "draft");
+        app.handle(ctrl_enter());
+        press(&mut app, KeyCode::Esc);
+        let mut settled = app.snapshot.as_ref().unwrap().clone();
+        settled.running = false;
+        settled.main_running = false;
+        app.apply(Update::Snapshot(Box::new(settled)));
+        assert!(!app.running(), "the run shows as ended");
+        app.handle(ctrl_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit-now"],
+            "the retry re-arms the stop in flight instead of sending another"
+        );
+        app.apply(Update::Stopped { error: None });
+        let sent_now = sent.borrow();
+        assert_eq!(
+            describe(&sent_now[1..]),
+            ["submit:queue:draft"],
+            "the re-armed gesture submits once the stop replied"
+        );
+    }
+
+    /// Esc calls off the submit of the stop it asked for, and a Ctrl+Enter
+    /// after it re-arms that submit rather than asking for a second stop. The
+    /// one reply still on its way then decides for the gesture the user last
+    /// meant, so two replies cannot settle each other's.
+    #[test]
+    fn esc_then_ctrl_enter_rearms_the_one_stop_in_flight() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "draft");
+        app.handle(ctrl_enter());
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit-now"],
+            "Esc sends no second stop"
+        );
+        app.handle(ctrl_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit-now"],
+            "the retry re-arms the stop in flight instead of sending another"
+        );
+        app.apply(Update::Stopped { error: None });
+        let sent_now = sent.borrow();
+        assert_eq!(
+            describe(&sent_now[1..]),
+            ["submit:queue:draft"],
+            "the re-armed gesture submits once that stop settled"
+        );
+        assert_eq!(
+            sent_now
+                .iter()
+                .filter(|command| {
+                    matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
+                })
+                .count(),
+            1,
+            "at most one submit"
+        );
+    }
+
+    /// A cancelled gesture whose stop fails keeps the draft and shows the
+    /// reason: cancelling does not hide the failure, and nothing is submitted.
+    #[test]
+    fn a_cancelled_stop_that_fails_keeps_the_draft() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "draft");
+        app.handle(ctrl_enter());
+        press(&mut app, KeyCode::Esc);
+        app.apply(Update::Stopped {
+            error: Some("the stop failed".into()),
+        });
+        assert!(
+            sent.borrow()
+                .iter()
+                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            "a cancelled submit sends nothing: {}",
+            describe(&sent.borrow()).join(", ")
+        );
+        assert_eq!(app.composer.text(), "draft");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.contains("the stop failed")),
+            "the failure is still shown: {:?}",
+            app.notices
+        );
+    }
+
+    /// A retry whose stop fails submits nothing: the failure of the stop it
+    /// waits for still prevents the submit.
+    #[test]
+    fn a_retry_whose_stop_fails_submits_nothing() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "draft");
+        app.handle(ctrl_enter());
+        press(&mut app, KeyCode::Esc);
+        app.handle(ctrl_enter());
+        app.apply(Update::Stopped {
+            error: Some("the retry stop failed".into()),
+        });
+        assert!(
+            sent.borrow()
+                .iter()
+                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            "no submit follows the retry's failed stop: {}",
+            describe(&sent.borrow()).join(", ")
+        );
+        assert_eq!(app.composer.text(), "draft");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.contains("the retry stop failed")),
+            "the failure is shown: {:?}",
+            app.notices
+        );
+    }
+
+    /// Ctrl+Enter waits for a clipboard or image read the way Enter does: a
+    /// stop that settles first would submit without the paste or attachment.
+    /// Once the read lands, the one submitted message carries it.
+    #[test]
+    fn send_now_waits_for_a_pending_insertion() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        for image in [false, true] {
+            let (mut app, sent, home) = session_with_queue(true, &[("a", "first")]);
+            app.fullscreen = false;
+            app.composer.set_accepts_images(true);
+            let (clipboard_send, clipboard_receive) = std::sync::mpsc::channel();
+            let (image_send, image_receive) = std::sync::mpsc::channel();
+            let path = home.path().join("screen.png");
+            wide_png(&path, 32);
+            let plan = app.composer.plan_files(&[path]).unwrap();
+            let images = crate::ui::composer::read_planned(&plan).unwrap();
+            if image {
+                app.image_read = Some(ImageRead {
+                    plan,
+                    receive: image_receive,
+                });
+            } else {
+                app.clipboard = Some(ClipboardRead::Native(clipboard_receive));
+            }
+            typed(&mut app, "look");
+
+            app.handle(ctrl_enter());
+            assert!(
+                sent.borrow().is_empty(),
+                "send now must not withdraw or stop before the insertion lands"
+            );
+            let notice = if image {
+                "Wait for the image insertion before sending"
+            } else {
+                "Wait for clipboard insertion before sending"
+            };
+            assert_eq!(
+                app.notice.as_ref().map(|(text, _)| text.as_str()),
+                Some(notice)
+            );
+
+            if image {
+                image_send.send(Ok(images)).unwrap();
+            } else {
+                clipboard_send
+                    .send(Ok(crate::clipboard::Source::Text(" at this".into())))
+                    .unwrap();
+            }
+            app.tick();
+            app.handle(ctrl_enter());
+            assert_eq!(
+                describe(&sent.borrow()),
+                ["withdraw:a", "submit-now"],
+                "the gesture goes once the insertion is in"
+            );
+        }
+    }
+
+    /// Ctrl+S submits in the other mode during a run, so it takes the same
+    /// pending-insertion guard Enter does; the alternate-key normalization
+    /// must not bypass it.
+    #[test]
+    fn ctrl_s_waits_for_a_pending_insertion_too() {
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        let (_send, receive) = std::sync::mpsc::channel();
+        app.clipboard = Some(ClipboardRead::Native(receive));
+        typed(&mut app, "look");
+        app.handle(InputEvent::Key(KeyEvent::new(
+            KeyCode::Char('s'),
+            Modifiers::CTRL,
+        )));
+        assert!(
+            sent.borrow().is_empty(),
+            "Ctrl+S must not submit while the clipboard is being read"
+        );
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("Wait for clipboard insertion before sending")
+        );
     }
 
     #[test]
@@ -15768,10 +16869,7 @@ mod tests {
                         .unwrap();
                 }
                 app.tick();
-                app.handle(InputEvent::Key(KeyEvent::new(
-                    KeyCode::Char('s'),
-                    Modifiers::CTRL,
-                )));
+                press(&mut app, KeyCode::Enter);
                 if image {
                     assert!(matches!(
                         sent.borrow().as_slice(),
@@ -15807,6 +16905,168 @@ mod tests {
             }],
         }));
         assert_eq!(app.composer.text(), "first\nsecond");
+    }
+
+    /// Ctrl+Enter is Esc then Enter as one key: the withdrawals go first, then
+    /// one stop, and the combined draft is submitted only after the stop's
+    /// reply, with the recalled messages ahead of the draft that was typed.
+    #[test]
+    fn ctrl_enter_withdraws_stops_and_submits_once_the_stop_settled() {
+        let ctrl_enter = InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        for (fullscreen, parts) in [(false, false), (true, false), (true, true)] {
+            let (mut app, sent, home) =
+                session_with_queue(true, &[("a", "first"), ("b", "second")]);
+            app.fullscreen = fullscreen;
+            app.composer.set_accepts_images(true);
+            typed(&mut app, "and then");
+            if parts {
+                let path = home.path().join("screen.png");
+                wide_png(&path, 32);
+                let plan = app.composer.plan_files(&[path]).unwrap();
+                app.composer
+                    .attach_image(
+                        crate::ui::composer::read_planned(&plan)
+                            .unwrap()
+                            .remove(0)
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+            app.handle(ctrl_enter.clone());
+            assert_eq!(
+                describe(&sent.borrow()),
+                ["withdraw:a", "withdraw:b", "submit-now"],
+                "the withdrawals reach the session before the stop, and the\n                 submit waits for its reply"
+            );
+
+            for (id, text) in [("first", "a"), ("second", "b")] {
+                let _ = text;
+                app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+                    content: vec![dim_agent_types::ContentBlock::Text { text: id.into() }],
+                }));
+            }
+            let expected = if parts {
+                "first\nsecond\nand then [Image]"
+            } else {
+                "first\nsecond\nand then"
+            };
+            assert_eq!(
+                app.composer.text(),
+                expected,
+                "recalled messages keep queue order, then the draft that was typed"
+            );
+            assert!(
+                sent.borrow()
+                    .iter()
+                    .all(|command| !matches!(command, Command::Submit(..))),
+                "nothing is submitted while the stop settles"
+            );
+            press(&mut app, KeyCode::Enter);
+            app.handle(ctrl_enter.clone());
+            assert!(
+                sent.borrow()
+                    .iter()
+                    .all(|command| !matches!(command, Command::Submit(..))),
+                "Enter and Ctrl+Enter send nothing while the stop settles"
+            );
+
+            app.apply(Update::Stopped { error: None });
+            let sent_now = sent.borrow();
+            let submitted = &sent_now[3..];
+            assert_eq!(
+                submitted.len(),
+                1,
+                "exactly one submit: {:?}",
+                describe(&sent_now)
+            );
+            if parts {
+                assert!(
+                    matches!(
+                        submitted,
+                        [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                            if matches!(parts.first(), Some(DraftPart::Text(text)) if text == "first\nsecond\nand then ")
+                                && parts.iter().any(|part| matches!(part, DraftPart::Block(_)))
+                    ),
+                    "the recalled messages come first and the draft keeps its parts: {}",
+                    describe(submitted).join(", ")
+                );
+            } else {
+                assert_eq!(
+                    describe(submitted),
+                    ["submit:queue:first\nsecond\nand then"],
+                    "recalled messages keep queue order ahead of the typed draft"
+                );
+            }
+            drop(sent_now);
+            assert!(app.composer.is_empty());
+        }
+    }
+
+    /// A stop that fails submits nothing and leaves the combined draft in the
+    /// composer with a notice, so nothing typed is lost.
+    #[test]
+    fn a_failed_stop_keeps_the_combined_draft() {
+        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first")]);
+        typed(&mut app, "and then");
+        app.handle(InputEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            Modifiers::CTRL,
+        )));
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        app.apply(Update::Stopped {
+            error: Some("the run would not stop".into()),
+        });
+        assert!(
+            sent.borrow()
+                .iter()
+                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            "no submit follows a failed stop"
+        );
+        assert_eq!(app.composer.text(), "first\nand then");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.contains("the run would not stop")),
+            "the failure is reported: {:?}",
+            app.notices
+        );
+    }
+
+    /// Ctrl+Enter takes the guards Enter has: a running shell command with a
+    /// shell line sends nothing, and an empty draft with nothing held is a
+    /// no-op. Idle, it submits like Enter.
+    #[test]
+    fn ctrl_enter_keeps_the_guards_enter_has() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        app.shell = Some(crate::ui::shell::Running::new("cargo test".into(), false));
+        typed(&mut app, "!ls");
+        app.handle(ctrl_enter());
+        assert!(sent.borrow().is_empty(), "a running shell command holds it");
+        assert_eq!(
+            app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some("A shell command is already running")
+        );
+
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        app.handle(ctrl_enter());
+        assert!(
+            sent.borrow().is_empty(),
+            "an empty draft has nothing to send"
+        );
+
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        typed(&mut app, "idle draft");
+        app.handle(ctrl_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit:queue:idle draft"],
+            "idle, Ctrl+Enter submits as Enter does"
+        );
     }
 
     /// Shift+Left takes the newest queued message back, and its text enters
@@ -15887,16 +17147,55 @@ mod tests {
         );
     }
 
-    /// Enter on an empty draft steers the oldest queued message, as Ctrl+S does.
+    /// Enter on an empty draft steers the oldest queued message in either
+    /// mode; Ctrl+S only adds that in queue mode, where an empty draft has no
+    /// other meaning.
     #[test]
     fn enter_on_an_empty_draft_steers_like_ctrl_s() {
-        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first"), ("b", "second")]);
-        press(&mut app, KeyCode::Enter);
-        let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
-            KeyCode::Char('s'),
-            Modifiers::CTRL,
-        )));
-        assert_eq!(describe(&sent.borrow()), ["steer:a", "steer:a"]);
+        let ctrl_s = || {
+            InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+                KeyCode::Char('s'),
+                Modifiers::CTRL,
+            ))
+        };
+        for saved in [None, Some("queue")] {
+            let (mut app, sent, home) =
+                session_with_queue(true, &[("a", "first"), ("b", "second")]);
+            if let Some(value) = saved {
+                assert_eq!(
+                    crate::ui::config::write(home.path(), DEFAULT_SEND_MODE_KEY, value.into()),
+                    None
+                );
+                let theme = test_theme();
+                let mut saved_app = App::new(
+                    Box::new(Recorder(sent.clone())),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette,
+                    home.path().to_path_buf(),
+                    "/work".into(),
+                );
+                saved_app.apply(Update::Snapshot(Box::new(
+                    app.snapshot.take().expect("the run's snapshot"),
+                )));
+                app = saved_app;
+            }
+            assert_eq!(
+                app.default_send_mode,
+                saved.map_or(SubmitMode::Steer, |_| SubmitMode::Queue)
+            );
+            press(&mut app, KeyCode::Enter);
+            app.handle(ctrl_s());
+            let expected: &[&str] = if saved.is_some() {
+                &["steer:a", "steer:a"]
+            } else {
+                &["steer:a"]
+            };
+            assert_eq!(
+                describe(&sent.borrow()),
+                expected,
+                "saved {saved:?}: an empty draft steers the oldest queued message,\n                 and only queue mode gives Ctrl+S that same job"
+            );
+        }
     }
 
     /// Esc with no run in progress keeps the draft.

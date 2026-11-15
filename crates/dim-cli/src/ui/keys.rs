@@ -92,6 +92,12 @@ pub fn report(fullscreen: bool, mouse: bool, default_send_mode: SubmitMode) -> V
         ),
         format!(
             "  {}",
+            t(
+                "Ctrl+Enter interrupt and send now: the draft and every held message, as one message"
+            )
+        ),
+        format!(
+            "  {}",
             t("Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft")
         ),
         format!("  {}", t("Shift+Tab cycle permissions (composer focused)")),
@@ -145,24 +151,35 @@ mod tests {
     #[test]
     fn keys_report_keeps_shortcut_only_actions_and_distinguishes_modes() {
         for fullscreen in [false, true] {
-            let report = report(fullscreen, false, SubmitMode::Queue).join("\n");
-            assert!(
-                report.contains("Esc interrupt, queued messages return"),
-                "{report}"
-            );
-            assert!(report.contains("Enter queue · Ctrl+S steer"), "{report}");
-            assert!(report.contains("Shift+Tab cycle permissions"), "{report}");
-            if fullscreen {
+            for (mode, mapping) in [
+                (SubmitMode::Queue, "Enter queue · Ctrl+S steer"),
+                (SubmitMode::Steer, "Enter steer · Ctrl+S queue"),
+            ] {
+                let report = report(fullscreen, false, mode).join("\n");
                 assert!(
-                    report.contains("Home/End top or bottom (empty draft)"),
+                    report.contains("Esc interrupt, queued messages return"),
                     "{report}"
                 );
-                assert!(report.contains("Tab pick a message"), "{report}");
-                assert!(!report.contains("Terminal-owned history"), "{report}");
-            } else {
-                assert!(report.contains("Terminal-owned history"), "{report}");
-                assert!(!report.contains("Home/End"), "{report}");
-                assert!(!report.contains("Tab pick a message"), "{report}");
+                assert!(report.contains(mapping), "{mode:?}: {report}");
+                assert!(
+                    report.contains(
+                        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message"
+                    ),
+                    "{report}"
+                );
+                assert!(report.contains("Shift+Tab cycle permissions"), "{report}");
+                if fullscreen {
+                    assert!(
+                        report.contains("Home/End top or bottom (empty draft)"),
+                        "{report}"
+                    );
+                    assert!(report.contains("Tab pick a message"), "{report}");
+                    assert!(!report.contains("Terminal-owned history"), "{report}");
+                } else {
+                    assert!(report.contains("Terminal-owned history"), "{report}");
+                    assert!(!report.contains("Home/End"), "{report}");
+                    assert!(!report.contains("Tab pick a message"), "{report}");
+                }
             }
         }
         let previous = crate::ui::i18n::active();
@@ -172,12 +189,16 @@ mod tests {
             }
             crate::ui::i18n::set(locale);
             for fullscreen in [false, true] {
-                let report = report(fullscreen, false, SubmitMode::Queue).join("\n");
+                let report = report(fullscreen, false, SubmitMode::Steer).join("\n");
                 for (key, visible) in [
                     ("Shift+Tab cycle permissions (composer focused)", true),
                     (
                         "Shift+Tab newer target while picked · Esc return to composer",
                         fullscreen,
+                    ),
+                    (
+                        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message",
+                        true,
                     ),
                 ] {
                     let translated = t(key);
