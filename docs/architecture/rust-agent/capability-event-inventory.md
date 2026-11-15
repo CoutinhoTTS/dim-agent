@@ -4,15 +4,16 @@
 范围是仓库内生产实现，以及记录的产品/本地装配；不含测试插件和外部动态安装包。
 后续代码变化应以链接的类型、装配与所属契约为准，而不是把本表当成第二份规范。
 
-## Capability（22 个）
+## Capability 候选与 Timeline 关联部件（22 项）
 
-识别依据是 [Capability 契约](../../design/plugin-contract.md#6-capability)：部件依赖 Timeline
-或 Dispatcher。产品的 20 个部件取自[生成目录](generated/catalog.md#capabilities)；
+候选来自依赖 Timeline / Dispatcher 的机械扫描，而 [Capability 契约](../../design/plugin-contract.md#6-capability)
+按折叠状态或写自身领域事实的行为定义。依赖存在不等于行为分类已经核实；只写输入或提供服务
+的部件不能仅凭依赖被认定为 Capability。产品的 20 个标记项取自[生成目录](generated/catalog.md#capabilities)；
 另补[本地装配](generated/local/services.json)的 HooksBranch 和源码中的可选 ShellSession。
-这 22 个都是 **branch** 作用域；Session 中的 Wait 工具等同名业务部件不因此自动算 Capability。
+这 22 个候选都是 **branch** 作用域；Session 中的 Wait 工具等同名业务部件不因此自动算 Capability。
 这里只列主要事件关联，不把订阅列表当成全部读取依赖。
 
-| Capability | 主要职责 | 主要事件关联 | 装配范围 | 实现 / 所属说明 |
+| 候选部件 | 主要职责 | 主要事件关联 | 装配范围 | 实现 / 所属说明 |
 | --- | --- | --- | --- | --- |
 | Approval | 审批请求、响应与未完成请求结算 | approval/*；读取权限状态 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/approval.rs) / [说明](plugins/Permission.md) |
 | BackgroundExec | 后台执行任务及完成通知 | exec/*、input/message；中断与回合边界 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) / [说明](plugins/WorkspaceTools.md) |
