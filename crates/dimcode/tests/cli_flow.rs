@@ -618,10 +618,19 @@ fn a_build_from_source_reports_its_version_as_source() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        format!("dimcode {}-source\n", env!("CARGO_PKG_VERSION")),
-        "a build the release flow did not stamp reports the committed version marked -source"
+    let printed = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_owned();
+    let prefix = format!("dimcode {}-source", env!("CARGO_PKG_VERSION"));
+    assert!(
+        printed == prefix
+            || printed.strip_prefix(&prefix).is_some_and(|commit| {
+                commit.strip_prefix('+').is_some_and(|commit| {
+                    commit.len() == 8 && commit.chars().all(|c| c.is_ascii_hexdigit())
+                })
+            }),
+        "a build the release flow did not stamp reports the committed version marked -source, \
+         optionally naming the commit it was built from: {printed}"
     );
 }
 

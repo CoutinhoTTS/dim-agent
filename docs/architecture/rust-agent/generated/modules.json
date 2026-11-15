@@ -34725,7 +34725,8 @@
         "mod version",
         "path version::RELEASE",
         "path version::VERSION",
-        "path version::current"
+        "path version::current",
+        "path version::install"
       ]
     },
     {

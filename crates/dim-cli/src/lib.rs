@@ -62,6 +62,14 @@ pub fn hold_installation() -> std::result::Result<(), String> {
     update::hold_installation()
 }
 
+/// Hands this build the commit the final binary crate read at build time. The
+/// binary calls this once before it runs the CLI, so nothing in this crate reads
+/// git or its environment, and a new commit does not recompile it. A release
+/// build ignores the value: `current()` reports the version alone.
+pub fn install_git_commit(commit: Option<&'static str>) {
+    version::install(commit);
+}
+
 /// Runs the CLI with the process arguments and returns its exit code. The
 /// host binary must answer `app-server` with the App Server command line,
 /// which the CLI starts as its daemon unless `--server` names another.

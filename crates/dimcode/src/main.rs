@@ -46,7 +46,15 @@ fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
     );
 }
 
+/// The commit this source build was made from, which `build.rs` reads at build
+/// time. A release build gets nothing here, so its output cannot change.
+const GIT_COMMIT: Option<&str> = match option_env!("DIM_GIT_COMMIT") {
+    Some(commit) if !commit.is_empty() => Some(commit),
+    _ => None,
+};
+
 fn main() {
+    dim_cli::install_git_commit(GIT_COMMIT);
     #[cfg(target_os = "linux")]
     unsafe {
         unsafe extern "C" {

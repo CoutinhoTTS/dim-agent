@@ -15218,7 +15218,7 @@ mod tests {
                 }
             }
             if cols >= 29 {
-                assert!(welcome.contains(env!("CARGO_PKG_VERSION")), "{welcome}");
+                assert!(welcome.contains(&crate::version::current()), "{welcome}");
                 assert!(web.contains(t("DIM Web is ready")), "{web}");
             }
         }
