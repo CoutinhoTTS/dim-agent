@@ -280,10 +280,9 @@ async fn the_relay_refuses_control_frames_and_unknown_channels() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_relay_delivers_a_provider_message_over_one_mebibyte_intact() {
     let transcript = "a".repeat(2 * 1024 * 1024);
-    let size = transcript.len();
     let text = json!({
         "type": "response.audio_transcript.done",
-        "transcript": transcript,
+        "transcript": transcript.clone(),
     })
     .to_string();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -315,7 +314,21 @@ async fn the_relay_delivers_a_provider_message_over_one_mebibyte_intact() {
     match next_event(&mut received).await {
         RealtimeEvent::Event(event) => {
             assert_eq!(event["type"], "response.audio_transcript.done");
-            assert_eq!(event["transcript"].as_str().unwrap().len(), size);
+            let received = event["transcript"]
+                .as_str()
+                .expect("the transcript is a string");
+            assert!(
+                received == transcript.as_str(),
+                "the transcript changed on the wire: sent {} bytes, received {} bytes, \
+                 first difference at {}",
+                transcript.len(),
+                received.len(),
+                received
+                    .bytes()
+                    .zip(transcript.bytes())
+                    .position(|(received, sent)| received != sent)
+                    .unwrap_or(received.len().min(transcript.len())),
+            );
         }
         RealtimeEvent::Ended(end) => {
             panic!("the provider's message ended the session: {end:?}")
@@ -392,8 +405,17 @@ async fn a_fragmented_provider_message_over_the_socket_limit_ends_the_session() 
         .unwrap();
     match next_event(&mut received).await {
         RealtimeEvent::Ended(RealtimeEnd::Error(message)) => {
+            // tungstenite 0.24 reports the complete message size, which is one
+            // byte past the bound for this fragment layout
+            // (`IncompleteMessage::extend`, protocol/message.rs).
+            let size = max_message + 1;
             assert!(message.contains("The realtime socket failed"), "{message}");
-            assert!(message.contains(&max_message.to_string()), "{message}");
+            assert!(
+                message.contains(&format!(
+                    "Space limit exceeded: Message too long: {size} > {max_message}"
+                )),
+                "{message}"
+            );
         }
         RealtimeEvent::Ended(end) => panic!("the session ended for another reason: {end:?}"),
         RealtimeEvent::Event(event) => {
