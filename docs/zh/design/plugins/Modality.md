@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview §4 插件目录](../overview.md#4-插件目录)、[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3。语言：由提供方执行的类别优先使用 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-> **适配器按提供方、按调用解析。** [#40](https://github.com/arcships/dim/issues/40) 在 [#19](https://github.com/arcships/dim/issues/19) 中决定：Modality 在任务需要时解析该类别的适配器，而不是把所有适配器都作为依赖收集。形态是每个目录提供方一份副本：适配器为它服务的每个提供方提供 `ModalityAdapterService`，以该提供方的 id 为 key（A.2），而 Modality 在每次调用时读取被调模型的提供方 key，不声明依赖。缺失、Pending、Failed 或正在重载的适配器解析为空，于是只有它服务的操作不可用，Modality 保持 Active。目录只声明家族名 `modalityAdapter` 一次；按提供方的副本是它的动态 key，与 Session 的 `McpServer` 和 skill `Contribution` 已经是同一种形态。同一 key 的第二个提供方在装配时失败。
+> **适配器按提供方、按调用解析。** [#40](https://github.com/arcships/dim/issues/40) 在 [#19](https://github.com/arcships/dim/issues/19) 中决定：Modality 在任务需要时解析该类别的适配器，而不是把所有适配器都作为依赖收集。适配器为它服务的每个目录提供方提供一份副本，以该提供方的 id 作为家族名的动态 key（A.2）；家族名本身的那份副本服务任何没有专属副本的提供方，内置适配器因此仍能服务它不认识的提供方。两者都在时专属副本优先。Modality 在每次调用时先读被调模型的提供方 key、再读家族名，不声明依赖；它会用到的适配器缺失、Pending、Failed 或正在重载时解析为空，于是只有它服务的操作不可用，Modality 保持 Active。按提供方的副本与 Session 的 `McpServer`、skill 的 `Contribution` 已经是同一种形态。
 
 > **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
 
@@ -41,7 +41,7 @@ flowchart LR
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
 | `Modality` | 进程（控制节点） | Provider 的模型选择（`ModelSelectionHost`）与非对话连接解析；`pluginFiles`（扩展：UTF-8 与二进制）；Settings 业务来源 `modality`；按提供方适配器 key 的按调用读取（[#40](https://github.com/arcships/dim/issues/40) 已决定，A.2）；控制节点的 HostPlatform（OCR）；诊断 | `modalityTasks` 与 `modalityTargets` 进程服务；把 `modality`（`modality.*`）注册到 `managementMethods` |
-| 适配器插件 | 进程 | 各自的提供方依赖 | `modalityAdapter` 副本，它服务的每个目录提供方一份，以该提供方的 id 为 key（A.2） |
+| 适配器插件 | 进程 | 各自的提供方依赖 | `modalityAdapter` 副本：它服务的每个目录提供方一份（以该提供方的 id 为 key），加上服务任何没有专属副本的提供方的家族名副本（A.2） |
 
 **依赖的契约：**[方法](../contracts/session-boundary.md)契约（注册到 `managementMethods` 的命名空间、每次调用的进度接收器、绑定连接的通知）；按提供方适配器 key 的按调用读取（[#40](https://github.com/arcships/dim/issues/40) 已决定，§1 与 A.2）；Provider 的模型选择（`ResolveModelSelection::resolve`，拒绝不可选的显式模型；[AuxiliaryModel](../appserver/auxiliary-model.md)）、用于选项列表的可选模型读取（§9.2），以及每个适配器操作与实时会话所需的非对话连接解析（[overview 附录 B.2](../overview.md#b2-app-server-进程插件)，§9.3）；`pluginFiles`（扩展），含二进制原子替换与格式版本（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；带隔离的 HostPlatform spawn（[HostPlatform](../../../architecture/rust-agent/plugins/HostPlatform.md)，隔离补充见 [overview 附录 B.1](../overview.md#b1-session-与分支-capability)）。
 **此处定义的契约：**类别与操作标识符；`modality` 设置文档中的默认值 key `modality.<category>` 与 `modality.<category>.<operation>`（Modality 自有；Provider 不持有任何 key）；`modalityAdapter` 与 `modalityTasks` 服务（A.2 与 A.3；`modalityAdapter` 目前是进程内 Rust 绑定，因为它的调用携带不可序列化的 `ModalityConnection`，而 `modalityTasks` 是语言中立的；Rust 绑定见附录 G）；`modality` 设置文档及其 schema；任务记录与结果格式（格式版本 1）；`modality.*` 方法与 `modality.realtime.event`、`modality.realtime.ended` 通知。Provider 对模态一无所知；Modality 在适配器之外不了解任何提供方特有语义。
@@ -224,7 +224,7 @@ sequenceDiagram
 | `modality.realtime.open/send/close`、`modality.realtime.event`、`modality.realtime.ended` | 管理方法及绑定连接的通知 | 实时会话 |
 | `modalityTasks` | 进程服务，无 key | 与任务方法相同的操作，供其他进程插件使用 |
 | `modalityTargets` | 进程服务，无 key | 向进程使用方回答某个操作当前解析到的目标，或它不可用的原因（§9.4）；无任务、无凭据 |
-| `modalityAdapter` | 进程服务，每个目录提供方一份副本，以该提供方的 id 为 key；按调用读取且不声明（§1、A.2） | 由提供方执行的类别 |
+| `modalityAdapter` | 进程服务，按提供方 id 的专属副本加名字上的家族名副本；按调用读取且不声明（§1、A.2） | 由提供方执行的类别 |
 | `ocrHelper` | 进程服务，无 key，由插件的进程行提供；Modality 每次调用时读取（§9.1） | `local/pp-ocr` 目标的描述：可执行文件、参数、可读路径（A.2.1） |
 | `modality` 设置文档 | 业务配置（Settings 来源，schema 由 Modality 声明，经 Settings 类型化操作写入） | 操作默认值、上限；使用时读取 |
 | `dimcode modality`、`image`、`video`、`speech`、`music`、`audio`、`asset`、`motion`、`ocr`、`realtime` | CLI | 方法的薄客户端 |
@@ -328,7 +328,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 
 ### A.2 适配器与 OCR
 
-服务 `modalityAdapter`，作用域为进程，目录里声明一个名字，每个目录提供方一份副本，以提供方 id 为 key。适配器服务一组提供方：它为每个提供方提供一份副本，两个适配器声称同一提供方时在装配时失败。Modality 每次调用读取被调模型提供方的那份副本且不声明依赖，因此缺失、Pending、Failed 或正在重载的适配器解析为空，只有它服务的操作不可用，重载由下一次调用看到。调用携带模型的已解析连接，而该连接是仅限一次调用的凭据材料而非数据，因此执行媒体的适配器在进程内：在 Provider 暴露执行操作之前，外部语言适配器不提供任何媒体操作，而 Provider 目前不提供该操作（[Provider 管理 §3.8](../appserver/provider-management.md#38-适配器的媒体执行)，[#1613](https://github.com/arcships/dim/issues/1613)）。解析到的适配器是否服务某个操作，由它自己回答（`operations`）；Modality 不保留第二份名单。取消是一个协议动作：Modality 丢弃该调用（或发送绑定的取消请求）；适配器停止本地工作。错误是数据 `{ code, message }`，`code` 为 `invalid_input`、`unavailable`、`provider_error` 之一。
+服务 `modalityAdapter`，作用域为进程，目录里声明一个名字，分两级副本：按提供方的副本位于该提供方 id 的动态 key 上，家族名副本位于名字本身并服务任何没有专属副本的提供方。Modality 每次调用先读被调模型提供方的专属副本、再读家族名副本，不声明依赖，因此它会用到的适配器缺失、Pending、Failed 或正在重载时解析为空，只有它服务的操作不可用，重载由下一次调用看到。两个适配器声称同一提供方时在装配时失败，专属副本胜过家族名副本，通用适配器因此继续服务没有专属副本的提供方。调用携带模型的已解析连接，而该连接是仅限一次调用的凭据材料而非数据，因此执行媒体的适配器在进程内：在 Provider 暴露执行操作之前，外部语言适配器不提供任何媒体操作，而 Provider 目前不提供该操作（[Provider 管理 §3.8](../appserver/provider-management.md#38-适配器的媒体执行)，[#1613](https://github.com/arcships/dim/issues/1613)）。解析到的适配器是否服务某个操作，由它自己回答（`operations`）；Modality 不保留第二份名单。取消是一个协议动作：Modality 丢弃该调用（或发送绑定的取消请求）；适配器停止本地工作。错误是数据 `{ code, message }`，`code` 为 `invalid_input`、`unavailable`、`provider_error` 之一。
 
 | 方法 | 类型 | 请求 | 回复 |
 | --- | --- | --- | --- |
@@ -482,7 +482,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 | 步骤 | 机制 |
 | --- | --- |
 | 提交 | 在边界校验；写入 `queued`（revision 1）与输入文件；返回。通过 `ctx.effect`（Cordis 的 effect 机制，[rutis 生命周期](../rutis-usage.md#4-rutis-提供的生命周期)）注册的调度器在有空闲槽位时启动它；调度器与每个运行中的任务都是 effect 工作，插件卸载时由它清理 |
-| 启动 | 写入 `running` 及已解析的执行方；在被调模型的提供方 key 解析该操作的适配器（A.2）；调用 `submit`；一旦得知即写入 `remote_handle` |
+| 启动 | 写入 `running` 及已解析的执行方；先在被调模型的提供方 key、再在家族名解析该操作的适配器（A.2）；调用 `submit`；一旦得知即写入 `remote_handle` |
 | 终态 | 在每任务锁下一次写入并比较 `revision`；第一个终态写入胜出；之后的结果被丢弃，其文件被删除。保留在写入之后、状态对 `wait`/`status` 可见之前执行 |
 | 保留 | 每次 `apply` 时以及每次终态写入之后：早于 30 天或超出最新 200 个的终态任务连同其文件删除，最旧的先删（A.4，A2） |
 | 取消 | 标记已请求；取消本地令牌（中止 HTTP，或经 HostPlatform 杀死 OCR helper 的进程树）。取消后 drive 继续等待 `submit`，使执行方已接受的作业交出句柄；取消等待提交阶段结束（两者都以 3 秒为界，低于 rutis 的 10 秒卸载上限）。然后重读记录；有句柄时调用 `cancel_remote`（与调用令牌和本代 stop 竞速，挂起的提供方既拖不住客户端也拖不住卸载）；释放资源；写入 `cancelled`，带执行方的答复或 `null`。执行方回答 `unsupported` 时，提供方作业继续运行并计费；记录保留 `unsupported`，Modality 不再等待它 |
@@ -504,7 +504,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 | 以相同 `client_task_id` 重复 `submit` | 第二次在第一次之后 | 返回已有任务 | Modality |
 | 重复 `cancel` | — | 幂等 | Modality |
 | Modality 重载期间的 `wait` | wait 挂起 | 按方法契约中断；客户端重连后再次调用 `wait` | Rpc、客户端 |
-| 适配器插件重载或被移除 | Modality 从不随适配器重载 | 卸载中断的运行中调用使其任务 `interrupted`，从不重新提交；尚未开始的任务在适配器缺失时以 `unavailable` 失败。适配器在每次调用时于被调模型的提供方 key 解析，因此重载或移除只影响该适配器服务的操作 | Modality |
+| 适配器插件重载或被移除 | Modality 从不随适配器重载 | 卸载中断的运行中调用使其任务 `interrupted`，从不重新提交；尚未开始的任务在适配器缺失时以 `unavailable` 失败。适配器在每次调用时先于被调模型的提供方 key、再于家族名解析，因此重载或移除只影响该适配器服务的操作 | Modality |
 | 适配器在运行时报告不可用 | 标志为 false | 对它的新提交 `unavailable`；运行中任务继续 | Modality |
 | 任务中途进程重启 | `running` 记录 | 启动规则；从不重新提交 | Modality |
 | 保留策略删除了客户端仍在引用的任务 | — | 仅限终态任务；`result` 以 `not_found` 失败 | Modality |
@@ -550,7 +550,7 @@ helper 以目标的描述调用（A.2.1）：描述中的 `executable` 与 `args
 5. 启动前、运行中（本地中止、远端取消、不支持）以及对终态任务的取消；取消与完成竞争只产生一个终态。
 6. 重复 `client_task_id` 返回同一任务。
 7. 重启：宿主任务 `interrupted`；有句柄的提供方任务恢复且不发生第二次 `submit`；无句柄的 `interrupted`；`queued` 的 `interrupted`。
-8. 适配器重载与移除：Modality 从不随适配器重载。适配器在每次调用时于被调模型的提供方 key 解析，因此重载或移除适配器插件只影响该适配器服务的操作；卸载中断的运行中调用使其任务 `interrupted`。适配器被移除且已配置的默认值指向其模型时，`modality.capabilities` 报告“no adapter for the configured model”，其他操作保持可用。
+8. 适配器重载与移除：Modality 从不随适配器重载。适配器在每次调用时先于被调模型的提供方 key、再于家族名解析，因此重载或移除适配器插件只影响该适配器服务的操作；卸载中断的运行中调用使其任务 `interrupted`。该模型已无任何适配器副本且已配置的默认值指向它时，`modality.capabilities` 报告“no adapter for the configured model”，其他操作保持可用。
 9. 在控制节点上运行 OCR。`local/apple-vision` 在 Apple Silicon 上出现，其他平台以 `platform` 原因缺席，其提交以 `unavailable` 失败；任务经受限 spawn 运行 fixture Apple Vision helper 并发布其产物，取消会杀死它，指明其他节点的任务以 `node_unavailable` 失败。`local/pp-ocr` 用一个 fixture 插件演练，其进程行提供 `ocrHelper`，helper 是桩——从不加载引擎或任何下载文件：(a) 在场：目标与 `local/apple-vision` 并列列出，任务带着描述的 read 路径经受限 spawn 运行桩，其产物与 `data.pages` 被发布；(b) 缺席：fixture 插件未安装时目标不被列出，Apple Vision 仍可用，指名 `local/pp-ocr` 的提交以 `unavailable` 失败并带其 `runtime` 原因；(b2) 旧契约：`describe` 报告其他 `contract` 的 fixture 插件使目标不可用并带“the PP-OCR plugin needs an update”，提交以 `unavailable` 失败；(c) 提供方在任务读到描述之后、桩 helper 启动之前被移除：移除后取得的快照只列出 Apple Vision，下一次指名 `local/pp-ocr` 的提交失败，而已接纳的任务仍从旧副本成功完成；fixture 的描述指名一个位于插件目录之外的测试自带 gate 可执行文件，它向工作目录写入就绪标记并等待 go 标记，然后才从插件目录 exec 桩 helper，流程测试在就绪标记处移除 fixture 插件，之后再写 go 标记，因此移除正落在这个窗口内；第二个变体在就绪标记处更新 fixture 插件，任务仍用旧副本完成；gate 与桩都是 `crates/dim-modality/tests/` 下的测试代码，不新增生产钩子；桩在启动时读取其插件目录中的一个文件，因此在该窗口内被删除的副本会使任务失败；(d) helper 失败：类型化拒绝变成任务的错误码，意外退出变成任务的 `executor_error`，工作目录被删除；(e) 描述指名的目录在 spawn 之前被测试删除：spawn 拒绝该已消失的路径，任务结算为 `executor_error`，其工作目录被删除；(f) 停滞的行：fixture 的 `describe` 永不回答，图像提交完成且不读取它，而快照仍在上界内应答，不列出插件目标，`local/apple-vision` 保持原样；(g) 取消：在启动时 `describe` 仍挂起时被取消的 `local/pp-ocr` 任务结算为 `cancelled`，该读取被丢弃。
 10. 实时：会话以 `{ connectionId, transport }` 打开，把文本、音频与控制帧转发给适配器，并且只向发起连接发送提供方事件；它在 `close`、发起连接结束、提供方结束、`direct` 连接的 `expires_at` 到期、空闲上限与卸载时结束，各有自己的 `ended` 原因；超过上限的帧以 `invalid_input` 拒绝且会话保持打开；第五个会话以 `realtime_limit` 失败；其他连接的 `send` 与 `close` 为 `not_found`；没有声明的模型在适配器被调用之前使 `open` 失败；每个 `realtime.*` 提交都是 `modality_unknown_operation`。
 11. 任何 Session 中都不出现 Timeline 事件、工具声明或输入。
@@ -645,7 +645,7 @@ pub trait ModalityAdapter: Send + Sync + 'static {
 }
 ```
 
-A.2 中的实时操作映射到实时方法，随它们一起绑定：适配器通过 `events` 上报事件，提供方关闭会话时上报 `Ended(Provider)`，协议失败时上报 `Ended(Error(message))`；该消息只记录日志，从不写入连接。对 Modality 结束的每个会话，Modality 都会调用 `realtime_close`，上限五秒；适配器无法完成时丢弃该会话。在 Rust 中注册以 `TypeKey::dynamic(provider_id)` 在声明的家族名下提供 `ModalityAdapter`，它服务的每个目录提供方一份。适配器如何提供与发现是 A.2 的契约；本附录只绑定各操作。
+A.2 中的实时操作映射到实时方法，随它们一起绑定：适配器通过 `events` 上报事件，提供方关闭会话时上报 `Ended(Provider)`，协议失败时上报 `Ended(Error(message))`；该消息只记录日志，从不写入连接。对 Modality 结束的每个会话，Modality 都会调用 `realtime_close`，上限五秒；适配器无法完成时丢弃该会话。在 Rust 中注册以 `TypeKey::named("modalityAdapter")` 提供家族名副本，并为它服务的每个目录提供方各提供一份 `TypeKey::dynamic(provider_id)` 副本。适配器如何提供与发现是 A.2 的契约；本附录只绑定各操作。
 
 Modality 自身的 `managementMethods` 使用[方法](../contracts/session-boundary.md)契约的绑定。`modalityTasks` 服务由同一实现以 `TypeKey::named("modalityTasks")` 提供，每个 `modality.task.*` 声明对应一个方法，请求与回复类型相同：
 
