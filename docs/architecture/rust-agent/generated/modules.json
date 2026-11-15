@@ -48746,7 +48746,8 @@
       "to": "dim_cli::ui::render::fullscreen",
       "references": [
         "path FullScreen",
-        "path FullScreen::new"
+        "path FullScreen::new",
+        "path crate::ui::render::fullscreen::FullScreen::new"
       ]
     },
     {
@@ -48914,6 +48915,7 @@
         "path QUEUE_HINT_MORE",
         "path TASK_FADE",
         "path WebOpened",
+        "path apply_jump",
         "path banner",
         "path chunk",
         "path live_panel_rows",
