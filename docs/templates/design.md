@@ -8,13 +8,21 @@ Rules: [design rules](../architecture/rust-agent/principles.md), [ADR 002](../ad
 
 ## 1. Scope and non-goals
 
-What this part owns and what it does not. Link the authoritative contracts for everything
-outside that scope. Distinguish clarifications of existing behavior from proposed semantic changes.
+State the intended use and affected contract: who calls this part, what produces its inputs,
+and which lifecycle boundaries matter. Link the authoritative contracts and available complete
+flows that ground those assumptions. Distinguish compliance fixes and wording clarifications
+from proposed semantic changes; observed implementation behavior does not override the contract.
+
+Use only the sections and tables needed for this change; explain inapplicable scope briefly and
+link existing arguments for unchanged obligations. Retain the rule-check and cross-module
+requirement sections required by AGENTS.md. No particular formal tool is required.
 
 ## 2. Own contract
 
 The inputs, outputs, services, events, state and errors this part owns. Name public contract
-terms where the decision depends on them. Do not describe another module's registration,
+terms where the decision depends on them. Identify affected obligations and who discharges each,
+including admission and settlement across lifecycle boundaries. A narrower model does not remove
+those obligations. Do not describe another module's registration,
 routing, retry or cleanup behavior; link to its contract.
 
 ## 3. Assumptions, events and state
@@ -57,7 +65,8 @@ proof or proof of the implementation.
 | | | | | |
 
 Show why these queries produce the recovery result required by this part's contract. State what
-is deliberately settled, paused or discarded. Use the [property-query contract](../design/timeline-property-query.md),
+is deliberately settled, paused or discarded under the existing lifecycle and owner contracts;
+new-state recovery does not by itself justify old-work settlement. Use the [property-query contract](../design/timeline-property-query.md),
 not full-history collection or a default snapshot per event. Explain pagination and handoff to
 live consumption. Distinguish first installation from reload where their obligations differ.
 State expected scan, decode and retained-data costs and how implementation measurements will
@@ -83,7 +92,8 @@ Answer the applicable rules from [design rules §4](../architecture/rust-agent/p
 Map the modeled actions and queries to implementation boundaries or planned entry points.
 Name the affected public flows and the observations that distinguish a violation. Keep design
 arguments, bounded model-check evidence, implementation tests and performance measurements
-distinct. Reuse applicable evidence; record run results in the issue or PR, not here.
+distinct. Classify discrepancies against the contract before making them regression expectations.
+Reuse applicable evidence; record run results in the issue or PR, not here.
 
 ## 10. Binding appendix
 

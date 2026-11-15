@@ -20,7 +20,8 @@ The proposed authoring requirement is new: a design states the assumptions, defi
 transitions and propositions of its Timeline-facing contract, and supplies an argument for those
 propositions before implementation. Plugin-specific execution design remains in its own scope.
 An example of successful behavior is not the argument. Unresolved obligations remain explicit;
-a design with an unresolved required proposition is not ready to implement as an established contract.
+an unresolved required proposition remains an open design obligation, even when a smaller model
+passes. Exploratory models and experiments may investigate it; they do not establish the contract.
 A proposed behavior change still requires owner agreement under AGENTS.md.
 
 ## 2. Name the role, not an ambiguous owner
@@ -42,6 +43,22 @@ or consumer can be added unless a specific contract actually supplies that restr
 
 ## 3. Write the problem before choosing the implementation
 
+Start from the change's intended use and the authoritative contracts. Identify the caller, event
+producers, admission boundary and lifecycle responsibilities through their public contracts;
+use the selected profile and existing complete flows to check that those assumptions represent
+actual use. Code and experiments are evidence of behavior, not authority to redefine a contract.
+If behavior conflicts with an existing requirement, classify it as a compliance defect before
+proposing a new policy. A new integration states the guarantees it relies on without enumerating
+all future plugins.
+
+From that context, identify the obligations affected by the change and the owner of each.
+A compact table can link obligation, contract source, argument and implementation observation;
+prose is sufficient when that is clearer. Coverage is relative to these declared obligations,
+not a claim that every possible business need has been discovered. Do not add a requirement
+solely because a speculative trace can be constructed: establish that the trace is permitted
+by the environment and violates an agreed promise. Broader robustness experiments may still be
+useful, but their inputs are not evidence of product reachability.
+
 The common design obligation concerns the part's contract with the Timeline: the facts it
 consumes and produces, their effect on its business state, and recovery and consumption handoff.
 It does not prescribe the size, internal organization or execution algorithm of a Capability.
@@ -49,13 +66,19 @@ The definition of a Capability remains [principles §1](../architecture/rust-age
 A transition table describes this contract; it is not a requirement to split a feature into tiny
 state machines or implement a pure reducer.
 
-Plugin-specific execution design owns external calls, processes, resource management and external
-system behavior. Those may have their own models and proofs, but this guide does not require
+Plugin-specific execution design owns the internal algorithms of external calls, processes,
+resource management and external systems. Those may have their own models and proofs, but this guide does not require
 proving them as part of every Timeline argument. At the boundary, name only the inputs and
 guarantees needed by the proposition. For example, a claim about a terminal fact may depend on
 the work owner's settlement guarantee; link that guarantee rather than modeling its entire
 execution. If that guarantee is not established, keep the dependency explicit instead of claiming
 an unconditional result. A Timeline proof is not a proof of all plugin behavior.
+
+This scope does not exclude the part's admission, in-flight work settlement or generation boundary.
+Apply the existing [lifecycle contract](plugin-contract.md#7-lifecycle-of-a-part) when deriving
+obligations; distinguish its old-work settlement from the new-state query. "Caller-owned future"
+or "external execution" is not an exemption. An obligation may have a separate argument or owner,
+but must remain accounted for; excluding it from one model does not discharge it.
 
 Define the relevant state space S, its initial condition Init, the input/event domain E and
 the allowed transition relation Next. A useful notation for one transition is:
@@ -80,7 +103,8 @@ Init(s) implies I(s)
 I(s) and Next(s, s') imply I(s')
 ```
 
-Check every enabled transition, including irrelevant input and failure outcomes. A temporal
+Check every transition admitted by the stated environment that can affect the proposition,
+including relevant ignored inputs and failure outcomes. A temporal
 property may need a small history variable in the model; that does not require production code
 to retain a history copy. Do not strengthen assumptions solely to exclude an inconvenient path.
 
@@ -137,15 +161,18 @@ Record outstanding obligations and their effect on the claim. Keep execution res
 investigation and delivery progress in the issue/PR. Tool references:
 [TLC](https://docs.tlapl.us/using:tlc:start) and
 [Lean proof validation](https://lean-lang.org/doc/reference/latest/ValidatingProofs/).
-No design is required to use all tools. Choose evidence for the proposition, not a tool checklist.
+No design is required to use a particular tool or all evidence forms. Mathematical reasoning may
+be a short case analysis; use a machine-checked proof or bounded model where it helps establish
+the claim. Scale the document to the affected contract: unchanged obligations can link existing
+arguments, and inapplicable sections need only a brief scope explanation. Retain the sections
+required by AGENTS.md.
+Do not split a Capability or introduce runtime state solely to fit the template or proof tool.
 
-Ground environment assumptions in the selected profile, caller and event-producer contracts,
-lifecycle ownership and existing integration flows. Record missing evidence; an isolated model
-cannot establish that its inputs represent actual use.
-Start with the owner's externally observable promises and map each to an argument, a dependency
-or an explicit gap; do not choose the coverage solely from what is easy to model.
-Map the design's actions and observation points to implementation entry points. Translate relevant
-counterexamples into existing flow tests. Code review checks whether locks, awaits, queries and
+Map the design's actions and observation points to implementation entry points. Classify a
+counterexample against the contract before writing a regression expectation: it may expose a
+model mistake, an implementation defect or a genuinely unspecified requirement. A characterization
+of defective behavior must not become a test requiring that defect. Reuse complete flow tests to
+check the boundary with real callers as well as the local model. Code review checks whether locks, awaits, queries and
 effects preserve the modeled boundaries; model correctness alone does not establish that mapping.
 
 The [WaitBranch example](examples/wait-argument.md) gives a scoped mathematical argument and
