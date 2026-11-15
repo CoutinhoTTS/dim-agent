@@ -1141,6 +1141,12 @@ pub trait ToolDriver: Send + Sync + 'static {
     fn resolve_write(&self, call: ToolCall, _: CancellationToken) -> HostFuture<'_, ToolCall> {
         Box::pin(async move { Ok(call) })
     }
+    /// Whether this call may run beside other calls of its batch. One driver
+    /// serves every host tool of a Session, so the answer is per call; the
+    /// default is [`crate::tool_registry::ToolConcurrency::Exclusive`].
+    fn concurrency(&self, _: &ToolCall) -> crate::tool_registry::ToolConcurrency {
+        crate::tool_registry::ToolConcurrency::Exclusive
+    }
     fn execute(
         &self,
         call: ToolCall,

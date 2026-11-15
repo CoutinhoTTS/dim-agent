@@ -4,6 +4,7 @@ use crate::{
     approval::{AdmitCall, Approval},
     host::*,
     tool_binding::ToolBinding,
+    tool_registry::{ToolClaim, ToolConcurrency, ToolContribution},
 };
 use dim_agent_runtime::{
     AgentError, CAPABILITY_RELOADING, Dispatcher, Names, QueryComparison, QueryFilter,
@@ -22,11 +23,14 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
-use tokio::{sync::oneshot, time::timeout};
+use tokio::{
+    sync::{oneshot, watch},
+    time::timeout,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Default)]
@@ -410,6 +414,13 @@ impl DynPlugin for ToolExecutorPlugin {
                                     return Ok((results, Vec::new()));
                                 }
                                 let count = batch.calls.len();
+                                let classes = batch.calls.iter().map(|call| {
+                                    binding
+                                        .handler(&batch.request_id, &call.name)
+                                        .map(|tool| tool.handler.concurrency(call))
+                                        .unwrap_or(ToolConcurrency::Exclusive)
+                                });
+                                let (turn, segment_of, mut waiters) = Turn::new(classes, count);
                                 let calls = batch.calls.iter().cloned().enumerate().map(|(index, call)| {
                                     let binding = binding.clone();
                                     let approval = approval.clone();
@@ -417,12 +428,22 @@ impl DynPlugin for ToolExecutorPlugin {
                                     let cancel = cancel.clone();
                                     let event_id = call_event_id.clone();
                                     let session_id = identity.session_id.clone();
+                                    let segment = segment_of[index];
+                                    let turn = turn.clone();
+                                    let mut barrier = std::mem::replace(
+                                        &mut waiters[index],
+                                        watch::channel(0).1,
+                                    );
                                     let context = ToolExecutionContext {
                                         turn_id: batch.turn_id.clone(),
                                         request_id: batch.request_id.clone(),
                                         branch_id: identity.branch_id.clone(),
                                     };
                                     async move {
+                                        // Releases this call's step on every exit:
+                                        // a result, a refusal, a panic or a dropped
+                                        // future.
+                                        let _settled = Settled { turn, segment };
                                         if cancel.is_cancelled() {
                                             return (
                                                 index,
@@ -458,19 +479,48 @@ impl DynPlugin for ToolExecutorPlugin {
                                         let (result, outcome) = if cancel.is_cancelled() {
                                             (ToolResult::error("Tool cancelled before execution"), "interrupted")
                                         } else {
-                                            match AssertUnwindSafe(async {
-                                                execute(&binding, &approval, call.clone(), context.clone(), cancel).await
-                                            }).catch_unwind().await {
-                                                Ok(Ok(result)) => {
-                                                    let outcome = if interrupt.is_cancelled() { "interrupted" } else if result.is_error == Some(true) { "failure" } else { "returned" };
-                                                    (result, outcome)
-                                                },
+                                            let admitted = AssertUnwindSafe(admit(
+                                                &binding,
+                                                &approval,
+                                                call.clone(),
+                                                &context,
+                                                cancel.clone(),
+                                            ))
+                                            .catch_unwind()
+                                            .await;
+                                            match admitted {
+                                                Ok(Ok(admitted)) => {
+                                                    // Two things hold before a call runs:
+                                                    // its own admission is done and every
+                                                    // earlier step settled. A sibling's
+                                                    // admission is not one of them.
+                                                    if segment > 0 {
+                                                        let ready = tokio::select! {
+                                                            biased;
+                                                            _ = cancel.cancelled() => false,
+                                                            waited = barrier.wait_for(|head| *head > segment - 1) => waited.is_ok(),
+                                                        };
+                                                        if !ready {
+                                                            (ToolResult::error("Tool cancelled before execution"), "interrupted")
+                                                        } else {
+                                                            let outcome = AssertUnwindSafe(run(admitted, context.clone(), cancel.clone()))
+                                                                .catch_unwind()
+                                                                .await;
+                                                            settled(outcome, interrupt.is_cancelled(), &mut errors)
+                                                        }
+                                                    } else {
+                                                        let outcome = AssertUnwindSafe(run(admitted, context.clone(), cancel.clone()))
+                                                            .catch_unwind()
+                                                            .await;
+                                                        settled(outcome, interrupt.is_cancelled(), &mut errors)
+                                                    }
+                                                }
                                                 Ok(Err(error)) => {
                                                     let outcome = if matches!(error, HostError::Cancelled(_)) { "interrupted" } else { "failure" };
                                                     let reloading = matches!(&error, HostError::Cancelled(reason) if reason == CAPABILITY_RELOADING);
                                                     let result = if reloading { reload_cancelled() } else { ToolResult::error(error.to_string()) };
                                                     (result, outcome)
-                                                },
+                                                }
                                                 Err(panic) => {
                                                     let message = panic_message(panic);
                                                     errors.push(AgentError::fault("ToolExecutor host", &message));
@@ -581,17 +631,29 @@ impl DynPlugin for ToolExecutorPlugin {
         })
     }
 }
-/// Admits one call through Approval, then runs its handler.
-async fn execute(
+
+/// What admission produced for one call: the handler it will run and the call
+/// Approval admitted.
+struct Admitted {
+    tool: Arc<ToolContribution>,
+    claim: Option<Box<dyn ToolClaim>>,
+    call: ToolCall,
+}
+
+/// Admits one call through Approval. It starts the moment the batch starts
+/// and settles on its own, whatever step is running, so a batch's approval
+/// questions appear together and one call never waits for a sibling's.
+async fn admit(
     binding: &ToolBinding,
     approval: &Approval,
     call: ToolCall,
-    context: ToolExecutionContext,
+    context: &ToolExecutionContext,
     cancel: CancellationToken,
-) -> Result<ToolResult, HostError> {
+) -> Result<Admitted, HostError> {
     let tool = match binding.handler(&context.request_id, &call.name) {
         Ok(tool) => tool,
-        Err(message) => return Ok(ToolResult::error(message)),
+        // An unknown tool is denied here, without an approval question.
+        Err(message) => return Err(HostError::failed(message)),
     };
     let claim = binding.take_claim(&context.request_id, &call.id);
     let risk = tool.handler.risk(&call).or(tool.definition.risk.as_deref());
@@ -617,9 +679,152 @@ async fn execute(
             cancel.clone(),
         )
         .await?;
-    match claim {
-        Some(claim) => claim.dispatch(call, context, cancel).await,
-        None => tool.handler.execute(call, context, cancel).await,
+    Ok(Admitted { tool, claim, call })
+}
+
+/// Runs an admitted call through its handler.
+async fn run(
+    admitted: Admitted,
+    context: ToolExecutionContext,
+    cancel: CancellationToken,
+) -> Result<ToolResult, HostError> {
+    match admitted.claim {
+        Some(claim) => claim.dispatch(admitted.call, context, cancel).await,
+        None => {
+            admitted
+                .tool
+                .handler
+                .execute(admitted.call, context, cancel)
+                .await
+        }
+    }
+}
+
+/// Admits one call through Approval, then runs its handler.
+async fn execute(
+    binding: &ToolBinding,
+    approval: &Approval,
+    call: ToolCall,
+    context: ToolExecutionContext,
+    cancel: CancellationToken,
+) -> Result<ToolResult, HostError> {
+    let admitted = admit(binding, approval, call, &context, cancel.clone()).await?;
+    run(admitted, context, cancel).await
+}
+
+/// The steps of one batch and the barrier between them.
+///
+/// A step is a run of consecutive calls that may share one moment: a call
+/// whose handler answers `Concurrent` joins the step before it, and an
+/// `Exclusive` call starts a step of its own. `segment_of` holds the step of
+/// each call, and `head` the number of leading steps that have settled
+/// completely, so a step starts only after every earlier step finished.
+struct Turn {
+    /// Calls of each step that have not settled yet.
+    remaining: Vec<AtomicUsize>,
+    /// Leading steps that settled completely; starts at zero.
+    head: watch::Sender<usize>,
+}
+impl Turn {
+    /// Fixes the steps before any call is polled. It also returns one barrier
+    /// receiver per call, taken here so a call subscribes before any of them
+    /// can advance.
+    fn new(
+        classes: impl IntoIterator<Item = ToolConcurrency>,
+        count: usize,
+    ) -> (Arc<Self>, Vec<usize>, Vec<watch::Receiver<usize>>) {
+        let mut segment_of = Vec::with_capacity(count);
+        let mut remaining: Vec<AtomicUsize> = Vec::new();
+        // The step before this call, and whether it is a step reads may share.
+        let mut previous: Option<(usize, bool)> = None;
+        for class in classes {
+            let segment = match (class, previous) {
+                // A read joins a read step before it, and an exclusive call
+                // starts a step of its own; nothing joins an exclusive step.
+                (ToolConcurrency::Concurrent, Some((segment, true))) => segment,
+                _ => {
+                    remaining.push(AtomicUsize::new(0));
+                    remaining.len() - 1
+                }
+            };
+            remaining[segment].fetch_add(1, Ordering::SeqCst);
+            segment_of.push(segment);
+            previous = Some((segment, class == ToolConcurrency::Concurrent));
+        }
+        debug_assert_eq!(segment_of.len(), count);
+        let head = watch::Sender::new(0);
+        let waiters = (0..count).map(|_| head.subscribe()).collect();
+        (Arc::new(Self { remaining, head }), segment_of, waiters)
+    }
+}
+
+/// Releases one call's place in its step, however the call ends: a settled
+/// result, a refused admission, a panic or a dropped future.
+struct Settled {
+    turn: Arc<Turn>,
+    segment: usize,
+}
+impl Drop for Settled {
+    fn drop(&mut self) {
+        let left = self.turn.remaining[self.segment].fetch_sub(1, Ordering::SeqCst) - 1;
+        if left != 0 {
+            return;
+        }
+        // Only a settled prefix advances the barrier. A later step can reach
+        // zero first, when every call in it was refused during admission while
+        // an earlier step still runs, and starting the steps after it then
+        // would break the call order. `send_if_modified` holds the channel
+        // lock, so concurrent drops advance the prefix one at a time.
+        self.turn.head.send_if_modified(|head| {
+            let start = *head;
+            while *head < self.turn.remaining.len()
+                && self.turn.remaining[*head].load(Ordering::SeqCst) == 0
+            {
+                *head += 1;
+            }
+            *head != start
+        });
+    }
+}
+
+/// The result and outcome label of one run, after its panic boundary. A panic
+/// also records a fault, which fails the turn: the run never produced a result.
+fn settled(
+    outcome: Result<Result<ToolResult, HostError>, Box<dyn std::any::Any + Send>>,
+    interrupted: bool,
+    errors: &mut Vec<AgentError>,
+) -> (ToolResult, &'static str) {
+    match outcome {
+        Ok(Ok(result)) => {
+            let label = if interrupted {
+                "interrupted"
+            } else if result.is_error == Some(true) {
+                "failure"
+            } else {
+                "returned"
+            };
+            (result, label)
+        }
+        Ok(Err(error)) => {
+            let label = if matches!(error, HostError::Cancelled(_)) {
+                "interrupted"
+            } else {
+                "failure"
+            };
+            let reloading =
+                matches!(&error, HostError::Cancelled(reason) if reason == CAPABILITY_RELOADING);
+            let result = if reloading {
+                reload_cancelled()
+            } else {
+                ToolResult::error(error.to_string())
+            };
+            (result, label)
+        }
+        Err(panic) => {
+            let message = panic_message(panic);
+            errors.push(AgentError::fault("ToolExecutor host", &message));
+            (ToolResult::error(message), "defect")
+        }
     }
 }
 
@@ -994,4 +1199,99 @@ pub(crate) fn is_reload_settled(result: &ToolResult) -> bool {
         .as_ref()
         .and_then(|content| content.get("settlement"))
         .is_some_and(|value| value == CAPABILITY_RELOADING)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn waiters(
+        classes: &[ToolConcurrency],
+    ) -> (Arc<Turn>, Vec<usize>, Vec<watch::Receiver<usize>>) {
+        Turn::new(classes.to_vec(), classes.len())
+    }
+
+    fn settle(turn: &Arc<Turn>, segment: usize) {
+        drop(Settled {
+            turn: turn.clone(),
+            segment,
+        });
+    }
+
+    #[test]
+    fn a_concurrent_call_joins_the_step_before_it_and_an_exclusive_one_starts_a_step() {
+        use ToolConcurrency::{Concurrent as C, Exclusive as X};
+        let (_, segments, _) = waiters(&[C, X, C, C, X, C]);
+        assert_eq!(segments, [0, 1, 2, 2, 3, 4]);
+        let (_, segments, _) = waiters(&[C, C, C]);
+        assert_eq!(segments, [0, 0, 0]);
+        let (_, segments, _) = waiters(&[X, X]);
+        assert_eq!(segments, [0, 1]);
+        let (_, segments, _) = waiters(&[]);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn the_barrier_advances_over_the_settled_prefix_only() {
+        // Three exclusive calls: one step each.
+        let (turn, _, mut waiters) = waiters(&[
+            ToolConcurrency::Exclusive,
+            ToolConcurrency::Exclusive,
+            ToolConcurrency::Exclusive,
+        ]);
+        assert_eq!(turn.head.borrow().clone(), 0);
+        // Step 1 settles first because its call was refused during admission
+        // while step 0 still runs. The prefix does not move.
+        settle(&turn, 1);
+        assert_eq!(
+            *turn.head.borrow(),
+            0,
+            "a later step settling first leaves the prefix alone"
+        );
+        assert!(
+            waiters[1]
+                .wait_for(|head| *head > 0)
+                .now_or_never()
+                .is_none(),
+            "step 1 still waits for step 0"
+        );
+        // Step 0 settles: the prefix runs over steps 0 and 1.
+        settle(&turn, 0);
+        assert_eq!(*turn.head.borrow(), 2);
+        assert!(
+            waiters[1]
+                .wait_for(|head| *head > 0)
+                .now_or_never()
+                .is_some(),
+            "step 1 starts once step 0 settled"
+        );
+        // Step 2 settles last.
+        settle(&turn, 2);
+        assert_eq!(*turn.head.borrow(), 3);
+    }
+
+    #[test]
+    fn a_step_advances_the_prefix_only_when_all_of_its_calls_settled() {
+        use ToolConcurrency::{Concurrent as C, Exclusive as X};
+        // Steps: call 0 alone, calls 1 and 2 together.
+        let (turn, segments, mut waiters) = waiters(&[X, C, C]);
+        assert_eq!(segments, [0, 1, 1]);
+        settle(&turn, segments[1]);
+        assert_eq!(*turn.head.borrow(), 0);
+        settle(&turn, segments[0]);
+        assert_eq!(
+            *turn.head.borrow(),
+            1,
+            "step 1 still holds one call, so the prefix stops before it"
+        );
+        assert!(
+            waiters[2]
+                .wait_for(|head| *head > 1)
+                .now_or_never()
+                .is_none(),
+            "step 2 waits for its own step"
+        );
+        settle(&turn, segments[2]);
+        assert_eq!(*turn.head.borrow(), 2);
+    }
 }
