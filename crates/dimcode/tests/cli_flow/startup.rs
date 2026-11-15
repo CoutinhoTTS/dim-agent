@@ -937,7 +937,7 @@ fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
             let result = match request["method"].as_str().unwrap() {
                 "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
                     "protocolVersion":4,"daemonProfile":{"kind":"product"},
-                    "features":["session.create","session.create.modelFromSession","session.history","session.history.latestTurn","session.methods","provider.list"]}),
+                    "features":["session.create","session.create.modelFromSession","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list"]}),
                 "session.create" => {
                     creates += 1;
                     calls.send(request["params"].clone()).unwrap();
@@ -1588,7 +1588,7 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
                 if wire.2 && wire.empty_state(&request) { continue; }
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => {
-                        let mut features = vec!["session.create", "session.history", "session.history.latestTurn", "session.methods", "provider.list"];
+                        let mut features = vec!["session.create", "session.history", "session.history.latestTurn", "session.input.pending.blockPresence", "session.methods", "provider.list"];
                         if management {
                             features.push("provider.management");
                         }

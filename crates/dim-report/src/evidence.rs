@@ -69,6 +69,7 @@ impl ErrorReference {
         if observed.client_version.is_empty() {
             return Err(RpcError::invalid("Client version is required"));
         }
+        let client_version = Some(observed.client_version.clone());
         let default_model = tree
             .and_then(|tree| tree.get(&branch).ok())
             .as_ref()
@@ -77,6 +78,7 @@ impl ErrorReference {
             Snapshot {
                 error: Some(observed.into()),
                 timeline,
+                client_version,
             },
             default_model,
         ))
@@ -173,6 +175,9 @@ impl From<Observed> for CapturedError {
 pub(super) struct Snapshot {
     pub(super) error: Option<CapturedError>,
     pub(super) timeline: Result<TimelineEvidence, Missing>,
+    /// The label the reporting client sent for itself, when it sent one: a
+    /// comparison with the daemon's own label is what a report shows.
+    pub(super) client_version: Option<String>,
 }
 
 impl Snapshot {
@@ -193,6 +198,7 @@ impl Snapshot {
             Self {
                 error: None,
                 timeline,
+                client_version: None,
             },
             model,
         )

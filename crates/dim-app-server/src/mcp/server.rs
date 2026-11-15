@@ -226,7 +226,10 @@ impl ClientHandler for Notifications {
         capabilities.extensions = Some([(UI_EXTENSION.to_owned(), extension)].into());
         ClientConfig::new(
             capabilities,
-            Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            Implementation::new(
+                env!("CARGO_PKG_NAME"),
+                dim_agent_capabilities::build::current(),
+            ),
         )
     }
     async fn on_tool_list_changed(&self, _: NotificationContext<RoleClient>) {

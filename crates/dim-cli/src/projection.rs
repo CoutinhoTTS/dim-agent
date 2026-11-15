@@ -282,6 +282,7 @@ impl Projection {
                         mode: data.effective_mode(),
                         user: Some(user.clone()),
                         applied: false,
+                        has_raw_blocks: Some(!data.blocks.is_empty()),
                     });
                 } else if let Some(text) = data.blocks.iter().find_map(|block| {
                     let dim_agent_types::InputBlock::Raw { text, .. } = block;
@@ -658,11 +659,13 @@ impl Projection {
         }
     }
 
-    /// The content of a held message, to re-submit it as Steer.
+    /// The content of a held operator message for user queue actions.
     pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
         self.inputs
             .iter()
-            .find(|input| input.input_id == input_id && !input.applied)
+            .find(|input| {
+                input.input_id == input_id && !input.applied && input.has_raw_blocks == Some(false)
+            })
             .and_then(|input| input.user.as_ref())
     }
 
@@ -737,6 +740,7 @@ impl Projection {
         pending.sort_by_key(|input| (!input.applied, input.sequence));
         let queued = pending
             .into_iter()
+            .filter(|input| input.has_raw_blocks == Some(false))
             .filter_map(|input| {
                 let user = input.user.as_ref()?;
                 Some(QueuedInput {
@@ -1153,6 +1157,8 @@ impl Projection {
             self.row(index).pending = true;
             self.input_rows.insert(input.input_id.clone(), index);
         }
+        self.inputs
+            .retain(|existing| existing.input_id != input.input_id);
         self.inputs.push(input.clone());
     }
 
