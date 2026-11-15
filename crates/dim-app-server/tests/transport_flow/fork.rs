@@ -546,6 +546,268 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
     server.join().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_checks_rest_points_without_scanning_completed_history() {
+    use dim_agent_runtime::{Timeline, TimelineKey};
+    use dim_agent_types::{
+        BranchResumeData, EventDraft, ExecEndedData, ExecStartedData, ExecStatus, ExtensionEvent,
+        InputAppliedData, InputBlock, InputConsumedData, InputDeletedData, InputHandover,
+        InputMessageData, InputMode, ToolResult, TurnEndData, TurnStartData,
+    };
+    use dim_app_server::storage::{SessionStore, SqliteStorage, SqliteTimelineStore};
+
+    let started_task = |id: &str| {
+        EventKind::ExecStarted(ExecStartedData {
+            turn_id: id.into(),
+            request_id: id.into(),
+            call_id: id.into(),
+            task_id: id.into(),
+            description: "completed fixture".into(),
+            title: None,
+            output_path: String::new(),
+        })
+    };
+    let ended_task = |id: &str| {
+        EventKind::ExecEnded(ExecEndedData {
+            task_id: id.into(),
+            status: ExecStatus::Completed,
+            result: ToolResult::text("done"),
+        })
+    };
+    let wake = |id: &str, ended: &str| {
+        let mut draft = EventDraft::from(EventKind::InputMessage(InputMessageData::text(
+            "done",
+            Some(InputMode::Steer),
+        )))
+        .with_id(id);
+        draft.tags = Some(vec![format!("exec-wake-result:{ended}")]);
+        draft
+    };
+    let mut costs = Vec::new();
+    for (noise, turns) in [(64, 1), (16_384, 1), (64, 2_050)] {
+        let store = Store::new();
+        let (server, _) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let sid = session(&mut client).await;
+        turn(&mut client, &sid, "ready").await;
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+
+        let database = SqliteStorage::open(store.database()).unwrap();
+        let native = SqliteTimelineStore::new(database.clone());
+        let timeline = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: sid.clone(),
+                branch_id: "main".into(),
+            },
+            vec![],
+            native.clone(),
+        )
+        .await
+        .unwrap();
+        timeline
+            .append(EventKind::BranchResume(BranchResumeData {}).into())
+            .unwrap();
+        timeline
+            .append(started_task("pending-task").into())
+            .unwrap();
+        let pending = timeline
+            .append(
+                EventKind::InputMessage(InputMessageData {
+                    mode: Some(InputMode::Queue),
+                    handover: (turns > 1).then(|| InputHandover {
+                        turn_id: "pending-handover".into(),
+                        request_id: "pending-handover".into(),
+                    }),
+                    blocks: vec![InputBlock::Raw {
+                        text: "withdrawn after the historical cut".into(),
+                        key: None,
+                        retire: false,
+                    }],
+                    ..Default::default()
+                })
+                .into(),
+            )
+            .unwrap();
+        let mut facts = (0..noise)
+            .map(|index| {
+                EventDraft::from(EventKind::Extension(
+                    ExtensionEvent::new("fork-probe", "noise", json!({"index":index})).unwrap(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        for index in 0..turns {
+            let id = format!("completed-{index}");
+            let ended = format!("ended-{index}");
+            let wake_id = format!("wake-{index}");
+            facts.extend([
+                EventDraft::from(EventKind::InputMessage(InputMessageData::text(
+                    "completed",
+                    Some(InputMode::Queue),
+                )))
+                .with_id(&id),
+                EventKind::InputApplied(InputAppliedData {
+                    input_id: id.clone(),
+                    mode: Some(InputMode::Queue),
+                })
+                .into(),
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: id.clone(),
+                })
+                .into(),
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: id.clone(),
+                })
+                .into(),
+                started_task(&id).into(),
+                EventDraft::from(ended_task(&id)).with_id(&ended),
+                wake(&wake_id, &ended),
+                EventKind::InputApplied(InputAppliedData {
+                    input_id: wake_id.clone(),
+                    mode: Some(InputMode::Steer),
+                })
+                .into(),
+                EventKind::InputConsumed(InputConsumedData { input_id: wake_id }).into(),
+                EventKind::TurnEnd(TurnEndData {
+                    turn_id: id,
+                    outcome: dim_agent_types::TurnOutcome::Completed {
+                        reason: "done".into(),
+                    },
+                })
+                .into(),
+            ]);
+        }
+        for batch in facts.chunks(256) {
+            timeline
+                .append_batch_registered(batch.to_vec(), |_| Ok(()))
+                .unwrap();
+        }
+        let retained = timeline
+            .append(
+                EventKind::InputMessage(InputMessageData::text(
+                    "retained",
+                    Some(InputMode::Append),
+                ))
+                .into(),
+            )
+            .unwrap();
+        let compaction = serde_json::from_value(json!({
+            "through":retained.sequence,"status":"completed","retain_from":retained.id,
+            "replacement":[{"role":"user","content":"summary"}],
+            "strategy":"summary","diagnostics":{
+                "reason":"auto","trigger":"threshold","estimatedInputTokens":1,
+                "entriesReplaced":1,"modelCallCount":1,"durationMs":1,"strategy":{"kind":"summary"}
+            },"context_baseline":[]
+        }))
+        .unwrap();
+        timeline
+            .append(EventKind::ContextCompaction(compaction).into())
+            .unwrap();
+        let waiting_at = timeline.committed();
+        let deleted = timeline
+            .append(
+                EventKind::InputDeleted(InputDeletedData {
+                    input_id: pending.id.clone(),
+                })
+                .into(),
+            )
+            .unwrap();
+        let ended = timeline.append(ended_task("pending-task").into()).unwrap();
+        timeline
+            .append_batch_registered(
+                vec![
+                    wake("pending-wake", &ended.id),
+                    EventKind::InputApplied(InputAppliedData {
+                        input_id: "pending-wake".into(),
+                        mode: Some(InputMode::Steer),
+                    })
+                    .into(),
+                    EventKind::InputConsumed(InputConsumedData {
+                        input_id: "pending-wake".into(),
+                    })
+                    .into(),
+                ],
+                |_| Ok(()),
+            )
+            .unwrap();
+        let rested_at = timeline.committed();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            timeline
+                .watch()
+                .wait_for(|&(published, _)| published >= rested_at),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        native.close().await.unwrap();
+        database.close().await.unwrap();
+        drop((timeline, native, database));
+
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+        assert_ok(
+            &client
+                .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
+                .await,
+        );
+        let storage = server.service::<SessionStore>().unwrap();
+        let mut scenario_costs = Vec::new();
+        for (at, cause) in [
+            (waiting_at, "an input is waiting to be consumed"),
+            (deleted.sequence, "a background task is running"),
+            (ended.sequence, "a background task has not woken the branch"),
+        ] {
+            storage.timeline_diagnostics().record_query_statistics();
+            let started = std::time::Instant::now();
+            let (code, message) = error(&fork(&mut client, &sid, at).await);
+            let elapsed = started.elapsed();
+            let statements = storage.timeline_diagnostics().take_query_statistics();
+            let steps: i64 = statements.iter().map(|stat| i64::from(stat.vm_steps)).sum();
+            assert_eq!(code, "session_invalid_input");
+            assert!(message.contains(cause), "{at}: {message}");
+            assert!(steps > 0, "the wire check must record native query work");
+            scenario_costs.push(steps);
+            eprintln!(
+                "fork rest-point check: noise={noise}, turns={turns}, cause={cause}, vm_steps={steps}, elapsed={elapsed:?}"
+            );
+        }
+        costs.push(scenario_costs);
+
+        let fid = forked(&fork(&mut client, &sid, rested_at).await);
+        let target = agent.get_session(&fid).unwrap();
+        let copied = history(&target, "main").await;
+        assert_eq!(
+            copied
+                .iter()
+                .filter(|event| event.kind.key() == "fork-probe/noise")
+                .count(),
+            noise,
+            "rest-point queries must not change the store-side copy"
+        );
+        assert!(
+            !copied
+                .iter()
+                .filter(|event| event.sequence > rested_at)
+                .any(|event| WORK.contains(&event.kind.key())),
+            "the withdrawn input must not run in the fork"
+        );
+        drop((target, agent, client));
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+    assert!(
+        costs.iter().all(|scenario| scenario
+            .iter()
+            .zip(&costs[0])
+            .all(|(steps, baseline)| *steps <= baseline * 2)),
+        "completed and irrelevant history must not drive fork validation reads: {costs:?}"
+    );
+}
+
 /// Acceptance 7 (#127): a fork of a leader whose request to a member is
 /// open at the cut records a failed result and starts no turn; the source's
 /// member keeps working and its result reaches the source.

@@ -816,7 +816,9 @@ fn in_field(path: &str, values: &[&str]) -> QueryFilter {
     }
 }
 
-fn unposted_filter() -> QueryFilter {
+/// Selects completed or failed tasks whose generation was open when they ended
+/// and whose wake input is absent within the caller's Timeline query scope.
+pub fn unposted_filter() -> QueryFilter {
     let mut conditions = vec![in_field("kind", &["exec/ended"])];
     conditions.extend(vec![
         in_field("data.status", &["completed", "failed"]),
