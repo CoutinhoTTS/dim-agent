@@ -44,12 +44,12 @@ pub type ExecutionSettingsRead = Arc<
 /// the name for any language and called directly by a Rust reader through the
 /// binding that holds it. The owner provides both with [`provide`].
 #[derive(Clone)]
-pub struct ExecutionSettingsHost(Arc<dyn HostDispatch>);
+pub struct ExecutionSettingsHost(ExecutionSettingsRead);
 
 impl ExecutionSettingsHost {
     /// Binds an owner's read as the face's operation.
     pub fn new(read: ExecutionSettingsRead) -> Self {
-        Self(Arc::new(Face(read)))
+        Self(read)
     }
 
     /// Switches that never change, for an assembly that stores none, such as an
@@ -64,33 +64,29 @@ impl ExecutionSettingsHost {
         &self,
         cancel: CancellationToken,
     ) -> std::result::Result<ExecutionSettings, ExecutionSettingsError> {
-        port_faces::call(NAME, &self.0, "read", &Empty {}, &cancel)
-            .await
-            .map_err(|error| ExecutionSettingsError::Failed {
-                message: error.to_string(),
-            })
+        crate::port_faces::read(
+            cancel,
+            || ExecutionSettingsError::Failed {
+                message: format!("{NAME}: cancelled"),
+            },
+            |cancel| (self.0)(cancel),
+        )
+        .await
     }
 }
 
 /// Provides one owner's [`ExecutionSettingsHost`]: the binding its Rust
 /// readers hold and the face any other language calls by name.
 pub fn provide(ctx: &Ctx, host: &ExecutionSettingsHost) -> rutis::Result<()> {
-    ctx.provide_at(
-        Key::<ExecutionSettingsHost>::of(),
-        Arc::new(ExecutionSettingsHost(host.0.clone())),
-    )?;
-    ctx.provide_at(
-        port_faces::face_key::<ExecutionSettingsHost>(),
-        host.0.clone(),
-    )?;
+    let host = Arc::new(host.clone());
+    ctx.provide_at(Key::<ExecutionSettingsHost>::of(), host.clone())?;
+    ctx.provide_at(crate::port_faces::face_key::<ExecutionSettingsHost>(), host)?;
     Ok(())
 }
 
 const NAME: &str = "executionSettingsHost";
 
-struct Face(ExecutionSettingsRead);
-
-impl HostDispatch for Face {
+impl HostDispatch for ExecutionSettingsHost {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(json!({"read": "async"}))
     }
@@ -100,8 +96,10 @@ impl HostDispatch for Face {
             return Err(port_faces::unknown_method(NAME, method));
         }
         let Empty {} = port_faces::request(NAME, args)?;
-        let cancel = CancellationToken::new();
-        let read = (self.0)(cancel.clone());
-        port_faces::serving(NAME, cancel, read)
+        let host = self.clone();
+        crate::port_faces::serving(
+            NAME,
+            async move { host.read(CancellationToken::new()).await },
+        )
     }
 }

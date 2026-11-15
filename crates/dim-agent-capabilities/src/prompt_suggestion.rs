@@ -98,12 +98,12 @@ pub type PromptSuggestionSettingsRead = Arc<
 /// served under the name for any language and called directly by the Session
 /// part through the binding that holds it.
 #[derive(Clone)]
-pub struct PromptSuggestionSettingsHost(Arc<dyn HostDispatch>);
+pub struct PromptSuggestionSettingsHost(PromptSuggestionSettingsRead);
 
 impl PromptSuggestionSettingsHost {
     /// Binds an owner's read as the face's operation.
     pub fn new(read: PromptSuggestionSettingsRead) -> Self {
-        Self(Arc::new(SettingsFace(read)))
+        Self(read)
     }
 
     /// The `prompt-suggestion` document as its source holds it now.
@@ -111,39 +111,32 @@ impl PromptSuggestionSettingsHost {
         &self,
         cancel: CancellationToken,
     ) -> std::result::Result<PromptSuggestionSettings, PromptSuggestionSettingsError> {
-        crate::port_faces::call(
-            SETTINGS,
-            &self.0,
-            "read",
-            &crate::port_faces::Empty {},
-            &cancel,
+        crate::port_faces::read(
+            cancel,
+            || PromptSuggestionSettingsError::Failed {
+                message: format!("{SETTINGS}: cancelled"),
+            },
+            |cancel| (self.0)(cancel),
         )
         .await
-        .map_err(|error| PromptSuggestionSettingsError::Failed {
-            message: error.to_string(),
-        })
     }
 }
 
 /// Provides one owner's [`PromptSuggestionSettingsHost`]: the binding its Rust
 /// readers hold and the face any other language calls by name.
 pub fn provide_settings(ctx: &Ctx, host: &PromptSuggestionSettingsHost) -> rutis::Result<()> {
-    ctx.provide_at(
-        Key::<PromptSuggestionSettingsHost>::of(),
-        Arc::new(PromptSuggestionSettingsHost(host.0.clone())),
-    )?;
+    let host = Arc::new(host.clone());
+    ctx.provide_at(Key::<PromptSuggestionSettingsHost>::of(), host.clone())?;
     ctx.provide_at(
         crate::port_faces::face_key::<PromptSuggestionSettingsHost>(),
-        host.0.clone(),
+        host,
     )?;
     Ok(())
 }
 
 const SETTINGS: &str = "promptSuggestionSettingsHost";
 
-struct SettingsFace(PromptSuggestionSettingsRead);
-
-impl HostDispatch for SettingsFace {
+impl HostDispatch for PromptSuggestionSettingsHost {
     fn methods(&self) -> Option<Value> {
         Some(json!({"read": "async"}))
     }
@@ -153,9 +146,10 @@ impl HostDispatch for SettingsFace {
             return Err(crate::port_faces::unknown_method(SETTINGS, method));
         }
         let crate::port_faces::Empty {} = crate::port_faces::request(SETTINGS, args)?;
-        let cancel = CancellationToken::new();
-        let read = (self.0)(cancel.clone());
-        crate::port_faces::serving(SETTINGS, cancel, read)
+        let host = self.clone();
+        crate::port_faces::serving(SETTINGS, async move {
+            host.read(CancellationToken::new()).await
+        })
     }
 }
 

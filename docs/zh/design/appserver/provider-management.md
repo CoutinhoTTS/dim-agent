@@ -530,9 +530,10 @@ leader 的模型，同样不自留规则（[Collaboration](../plugins/Collaborat
 Dispatcher、before 回调、Session 与分支部件；driver、路由和非 chat 规则。读取不增加状态、
 缓存、通知、crate 或模块。
 
-**Rust 绑定。** 绑定接收 `CancellationToken`；取消它会放弃 dispatcher 的等待并返回
-`ModelPortError::Cancelled`。数据面在边界将 owner 的 `HostError` 映射为公开的
-`ModelPortError` 错误码。
+**Rust 绑定。** 绑定直接调用类型化操作，不经过 JSON 或桥接任务。绑定接收
+`CancellationToken`；取消它返回 `ModelPortError::Cancelled`。每次调用持有独立的子 token，
+调用完成或被丢弃时取消该子 token，不取消调用方的 token。操作将 owner 的 `HostError`
+映射为公开的 `ModelPortError`；dispatcher 调用同一个操作并编码回复或错误。
 
 端口是 `crates/dim-agent-capabilities/src/host.rs` 中的
 `SelectableModelsHost`，位于 `ModelSelectionHost` 旁。它的两个读取就是 §3.6 列出的操作：

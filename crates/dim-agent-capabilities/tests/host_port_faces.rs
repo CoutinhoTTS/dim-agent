@@ -20,6 +20,7 @@ use dim_agent_capabilities::toolchain::{
     InstalledToolchain, ToolchainSourceHost, ToolchainSourceReply, ToolchainView,
 };
 use dim_agent_types::{ModalityModelSnapshot, ModelId, ModelSelection};
+use futures_util::FutureExt;
 use rutis::Ctx;
 use rutis::host::CtxHost;
 use rutis_bridge::session::{Error, HostDispatch, Value as RpcValue, host_key};
@@ -66,12 +67,20 @@ async fn the_execution_switches_answer_the_same_through_the_binding_and_the_face
     let binding = root.get::<ExecutionSettingsHost>().unwrap();
     let cancel = CancellationToken::new();
     assert_eq!(
-        binding.read(cancel.clone()).await.unwrap(),
+        binding
+            .read(cancel.clone())
+            .now_or_never()
+            .expect("a ready native read needs no bridge task")
+            .unwrap(),
         wire::<ExecutionSettings>(&root, "executionSettingsHost", "read").await
     );
     assert_eq!(
         wire::<ExecutionSettings>(&root, "executionSettingsHost", "read").await,
         switches
+    );
+    assert!(
+        !cancel.is_cancelled(),
+        "a completed read preserves its caller's token"
     );
 }
 
@@ -153,7 +162,11 @@ async fn the_prompt_suggestion_document_answers_the_same_through_the_binding_and
     let over_the_wire =
         wire::<PromptSuggestionSettings>(&root, "promptSuggestionSettingsHost", "read").await;
     assert_eq!(
-        binding.read(CancellationToken::new()).await.unwrap(),
+        binding
+            .read(CancellationToken::new())
+            .now_or_never()
+            .expect("a ready native read needs no bridge task")
+            .unwrap(),
         over_the_wire
     );
     assert_eq!(
@@ -184,7 +197,8 @@ async fn the_selectable_models_answer_their_documented_empty_request() {
     assert_eq!(
         binding
             .selectable_models(CancellationToken::new())
-            .await
+            .now_or_never()
+            .expect("a ready native read needs no bridge task")
             .unwrap(),
         empty
     );
@@ -193,7 +207,8 @@ async fn the_selectable_models_answer_their_documented_empty_request() {
     assert_eq!(
         binding
             .selectable_for_modality(CancellationToken::new())
-            .await
+            .now_or_never()
+            .expect("a ready native read needs no bridge task")
             .unwrap(),
         modality
     );
@@ -248,7 +263,8 @@ async fn the_model_selection_answers_the_same_through_the_binding_and_the_face()
     assert_eq!(
         binding
             .resolve(request, CancellationToken::new())
-            .await
+            .now_or_never()
+            .expect("a ready native read needs no bridge task")
             .unwrap(),
         selected
     );
@@ -321,35 +337,69 @@ fn watched(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_abandoned_wait_cancels_the_owner_read() {
-    let root = Ctx::root().unwrap();
-    let started = Arc::new(tokio::sync::Notify::new());
-    let cancelled = Arc::new(Mutex::new(None));
-    let settled = Arc::new(tokio::sync::Notify::new());
-    dim_agent_capabilities::execution_settings::provide(
-        &root,
-        &watched(started.clone(), cancelled.clone(), settled.clone()),
-    )
-    .unwrap();
-    let reply = face(&root, "executionSettingsHost")
-        .invoke("read", RpcValue::List(vec![json!({}).into()]))
+async fn cancelled_native_and_abandoned_native_or_wire_reads_settle_the_owner() {
+    for mode in ["wire_drop", "native_drop", "native_cancel"] {
+        let root = Ctx::root().unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let cancelled = Arc::new(Mutex::new(None));
+        let settled = Arc::new(tokio::sync::Notify::new());
+        dim_agent_capabilities::execution_settings::provide(
+            &root,
+            &watched(started.clone(), cancelled.clone(), settled.clone()),
+        )
         .unwrap();
-    let RpcValue::Reference(wait) = reply else {
-        panic!("the face answers a future");
-    };
-    let entered = started.notified();
-    let held = tokio::spawn(async move {
-        let _ = wait.wait_async().await;
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
-        .await
-        .expect("the owner's read starts once its wait does");
-    held.abort();
-    let _ = held.await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), settled.notified())
-        .await
-        .expect("dropping the wait cancels the owner's read");
-    assert_eq!(*cancelled.lock().unwrap(), Some(true));
+        let caller = CancellationToken::new();
+        let entered = started.notified();
+        let held = if mode == "wire_drop" {
+            let reply = face(&root, "executionSettingsHost")
+                .invoke("read", RpcValue::List(vec![json!({}).into()]))
+                .unwrap();
+            let RpcValue::Reference(wait) = reply else {
+                panic!("the face answers a future");
+            };
+            tokio::spawn(async move {
+                wait.wait_async()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        } else {
+            let binding = root.get::<ExecutionSettingsHost>().unwrap();
+            let cancel = caller.clone();
+            tokio::spawn(async move {
+                binding
+                    .read(cancel)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+            .await
+            .expect("the owner's read starts once its wait does");
+        if mode == "native_cancel" {
+            caller.cancel();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), held)
+                .await
+                .expect("cancelling the caller ends its read")
+                .unwrap();
+            assert!(
+                result.is_err(),
+                "{mode}: cancellation is not a successful read"
+            );
+        } else {
+            held.abort();
+            let _ = held.await;
+            assert!(
+                !caller.is_cancelled(),
+                "{mode}: dropping a read preserves its caller's token"
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), settled.notified())
+            .await
+            .expect("ending the call cancels the owner's worker");
+        assert_eq!(*cancelled.lock().unwrap(), Some(true), "{mode}");
+    }
 }
 
 #[tokio::test]

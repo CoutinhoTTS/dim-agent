@@ -823,9 +823,12 @@ client protocol and `PROTOCOL_VERSION`; persistence and its format; Timeline,
 Dispatcher, callbacks, Session and branch parts; and the driver, route and
 non-chat rules. The read adds no state, cache, notification, crate or module.
 
-**Rust binding.** The binding takes a `CancellationToken`; cancelling it abandons
-the dispatched wait and returns `ModelPortError::Cancelled`. The face maps the
-owner's `HostError` into the public `ModelPortError` codes at its boundary.
+**Rust binding.** The binding calls the typed operation directly, without JSON
+or a bridge task. It takes a `CancellationToken`; cancelling it returns
+`ModelPortError::Cancelled`. Each call owns a child token that is cancelled when
+the call completes or is abandoned, without cancelling the caller's token. The
+operation maps the owner's `HostError` into the public `ModelPortError` codes;
+the dispatcher invokes that same operation and encodes its reply or error.
 
 The port is `SelectableModelsHost` in
 `crates/dim-agent-capabilities/src/host.rs` beside `ModelSelectionHost`. Its two

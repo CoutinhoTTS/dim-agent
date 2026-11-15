@@ -1,7 +1,7 @@
 use crate::history::HistoryEntry;
 use dim_agent_runtime::PromptSourceTarget;
 use dim_agent_types::*;
-use futures_util::{FutureExt, Stream};
+use futures_util::Stream;
 use rutis::Ctx;
 use rutis::host::{CtxHost, Key};
 use rutis_bridge::session::{HostDispatch, Reply, Value as BridgeValue};
@@ -673,19 +673,6 @@ pub fn undeclared_modality_operation(operation: &str) -> HostError {
     )
 }
 
-/// The face's error, decoded as the typed failure its caller matches on: the
-/// codes are the port's own, and anything else is a failed call.
-fn port_failure(error: rutis_bridge::session::Error) -> ModelPortError {
-    let message = error.to_string();
-    match error.code() {
-        Some("cancelled") => ModelPortError::Cancelled { message },
-        Some("owner_closed") => ModelPortError::OwnerClosed { message },
-        Some("invalid_request") => ModelPortError::InvalidRequest { message },
-        Some("model_unavailable") => ModelPortError::ModelUnavailable { message },
-        _ => ModelPortError::Failed { message },
-    }
-}
-
 /// What a process model port fails with: `{code, message}`. The owner's
 /// [`HostError`] becomes one of these codes where the face is served, so a
 /// caller of any language reads the same vocabulary.
@@ -788,12 +775,12 @@ pub type ResolveModelSelection = Arc<
 /// the name for any language and called directly by a Rust reader through the
 /// binding that holds it.
 #[derive(Clone)]
-pub struct ModelSelectionHost(Arc<dyn HostDispatch>);
+pub struct ModelSelectionHost(ResolveModelSelection);
 
 impl ModelSelectionHost {
     /// Binds an owner's resolution as the face's operation.
     pub fn new(resolve: ResolveModelSelection) -> Self {
-        Self(Arc::new(SelectionFace(resolve)))
+        Self(resolve)
     }
 
     /// The model one request resolves to.
@@ -802,31 +789,37 @@ impl ModelSelectionHost {
         request: ModelSelectionRequest,
         cancel: CancellationToken,
     ) -> std::result::Result<ModelSelection, ModelPortError> {
-        crate::port_faces::call(MODEL_SELECTION, &self.0, "resolve", &request, &cancel)
-            .await
-            .map_err(port_failure)
+        crate::port_faces::read(
+            cancel,
+            || ModelPortError::Cancelled {
+                message: format!("{MODEL_SELECTION}: cancelled"),
+            },
+            |cancel| async move {
+                (self.0)(
+                    request.explicit,
+                    request.cwd.map(std::path::PathBuf::from),
+                    cancel,
+                )
+                .await
+                .map_err(ModelPortError::from)
+            },
+        )
+        .await
     }
 }
 
 /// Provides one owner's [`ModelSelectionHost`]: the binding its Rust readers
 /// hold and the face any other language calls by name.
 pub fn provide_model_selection(ctx: &Ctx, host: &ModelSelectionHost) -> rutis::Result<()> {
-    ctx.provide_at(
-        Key::<ModelSelectionHost>::of(),
-        Arc::new(ModelSelectionHost(host.0.clone())),
-    )?;
-    ctx.provide_at(
-        crate::port_faces::face_key::<ModelSelectionHost>(),
-        host.0.clone(),
-    )?;
+    let host = Arc::new(host.clone());
+    ctx.provide_at(Key::<ModelSelectionHost>::of(), host.clone())?;
+    ctx.provide_at(crate::port_faces::face_key::<ModelSelectionHost>(), host)?;
     Ok(())
 }
 
 const MODEL_SELECTION: &str = "modelSelectionHost";
 
-struct SelectionFace(ResolveModelSelection);
-
-impl HostDispatch for SelectionFace {
+impl HostDispatch for ModelSelectionHost {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(json!({"resolve": "async"}))
     }
@@ -836,17 +829,10 @@ impl HostDispatch for SelectionFace {
             return Err(crate::port_faces::unknown_method(MODEL_SELECTION, method));
         }
         let request: ModelSelectionRequest = crate::port_faces::request(MODEL_SELECTION, args)?;
-        let cancel = CancellationToken::new();
-        let resolve = (self.0)(
-            request.explicit,
-            request.cwd.map(std::path::PathBuf::from),
-            cancel.clone(),
-        );
-        crate::port_faces::serving(
-            MODEL_SELECTION,
-            cancel,
-            async move { resolve.await.map_err(ModelPortError::from) }.boxed(),
-        )
+        let host = self.clone();
+        crate::port_faces::serving(MODEL_SELECTION, async move {
+            host.resolve(request, CancellationToken::new()).await
+        })
     }
 }
 
@@ -917,15 +903,18 @@ pub type ModalityModelsRead =
 /// under the name for any language and called directly by a Rust reader
 /// through the binding that holds them.
 #[derive(Clone)]
-pub struct SelectableModelsHost(Arc<dyn HostDispatch>);
+pub struct SelectableModelsHost {
+    selectable: SelectableModelsRead,
+    modality: ModalityModelsRead,
+}
 
 impl SelectableModelsHost {
     /// Binds an owner's two enumerations as the face's operations.
     pub fn new(selectable: SelectableModelsRead, modality: ModalityModelsRead) -> Self {
-        Self(Arc::new(SelectableFace {
+        Self {
             selectable,
             modality,
-        }))
+        }
     }
 
     /// The models the owner would serve, as execution would select them.
@@ -933,15 +922,19 @@ impl SelectableModelsHost {
         &self,
         cancel: CancellationToken,
     ) -> std::result::Result<SelectableModelsReply, ModelPortError> {
-        crate::port_faces::call(
-            SELECTABLE_MODELS,
-            &self.0,
-            "selectableModels",
-            &crate::port_faces::Empty {},
-            &cancel,
+        crate::port_faces::read(
+            cancel,
+            || ModelPortError::Cancelled {
+                message: format!("{SELECTABLE_MODELS}: cancelled"),
+            },
+            |cancel| async move {
+                let models = (self.selectable)(cancel)
+                    .await
+                    .map_err(ModelPortError::from)?;
+                Ok(SelectableModelsReply { models })
+            },
         )
         .await
-        .map_err(port_failure)
     }
 
     /// The models the owner would select for a non-conversational use, with
@@ -953,40 +946,34 @@ impl SelectableModelsHost {
         &self,
         cancel: CancellationToken,
     ) -> std::result::Result<ModalityModelsReply, ModelPortError> {
-        crate::port_faces::call(
-            SELECTABLE_MODELS,
-            &self.0,
-            "selectableForModality",
-            &crate::port_faces::Empty {},
-            &cancel,
+        crate::port_faces::read(
+            cancel,
+            || ModelPortError::Cancelled {
+                message: format!("{SELECTABLE_MODELS}: cancelled"),
+            },
+            |cancel| async move {
+                let models = (self.modality)(cancel)
+                    .await
+                    .map_err(ModelPortError::from)?;
+                Ok(ModalityModelsReply { models })
+            },
         )
         .await
-        .map_err(port_failure)
     }
 }
 
 /// Provides one owner's [`SelectableModelsHost`]: the binding its Rust readers
 /// hold and the face any other language calls by name.
 pub fn provide_selectable_models(ctx: &Ctx, host: &SelectableModelsHost) -> rutis::Result<()> {
-    ctx.provide_at(
-        Key::<SelectableModelsHost>::of(),
-        Arc::new(SelectableModelsHost(host.0.clone())),
-    )?;
-    ctx.provide_at(
-        crate::port_faces::face_key::<SelectableModelsHost>(),
-        host.0.clone(),
-    )?;
+    let host = Arc::new(host.clone());
+    ctx.provide_at(Key::<SelectableModelsHost>::of(), host.clone())?;
+    ctx.provide_at(crate::port_faces::face_key::<SelectableModelsHost>(), host)?;
     Ok(())
 }
 
 const SELECTABLE_MODELS: &str = "selectableModelsHost";
 
-struct SelectableFace {
-    selectable: SelectableModelsRead,
-    modality: ModalityModelsRead,
-}
-
-impl HostDispatch for SelectableFace {
+impl HostDispatch for SelectableModelsHost {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(json!({"selectableModels": "async", "selectableForModality": "async"}))
     }
@@ -996,25 +983,16 @@ impl HostDispatch for SelectableFace {
             return Err(crate::port_faces::unknown_method(SELECTABLE_MODELS, method));
         }
         let crate::port_faces::Empty {} = crate::port_faces::request(SELECTABLE_MODELS, args)?;
-        let cancel = CancellationToken::new();
-        let encode = |error: rutis_bridge::session::Error| ModelPortError::Failed {
-            message: error.to_string(),
-        };
-        let read: Pin<Box<dyn Future<Output = Result<BridgeValue, ModelPortError>> + Send>> =
-            if method == "selectableModels" {
-                let read = (self.selectable)(cancel.clone());
-                Box::pin(async move {
-                    let models = read.await.map_err(ModelPortError::from)?;
-                    rutis_bridge::session::arg(&SelectableModelsReply { models }).map_err(encode)
-                })
-            } else {
-                let read = (self.modality)(cancel.clone());
-                Box::pin(async move {
-                    let models = read.await.map_err(ModelPortError::from)?;
-                    rutis_bridge::session::arg(&ModalityModelsReply { models }).map_err(encode)
-                })
-            };
-        crate::port_faces::serving_encoded(SELECTABLE_MODELS, cancel, read)
+        let host = self.clone();
+        if method == "selectableModels" {
+            crate::port_faces::serving(SELECTABLE_MODELS, async move {
+                host.selectable_models(CancellationToken::new()).await
+            })
+        } else {
+            crate::port_faces::serving(SELECTABLE_MODELS, async move {
+                host.selectable_for_modality(CancellationToken::new()).await
+            })
+        }
     }
 }
 

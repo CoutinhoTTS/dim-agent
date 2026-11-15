@@ -590,6 +590,7 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/execution_settings.rs",
       "unexpandedMacros": [
+        "format",
         "json"
       ]
     },
@@ -1007,8 +1008,7 @@
       "file": "crates/dim-agent-capabilities/src/port_faces.rs",
       "unexpandedMacros": [
         "format",
-        "tokio::select",
-        "vec"
+        "tokio::select"
       ]
     },
     {
@@ -1478,8 +1478,7 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/toolchain.rs",
       "unexpandedMacros": [
-        "json",
-        "vec"
+        "json"
       ]
     },
     {
@@ -11817,10 +11816,10 @@
       "to": "dim_agent_capabilities::port_faces",
       "references": [
         "path Empty",
-        "path port_faces::call",
-        "path port_faces::face_key",
+        "path crate::port_faces::face_key",
+        "path crate::port_faces::read",
+        "path crate::port_faces::serving",
         "path port_faces::request",
-        "path port_faces::serving",
         "path port_faces::unknown_method",
         "use crate::port_faces",
         "use crate::port_faces::Empty"
@@ -13073,11 +13072,10 @@
       "to": "dim_agent_capabilities::port_faces",
       "references": [
         "path crate::port_faces::Empty",
-        "path crate::port_faces::call",
         "path crate::port_faces::face_key",
+        "path crate::port_faces::read",
         "path crate::port_faces::request",
         "path crate::port_faces::serving",
-        "path crate::port_faces::serving_encoded",
         "path crate::port_faces::unknown_method"
       ]
     },
@@ -15329,8 +15327,8 @@
       "to": "dim_agent_capabilities::port_faces",
       "references": [
         "path crate::port_faces::Empty",
-        "path crate::port_faces::call",
         "path crate::port_faces::face_key",
+        "path crate::port_faces::read",
         "path crate::port_faces::request",
         "path crate::port_faces::serving",
         "path crate::port_faces::unknown_method"
@@ -17999,6 +17997,7 @@
       "references": [
         "path Empty",
         "path port_faces::face_key",
+        "path port_faces::failure",
         "path port_faces::request",
         "path port_faces::unknown_method",
         "use crate::port_faces",

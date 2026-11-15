@@ -1,18 +1,12 @@
-//! The plumbing of the process host-port faces: the one request object a call
-//! carries, the wait a caller abandons, and the errors a face answers with.
-//!
-//! Each port writes its dispatcher over these helpers, so the wire shape and
-//! its Rust binding are one module: the dispatcher accepts exactly the
-//! documented request object, and its reply is a cancellable future — a caller
-//! that drops its wait cancels the call, and the owner sees the token it was
-//! given cancelled.
-use rutis::host::{BoxFuture, Key};
+//! Data encoding at the process host-port boundary and cancellation of
+//! typed owner reads. Native calls do not pass through the dispatcher.
+use rutis::host::Key;
 use rutis_bridge::session::{
     Error as BridgeError, HostDispatch, Reply, Value as BridgeValue, host_key,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::sync::Arc;
+use std::future::Future;
 use tokio_util::sync::CancellationToken;
 
 /// The request of an operation that takes none: the documented `{}`.
@@ -47,42 +41,21 @@ pub(crate) fn request<T: DeserializeOwned>(
     serde_json::from_value(request).map_err(|error| invalid(port, error))
 }
 
-/// One operation's answer as the face serves it: a cancellable future whose
-/// token is cancelled when the last caller drops its wait, so an abandoned
-/// call ends the owner's read instead of letting it run on.
+/// Encodes a typed operation's reply for a caller across the bridge.
+/// Abandoning the wait drops the operation and its cancellation guard.
 pub(crate) fn serving<T, E>(
     port: &'static str,
-    cancel: CancellationToken,
-    call: BoxFuture<'static, Result<T, E>>,
+    call: impl Future<Output = Result<T, E>> + Send + 'static,
 ) -> Reply
 where
     T: Serialize + Send + 'static,
     E: Serialize + std::fmt::Display + Send + 'static,
 {
-    let guard = cancel.clone().drop_guard();
     Ok(BridgeValue::cancellable_future(async move {
-        let _abandoned = guard;
         match call.await {
             Ok(reply) => rutis_bridge::session::arg(&reply),
             Err(error) => Err(failure(port, error)),
         }
-    }))
-}
-
-/// [`serving`] for an answer already encoded: a face whose operations answer
-/// with different reply types encodes each one itself.
-pub(crate) fn serving_encoded<E>(
-    port: &'static str,
-    cancel: CancellationToken,
-    call: BoxFuture<'static, Result<BridgeValue, E>>,
-) -> Reply
-where
-    E: Serialize + std::fmt::Display + Send + 'static,
-{
-    let guard = cancel.clone().drop_guard();
-    Ok(BridgeValue::cancellable_future(async move {
-        let _abandoned = guard;
-        call.await.map_err(|error| failure(port, error))
     }))
 }
 
@@ -108,39 +81,22 @@ pub(crate) fn unknown_method(port: &str, method: &str) -> BridgeError {
     BridgeError::Value(format!("{port} has no method {method}"))
 }
 
-/// The caller's side of one operation: the request it sends and the wait it
-/// abandons. A cancelled `cancel` ends the call before it starts, and a wait
-/// dropped mid-flight cancels the owner's read.
-pub(crate) async fn call<T: DeserializeOwned>(
-    port: &'static str,
-    face: &Arc<dyn HostDispatch>,
-    method: &str,
-    request: &impl Serialize,
-    cancel: &CancellationToken,
-) -> Result<T, BridgeError> {
+/// Runs an owner read in the caller's task. Cancelling or dropping the call
+/// cancels only its child token; a pre-cancelled call never reaches the owner.
+pub(crate) async fn read<T, E, F: Future<Output = Result<T, E>>>(
+    cancel: CancellationToken,
+    cancelled: impl FnOnce() -> E,
+    read: impl FnOnce(CancellationToken) -> F,
+) -> Result<T, E> {
     if cancel.is_cancelled() {
-        return Err(cancelled(port));
+        return Err(cancelled());
     }
-    let args = BridgeValue::List(vec![rutis_bridge::session::arg(request)?]);
-    let reply = face.invoke(method, args)?;
-    let BridgeValue::Reference(wait) = reply else {
-        return reply
-            .json()
-            .map_err(|_| invalid(port, "the reply is not data"))
-            .and_then(|value| serde_json::from_value(value).map_err(|error| invalid(port, error)));
-    };
-    let reply = tokio::select! {
-        reply = wait.wait_async() => reply?,
-        _ = cancel.cancelled() => return Err(cancelled(port)),
-    };
-    let value = reply
-        .json()
-        .map_err(|_| invalid(port, "the reply is not data"))?;
-    serde_json::from_value(value).map_err(|error| invalid(port, error))
-}
-
-fn cancelled(port: &str) -> BridgeError {
-    rutis_bridge::exports::failure(port, "cancelled", format!("{port}: cancelled"), None)
+    let child = cancel.child_token();
+    let _abandoned = child.clone().drop_guard();
+    tokio::select! {
+        result = read(child) => result,
+        _ = cancel.cancelled() => Err(cancelled()),
+    }
 }
 
 /// The key a port type's face is served at: its name in camelCase, as a

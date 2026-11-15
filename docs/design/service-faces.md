@@ -380,7 +380,7 @@ eventSubscriptions.list {sessionId} -> reply
 
 ### 4.10 宿主端口：`executionSettingsHost` 等五个
 
-这五个读取端口持有 owner 的闭包，Rust 绑定调用同模块的 dispatcher，不写第二份业务逻辑。异步回复是 `cancellable_future`：丢弃等待会取消 owner 的 token，owner 的生命周期仍约束其工作。
+这五个读取端口持有 owner 的闭包，Rust 绑定直接调用类型化操作；dispatcher 只在跨语言边界解码请求、调用同一个操作并编码回复，不写第二份业务逻辑。Rust 调用不经过 JSON，也不为读取另起桥接任务。每次异步调用持有独立的子取消 token：取消或丢弃调用会取消该次 owner 读取，不取消调用方的父 token。跨语言回复使用 `cancellable_future`，放弃等待会丢弃同一个读取；owner 的生命周期仍约束其工作。
 
 ```text
 executionSettingsHost.read({}) -> {sandbox, network}

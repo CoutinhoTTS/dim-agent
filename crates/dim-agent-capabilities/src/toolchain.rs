@@ -61,12 +61,12 @@ pub type InstalledToolchains = Arc<dyn Fn() -> Vec<InstalledToolchain> + Send + 
 /// the name for any language and called directly by a Rust reader through the
 /// binding that holds it.
 #[derive(Clone)]
-pub struct ToolchainSourceHost(Arc<dyn HostDispatch>);
+pub struct ToolchainSourceHost(InstalledToolchains);
 
 impl ToolchainSourceHost {
     /// Binds an owner's list as the face's operation.
     pub fn new(toolchains: InstalledToolchains) -> Self {
-        Self(Arc::new(Face(toolchains)))
+        Self(toolchains)
     }
 
     /// Toolchains that never change, for an assembly that installs no
@@ -77,37 +77,23 @@ impl ToolchainSourceHost {
 
     /// The installed runtimes, in order.
     pub fn list(&self) -> std::result::Result<ToolchainSourceReply, ToolchainSourceError> {
-        let failed = |error: String| ToolchainSourceError::Failed { message: error };
-        let request =
-            rutis_bridge::session::arg(&Empty {}).map_err(|error| failed(error.to_string()))?;
-        let reply = self
-            .0
-            .invoke("list", BridgeValue::List(vec![request]))
-            .map_err(|error| failed(error.to_string()))?;
-        let value = reply.json().map_err(|error| failed(error.to_string()))?;
-        serde_json::from_value(value).map_err(|error| failed(error.to_string()))
+        let toolchains = (self.0)().iter().filter_map(view).collect();
+        Ok(ToolchainSourceReply { toolchains })
     }
 }
 
 /// Provides one owner's [`ToolchainSourceHost`]: the binding its Rust readers
 /// hold and the face any other language calls by name.
 pub fn provide(ctx: &Ctx, host: &ToolchainSourceHost) -> rutis::Result<()> {
-    ctx.provide_at(
-        Key::<ToolchainSourceHost>::of(),
-        Arc::new(ToolchainSourceHost(host.0.clone())),
-    )?;
-    ctx.provide_at(
-        port_faces::face_key::<ToolchainSourceHost>(),
-        host.0.clone(),
-    )?;
+    let host = Arc::new(host.clone());
+    ctx.provide_at(Key::<ToolchainSourceHost>::of(), host.clone())?;
+    ctx.provide_at(port_faces::face_key::<ToolchainSourceHost>(), host)?;
     Ok(())
 }
 
 const NAME: &str = "toolchainSourceHost";
 
-struct Face(InstalledToolchains);
-
-impl HostDispatch for Face {
+impl HostDispatch for ToolchainSourceHost {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(json!({"list": "sync"}))
     }
@@ -117,8 +103,10 @@ impl HostDispatch for Face {
             return Err(port_faces::unknown_method(NAME, method));
         }
         let Empty {} = port_faces::request(NAME, args)?;
-        let toolchains = (self.0)().iter().filter_map(view).collect();
-        rutis_bridge::session::arg(&ToolchainSourceReply { toolchains })
+        let reply = self
+            .list()
+            .map_err(|error| port_faces::failure(NAME, error))?;
+        rutis_bridge::session::arg(&reply)
     }
 }
 
