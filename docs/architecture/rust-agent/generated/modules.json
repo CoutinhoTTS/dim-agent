@@ -6483,6 +6483,7 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/text.rs",
       "unexpandedMacros": [
+        "matches",
         "vec"
       ]
     },
@@ -41918,6 +41919,13 @@
     },
     {
       "from": "dim_cli::ui::composer",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
       "to": "dim_cli::attachments",
       "references": [
         "path MAX_IMAGES",
@@ -42426,6 +42434,13 @@
         "path MAX_INPUT_ROWS",
         "path Outcome::SubmitDraft",
         "path read_planned"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::ui::composer::palette",
+      "references": [
+        "path palette"
       ]
     },
     {
@@ -47911,6 +47926,7 @@
         "path gutter_width",
         "path truncate_cells",
         "path wrap_cells",
+        "path wrap_with_source",
         "use crate::ui::text::ASSISTANT_MARK",
         "use crate::ui::text::DONE_MARK",
         "use crate::ui::text::ERROR_MARK",
@@ -47925,7 +47941,8 @@
         "use crate::ui::text::display_width",
         "use crate::ui::text::gutter_width",
         "use crate::ui::text::truncate_cells",
-        "use crate::ui::text::wrap_cells"
+        "use crate::ui::text::wrap_cells",
+        "use crate::ui::text::wrap_with_source"
       ]
     },
     {
