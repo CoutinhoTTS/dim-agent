@@ -9522,7 +9522,8 @@ mod tests {
                 .route("/v1/chat/completions", axum::routing::post(completion))
                 .with_state(provider.clone());
             let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let directory = std::env::temp_dir().join(format!("dim-eval-{label}"));
+            let directory =
+                std::env::temp_dir().join(format!("dim-eval-{label}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&directory);
             std::fs::create_dir_all(&directory).unwrap();
             let models = directory.join("models.json");
