@@ -165,6 +165,7 @@ New bindings automatically adopt the replacement through the existing flow below
 - **MCP 启用**：已配置的服务器启用即运行，没有宿主本地批准（[ADR 003](../../adr/003-approval-scope.md)）；项目 `.mcp.json` 的条目默认禁用，只由用户的本地记录启用。已禁用或删除的服务器不发现、不连接，McpSession 不提供其集合（状态 `Disabled`）；配置或启用变化时立即撤销旧集合（仅刷新时保留旧集合至替换就绪）。配置替换时，已绑定请求所持的旧版本 handler 保留其代次直到释放；停用、删除或显式断开会在所有 Session 中关闭它，包括已绑定的请求；停用在来源文件不可读时也生效，被撤回的条目报告为 `Disabled` 而非连接失败。协调者的应用状态变化时各 McpSession 重读选择，外部编辑经目录读取或连接操作被发现后到达每个 Session；Session 开始关闭后不再发现或创建连接。文件根授权、工具权限预设与 Session 回放都不启用条目。McpSession 在首次发现及任何目录或设置读取之前先订阅 settings/applied，避免在初次读取与订阅之间提交的变更永远不被观察。
 - **维护变化**：动态来源按整组校验、原子替换；分支采用新的工具集合，作为 `context/configured` 的工具部分写入 Timeline（工具声明属于模型上下文）。
 - **请求一致**：在 Loop 构造请求时固定本请求的声明与实现（同一版本），供 ToolExecutor 按名取实现；本请求结算后释放。Loop 在 `turn/end` 统一 `retain_only(None)`，不在每种结束路径各自释放。
+- **MCP 工具的排序类别**：`tools/list` 的每项带 `annotations.readOnlyHint` 时，`McpTool.read_only` 记录 `readOnlyHint == true`，`McpToolHandler` 据此回答执行顺序类别（`Concurrent` 或 `Exclusive`），与宿主工具、注册工具同一机制（[ToolRegistry](plugins/ToolRegistry.md#handler-contract)、[ToolExecution](plugins/ToolExecution.md#toolexecutor)）。缺省、`false` 与非布尔值都是独占。**它只决定执行顺序**：定义里仍是 `risk: None`，Permission 与 Approval 只看 `risk`，所以 hint 不改变任何审批、允许集或权限；服务器误标只让它自己的调用失去顺序，回到同批并发。
 
 不负责：审批与权限、Skill、沙箱与路径、提示词来源、工具执行流程（归 ToolExecutor）。
 
