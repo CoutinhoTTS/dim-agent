@@ -473,9 +473,7 @@ fn history_page_query(branch: &str, from: u64, through: u64, limit: usize) -> Ti
 /// How many facts one page of a prefix read holds.
 const PREFIX_PAGE: u64 = 4096;
 
-/// Folds the facts of the session's `main` chain through `at`, in chain order,
-/// into `rest` one page at a time: the fork's rest-point check reads them as
-/// one history without the prefix being held.
+/// Folds the rest-point facts of `main` through `at` in chain order.
 async fn chain_through(
     session: &Session,
     at: u64,
@@ -484,6 +482,12 @@ async fn chain_through(
     let mut query = history_page_query("main", 1, at, PREFIX_PAGE as usize);
     query.scope = TimelineQueryScope::Chain;
     query.from = None;
+    query.query.filter = Some(QueryFilter::In {
+        value: QueryOperand::Field {
+            path: "kind".into(),
+        },
+        values: RestPoint::KINDS.into_iter().map(Into::into).collect(),
+    });
     loop {
         let reply = session.query("main", query.clone()).await?;
         let QueryOutput::Events { events } = reply.result else {
@@ -2124,6 +2128,20 @@ struct RestPoint {
 }
 
 impl RestPoint {
+    const KINDS: [&str; 11] = [
+        "turn/start",
+        "turn/end",
+        "branch/start",
+        "branch/resume",
+        "stop/interrupt",
+        "input/message",
+        "input/applied",
+        "input/consumed",
+        "input/deleted",
+        "exec/started",
+        "exec/ended",
+    ];
+
     /// Folds one page of the prefix.
     fn page(&mut self, events: &[Arc<dim_agent_types::AgentEvent>]) {
         for event in events {

@@ -546,6 +546,178 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
     server.join().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fork_checks_only_rest_point_facts_and_keeps_state_across_pages() {
+    use dim_agent_runtime::{Timeline, TimelineKey};
+    use dim_agent_types::{
+        ExtensionEvent, InputBlock, InputDeletedData, InputMessageData, InputMode, TurnEndData,
+        TurnStartData,
+    };
+    use dim_app_server::storage::{SessionStore, SqliteStorage, SqliteTimelineStore};
+
+    let mut costs = Vec::new();
+    for (noise, turns) in [(64, 1), (16_384, 1), (64, 2_050)] {
+        let store = Store::new();
+        let (server, _) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let sid = session(&mut client).await;
+        turn(&mut client, &sid, "ready").await;
+        drop(client);
+        server.shutdown();
+        server.join().await.unwrap();
+
+        let database = SqliteStorage::open(store.database()).unwrap();
+        let native = SqliteTimelineStore::new(database.clone());
+        let timeline = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: sid.clone(),
+                branch_id: "main".into(),
+            },
+            vec![],
+            native.clone(),
+        )
+        .await
+        .unwrap();
+        let pending = timeline
+            .append(
+                EventKind::InputMessage(InputMessageData {
+                    mode: Some(InputMode::Queue),
+                    blocks: vec![InputBlock::Raw {
+                        text: "withdrawn after the historical cut".into(),
+                        key: None,
+                        retire: false,
+                    }],
+                    ..Default::default()
+                })
+                .into(),
+            )
+            .unwrap();
+        let mut facts = (0..noise)
+            .map(|index| {
+                EventKind::Extension(
+                    ExtensionEvent::new("fork-probe", "noise", json!({"index":index})).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for index in 0..turns {
+            facts.push(EventKind::TurnStart(TurnStartData {
+                turn_id: format!("completed-{index}"),
+            }));
+            facts.push(EventKind::TurnEnd(TurnEndData {
+                turn_id: format!("completed-{index}"),
+                outcome: dim_agent_types::TurnOutcome::Completed {
+                    reason: "done".into(),
+                },
+            }));
+        }
+        for batch in facts.chunks(256) {
+            timeline
+                .append_batch_registered(
+                    batch.iter().cloned().map(Into::into).collect(),
+                    |_| Ok(()),
+                )
+                .unwrap();
+        }
+        let retained = timeline
+            .append(
+                EventKind::InputMessage(InputMessageData::text(
+                    "retained",
+                    Some(InputMode::Append),
+                ))
+                .into(),
+            )
+            .unwrap();
+        let compaction = serde_json::from_value(json!({
+            "through":retained.sequence,"status":"completed","retain_from":retained.id,
+            "replacement":[{"role":"user","content":"summary"}],
+            "strategy":"summary","diagnostics":{
+                "reason":"auto","trigger":"threshold","estimatedInputTokens":1,
+                "entriesReplaced":1,"modelCallCount":1,"durationMs":1,"strategy":{"kind":"summary"}
+            },"context_baseline":[]
+        }))
+        .unwrap();
+        timeline
+            .append(EventKind::ContextCompaction(compaction).into())
+            .unwrap();
+        let waiting_at = timeline.committed();
+        let deleted = timeline
+            .append(
+                EventKind::InputDeleted(InputDeletedData {
+                    input_id: pending.id.clone(),
+                })
+                .into(),
+            )
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            timeline
+                .watch()
+                .wait_for(|&(published, _)| published >= deleted.sequence),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        native.close().await.unwrap();
+        database.close().await.unwrap();
+        drop((timeline, native, database));
+
+        let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
+        assert_ok(
+            &client
+                .rpc("session.idle", json!({"sessionId":sid,"branchId":"main"}))
+                .await,
+        );
+        let storage = server.service::<SessionStore>().unwrap();
+        storage.timeline_diagnostics().record_query_statistics();
+        let started = std::time::Instant::now();
+        let (code, message) = error(&fork(&mut client, &sid, waiting_at).await);
+        let elapsed = started.elapsed();
+        let statements = storage.timeline_diagnostics().take_query_statistics();
+        let steps: i64 = statements.iter().map(|stat| i64::from(stat.vm_steps)).sum();
+        assert_eq!(code, "session_invalid_input");
+        assert!(
+            message.contains("an input is waiting to be consumed"),
+            "{message}"
+        );
+        assert!(steps > 0, "the wire check must record native query work");
+        if turns == 1 {
+            costs.push(steps);
+        }
+        eprintln!(
+            "fork rest-point check: noise={noise}, turns={turns}, vm_steps={steps}, elapsed={elapsed:?}"
+        );
+
+        let fid = forked(&fork(&mut client, &sid, deleted.sequence).await);
+        let target = agent.get_session(&fid).unwrap();
+        let copied = history(&target, "main").await;
+        assert_eq!(
+            copied
+                .iter()
+                .filter(|event| event.kind.key() == "fork-probe/noise")
+                .count(),
+            noise,
+            "kind filtering must not change the store-side copy"
+        );
+        assert!(
+            !copied
+                .iter()
+                .filter(|event| event.sequence > deleted.sequence)
+                .any(|event| WORK.contains(&event.kind.key())),
+            "the withdrawn input must not run in the fork"
+        );
+        drop((target, agent, client));
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+    assert!(
+        costs[1] <= costs[0] * 2,
+        "irrelevant history must not drive fork validation reads: {costs:?}"
+    );
+}
+
 /// Acceptance 7 (#127): a fork of a leader whose request to a member is
 /// open at the cut records a failed result and starts no turn; the source's
 /// member keeps working and its result reaches the source.

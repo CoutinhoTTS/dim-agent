@@ -327,6 +327,17 @@ starts nothing. Append inputs may remain: they start no turn and join the next r
 right after `validate_context_boundary`, by reading those capabilities' facts (§14, §16 D1). The usual fork points, after a turn ends or before a user message, are rest
 points unless a background task was running.
 
+The rest-point read selects only `turn/start`, `turn/end`, `branch/start`, `branch/resume`,
+`stop/interrupt`, `input/message`, `input/applied`, `input/consumed`, `input/deleted`,
+`exec/started` and `exec/ended` through the fixed cut, using the existing
+[Timeline property query](../timeline-property-query.md). It folds the selected facts in position
+order, carrying state between pages. Branch start/resume facts reset the generation's closing
+state; interrupts and tagged wake inputs must remain in the same fold as task endings.
+The read volume is the number of these facts before the cut, not all historical events; it still
+grows with relevant input, turn and task history. Context compaction cannot truncate this read:
+an older input or background task may still be pending. The context-boundary check and storage-side
+copy keep their own contracts and costs.
+
 **Why `main` only.** A child branch's history is its ancestors' prefixes followed by its own events, and each branch
 numbers its events from 1. Laying that out as one `main` would renumber events, and compaction `through`,
 `branch/create.at`, `branch/start.createEvent`, batch ends and snapshot anchors refer to those numbers: the store
@@ -697,6 +708,10 @@ stop would deadlock that reload, and delaying release would let a later member i
 11. A delete of a Session still building, a `session.create` and a `session.fork` held in a capability's apply after
     their rows commit and are listed, waits for the build, then replies `{deleted: true}`; no row and no loaded Session of the id
     remain (D6). An id that is not one path component is refused and removes nothing (D3).
+12. With a fixed compacted context tail, growing unrelated history does not grow the rest-point query work.
+    A pending input before that compaction still refuses a historical cut, including when relevant facts span
+    multiple pages; a cut after its withdrawal succeeds, preserves the copied history and starts no work.
+    Covered by `fork_checks_only_rest_point_facts_and_keeps_state_across_pages` in [fork.rs](../../../crates/dim-app-server/tests/transport_flow/fork.rs).
 
 Tests: 1 and 2 are `delete_closes_a_running_session_and_removes_what_it_stored` and
 `unloaded_and_damaged_sessions_are_deleted_by_id` in
