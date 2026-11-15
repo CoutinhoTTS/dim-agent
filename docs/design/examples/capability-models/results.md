@@ -1,5 +1,7 @@
 # TLC run record
 
+Scope clarification: this is the original 34-configuration experiment, not a complete per-Capability coverage verdict. See the subsequent [coverage audit](coverage-audit.md) and its separate Wait selection probe; none of these recorded models/configurations was changed by that audit.
+
 Date: 2026-11-15. Code correspondence: `8a5fe0980`. Java 17.0.18, TLA+ tools release 1.7.4, TLC 2.19 (rev 5a47802), one worker, 2 GiB maximum heap.
 
 **34 configurations executed: 32 passed; two ShellSession recovery configurations produced temporal counterexamples.** All searches exhausted their state queues. A counterexample is a failed property, not a passing test. There were no parser errors or timeouts in this final run.
