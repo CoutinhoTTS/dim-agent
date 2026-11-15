@@ -1706,3 +1706,195 @@ async fn stop_turn_stops_only_the_open_turn_it_names() {
     );
     soon(agent.close()).await.unwrap();
 }
+
+/// One batch `[x0, x1, c2]`: X0 holds the turn, the two calls after it wait
+/// for their steps.
+struct HoldingTools {
+    entered: Arc<Notify>,
+    /// Names whose calls only read.
+    concurrent: Vec<&'static str>,
+    started: Arc<Mutex<Vec<String>>>,
+    /// Wakes the test when the held call's cancel token fires.
+    cancelled: Arc<Notify>,
+    /// Calls left running when the batch settled.
+    live: Arc<AtomicUsize>,
+}
+struct Live(Arc<AtomicUsize>);
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl ToolDriver for HoldingTools {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        ["x0", "x1", "c2"]
+            .map(|name| {
+                dim_agent_capabilities::tool_registry::definition(
+                    name,
+                    name,
+                    serde_json::json!({"type":"object"}),
+                )
+            })
+            .to_vec()
+    }
+    fn concurrency(
+        &self,
+        call: &ToolCall,
+    ) -> dim_agent_capabilities::tool_registry::ToolConcurrency {
+        if self.concurrent.contains(&call.name.as_str()) {
+            dim_agent_capabilities::tool_registry::ToolConcurrency::Concurrent
+        } else {
+            dim_agent_capabilities::tool_registry::ToolConcurrency::Exclusive
+        }
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        _: ToolExecutionContext,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        self.started.lock().unwrap().push(call.name.clone());
+        if call.name == "x0" {
+            self.live.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            let cancelled = self.cancelled.clone();
+            let live = self.live.clone();
+            return Box::pin(async move {
+                let _live = Live(live);
+                cancel.cancelled().await;
+                cancelled.notify_one();
+                Err(HostError::Cancelled("x0 cancelled".into()))
+            });
+        }
+        Box::pin(async move { Ok(ToolResult::text(format!("{} ran", call.name))) })
+    }
+}
+
+/// The model's first reply is the batch `[x0, x1, c2]`, then text.
+struct BatchModel;
+impl ModelDriver for BatchModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: dim_agent_capabilities::host::ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let first = !request
+            .messages
+            .iter()
+            .any(|message| format!("{message:?}").contains("x0 done"));
+        Box::pin(async move {
+            if !first {
+                return EchoModel.invoke(request, connection, cancel).await;
+            }
+            let mut chunks = vec![Ok(ModelChunk::MessageStart {
+                message_id: "batch".into(),
+            })];
+            for name in ["x0", "x1", "c2"] {
+                chunks.push(Ok(ModelChunk::ToolStart {
+                    id: name.into(),
+                    name: name.into(),
+                }));
+                chunks.push(Ok(ModelChunk::ToolUse(ToolCall {
+                    id: name.into(),
+                    name: name.into(),
+                    input: JsonObject::new(),
+                })));
+            }
+            chunks.push(Ok(ModelChunk::MessageStop {
+                message_id: "batch".into(),
+                reason: ModelStopReason::ToolUse,
+            }));
+            Ok(Box::pin(futures_util::stream::iter(chunks)) as ModelStream)
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupt_while_a_later_segment_waits_cancels_those_calls() {
+    let entered = Arc::new(Notify::new());
+    let cancelled = Arc::new(Notify::new());
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let live = Arc::new(AtomicUsize::new(0));
+    let tools = Arc::new(HoldingTools {
+        entered: entered.clone(),
+        concurrent: vec!["c2"],
+        started: started.clone(),
+        cancelled: cancelled.clone(),
+        live: live.clone(),
+    });
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(BatchModel))))
+        .session_value(Arc::new(ToolHost(tools)))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    dim_agent_capabilities::register_names(&mut builder);
+    defaults::install(&mut builder);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig {
+        tools: Some(vec!["x0".into(), "x1".into(), "c2".into()]),
+        permission_policy: PermissionPolicy {
+            preset: PermissionPreset::FullAccess,
+            ..Default::default()
+        },
+        ..SessionConfig::default()
+    }))
+    .await
+    .unwrap();
+    session
+        .submit("go".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    soon(entered.notified()).await;
+    assert_eq!(
+        *started.lock().unwrap(),
+        ["x0"],
+        "only the held call started by the interrupt"
+    );
+    session.stop("main", "operator stop".into()).await.unwrap();
+    soon(cancelled.notified()).await;
+    soon(session.idle("main")).await.unwrap();
+    assert_eq!(
+        live.load(Ordering::SeqCst),
+        0,
+        "the held call released its resources"
+    );
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let results = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => Some(data.results.clone()),
+            _ => None,
+        })
+        .expect("the batch settles once");
+    let cancelled_texts: Vec<&str> = results
+        .iter()
+        .filter_map(|item| match &item.result.content {
+            ToolContent::Text(text) if text == "Tool cancelled before execution" => {
+                Some(item.call_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cancelled_texts,
+        ["x1", "c2"],
+        "the waiting calls settle as cancelled: {results:?}"
+    );
+    assert_eq!(
+        started.lock().unwrap().len(),
+        1,
+        "neither waiting call ran: {:?}",
+        started.lock().unwrap()
+    );
+    soon(agent.close()).await.unwrap();
+}

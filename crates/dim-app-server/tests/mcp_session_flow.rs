@@ -85,6 +85,15 @@ struct Remote {
     lookup_ids: Mutex<Vec<Value>>,
     /// The params of every `notifications/cancelled` the server received.
     cancelled: Mutex<Vec<Value>>,
+    /// Publishes the `peek/*` tools, two of them hinted read-only.
+    ordering: AtomicBool,
+    /// How many `peek/*` calls are inside the server now.
+    peek_inflight: AtomicUsize,
+    /// The highest `peek_inflight` seen while `ordering` holds, so a test can
+    /// tell two overlapping calls from two that ran one after the other.
+    peek_peak: AtomicUsize,
+    /// Reaches when both hinted calls are inside the server at once.
+    peek_pair: tokio::sync::Barrier,
 }
 impl Remote {
     fn new() -> Arc<Self> {
@@ -114,6 +123,10 @@ impl Remote {
             hold_retry: AtomicBool::new(false),
             lookup_ids: Mutex::default(),
             cancelled: Mutex::default(),
+            ordering: AtomicBool::new(false),
+            peek_inflight: AtomicUsize::new(0),
+            peek_peak: AtomicUsize::new(0),
+            peek_pair: tokio::sync::Barrier::new(2),
         })
     }
 
@@ -133,6 +146,16 @@ impl Remote {
         self.cancelled.lock().unwrap().clone()
     }
 }
+/// Counts a `peek/*` call as finished when it leaves the server.
+struct ObservePeak {
+    remote: Arc<Remote>,
+}
+impl Drop for ObservePeak {
+    fn drop(&mut self) {
+        self.remote.peek_inflight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 async fn rpc(
     State(remote): State<Arc<Remote>>,
     headers: HeaderMap,
@@ -213,6 +236,14 @@ async fn rpc(
             if remote.nullable.load(Ordering::SeqCst) {
                 tools.push(json!({"name":"spaces","description":"List spaces","inputSchema":{"type":"object","properties":{"space_id":{"type":["string","null"]}},"required":["space_id"]}}));
             }
+            if remote.ordering.load(Ordering::SeqCst) {
+                // Two hinted reads and two that do not declare the hint: the
+                // first two share a step while the others order.
+                tools.push(json!({"name":"peek/a","description":"Read a value","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}}));
+                tools.push(json!({"name":"peek/b","description":"Read a value","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}}));
+                tools.push(json!({"name":"peek/c","description":"Declares no hint","inputSchema":{"type":"object"}}));
+                tools.push(json!({"name":"peek/d","description":"The hint is false","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":false}}));
+            }
             if remote.broken.load(Ordering::SeqCst) {
                 tools.push(json!({"name":"broken","inputSchema":{"type":"object","properties":{"x":{"type":["string","file"]}}}}));
             }
@@ -264,7 +295,20 @@ async fn rpc(
             if name == "lookup/item" && remote.hold_retry.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(2800)).await;
             }
-            if body["params"]["name"] == "chart" {
+            if name.starts_with("peek/") {
+                let inside = remote.peek_inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                let _left = ObservePeak {
+                    remote: remote.clone(),
+                };
+                remote.peek_peak.fetch_max(inside, Ordering::SeqCst);
+                if name == "peek/a" || name == "peek/b" {
+                    // Only the two hinted reads can be inside together, so a
+                    // barrier of two either opens or the test times out.
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(3), remote.peek_pair.wait()).await;
+                }
+                json!({"content":[{"type":"text","text":"peeked"}]})
+            } else if body["params"]["name"] == "chart" {
                 if remote.app_hold.load(Ordering::SeqCst) {
                     remote.app_called.notify_waiters();
                     std::future::pending::<()>().await;
@@ -320,6 +364,8 @@ enum Action {
         pause: bool,
         name: Option<String>,
     },
+    /// One batch of several calls, each named by the original MCP tool name.
+    Batch(Vec<&'static str>),
     Text,
     /// Ignores cancellation until released, so a Session close waits for it.
     Hold,
@@ -383,6 +429,36 @@ impl ModelDriver for Model {
                         ],
                         ModelStopReason::ToolUse,
                     )
+                }
+                Action::Batch(names) => {
+                    let mut chunks = Vec::new();
+                    for original in names {
+                        let name = request
+                            .tools
+                            .as_ref()
+                            .unwrap()
+                            .iter()
+                            .find(|tool| {
+                                tool.metadata
+                                    .as_ref()
+                                    .and_then(|m| m.mcp_original_tool_name.as_deref())
+                                    == Some(original)
+                            })
+                            .unwrap_or_else(|| panic!("{original} is offered"))
+                            .name
+                            .clone();
+                        let id = uuid::Uuid::new_v4().to_string();
+                        chunks.push(ModelChunk::ToolStart {
+                            id: id.clone(),
+                            name: name.clone(),
+                        });
+                        chunks.push(ModelChunk::ToolUse(ToolCall {
+                            id,
+                            name,
+                            input: Default::default(),
+                        }));
+                    }
+                    (chunks, ModelStopReason::ToolUse)
                 }
                 Action::Text => (
                     vec![ModelChunk::Text("done".into()), ModelChunk::TextEnd],
@@ -1095,6 +1171,48 @@ async fn temporary_mcp_failed_setup_cleans_up_and_an_abandoned_binding_expires()
         env.remote.deletes.load(Ordering::SeqCst),
         deleted + 2,
         "closing the Session disposes both configured and temporary connections"
+    );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn hinted_mcp_tools_of_one_batch_overlap_and_an_unhinted_one_runs_alone() {
+    let env = Env::new().await;
+    env.remote.ordering.store(true, Ordering::SeqCst);
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    // `peek/a` and `peek/b` declare `readOnlyHint`, so they share one step and
+    // the server's barrier of two opens. An unhinted call would run alone, and
+    // the barrier would time out.
+    env.turn(&session, Action::Batch(vec!["peek/a", "peek/b"]))
+        .await;
+    let settled = results(&session).await;
+    let last = settled.last().unwrap();
+    assert!(last.contains("peeked"), "{last}");
+    assert_eq!(
+        env.remote.peek_peak.load(Ordering::SeqCst),
+        2,
+        "the two hinted calls are inside the server at the same time"
+    );
+    env.close().await;
+}
+
+#[tokio::test]
+async fn an_unhinted_mcp_tool_orders_its_calls_beside_the_hinted_ones() {
+    let env = Env::new().await;
+    env.remote.ordering.store(true, Ordering::SeqCst);
+    let session = env.session(false, PermissionPreset::FullAccess).await;
+    ready(&session).await;
+    // `peek/c` declares no hint and `peek/d` declares `readOnlyHint: false`,
+    // so each is alone in its step and never meets the other in the server.
+    env.turn(&session, Action::Batch(vec!["peek/c", "peek/d", "peek/a"]))
+        .await;
+    let settled = results(&session).await;
+    assert!(settled.last().unwrap().contains("peeked"));
+    assert_eq!(
+        env.remote.peek_peak.load(Ordering::SeqCst),
+        1,
+        "an unhinted tool never shares a step"
     );
     env.close().await;
 }

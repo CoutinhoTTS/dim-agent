@@ -9,7 +9,7 @@
 use crate::{
     host::{CancelledFn, HostError, HostFuture, ToolExecutionContext, call_until_cancelled},
     timeline_tree::TreeCommands,
-    tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
+    tool_registry::{ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry, definition},
     workspace_tools::background::{WAKE_TASK_TAG, tagged},
 };
 use dim_agent_runtime::{
@@ -350,6 +350,11 @@ impl WaitTool {
     }
 }
 impl ToolHandler for WaitTool {
+    /// Waiting changes nothing another call of the batch can observe, and it
+    /// runs for as long as the timeout allows.
+    fn concurrency(&self, _: &ToolCall) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
     fn execute(
         &self,
         call: ToolCall,

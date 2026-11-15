@@ -132,6 +132,31 @@ contract](Permission.md#write-targets-without-the-facts) decides whether the tar
 | `B:Dispatcher` | Replay batches, receive batches/interrupts and report faults. |
 | `B:Timeline` | Commit progress/results. |
 
+### Scheduling
+
+A batch keeps the order the model wrote for the calls that can change state.
+Each call's handler answers `concurrency`: `Concurrent` calls share a step with
+the `Concurrent` calls next to them, and an `Exclusive` call is a step of its
+own. A step starts only after every call of an earlier step settled, and the
+calls inside one step run together. `[read, edit, read, read, exec, read]` is
+four steps: `[read]`, `[edit]`, `[read, read]`, `[exec]`, `[read]` — the second
+`read` pair shares a step because both answered `Concurrent`, and each `edit`
+and `exec` waits for everything before it. A handler that answers nothing is
+`Exclusive`, so a tool whose effects nobody declared keeps the call order.
+
+Steps are fixed before any call is polled. Admission is not: every call's
+Permission check, `PreToolUse` advice and approval request starts when the
+batch does and settles on its own, whatever step is running, so the questions
+of one batch appear together. A call runs once its own admission finished and
+the step before it settled; it never waits for a sibling's admission. A
+refused, cancelled or panicking call settles as its own error result and
+releases its step, so a later step still starts. Interrupt and reload reach a
+call still waiting for its step as `Tool cancelled before execution`.
+
+The class decides order only. It is not a field of `ToolDefinition`: it never
+reaches a model request's declaration or a persisted configuration, and it
+grants no permission. Approval still admits each call under its risk.
+
 ### Events and lifetime
 
 Consumes `step/tool-call`, `stop/interrupt`, `turn/start`, `turn/end`; produces
