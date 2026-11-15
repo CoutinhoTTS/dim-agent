@@ -9,7 +9,7 @@ use crate::ui::render::panel::{clip, wrap};
 use crate::ui::text::{
     ASSISTANT_MARK, DONE_MARK, ERROR_MARK, FAILED_MARK, LINE_MARK, LOAD_MORE_MARK, RUNNING_MARK,
     SHELL_MARK, STATUS_MARK, THINKING_BAR, USER_MARK, display_width, gutter_width, truncate_cells,
-    wrap_cells,
+    wrap_cells, wrap_with_source,
 };
 use crate::ui::theme::Palette;
 use crate::ui::theme::ansi::fg;
@@ -43,23 +43,27 @@ pub struct UserStyle<'a> {
     pub surface: Option<&'a str>,
 }
 
-/// A user message: the bar on every row, the text in its colour. With a surface
-/// tint every row is padded to the content width so it reads as a band.
+/// A user message: the bar on every row, the text in its colour, and each
+/// `/skill:<name>` token as one highlighted unit. With a surface tint every row
+/// is padded to the content width so it reads as a band.
 pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<String> {
     use crate::ui::theme::ansi::{Paint, paint};
     let gutter = gutter_width(width);
     let content = width.saturating_sub(gutter).max(1);
-    wrap_cells(text, content)
+    let spans: Vec<(usize, usize)> = dim_agent_types::skill_token::tokens(text)
+        .map(|token| (token.start, token.end))
+        .collect();
+    wrap_with_source(text, content)
         .into_iter()
         .map(|row| {
             let lead = gutter_mark(USER_MARK, gutter);
             let body = match style.surface {
                 Some(_) => {
-                    let used = display_width(&row);
-                    format!("{row}{}", " ".repeat(content.saturating_sub(used)))
+                    let used = display_width(&row.text);
+                    format!("{}{}", row.text, " ".repeat(content.saturating_sub(used)))
                 }
-                None if row.is_empty() => " ".to_owned(),
-                None => row,
+                None if row.text.is_empty() => " ".to_owned(),
+                None => row.text.clone(),
             };
             format!(
                 "{}{}",
@@ -72,7 +76,7 @@ pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<Strin
                     }
                 ),
                 paint(
-                    &body,
+                    &token_runs(&body, &row.covered(&spans)),
                     Paint {
                         fg: Some(style.color),
                         bg: style.surface,
@@ -82,6 +86,29 @@ pub fn render_user(text: &str, width: usize, style: &UserStyle<'_>) -> Vec<Strin
             )
         })
         .collect()
+}
+
+/// `body`, the row and any band padding after it, with every character that a
+/// token covers made bold so it reads as one highlighted unit. The padding has
+/// no flag of its own and stays plain.
+fn token_runs(body: &str, covered: &[bool]) -> String {
+    use crate::ui::theme::ansi::{Paint, paint};
+    let mut out = String::new();
+    for (index, ch) in body.chars().enumerate() {
+        let marked = covered.get(index).copied().unwrap_or(false);
+        let mut run = ch.to_string();
+        if marked {
+            run = paint(
+                &run,
+                Paint {
+                    bold: true,
+                    ..Paint::default()
+                },
+            );
+        }
+        out.push_str(&run);
+    }
+    out
 }
 
 /// Rows of running reasoning under its title and blank row: the newest
@@ -926,5 +953,74 @@ mod tests {
         };
         let rows = render_user("hi", 40, &banded);
         assert_eq!(display_width(&strip(&rows[0])), 40);
+    }
+
+    /// A `/skill:<name>` token is one highlighted unit: its characters carry
+    /// the bold attribute and the words around it do not, and the visible text
+    /// is unchanged.
+    #[test]
+    fn a_skill_token_draws_as_one_unit() {
+        let (visible, bold) = drawn("run /skill:commit now", 60);
+        assert_eq!(
+            bold, "/skill:commit",
+            "the whole token is highlighted and nothing else is"
+        );
+        assert!(
+            visible.contains("run /skill:commit now"),
+            "the visible text is as typed: {visible:?}"
+        );
+    }
+
+    /// A row keeps the source byte of every character it draws, so a token stays
+    /// one unit when a newline, a tab, a CRLF or a row break stands before it.
+    #[test]
+    fn a_skill_token_keeps_its_offsets_across_the_drawing() {
+        let cases = [
+            ("hello\n/skill:commit now", 60),
+            ("\t/skill:commit now", 60),
+            ("hello\r\n/skill:commit now", 60),
+            ("hello\none two three /skill:commit", 15),
+        ];
+        let bold: Vec<String> = cases
+            .iter()
+            .map(|(text, width)| drawn(text, *width).1)
+            .collect();
+        assert_eq!(
+            bold, ["/skill:commit"; 4],
+            "{cases:?} each keep the token whole"
+        );
+    }
+
+    /// The characters a row draws in order, and the ones among them drawn bold.
+    fn drawn(text: &str, width: usize) -> (String, String) {
+        let style = UserStyle {
+            color: "ansi:2",
+            surface: None,
+        };
+        let mut visible = String::new();
+        let mut bold = String::new();
+        for row in render_user(text, width, &style) {
+            let mut marked = false;
+            let mut chars = row.chars();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    let mut codes = String::new();
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                        codes.push(c);
+                    }
+                    marked = codes.split(['[', ';']).any(|code| code == "1");
+                    continue;
+                }
+                visible.push(c);
+                if marked {
+                    bold.push(c);
+                }
+            }
+            visible.push('\n');
+        }
+        (visible, bold)
     }
 }

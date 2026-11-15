@@ -2363,6 +2363,26 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_types::skill_token",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types",
+      "file": "crates/dim-agent-types/src/skill_token.rs",
+      "unexpandedMacros": [
+        "matches"
+      ]
+    },
+    {
+      "id": "dim_agent_types::skill_token::tests",
+      "crate": "dim_agent_types",
+      "parent": "dim_agent_types::skill_token",
+      "file": "crates/dim-agent-types/src/skill_token.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq",
+        "panic"
+      ]
+    },
+    {
       "id": "dim_agent_types::tool",
       "crate": "dim_agent_types",
       "parent": "dim_agent_types",
@@ -6473,7 +6493,8 @@
       "file": "crates/dim-cli/src/ui/text.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "vec"
       ]
     },
     {
@@ -8085,6 +8106,13 @@
       "to": "dim_agent_types::model",
       "references": [
         "use dim_agent_types::CompactionTrigger"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::tokens"
       ]
     },
     {
@@ -16971,6 +16999,13 @@
     },
     {
       "from": "dim_agent_capabilities::skills::session",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -22823,6 +22858,13 @@
     },
     {
       "from": "dim_agent_types",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "mod skill_token"
+      ]
+    },
+    {
+      "from": "dim_agent_types",
       "to": "dim_agent_types::tool",
       "references": [
         "mod tool"
@@ -23107,6 +23149,24 @@
       "to": "dim_agent_types",
       "references": [
         "path crate::JS_MAX_SAFE_INTEGER"
+      ]
+    },
+    {
+      "from": "dim_agent_types::skill_token",
+      "to": "dim_agent_types::skill_token::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_types::skill_token::tests",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path Token",
+        "path tokens",
+        "use super::Token",
+        "use super::names_a_token",
+        "use super::tokens"
       ]
     },
     {
@@ -41859,6 +41919,13 @@
     },
     {
       "from": "dim_cli::ui::composer",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer",
       "to": "dim_cli::attachments",
       "references": [
         "path MAX_IMAGES",
@@ -42367,6 +42434,13 @@
         "path MAX_INPUT_ROWS",
         "path Outcome::SubmitDraft",
         "path read_planned"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::tests",
+      "to": "dim_cli::ui::composer::palette",
+      "references": [
+        "path palette"
       ]
     },
     {
@@ -47049,7 +47123,8 @@
         "path display_width",
         "path expand_tabs",
         "path truncate_cells",
-        "path wrap_cells"
+        "path wrap_cells",
+        "path wrap_with_source"
       ]
     },
     {
@@ -47734,6 +47809,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellOutcome::Exited",
@@ -47845,6 +47927,7 @@
         "path gutter_width",
         "path truncate_cells",
         "path wrap_cells",
+        "path wrap_with_source",
         "use crate::ui::text::ASSISTANT_MARK",
         "use crate::ui::text::DONE_MARK",
         "use crate::ui::text::ERROR_MARK",
@@ -47859,7 +47942,8 @@
         "use crate::ui::text::display_width",
         "use crate::ui::text::gutter_width",
         "use crate::ui::text::truncate_cells",
-        "use crate::ui::text::wrap_cells"
+        "use crate::ui::text::wrap_cells",
+        "use crate::ui::text::wrap_with_source"
       ]
     },
     {
@@ -48130,6 +48214,13 @@
         "path dim_agent_types::PermissionPreset::FullAccess",
         "path dim_agent_types::PermissionPreset::ReadOnly",
         "path dim_agent_types::PermissionPreset::WorkspaceWrite"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::names_a_token"
       ]
     },
     {
@@ -54013,6 +54104,10 @@
       "path": "S::Ok"
     },
     {
+      "module": "dim_agent_types::skill_token",
+      "path": "char::is_whitespace"
+    },
+    {
       "module": "dim_agent_types::tool",
       "path": "D::Error"
     },
@@ -55043,6 +55138,10 @@
     {
       "module": "dim_cli::ui::transcript::blocks",
       "path": "CompactionDetailState::Unloaded"
+    },
+    {
+      "module": "dim_cli::ui::transcript::blocks",
+      "path": "Paint::default"
     },
     {
       "module": "dim_cli::ui::transcript::blocks",

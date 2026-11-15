@@ -9,8 +9,15 @@ import { nuxtUiTestPlugin } from "./helpers/nuxt-ui.mjs"
 
 globalThis.Document = class {}
 globalThis.ShadowRoot = class {}
+/** Every observer the components create, so a test can fire one by hand. */
+globalThis.chatInputObservers = []
+globalThis.ResizeObserver = class {
+  constructor(callback) { this.callback = callback; this.observed = [] }
+  observe(target) { this.observed.push(target); globalThis.chatInputObservers.push(this) }
+  disconnect() { this.observed = [] }
+}
 
-const components = /\/(ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt)\.vue$/
+const components = /\/(ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt|TimelineUserMessage)\.vue$/
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("../../stores/") || (context.parentURL?.endsWith("/stores/chat.ts") && ["./connection", "./sessions", "./ui"].includes(specifier))) {
@@ -19,7 +26,7 @@ registerHooks({
       const source = `export const ${name}=()=>globalThis.chatInputStores.${store}; export const workspaceName=x=>x`
       return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true }
     }
-    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const createI18n=()=>({global:{t:key=>key,locale:{value:\"en\"},setLocaleMessage(){},availableLocales:[]}});export const useI18n=()=>({t:key=>key})", shortCircuit: true }
+    if (specifier === "vue-i18n") return { url: "data:text/javascript,export const createI18n=()=>({global:{t:key=>key,locale:{value:\"en\"},setLocaleMessage(){},availableLocales:[]}});export const useI18n=()=>({t:key=>key,locale:{value:'en'}})", shortCircuit: true }
     if (specifier === "vue-router") return { url: "data:text/javascript,export const useRoute=()=>({params:{}});export const useRouter=()=>({push:async to=>globalThis.chatInputNavigations.push(to)});export const RouterLink={render:()=>null}", shortCircuit: true }
     if (specifier.endsWith(".vue") && !components.test(specifier)) return { url: "data:text/javascript,export default {render:()=>null}", shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
@@ -38,6 +45,7 @@ registerHooks({
 const { default: ChatPage } = await import("../src/features/chat/ChatPage.vue")
 const { default: LineConversation } = await import("../src/features/lines/LineConversation.vue")
 const { default: ComposerPanel } = await import("../src/features/chat/ComposerPanel.vue")
+const { default: TimelineUserMessage } = await import("../src/features/chat/TimelineUserMessage.vue")
 const { useChatStore } = await import("../src/stores/chat.ts")
 const { readNotification } = await import("../src/rpc/read.ts")
 const { RpcError } = await import("../src/rpc/client.ts")
@@ -511,4 +519,91 @@ test("image submission uploads the File before sending only its durable referenc
   await chat.submit("session", "main", "retry", { images: [image], pastes: [] })
   assert.equal(uploads.length, 1, "retrying a draft reuses its accepted file identity")
   assert.equal(calls[1].params.user.content[1].source.fileId, "image-1")
+})
+
+test("the /skill: namespace offers Skills, fills the token, and sends it as a message", async (t) => {
+  const skills = [{ name: "commit", description: "Writes commit messages" }, { name: "deploy", description: "Ships a build" }]
+  const { root, submissions } = mount(t, "main", [], ComposerPanel, {}, { skills })
+  const field = all(root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props["onUpdate:modelValue"]("/skill:")
+  await flush()
+  const labels = all(root).filter((element) => element.type === "button").map(text)
+  const offered = labels.filter((label) => label.includes("/skill:"))
+  assert.equal(offered.length, 2, `the namespace narrows the menu to Skills: ${labels}`)
+  assert.ok(offered[0].includes("/skill:commit") && offered[1].includes("/skill:deploy"), offered.join("|"))
+  assert.equal(labels.some((label) => label.includes("/compact")), false, "no command row joins them")
+
+  field.props["onUpdate:modelValue"]("/skill:dep")
+  await flush()
+  const deploy = all(root).find((element) => element.type === "button" && text(element).includes("/skill:deploy"))
+  click(deploy)
+  await flush()
+  assert.deepEqual(submissions, [], "filling is not sending")
+
+  const sent = []
+  const typed = mount(t, "main", [], ComposerPanel, {}, { skills, send: async (message) => { sent.push(message) } })
+  const typedField = all(typed.root).find((element) => element.type === "textarea")
+  typedField.props.onFocus()
+  typedField.props["onUpdate:modelValue"]("/skill:deploy ")
+  await flush()
+  typedField.props.onKeydown({ key: "Enter", preventDefault() {}, stopPropagation() {} })
+  await flush()
+  assert.deepEqual(sent, ["/skill:deploy "], "a /skill: draft is a message, never a command")
+})
+
+test("the input draws each /skill: token as one chip, typed or filled", async (t) => {
+  const chips = (root) => all(root)
+    .filter((element) => element.props.class === "skill-chip")
+    .map(text)
+  const skills = [{ name: "commit", description: "Writes commit messages" }]
+
+  const typed = mount(t, "main", [], ComposerPanel, {}, { skills })
+  const field = all(typed.root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props["onUpdate:modelValue"]("please /skill:commit it")
+  await flush()
+  assert.deepEqual(chips(typed.root), ["/skill:commit"], "a typed token is one chip, and the words around it are not")
+
+  const filled = mount(t, "main", [], ComposerPanel, {}, { skills })
+  const filledField = all(filled.root).find((element) => element.type === "textarea")
+  filledField.props.onFocus()
+  filledField.props["onUpdate:modelValue"]("/skill:")
+  await flush()
+  const row = all(filled.root).find((element) => element.type === "button" && text(element).includes("/skill:commit"))
+  click(row)
+  await flush()
+  assert.deepEqual(chips(filled.root), ["/skill:commit"], "a filled token is the same chip before it is sent")
+})
+
+test("a user message draws each /skill: token as one chip", async (t) => {
+  const { root } = mount(t, "main", [], TimelineUserMessage, {}, { text: "please /skill:commit it", at: 0, quotable: false, branchable: false })
+  const chips = all(root).filter((element) => element.props.class === "skill-chip").map(text)
+  assert.deepEqual(chips, ["/skill:commit"], "the token is one chip and the words around it are not")
+  assert.ok(text(root).includes("please /skill:commit it"), "the chip keeps the typed text")
+})
+
+test("the chip layer follows the field's width when the field resizes", async (t) => {
+  const skills = [{ name: "commit", description: "Writes commit messages" }]
+  globalThis.chatInputObservers = []
+  const { root } = mount(t, "main", [], ComposerPanel, {}, { skills })
+  const typed = all(root).find((element) => element.type === "textarea")
+  typed.props.onFocus()
+  typed.props["onUpdate:modelValue"]("please /skill:commit it")
+  await flush()
+  const body = all(root).find((element) => element.props.class === "composer-highlight-body")
+  assert(body, "the chip layer draws the draft behind the field")
+  assert.equal(globalThis.chatInputObservers.length, 1, "the composer watches the field, so a resize that no input caused still moves the layer")
+  const observer = globalThis.chatInputObservers[0]
+  const watched = observer.observed[0]
+  assert.equal(watched.props.class, "composer-input", "it watches the field and nothing else")
+  watched.clientWidth = 240
+  observer.callback()
+  assert.equal(body.style.width, "240px", "a width the draft did not cause moves the layer")
+  watched.clientWidth = 180
+  observer.callback()
+  assert.equal(body.style.width, "180px", "every later width follows too")
+  watched.scrollTop = 12
+  watched.props.onScroll()
+  assert.equal(body.style.transform, "translateY(-12px)", "the scroll path still carries the offset")
 })

@@ -279,7 +279,7 @@ Rows follow the sections of the [feature list](../feature-list.md), which descri
 | `/queue` panel and queue deletion | done in both terminal UIs | — | [CLI commands](cli-commands.md#queued-messages) |
 | Retrieve a queued message for editing | done; images and multi-block messages remain queued with a notice | — | [CLI commands](cli-commands.md#queued-messages) |
 | Multiline, paste, large paste, images, mixed attachments, `@` files, `!` / `!!` | done | attachments: later phase | [CLI attachment input](cli-attachment-input.md), [ShellInput](plugins/ShellInput.md) |
-| Skill references: the `/` palette lists them, and `$skill: <name>` loads one with the message | done | none | [Skills](plugins/Skills.md#9-references-load-with-the-operators-input) |
+| Skill references: the `/` palette lists them, and a `/skill:<name>` token loads one with the message | done | none | [Skills](plugins/Skills.md#9-references-load-with-the-operators-input) |
 | Clipboard text, images, files; selection copy; OSC 52 | done | browser | |
 | Message copying through message actions | none | — | |
 | Open links, tool groups, `/tools` | done | done (rendering) | |

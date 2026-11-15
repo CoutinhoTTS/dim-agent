@@ -78,13 +78,41 @@ fn rank(command: &Command, query: &str) -> Option<u8> {
     })
 }
 
-/// A skill offered next to the commands (`$skill: name`).
+/// A skill offered next to the commands, as the `/skill:<name>` token.
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
     pub description: String,
     pub display_name: Option<String>,
     pub display_description: Option<String>,
+}
+
+/// What a query means for the menu: the part that matches commands, the part
+/// that matches Skill names, and whether the `skill:` namespace confines the
+/// menu to Skills.
+pub struct Query<'a> {
+    pub command: &'a str,
+    pub skill: &'a str,
+    pub skills_only: bool,
+}
+
+/// What `query` means for the menu, in the words of [`Query`]. `/skill:de`
+/// narrows the menu to the Skills whose names start with `de`; any other query
+/// matches commands and Skills as it always did.
+pub fn parse_query(query: &str) -> Query<'_> {
+    let trimmed = query.trim_start();
+    match trimmed.strip_prefix("skill:") {
+        Some(rest) => Query {
+            command: "\u{0}",
+            skill: rest,
+            skills_only: true,
+        },
+        None => Query {
+            command: trimmed,
+            skill: trimmed,
+            skills_only: false,
+        },
+    }
 }
 
 impl Skill {
@@ -98,6 +126,12 @@ impl Skill {
             Some(name) if description.is_empty() => name.clone(),
             Some(name) => format!("{name} · {description}"),
         }
+    }
+
+    /// The row's label: the token the row fills, so the menu reads in the same
+    /// words the draft and the transcript do.
+    fn label(&self) -> String {
+        format!("{}{}", dim_agent_types::skill_token::PREFIX, self.name)
     }
 }
 
@@ -135,11 +169,18 @@ fn filter_skills<'a>(skills: &'a [Skill], query: &str) -> Vec<&'a Skill> {
 }
 
 /// Palette rows for `query`: commands and skills share the list; skills lead
-/// when a skill name matches and no command name does. A command reads
-/// `/name` and its description.
+/// Palette rows for `query`: commands and skills share the list; skills lead
+/// when a skill name matches and no command name does, and the `skill:`
+/// namespace leaves the commands out. A command reads `/name` and its
+/// description, a Skill `/skill:<name>` and its own.
 pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
-    let commands = filter_commands(query, context);
-    let matched_skills = filter_skills(skills, query);
+    let parsed = parse_query(query);
+    let commands = if parsed.skills_only {
+        Vec::new()
+    } else {
+        filter_commands(parsed.command, context)
+    };
+    let matched_skills = filter_skills(skills, parsed.skill);
     let command_rows: Vec<Row> = commands
         .iter()
         .map(|command| {
@@ -162,7 +203,7 @@ pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
         .iter()
         .map(|skill| Row {
             kind: Kind::Skill(skill.name.clone()),
-            label: format!("${}", skill.name),
+            label: skill.label(),
             detail: skill.detail(),
             key: None,
             unavailable: false,
@@ -174,12 +215,7 @@ pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
     if command_rows.is_empty() {
         return skill_rows;
     }
-    let normalized = query
-        .trim()
-        .to_lowercase()
-        .trim_start_matches('$')
-        .trim_start_matches('/')
-        .to_owned();
+    let normalized = parsed.skill.trim().to_lowercase();
     let skills_first = !normalized.is_empty()
         && matched_skills.iter().any(|s| {
             s.name.to_lowercase().starts_with(&normalized)
