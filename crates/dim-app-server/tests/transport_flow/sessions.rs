@@ -2249,16 +2249,20 @@ async fn pending_follows_the_queue_until_an_input_is_consumed_or_deleted() {
         json!({"pending":true})
     );
 
-    // A turn consumes the held input, and from then on it is not pending.
+    // A turn consumes the held input, and from then on it is not pending. The
+    // turn parks on an approval, so it is still open when the withdrawal below
+    // runs: a Queue input written into an idle branch is applied at once and can
+    // then only be consumed, while one written behind a running turn is held
+    // unapplied (session access A.4). Only the held one can be withdrawn.
     sessions.ok("stop", at.clone()).await;
     sessions.ok("idle", at.clone()).await;
-    sessions
+    let drain = sessions
         .ok(
             "input",
             input(
                 &session,
                 "test:drain",
-                json!([{"type":"text","text":"keep going"}]),
+                json!([{"type":"text","text":"tool:confirm {}"}]),
             ),
         )
         .await;
@@ -2272,6 +2276,22 @@ async fn pending_follows_the_queue_until_an_input_is_consumed_or_deleted() {
     })
     .await
     .expect("the held input is consumed by a turn");
+    let drain = drain["sequence"].as_u64().unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if chain_events(&session, "main", drain + 1..)
+                .await
+                .unwrap()
+                .iter()
+                .any(|event| event.kind.key() == "approval/request")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the consuming turn parks on its approval");
 
     // A withdrawn input is not pending, and neither is an id the branch never
     // held.
@@ -2285,7 +2305,8 @@ async fn pending_follows_the_queue_until_an_input_is_consumed_or_deleted() {
             ),
         )
         .await;
-    sessions.ok("withdraw", ask(&deleted)).await;
+    let withdrawal = sessions.ok("withdraw", ask(&deleted)).await;
+    assert_eq!(withdrawal["status"], "deleted", "{withdrawal}");
     assert_eq!(
         sessions.ok("pending", ask(&deleted)).await,
         json!({"pending":false})
@@ -2313,6 +2334,7 @@ async fn pending_follows_the_queue_until_an_input_is_consumed_or_deleted() {
         "rejected"
     );
 
+    sessions.ok("stop", at).await;
     server.shutdown();
     server.join().await.unwrap();
 }
