@@ -79,7 +79,8 @@ results carry the reload-settlement marker, and Loop ends the turn as failed ins
 process restart equivalent for the new generation. This is an existing requirement, not a choice
 between retaining, migrating or cancelling old waits.
 
-The inspected implementation holds an `Arc<Wait>` in each call but does not connect its wait to
+The implementation inspected before the [reload fix in #1619](https://github.com/arcships/dim/pull/1619)
+holds an `Arc<Wait>` in each call but does not connect its wait to
 WaitBranch's generation cancellation. Losing the subscription does not finish that future.
 A full caller/ToolExecutor experiment confirmed that an old call can survive service replacement
 until a later turn stop, while the new service receives new notifications. This is a lifecycle

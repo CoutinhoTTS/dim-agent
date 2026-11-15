@@ -1,10 +1,10 @@
 # WaitBranch: a recovery and consumption argument
 
-Status: Draft.
 Scope: WaitBranch's open-turn projection and its fixed-cutoff handoff; not the whole Wait tool.
 Issue: [#1615](https://github.com/arcships/dim/issues/1615).
 
-This is a worked application of the [design argument method](../capability-design-arguments.md).
+This is an optional worked argument, not a required design format for other Capabilities.
+See the [design guide](../capability-design-arguments.md) for the default approach.
 The [Wait contract](../../architecture/rust-agent/plugins/Wait.md#waitbranch) remains authoritative.
 No event, runtime state, persistence format or recovery behavior is proposed here. The executable
 model is [WaitRecovery.tla](wait-model/WaitRecovery.tla), with [finite configuration](wait-model/WaitRecovery.cfg).

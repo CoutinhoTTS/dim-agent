@@ -1,6 +1,5 @@
 # Capability documentation responsibilities
 
-Status: Draft.
 Scope: the first current-document review for event/state-machine authoring, not a new runtime contract.
 Issue: [#1615](https://github.com/arcships/dim/issues/1615).
 
@@ -21,7 +20,7 @@ and completion belong in the issue. The proposed authoring method is in the
 | How do owner reads and saved results fit together? | [Saving boundaries](owner-state-indexed-reads.md), [Resume design](resume-read-design.md) | Keep cross-module dependencies here and detailed fields/algorithms in owner documents |
 | How does a part mount, name dependencies and cross languages? | [rutis usage](rutis-usage.md), [service faces](service-faces.md) | Link the current binding; do not copy old API spellings into architecture rules |
 | What exists in the actual assembly? | [Generated catalog](../architecture/rust-agent/generated/catalog.md) | Use as implementation evidence for that profile, not a closed universe of plugins |
-| How is a design justified before implementation? | [Design argument guide](capability-design-arguments.md) | Use the existing template; keep run outcomes and implementation progress in issues/PRs |
+| How can a design explain its use, promises and verification? | [Design argument guide](capability-design-arguments.md) | Reuse existing design material; reasoning tools are optional and run outcomes belong in issues/PRs |
 
 ## 2. Overlaps and ambiguity to resolve
 
@@ -36,7 +35,7 @@ These are review findings and proposed disposition, not silent amendments to the
 | Property-query §5 consumer recipes, Resume §3/§9, saving-boundaries §1/§5 and individual recovery pages | Multiple descriptions of the same owner's algorithm can drift | Duplicate-definition removal proposed. Keep owner-specific formulas/fields in the owner's page; higher-level documents retain integration requirements and links, not a second algorithm |
 | [Timeline read entries](timeline-read-entries.md) and the current query contract | A migration audit at an old base contains proposed APIs and historical call sites | Scope clarification. Treat it as an explicitly based audit, never the authoring API; default authoring routes to the current property-query contract |
 | AGENTS.md “Current Rust binding” and rutis usage appendix A | `TypedPlugin/Keyed` instructions disagree with the current `DynPlugin/Key` named-dependency binding | Binding clarification proposed in its own focused cleanup. Keep one binding source rather than introduce another copied summary here |
-| [Design template](../templates/design.md) | “Events and state” asks what happens but does not require a proposition or justification | New authoring requirement in this PR: assumptions, transitions, arguments, recovery queries and correspondence; no runtime semantic change |
+| [Design template](../templates/design.md) | The default guidance should help clarify contracts without imposing a proof workflow | Authoring guidance: actual use, affected public promises and verification; proofs and models are optional, with no runtime semantic change |
 
 ## 3. Review order and completion criteria
 
@@ -45,8 +44,8 @@ These are review findings and proposed disposition, not silent amendments to the
    approved behavior change needs its own contract change; moving text cannot approve it.
 3. Remove duplicate normative definitions in focused owner changes, replacing them with links.
    A precedence list alone leaves contradictory specifications in place.
-4. Migrate touched designs to explicit arguments, starting with a scoped example; expand the
-   implementation audit only after its requirements are unambiguous.
+4. Prioritize follow-up implementation checks by actual contract risk. Use scoped arguments when
+   helpful; do not require every design to migrate or every Capability to acquire a model.
 
 A finding is resolved when there is one definition at the correct layer, dependent documents
 link it, and any semantic change has explicit agreement. This document is not a permanent

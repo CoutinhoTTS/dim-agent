@@ -3,31 +3,26 @@
 Scope: process | Session | branch.
 Issue: #NNN. Delivery status belongs in the issue.
 
-Use the [four-question guide](../design/capability-design-arguments.md). Keep the explanation as
-short as the affected contract allows; link existing arguments for unchanged behavior.
+Keep this document proportional to the change. Link existing answers instead of repeating them;
+no separate proof, model or argument is required. The [design guide](../design/capability-design-arguments.md)
+offers optional help.
 
-## 1. Where is it used?
+## Use and scope
 
-Callers, input producers, declared dependencies and the public guarantees this design relies on.
-Link the authoritative contracts and relevant complete flows. Identify the parts that are Capabilities.
+The actual callers, input producers and intended behavior. What this part owns and what it does not.
+Identify the parts that are Capabilities.
 
-## 2. What is it responsible for?
+## Own contract and dependencies
 
-Own inputs, outputs, state and errors; responsibilities during normal execution, cancellation and
-reload. For new events, define meaning, establishment condition, correlation identity, permitted
-writers and compatibility. Distinguish existing requirements from proposed behavior changes.
+Affected inputs, outputs, events, state, errors and public dependencies. Link the owners' contracts.
+For changed events, explain their meaning, correlation and compatibility. Describe affected recovery
+and lifecycle behavior under the existing contracts. Distinguish existing promises from proposed changes.
 
-## 3. Why does it work?
+## Verification
 
-Relevant states and transitions, the properties they must preserve and the argument that they do.
-State assumptions, progress conditions and unresolved obligations. If recovery is involved, explain
-why the precise queries return the required state and how consumption resumes. Consult the
-[reference](../design/capability-design-reference.md) only for the details this argument needs.
-
-## 4. Does the implementation match?
-
-Code or planned entry points, observable outcomes and the real flows that check them. State what
-the evidence establishes and what it leaves open; run results belong in the issue or PR.
+Observable outcomes and relevant flow tests or review checks. State material uncertainties.
+Add a transition table, argument or model only when it helps resolve a specific design question.
+Run results belong in the issue or PR.
 
 ## Rule check
 

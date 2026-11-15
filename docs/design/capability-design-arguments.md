@@ -1,47 +1,35 @@
-# Capability design arguments
+# Capability design guide
 
-Scope: designing a plugin's Timeline events, state and lifecycle before implementation.
+Scope: help with a plugin's Timeline events, state and lifecycle design.
 Issue: [#1615](https://github.com/arcships/dim/issues/1615).
 
-Use the [design template](../templates/design.md) to answer four questions. The new requirement
-is to justify the design before implementation; event and lifecycle rules stay in their existing
-contracts. Reuse arguments for unchanged behavior. Short prose is sufficient; tables and formal
-tools are optional.
+Describe the actual use, the affected public promises and how to verify them. Existing design
+material can supply these answers by link; a small change needs only a short explanation in its PR.
+This guide adds no proof prerequisite, mandatory model or separate design deliverable.
 
-## 1. Where is it used?
+- **Actual use:** who calls this part and produces its inputs? Use the relevant integration and
+  contracts to establish the scenario. Known plugins are examples, not a closed list of consumers.
+- **Public promises:** what behavior changes, and what must remain true? Describe only the affected
+  inputs, outputs, events, state and lifecycle responsibilities. Link other owners' contracts.
+  Recovery and old-work settlement follow the existing contracts; they are different responsibilities.
+- **Verification:** what observable outcome would show that the change meets those promises?
+  Reuse relevant flow tests and review the affected boundaries. State material uncertainties.
 
-Who calls the part, who produces its inputs, and what do their contracts guarantee? Ground the
-assumptions in the selected profile and complete flows. Known plugins are examples, not a closed
-list of future writers or consumers.
+Do not invent requirements from hypothetical traces without establishing their relevance to the
+intended use and agreed promises. An observed contract violation is a defect, not a new expected
+behavior. Changes to a promise follow the existing owner-confirmation process in AGENTS.md.
 
-## 2. What is it responsible for?
+## Optional reasoning tools
 
-State its own inputs, outputs, events and state, and what must happen during normal execution,
-cancellation and reload. Link guarantees supplied by others. Internal execution can stay abstract,
-but admission and old-work settlement cannot disappear from the argument.
+When ordering, concurrency or recovery is difficult to assess by ordinary review, a transition
+table, case analysis or formal model may help resolve a specific question. Choose the smallest
+useful technique. Do not split Capabilities or add runtime state to fit a model or template.
 
-## 3. Why does the design meet those responsibilities?
+The [reference](capability-design-reference.md) describes these techniques and their limits.
+The [Wait example](examples/wait-argument.md), [implementation experiment](examples/wait-contract-experiment.md)
+and [usage context](examples/wait-usage-context.md) are scoped examples, not a standard shape for
+every Capability. A proof supports its stated claims under its assumptions; it does not establish
+that the requirements are complete or that the implementation is correct.
 
-Define the relevant state and transitions, then explain why the required properties hold from
-the initial state through those transitions. Include the environment assumptions needed for
-progress. For recovery, show why the structured queries reconstruct the required business state;
-that is separate from ending old work. Make unresolved obligations explicit.
-
-## 4. Does the implementation match?
-
-Map the argument to code boundaries and observable results in real flows. Distinguish a manual
-argument, a bounded model check and implementation tests; none silently proves the others.
-An observed contract violation is a defect, not a new regression expectation.
-
-Follow existing contracts. Do not invent a requirement just because a speculative scenario can
-be constructed; first establish that it is permitted and violates an agreed promise. Changes to
-the promise follow the existing owner-confirmation process in AGENTS.md.
-
-## Reference, when needed
-
-The [reference](capability-design-reference.md) explains roles, argument techniques, recovery
-queries and evidence limits. It is not another required form. The [Wait example](examples/wait-argument.md)
-and [implementation experiment](examples/wait-contract-experiment.md) illustrate scoped arguments;
-[Wait's usage context](examples/wait-usage-context.md) shows how to check their assumptions.
-The [document responsibility review](capability-document-review.md) routes questions to current
-contracts. No tool, component size or runtime architecture is prescribed by this method.
+The [document responsibility review](capability-document-review.md) locates existing contracts.
+It is not a requirement to migrate all designs or formally verify every Capability.

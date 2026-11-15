@@ -1,11 +1,12 @@
 # Capability design argument reference
 
-Scope: optional explanations of the [four-question design guide](capability-design-arguments.md).
+Scope: optional reasoning techniques for the [design guide](capability-design-arguments.md).
 Issue: [#1615](https://github.com/arcships/dim/issues/1615).
 
 Read the relevant section when a design needs it; this is not an additional checklist or a
-requirement to use every technique. Event, query and lifecycle semantics remain in their existing
-contracts. The [responsibility review](capability-document-review.md) identifies those sources.
+requirement to supply an argument. Use a technique only to resolve a specific question that ordinary
+contract review and relevant flow tests leave unclear. Event, query and lifecycle semantics remain
+in their existing contracts. The [responsibility review](capability-document-review.md) identifies those sources.
 
 ## 1. Name the role, not an ambiguous owner
 
@@ -42,7 +43,7 @@ solely because a speculative trace can be constructed: establish that the trace 
 by the environment and violates an agreed promise. Broader robustness experiments may still be
 useful, but their inputs are not evidence of product reachability.
 
-The common design obligation concerns the part's contract with the Timeline: the facts it
+For a Timeline argument, the subject is the part's contract with the Timeline: the facts it
 consumes and produces, their effect on its business state, and recovery and consumption handoff.
 It does not prescribe the size, internal organization or execution algorithm of a Capability.
 The definition of a Capability remains [principles §1](../architecture/rust-agent/principles.md#1-插件部件与-capability-有界).
@@ -63,8 +64,8 @@ obligations; distinguish its old-work settlement from the new-state query. "Call
 or "external execution" is not an exemption. An obligation may have a separate argument or owner,
 but must remain accounted for; excluding it from one model does not discharge it.
 
-Define the relevant state space S, its initial condition Init, the input/event domain E and
-the allowed transition relation Next. A useful notation for one transition is:
+If a transition model helps answer the question, define the relevant state space S, its initial
+condition Init, the input/event domain E and the allowed transition relation Next. A useful notation for one transition is:
 
 ```text
 (relevant business state, consumed fact or declared boundary input)
@@ -77,7 +78,7 @@ that proposition. Internal execution can remain abstract behind its declared con
 example, a cancellation request and a settled result cannot be treated as the same boundary
 input when their difference changes which terminal facts are allowed.
 
-## 3. State and discharge the propositions
+## 3. When making a mathematical argument
 
 For a safety invariant I, give both obligations:
 
@@ -100,7 +101,7 @@ provided. Proving two parts independently does not prove their handoff. Consider
 writer, a consumer disappearing, and a late result where those affect the proposition. Do not model
 arbitrary plugins as authorized writers of another part's terminal facts.
 
-## 4. Prove the recovery result, not an implementation technique
+## 4. When reasoning formally about recovery
 
 Define ExpectedRecovery(H, c) from the owning business contract for history H at cutoff c.
 Then establish:
@@ -132,7 +133,7 @@ on the implementation under the [resume acceptance](resume-read-design.md#8-验�
 
 ## 5. Evidence and implementation correspondence
 
-| Evidence | What the design must specify | What it does not establish |
+| Evidence | Information needed to support this claim | What it does not establish |
 | --- | --- | --- |
 | Mathematical argument | Definitions, assumptions, proposition, initial case and preservation or progress argument | Machine checking or correctness of source code |
 | Machine-checked proof, for example Lean | Exact theorem, definitions, assumptions/axioms, tool version and reproducible command | Correctness of a different model or its Rust implementation |
@@ -147,7 +148,7 @@ investigation and delivery progress in the issue/PR. Tool references:
 No design is required to use a particular tool or all evidence forms. Mathematical reasoning may
 be a short case analysis; use a machine-checked proof or bounded model where it helps establish
 the claim. Scale the document to the affected contract: unchanged obligations can link existing
-arguments, and inapplicable sections need only a brief scope explanation. Retain the sections
+design material. Omit techniques and sections that do not help the question at hand. Retain the sections
 required by AGENTS.md.
 Do not split a Capability or introduce runtime state solely to fit the template or proof tool.
 
