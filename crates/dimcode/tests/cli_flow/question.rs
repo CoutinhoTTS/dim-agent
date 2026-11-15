@@ -55,7 +55,7 @@ fn rejected() -> Vec<(Value, &'static str)> {
     };
     let mut same_id = question("Same id?");
     same_id["id"] = json!("x");
-    let many: Vec<_> = (0..7).map(|n| json!({"label":n.to_string()})).collect();
+    let many: Vec<_> = Vec::from_fn(7, |n| json!({"label":n.to_string()}));
     vec![
         (json!({"questions":vec![question("Five?"); 5]}), "Five?"),
         (
@@ -1237,7 +1237,7 @@ fn native_tui_question_answer_reaches_the_next_model_request() {
     let address = listener.local_addr().unwrap();
     let model = thread::spawn(move || {
         for phase in 0..2 {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + HANG_GUARD;
             let stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,

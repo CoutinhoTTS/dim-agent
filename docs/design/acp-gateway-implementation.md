@@ -129,7 +129,7 @@ Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一
 | `session/prompt` | 可接 | §5；`session.submit {sessionId, branchId:"main", submissionId:<uuid>, user:<mapped>, mode:"queue"}`。回复携带原生已提交 event；等消费该 input 的 turn 终态才回复 ACP。每 Session 同时只接受一个 prompt |
 | `session/cancel` | 可接 | §6；作用于该连接已登记的 Session，有本连接 prompt 时先撤回尚未采用的 input，再按需 `session.stop {sessionId,branchId:"main"}`；没有本连接 prompt 时，仍可请求该 Session main 的当前 turn 停止。不能因本地没有 prompt 就忽略取消 |
 | `session/close` | 条件可接 | 原生 `session.close {sessionId}`；这是显式关闭整个 Dim Session，影响其他客户端和分支。等待原生结算成功后清理本 runtime、回复 `{}`；不是 detach。当前 daemon 对关闭 id 的再 attach 可能拒绝，不能承诺关闭后可立即 resume |
-| `session/delete` | 条件可接 | 原生 `session.delete {sessionId}`，等待原生持久化删除结果，再删除本 runtime。失败保留诊断，不本地隐藏记录冒充删除 |
+| `session/delete` | 条件可接 | 本连接已 attach 的 Session 继续调用原生 `session.delete {sessionId}`，等待原生持久化删除结果，再删除本 runtime。未登记的 id 无须先 load/attach，调用 `session.delete {sessionId,requireInactive:true}`，由 [Session deletion](appserver/session-deletion-and-fork.md#31-method) 的原子检查保护其他连接使用中的 Session；`deleted:false` 映射为 ACP resource not found。失败保留诊断，不本地隐藏记录冒充删除 |
 | `session/set_mode` | 条件可接 | 仅提供 `read-only`、`workspace-write`、`full-access`。先 get policy/version，再 update `{sessionId,branchId:"main",expectedVersion,policy:<保留工具列表，仅替换 preset>}`。冲突返回错误并刷新；不盲重试旧 policy，不映射 plan mode |
 | `session/set_config_option` | 条件可接 | `mode` 复用上一行。`model` 仅在安全 provider catalog 和 `session.model.update` 可用时提供：保留 catalog 中 native model id，使用生成该选项的 providerId 调用 `{sessionId,branchId:"main",providerId,modelId}`。等待原生 `{model,outcome:"adopted"|"unchanged"}` 并接收 `context/configured`，再返回完整 configOptions；`configuration_superseded` 时刷新并报错，不把请求值直接当 currentValue |
 
@@ -183,8 +183,8 @@ attachment 上传成功而后续 submit 失败时，文件仍归原生 Session�
 
 1. `account.providers {}` 返回 `providerId/displayName/loginMethods`；`account.status {providerId}` 返回 AccountSnapshot。只有方法明确不存在或 providers 为空时，才视为没有此接入；网络、存储、配置错误不能吞成“无须认证”。
 2. auth method id 从发现的 provider/method/flow 确定性编码，按本连接已发布 id 查表，不从客户端 methodId 解析任意 provider、realm 或 callback。provider id 来自原生响应，public build 不硬编码某个私有账户。独立 terminal helper 重新 discovery 并生成同一 id 表，再校验传入 id，不依赖父进程的内存映射。
-3. 当 provider 声明 browser，且宿主可打开浏览器并捕获其已配置 loopback redirect 时，发布 agent-type browser method；它才使用 `authenticate`。已登录时调用 authenticate 只核对状态并成功，不重启登录。
-4. client 声明 `clientCapabilities.auth.terminal=true` 或 Registry 的 `clientCapabilities._meta["terminal-auth"]=true` 时，可发布 terminal-type method。args **替换**默认启动参数，完整包含 `acp`、宿主的绝对 `--home`、显式 `--server` / `--model-config`、登录 directory / redirect URI，以及 `--auth-setup METHOD_ID`；不得依赖被替换参数中的配置。新交互进程复用既有 CLI login 的 browser/device 流程与相同 executable、home 和 profile。客户端等待交互进程退出后再试请求；按照 ACP，**不能**把 terminal methodId 发给 authenticate。
+3. 每个 provider 只发布一种认证方法：client 声明 `clientCapabilities.auth.terminal=true` 或 Registry 的 `clientCapabilities._meta["terminal-auth"]=true` 且宿主有终端入口时，选择 device flow、terminal handler；否则选择 browser flow、agent handler。provider 必须声明所选 flow，browser handler 还要求宿主可打开浏览器并捕获已配置的 loopback redirect；无法执行所选方式时不发布该 provider 的方法。不同时发布 browser/device 或 agent/terminal 备选项。仅 agent method 使用 `authenticate`；已登录时只核对状态并成功，不重启登录。
+4. terminal-type method 的 args **替换**默认启动参数，完整包含 `acp`、宿主的绝对 `--home`、显式 `--server` / `--model-config`、登录 directory / redirect URI，以及 `--auth-setup METHOD_ID`；不得依赖被替换参数中的配置。新交互进程复用既有 CLI login 的 device 流程与相同 executable、home 和 profile，使远程用户可在自己的浏览器授权设备码。客户端等待交互进程退出后再试请求；按照 ACP，**不能**把 terminal methodId 发给 authenticate。
 5. 无可交付 UI/终端的 headless 宿主不发布不可执行的方法。device 已有原生接口，但首版通过上述交互 helper 提供，不另造 ACP user-code/form 流程。终端 helper 是独立交互进程，其文本输出不进入 ACP 连接 stdout。复用 Gateway 的宿主通过 `Login.terminal_args` 提供完整启动前缀；`None` 表示没有终端入口。
 
 ```text

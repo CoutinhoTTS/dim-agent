@@ -2,6 +2,7 @@ mod allocation;
 mod app_server;
 mod catalog;
 mod modules;
+mod npm;
 mod plugins;
 mod prompt_eval;
 mod rule;
@@ -65,6 +66,7 @@ async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             boundaries(false)?;
             catalog::check(&root()).await?;
             types::check(&root())?;
+            npm::check(&root())?;
         }
         Some("types") => types::write(&root())?,
         _ => {
@@ -377,7 +379,7 @@ fn boundaries(write: bool) -> std::result::Result<(), Box<dyn std::error::Error>
         .current_dir(root())
         .output()?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned().into());
+        return Err(String::from_utf8_lossy_owned(output.stderr).into());
     }
     let metadata: Value = serde_json::from_slice(&output.stdout)?;
     let mut edges = vec![];

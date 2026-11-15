@@ -7,6 +7,7 @@
 //! Select a model
 //! > Provider / model          ZDR  ‹ high ›  current
 //!   Other provider / model    low
+//!   Third provider / model    —
 //!   Edit models
 //!   Subagent models: Agent choice
 //! Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
@@ -27,7 +28,9 @@
 //! the model and writes it as the default the next Session in the launch
 //! workspace reads; a cycled effort is saved as its `reasoningEffort` and sent
 //! with the model's other saved preferences. A model with no advertised effort
-//! ignores the arrows. Typing in the filter keeps ←/→ for the cursor.
+//! ignores the arrows; one that advertises efforts draws `—` in the effort cell
+//! until one is chosen, saved or declared, bracketed while the row is focused.
+//! Typing in the filter keeps ←/→ for the cursor.
 //!
 //! Choosing a policy writes only `collaboration.set_model_policy`; the leader's
 //! model and the provider default are untouched.
@@ -35,8 +38,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::session::{
-    Area, EmptyProvider, EmptyReason, ModelItem, ModelList, ModelPolicyUpdate, NeedsLimitsProvider,
-    SubagentModelPolicy,
+    Area, EmptyProvider, EmptyReason, ModelItem, ModelList, ModelOutcome, ModelPolicyUpdate,
+    NeedsLimitsProvider, SubagentModelPolicy,
 };
 use crate::ui::i18n::{t, tf};
 use crate::ui::list_panel::{Event, Item, ListPanel};
@@ -507,13 +510,49 @@ fn effort_detail(model: &ModelItem, chosen: Option<&str>, focused: bool, current
             None => "‹ — ›".to_owned(),
         }
     } else {
-        shown.unwrap_or("").to_owned()
+        shown.unwrap_or("—").to_owned()
     };
-    match (effort.is_empty(), current) {
+    let state = match (effort.is_empty(), current) {
         (true, true) => t("current").to_owned(),
         (false, true) => format!("{effort}  {}", t("current")),
         (false, false) => effort,
         (true, false) => String::new(),
+    };
+    // How the id was identified is the row's own statement about the model, so
+    // it rides after the effort: a user reading an unusable row sees which
+    // model it was taken to be, or the rows that disagreed.
+    let outcome = outcome_text(&model.outcome);
+    match (state.is_empty(), outcome.is_empty()) {
+        (true, _) => outcome,
+        (_, true) => state,
+        (false, false) => format!("{state}  {outcome}"),
+    }
+}
+
+/// What identification made of one row's id, as the row's suffix.
+fn outcome_text(outcome: &ModelOutcome) -> String {
+    match outcome {
+        ModelOutcome::Identified {
+            provider_id,
+            model_id,
+            inferred: false,
+        } => tf(
+            "identified: {model} at {provider}",
+            &[("model", model_id), ("provider", provider_id)],
+        ),
+        ModelOutcome::Identified {
+            provider_id,
+            model_id,
+            inferred: true,
+        } => tf(
+            "inferred from several rows: {model} at {provider}",
+            &[("model", model_id), ("provider", provider_id)],
+        ),
+        ModelOutcome::Ambiguous { candidates } => tf(
+            "ambiguous: {candidates}",
+            &[("candidates", &candidates.join(", "))],
+        ),
+        ModelOutcome::Unidentified => t("unidentified").to_owned(),
     }
 }
 
@@ -598,7 +637,7 @@ fn limits_rows(
     for provider in providers {
         let name = ("provider", provider.provider_name.as_str());
         let id = ("id", provider.provider_id.as_str());
-        let text = if provider.count == 1 {
+        let mut text = if provider.count == 1 {
             tf(
                 "{provider}: 1 model needs a window · dimcode models {id} --set-missing-limits",
                 &[name, id],
@@ -610,6 +649,12 @@ fn limits_rows(
                 &[name, ("count", &count), id],
             )
         };
+        // The reason and the rows that disagree appear together, so a user
+        // choosing what an id stands for reads the candidates here rather than
+        // only in the refusal text.
+        if !provider.candidates.is_empty() {
+            text.push_str(&format!(" · {}", provider.candidates.join(", ")));
+        }
         let mut row = Item::heading(text);
         row.sticky = true;
         items.push(row);
@@ -684,6 +729,11 @@ mod tests {
             efforts: efforts.iter().map(|effort| (*effort).to_owned()).collect(),
             default_effort: default_effort.map(str::to_owned),
             saved_effort: saved.map(str::to_owned),
+            outcome: ModelOutcome::Identified {
+                provider_id: provider.into(),
+                model_id: id.into(),
+                inferred: false,
+            },
         }
     }
 
@@ -750,6 +800,153 @@ mod tests {
         assert!(!screen.contains("ZDR"), "{screen}");
     }
 
+    /// The row says how its id was identified, in the four wordings: one row,
+    /// several agreeing rows, a disagreement, and nothing.
+    #[test]
+    fn a_rows_suffix_says_how_its_id_was_identified() {
+        let mut panel = ModelsPanel::new();
+        let outcome = |outcome| ModelItem {
+            provider_id: "relay".into(),
+            provider_name: "Relay".into(),
+            provider_version: 1,
+            model_id: "listed-id".into(),
+            display_name: "listed-id".into(),
+            zdr: false,
+            efforts: Vec::new(),
+            default_effort: None,
+            saved_effort: None,
+            outcome,
+        };
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                outcome(ModelOutcome::Identified {
+                    provider_id: "moonshot".into(),
+                    model_id: "kimi-k3".into(),
+                    inferred: false,
+                }),
+                outcome(ModelOutcome::Identified {
+                    provider_id: "openai".into(),
+                    model_id: "gpt-5.5".into(),
+                    inferred: true,
+                }),
+                outcome(ModelOutcome::Ambiguous {
+                    candidates: vec![
+                        "ark-code/ark-code-latest".into(),
+                        "byteplus-coding-plan/ark-code-latest".into(),
+                    ],
+                }),
+                outcome(ModelOutcome::Unidentified),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        // Wide enough that the candidates a row names are not cut off.
+        let screen = panel
+            .render(
+                120,
+                16,
+                &crate::ui::theme::palette::terminal_palette(
+                    ColorMode::TrueColor,
+                    Appearance::Dark,
+                ),
+            )
+            .join("\n");
+        assert!(
+            screen.contains("identified: kimi-k3 at moonshot"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("inferred from several rows: gpt-5.5 at openai"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains(
+                "ambiguous: ark-code/ark-code-latest, byteplus-coding-plan/ark-code-latest"
+            ),
+            "{screen}"
+        );
+        assert!(screen.contains("unidentified"), "{screen}");
+    }
+
+    /// A row that offers efforts and has none chosen, saved or declared says
+    /// that a choice exists, where a row that offers none says nothing.
+    #[test]
+    fn an_unfocused_row_that_offers_efforts_and_has_none_selected_says_so() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, None),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains('—'), "{screen}");
+        assert!(!row.contains("low") && !row.contains("high"), "{screen}");
+        let plain = screen
+            .lines()
+            .find(|line| line.contains("plain"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(!plain.contains('—'), "{screen}");
+    }
+
+    /// Focused, the row brackets that placeholder the way it brackets an
+    /// effort it would send.
+    #[test]
+    fn a_focused_row_that_offers_efforts_and_has_none_selected_brackets_it() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, None),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        assert_eq!(panel.handle_key(key_of(KeyCode::Down)), Effect::None);
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains("‹ — ›"), "{screen}");
+    }
+
+    /// What the model would use takes the placeholder's place, so a declared
+    /// default reads as the effort it is.
+    #[test]
+    fn a_declared_default_effort_stands_in_for_the_placeholder() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, Some("high")),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains("high"), "{screen}");
+        assert!(!row.contains('—'), "{screen}");
+    }
+
     #[test]
     fn arrows_cycle_the_highlighted_models_effort_and_enter_adopts_it() {
         let mut panel = panel();
@@ -781,6 +978,7 @@ mod tests {
         let mut panel = panel();
         assert_eq!(panel.handle_key(key_of(KeyCode::Down)), Effect::None);
         assert!(!drawn(&panel).contains('‹'), "{}", drawn(&panel));
+        assert!(!drawn(&panel).contains('—'), "{}", drawn(&panel));
         assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
         assert!(matches!(
             panel.handle_key(key_of(KeyCode::Enter)),
@@ -920,6 +1118,7 @@ mod tests {
                 provider_id: "dim".into(),
                 provider_name: "Dim OAuth".into(),
                 count: 2,
+                candidates: Vec::new(),
             }],
         }));
         let screen = drawn(&panel);
@@ -941,6 +1140,7 @@ mod tests {
                 provider_id: "dim".into(),
                 provider_name: "Dim OAuth".into(),
                 count: 1,
+                candidates: Vec::new(),
             }],
         }));
         assert!(
@@ -968,6 +1168,7 @@ mod tests {
                 provider_id: "dim".into(),
                 provider_name: "Dim OAuth".into(),
                 count: 3,
+                candidates: Vec::new(),
             }],
         }));
         let screen = drawn(&panel);

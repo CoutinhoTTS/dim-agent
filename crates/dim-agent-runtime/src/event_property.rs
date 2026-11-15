@@ -198,7 +198,7 @@ impl<'a> PropertySerializer<'a> {
             .strip_prefix('[')
             .and_then(|path| path.split_once(']'));
         PropertyArray {
-            rest: subscript.map(|(_, rest)| rest.strip_prefix('.').unwrap_or(rest)),
+            rest: subscript.map(|(_, rest)| rest.trim_prefix('.')),
             index: subscript.and_then(|(index, _)| index.parse().ok()),
             offset: 0,
             values: Vec::new(),

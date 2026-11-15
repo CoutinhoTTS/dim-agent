@@ -65,16 +65,16 @@ test("a full sync of the committed model descriptors is idempotent", async (t) =
   await writeSelfUpstream(cwd, upstream, providers);
   execFileSync(process.execPath, [script, "--sync"], { cwd, env });
   // A `remote` provider with no committed default gets the one derived from its
-  // models. That is the release step's own change, so the first sync may write
-  // it; a second sync must then find nothing to do.
+  // models. That is the release step's own change, so the committed catalog
+  // carries every derived default, and a sync that derives a new one fails
+  // here, naming the providers that must be committed.
   const first = await readFile(path, "utf8");
   const settled = JSON.parse(first).providers
     .filter(({ providerId, metadata }) =>
       providers.find((old) => old.providerId === providerId).metadata.defaultModelId === undefined
       && metadata.defaultModelId !== undefined)
     .map(({ providerId }) => providerId);
-  assert.deepEqual(settled.sort(),
-    ["qwencloud", "qwencloud-coding-plan", "qwencloud-token-plan", "step-plan-intl", "tencent-hunyuan", "xiaomi-mimo"]);
+  assert.deepEqual(settled, []);
   const strip = (list) => list.map(({ providerId, metadata, ...rest }) => ({
     providerId,
     ...rest,
@@ -689,4 +689,30 @@ test("an override for a local or unknown provider fails the offline run", async 
   const unknown = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
   assert.equal(unknown.status, 1);
   assert.match(unknown.stderr, /Model override provider not-a-provider is not a bundled provider/);
+});
+
+test("a plan provider states it and an API entry beside it does not", async (t) => {
+  const { cwd, env } = await checkout(t);
+  const path = join(cwd, bundled);
+  const declared = JSON.parse(await readFile(path, "utf8"));
+  const write = () => writeFile(path, JSON.stringify(declared, null, 2));
+  const provider = (id) => declared.providers.find((entry) => entry.providerId === id);
+
+  assert.equal(provider("openai-codex").metadata.plan, true);
+  assert.equal(provider("openai").metadata.plan, undefined);
+
+  const codex = provider("openai-codex");
+  codex.metadata.plan = "yes";
+  await write();
+  const invalid = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /Provider openai-codex: plan is either absent or true/);
+
+  codex.metadata.plan = true;
+  const ollama = provider("ollama");
+  ollama.metadata.plan = true;
+  await write();
+  const empty = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /Provider ollama: only a provider with bundled models states a plan/);
 });

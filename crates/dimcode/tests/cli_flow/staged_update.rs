@@ -36,8 +36,8 @@ while [ -L "$target" ]; do
     *) target=$(dirname "$target")/$link ;;
   esac
 done
-directory=$(cd "$(dirname "$target")" && pwd)
-while [ ! -f "$directory/package.json" ]; do directory=$(dirname "$directory"); done
+directory=$(cd "$(dirname "$target")" && pwd) || exit 1
+while [ ! -f "$directory/package.json" ] && [ "$directory" != / ]; do directory=$(dirname "$directory"); done
 sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$directory/package.json"
 "#;
 
@@ -57,8 +57,8 @@ while [ -L "$target" ]; do
     *) target=$(dirname "$target")/$link ;;
   esac
 done
-directory=$(cd "$(dirname "$target")" && pwd)
-while [ ! -f "$directory/package.json" ]; do directory=$(dirname "$directory"); done
+directory=$(cd "$(dirname "$target")" && pwd) || exit 1
+while [ ! -f "$directory/package.json" ] && [ "$directory" != / ]; do directory=$(dirname "$directory"); done
 if [ -n "$UPDATE_SLOW" ]; then
   printf 'checking %s\n' "$directory" >> "$UPDATE_CHECKING"
   sleep 2
@@ -242,7 +242,14 @@ retired="$prefix/lib/node_modules/.dimcode-alpha.retired"
 rm -rf "$retired"
 if [ -d "$package" ]; then mv "$package" "$retired"; fi
 : > "$UPDATE_WAITING"
-while [ ! -f "$UPDATE_GATE" ]; do sleep 0.1; done
+# The gate lives in the test's own home: a fresh directory made for this test
+# alone, removed only when this test ends. The loop can end only after its own
+# test has ended, so no other test's home can end it early.
+home=${UPDATE_GATE%/*}
+while [ ! -f "$UPDATE_GATE" ]; do
+  [ -d "$home" ] || exit 1
+  sleep 0.1
+done
 if [ "$UPDATE_FAIL" = 1 ]; then exit 143; fi
 if [ -z "$UPDATE_VERSION" ]; then echo 'Installed package'; exit 0; fi
 mkdir -p "$package/node_modules/dimcode-darwin-arm64/bin"
@@ -287,12 +294,12 @@ fn an_interrupted_staged_update_keeps_the_installed_command() {
                 ("UPDATE_FAIL", if dies { "1" } else { "0" }),
             ],
         );
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = OwnedChild::spawn(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        );
         installed.until_waiting();
         assert_eq!(
             installed.try_version("dima").as_deref(),
@@ -303,8 +310,8 @@ fn an_interrupted_staged_update_keeps_the_installed_command() {
             assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
         }
         installed.release();
-        let output = wait(child);
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let output = child.wait();
+        let stderr = String::from_utf8_lossy_owned(output.stderr);
         assert!(!output.status.success(), "{case}: {stderr}");
         if !dies {
             assert!(stderr.contains("Update interrupted"), "{case}: {stderr}");
@@ -359,7 +366,7 @@ fn an_update_that_installs_nothing_keeps_the_installed_command() {
             )
             .output()
             .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = String::from_utf8_lossy_owned(output.stderr);
         assert!(!output.status.success(), "{case}: {stderr}");
         assert!(!stderr.contains("Updated "), "{case}: {stderr}");
         assert!(
@@ -393,7 +400,7 @@ fn a_staged_update_switches_the_package_its_commands_and_the_global_config() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(stderr.contains("Updated dimcode-alpha"), "{stderr}");
     assert_eq!(installed.installed(), version);
@@ -446,7 +453,7 @@ fn a_staged_update_whose_new_command_fails_puts_the_previous_version_back() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(!stderr.contains("Updated "), "{stderr}");
     assert_eq!(
@@ -474,7 +481,7 @@ fn a_command_the_manager_renames_takes_the_name_of_its_link() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(
         installed.version("escape"),
@@ -510,7 +517,7 @@ fn a_command_another_package_owns_is_never_taken() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
         stderr.contains("shared-cli") && stderr.contains("other-cli"),
@@ -561,7 +568,7 @@ fn one_packages_staging_survives_the_others_update() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(installed.installed(), version, "{stderr}");
     assert_eq!(
@@ -602,7 +609,7 @@ fn one_packages_staging_survives_the_others_update() {
         .env("UPDATE_WAITING", installed.home.0.join("waiting"))
         .env("UPDATE_COMMAND", REPORTS_VERSION);
     let output = command.output().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
         stderr.contains("An earlier update left dimcode at"),
@@ -631,12 +638,12 @@ fn an_interruption_during_the_post_switch_check_puts_the_previous_version_back()
         &[("UPDATE_COMMAND", SLOW_VERSION), ("UPDATE_SLOW", "1")],
     );
     command.env("UPDATE_CHECKING", &checking);
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = OwnedChild::spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
     let deadline = Instant::now() + HANG_GUARD;
     while !checking.exists() {
         assert!(
@@ -650,8 +657,8 @@ fn an_interruption_during_the_post_switch_check_puts_the_previous_version_back()
         0,
         "the flow must be able to interrupt the update while it checks"
     );
-    let output = wait(child);
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let output = child.wait();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
         stderr.contains("interrupted while checking"),
@@ -689,7 +696,7 @@ fn an_alias_the_package_never_declared_survives_an_update() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(
         alias.is_symlink(),
@@ -716,7 +723,7 @@ fn a_declared_command_the_new_version_drops_is_retired() {
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(
         !installed.prefix.join("bin/dropped").exists(),
@@ -742,7 +749,7 @@ fn a_live_manifest_that_cannot_be_read_retires_nothing_and_the_update_goes_on() 
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(
         stderr.contains("Updated dimcode-alpha"),
@@ -776,11 +783,12 @@ while [ -L "$target" ]; do
     *) target=$(dirname "$target")/$link ;;
   esac
 done
-directory=$(cd "$(dirname "$target")" && pwd)
-while [ ! -f "$directory/package.json" ]; do directory=$(dirname "$directory"); done
+directory=$(cd "$(dirname "$target")" && pwd) || exit 1
+while [ ! -f "$directory/package.json" ] && [ "$directory" != / ]; do directory=$(dirname "$directory"); done
 if [ -n "$UPDATE_SLOW" ]; then
   printf 'checking %s\n' "$directory" >> "$UPDATE_CHECKING"
-  sh -c 'echo $$ > "$UPDATE_CHECK_CHILD"; sleep 1; echo survived > "$UPDATE_CHECK_MARKER"; while :; do sleep 0.2; done' &
+  # The loop ends only at this test's own `Home` drop; see the gate loop in MOCK_NPM.
+  sh -c 'echo $$ > "$UPDATE_CHECK_CHILD"; sleep 1; echo survived > "$UPDATE_CHECK_MARKER"; home=${UPDATE_CHECK_MARKER%/*}; while [ -d "$home" ]; do sleep 0.2; done' &
   wait
 fi
 sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$directory/package.json"
@@ -803,12 +811,12 @@ fn an_interrupted_check_ends_every_process_it_started() {
         .env("UPDATE_CHECKING", &checking)
         .env("UPDATE_CHECK_CHILD", &started)
         .env("UPDATE_CHECK_MARKER", &marker);
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = OwnedChild::spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
     let deadline = Instant::now() + HANG_GUARD;
     while !started.exists() {
         assert!(
@@ -827,8 +835,8 @@ fn an_interrupted_check_ends_every_process_it_started() {
         0,
         "the flow must be able to interrupt the update while it checks"
     );
-    let output = wait(child);
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let output = child.wait();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(!stderr.contains("Updated "), "{stderr}");
     assert_eq!(

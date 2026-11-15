@@ -585,7 +585,7 @@ async fn two_publishes_share_the_install_delivery_budget() {
     fixture.producer.declare(im_declaration()).await.unwrap();
     let gate = fixture.sessions.gate();
     let targets =
-        |prefix: &str| -> Vec<String> { (0..8).map(|index| format!("{prefix}-{index}")).collect() };
+        |prefix: &str| -> Vec<String> { Vec::from_fn(8, |index| format!("{prefix}-{index}")) };
     let first = event_to("one", &targets("a"));
     let second = event_to("two", &targets("b"));
     let one = {

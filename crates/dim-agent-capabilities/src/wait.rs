@@ -217,13 +217,9 @@ impl Wait {
             }
             state.waiting = true;
         }
-        struct Release<'a>(&'a Mutex<State>);
-        impl Drop for Release<'_> {
-            fn drop(&mut self) {
-                self.0.lock().unwrap().waiting = false;
-            }
-        }
-        let _release = Release(&self.state);
+        let _release = std::mem::DropGuard::new(&self.state, |state: &Mutex<State>| {
+            state.lock().unwrap().waiting = false;
+        });
         let started = Instant::now();
         let waited = || started.elapsed().as_millis() as u64;
         if cancel.is_cancelled() {

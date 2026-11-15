@@ -23,7 +23,7 @@ use crate::client::{self, Client, Message};
 use crate::model::session::{
     ACCOUNT_NAMESPACE, Account, AccountDescriptor, Command, CompactReply, ContextReading,
     DIM_OAUTH_ID, DeleteOutcome, DeleteReply, DraftPart, EmptyProvider, EmptyReason,
-    ExecutionSnapshot, ManagementReply, ModelItem, ModelList, ModelPolicyUpdate,
+    ExecutionSnapshot, ManagementReply, ModelItem, ModelList, ModelOutcome, ModelPolicyUpdate,
     NeedsLimitsProvider, OauthEvent, OauthStart, PluginItem, PluginReply, PromptField,
     PromptSetting, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem, RuntimesError,
     SandboxBackend, SessionItem, SessionPort, SessionsScope, SubagentModelPolicy,
@@ -69,6 +69,7 @@ struct ProviderSummary {
     auth: serde_json::Value,
     base_url: String,
     credential_configured: bool,
+    glued_prefix: Option<String>,
     enabled: bool,
     version: u32,
     account: Option<AccountDescriptor>,
@@ -112,6 +113,8 @@ struct ManagementConnection {
     auth: serde_json::Value,
     base_url: String,
     credential_configured: bool,
+    #[serde(default)]
+    glued_prefix: Option<String>,
 }
 #[derive(Deserialize)]
 struct ProviderManagement {
@@ -809,7 +812,6 @@ impl Worker {
             crate::add_creation_worktree(&self.client, &self.options, &mut params)?;
             params
         };
-        let mut preferences = params.get("modelPreferences").cloned();
         let mut target = if initial {
             self.options
                 .provider
@@ -835,19 +837,13 @@ impl Worker {
                         .client
                         .typed("provider.management", json!({}))
                         .await?;
-                    let configured = snapshot
+                    snapshot
                         .providers
                         .into_iter()
                         .find(|entry| entry.provider_id == provider)
                         .ok_or_else(|| format!("{cannot_copy}, or select a configured Provider model before starting a new Session"))?;
-                    preferences = configured.preferences.get(&model).cloned();
-                } else {
-                    preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
                 }
                 target = Some((provider, model));
-            }
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
             }
             match self.client.typed::<Created>("session.create", params).await {
                 Ok(created) => Ok(created),
@@ -855,9 +851,6 @@ impl Worker {
                     &mut self.client,
                     target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
                     error,
-                    preferences
-                        .as_ref()
-                        .filter(|_| !initial || self.options.effort.is_none()),
                 )
                 .await),
             }
@@ -3263,6 +3256,7 @@ impl Worker {
                 custom: summary.source == "custom",
                 base_url: Some(summary.base_url).filter(|url| !url.is_empty()),
                 api_key_preview: summary.credential_configured.then(|| "••••••••".into()),
+                glued_prefix: summary.glued_prefix,
                 id: summary.provider_id,
                 version: summary.version,
                 name: summary.display_name,
@@ -3297,6 +3291,7 @@ impl Worker {
                         auth: connection.auth,
                         base_url: connection.base_url,
                         credential_configured: connection.credential_configured,
+                        glued_prefix: connection.glued_prefix,
                         enabled: entry
                             .enabled
                             .ok_or("Static Provider enable flag is missing")?,
@@ -3357,6 +3352,7 @@ impl Worker {
                 api_key,
                 base_url,
                 enabled,
+                glued_prefix,
             } => {
                 let probe = api_key.is_some() || base_url.is_some();
                 let mut patch = json!({});
@@ -3368,6 +3364,14 @@ impl Worker {
                 }
                 if let Some(enabled) = enabled {
                     patch["enabled"] = json!(enabled);
+                }
+                if let Some(prefix) = glued_prefix {
+                    // The patch's own "clear it" is a null, and its "leave it
+                    // alone" is the omitted field.
+                    patch["gluedPrefix"] = match prefix {
+                        Some(prefix) => json!(prefix),
+                        None => json!(null),
+                    };
                 }
                 let notice = if probe {
                     "Connected"
@@ -3538,6 +3542,11 @@ impl Worker {
             };
             let preferences = self.saved_preferences(&provider_id).await;
             let total = catalog.models.len();
+            let ambiguous: Vec<crate::wire::CatalogPreferences> = catalog
+                .models
+                .iter()
+                .filter_map(|model| model.metadata.clone())
+                .collect();
             let undeclared = catalog
                 .models
                 .iter()
@@ -3596,14 +3605,37 @@ impl Worker {
                             efforts,
                             default_effort,
                             saved_effort,
+                            outcome: model_outcome(model.metadata.as_ref(), &provider_id),
                         }
                     }),
             );
             if undeclared > 0 {
+                let mut candidates: Vec<String> = ambiguous
+                    .iter()
+                    .flat_map(|metadata| {
+                        metadata
+                            .identification
+                            .as_ref()
+                            .filter(|identification| identification.rule == "ambiguous")
+                            .map(|identification| {
+                                identification
+                                    .candidates
+                                    .iter()
+                                    .map(|candidate| {
+                                        format!("{}/{}", candidate.provider_id, candidate.model_id)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                candidates.sort();
+                candidates.dedup();
                 limits.push(NeedsLimitsProvider {
                     provider_id: provider_id.clone(),
                     provider_name: provider_name.clone(),
                     count: undeclared,
+                    candidates,
                 });
             }
             if models.len() == before {
@@ -3774,8 +3806,8 @@ impl Worker {
 
     /// Switches the session's model, or at home the one the first message
     /// starts a session on, then makes it the default for new ones.
-    /// A cycled `reasoning_effort` is saved first, then sent with the model's
-    /// other saved preferences. `label` is the picker row's text, which the
+    /// A cycled `reasoning_effort` is saved first, so the server reads it when
+    /// it adopts the model. `label` is the picker row's text, which the
     /// default's confirmation names back.
     async fn select_model(
         &mut self,
@@ -3791,14 +3823,6 @@ impl Worker {
         if let Some(effort) = &reasoning_effort {
             self.save_reasoning_effort(&provider_id, &model_id, effort)
                 .await?;
-        }
-        let mut preferences =
-            saved_model_preferences(&mut self.client, &provider_id, &model_id).await?;
-        if let Some(effort) = &reasoning_effort {
-            let value = preferences.get_or_insert_with(|| json!({}));
-            if let Some(object) = value.as_object_mut() {
-                object.insert("reasoningEffort".to_owned(), json!(effort));
-            }
         }
         let model = if self.session_id.is_empty() {
             self.model_session = None;
@@ -3819,10 +3843,7 @@ impl Worker {
             model
         } else {
             let target = (provider_id.clone(), model_id.clone());
-            let mut params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
-            }
+            let params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
             let updated: Updated = match self.client.typed("session.model.update", params).await {
                 Ok(updated) => updated,
                 Err(error) => {
@@ -3830,7 +3851,6 @@ impl Worker {
                         &mut self.client,
                         Some((target.0.as_str(), target.1.as_str())),
                         error,
-                        preferences.as_ref(),
                     )
                     .await);
                 }
@@ -4812,6 +4832,42 @@ fn group(n: u64) -> String {
     out
 }
 
+/// What identification made of one entry's id, in the words its row shows.
+///
+/// A merge is the one rule whose numbers come from several rows rather than
+/// from one declaration, so it reads as inferred from them; every other rule
+/// named one row, and the entry's `matchedProviderId` and `matchedModelId` say
+/// which.
+fn model_outcome(
+    metadata: Option<&crate::wire::CatalogPreferences>,
+    listed_by: &str,
+) -> ModelOutcome {
+    let Some(metadata) = metadata else {
+        return ModelOutcome::Unidentified;
+    };
+    let Some(identification) = metadata.identification.as_ref() else {
+        return ModelOutcome::Unidentified;
+    };
+    if identification.rule == "ambiguous" {
+        return ModelOutcome::Ambiguous {
+            candidates: identification
+                .candidates
+                .iter()
+                .map(|candidate| format!("{}/{}", candidate.provider_id, candidate.model_id))
+                .collect(),
+        };
+    }
+    ModelOutcome::Identified {
+        provider_id: metadata
+            .matched_provider_id
+            .as_deref()
+            .unwrap_or(listed_by)
+            .to_owned(),
+        model_id: metadata.matched_model_id.clone().unwrap_or_default(),
+        inferred: identification.rule == "merge",
+    }
+}
+
 fn effort_choices(
     capabilities: &dim_agent_types::CatalogCapabilities,
     reasoning: Option<&dim_agent_types::ModelReasoning>,
@@ -4845,12 +4901,10 @@ pub(crate) async fn adopt_startup(
     if let Some(model) = &options.model {
         params["modelId"] = json!(model);
     }
-    let mut saved = None;
-    if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
+    if let Some(provider) = &options.provider {
         params["providerId"] = json!(provider);
-        saved = saved_model_preferences(client, provider, model).await?;
     }
-    if let Some(preferences) = options.creation_preferences(saved) {
+    if let Some(preferences) = options.creation_preferences() {
         params["modelPreferences"] = preferences;
     }
     client
@@ -4879,25 +4933,6 @@ fn selection_version(reply: serde_json::Value) -> crate::Result<Option<u32>> {
     let current: Current =
         serde_json::from_value(reply).map_err(|_| "Invalid provider.selection response")?;
     Ok(current.selection.map(|selection| selection.version))
-}
-
-pub(crate) async fn saved_model_preferences(
-    client: &mut Client,
-    provider_id: &str,
-    model_id: &str,
-) -> crate::Result<Option<serde_json::Value>> {
-    if !client.offers("provider.management") {
-        return Ok(None);
-    }
-    let snapshot: ProviderManagement = client
-        .typed("provider.management", json!({"providerId":provider_id}))
-        .await?;
-    let provider = snapshot
-        .providers
-        .into_iter()
-        .next()
-        .ok_or("Provider management entry is missing")?;
-    Ok(provider.preferences.get(model_id).cloned())
 }
 
 pub(crate) async fn clear_model_preferences(
