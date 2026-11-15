@@ -38,6 +38,18 @@
       ]
     },
     {
+      "id": "dim_acp::commands",
+      "crate": "dim_acp",
+      "parent": "dim_acp",
+      "file": "crates/dim-acp/src/commands.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "unreachable"
+      ]
+    },
+    {
       "id": "dim_acp::config",
       "crate": "dim_acp",
       "parent": "dim_acp",
@@ -65,6 +77,7 @@
       "file": "crates/dim-acp/src/gateway.rs",
       "unexpandedMacros": [
         "eprintln",
+        "format",
         "json",
         "matches",
         "tokio::select",
@@ -7347,6 +7360,13 @@
     },
     {
       "from": "dim_acp",
+      "to": "dim_acp::commands",
+      "references": [
+        "mod commands"
+      ]
+    },
+    {
+      "from": "dim_acp",
       "to": "dim_acp::config",
       "references": [
         "mod config"
@@ -7453,6 +7473,36 @@
       ]
     },
     {
+      "from": "dim_acp::commands",
+      "to": "dim_acp::config",
+      "references": [
+        "path Config",
+        "use crate::config::Config"
+      ]
+    },
+    {
+      "from": "dim_acp::commands",
+      "to": "dim_acp::rpc",
+      "references": [
+        "path Rpc",
+        "use crate::rpc::Rpc"
+      ]
+    },
+    {
+      "from": "dim_acp::commands",
+      "to": "dim_agent_types::goal",
+      "references": [
+        "path GoalRead",
+        "path GoalViewStatus::Active",
+        "path GoalViewStatus::Blocked",
+        "path GoalViewStatus::Completed",
+        "path GoalViewStatus::None",
+        "path GoalViewStatus::Paused",
+        "use dim_agent_types::GoalRead",
+        "use dim_agent_types::GoalViewStatus"
+      ]
+    },
+    {
       "from": "dim_acp::config",
       "to": "dim_acp::rpc",
       "references": [
@@ -7529,6 +7579,14 @@
         "path crate::auth::authenticate",
         "path crate::auth::discover",
         "path crate::auth::ensure"
+      ]
+    },
+    {
+      "from": "dim_acp::gateway",
+      "to": "dim_acp::commands",
+      "references": [
+        "path crate::commands::parse",
+        "path crate::commands::run"
       ]
     },
     {
@@ -52755,6 +52813,10 @@
     }
   ],
   "unresolved": [
+    {
+      "module": "dim_acp::commands",
+      "path": "char::is_whitespace"
+    },
     {
       "module": "dim_acp::gateway",
       "path": "Lookup::Accepted"
