@@ -1240,6 +1240,7 @@ picker, and Esc there closes the area to the prompt, not back to the picker.
 Select a model
 > Ready / flash              ZDR  ‹ high ›  current
   Ready / plain              low
+  Ready / sonnet             —
   Edit models                Ready  ready
   Other / model-x
   Edit models                Other  other
@@ -1256,8 +1257,10 @@ Enter also writes the default a new Session in this folder reads ([provider mana
 §4](appserver/provider-management.md#4-client-integration)).
 
 Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
-modes; explicit-value forms and the line client keep their command behavior. The selection
-contract is owned by [model configuration](model-configuration.md#scrollback-interaction).
+modes; explicit-value forms and the line client keep their command behavior. At Home the
+picker and the explicit-value forms act on the footer's preview, the model the first
+message's Session adopts. The selection contract is owned by [model
+configuration](model-configuration.md#scrollback-interaction).
 
 ### The Workflow area
 

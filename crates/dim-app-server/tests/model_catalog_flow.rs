@@ -577,6 +577,9 @@ fn a_plan_row_without_a_canonical_id_names_no_other_vendor() {
 /// A catalog of exactly the providers a case states, built through the step
 /// the shipped file goes through: `from_value` drops every limit a row's
 /// `metadata.raw` does not declare, so a built row declares its limits there.
+///
+/// It answers "what does the matcher run over": a case's input, never its
+/// expected value, which `bundled` reads from the row the case names.
 fn catalog(providers: serde_json::Value) -> BundledCatalog {
     BundledCatalog::from_value(json!({ "providers": providers }))
         .expect("the case states the catalog its rule needs")
@@ -719,7 +722,13 @@ fn stored(model_id: &str) -> ModelEntry {
     .expect("a stored entry states its id and API")
 }
 
-/// One row of a catalog, as the catalog holds it.
+/// One row of a catalog, as the catalog holds it, read directly rather than
+/// through the matcher.
+///
+/// It answers "what does this row declare": a case's expected value, which the
+/// matcher's answer (`relay`, `builtin`) is compared against. It never builds
+/// a case's input, since an expectation read back from the rows a case already
+/// projected would only assert that the catalog agrees with itself.
 fn bundled(catalog: &BundledCatalog, provider_id: &str, model_id: &str) -> ModelEntry {
     catalog
         .bundled_models(provider_id)
@@ -859,16 +868,20 @@ fn an_id_is_identified_before_its_numbers_are_read() {
     }
 }
 
-/// One canonical id names three vendor rows and their numbers differ, so the
-/// display name of one row is what settles which of them answers.
+/// One canonical id names three vendor rows and their numbers and efforts
+/// differ, so the display name of one row is what settles which of them
+/// answers, and that row's efforts come with it.
 #[test]
 fn a_canonical_id_is_narrowed_by_the_display_name() {
     let catalog = catalog(json!([vendor(
         "acme",
         json!([
-            with_canonical(
-                row("acme-v4-flash", "Acme V4 Flash", 200_000, 64_000),
-                "acme/acme-v4.1-flash-1017",
+            with_efforts(
+                with_canonical(
+                    row("acme-v4-flash", "Acme V4 Flash", 200_000, 64_000),
+                    "acme/acme-v4.1-flash-1017",
+                ),
+                &["low", "high"],
             ),
             with_canonical(
                 row(
@@ -879,9 +892,12 @@ fn a_canonical_id_is_narrowed_by_the_display_name() {
                 ),
                 "acme/acme-v4.1-flash-1017",
             ),
-            with_canonical(
-                row("acme-flash", "Acme V4.1 Flash", 1_000_000, 128_000),
-                "acme/acme-v4.1-flash-1017",
+            with_efforts(
+                with_canonical(
+                    row("acme-flash", "Acme V4.1 Flash", 1_000_000, 128_000),
+                    "acme/acme-v4.1-flash-1017",
+                ),
+                &["low", "high", "max"],
             ),
         ])
     ),]));
@@ -894,6 +910,15 @@ fn a_canonical_id_is_narrowed_by_the_display_name() {
     assert_eq!(
         entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
         Some("acme-canonical")
+    );
+    assert!(
+        efforts(&narrowed).is_some_and(|efforts| !efforts.is_empty()),
+        "the narrowed row offers efforts, so carrying them is visible"
+    );
+    assert_ne!(
+        efforts(&narrowed),
+        efforts(&bundled(&catalog, "acme", "acme-v4-flash")),
+        "the rows offer different efforts, so which one answers is visible"
     );
     assert_eq!(efforts(&entry), efforts(&narrowed));
 }
@@ -1026,10 +1051,10 @@ fn a_plan_keeps_its_own_numbers_on_its_own_provider() {
     assert_ne!(numbers(&api), numbers(&plan));
 }
 
-/// A provider's stored list can lag the bundle by a model. When it does, the
-/// provider still answers for that model from its own family before any other
-/// seller does: the plan keeps its own window for `acme-5.5` rather than the
-/// vendor API entry the plan rule would otherwise prefer.
+/// A provider answers for its own family before another seller does, and the
+/// token step is what makes it once step 1 names nothing: the id is a dated
+/// form no row spells, so the plan keeps its own window for `acme-5.5` rather
+/// than the vendor API entry the plan rule would otherwise prefer.
 #[test]
 fn a_providers_own_family_answers_before_another_seller() {
     let catalog = catalog(json!([
@@ -1045,17 +1070,11 @@ fn a_providers_own_family_answers_before_another_seller() {
     let provider = ProviderProjection {
         provider_id: "acme-plan".into(),
         source: Some(ModelSource::Builtin),
-        models: catalog
-            .bundled_models("acme-plan")
-            .unwrap()
-            .iter()
-            .filter(|model| model.model_id != "acme-5.5")
-            .cloned()
-            .collect(),
+        models: catalog.bundled_models("acme-plan").unwrap().to_vec(),
         ..Default::default()
     };
     let entry = catalog
-        .project(&provider, &json!({ "id": "acme-5.5" }))
+        .project(&provider, &json!({ "id": "acme-5.5-20250801" }))
         .unwrap();
     assert_eq!(matched(&entry), ("acme-plan", "acme-5.5"));
     assert_eq!(
@@ -1066,6 +1085,7 @@ fn a_providers_own_family_answers_before_another_seller() {
         numbers(&entry),
         numbers(&bundled(&catalog, "acme", "acme-5.5"))
     );
+    assert_eq!(rule(&entry), "token");
 }
 
 /// A vendor row is an answer where an aggregator row alone is not: the merge
@@ -2078,8 +2098,8 @@ fn a_prefixed_id_without_the_statement_is_unidentified() {
 #[test]
 fn an_exact_row_still_wins_with_the_prefix_set() {
     let catalog = prefix_catalog();
-    // A stored list that carries the prefixed id itself, which is what step 1
-    // reads before any step breaks the id into tokens.
+    // The bundle carries only `acme-k3`, so step 1 has no `auto-acme-k3` row
+    // to read and answers from the model this provider added itself.
     let provider = ProviderProjection {
         provider_id: "acme".into(),
         source: Some(ModelSource::Builtin),

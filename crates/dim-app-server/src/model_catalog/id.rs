@@ -479,20 +479,28 @@ impl BundledCatalog {
         )
     }
 
-    /// Step 1: the projection's own list, by exact id. The row answers with
-    /// all its own fields, which describe the provider's own API.
+    /// Step 1: what the provider declares for this id, by exact id. A builtin
+    /// provider's declarations are its bundled rows and the models the user
+    /// added, which the projection carries; a custom provider declares nothing,
+    /// so step 1 never answers for it.
     fn own_row(&self, provider: &ProviderProjection, id: &str) -> Option<(String, ModelEntry)> {
         if provider.source == Some(ModelSource::Custom) {
             return None;
         }
-        let entry = provider.models.iter().find(|model| model.model_id == id)?;
         // The bundled entry is the declaration for a builtin provider's model,
-        // so a stored copy that lacks a limit is supplied from it.
+        // so the model the user added to it is read through the bundle when the
+        // two name the same id.
         let entry = self
             .bundled_models(&provider.provider_id)
             .and_then(|models| models.iter().find(|bundled| bundled.model_id == id))
             .cloned()
-            .unwrap_or_else(|| entry.clone());
+            .or_else(|| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.model_id == id)
+                    .cloned()
+            })?;
         Some((provider.provider_id.clone(), entry))
     }
 
