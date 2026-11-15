@@ -510,9 +510,12 @@ round trip, and no AgentLoop change. The design is:
   one line naming the loaded Skill, never as its text ([clients](../clients.md)); the same
   predicate tells a `dim-hooks` block beside it apart, which a client shows as its own row
   (Hooks §3.3). The ACP gateway applies the same rule when it
-  replays an input to the editor on `session/load` and on a history read. A prefill for edit or
-  fork takes the operator's text only, so resending does not load the Skill twice. Export keeps
-  the raw record.
+  replays an input to the editor on `session/load` and on a history read, and it delimits each
+  `/skill:<name>` token in the operator's own words so the editor can draw it as one unit; it
+  advertises no Skill as an ACP command, because that list carries the gateway's native
+  `/compact`, `/usage`, `/goal` and `/loop` only ([AcpGateway §4.7](AcpGateway.md)). A prefill for
+  edit or fork takes the operator's text only, so resending does not load the Skill twice. Export
+  keeps the raw record.
 - **The palettes offer the token, not a marker.** The CLI and web `/` menus list enabled,
   unshadowed, user-invocable Skills whose names the token can carry, and choosing one fills
   `/skill:<name> ` and sends nothing. Typing `/skill:` narrows the menu to Skills. Neither palette

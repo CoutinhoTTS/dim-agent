@@ -8109,6 +8109,13 @@
     },
     {
       "from": "dim_acp::projection",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
       "to": "dim_client::wire",
       "references": [
         "path Event",
@@ -47786,6 +47793,13 @@
     },
     {
       "from": "dim_cli::ui::transcript::blocks",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::transcript::blocks",
       "to": "dim_cli::model::shell",
       "references": [
         "path ShellOutcome::Exited",
@@ -48182,6 +48196,13 @@
         "path dim_agent_types::PermissionPreset::FullAccess",
         "path dim_agent_types::PermissionPreset::ReadOnly",
         "path dim_agent_types::PermissionPreset::WorkspaceWrite"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_agent_types::skill_token",
+      "references": [
+        "path dim_agent_types::skill_token::names_a_token"
       ]
     },
     {
@@ -55099,6 +55120,10 @@
     {
       "module": "dim_cli::ui::transcript::blocks",
       "path": "CompactionDetailState::Unloaded"
+    },
+    {
+      "module": "dim_cli::ui::transcript::blocks",
+      "path": "Paint::default"
     },
     {
       "module": "dim_cli::ui::transcript::blocks",
