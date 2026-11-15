@@ -1083,8 +1083,12 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 交互式 TUI 启动时，如果内置守护进程在[启动说明](../../design/appserver/native-storage-format.md#启动不兼容诊断)
 中明确报告本地库格式更新，macOS 和 Linux 上经 npm 全局安装的发行构建先显示诊断，
 再检查一次发布渠道，遵循自动更新开关和跳过版本的设置。
-恢复在 TUI 接管终端前运行，输出写到 stderr。
+恢复在 TUI 接管终端前运行，输出写到 stderr，且只在 stderr 是终端时进行，
+因此无终端启动保留诊断，也不会说明它没有运行的更新。
 其他安装方式、外置守护进程、非交互命令及其他启动失败沿用原报错路径。
+
+`DIMCODE_STARTUP_RETRY` 是循环保护：恢复后的调用会设置它，环境里已有这个变量时
+禁用恢复并保留诊断，而不是反复重启。
 CLI 按当前渠道标签暂存新版，与[更新命令](#更新对话框)一致，因此 npm 用与安装相同的
 仓库配置解析版本；`DIMCODE_NPM_REGISTRY` 仍然只决定可用性检查用哪个仓库，不必与
 安装用的仓库一致。[更新命令](#更新对话框)负责安装锁、旧消费者退出确认、进度和取消。

@@ -1790,9 +1790,14 @@ An interactive TUI launch can recover when its own embedded daemon identifies
 a newer store in the [startup note](appserver/native-storage-format.md#启动不兼容诊断).
 On macOS and Linux, a released npm global installation displays the store
 diagnostic and checks its channel once, honoring automatic-update settings and
-skipped versions. This runs before the TUI takes over and uses stderr. Other
-installations, external servers, noninteractive commands, and other startup
-failures use the normal error path.
+skipped versions. This runs before the TUI takes over and uses stderr, and only
+where stderr is a terminal, so a headless launch keeps the diagnostic and says
+nothing about an update it did not run. Other installations, external servers,
+noninteractive commands, and other startup failures use the normal error path.
+
+`DIMCODE_STARTUP_RETRY` is the loop guard: the recovered invocation sets it, so
+an environment that already carries the variable disables recovery and keeps the
+diagnostic rather than restarting in a loop.
 
 The CLI stages the newer version its current channel tag resolves to, as the
 [update command](#update-dialog) does, so npm resolves the version against the
