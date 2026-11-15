@@ -18,7 +18,7 @@ implementation experiment. It does not make the Boolean projection a complete Wa
 | A task-specific call returns a matching task; a consumed arrival cannot be returned again | Wait tool and service contract | Notification argument; matching calls followed by draining calls |
 | Recovery uses the last boundary and connects to later consumption | WaitBranch plus Dispatcher/query contracts | Existing P1–P4 and TLC model; real queries held across later boundary/arrival writes |
 | Steer takes priority among currently pending arrivals, then the first matching task | Current `Wait::take` behavior, also referencing TS `takeMatchingInput` in its source | Explicit experimental selection policy below; not a new cross-plugin rule or a priority over future arrivals |
-| One wait per branch; caller cancellation/drop releases the slot | Wait service contract | Existing local-execution concurrency/stop flow; not modeled by this experiment |
+| One wait per branch; caller cancellation/drop releases the slot | Wait service contract | Existing concurrency/stop flow; the [usage-context experiment](wait-usage-context.md#4-corrections-to-model-scope) exposes an unresolved cross-generation exclusivity scope |
 | Timeout bounds, error text and tool result format | Wait tool contract | Existing timeout-boundary flow; no mathematical timing guarantee here |
 | Exact winner of simultaneous timeout, cancellation and arrival | No total priority specified by the owner contract | Do not infer one from a sequential experiment; an asynchronous model must permit the contracted outcomes |
 | External task execution and cancellation | BackgroundExec or the corresponding task owner | Dependency on its notification contract; outside Wait's proof |

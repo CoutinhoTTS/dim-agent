@@ -72,11 +72,23 @@ already posted the notification; they make no claim that every terminal will pos
 Its zero-timeout reads exercise the public service, not the model-facing tool's timeout validation.
 
 The [TLC recovery model](wait-argument.md) remains a model of one projection and new-generation
-handoff. It does not cover active calls across replacement. Before adding that claim, distinguish
-WaitBranch-only replacement from ToolExecutor replacement and Session closing, then establish
-which caller is responsible for ending the old call. The existing code retaining a service handle
-is not evidence that the new generation will deliver events to it. This is a scoped coverage gap,
-not a newly imposed cancellation policy or a demonstrated production defect.
+handoff. It does not cover active calls across replacement. The local-execution flow
+`wait_call_cancellation_settles_after_its_branch_service_reloads` characterizes this separate path:
+
+1. The scripted model calls the actual wait tool; a public second-call refusal establishes that
+   the old service already has an active wait before replacement starts.
+2. Only WaitBranch restarts. A newly resolved service receives a later steer, while the model's
+   old call has not produced a result.
+3. Stopping the turn propagates cancellation through ToolExecutor. The old call returns
+   `interrupted`; a subsequent call on that retained service confirms its waiting slot was released.
+
+This exercises caller-owned cancellation, not automatic migration, whole-Session reload or
+ToolExecutor replacement. The test characterizes the current generation boundary for review;
+it does not settle the intended scope of "only one wait per branch" in the owner document.
+The implementation's slot is per service instance, so old and new generations can have overlapping
+calls. Whether branch-wide exclusivity should span those generations needs owner alignment before
+changing behavior or treating this characterization as an accepted cross-generation policy.
+No runtime fix or new cancellation rule is introduced here.
 
 New plugin integrations should supply the same boundary information: admission, event meaning,
 ordering, call cancellation and reload responsibility. They need not appear on a fixed list of
