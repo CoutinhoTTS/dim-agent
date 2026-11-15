@@ -231,12 +231,21 @@ pub(crate) struct CatalogMetadata {
     role: Option<ProviderRole>,
     #[serde(default)]
     plan: bool,
+    /// The canonical namespace this provider's own models name, stated by its
+    /// sync policy so the rows of a vendor provider can be told apart.
+    vendor_namespace: Option<String>,
     pub(crate) raw: Option<CatalogRawMetadata>,
 }
 
 /// Whether a provider serves its own vendor's models or resells other
 /// vendors'. A provider whose model list comes from the user or the endpoint
 /// has no bundled models and declares none.
+///
+/// The role is a provider-level fact, and a row is this vendor's declaration
+/// only when its canonical id names the provider's own namespace or the row
+/// states none. A row of a vendor provider whose canonical id names another
+/// vendor is a resale, and the matcher reads it only where it reads an
+/// aggregator row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderRole {
@@ -396,6 +405,17 @@ impl BundledCatalog {
         Some(self.provider(provider_id)?.metadata.as_ref()?.plan)
     }
 
+    /// The canonical namespace `provider_id`'s own models name, as the
+    /// provider's sync policy stated it. `None` when the provider is not
+    /// bundled or states none.
+    pub fn vendor_namespace(&self, provider_id: &str) -> Option<&str> {
+        self.provider(provider_id)?
+            .metadata
+            .as_ref()?
+            .vendor_namespace
+            .as_deref()
+    }
+
     pub fn project(
         &self,
         provider: &ProviderProjection,
@@ -417,8 +437,9 @@ impl BundledCatalog {
             .as_ref()
             .map(|m| m.capability_override_fields.clone())
             .unwrap_or_default();
-        let lookup = self.lookup(provider, &id);
-        let identification = self.identify_record(provider, &id, &explicit);
+        let kind = entry_kind(&entry);
+        let lookup = self.lookup(provider, &id, kind.as_deref());
+        let identification = self.identify_record(provider, &id, kind.as_deref(), &explicit);
         if let Some(found_lookup) = lookup {
             let pid = found_lookup.provider_id.clone();
             let found = found_lookup.entry;
@@ -475,9 +496,10 @@ impl BundledCatalog {
         &self,
         provider: &ProviderProjection,
         id: &str,
+        kind: Option<&str>,
         declared: &[String],
     ) -> Option<ModelIdentification> {
-        match self.identify(provider, id) {
+        match self.identify(provider, id, kind) {
             Ok(Some(found)) => Some(ModelIdentification {
                 rule: found.rule.into(),
                 narrowed_by_display_name: found.narrowed,
@@ -580,7 +602,12 @@ impl BundledCatalog {
         }
         // The identified entry supplies the pair. The row itself answers step 1
         // on its own provider, so the entry is looked up outside that list.
-        let Some(found) = self.lookup(&ProviderProjection::default(), &model.model_id) else {
+        let kind = entry_kind(model);
+        let Some(found) = self.lookup(
+            &ProviderProjection::default(),
+            &model.model_id,
+            kind.as_deref(),
+        ) else {
             return;
         };
         let filled = Self::fill_from(&found, model, needs);
@@ -607,13 +634,14 @@ impl BundledCatalog {
             .as_ref()
             .map(|metadata| metadata.capability_override_fields.clone())
             .unwrap_or_default();
+        let kind = entry_kind(entry);
         entry.metadata.get_or_insert_default().identification =
-            self.identify_record(provider, &entry.model_id, &marked);
+            self.identify_record(provider, &entry.model_id, kind.as_deref(), &marked);
         let needs = [
             !marked.iter().any(|name| name == "contextWindow"),
             !marked.iter().any(|name| name == "maxOutputTokens"),
         ];
-        let filled = match self.lookup(provider, &entry.model_id) {
+        let filled = match self.lookup(provider, &entry.model_id, kind.as_deref()) {
             Some(found) => {
                 let metadata = entry.metadata.get_or_insert_default();
                 metadata.matched_provider_id = Some(found.provider_id.clone());
@@ -644,16 +672,18 @@ impl BundledCatalog {
             .iter()
             .map(|model| {
                 let mut model = model.clone();
+                let kind = entry_kind(&model);
                 let identification = self.identify_record(
                     provider,
                     &model.model_id,
+                    kind.as_deref(),
                     model
                         .metadata
                         .as_ref()
                         .map(|metadata| metadata.capability_override_fields.as_slice())
                         .unwrap_or_default(),
                 );
-                if let Some(found) = self.lookup(provider, &model.model_id) {
+                if let Some(found) = self.lookup(provider, &model.model_id, kind.as_deref()) {
                     let provider_id = found.provider_id.clone();
                     let strategy = found.strategy.clone();
                     let score = found.score;
@@ -780,9 +810,16 @@ impl BundledCatalog {
     }
 
     /// Bundled metadata for a model served by a relay outside the catalog,
-    /// read with the projection of the record that serves it.
-    pub fn fallback(&self, provider: &ProviderProjection, id: &str) -> Option<ModelEntry> {
-        self.lookup(provider, id).map(|found| found.entry)
+    /// read with the projection of the record that serves it. `kind` is the
+    /// kind the listed id states, as `raw_kind` reads one, so a media id takes
+    /// no chat row and a chat id takes no media row.
+    pub fn fallback(
+        &self,
+        provider: &ProviderProjection,
+        id: &str,
+        kind: Option<&str>,
+    ) -> Option<ModelEntry> {
+        self.lookup(provider, id, kind).map(|found| found.entry)
     }
 
     fn apply_provider_rules(&self, provider: &ProviderProjection, entry: &mut ModelEntry) {
@@ -1465,14 +1502,32 @@ fn apply_capabilities(c: &mut CatalogCapabilities, m: &Map<String, Value>) {
     }
 }
 
-/// The kind a model descriptor declares in its raw `type`, lowercased with
-/// `_` read as `-`. `model` names the object (`"object": "model"`) rather
-/// than a kind, so it reads as none.
+/// The kind a stated `type` names, lowercased with `_` read as `-`. `model`
+/// names the object (`"object": "model"`) rather than a kind, so it reads as
+/// none, and so does an empty `type`. This and `raw_kind` are the one reader
+/// of a stated kind: `raw_kind` reads a raw model map, and a caller that has
+/// only the stated string normalises it here.
+pub fn kind_of(value: &str) -> Option<String> {
+    let kind = value.trim().to_lowercase().replace('_', "-");
+    (!kind.is_empty() && kind != "model").then_some(kind)
+}
+
+/// The kind a raw model map states in its `type`, read by `kind_of`. Every
+/// reader of a stated kind reads it here: the catalog's rows, an entry's own
+/// kind, and the kind a listed id carries.
+pub fn raw_kind(raw: &Map<String, Value>) -> Option<String> {
+    kind_of(string(raw.get("type"))?)
+}
+
+/// The kind a model descriptor declares in its raw `type`.
 pub(crate) fn model_kind(metadata: &ModelMetadata) -> Option<String> {
-    let kind = string(metadata.raw.get("type"))?
-        .to_lowercase()
-        .replace('_', "-");
-    (kind != "model").then_some(kind)
+    raw_kind(&metadata.raw)
+}
+
+/// The kind an entry states: the `type` in the raw provider fields its id came
+/// from, which a merge reads to decide which rows may join it.
+pub(crate) fn entry_kind(entry: &ModelEntry) -> Option<String> {
+    entry.metadata.as_ref().and_then(model_kind)
 }
 
 fn string(v: Option<&Value>) -> Option<&str> {

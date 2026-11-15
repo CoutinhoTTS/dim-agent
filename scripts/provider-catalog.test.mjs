@@ -379,6 +379,192 @@ test("a provider with bundled models states its role and an empty one does not",
   assert.match(carried.stderr, /Provider ollama: a provider without bundled models carries no role/);
 });
 
+test("a sync refuses a vendor provider whose upstream starts naming canonical ids", async (t) => {
+  const { cwd, env, upstream } = await checkout(t);
+  const path = join(cwd, bundled);
+  const committed = JSON.parse(await readFile(path, "utf8"));
+  const stepfun = committed.providers.find((provider) => provider.providerId === "stepfun");
+  assert.equal(stepfun.metadata.role, "vendor");
+  assert.equal(stepfun.metadata.vendorNamespace, undefined, "stepfun must state no namespace for this test");
+  assert.equal(stepfun.models.some((model) => model.metadata.raw.canonical_model_id !== undefined), false,
+    "stepfun must carry no canonical id for this test");
+  assert.equal((await policies(cwd))["stepfun"].source, "remote");
+
+  // A new row upstream adds with no canonical id needs no namespace: the
+  // provider still has nothing to tell apart, so the sync writes the row and
+  // the provider states none.
+  const row = { id: "step-new-chat", limit: { context: 256000, output: 256000 }, tool_call: true };
+  await writeFile(join(upstream, "stepfun.json"), JSON.stringify({
+    api: stepfun.metadata.raw.api,
+    models: [...stepfun.models.map((model) => model.metadata.raw), row],
+  }));
+  execFileSync(process.execPath, [script, "--sync", "stepfun"], { cwd, env });
+  const synced = JSON.parse(await readFile(path, "utf8"))
+    .providers.find((provider) => provider.providerId === "stepfun");
+  assert.notEqual(synced.models.find((model) => model.modelId === "step-new-chat"), undefined);
+  assert.equal(synced.metadata.vendorNamespace, undefined);
+  const before = await readFile(path, "utf8");
+
+  // A new row that carries a canonical id makes the candidate a vendor whose
+  // rows name one while its policy states no namespace, so the candidate the
+  // sync built is refused before it is written.
+  await writeFile(join(upstream, "stepfun.json"), JSON.stringify({
+    api: stepfun.metadata.raw.api,
+    models: [...stepfun.models.map((model) => model.metadata.raw), row,
+      { ...row, id: "step-new-reasoner", canonical_model_id: "stepfun/step-new-reasoner" }],
+  }));
+  const refused = spawnSync(process.execPath, [script, "--sync", "stepfun"], { cwd, env, encoding: "utf8" });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /Provider stepfun: a vendor provider whose rows carry a canonical id needs a vendorNamespace/);
+  assert.equal(await readFile(path, "utf8"), before);
+});
+
+test("a namespace the catalog and the policy state differently fails by name", async (t) => {
+  const { cwd, env } = await checkout(t);
+  const path = join(cwd, bundled);
+  const committed = JSON.parse(await readFile(path, "utf8"));
+  const deepseek = committed.providers.find((provider) => provider.providerId === "deepseek");
+  assert.equal(deepseek.metadata.vendorNamespace, "deepseek");
+
+  // A hand edit of one file without the other: the rows still name a canonical
+  // id, so presence holds and agreement is what fails.
+  const declared = await policies(cwd);
+  declared["deepseek"].vendorNamespace = "another-vendor";
+  await writeFile(join(cwd, policy), JSON.stringify({ providers: declared }, null, 2));
+  const differs = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
+  assert.equal(differs.status, 1);
+  assert.match(differs.stderr,
+    /Provider deepseek: the catalog states vendorNamespace deepseek, and its policy states another-vendor/);
+
+  // The other direction: the catalog's statement is what a hand edit changed.
+  declared["deepseek"].vendorNamespace = "deepseek";
+  await writeFile(join(cwd, policy), JSON.stringify({ providers: declared }, null, 2));
+  deepseek.metadata.vendorNamespace = "another-vendor";
+  await writeFile(path, JSON.stringify(committed, null, 2));
+  const stated = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
+  assert.equal(stated.status, 1);
+  assert.match(stated.stderr,
+    /Provider deepseek: the catalog states vendorNamespace another-vendor, and its policy states deepseek/);
+});
+
+test("a namespace the matcher could not compare as written is refused by name", async (t) => {
+  const { cwd, env } = await checkout(t);
+  const path = join(cwd, bundled);
+  const original = await readFile(path, "utf8");
+  const committed = JSON.parse(original);
+  const deepseek = committed.providers.find((provider) => provider.providerId === "deepseek");
+  const own = deepseek.metadata.vendorNamespace;
+  assert.ok(own !== undefined, "deepseek must state a namespace for this test");
+  const declared = await policies(cwd);
+
+  // The matcher compares the namespace byte for byte, so a padded value would
+  // pass a trimmed comparison and still name none of the provider's rows.
+  for (const written of [` ${own} `, `${own}/models`]) {
+    declared["deepseek"].vendorNamespace = written;
+    await writeFile(join(cwd, policy), JSON.stringify({ providers: declared }, null, 2));
+    const inPolicy = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
+    assert.equal(inPolicy.status, 1, `${JSON.stringify(written)} in the policy`);
+    assert.match(inPolicy.stderr, /Provider deepseek: vendorNamespace must be non-empty and contain no whitespace or "\/"/);
+
+    declared["deepseek"].vendorNamespace = own;
+    await writeFile(join(cwd, policy), JSON.stringify({ providers: declared }, null, 2));
+    deepseek.metadata.vendorNamespace = written;
+    await writeFile(path, JSON.stringify(committed, null, 2));
+    const inCatalog = spawnSync(process.execPath, [script], { cwd, env, encoding: "utf8" });
+    assert.equal(inCatalog.status, 1, `${JSON.stringify(written)} in the catalog`);
+    assert.match(inCatalog.stderr, /Provider deepseek: metadata\.vendorNamespace must be non-empty and contain no whitespace or "\/"/);
+
+    deepseek.metadata.vendorNamespace = own;
+    await writeFile(path, original);
+  }
+});
+
+test("a sync writes the namespace its policy states and keeps a resold row", async (t) => {
+  const { cwd, env, upstream } = await checkout(t);
+  const path = join(cwd, bundled);
+  const declared = JSON.parse(await readFile(path, "utf8"));
+  const qwencloud = declared.providers.find((provider) => provider.providerId === "qwencloud");
+  const own = qwencloud.models.find((model) => model.metadata.raw.canonical_model_id === `alibaba/${model.modelId}`);
+  assert.notEqual(own, undefined, "qwencloud must carry a row of its own");
+  const foreign = { ...own.metadata.raw, id: "another-vendors-model", canonical_model_id: "another/another-vendors-model" };
+  await writeFile(join(upstream, "alibaba.json"), JSON.stringify({
+    api: qwencloud.metadata.raw.api,
+    models: [...qwencloud.models.map((model) => model.metadata.raw), foreign],
+  }));
+  execFileSync(process.execPath, [script, "--sync", "qwencloud"], { cwd, env });
+
+  const synced = JSON.parse(await readFile(path, "utf8"))
+    .providers.find((provider) => provider.providerId === "qwencloud");
+  assert.equal(synced.metadata.vendorNamespace, "alibaba");
+  const resold = synced.models.find((model) => model.modelId === "another-vendors-model");
+  assert.notEqual(resold, undefined, "the sync keeps the row it synchronized");
+  assert.equal(resold.metadata.raw.canonical_model_id, "another/another-vendors-model");
+  assert.notEqual(resold.metadata.raw.canonical_model_id.split("/")[0], synced.metadata.vendorNamespace);
+});
+
+test("a vendor provider whose rows are all its own keeps every row a declaration", async (t) => {
+  const { cwd, env, upstream } = await checkout(t);
+  const path = join(cwd, bundled);
+  const original = JSON.parse(await readFile(path, "utf8"));
+  const provider = original.providers.find((entry) => entry.providerId === "deepseek");
+  for (const model of provider.models) {
+    assert.equal(model.metadata.raw.canonical_model_id.split("/")[0], provider.metadata.vendorNamespace,
+      `${model.modelId} must name the namespace its provider states`);
+  }
+  await writeFile(join(upstream, "deepseek.json"), JSON.stringify({
+    api: provider.metadata.raw.api,
+    models: provider.models.map((model) => model.metadata.raw),
+  }));
+  execFileSync(process.execPath, [script, "--sync", "deepseek"], { cwd, env });
+
+  const synced = JSON.parse(await readFile(path, "utf8"))
+    .providers.find((entry) => entry.providerId === "deepseek");
+  assert.equal(synced.metadata.vendorNamespace, provider.metadata.vendorNamespace);
+  for (const model of synced.models) {
+    const row = provider.models.find((entry) => entry.modelId === model.modelId);
+    assert.equal(model.metadata.raw.canonical_model_id, row.metadata.raw.canonical_model_id,
+      `${model.modelId} keeps the canonical id that names its own vendor`);
+  }
+});
+
+test("a committed resale keeps the canonical id a sync's upstream omits", async (t) => {
+  const { cwd, env, upstream } = await checkout(t);
+  const path = join(cwd, bundled);
+  const original = JSON.parse(await readFile(path, "utf8"));
+  const resold = original.providers.flatMap((provider) => provider.models
+    .filter((model) => model.metadata.raw.canonical_model_id !== undefined
+      && model.metadata.raw.canonical_model_id.split("/")[0] !== provider.metadata.vendorNamespace)
+    .map((model) => ({ provider, model })));
+  assert.ok(resold.length > 0, "the catalog must state a resale for this test");
+  const providers = [...new Set(resold.map(({ provider }) => provider.providerId))];
+  for (const providerId of providers) {
+    const provider = original.providers.find((entry) => entry.providerId === providerId);
+    const policy = (await policies(cwd))[providerId];
+    const dropped = new Set(resold.filter((entry) => provider.providerId === providerId)
+      .map(({ model }) => model.modelId));
+    await writeFile(join(upstream, `${policy.upstreamId ?? providerId}.json`), JSON.stringify({
+      api: provider.metadata.raw.api,
+      models: provider.models.map((model) => {
+        if (!dropped.has(model.modelId)) return model.metadata.raw;
+        const { canonical_model_id: omitted, ...withoutCanonical } = model.metadata.raw;
+        return withoutCanonical;
+      }),
+    }));
+    const summary = execFileSync(process.execPath, [script, "--sync", providerId], { cwd, env, encoding: "utf8" });
+    for (const modelId of dropped) {
+      assert.match(summary, new RegExp(`canonical_model_id .* kept; upstream omits it`),
+        `${providerId}/${modelId} must be reported as carried`);
+    }
+  }
+  assert.equal(await readFile(path, "utf8"), await readFile(join(root, bundled), "utf8"));
+  for (const { provider, model } of resold) {
+    const kept = JSON.parse(await readFile(path, "utf8"))
+      .providers.find((entry) => entry.providerId === provider.providerId)
+      .models.find((entry) => entry.modelId === model.modelId);
+    assert.equal(kept.metadata.raw.canonical_model_id, model.metadata.raw.canonical_model_id);
+  }
+});
+
 test("a keepBundledModels provider keeps a bundled entry the upstream no longer lists", async (t) => {
   const { cwd, env, upstream } = await checkout(t);
   const path = join(cwd, bundled);

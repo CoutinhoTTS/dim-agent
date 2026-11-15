@@ -9107,7 +9107,7 @@ async fn an_edited_merged_limit_stays_edited() {
     // read from the catalog rather than restated here.
     let merged = BundledCatalog::load()
         .unwrap()
-        .fallback(&Default::default(), ID)
+        .fallback(&Default::default(), ID, None)
         .unwrap();
     let merged = (
         merged.capabilities.context_window,

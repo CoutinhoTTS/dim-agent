@@ -478,6 +478,27 @@ on every discovery and every read, not against the row an earlier listing left.
 What the user stated keeps applying on either kind of provider, through
 `capabilityOverrideFields` and the other user-owned state.
 
+A vendor entry is a row of a provider whose role is `vendor`, when the row's
+canonical id names that provider's own namespace or the row states no canonical
+id. A row of a vendor provider whose canonical id names another vendor is a
+resale: the steps that read vendor entries pass it over, and the merge reads it
+as it reads an aggregator row. The first step still reads it for its own
+provider, since a bundled row is that provider's declaration whichever model it
+resells. A provider's own namespace is `metadata.vendorNamespace`, which the
+sync writes from the provider's policy beside its role, and every vendor
+provider whose rows carry canonical ids states one. A plan row that resells
+another vendor's model, where upstream gives it no canonical id, has that id
+stated in the committed catalog, and the sync keeps it.
+
+A row joins that merge only when its kind is the id's kind. A row that states
+no kind, because its raw `type` is absent or `model`, joins any id. An id that
+states `chat` takes the rows stating `chat`, and an id stating any other kind
+takes the rows stating exactly that kind, with no synonym. An id that states no
+kind takes the rows stating `chat` or none when any row of its name states
+`chat`, and otherwise every row of its name: it keeps the media rows it merged
+before and carries their `type`, which is what keeps a media model out of
+conversations. An id left with no joining row stays unidentified.
+
 A provider's record states a prefix its listed ids carry, and that prefix is
 stripped once, at the head of the id and case-insensitively, before the id is
 broken into the tokens every token and name step compares. The first step and

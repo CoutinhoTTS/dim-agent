@@ -55,7 +55,7 @@ fn a_bundled_match_declares_both_limits_and_an_unmatched_descriptor_has_none() {
     assert_eq!(numbers(&matched), numbers(&row));
     assert!(matched.capabilities.missing_limits().is_empty());
     let id = "zzzz-private-descriptor";
-    assert!(catalog.fallback(&Default::default(), id).is_none());
+    assert!(catalog.fallback(&Default::default(), id, None).is_none());
     let unmatched = catalog.project(&provider, &json!({ "id": id })).unwrap();
     assert_eq!(
         unmatched.capabilities.missing_limits(),
@@ -403,6 +403,177 @@ fn a_plan_provider_is_marked_and_its_api_entry_is_not() {
     }
 }
 
+/// The ids the shipped catalog answers where the catalog's own metadata says
+/// they belong: a model a plan resells at the vendor row that declares it, a
+/// model only the user's list declares at that declaration, a vendor's own id
+/// at its vendor, and Qwen's own rows on the provider that serves them.
+#[test]
+fn the_resold_models_identify_where_the_catalog_says_they_belong() {
+    let catalog = BundledCatalog::load().unwrap();
+    for (id, provider, model) in [
+        ("deepseek-v4.1-flash", "deepseek", "deepseek-flash"),
+        ("kimi-k2.5", "custom-provider", "kimi-k2.5"),
+        ("glm-5.2", "zai", "glm-5.2"),
+        ("qwen3.8-max", "qwencloud", "qwen3.8-max"),
+        ("qwen3.7-plus", "qwencloud", "qwen3.7-plus"),
+    ] {
+        let entry = relay(&catalog, id);
+        assert_eq!(matched(&entry), (provider, model), "{id}");
+        let row = bundled(&catalog, provider, model);
+        assert!(
+            row.capabilities.missing_limits().is_empty(),
+            "{id}: {provider} declares no limit for {model}"
+        );
+        assert_eq!(numbers(&entry), numbers(&row), "{id}");
+    }
+}
+
+/// Every vendor provider whose rows name a canonical id states the namespace
+/// its own models name, and no row that names another vendor answers as its
+/// provider's declaration: such a row is the merge's, not the vendor's.
+#[test]
+fn a_vendor_provider_answers_only_for_the_namespace_it_states() {
+    use dim_app_server::model_catalog::ProviderRole;
+    let catalog = BundledCatalog::load().unwrap();
+    let mut declaring = 0;
+    let mut resold = 0;
+    for provider in catalog.providers() {
+        let Some(own) = catalog.vendor_namespace(&provider.provider_id) else {
+            continue;
+        };
+        let names = provider
+            .models
+            .iter()
+            .any(|model| canonical_namespace(model).is_some());
+        if names {
+            declaring += 1;
+        }
+        for model in &provider.models {
+            let Some(named) = canonical_namespace(model) else {
+                continue;
+            };
+            if named == own {
+                continue;
+            }
+            resold += 1;
+            let entry = relay(&catalog, &model.model_id);
+            let answered_by_its_provider =
+                matched(&entry) == (provider.provider_id.as_str(), model.model_id.as_str());
+            assert!(
+                !answered_by_its_provider
+                    || !["token", "qualified", "canonical"].contains(&rule(&entry)),
+                "{}/{} names {named} and answered by the {} step",
+                provider.provider_id,
+                model.model_id,
+                rule(&entry)
+            );
+        }
+    }
+    assert!(
+        declaring > 0,
+        "no vendor provider states a namespace, so nothing is covered"
+    );
+    assert!(resold > 0, "no row resells another vendor's model");
+    let vendors: Vec<_> = catalog
+        .providers()
+        .filter(|provider| {
+            catalog.role(&provider.provider_id) == Some(ProviderRole::Vendor)
+                && provider
+                    .models
+                    .iter()
+                    .any(|model| canonical_namespace(model).is_some())
+        })
+        .map(|provider| provider.provider_id.as_str())
+        .collect();
+    for vendor in vendors {
+        assert!(
+            catalog.vendor_namespace(vendor).is_some(),
+            "{vendor} declares canonical ids but states no namespace"
+        );
+    }
+}
+
+/// Every plan row the catalog leaves without a canonical id, on a plan provider
+/// that states a namespace, names no other vendor's model: no vendor declares
+/// the same id, and no row of the catalog states another vendor's canonical id
+/// for it. Such a row would be a resale the merge reads, so the committed
+/// catalog owes it the canonical id.
+///
+/// Ids are compared exactly, by their last path segment, case-insensitively. A
+/// vendor provider's own namespace is the one it states, and an aggregator
+/// states none, so only the canonical id a row states can tie it to a vendor. A
+/// plan provider that states no namespace is skipped: `openai-codex`,
+/// `grok-build` and `step-plan` have no canonical rows and resell nothing, so
+/// the catalog has nothing to compare them against.
+#[test]
+fn a_plan_row_without_a_canonical_id_names_no_other_vendor() {
+    use dim_app_server::model_catalog::ProviderRole;
+    let catalog = BundledCatalog::load().unwrap();
+    let mut checked = 0;
+    for provider in catalog.providers() {
+        if catalog.role(&provider.provider_id) != Some(ProviderRole::Vendor)
+            || catalog.is_plan(&provider.provider_id) != Some(true)
+        {
+            continue;
+        }
+        let Some(own) = catalog.vendor_namespace(&provider.provider_id) else {
+            continue;
+        };
+        for model in &provider.models {
+            if canonical_namespace(model).is_some() {
+                continue;
+            }
+            checked += 1;
+            let segment = last_segment(&model.model_id);
+            let mut ties = Vec::new();
+            for other in catalog.providers() {
+                let states = catalog.vendor_namespace(&other.provider_id);
+                for row in &other.models {
+                    if let Some(namespace) = states {
+                        let declares = namespace != own
+                            && canonical_namespace(row).is_none_or(|named| named == namespace)
+                            && last_segment(&row.model_id).eq_ignore_ascii_case(segment);
+                        if declares {
+                            ties.push(format!(
+                                "`{provider_id}/{row_model}` declares it as {namespace}'s",
+                                provider_id = other.provider_id,
+                                row_model = row.model_id,
+                            ));
+                        }
+                    }
+                    let canonical = row
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.raw.get("canonical_model_id"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|canonical| {
+                            canonical.split_once('/').is_some_and(|(it, _)| it != own)
+                                && last_segment(canonical).eq_ignore_ascii_case(segment)
+                        });
+                    if let Some(canonical) = canonical {
+                        ties.push(format!(
+                            "`{provider_id}/{row_model}` states `{canonical}`",
+                            provider_id = other.provider_id,
+                            row_model = row.model_id,
+                        ));
+                    }
+                }
+            }
+            assert!(
+                ties.is_empty(),
+                "{}/{} states no canonical id but is another vendor's model, and its provider's own namespace is {own}: {}",
+                provider.provider_id,
+                model.model_id,
+                ties.join("; ")
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "no plan provider that states a namespace lists a row without a canonical id"
+    );
+}
+
 /// A catalog of exactly the providers a case states, built through the step
 /// the shipped file goes through: `from_value` drops every limit a row's
 /// `metadata.raw` does not declare, so a built row declares its limits there.
@@ -417,6 +588,28 @@ fn catalog(providers: serde_json::Value) -> BundledCatalog {
 /// A provider serving its own vendor's models.
 fn vendor(provider_id: &str, models: serde_json::Value) -> serde_json::Value {
     provider(provider_id, "vendor", false, models)
+}
+
+/// The same provider, stating the canonical namespace its own models name.
+fn namespaced_vendor(
+    provider_id: &str,
+    vendor_namespace: &str,
+    models: serde_json::Value,
+) -> serde_json::Value {
+    let mut provider = provider(provider_id, "vendor", false, models);
+    provider["metadata"]["vendorNamespace"] = json!(vendor_namespace);
+    provider
+}
+
+/// A vendor selling a subscription beside its API entry, stating its namespace.
+fn namespaced_plan_provider(
+    provider_id: &str,
+    vendor_namespace: &str,
+    models: serde_json::Value,
+) -> serde_json::Value {
+    let mut provider = provider(provider_id, "vendor", true, models);
+    provider["metadata"]["vendorNamespace"] = json!(vendor_namespace);
+    provider
 }
 
 /// A provider reselling other vendors' models.
@@ -495,6 +688,66 @@ fn with_efforts(mut row: serde_json::Value, efforts: &[&str]) -> serde_json::Val
 fn with_tool_calling(mut row: serde_json::Value, tool_calling: bool) -> serde_json::Value {
     row["capabilities"]["toolCalling"] = json!(tool_calling);
     row
+}
+
+/// The same row, stating the kind of model it describes.
+fn with_kind(mut row: serde_json::Value, kind: &str) -> serde_json::Value {
+    row["metadata"]["raw"]["type"] = json!(kind);
+    row
+}
+
+/// One row of a kind other than chat: the kind stated in its raw `type`, and a
+/// placeholder pair its provider writes across its rows.
+fn media_row(
+    model_id: &str,
+    display_name: &str,
+    kind: &str,
+    window: u64,
+    output: u64,
+) -> serde_json::Value {
+    let mut row = with_raw(
+        row(model_id, display_name, window, output),
+        json!({ "type": kind }),
+    );
+    row["metadata"]["reasoning"] = json!({ "supported": false });
+    row
+}
+
+/// One entry of a provider's stored list, as a provider that states its own
+/// kind, its pair and a reasoning toggle saved it.
+fn chat_row(model_id: &str, display_name: &str, window: u64, output: u64) -> ModelEntry {
+    serde_json::from_value(json!({
+        "modelId": model_id,
+        "displayName": display_name,
+        "status": "active",
+        "capabilities": {
+            "modalities": ["text"], "toolCalling": true, "streaming": true,
+            "structuredOutput": true, "vision": false, "audio": false,
+            "reasoning": true, "contextWindow": window, "maxOutputTokens": output,
+        },
+        "metadata": {
+            "reasoning": { "supported": true, "effortOptions": ["low", "high"] },
+            "raw": { "type": "chat" },
+        },
+    }))
+    .expect("a listed chat row states its id, pair, kind and efforts")
+}
+
+/// The namespace a row's canonical id names, as the matcher reads it.
+fn canonical_namespace(model: &ModelEntry) -> Option<&str> {
+    model
+        .metadata
+        .as_ref()?
+        .raw
+        .get("canonical_model_id")?
+        .as_str()?
+        .split_once('/')
+        .map(|(namespace, _)| namespace)
+}
+
+/// An id's last path segment, which is the part two ids name a model by.
+fn last_segment(id: &str) -> &str {
+    id.rsplit_once('/').map_or(id, |(_, segment)| segment)
 }
 
 /// One entry of a provider's stored list, as that provider saved it.
@@ -593,6 +846,19 @@ fn prefixed_relay(catalog: &BundledCatalog, id: &str, prefix: Option<&str>) -> M
         ..Default::default()
     };
     catalog.project(&provider, &json!({ "id": id })).unwrap()
+}
+
+/// The same projection, for a listed id that states its own kind: the kind it
+/// carries is the one the merge joins rows of.
+fn kinded_relay(catalog: &BundledCatalog, id: &str, kind: &str) -> ModelEntry {
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        ..Default::default()
+    };
+    catalog
+        .project(&provider, &json!({ "id": id, "raw": { "type": kind } }))
+        .unwrap()
 }
 
 /// Projects one id through a builtin provider's own bundled list.
@@ -969,6 +1235,239 @@ fn a_custom_provider_row_is_a_declaration() {
         );
         assert!(entry.capabilities.missing_limits().is_empty(), "{input}");
     }
+}
+
+/// A vendor provider's foreign-canonical row is not its declaration, while its
+/// own row still is: the id the foreign row names is answered by the vendor
+/// that model belongs to, and the id the own row names is answered here.
+#[test]
+fn a_foreign_canonical_row_is_not_a_declaration() {
+    let own = row("acme-5", "Acme 5", 400_000, 128_000);
+    let catalog = catalog(json!([
+        namespaced_vendor(
+            "acme-plan",
+            "acme",
+            json!([
+                with_canonical(
+                    row("acme-own", "Acme Own", 200_000, 64_000),
+                    "acme/acme-own"
+                ),
+                with_canonical(
+                    row("globus-5", "Globus 5", 100_000, 32_000),
+                    "globus/globus-5",
+                ),
+            ]),
+        ),
+        namespaced_vendor("acme", "acme", json!([own.clone()])),
+        namespaced_vendor(
+            "globus",
+            "globus",
+            json!([row("globus-5", "Globus 5", 300_000, 96_000)]),
+        ),
+    ]));
+    let foreign = relay(&catalog, "globus-5");
+    assert_eq!(
+        matched(&foreign),
+        ("globus", "globus-5"),
+        "the plan's resold row does not answer for the vendor that owns it"
+    );
+    assert_eq!(
+        numbers(&foreign),
+        numbers(&bundled(&catalog, "globus", "globus-5"))
+    );
+    let own_id = relay(&catalog, "acme-own");
+    assert_eq!(
+        matched(&own_id),
+        ("acme-plan", "acme-own"),
+        "the plan's own row is still its declaration"
+    );
+    assert_eq!(rule(&own_id), "token");
+}
+
+/// A foreign-canonical row of a vendor provider joins the merge exactly as an
+/// aggregator row does, so an id only that row names still gets its numbers and
+/// the smallest pair wins.
+#[test]
+fn a_foreign_canonical_row_still_joins_the_merge() {
+    let catalog = catalog(json!([
+        namespaced_vendor(
+            "acme-plan",
+            "acme",
+            json!([with_canonical(
+                row("globus-5", "Globus 5", 100_000, 32_000),
+                "globus/globus-5",
+            )]),
+        ),
+        aggregator(
+            "reseller",
+            json!([row("globus-5", "Globus 5", 200_000, 16_000)]),
+        ),
+    ]));
+    let entry = relay(&catalog, "globus-5");
+    assert_eq!(identification(&entry).rule, "merge");
+    let merged = (
+        numbers(&bundled(&catalog, "acme-plan", "globus-5")).0,
+        numbers(&bundled(&catalog, "reseller", "globus-5")).1,
+    );
+    assert_eq!(numbers(&entry), merged);
+    assert_eq!(
+        adopted(&entry),
+        [
+            ("contextWindow", merged.0.unwrap(), "acme-plan"),
+            ("maxOutputTokens", merged.1.unwrap(), "reseller"),
+        ]
+    );
+}
+
+/// A vendor-provider row that states no canonical id stays a declaration: the
+/// catalog says nothing against the role for it, so the role's answer stands.
+#[test]
+fn a_row_without_a_canonical_id_stays_a_declaration() {
+    let catalog = catalog(json!([
+        namespaced_plan_provider(
+            "acme-plan",
+            "acme",
+            json!([
+                row("acme-5", "Acme 5", 258_400, 128_000),
+                with_canonical(
+                    row("acme-5-pro", "Acme 5 Pro", 1_000_000, 128_000),
+                    "acme/acme-5-pro"
+                ),
+            ]),
+        ),
+        namespaced_vendor(
+            "acme",
+            "acme",
+            json!([row("acme-5", "Acme 5", 1_050_000, 128_000)]),
+        ),
+    ]));
+    let on_the_plan = builtin(&catalog, "acme-plan", "acme-5");
+    assert_eq!(matched(&on_the_plan), ("acme-plan", "acme-5"));
+    assert_eq!(
+        numbers(&on_the_plan),
+        numbers(&bundled(&catalog, "acme-plan", "acme-5"))
+    );
+    assert_eq!(rule(&on_the_plan), "provider-exact");
+    let on_a_relay = relay(&catalog, "acme-5");
+    assert_eq!(
+        matched(&on_a_relay),
+        ("acme", "acme-5"),
+        "the API entry still answers a bare id over the plan"
+    );
+    assert_eq!(
+        numbers(&on_a_relay),
+        numbers(&bundled(&catalog, "acme", "acme-5"))
+    );
+}
+
+/// A plan row whose canonical id names another vendor stops answering a bare id
+/// ahead of that vendor's row: with the id stated, the plan's row leaves the
+/// vendor index and the vendor's own canonical id answers instead.
+#[test]
+fn a_stated_resale_stops_answering_ahead_of_its_vendor() {
+    let build = |canonical: Option<&str>| {
+        let plan = match canonical {
+            Some(canonical) => {
+                with_canonical(row("globus-5", "Globus 5", 262_144, 32_768), canonical)
+            }
+            None => row("globus-5", "Globus 5", 262_144, 32_768),
+        };
+        catalog(json!([
+            namespaced_plan_provider("acme-coding-plan", "acme", json!([plan])),
+            namespaced_vendor(
+                "globus",
+                "globus",
+                json!([with_canonical(
+                    row("globus-5-2026-01", "Globus 5", 1_048_576, 384_000),
+                    "globus/globus-5"
+                )]),
+            ),
+        ]))
+    };
+    let unstated = build(None);
+    let answered = relay(&unstated, "globus-5");
+    assert_eq!(
+        matched(&answered),
+        ("acme-coding-plan", "globus-5"),
+        "without the canonical id the plan's row answers the bare id by token"
+    );
+    assert_eq!(rule(&answered), "token");
+
+    let stated = build(Some("globus/globus-5"));
+    let restored = relay(&stated, "globus-5");
+    assert_eq!(matched(&restored), ("globus", "globus-5-2026-01"));
+    assert_eq!(rule(&restored), "canonical");
+    assert_eq!(
+        numbers(&restored),
+        numbers(&bundled(&stated, "globus", "globus-5-2026-01")),
+        "the vendor's own numbers answer, not the plan's"
+    );
+}
+
+/// A plan row that resells another vendor's model stops answering ahead of the
+/// `custom-provider` declaration too: the declaration is what the user wrote,
+/// and the resold row is only the merge's.
+#[test]
+fn a_stated_resale_stops_answering_ahead_of_the_declaration() {
+    let build = |canonical: Option<&str>| {
+        let plan = match canonical {
+            Some(canonical) => {
+                with_canonical(row("globus-5", "Globus 5", 262_144, 32_768), canonical)
+            }
+            None => row("globus-5", "Globus 5", 262_144, 32_768),
+        };
+        catalog(json!([
+            namespaced_plan_provider("acme-coding-plan", "acme", json!([plan])),
+            aggregator(
+                "custom-provider",
+                json!([row("globus-5", "Globus 5", 262_144, 262_144)]),
+            ),
+        ]))
+    };
+    let unstated = build(None);
+    assert_eq!(
+        matched(&relay(&unstated, "globus-5")),
+        ("acme-coding-plan", "globus-5"),
+        "without the canonical id the plan's row answers over the declaration"
+    );
+
+    let stated = build(Some("globus/globus-5"));
+    let declared = relay(&stated, "globus-5");
+    assert_eq!(matched(&declared), ("custom-provider", "globus-5"));
+    assert_eq!(rule(&declared), "custom-provider");
+    assert_eq!(
+        numbers(&declared),
+        numbers(&bundled(&stated, "custom-provider", "globus-5"))
+    );
+}
+
+/// A row states its own namespace because its canonical id names the vendor
+/// that model belongs to, so a provider's own plan row that repeats the
+/// provider's namespace stays its declaration: the row is what decides, not the
+/// provider's list of canonical ids.
+#[test]
+fn a_plan_row_naming_its_own_namespace_stays_a_declaration() {
+    let catalog = catalog(json!([
+        namespaced_plan_provider(
+            "acme-plan",
+            "acme",
+            json!([with_canonical(
+                row("acme-5", "Acme 5", 258_400, 128_000),
+                "acme/acme-5"
+            )]),
+        ),
+        aggregator(
+            "custom-provider",
+            json!([row("acme-5", "Acme 5", 262_144, 262_144)]),
+        ),
+    ]));
+    let answered = relay(&catalog, "acme-5");
+    assert_eq!(matched(&answered), ("acme-plan", "acme-5"));
+    assert_eq!(rule(&answered), "token");
+    assert_eq!(
+        numbers(&answered),
+        numbers(&bundled(&catalog, "acme-plan", "acme-5"))
+    );
 }
 
 /// Step 1 answers an aggregator's own house model on that aggregator's own
@@ -1472,6 +1971,424 @@ fn a_tagged_row_does_not_join_an_untagged_input() {
             numbers(&bundled(&catalog, "reseller-a", "acme/precision-8b")).1,
         ),
         "the untagged input takes the untagged rows' minimum"
+    );
+}
+
+/// A listed chat id whose only joining rows are media rows is answered by
+/// none of them. The entry keeps the name, the window, the output cap and the
+/// reasoning toggle the listing declared, and reports no identification at
+/// all, so the picker says nothing named the model instead of naming a video
+/// row as the model it was taken to be.
+#[test]
+fn a_chat_id_joins_no_row_of_another_kind() {
+    let catalog = catalog(json!([
+        aggregator(
+            "video-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "video-generation",
+                8_192,
+                8_192,
+            )]),
+        ),
+        aggregator(
+            "image-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "image-generation",
+                8_192,
+                8_192,
+            )]),
+        ),
+    ]));
+    let declared = chat_row("acme-omni-3", "Acme Omni 3", 1_000_000, 128_000);
+    let declared_efforts = efforts(&declared).expect("the listing states its efforts");
+    let declared_numbers = numbers(&declared);
+    for reseller in ["video-reseller", "image-reseller"] {
+        let joining = bundled(&catalog, reseller, "acme-omni-3");
+        assert_eq!(
+            numbers(&joining),
+            (Some(8_192), Some(8_192)),
+            "{reseller}'s placeholder pair is what a kind-blind merge would adopt"
+        );
+    }
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        models: vec![declared.clone()],
+        ..Default::default()
+    };
+    let effective = catalog.effective_models(&provider, std::slice::from_ref(&declared), &[]);
+    let entry = &effective[0];
+    assert!(
+        entry.metadata.as_ref().unwrap().identification.is_none(),
+        "no step named the model, so the entry reports no identification"
+    );
+    assert_eq!(
+        (entry.display_name.as_str(), numbers(entry)),
+        (declared.display_name.as_str(), declared_numbers),
+        "the entry keeps the name and the pair its own listing declared"
+    );
+    assert_eq!(
+        efforts(entry),
+        Some(declared_efforts),
+        "the entry keeps the efforts its own listing declared"
+    );
+    assert!(
+        entry.capabilities.reasoning,
+        "a media row that declares reasoning unsupported never turns it off"
+    );
+    assert_eq!(
+        matched(entry),
+        ("provider-default", "-"),
+        "neither media row is named as the model this id was taken to be"
+    );
+}
+
+/// A chat id beside a chat row and a media row of the same name merges with
+/// the chat row alone: the numbers are the chat row's, and the media row's
+/// placeholder pair takes no part in the minimum.
+#[test]
+fn a_chat_id_joins_the_chat_row_beside_a_media_row_of_the_same_name() {
+    let catalog = catalog(json!([
+        aggregator(
+            "chat-reseller",
+            json!([with_efforts(
+                with_kind(row("acme-omni-3", "Acme Omni 3", 200_000, 64_000), "chat"),
+                &["low", "high"],
+            )]),
+        ),
+        aggregator(
+            "video-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "video-generation",
+                8_192,
+                8_192,
+            )]),
+        ),
+    ]));
+    let entry = kinded_relay(&catalog, "acme-omni-3", "chat");
+    let chat = bundled(&catalog, "chat-reseller", "acme-omni-3");
+    let media = bundled(&catalog, "video-reseller", "acme-omni-3");
+    assert!(
+        numbers(&media).0 < numbers(&chat).0,
+        "the media row's pair is the smaller one, so a kind-blind join would take it"
+    );
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        (numbers(&entry), efforts(&entry)),
+        (numbers(&chat), efforts(&chat)),
+        "the merge is the chat row's own numbers and efforts"
+    );
+    assert_eq!(matched(&entry), ("chat-reseller", "acme-omni-3"));
+    assert_eq!(
+        adopted(&entry),
+        [
+            ("contextWindow", 200_000, "chat-reseller"),
+            ("maxOutputTokens", 64_000, "chat-reseller"),
+        ],
+        "the media row supplies no limit"
+    );
+}
+
+/// A row whose `raw.type` is `"model"` names the JSON object rather than a
+/// kind, so it joins a chat id as a row stating the chat kind does; a row that
+/// states no type at all joins one too.
+#[test]
+fn a_row_stating_no_kind_of_its_own_joins_a_chat_id() {
+    let catalog = catalog(json!([
+        aggregator(
+            "kinds-reseller",
+            json!([with_raw(
+                row("acme-omni-3", "Acme Omni 3", 128_000, 8_000),
+                json!({ "type": "model" }),
+            )]),
+        ),
+        aggregator(
+            "bare-reseller",
+            json!([row("acme-omni-3", "Acme Omni 3", 64_000, 16_000)]),
+        ),
+    ]));
+    let entry = kinded_relay(&catalog, "acme-omni-3", "chat");
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        numbers(&entry),
+        (
+            numbers(&bundled(&catalog, "bare-reseller", "acme-omni-3")).0,
+            numbers(&bundled(&catalog, "kinds-reseller", "acme-omni-3")).1,
+        ),
+        "both rows join, so both minima are taken"
+    );
+    assert_eq!(
+        adopted(&entry),
+        [
+            ("contextWindow", 64_000, "bare-reseller"),
+            ("maxOutputTokens", 8_000, "kinds-reseller"),
+        ],
+        "a row stating `model` and a row stating no kind both supply a limit"
+    );
+}
+
+/// The kind rule holds on both paths the id's kind travels through here: a
+/// media id joins a row of its own kind and refuses a chat row, and a chat id
+/// takes the chat row. `effective_models` reads a stored row's kind and
+/// `project` reads a listed descriptor's, which are the two paths the kind
+/// reaches identification through.
+///
+/// `identify_entry` is the third caller of that chain and is `pub(crate)`, so
+/// an integration test cannot reach it; its stored-row case is the one
+/// `effective_models` states here, because both read the kind from the entry
+/// they are handed.
+#[test]
+fn a_media_id_joins_only_a_row_of_its_own_kind_on_every_path() {
+    let catalog = catalog(json!([
+        aggregator(
+            "media-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "image-generation",
+                8_192,
+                4_096,
+            )]),
+        ),
+        aggregator(
+            "chat-reseller",
+            json!([row("acme-omni-3", "Acme Omni 3", 200_000, 64_000)]),
+        ),
+    ]));
+    let media = bundled(&catalog, "media-reseller", "acme-omni-3");
+    let chat = bundled(&catalog, "chat-reseller", "acme-omni-3");
+    assert!(
+        numbers(&media).0 < numbers(&chat).0,
+        "a kind-blind merge would take the media row's smaller window"
+    );
+    let projection = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        models: vec![media.clone()],
+        ..Default::default()
+    };
+
+    let effective = catalog.effective_models(&projection, std::slice::from_ref(&media), &[]);
+    assert_eq!(
+        (rule(&effective[0]), numbers(&effective[0])),
+        ("merge", numbers(&media)),
+        "an image-generation id merges the row of its own kind"
+    );
+    assert_eq!(
+        adopted(&effective[0]),
+        [
+            ("contextWindow", 8_192, "media-reseller"),
+            ("maxOutputTokens", 4_096, "media-reseller"),
+        ],
+        "the chat row supplies nothing to a media id"
+    );
+
+    let listed = |kind: &str| {
+        catalog
+            .project(
+                &ProviderProjection {
+                    provider_id: "my-gateway".into(),
+                    source: Some(ModelSource::Custom),
+                    ..Default::default()
+                },
+                &json!({ "id": "acme-omni-3", "raw": { "type": kind } }),
+            )
+            .unwrap()
+    };
+    let image = listed("image-generation");
+    assert_eq!(
+        (rule(&image), numbers(&image)),
+        ("merge", numbers(&media)),
+        "a listed image-generation id takes the media row"
+    );
+    let chatted = listed("chat");
+    assert_eq!(
+        (rule(&chatted), numbers(&chatted)),
+        ("merge", numbers(&chat)),
+        "a listed chat id takes the chat row the media row does not outrank"
+    );
+}
+
+/// An id that states no kind keeps every row of its name, so a media model a
+/// relay lists without a `type` still merges and still carries the media kind
+/// it inherited. That inherited `type` is what keeps it out of conversations.
+#[test]
+fn a_no_kind_id_keeps_a_media_row_of_one_kind() {
+    let catalog = catalog(json!([aggregator(
+        "image-reseller",
+        json!([media_row(
+            "acme-omni-3",
+            "Acme Omni 3",
+            "image-generation",
+            32_768,
+            4_096,
+        )]),
+    )]));
+    let entry = relay(&catalog, "acme-omni-3");
+    let row = bundled(&catalog, "image-reseller", "acme-omni-3");
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        entry.metadata.as_ref().unwrap().raw.get("type"),
+        row.metadata.as_ref().unwrap().raw.get("type"),
+        "the entry carries the media kind it inherited from the row"
+    );
+    assert_eq!(numbers(&entry), numbers(&row));
+}
+
+/// A no-kind id beside a chat row and a media row of the same name merges with
+/// the chat row only: the numbers are the chat row's and the media row's pair
+/// is not in the minimum.
+#[test]
+fn a_no_kind_id_beside_a_chat_row_takes_only_the_chat_row() {
+    let catalog = catalog(json!([
+        aggregator(
+            "chat-reseller",
+            json!([with_kind(
+                row("acme-omni-3", "Acme Omni 3", 200_000, 64_000),
+                "chat",
+            )]),
+        ),
+        aggregator(
+            "video-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "video-generation",
+                8_192,
+                8_192,
+            )]),
+        ),
+    ]));
+    let entry = relay(&catalog, "acme-omni-3");
+    let chat = bundled(&catalog, "chat-reseller", "acme-omni-3");
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        numbers(&entry),
+        numbers(&chat),
+        "the chat row is the only row the merge reads"
+    );
+    assert_eq!(matched(&entry), ("chat-reseller", "acme-omni-3"));
+    assert_eq!(
+        adopted(&entry),
+        [
+            ("contextWindow", 200_000, "chat-reseller"),
+            ("maxOutputTokens", 64_000, "chat-reseller"),
+        ],
+        "the media row's smaller pair is not in the minimum"
+    );
+    assert_eq!(
+        entry.metadata.as_ref().unwrap().raw.get("type"),
+        chat.metadata.as_ref().unwrap().raw.get("type"),
+        "the entry carries the chat row's `type`"
+    );
+}
+
+/// A no-kind id whose only joining rows are media rows of two different kinds
+/// still merges both, which is what a listing that states no kind does today.
+#[test]
+fn a_no_kind_id_keeps_media_rows_of_two_kinds() {
+    let catalog = catalog(json!([
+        aggregator(
+            "video-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "video-generation",
+                128_000,
+                16_384,
+            )]),
+        ),
+        aggregator(
+            "audio-reseller",
+            json!([media_row(
+                "acme-omni-3",
+                "Acme Omni 3",
+                "audio",
+                64_000,
+                32_768,
+            )]),
+        ),
+    ]));
+    let entry = relay(&catalog, "acme-omni-3");
+    let video = bundled(&catalog, "video-reseller", "acme-omni-3");
+    let audio = bundled(&catalog, "audio-reseller", "acme-omni-3");
+    assert_ne!(
+        numbers(&video),
+        numbers(&audio),
+        "the two rows declare different pairs, so each minimum names one row"
+    );
+    assert_eq!(rule(&entry), "merge");
+    assert_eq!(
+        numbers(&entry),
+        (
+            numbers(&audio).0.min(numbers(&video).0),
+            numbers(&audio).1.min(numbers(&video).1),
+        ),
+        "both rows join, so the smaller window and the smaller cap are taken"
+    );
+}
+
+/// A listed chat id whose only joining rows are media rows stays unidentified
+/// on the projection path too, and the projection says so rather than naming
+/// the row it refused.
+#[test]
+fn a_chat_id_naming_only_media_rows_stays_unidentified_on_a_projection() {
+    let catalog = catalog(json!([aggregator(
+        "video-reseller",
+        json!([media_row(
+            "acme-omni-3",
+            "Acme Omni 3",
+            "video-generation",
+            8_192,
+            8_192,
+        )]),
+    ),]));
+    let provider = ProviderProjection {
+        provider_id: "my-gateway".into(),
+        source: Some(ModelSource::Custom),
+        ..Default::default()
+    };
+    let entry = catalog
+        .project(
+            &provider,
+            &json!({
+                "id": "acme-omni-3",
+                "raw": { "type": "chat" },
+                "limit": { "context": 1_000_000, "output": 128_000 },
+                "reasoning": { "supported": true },
+            }),
+        )
+        .unwrap();
+    let metadata = entry.metadata.as_ref().unwrap();
+    assert!(metadata.identification.is_none(), "no step named the model");
+    assert_eq!(
+        (
+            metadata.matched_provider_id.as_deref(),
+            metadata.matched_model_id.as_deref(),
+            metadata.match_strategy.as_deref(),
+        ),
+        (None, None, Some("provider-default")),
+        "a refused merge leaves no matched row and no merge strategy"
+    );
+    assert_eq!(
+        numbers(&entry),
+        (Some(1_000_000), Some(128_000)),
+        "the projection keeps the pair the descriptor declared"
+    );
+    assert_eq!(
+        metadata.metadata_source.as_deref(),
+        Some("provider-default"),
+        "no media row supplies the entry's metadata"
+    );
+    assert_eq!(
+        entry.display_name, "acme-omni-3",
+        "the media row's display name is not adopted"
     );
 }
 
