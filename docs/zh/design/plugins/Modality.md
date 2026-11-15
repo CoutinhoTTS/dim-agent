@@ -2,7 +2,7 @@
 
 状态：草案。总体设计：[overview §4 插件目录](../overview.md#4-插件目录)、[ADR 002](../../adr/002-plugin-scope.md)。阶段：P3。语言：由提供方执行的类别优先使用 TypeScript（[overview 附录 C](../overview.md#附录-c-实现语言)）。
 
-> **适配器按提供方、按调用解析。** [#40](https://github.com/arcships/dim/issues/40) 在 [#19](https://github.com/arcships/dim/issues/19) 中决定：Modality 在任务需要时解析该类别的适配器，而不是把所有适配器都作为依赖收集。适配器为它服务的每个目录提供方提供一份副本，以该提供方的 id 作为家族名的动态 key（A.2）；家族名本身的那份副本服务任何没有专属副本的提供方，内置适配器因此仍能服务它不认识的提供方。两者都在时专属副本优先。Modality 在每次调用时先读被调模型的提供方 key、再读家族名，不声明依赖；它会用到的适配器缺失、Pending、Failed 或正在重载时解析为空，于是只有它服务的操作不可用，Modality 保持 Active。按提供方的副本与 Session 的 `McpServer`、skill 的 `Contribution` 已经是同一种形态。
+> **适配器按提供方、按调用解析。** [#40](https://github.com/arcships/dim/issues/40) 在 [#19](https://github.com/arcships/dim/issues/19) 中决定：Modality 在任务需要时解析该类别的适配器，而不是把所有适配器都作为依赖收集。适配器为它服务的每个目录提供方提供一份副本，以该提供方的 id 作为家族名的动态 key（A.2）；家族名本身的那份副本服务任何没有专属副本的提供方，内置适配器因此仍能服务它不认识的提供方。两者都在时专属副本优先；内置适配器只提供家族名副本，因此专用适配器可以接管某个提供方而不与它冲突。Modality 在每次调用时先读被调模型的提供方专属副本、再读家族名副本，不声明依赖；它会用到的副本缺失、Pending、Failed 或正在重载时解析为空，于是只有它服务的操作不可用，Modality 保持 Active。按提供方的副本与 Session 的 `McpServer`、skill 的 `Contribution` 已经是同一种形态。
 
 > **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
 
@@ -40,10 +40,10 @@ flowchart LR
 
 | 部分 | 作用域 | 依赖 | 提供 |
 | --- | --- | --- | --- |
-| `Modality` | 进程（控制节点） | Provider 的模型选择（`ModelSelectionHost`）与非对话连接解析；`pluginFiles`（扩展：UTF-8 与二进制）；Settings 业务来源 `modality`；按提供方适配器 key 的按调用读取（[#40](https://github.com/arcships/dim/issues/40) 已决定，A.2）；控制节点的 HostPlatform（OCR）；诊断 | `modalityTasks` 与 `modalityTargets` 进程服务；把 `modality`（`modality.*`）注册到 `managementMethods` |
+| `Modality` | 进程（控制节点） | Provider 的模型选择（`ModelSelectionHost`）与非对话连接解析；`pluginFiles`（扩展：UTF-8 与二进制）；Settings 业务来源 `modality`；按提供方适配器副本、并以家族名副本兜底的按调用读取（[#40](https://github.com/arcships/dim/issues/40) 已决定，A.2）；控制节点的 HostPlatform（OCR）；诊断 | `modalityTasks` 与 `modalityTargets` 进程服务；把 `modality`（`modality.*`）注册到 `managementMethods` |
 | 适配器插件 | 进程 | 各自的提供方依赖 | `modalityAdapter` 副本：它服务的每个目录提供方一份（以该提供方的 id 为 key），加上服务任何没有专属副本的提供方的家族名副本（A.2） |
 
-**依赖的契约：**[方法](../contracts/session-boundary.md)契约（注册到 `managementMethods` 的命名空间、每次调用的进度接收器、绑定连接的通知）；按提供方适配器 key 的按调用读取（[#40](https://github.com/arcships/dim/issues/40) 已决定，§1 与 A.2）；Provider 的模型选择（`ResolveModelSelection::resolve`，拒绝不可选的显式模型；[AuxiliaryModel](../appserver/auxiliary-model.md)）、用于选项列表的可选模型读取（§9.2），以及每个适配器操作与实时会话所需的非对话连接解析（[overview 附录 B.2](../overview.md#b2-app-server-进程插件)，§9.3）；`pluginFiles`（扩展），含二进制原子替换与格式版本（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；带隔离的 HostPlatform spawn（[HostPlatform](../../../architecture/rust-agent/plugins/HostPlatform.md)，隔离补充见 [overview 附录 B.1](../overview.md#b1-session-与分支-capability)）。
+**依赖的契约：**[方法](../contracts/session-boundary.md)契约（注册到 `managementMethods` 的命名空间、每次调用的进度接收器、绑定连接的通知）；按提供方适配器副本、并以家族名副本兜底的按调用读取（[#40](https://github.com/arcships/dim/issues/40) 已决定，§1 与 A.2）；Provider 的模型选择（`ResolveModelSelection::resolve`，拒绝不可选的显式模型；[AuxiliaryModel](../appserver/auxiliary-model.md)）、用于选项列表的可选模型读取（§9.2），以及每个适配器操作与实时会话所需的非对话连接解析（[overview 附录 B.2](../overview.md#b2-app-server-进程插件)，§9.3）；`pluginFiles`（扩展），含二进制原子替换与格式版本（[App Server README](../../../../crates/dim-app-server/README.md#trusted-plugin-storage)）；带隔离的 HostPlatform spawn（[HostPlatform](../../../architecture/rust-agent/plugins/HostPlatform.md)，隔离补充见 [overview 附录 B.1](../overview.md#b1-session-与分支-capability)）。
 **此处定义的契约：**类别与操作标识符；`modality` 设置文档中的默认值 key `modality.<category>` 与 `modality.<category>.<operation>`（Modality 自有；Provider 不持有任何 key）；`modalityAdapter` 与 `modalityTasks` 服务（A.2 与 A.3；`modalityAdapter` 目前是进程内 Rust 绑定，因为它的调用携带不可序列化的 `ModalityConnection`，而 `modalityTasks` 是语言中立的；Rust 绑定见附录 G）；`modality` 设置文档及其 schema；任务记录与结果格式（格式版本 1）；`modality.*` 方法与 `modality.realtime.event`、`modality.realtime.ended` 通知。Provider 对模态一无所知；Modality 在适配器之外不了解任何提供方特有语义。
 
 ## 2. 数据与状态
@@ -328,7 +328,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 
 ### A.2 适配器与 OCR
 
-服务 `modalityAdapter`，作用域为进程，目录里声明一个名字，分两级副本：按提供方的副本位于该提供方 id 的动态 key 上，家族名副本位于名字本身并服务任何没有专属副本的提供方。Modality 每次调用先读被调模型提供方的专属副本、再读家族名副本，不声明依赖，因此它会用到的适配器缺失、Pending、Failed 或正在重载时解析为空，只有它服务的操作不可用，重载由下一次调用看到。两个适配器声称同一提供方时在装配时失败，专属副本胜过家族名副本，通用适配器因此继续服务没有专属副本的提供方。调用携带模型的已解析连接，而该连接是仅限一次调用的凭据材料而非数据，因此执行媒体的适配器在进程内：在 Provider 暴露执行操作之前，外部语言适配器不提供任何媒体操作，而 Provider 目前不提供该操作（[Provider 管理 §3.8](../appserver/provider-management.md#38-适配器的媒体执行)，[#1613](https://github.com/arcships/dim/issues/1613)）。解析到的适配器是否服务某个操作，由它自己回答（`operations`）；Modality 不保留第二份名单。取消是一个协议动作：Modality 丢弃该调用（或发送绑定的取消请求）；适配器停止本地工作。错误是数据 `{ code, message }`，`code` 为 `invalid_input`、`unavailable`、`provider_error` 之一。
+服务 `modalityAdapter`，作用域为进程，目录里声明一个名字，分两级副本：按提供方的副本位于该提供方 id 的动态 key 上，家族名副本位于名字本身并服务任何没有专属副本的提供方。Modality 每次调用先读被调模型提供方的专属副本、再读家族名副本，不声明依赖，因此它会用到的副本缺失、Pending、Failed 或正在重载时解析为空，只有它服务的操作不可用，重载由下一次调用看到。一个名字只有一个绑定：两个适配器声称同一提供方时在装配时失败，因此内置适配器只提供家族名副本，把每个提供方槽位留给专用适配器；被接管的提供方由该适配器服务。调用携带模型的已解析连接，而该连接是仅限一次调用的凭据材料而非数据，因此执行媒体的适配器在进程内：在 Provider 暴露执行操作之前，外部语言适配器不提供任何媒体操作，而 Provider 目前不提供该操作（[Provider 管理 §3.8](../appserver/provider-management.md#38-适配器的媒体执行)，[#1613](https://github.com/arcships/dim/issues/1613)）。解析到的适配器是否服务某个操作，由它自己回答（`operations`）；Modality 不保留第二份名单。取消是一个协议动作：Modality 丢弃该调用（或发送绑定的取消请求）；适配器停止本地工作。错误是数据 `{ code, message }`，`code` 为 `invalid_input`、`unavailable`、`provider_error` 之一。
 
 | 方法 | 类型 | 请求 | 回复 |
 | --- | --- | --- | --- |
