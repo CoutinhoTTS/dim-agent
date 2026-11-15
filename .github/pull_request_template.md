@@ -22,7 +22,7 @@ Answer each item; write "n/a" with a reason where it does not apply. Rules: [des
 
 ## Documentation
 
-- [ ] For Timeline event/state/lifecycle changes, link the contract and usage context, affected obligations and their arguments, and implementation evidence; identify gaps and model bounds ([guide](../docs/design/capability-design-arguments.md)). Otherwise state why this is not applicable.
+- [ ] For Timeline event/state/lifecycle changes, link the design's [four answers](../docs/design/capability-design-arguments.md) and identify unresolved obligations; otherwise state why this is not applicable.
 - [ ] No accepted ADR is modified or deleted; a changed decision is a new ADR, and a link or typo fix uses `adr-erratum` ([ADR 008](../docs/adr/008-documentation-ownership.md)).
 - [ ] No other module's design is changed; a cross-module requirement is stated for its owner.
 - [ ] Delivery status is not added to an ADR, index or roadmap; binding details are in a binding appendix.
