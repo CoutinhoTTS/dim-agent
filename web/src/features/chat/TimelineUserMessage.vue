@@ -78,7 +78,7 @@ async function copy(): Promise<void> {
 .user-actions { display: flex; height: var(--control-sm); align-items: center; gap: var(--space-1); color: var(--muted-foreground); opacity: 0; transition: opacity var(--duration-hover) ease; }
 .user-message:hover .user-actions, .user-message:focus-within .user-actions { opacity: 1; }
 .user-skill, .user-hook { color: var(--muted-foreground); font-size: var(--text-xs); }
-.skill-chip { padding: 0 0.25em; border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-foreground); font-weight: var(--weight-ui-medium, 600); }
+.skill-chip { padding: 0 0.25em; border-radius: var(--radius-sm); background: var(--skill-chip); font-weight: var(--weight-ui-medium, 600); }
 .user-sent-time { margin-right: var(--space-1); white-space: nowrap; }
 .is-copied { color: var(--success); }
 @media (hover: none) { .user-actions { opacity: 1; } }

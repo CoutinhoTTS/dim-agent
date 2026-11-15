@@ -565,14 +565,13 @@ defineExpose({ focus: () => field.value?.focus(), quote })
 
 <style scoped>
 .composer-field { position: relative; }
-/* The highlight layer sits under the textarea and paints the same text in the same box, so a chip lands on the characters the textarea holds. It keeps the textarea's own font, size, line height, padding, wrapping and scroll: a token changes only its background, never its weight or padding, because either would move the glyphs off the characters above them. */
+/* The layer behind the field paints only the chip backgrounds: its text is transparent and keeps the field's font, size, line height, wrapping, content width and scroll offset, so a chip's box lands under the characters the field itself draws. The field's own text stays above it, so the caret, the selection, the placeholder and IME pre-edit are the browser's. */
 .composer-highlight { position: absolute; inset: 0; overflow: hidden; font: var(--text-base)/var(--leading-relaxed) var(--font-sans); white-space: pre-wrap; overflow-wrap: break-word; color: transparent; pointer-events: none; }
-.composer-highlight .skill-chip { border-radius: var(--radius-sm); background: var(--accent); }
+.composer-highlight .skill-chip { border-radius: var(--radius-sm); background: var(--skill-chip); }
 .composer-highlight-body { transform: translateY(0); }
-/* The textarea keeps the caret, the selection and IME composition; its own text is transparent, so what shows through is the layer behind it. Its scroller drives the layer's offset. */
-.composer-input { display: block; position: relative; width: 100%; min-height: 60px; max-height: 300px; resize: none; padding: 0; border: 0; background: transparent; color: transparent; caret-color: var(--foreground); font: var(--text-base)/var(--leading-relaxed) var(--font-sans); outline: none; overflow-y: auto; }
+/* The field paints the draft in its own colour over a transparent background, so the chip fill shows through under the glyphs. It never changes weight or padding: either would move the glyphs off the chips behind them. */
+.composer-input { display: block; position: relative; width: 100%; min-height: 60px; max-height: 300px; resize: none; padding: 0; border: 0; background: transparent; color: var(--foreground); font: var(--text-base)/var(--leading-relaxed) var(--font-sans); outline: none; overflow-y: auto; }
 .composer-input::placeholder { color: var(--muted-foreground); }
-.composer-input::selection { color: transparent; background: color-mix(in oklab, var(--accent) 40%, transparent); }
 .composer-panel[data-variant="panel"] { padding: var(--space-2) var(--space-3) var(--space-3); }
 .composer-panel[data-variant="panel"] .composer-input { min-height: 48px; }
 .command-menu { position: absolute; z-index: var(--z-popover); bottom: calc(100% + var(--space-2)); left: 0; width: 100%; max-width: none; max-height: min(320px, 50dvh); overflow-y: auto; padding: var(--space-1); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--card); color: var(--card-foreground); box-shadow: var(--shadow-pop); transform-origin: bottom left; --popover-enter-y: 4px; }
