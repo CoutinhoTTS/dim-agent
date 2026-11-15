@@ -321,6 +321,12 @@ A terminal without the kitty keyboard protocol or xterm modifyOtherKeys cannot
 tell `Ctrl+Enter` from `Enter`, so there it submits in the default mode and `Esc`
 then `Enter` remains the two-key route.
 
+The default send mode is a TUI setting: an ACP client decides for itself how it
+holds a message typed during a run, and reaches interrupt and send now with
+`session/cancel` followed by a new `session/prompt`
+([AcpGateway §4.2](plugins/AcpGateway.md#42-prompt-and-cancellation)). The Web
+composer is #1601.
+
 Enter on an empty composer opens `/tasks` only after the earlier branches have
 had their say: the shell-run guard in either mode, then the steer of the oldest
 queued message, and only with nothing held. The task line must show, as it does

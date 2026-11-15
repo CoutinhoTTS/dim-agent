@@ -84,6 +84,8 @@ load 固定 native 历史头，按 nextAfter/done 分页，按分支 sequence �
 
 本连接收到 cancel 后，prompt 必须返回 ACP cancelled，即使取消触发底层异常。Hooks 对 session.submit 的 input_blocked 拒绝显示原消息并返回 refusal；Gateway 不实现 Hooks。
 
+Session 已有未答复的 prompt 时，新到的 prompt 以 `session_busy` 拒绝；Gateway 既不排队它，也不把它 steer 进正在运行的 turn。因此运行期间用户输入的消息如何暂存，是 client 自己的选择。TUI 用[运行按键](../cli-commands.md#运行按键与排队)以它自己的方式达成这两个动作；在 ACP 上，同样的两步是 `session/cancel`、等待运行中 prompt 返回 `cancelled`，然后发送新的 `session/prompt`。Gateway 不 steer 第二个 prompt：ACP v1 未定义 turn 中途到达的 prompt，而且每个 prompt 的回复就是它自己 turn 的结束，两个 prompt steer 进同一个 turn 会共用一个结束点，无法各自给出诚实的停止原因。待协议定义 turn 中途投递后再重新讨论。
+
 ### 4.3 审批与提问
 
 所有分支的 native approval request 转为 ACP permission request。回答走 approval.respond；原生当前 policy 和 first-answer 顺序为准。resolved/cancelled 结束本地 waiter，不提供 always 选项。
