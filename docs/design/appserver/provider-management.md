@@ -1054,9 +1054,9 @@ request executed on the adapter's behalf — not the connection.
 
 **Decision: no such operation now.** `modalityConnectionHost`'s classification is
 `internal(secret)`, not `legacy-no-consumer`: what it returns is credential material that must not
-cross, not data waiting for a dispatcher. The catalog still reports `legacy-no-consumer` until the
-classification line changes with the implementation this decision calls for. The sixth migration
-of [#1292](https://github.com/arcships/dim/issues/1292) ends here rather than in a data face, and
+cross, not data waiting for a dispatcher, and [service faces §3.6](../service-faces.md#36-入口凭据与宿主资源)
+states that row. The sixth migration of
+[#1292](https://github.com/arcships/dim/issues/1292) ends here rather than in a data face, and
 media adapters execute in-process (`dim-modality-aimux`) through this native path. No media
 operation, signing, retry, redirect, upload, download or streaming behavior changes.
 
@@ -1066,14 +1066,14 @@ an existing operation serialized, and it cannot preserve what the native path do
 
 | Existing behavior | What an operation must match |
 | --- | --- |
-| One resolution per adapter call | Resolve once per call; keep the call's target fixed for its retries; later calls see updated configuration without mixing snapshots |
+| One resolution per adapter call | Resolve once per call and reuse that one resolution for the call's retries; a cache that answers a later call would report a configuration the adapter never resolved, so later calls resolve again |
 | Streaming downloads to files with a 2 GiB limit (`dim-modality-aimux`) | Stream to a file; never buffer a whole reply into base64 |
 | WebSocket realtime open/send/receive/close | A connection-scoped protocol, not one request and reply |
 | Vendor route and credential routing, including the fal image routes and query parameters | The same route selection and credential handling the catalog declares |
 | Redirects and per-vendor error mapping | The same rules the connection query applies now |
 | Cancellation and release at every step | Cancels owner work; dropping the call settles it and keeps the caller's token |
 
-`modalityRequest` as proposed in [#1399](https://github.com/arcships/dim/pull/1399) also accepted
+The `modalityRequest` operation proposed in an earlier revision of [#1399](https://github.com/arcships/dim/pull/1399) also accepted
 Bedrock routes without SigV4 signing, while every bundled media adapter refuses a Bedrock
 connection. Media support on Bedrock would be a new feature, not a serialization of an existing
 one.
