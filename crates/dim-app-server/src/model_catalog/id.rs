@@ -777,9 +777,12 @@ fn row_is_vendor(catalog: &BundledCatalog, row: &Row<'_>) -> bool {
 /// The role is a provider-level fact: only a `vendor` provider declares
 /// anything. The row decides the rest, because the catalog states the
 /// contradiction per row: a row whose canonical id names a namespace other
-/// than the provider's own belongs to that vendor, and the matcher reads it
-/// only where it reads an aggregator row. A row that states no canonical id
-/// says nothing against the role, so the role's answer stands for it.
+/// than the provider's own belongs to that vendor: the steps that read vendor
+/// rows pass it over, and the merge reads it as it reads an aggregator row.
+/// Step 1 reads a provider's bundled rows whatever they resell, so this
+/// predicate decides only what the later steps index. A row that states no
+/// canonical id says nothing against the role, so the role's answer stands
+/// for it.
 fn is_declaration(
     role: Option<ProviderRole>,
     own_namespace: Option<&str>,
