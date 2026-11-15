@@ -43,7 +43,7 @@ Wait is neither a durable inbox nor a join operation for the external process.
 | What happens when there is no open turn? | [input_queue.rs](../../../crates/dim-agent-capabilities/src/input_queue.rs), `input`, `release`; [agent_loop.rs](../../../crates/dim-agent-capabilities/src/agent_loop.rs), `driven`, `try_start` | A steer can become applied input and start a new turn. Its absence from Wait's pending state is intentional |
 | Can turns occur in arbitrary order? | AgentLoop's `try_start` and `consume` handling of `TurnStart`/`TurnEnd` | The real Loop checks turn identity and phase. Arbitrary repeated starts/ends in the isolated experiment are a broader input space, not reachable product traces |
 | Who cancels an active wait? | ToolExecutor's `StopInterrupt` handling and generation token; Wait's `arrival`; [host.rs](../../../crates/dim-agent-capabilities/src/host.rs), `call_until_cancelled` | Wait does not subscribe to stop events; the caller propagates cancellation. Cancelling this wait does not imply cancelling the background command |
-| Does reload reconnect an existing call? | WaitTool resolves an `Arc<Wait>` per call; WaitBranch installs a fresh service and subscription; owner contract says futures are caller-owned | The current recovery model has no active old call. Do not infer migration or cancellation of that call from rebuilding the new service |
+| Does reload reconnect an existing call? | WaitTool resolves an `Arc<Wait>` per call; WaitBranch installs a fresh service and subscription; owner contract says futures are caller-owned | The current recovery model omits active old calls. The lifecycle contract requires settlement; caller ownership of the future does not exempt the service generation from ending its work |
 
 ## 3. Check the whole path, not just the local transitions
 
@@ -71,24 +71,29 @@ to invent requirements for the product. Its successful tagged inputs assume the 
 already posted the notification; they make no claim that every terminal will post successfully.
 Its zero-timeout reads exercise the public service, not the model-facing tool's timeout validation.
 
-The [TLC recovery model](wait-argument.md) remains a model of one projection and new-generation
-handoff. It does not cover active calls across replacement. The local-execution flow
-`wait_call_cancellation_settles_after_its_branch_service_reloads` characterizes this separate path:
+The [TLC recovery model](wait-argument.md) omits active calls. Its successful new-generation
+handoff therefore cannot establish compliance with the [capability reload protocol](../../architecture/rust-agent/single-tree.md#能力重载协议).
+That protocol already requires unfinished operations to end with `capability reloading`; tool
+results carry the reload-settlement marker, and Loop ends the turn as failed instead of advancing.
+[Time bus §5](../../architecture/rust-agent/time-bus.md#5-副作用不重放) makes capability reload and
+process restart equivalent for the new generation. This is an existing requirement, not a choice
+between retaining, migrating or cancelling old waits.
 
-1. The scripted model calls the actual wait tool; a public second-call refusal establishes that
-   the old service already has an active wait before replacement starts.
-2. Only WaitBranch restarts. A newly resolved service receives a later steer, while the model's
-   old call has not produced a result.
-3. Stopping the turn propagates cancellation through ToolExecutor. The old call returns
-   `interrupted`; a subsequent call on that retained service confirms its waiting slot was released.
+The inspected implementation holds an `Arc<Wait>` in each call but does not connect its wait to
+WaitBranch's generation cancellation. Losing the subscription does not finish that future.
+A full caller/ToolExecutor experiment confirmed that an old call can survive service replacement
+until a later turn stop, while the new service receives new notifications. This is a lifecycle
+compliance defect, not merely unclear wording about single-call exclusivity. The experimental
+assertions requiring that survival are not retained as regression expectations; results and the
+reproduction commit are recorded in the PR.
 
-This exercises caller-owned cancellation, not automatic migration, whole-Session reload or
-ToolExecutor replacement. The test characterizes the current generation boundary for review;
-it does not settle the intended scope of "only one wait per branch" in the owner document.
-The implementation's slot is per service instance, so old and new generations can have overlapping
-calls. Whether branch-wide exclusivity should span those generations needs owner alignment before
-changing behavior or treating this characterization as an accepted cross-generation policy.
-No runtime fix or new cancellation rule is introduced here.
+The fix must connect generation termination to the accepted call's settlement and propagate the
+reload reason through the existing tool-result path. Wait must not write ToolExecutor's terminal
+facts itself. Ordinary caller cancellation remains a separate input. Recovery restores durable
+business state, not old waiting futures. A corrected regression must show that WaitBranch-only
+reload ends the old tool call without an extra user stop, marks reload settlement and prevents
+Loop from advancing that turn. The general case also needs the public service and retained-handle
+admission boundary considered; this documentation PR does not claim a runtime fix.
 
 New plugin integrations should supply the same boundary information: admission, event meaning,
 ordering, call cancellation and reload responsibility. They need not appear on a fixed list of
