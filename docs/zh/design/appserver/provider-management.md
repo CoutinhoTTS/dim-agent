@@ -318,6 +318,13 @@ Provider 在大量行上写出的那一对数值的行在该处不声明任何�
 而不是对着更早的列举留下的那一行。用户声明的内容在两种 Provider 上都照旧生效，经由
 `capabilityOverrideFields` 与其余用户自有状态。
 
+厂商条目是 role 为 `vendor` 的 Provider 上的行，且该行的规范 id 命名该 Provider 自有的命名空间，
+或该行未声明规范 id。vendor Provider 上规范 id 指向另一家厂商的行是转售：读取厂商条目的各步骤
+跳过它，合并像读取聚合行那样读它。第一步仍会为所属 Provider 读取它，因为无论转售哪家的模型，
+捆绑行都是该 Provider 的声明。Provider 自有的命名空间是 `metadata.vendorNamespace`，由同步从该
+Provider 的策略写入，与 role 相邻；凡是行上携带规范 id 的 vendor Provider 都声明它。转售另一家
+厂商模型、而 upstream 未给出规范 id 的 plan 行，其规范 id 在已提交的 catalog 中声明，并由同步保持。
+
 Provider 记录声明其列出 id 携带的前缀。该前缀在 id 头部、不区分大小写地只去除一次，早于 id 被
 拆成各 token 与名称步骤所比的 token。第一步与限定 id 步骤读取整个 id，因此精确行与限定 id 不受该
 声明影响；限定 id 步骤在去前缀之前作答，因为它读的是整个 id，会让它不剩 token 的前缀因此夺不走
