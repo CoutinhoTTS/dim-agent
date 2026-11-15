@@ -21,8 +21,10 @@ These runs check the [explicit additional scenarios and bounds](coverage-fill.md
 | [PermissionFacts](PermissionFacts.cfg) | 46 | 6 | 0 |
 | [FileBindingQueries](FileBindingQueries.cfg) | 11,110 | 7 | 0 |
 
-The unchanged Wait observation formula now passes against the expanded queue model. Its old counterexample remains at `5a78b2ed2`, with its old dependency hash. Do not relabel that old trace as a runtime defect or overwrite it as a passing run.
+The unchanged Wait observation formula `FirstPendingNotice` now passes against the expanded queue model. Its old counterexample remains at `5a78b2ed2`, with its old dependency hash. Do not relabel that old trace as a runtime defect or overwrite it as a passing run.
 
 A separate complete state dump for HookFollowups contains both chains reaching posted rounds `[1,2,3]`; thus the second-chain reset property is exercised, rather than passing because a second chain is unreachable. The actual reachable state and reproduction command are in JSON. This is a positive reachability check, not a deliberately failing invariant.
 
 Development drafts had parser/type errors that were corrected before these final runs. A larger Goal draft was stopped and its redundant full decision-history copy removed; the final transition checks preserve the relevant conditions and completed. No incomplete or timed-out draft is counted as passing evidence. No symmetry or state-constraint filters were used.
+
+A short constructive route to both full chains is: from Init, repeat `End("stop", "success") → Finish(TRUE) → ConsumeFollowup` three times; then `End("stop", "success") → Finish(FALSE) → NormalTurn`; repeat the three-step sequence three more times. Each chain has posted rounds 1, 2 and 3. This route explains reachability; the separately recorded dump state and reproduction command remain the execution evidence.

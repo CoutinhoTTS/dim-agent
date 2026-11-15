@@ -58,7 +58,9 @@
       "seed": 342233108249595330,
       "finished": "Finished in 01min 00s at (2026-11-15 23:54:50)",
       "invariants": [],
-      "properties": [],
+      "properties": [
+        "FirstPendingNotice"
+      ],
       "dependencies": [
         {
           "module": "docs/design/examples/capability-models/WaitRuntime.tla",

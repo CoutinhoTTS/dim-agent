@@ -118,13 +118,21 @@ Preparation 的 Release 表示 prepare 返回、准备局部工作不再展开�
 4. 外部算法正确性，例如路径/symlink/command 匹配、tokenizer、PTY marker、工具权限宿主和网络协议。
 5. 未找到生产路径的 context/scope 端到端运行流程，以及 ShellSession 宿主 crash 的真实复现。
 
-前面的 22 项有分项分析和局部边界模型实验；完整业务覆盖仍有[具体缺口](coverage-audit.md)，不能按部件有模型就认定完成。
+前面的 22 项有分项分析和局部边界模型实验；原审计列出的场景已在[逐项对应及边界](coverage-completion.md)中承接，不能因此认定实际需求或代码路径已穷尽。
 特别是 Shell 两个恢复性质目前**不成立于模型**，不属于“验证通过”，也没有在本附件里偷偷修运行时。
 
 ## 重跑
 
 使用 TLA+ tools release 1.7.4（其输出版本为 TLC 2.19）和 Java 17。以仓库根目录为工作目录，
-设置 `TLA_JAR` 为下载的 jar 的绝对路径。TLC 状态和日志放在临时目录，不使用产品 home。
+Java 和 jar 是仓库之外的前置依赖；仓库本身不能离线提供它们。
+从 [1.7.4 release artifact](https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar) 获取 jar，
+设置 `TLA_JAR` 为它的绝对路径，并先核对所有运行记录中的 `jar_sha256`：
+
+```sh
+printf '%s  %s\n' '936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88' "$TLA_JAR" | shasum -a 256 -c -
+```
+
+校验成功后再运行。TLC 状态和日志放在临时目录，不使用产品 home。
 
 ```sh
 for config in docs/design/examples/capability-models/*.cfg \
@@ -142,7 +150,7 @@ done
 
 原 34 个配置中，两个 `ExecLifecycle-Shell*` 预期返回 13（恢复活性反例），其余预期返回 0。
 补覆盖后的 `WaitSelectionCoverage` 预期返回 0；旧模型的 exit 13 反例保留为历史证据。
-本轮新增配置均预期返回 0，精确范围见补充实验。
+新增配置均预期返回 0，精确范围见[第一轮记录](coverage-fill-results.md)和[第二轮记录](coverage-completion-results.md)。
 任何解析错误、超时或新的反例都不是通过。禁用 deadlock 检查是为了允许已完成/等待环境的状态 stutter；
 只有声明了时序性质和相应公平性的模型才检查进度，不把安全性通过误报为“永不挂起”。
 

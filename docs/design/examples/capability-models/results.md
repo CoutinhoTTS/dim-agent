@@ -10,7 +10,7 @@ Date: 2026-11-15. Code correspondence: `8a5fe0980`. Java 17.0.18, TLA+ tools rel
 
 [Obligations, assumptions and commands](README.md) | [Machine-readable records and SHA-256 hashes](results.json) | [Actual counterexample traces](counterexamples.md)
 
-The runs explore 1,234,293 distinct states in total across separate models; these are not states of one composed system. The 177 configured invariant/property entries include repeated properties across configurations and must not be counted as 176 independent business promises. Bounds are the explicit finite domains and guards in each module and the constants in its configuration. No constraint filters or symmetry reductions were used.
+The runs explore 1,234,293 distinct states in total across separate models; these are not states of one composed system. The 177 configured invariant/property entries include repeated properties across configurations and must not be counted as independent business promises. Bounds are the explicit finite domains and guards in each module and the constants in its configuration. No constraint filters or symmetry reductions were used.
 
 | Configuration | Outcome / exit | Distinct states | Depth | Model SHA-256 prefix |
 | --- | --- | ---: | ---: | --- |
@@ -60,6 +60,6 @@ The runs explore 1,234,293 distinct states in total across separate models; thes
 
 Runtime code is unchanged. The previously recorded 660 relevant flow-test passes (and one pre-existing ignored long-command case) remain applicable; they were not rerun merely for these model/document edits. See [the per-part analysis](../timeline-capability-analysis.md) and [#1629](https://github.com/arcships/dim/issues/1629). Model checking is additional evidence, not a replacement for implementation correspondence or flow tests.
 
-The final run includes the existing ApprovalOrdering and ToolSegments specimens. Each JSON record contains the exact module/configuration hashes, observed exit status, counts and TLC fingerprint/seed. Raw run logs were retained locally under `/tmp/dim-capability-tlc/final`; the traces needed to review the failed properties are committed here. Counterexample choice can change with the fingerprint/seed.
+The final run includes the existing ApprovalOrdering and ToolSegments specimens. Each JSON record contains the exact module/configuration hashes, observed exit status, counts and TLC fingerprint/seed. The traces needed to review the failed properties are committed here. Local raw logs are not repository artifacts; the README reproduction command writes fresh logs to temporary paths. Counterexample choice can change with the fingerprint/seed.
 
 No runtime contract, accepted ADR, persistence format or mandatory development/CI requirement was changed.

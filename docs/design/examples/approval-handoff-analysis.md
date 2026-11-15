@@ -143,4 +143,4 @@ ToolExecutor 当前在批次开始时并发准入，随后可能等前一个执�
 本次不改变三个 branch 部件的职责、事件、服务、持久化格式或运行时。
 不新增机制需求；跨模块交接仍链接所属契约。模型变量只存在于模型中，不要求生产实现增加它们。
 只保留会影响上述竞争结论的三个时间位置；命令文本、文件内容和工具内部执行均不复制到模型。
-Permission 的恢复用直接等式解释，没有再建一个相同的 TLC 模型。
+Permission 的恢复在本文用直接等式解释；版本、发布与恢复的有限模型检查见 [PermissionState](capability-models/PermissionState.tla) 及其[运行记录](capability-models/results.json)。本文复用该模型，不另建副本。

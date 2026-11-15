@@ -1,6 +1,6 @@
 # Second coverage-fill TLC record
 
-All 24 new configurations completed with exit 0 and exhausted queues. The 46 existing configurations retain exact-hash evidence: 44 passes and the two Shell recovery counterexamples. This accounts for all 70 capability/approval/tool example configurations; it is not a coverage percentage. The separate guide's WaitRecovery example is outside this set.
+All 24 new configurations completed with exit 0 and exhausted queues. The reused Wait FIFO record checks `FirstPendingNotice` (the singular `PROPERTY` declaration in its cfg). The 46 existing configurations retain exact-hash evidence: 44 passes and the two Shell recovery counterexamples. This accounts for all 70 capability/approval/tool example configurations; it is not a coverage percentage. The separate guide's WaitRecovery example is outside this set.
 
 Code correspondence: `da7e3614b`; relevant source hashes, model/config hashes, actual exits, seeds and properties are in [JSON](coverage-completion-results.json). Toolchain: Java 17.0.18, TLA+ tools 1.7.4 / TLC 2.19, one worker, 2 GiB heap. See [scope and correspondence](coverage-completion.md) before interpreting a pass.
 

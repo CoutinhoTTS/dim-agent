@@ -986,6 +986,10 @@
     {
       "path": "tests/integration/tests/local_execution.rs",
       "sha256": "2f48ab984a61098cf199eed0bd59b0c411370396a6d24f904cb3126891510549"
+    },
+    {
+      "path": "crates/dim-app-server/src/collaboration/approvals.rs",
+      "sha256": "6998f8e32cae871c13caa142f37782df2726a2c6e9f11d2758e4740e6a984e95"
     }
   ]
 }
