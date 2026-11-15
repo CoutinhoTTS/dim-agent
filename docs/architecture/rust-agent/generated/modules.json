@@ -6483,7 +6483,6 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/text.rs",
       "unexpandedMacros": [
-        "matches",
         "vec"
       ]
     },
@@ -6494,7 +6493,8 @@
       "file": "crates/dim-cli/src/ui/text.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "vec"
       ]
     },
     {
@@ -47123,7 +47123,8 @@
         "path display_width",
         "path expand_tabs",
         "path truncate_cells",
-        "path wrap_cells"
+        "path wrap_cells",
+        "path wrap_with_source"
       ]
     },
     {
