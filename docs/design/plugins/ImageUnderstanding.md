@@ -68,11 +68,15 @@ An answer whose `stop_reason` is `MaxTokens` is returned with the text it produc
 explicit incomplete marker; it is not reused.
 
 **Admission.** The tool declares risk `session`, so it runs under every preset without a
-per-call approval ([ADR 003](../../adr/003-approval-scope.md)). The consent is a setting, and
-the setting covers the whole operation rather than one path: Modality's snapshot names the
-effective model and the reason it is that model, for a default the user persisted and for
-automatic resolution when none is persisted. So the image goes to whichever provider serves the
-effective target, and this design adds no second place to choose it.
+per-call approval ([ADR 003](../../adr/003-approval-scope.md)). Consent comes from the
+configuration, and that is a weaker statement for automatic resolution than for a persisted
+default, so both are named here. With a persisted `modality.image.understand` default the user
+named the model and the image goes where that model is served. With no default, Modality
+resolves automatically (Provider's global selection when it serves the operation, otherwise the
+first selectable vision model) and no one chose that provider for images; the snapshot reports
+the effective model, but not why automatic resolution picked it. The image goes to whichever
+provider serves the effective target either way, and this design adds no second place to choose
+it.
 
 That holds for both paths into the tool, and the two are not equal. An attached image enters by
 the user's own action; an image the model `read` from the workspace enters because the model
@@ -197,7 +201,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 No business meaning in core | No core change: the tool is registered through `toolRegistry`, and the reference rule stays in ModelProvider as Attachments already owns it. |
 | §4.5 Atomic batches | The design writes no event itself; Loop's ordinary tool-call batch covers the call and its result. |
 | §4.6 Context only from handed-off events | The answer reaches the model only as a tool result; no injection during request preparation. |
-| §4.7 Public events and services only | The part uses `toolRegistry`, the owning branch's event query (`branch.query`, [plugin contract §5.4](../plugin-contract.md#54-the-branch-facade)) to resolve a reference, the declared `auxiliaryModel` host and Modality's M1 read. |
+| §4.7 Public events and services only | The part uses `toolRegistry`, the owning branch's event query (`branch.query`, [plugin contract §5.4](../plugin-contract.md#54-the-event-query)) to resolve a reference, the declared `auxiliaryModel` host and Modality's M1 read. |
 | §4.8 Requirements to mechanism owners | §5, M1 and M2. No new runtime or rutis mechanism. |
 | §4.9 Only facts later decisions use enter the Timeline | Only the ordinary tool facts enter; the digest index is derived and discarded. |
 | §1 Capability and App Server boundary | A Session Capability in its own crate; the App Server only installs it. |
