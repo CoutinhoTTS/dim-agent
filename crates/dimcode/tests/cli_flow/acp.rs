@@ -566,6 +566,8 @@ fn acp_loop_commands_keep_native_ids_and_require_an_unambiguous_branch_target() 
                 "session.loop.stop",
             ],
         );
+        let list = wire.read("session.loop.list");
+        wire.reply(&list, json!({"loops":[]}));
         let mut records = Vec::new();
         for (id, prompt, interval) in [
             ("self-paced", "检查 deployment", None),
@@ -601,8 +603,8 @@ fn acp_loop_commands_keep_native_ids_and_require_an_unambiguous_branch_target() 
             stop["params"],
             json!({"sessionId":"session","loopId":"fixed"})
         );
-        records[1]["state"] = json!("stopped");
         wire.reply(&stop, json!({"loop":records[1],"settled":false}));
+        records[1]["state"] = json!("stopped");
         let list = wire.read("session.loop.list");
         wire.reply(&list, json!({"loops":records}));
         let stop = wire.read("session.loop.stop");
@@ -611,6 +613,21 @@ fn acp_loop_commands_keep_native_ids_and_require_an_unambiguous_branch_target() 
         wire.reply(&stop, json!({"loop":records[0]}));
         let list = wire.read("session.loop.list");
         wire.reply(&list, json!({"loops":records}));
+        let list = wire.read("session.loop.list");
+        wire.reply(&list, json!({"loops":records}));
+        let stop = wire.read("session.loop.stop");
+        assert_eq!(stop["params"]["loopId"], "fixed");
+        wire.reply(&stop, json!({"loop":records[1],"settled":false}));
+        let start = wire.read("session.loop.start");
+        let mut expiring = json!({"loopId":"expiring","branchId":"main","state":"running","round":1,"nextAt":null});
+        wire.reply(&start, json!({"loop":expiring}));
+        let list = wire.read("session.loop.list");
+        records.push(expiring.clone());
+        wire.reply(&list, json!({"loops":records}));
+        let stop = wire.read("session.loop.stop");
+        assert_eq!(stop["params"]["loopId"], "expiring");
+        expiring["state"] = json!("expired");
+        wire.reply(&stop, json!({"loop":expiring,"settled":false}));
         detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
@@ -618,6 +635,7 @@ fn acp_loop_commands_keep_native_ids_and_require_an_unambiguous_branch_target() 
     peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
     assert!(peer.response(2).get("error").is_none());
     assert_eq!(peer.commands(), ["loop"]);
+    let empty = peer.command(30, "session", "/loop stop");
     assert!(
         peer.command(3, "session", "/loop 检查 deployment")
             .contains("self-paced started")
@@ -669,16 +687,30 @@ fn acp_loop_commands_keep_native_ids_and_require_an_unambiguous_branch_target() 
         peer.command(9, "session", "/loop stop")
             .contains("self-paced stopped")
     );
-    assert!(
-        peer.command(10, "session", "/loop stop")
-            .contains("No single live loop")
-    );
+    let no_live = peer.command(10, "session", "/loop stop");
     assert!(
         peer.command(11, "session", "/loop stop two ids")
             .contains("Usage:")
     );
+    let stopped = peer.command(12, "session", "/loop stop fixed");
+    assert!(
+        peer.command(13, "session", "/loop expire soon")
+            .contains("expiring started")
+    );
+    let expired = peer.command(14, "session", "/loop stop expiring");
     peer.close();
     daemon.join().unwrap();
+    assert!(
+        empty.contains("No live loop")
+            && !empty.contains("choose")
+            && no_live.contains("No live loop")
+            && !no_live.contains("choose")
+            && stopped.contains("fixed stopped")
+            && !stopped.contains("still settling")
+            && expired.contains("expiring expired")
+            && !expired.contains("still settling"),
+        "empty: {empty}\nno live: {no_live}\nstopped: {stopped}\nexpired after listing: {expired}"
+    );
 }
 
 #[test]

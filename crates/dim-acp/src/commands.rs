@@ -251,7 +251,10 @@ async fn loops(
                 .iter()
                 .filter(|record| matches!(record.state.as_str(), "waiting" | "running"))
                 .collect();
-            if live.len() != 1 {
+            if live.is_empty() {
+                return Ok("No live loop on main.".into());
+            }
+            if live.len() > 1 {
                 return Ok(format!(
                     "No single live loop on main; choose /loop stop ID.\n{}",
                     loop_report(&listed.loops)
@@ -269,6 +272,7 @@ async fn loops(
         };
         #[derive(Deserialize)]
         struct Stopped {
+            r#loop: Loop,
             settled: Option<bool>,
         }
         if cancelled.is_cancelled() {
@@ -277,13 +281,17 @@ async fn loops(
         let stopped: Stopped = rpc
             .typed("session.loop.stop", json!({"sessionId":id,"loopId":target}))
             .await?;
-        return Ok(if stopped.settled == Some(false) {
-            format!(
-                "Loop {target} stop requested; an accepted round is still settling. Use /loop to inspect it."
-            )
-        } else {
-            format!("Loop {target} stopped.")
-        });
+        return Ok(
+            if stopped.settled == Some(false)
+                && !matches!(stopped.r#loop.state.as_str(), "stopped" | "expired")
+            {
+                format!(
+                    "Loop {target} stop requested; an accepted round is still settling. Use /loop to inspect it."
+                )
+            } else {
+                format!("Loop {target} {}.", stopped.r#loop.state)
+            },
+        );
     }
     let seconds = [("s", 1u64), ("m", 60), ("h", 3600), ("d", 86400)]
         .into_iter()
