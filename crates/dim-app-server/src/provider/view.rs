@@ -200,8 +200,7 @@ impl ProviderService {
                 } else if overridden {
                     actions.push("reset");
                 }
-                let catalog_name =
-                    (effective.name != model.display_name).then_some(effective.name);
+                let catalog_name = (effective.name != model.display_name).then_some(effective.name);
                 ManagementModel {
                     enabled: !record.disabled_model_ids.contains(&model.model_id),
                     endpoint_override: record.endpoint_overrides.get(&model.model_id).copied(),
@@ -328,8 +327,7 @@ impl ProviderService {
                             .disabled_model_ids
                             .contains(&effective.entry.model_id);
                         let alias = record.model_aliases.get(&effective.entry.model_id).cloned();
-                        let catalog_name =
-                            (name != effective.entry.display_name).then_some(name);
+                        let catalog_name = (name != effective.entry.display_name).then_some(name);
                         ManagementModel {
                             enabled,
                             model: effective.entry,

@@ -9944,8 +9944,7 @@ async fn a_rename_through_management_stores_no_suffix() {
         )
         .await
         .unwrap();
-    let record: Value =
-        serde_json::from_str(&stored_record_json(&gateway.home, GATEWAY)).unwrap();
+    let record: Value = serde_json::from_str(&stored_record_json(&gateway.home, GATEWAY)).unwrap();
     let overrides = record["modelConfigOverrides"].as_array().unwrap();
     let stored = overrides
         .iter()
@@ -9964,7 +9963,13 @@ async fn a_rename_through_management_stores_no_suffix() {
             .chain(overrides)
             .map(|row| row["displayName"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["GLM-5.3", "GLM-5.3", "GLM-5.3", "GLM-5.3", "GLM-5.3 (Zhipu)"],
+        [
+            "GLM-5.3",
+            "GLM-5.3",
+            "GLM-5.3",
+            "GLM-5.3",
+            "GLM-5.3 (Zhipu)"
+        ],
         "no computed name reaches the record"
     );
     assert_eq!(
