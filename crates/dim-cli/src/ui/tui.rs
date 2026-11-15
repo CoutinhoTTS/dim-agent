@@ -139,6 +139,10 @@ enum Jump {
     Block(usize),
     /// Scroll so this block id is at the top (after a page loads above it).
     Show(usize),
+    /// Scroll to the top of this block id when it is taller than the viewport,
+    /// so a long report opens at its heading instead of scrolled past it
+    /// (`/keys`).
+    ShowTall(usize),
 }
 
 /// The card id of fullscreen's load-more row: no line or delegation id.
@@ -160,6 +164,7 @@ fn apply_jump(full: &mut FullScreen, app: &App, jump: Jump) {
         Jump::Pick => full.focus_older(app),
         Jump::Block(id) => full.pick_block(id, app),
         Jump::Show(id) => full.show_block(id, app),
+        Jump::ShowTall(id) => full.show_tall_block(id, app),
     }
 }
 
@@ -5583,8 +5588,14 @@ impl App {
                 &self.markdown,
                 self.fullscreen,
             ));
+            let id = self.dropped + self.history.len();
             self.record(block);
             frame.commits.push(text);
+            // A report taller than the viewport opens at its first row:
+            // a followed view shows the end of it and cuts the heading.
+            if self.fullscreen && self.jump.is_none() {
+                self.jump = Some(Jump::ShowTall(id));
+            }
         }
         for run in std::mem::take(&mut self.shell_runs) {
             let block = Block::Shell(run);
@@ -15912,6 +15923,51 @@ mod tests {
                 "the saved queue applies to both an idle and a running draft"
             );
         }
+    }
+
+    /// `/keys` fills an ordinary terminal, and a followed view draws the end of
+    /// a tall block, which cuts the heading that says what the report is: the
+    /// report asks the view for its first row.
+    #[test]
+    fn a_tall_report_opens_at_its_heading() {
+        let mut drawn = Drawn::new((80, 24), None, true);
+        drawn.app.fullscreen = true;
+        drawn.app.run_command("keys", "");
+        drawn.draw();
+        let id = drawn.app.dropped + drawn.app.history.len() - 1;
+        assert!(
+            matches!(&drawn.app.history[id - drawn.app.dropped], Block::Status { text, .. }
+                if text.starts_with("Application keys")),
+            "the report opens with its heading"
+        );
+        assert_eq!(
+            drawn.app.jump,
+            Some(Jump::ShowTall(id)),
+            "a tall report asks the view for its first row"
+        );
+    }
+
+    /// The jump the frame landed moves a followed view to the tall report's
+    /// first row, so the heading is drawn instead of the last rows.
+    #[test]
+    fn a_tall_report_opens_at_its_heading_in_the_view() {
+        let mut drawn = Drawn::new((80, 24), None, true);
+        drawn.app.fullscreen = true;
+        drawn.app.run_command("keys", "");
+        let mut full = crate::ui::render::fullscreen::FullScreen::new((80, 24), false);
+        let frame = drawn.app.frame((80, 24));
+        full.render(&frame, (80, 24), &drawn.app.palette, &drawn.app);
+        let jump = drawn.app.jump.take().expect("the report's jump");
+        apply_jump(&mut full, &drawn.app, jump);
+        let frame = drawn.app.frame((80, 24));
+        let bytes = full.render(&frame, (80, 24), &drawn.app.palette, &drawn.app);
+        let mut emu = crate::ui::render::testterm::Emu::new(80, 24);
+        emu.feed(&bytes);
+        let rows = emu.rows_text().join("\n");
+        assert!(
+            rows.contains("Application keys"),
+            "the report's heading is drawn: {rows}"
+        );
     }
 
     #[test]
