@@ -1097,6 +1097,16 @@ stdout 和 JSON 输出不变。只认识失败类型的客户端忽略进度类�
 开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
 构建或 `--home PATH` 两条路。
 
+守护进程在装配早期就 bind 端点，整套装配完成后才 open，所以在这中间连上的客户端
+拿到的是能接受连接、却什么都不应答的 socket。这段等待是启动阶段，不是自带上限的
+请求：`hello` 没有自己的上限，客户端按所在阶段的不活跃上限等应答，进度计数按上限
+本身向后推（连接和 spawn 等待 10 秒，start 锁等待为 shutdown 加启动加余量）。因此升级
+推进握手的上限与推进 spawn 的上限同源，所有会连接的动作（包括 `daemon stop`）都按所在
+阶段的上限等。`Client::greet` 发出 `hello`，`Client::complete_hello` 校验应答，有等待的
+调用方自己取应答；`Client::hello` 留给没有等待的调用方，例如 ACP gateway 的重连，它把
+整次尝试收在自己的期限（deadline）内。上限真正到期时，客户端报出当时所在阶段并给出
+`<native home>/daemon.log`；这条路径不会把 tokio 自己的 `deadline has elapsed` 交给用户。
+
 ```text
 $ dima
 Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
