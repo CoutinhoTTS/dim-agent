@@ -2,7 +2,7 @@ use crate::{
     Result,
     args::{Options, SERVER_REQUIREMENT},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsString,
@@ -464,6 +464,31 @@ impl<'a> StartupWait<'a> {
     fn expired(&self) -> bool {
         tokio::time::Instant::now() >= self.deadline
     }
+
+    /// Takes the reply to a `hello` this client sent under this wait's own
+    /// inactivity bound. A server that is bound but not yet open answers
+    /// nothing yet, and its startup progress moves the bound forward like any
+    /// other phase's. The note's pid is not compared: the server that accepted
+    /// this connection is the one being waited for.
+    async fn reply(&mut self, client: &mut Client, id: u64) -> Result<Value> {
+        let reply = client.response(id);
+        tokio::pin!(reply);
+        loop {
+            tokio::select! {
+                biased;
+                reply = &mut reply => return reply,
+                () = tokio::time::sleep(STARTUP_POLL) => {}
+            }
+            self.observe(None);
+            if self.expired() {
+                return Err(format!(
+                    "App Server did not answer hello during startup; see {}",
+                    self.note.with_file_name("daemon.log").display()
+                )
+                .into());
+            }
+        }
+    }
 }
 
 /// Waits for the start lock, polling every `STARTUP_POLL` as the spawn wait
@@ -695,10 +720,13 @@ async fn adopt(
 /// With `negotiate`, a typed `protocol_version` refusal steps one version
 /// down, no lower than [`CLIENT_PROTOCOL_FLOOR`], and every attempt opens a
 /// new connection; any other failure is final, as is a refusal at the floor.
+/// The greeting's reply is taken under `wait`, so a daemon that accepted the
+/// connection before it finished opening is a startup phase like the rest.
 async fn connect_negotiating(
     config: &ConnectionConfig,
     starting: bool,
     negotiate: bool,
+    wait: &mut StartupWait<'_>,
 ) -> Result<Option<Client>> {
     let mut config = config.clone();
     // One discarded connection per version from this client's protocol down to
@@ -715,7 +743,13 @@ async fn connect_negotiating(
             }
             Err(error) => return Err(error.into()),
         };
-        match client.hello().await {
+        // A server that is bound but not open has accepted this connection and
+        // answers nothing yet. Its reply is a startup phase, never a request
+        // with a bound of its own (#1620). A refusal arrives as an error, so the
+        // step-down keeps the greeting as one result beside the reply check.
+        let id = client.greet().await?;
+        let greeting = wait.reply(&mut client, id).await;
+        match greeting.and_then(|reply| client.complete_hello(reply)) {
             Ok(_) => return Ok(Some(client)),
             Err(error)
                 if negotiate
@@ -828,14 +862,21 @@ pub async fn connect_inner(
     // One client at a time decides whether to reuse, replace or start the
     // daemon; everyone else waits here and then runs the same decision, which
     // normally finds the successor at its own version. `--server` daemons are
-    // never started or replaced, so they take no lock.
-    let mut wait = StartupWait::new(&startup_note, start_lock_timeout(), locale);
+    // never started or replaced, so they take no lock. The connect below meets a
+    // daemon that may still be starting, so it is bounded like the spawn wait;
+    // only the lock has the wider bound, because its holder may shut one down
+    // first.
+    let mut wait = StartupWait::new(&startup_note, daemon_start_timeout(), locale);
     let _start_lock = if start && server.embedded {
-        Some(start_lock(&native_home, &mut wait).await?)
+        wait.rebind(start_lock_timeout());
+        let lock = start_lock(&native_home, &mut wait).await?;
+        wait.rebind(daemon_start_timeout());
+        Some(lock)
     } else {
         None
     };
-    if let Some(client) = connect_negotiating(&connection, false, negotiate).await?
+    let found = connect_negotiating(&connection, false, negotiate, &mut wait).await?;
+    if let Some(client) = found
         && let Some(link) = adopt(client, start, &server, &startup_note, desired, locale).await?
     {
         return Ok(Some(link));
@@ -949,7 +990,7 @@ pub async fn connect_inner(
     let mut child: Option<std::process::Child> = None;
     let mut poll = Duration::from_millis(5);
     loop {
-        if let Some(client) = connect_negotiating(&connection, true, negotiate).await? {
+        if let Some(client) = connect_negotiating(&connection, true, negotiate, &mut wait).await? {
             match adopt(client, start, &server, &startup_note, desired, locale).await? {
                 Some(link) => return Ok(Some(link)),
                 // The daemon behind the endpoint was another build's; it is
