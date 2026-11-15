@@ -89,7 +89,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `scheduleJobs` | `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md#a2-tool-schedule) 的 flat `JobRequest`/`JobReply`，与 `wakeups` 同一批次（[#1396](https://github.com/arcships/dim/pull/1396)）。 |
 | `wakeups` | `wakeups.create/list/cancel` | 形状按 [Scheduler](plugins/Scheduler.md#102-methods-and-tool) §10.2。 |
 | `loops` | `loops.start/next/list/stop` | 形状按 [Scheduler](plugins/Scheduler.md#126-interfaces) §12.6；`start`、`next`、`stop` 是迁改，`list` 是读取。投递 pass、恢复与 `settle_delivering` 不在此面。 |
-| `sessionFiles` | `sessionFiles.put/register/owns/owned_paths` | 形状按 [Session files](appserver/session-files.md) §9.1，`SessionFilesHost` 是进程内绑定。 |
+| `sessionFiles` | `sessionFiles.put/import/read/register/owns/owned_paths` | 形状按 [Session files](appserver/session-files.md) §9.1，`SessionFilesHost` 是进程内绑定。 |
 | `managedSearch` | `managedSearch.search` | 凭据由实现持有，见 §4.6。 |
 | `agentConfig` | `agentConfig.get()` | 形状见 §4.8。 |
 | `sessionLanguage` | `sessionLanguage.get()` | 形状见 §4.8。 |
@@ -268,19 +268,9 @@ workflowRuns.call(RunRequest)
 
 按 owner 契约 [Session files](appserver/session-files.md) §9.1 暴露 `sessionFiles`。`SessionFilesHost` 作为这组操作的进程内绑定。
 
-```text
-sessionFiles.put {sessionId, name, content: base64 string}
-  -> {fileId, path, bytes}
-sessionFiles.register {sessionId, path}
-sessionFiles.owns {sessionId, path} -> {owned: bool}
-sessionFiles.owned_paths {sessionId} -> {paths: [string]}
-  -> error {code: not_found | invalid | too_large | node_unavailable | cancelled | storage, message}
-```
+文件导入、分块读取、归属操作的参数、回复、错误及取消语义均由 §9.1 定义。文件传输使用按路径导入与有界读取操作。
 
-- 名字、`content`（base64）、`owned_paths` 和取消都按 §9.1；取消是协议动作（调用方丢弃调用或发 bridge cancel），不是 `cancel?` 字段。
-- 路径是 UTF-8 字符串。16 MiB 上限不变；先测是否超过 Channel 单条消息上限，超了在 owner 契约里加分块，不偷偷截断。
-- 消费者：Attachments 已声明 `P:sessionFiles`；WorkspaceTools/ShellSession（`register`）、FileAccessFacts（`owns`/`owned_paths`）。
-- 测试：`session_files_flow.rs`、`attachments_flow.rs`，加 loopback。
+进程内绑定和 wire 的行为一致性由 `session_files_flow.rs` 与 `attachments_flow.rs` 验证。
 
 ### 4.6 `managedSearch`
 
@@ -411,8 +401,7 @@ modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 6. 风险与开放问题
 
-1. **Channel 单条消息上限**：`sessionFiles.put` 的 16 MiB 可能超过限制。先测；超了就分块，不降低上限。
-2. **`Faces` 的传播**：`Names`、`PartRegistry`、`SessionResolver` 都要拿到同一份原因表；独立 host / 测试用空表，检查只在装配和 leaf 加载处生效。
+1. **`Faces` 的传播**：`Names`、`PartRegistry`、`SessionResolver` 都要拿到同一份原因表；独立 host / 测试用空表，检查只在装配和 leaf 加载处生效。
 
 ## 7. 交付顺序
 

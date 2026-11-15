@@ -155,3 +155,5 @@ impl PublicService for tool_registry::ToolSourcesView {}
 impl PublicService for methods::SessionMethods {}
 impl PublicService for agent_loop::AgentLoop {}
 impl PublicService for context_preparation::ContextPreparation {}
+
+pub mod session_files;

@@ -213,54 +213,33 @@ fn a_starting_daemon_that_reports_nothing_fails_at_the_bound() {
 fn progress_for_another_pid_does_not_extend_the_wait() {
     let home = Home::new();
     let note = note_path(&home);
-    let copies = home.0.join("copied-notes");
-    let mut body = String::new();
-    for counter in 1..=100 {
-        body.push_str(&note_write(&note, "999999", counter));
-        body.push_str(&format!(
-            "\ncat '{note}' >> '{copies}'\n",
-            note = note.display(),
-            copies = copies.display()
-        ));
-        body.push_str("\nsleep 0.1\n");
-    }
-    body.push_str("exec sleep 5");
-    let server = script(&home, "foreign-server", &body);
+    let server = script(&home, "foreign-server", "exec sleep 15");
+    write_progress_note(&note, 999999, 0);
     let started = Instant::now();
-    let output = home
+    let mut client = home
         .command()
         .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "1500")
         .args(["--server", server.to_str().unwrap(), "models", "fixture"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let mut published = 0;
+    for counter in 1..=100 {
+        if client.try_wait().unwrap().is_some() {
+            break;
+        }
+        write_progress_note(&note, 999999, counter);
+        published = counter;
+        thread::sleep(Duration::from_millis(100));
+    }
+    let output = wait(client);
     let elapsed = started.elapsed();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    // The child writes its notes after the CLI has gone: the timeout returns
-    // without killing it (crates/dim-cli/src/client.rs, the `did not start in
-    // time` error leaves the spawned child running in its own session), so
-    // this copy is the burst as it stood at the moment the CLI returned.
-    let written = fs::read_to_string(&copies).unwrap_or_default();
-    let named: Vec<&str> = written
-        .lines()
-        .filter(|line| line.starts_with("dimcode-startup-progress v1 pid="))
-        .collect();
+    assert!(published > 1, "the foreign-pid publisher made no progress");
     assert!(
-        named.len() > 1,
-        "the child reported no progress at all: {written}"
-    );
-    assert!(
-        named.iter().all(|line| line.contains("pid=999999")),
-        "a note named a pid other than the one under test: {written}"
-    );
-    // The child writes 100 notes 100 ms apart and the bound is 1500 ms: a wait
-    // that held ended while the burst was still running, so this count is the
-    // burst's prefix, about fifteen and fewer on a loaded machine. A wait a
-    // foreign-pid note extended ran until the burst ended, and counts all 100.
-    assert!(
-        named.len() < 100,
-        "the child had written {} of its 100 notes when the CLI returned, so a \
-         note for another pid extended the wait past the 1500 ms bound: {elapsed:?}",
-        named.len()
+        published < 100,
+        "the client waited through all {published} foreign-pid notes: {elapsed:?}"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("did not start in time"), "{stderr}");

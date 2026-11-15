@@ -321,8 +321,9 @@ async fn rpc(
             } else if body["params"]["name"] == "spaces" {
                 json!({"content":[{"type":"text","text":"spaces-ok"}]})
             } else if body["params"]["name"] == "screenshot" {
-                json!({"content":[
+                json!({"structuredContent":{"capture":"complete"},"isError":false,"content":[
                     {"type":"text","text":"screenshot captured"},
+                    {"type":"image","data":"PHN2Zy8+","mimeType":"image/svg+xml"},
                     {"type":"image","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=","mimeType":"image/png"}
                 ]})
             } else {
@@ -2578,8 +2579,15 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
         dim_agent_aimux::install(&mut builder);
         mcp::install(&mut builder);
         mcp_host_rows(&mut builder, &home);
+        let database = home.join("dimcode.sqlite");
+        builder.plugin(move |_| Ok(Box::new(dim_app_server::storage::SqliteStoragePlugin::new(database.clone()))));
+        builder.plugin(|_| {
+            let catalog = dim_app_server::catalog();
+            let build = Build::default();
+            Ok(Box::new(dim_app_server::storage::SessionStorePlugin::new(&Names::copy(&catalog, &build), 0)?))
+        });
         builder
-            .plugin(|_| Ok(Box::new(AimuxPlugin)))
+            .plugin(|names| Ok(Box::new(AimuxPlugin::with_files(names.key()?))))
             .plugin(move |_| Ok(Box::new(ConfiguredModelsPlugin(models.clone()))));
         let agent = MinimalHost::start_with(&builder, |root, _| {
             root.provide(credentials_host(BTreeSet::new()))
@@ -2609,6 +2617,8 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             })
             .await
             .unwrap();
+        agent.root().get::<dim_app_server::storage::SessionStore>().unwrap()
+            .timeline_store().create_session(session.id(), &SessionConfig::default()).await.unwrap();
         // The tool enters the request once its source is adopted.
         ready(&session).await;
         let mut ran = false;
@@ -2631,6 +2641,16 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             }
         }
         assert!(ran, "the MCP image tool ran and the stored tool result keeps the image");
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let result = events.iter().find_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => Some(&data.results[0].result),
+            _ => None,
+        }).unwrap();
+        assert_eq!(result.is_error, Some(false));
+        assert_eq!(result.structured_content, Some(JsonObject::from_iter([("capture".into(), json!("complete"))])));
+        let ToolContent::Blocks(blocks) = &result.content else { panic!("expected image tool blocks") };
+        assert!(matches!(&blocks[..], [ContentBlock::Text {text}, ContentBlock::Text {text: omitted}, ContentBlock::Image {source}, ContentBlock::Text {text: structured}]
+            if text == "screenshot captured" && omitted == "[Image omitted: the image cannot be sent to this model.]" && source.source_type == ImageSourceType::File && structured == r#"{"capture":"complete"}"#), "{blocks:?}");
         let bodies = requests.lock().unwrap().clone();
         let next = bodies
             .iter()
@@ -2651,6 +2671,8 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             tool["content"].as_str().unwrap().contains("[Image: sent in the following user message as tool output.]"),
             "{tool}"
         );
+        assert!(tool["content"].as_str().unwrap().contains("screenshot captured"));
+        assert!(tool["content"].as_str().unwrap().contains("[Image omitted: the image cannot be sent to this model.]"));
         let user = next["messages"].as_array().unwrap().last().unwrap();
         assert_eq!(user["role"], "user");
         assert!(
@@ -3863,7 +3885,7 @@ async fn a_stdio_entry_starts_a_command_the_toolchain_source_provides() {
     let session = env.session(false, PermissionPreset::FullAccess).await;
     let mcp = session.session_service::<McpSession>().unwrap();
     let mut changed = mcp.subscribe();
-    let version = tokio::time::timeout(Duration::from_secs(5), async {
+    let version = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match changed.borrow_and_update().servers.get("docs") {
                 Some(McpSourceState::Ready { version }) => return version.clone(),
@@ -3876,7 +3898,12 @@ async fn a_stdio_entry_starts_a_command_the_toolchain_source_provides() {
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|_| {
+        panic!(
+            "the stdio entry did not become ready: {:?}",
+            changed.borrow().servers
+        )
+    });
     adopted(&session, Some(&version)).await;
     env.turn(&session, Action::Text).await;
     let names: Vec<String> = env

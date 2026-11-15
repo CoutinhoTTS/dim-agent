@@ -4254,6 +4254,7 @@ fn model_with_vision(model_id: &str, vision: bool) -> ModelSelection {
 fn image(media_type: &str, data: Option<&str>, url: Option<&str>) -> ContentBlock {
     ContentBlock::Image {
         source: ImageSource {
+            file_id: None,
             source_type: if url.is_some() {
                 ImageSourceType::Url
             } else {
@@ -4300,8 +4301,17 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
                     user: Some(UserInput {
                         content: vec![
                             ContentBlock::Text { text: "look".into() },
-                            image("image/png", Some(png), None),
+                            ContentBlock::Image { source: ImageSource {
+                                source_type: ImageSourceType::File,
+                                media_type: "image/png".into(),
+                                file_id: Some("persisted-image".into()), data: None, url: None,
+                            } },
                             image("image/png", None, Some("https://example.test/a.png")),
+                            ContentBlock::Image { source: ImageSource {
+                                source_type: ImageSourceType::File,
+                                media_type: "image/svg+xml".into(),
+                                file_id: Some("persisted-svg".into()), data: None, url: None,
+                            } },
                             image("image/bmp", Some(png), None),
                             image("image/png", Some("not base64!"), None),
                         ],
@@ -4317,7 +4327,7 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         let unsendable = "[Image omitted: the image cannot be sent to this model.]";
         assert_eq!(
             sent_parts(requests.lock().unwrap().last().unwrap()),
-            ["look", "image:image/png", unsendable, unsendable, unsendable]
+            ["look", "image:image/png", unsendable, unsendable, unsendable, unsendable]
         );
 
         session
@@ -4330,7 +4340,7 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         assert_eq!(request.model_id, "text-only");
         let omitted = "[Image omitted: the current model does not accept images.]";
         let parts = sent_parts(&request);
-        assert_eq!(parts[..5], ["look", omitted, omitted, omitted, omitted]);
+        assert_eq!(parts[..6], ["look", omitted, omitted, omitted, omitted, omitted]);
         assert!(parts.contains(&"next".to_string()));
         let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("next"))));
@@ -4340,6 +4350,13 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
             EventKind::ModelCall(call) if call.request.model_id == "text-only"
                 && call.request.messages.iter().any(|message| matches!(&message.content,
                     MessageContent::Parts(parts) if parts.iter().any(|part| matches!(part, MessagePart::Image { .. })))))));
+        session.configure(ConfigureUpdate { model: Some(model_with_vision("seeing-again", true)), ..Default::default() }, "main").await.unwrap();
+        session.submit("look again".into(), InputMode::Queue, "main").await.unwrap();
+        session.idle("main").await.unwrap();
+        let restored = requests.lock().unwrap().last().unwrap().clone();
+        assert_eq!(restored.model_id, "seeing-again");
+        assert_eq!(sent_parts(&restored)[..6], ["look", "image:image/png", unsendable, unsendable, unsendable, unsendable]);
+        assert!(restored.messages.iter().any(|message| matches!(&message.content, MessageContent::Parts(parts) if parts.iter().any(|part| matches!(part, MessagePart::Image {source} if source.file_id.as_deref() == Some("persisted-image"))))));
         agent.close().await.unwrap();
     })
     .await
@@ -4450,6 +4467,7 @@ impl ToolDriver for Screenshot {
             if image {
                 blocks.push(ContentBlock::Image {
                     source: ImageSource {
+                        file_id: None,
                         source_type: ImageSourceType::Base64,
                         media_type: "image/png".into(),
                         data: Some(TOOL_IMAGE.into()),

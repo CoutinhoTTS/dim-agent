@@ -1078,3 +1078,49 @@ Compact: [Modal title] [Close]
          [Bound line selector]
          [Plugin ShadowRoot]
 ```
+
+## Session file HTTP API
+
+`POST /api/sessions/{sessionId}/files` accepts one `multipart/form-data` field
+named `file`; `?image=true` requests image recognition. It requires the Web cookie
+and an admitted same-origin header. The entry streams into a private temporary
+directory, then invokes [Attachments import](plugins/Attachments.md#file-import-and-read)
+with the received path. The reply is the attachment import reply.
+
+The raw file limit is 16 MiB, the multipart body limit 17 MiB, and a site admits
+four concurrent uploads. Each body chunk has a 30-second timeout; the complete
+operation has a 120-second deadline. Completion, failure and request cancellation
+drop the temporary directory. Native-store uploads use the owner-only directory
+`<database>.web-uploads`; WebEntry holds its exclusive lock and removes abandoned
+`upload-*` entries before admitting requests. The server selects staging names. Client-provided
+paths never enter this API. Direct Web RPC path import is rejected.
+
+`GET /api/sessions/{sessionId}/files/{fileId}` requires the Web cookie and checks
+an Origin header when supplied. Session files checks ownership before a bounded
+stream is returned. Missing or foreign files return 404; responses are private
+and not cached. The image content type is sniffed from the stored bytes.
+
+The composer retains browser `File` objects and object-URL previews until the
+submission is accepted. It displays upload progress, then submits returned image references.
+Failures retain the draft; removing an image, accepting a submission and unmounting
+release its preview URL. User and tool images in live or restored history use the
+authenticated file endpoint.
+
+### Modality file HTTP API
+
+`POST /api/modality/tasks` accepts multipart with a first `request` JSON field
+(up to 64 KiB), followed by up to 20 `file` fields with names and media types.
+The JSON uses [Modality task submit](plugins/Modality.md) parameters and cannot
+supply `files`. File data totals at most 100 MiB; the HTTP body limit is 101 MiB.
+Cookie/origin checks, four shared upload slots, staging cleanup and deadlines
+follow the Session upload contract. WebEntry supplies its staged paths to
+`modality.task.submit`; success means Modality has imported them into task storage.
+
+`POST /api/sessions/{sessionId}/modality-results` takes `{task_id, name}`. WebEntry
+asks `modality.task.export` for that task-owned source and passes it to Attachments
+import. Its reply is the Session attachment reply; task retention can subsequently
+remove the task without invalidating the Session file. Session size and image
+admission limits apply to this transfer.
+
+Authenticated Web RPC additionally serves `modality.task.status/list/wait/cancel/result`.
+Task submission and source-path export are reached through the HTTP operations.

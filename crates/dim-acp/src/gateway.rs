@@ -359,7 +359,54 @@ impl Gateway {
         });
     }
 
-    fn update(&self, id: &str, update: Value) -> Result<(), Error> {
+    async fn update(&self, id: &str, mut update: Value) -> Result<(), Error> {
+        let paths = match update.get("content").and_then(Value::as_array) {
+            Some(blocks) => (0..blocks.len())
+                .map(|index| format!("/content/{index}/content"))
+                .collect::<Vec<_>>(),
+            None => vec!["/content".into()],
+        };
+        for path in paths {
+            if let Some(file_id) = update
+                .pointer(&format!("{path}/fileId"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                use base64::{Engine, engine::general_purpose::STANDARD};
+                #[derive(Deserialize)]
+                struct Chunk {
+                    data: String,
+                    eof: bool,
+                }
+                let mut bytes = Vec::new();
+                loop {
+                    let chunk: Chunk = self
+                        .rpc
+                        .typed(
+                            "attachment.read",
+                            json!({"sessionId":id,"fileId":file_id,"offset":bytes.len()}),
+                        )
+                        .await?;
+                    if chunk.eof {
+                        break;
+                    }
+                    bytes.extend(
+                        STANDARD
+                            .decode(chunk.data)
+                            .map_err(|_| Error::internal_error())?,
+                    );
+                    if bytes.len() > 16 * 1024 * 1024 {
+                        return Err(Error::internal_error());
+                    }
+                }
+                let content = update
+                    .pointer_mut(&path)
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(Error::internal_error)?;
+                content.remove("fileId");
+                content.insert("data".into(), Value::String(STANDARD.encode(bytes)));
+            }
+        }
         self.outbox.notify(
             &self.cx,
             "session/update",
@@ -1286,7 +1333,7 @@ impl Gateway {
                         let mut projection = Projection::default();
                         for event in page.events {
                             for update in projection.event(&decode_native(event)?) {
-                                self.update(&id, update)?;
+                                self.update(&id, update).await?;
                             }
                         }
                         reply.respond(
@@ -1368,7 +1415,7 @@ impl Gateway {
                                     .any(|waiter| !waiter.reply.cancellation().is_cancelled())
                             {
                                 for update in updates {
-                                    self.update(&id, update)?;
+                                    self.update(&id, update).await?;
                                 }
                             }
                         }
@@ -1382,7 +1429,7 @@ impl Gateway {
                         for task in prepared.tasks {
                             let update = session.projection.pending_exec(&task);
                             if replay {
-                                self.update(&id, update)?;
+                                self.update(&id, update).await?;
                             }
                         }
                         for request in prepared.delegations {
@@ -1411,7 +1458,8 @@ impl Gateway {
                             .insert(id.clone(), Slot::Ready(Box::new(session)));
                         self.commands(&id)?;
                         if prepared.title_revision > 0 {
-                            self.title(&id, prepared.title, prepared.title_revision)?;
+                            self.title(&id, prepared.title, prepared.title_revision)
+                                .await?;
                         }
                         for waiter in loading.waiters {
                             if !matches!(waiter.kind, Preparation::New)
@@ -1432,7 +1480,7 @@ impl Gateway {
                             waiter.reply.respond(response)?;
                         }
                         for (method, params) in loading.buffered {
-                            self.notice(method, params)?;
+                            self.notice(method, params).await?;
                         }
                         self.questions(&id);
                         self.usage(&id);
@@ -1463,7 +1511,7 @@ impl Gateway {
                             waiter.reply.respond_with_error(error.clone())?;
                         }
                         for (method, params) in buffered {
-                            self.notice(method, params)?;
+                            self.notice(method, params).await?;
                         }
                     }
                 }
@@ -1559,7 +1607,8 @@ impl Gateway {
                                         "sessionUpdate":"agent_message_chunk",
                                         "content":{"type":"text","text":error.message},
                                     }),
-                                )?;
+                                )
+                                .await?;
                                 prompt.reply.respond(json!({"stopReason":"refusal"}))?;
                             } else {
                                 prompt.reply.respond_with_error(error)?;
@@ -1661,12 +1710,14 @@ impl Gateway {
                         self.update(
                             &id,
                             json!({"sessionUpdate":"config_option_update","configOptions":options}),
-                        )?;
+                        )
+                        .await?;
                         if mode && let Some(mode) = current_mode {
                             self.update(
                                 &id,
                                 json!({"sessionUpdate":"current_mode_update","currentModeId":mode}),
-                            )?;
+                            )
+                            .await?;
                         }
                     }
                     Err(error) => {
@@ -1682,7 +1733,7 @@ impl Gateway {
                             session.config = config;
                             let options = session.config.options();
                             reply.respond_with_error(error)?;
-                            self.update(&id,json!({"sessionUpdate":"config_option_update","configOptions":options}))?;
+                            self.update(&id,json!({"sessionUpdate":"config_option_update","configOptions":options})).await?;
                         } else {
                             reply.respond_with_error(error)?;
                         }
@@ -1741,7 +1792,7 @@ impl Gateway {
                     },
                 };
                 if let Some(text) = text {
-                    self.update(&id, json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}))?;
+                    self.update(&id, json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}})).await?;
                 }
                 command
                     .reply
@@ -1766,7 +1817,7 @@ impl Gateway {
                         && usage.context_window.is_finite()
                         && usage.context_window > 0.0
                     {
-                        self.update(&id,json!({"sessionUpdate":"usage_update","used":usage.estimated_input_tokens.ceil() as u64,"size":usage.context_window.floor() as u64}))?;
+                        self.update(&id,json!({"sessionUpdate":"usage_update","used":usage.estimated_input_tokens.ceil() as u64,"size":usage.context_window.floor() as u64})).await?;
                     }
                 }
             }
@@ -1865,7 +1916,8 @@ impl Gateway {
                                     session_id: id.clone(),
                                     branch_id: "main".into(),
                                     event,
-                                })?;
+                                })
+                                .await?;
                             }
                         }
                         if let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) {
@@ -1912,10 +1964,10 @@ impl Gateway {
                                 prompt.reply.respond(json!({"stopReason":"cancelled","_meta":{"dim":{"nativeCancellation":"unconfirmed"}}}))?;
                             }
                         }
-                        self.title(&id, title, title_revision)?;
+                        self.title(&id, title, title_revision).await?;
                         self.commands(&id)?;
                         if let Some(Slot::Ready(session)) = self.sessions.get(&id) {
-                            self.update(&id,json!({"sessionUpdate":"config_option_update","configOptions":session.config.options(),"_meta":{"dim/history":{"through":prepared.through,"before":prepared.before,"complete":prepared.before.is_none(),"replace":true}}}))?;
+                            self.update(&id,json!({"sessionUpdate":"config_option_update","configOptions":session.config.options(),"_meta":{"dim/history":{"through":prepared.through,"before":prepared.before,"complete":prepared.before.is_none(),"replace":true}}})).await?;
                         }
                     }
                     Err(error) => {
@@ -1931,7 +1983,7 @@ impl Gateway {
                     }
                 }
                 for (method, params) in buffered {
-                    self.notice(method, params)?;
+                    self.notice(method, params).await?;
                 }
                 self.questions(&id);
                 if self.recovering_sessions == 0 {
@@ -1985,7 +2037,7 @@ impl Gateway {
         Ok(())
     }
 
-    fn notice(&mut self, method: String, params: Value) -> Result<(), Error> {
+    async fn notice(&mut self, method: String, params: Value) -> Result<(), Error> {
         if method == "session.closed" {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -2051,9 +2103,10 @@ impl Gateway {
             return Ok(());
         }
         match method.as_str() {
-            "session.event" => self.event_notice(decode_native(params)?)?,
+            "session.event" => self.event_notice(decode_native(params)?).await?,
             "session.display" => {
-                self.event_notice(decode_native::<DisplayNotice>(params)?.into())?
+                self.event_notice(decode_native::<DisplayNotice>(params)?.into())
+                    .await?
             }
             "session.model.progress" => {
                 let progress: Progress = decode_native(params)?;
@@ -2064,7 +2117,7 @@ impl Gateway {
                 if let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) {
                     let updates = session.projection.progress(progress);
                     for update in updates {
-                        self.update(&id, update)?;
+                        self.update(&id, update).await?;
                     }
                 }
             }
@@ -2182,7 +2235,8 @@ impl Gateway {
                     }
                 } else if notice.source == "SessionStore" && notice.kind == "title" {
                     let title: Title = decode_native(notice.data)?;
-                    self.title(&notice.session_id, title.title, title.title_revision)?;
+                    self.title(&notice.session_id, title.title, title.title_revision)
+                        .await?;
                 }
             }
             _ => {}
@@ -2232,7 +2286,7 @@ impl Gateway {
         Err(rpc::unavailable())
     }
 
-    fn title(&mut self, id: &str, title: Option<String>, revision: u64) -> Result<(), Error> {
+    async fn title(&mut self, id: &str, title: Option<String>, revision: u64) -> Result<(), Error> {
         if let Some(Slot::Ready(session)) = self.sessions.get_mut(id)
             && session.title_revision.is_none_or(|old| revision > old)
         {
@@ -2240,7 +2294,8 @@ impl Gateway {
             self.update(
                 id,
                 json!({"sessionUpdate":"session_info_update","title":title}),
-            )?;
+            )
+            .await?;
         }
         Ok(())
     }
@@ -2381,7 +2436,7 @@ impl Gateway {
         }
     }
 
-    fn event_notice(&mut self, notice: EventNotice) -> Result<(), Error> {
+    async fn event_notice(&mut self, notice: EventNotice) -> Result<(), Error> {
         if let Some(Slot::Ready(session)) = self.sessions.get_mut(&notice.session_id) {
             let settled = if notice.event.sequence
                 > session
@@ -2492,7 +2547,7 @@ impl Gateway {
         let completed =
             finish.and_then(|result| session.prompt.take().map(|prompt| (prompt.reply, result)));
         for update in updates {
-            self.update(&notice.session_id, update)?;
+            self.update(&notice.session_id, update).await?;
         }
         if self.subagent_events {
             for snapshot in snapshots {
@@ -2504,14 +2559,16 @@ impl Gateway {
             self.update(
                 &notice.session_id,
                 json!({"sessionUpdate":"config_option_update","configOptions":options}),
-            )?;
+            )
+            .await?;
             self.commands(&notice.session_id)?;
         }
         if let Some(mode) = mode_update {
             self.update(
                 &notice.session_id,
                 json!({"sessionUpdate":"current_mode_update","currentModeId":mode}),
-            )?;
+            )
+            .await?;
         }
         if let Some((reply, result)) = completed {
             reply.respond_with_result(result)?;
@@ -2589,7 +2646,11 @@ impl Gateway {
 
     fn commands(&self, id: &str) -> Result<(), Error> {
         if let Some(Slot::Ready(session)) = self.sessions.get(id) {
-            self.update(id, json!({"sessionUpdate":"available_commands_update","availableCommands":crate::commands::available(&session.config)}))?;
+            self.outbox.notify(
+                &self.cx,
+                "session/update",
+                json!({"sessionId":id,"update":{"sessionUpdate":"available_commands_update","availableCommands":crate::commands::available(&session.config)}}),
+            )?;
         }
         Ok(())
     }
@@ -2656,7 +2717,7 @@ impl Gateway {
     /// Handles one native message, and reports whether the connection ends.
     async fn handle_native(&mut self, message: Option<Native>) -> Result<bool, Error> {
         match message {
-            Some(Native::Notice { method, params }) => self.notice(method, params)?,
+            Some(Native::Notice { method, params }) => self.notice(method, params).await?,
             Some(Native::Lost) => self.lost()?,
             Some(Native::Restored {
                 same_instance,

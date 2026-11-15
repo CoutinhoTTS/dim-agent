@@ -218,4 +218,5 @@ flowchart LR
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p8
   p10 -->|"dim_app_server::methods::ManagementMethods"| p7
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p7
+  p8 -->|"dim_agent_capabilities::host::SessionFilesHost"| p5
 ```

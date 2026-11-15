@@ -522,7 +522,7 @@ fn input(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 /// `image generate` inlines its input, waits out a non-terminal reply, and
 /// fetches the result in two chunks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_submission_inlines_its_input_and_fetches_the_result() {
+async fn a_submission_imports_its_input_and_fetches_the_result() {
     let payload = b"hello world";
     let mut script = Script::start(|wire| {
         wire.hello(&[CAPABILITIES]);
@@ -534,8 +534,11 @@ async fn a_submission_inlines_its_input_and_fetches_the_result() {
         let file = &submit["params"]["files"][0];
         assert_eq!(file["name"], "cat.png");
         assert_eq!(file["media_type"], "image/png");
-        assert_eq!(file["data_base64"], "aGVsbG8gd29ybGQ=");
-        assert!(file["node_path"].is_null(), "an inline input names no path");
+        assert!(file.get("data_base64").is_none());
+        assert_eq!(
+            std::fs::read(file["node_path"].as_str().unwrap()).unwrap(),
+            b"hello world"
+        );
         wire.reply(&submit, record("task-1", "queued"));
 
         let wait = wire.frame();
@@ -593,8 +596,6 @@ async fn a_submission_inlines_its_input_and_fetches_the_result() {
     script.join();
 }
 
-/// A submission larger than 8 MiB in total names every input by its
-/// canonical `node_path` instead of inlining any of them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_submission_above_the_inline_total_names_its_files_by_path() {
     let mut script = Script::start(|wire| {
@@ -608,7 +609,7 @@ async fn a_submission_above_the_inline_total_names_its_files_by_path() {
         );
         let path = file["node_path"].as_str().unwrap();
         assert!(path.starts_with('/'), "{path} is not absolute");
-        assert_eq!(std::fs::canonicalize(path).unwrap().to_str().unwrap(), path);
+        assert_eq!(std::fs::metadata(path).unwrap().len(), 8 * 1024 * 1024 + 1);
         wire.reply(&submit, record("task-2", "queued"));
     });
     let large = vec![0u8; 8 * 1024 * 1024 + 1];

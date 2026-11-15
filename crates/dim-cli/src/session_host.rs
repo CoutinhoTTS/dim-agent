@@ -1197,12 +1197,12 @@ impl Worker {
 
     /// Stores the draft's pastes as attachments, then submits its text
     /// and blocks in order.
-    async fn submit_draft(&mut self, parts: Vec<DraftPart>, mode: &str) {
+    async fn submit_draft(&mut self, mut parts: Vec<DraftPart>, mode: &str) {
         use dim_agent_types::ContentBlock;
         let mut content = Vec::new();
         let mut text = String::new();
         let mut pastes = 0;
-        for part in parts {
+        for part in parts.clone() {
             match part {
                 DraftPart::Text(value) => text.push_str(&value),
                 DraftPart::Paste(value) => {
@@ -1223,7 +1223,10 @@ impl Worker {
                         Ok(stored) => text
                             .push_str(&format!("[Pasted text: {} ({lines} lines)]", stored.path)),
                         Err(error) => {
-                            self.send(Update::Notice(format!("Paste {pastes}: {error}; not sent")));
+                            self.send(Update::DraftNotSent {
+                                parts,
+                                message: format!("Paste {pastes}: {error}; not sent"),
+                            });
                             return;
                         }
                     }
@@ -1240,6 +1243,23 @@ impl Worker {
         }
         if !text.is_empty() {
             content.push(ContentBlock::Text { text });
+        }
+        if let Err(error) =
+            crate::images::import(&mut self.client, &self.session_id, &mut content).await
+        {
+            let mut images = content
+                .iter()
+                .filter(|block| matches!(block, ContentBlock::Image { .. }));
+            for part in &mut parts {
+                if let DraftPart::Block(block @ ContentBlock::Image { .. }) = part {
+                    *block = images.next().expect("draft image order").clone();
+                }
+            }
+            self.send(Update::DraftNotSent {
+                parts,
+                message: format!("Image import failed: {error}; not sent"),
+            });
+            return;
         }
         let mut params = json!({
             "sessionId": self.session_id,

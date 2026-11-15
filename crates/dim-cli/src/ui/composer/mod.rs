@@ -235,6 +235,44 @@ impl Composer {
         self.renumber();
     }
 
+    pub fn restore_draft(&mut self, parts: Vec<DraftPart>) {
+        self.shell = None;
+        self.area.set_cursor(self.area.text().len());
+        if !self.area.text().is_empty() {
+            self.area.insert_str("\n");
+        }
+        for part in parts {
+            let (buffer, content, block) = match part {
+                DraftPart::Text(text) => {
+                    self.area.insert_str(&text);
+                    continue;
+                }
+                DraftPart::Paste(text) => (
+                    tf(
+                        "[... {count} lines]",
+                        &[("count", &text.split('\n').count().to_string())],
+                    ),
+                    text,
+                    None,
+                ),
+                DraftPart::Block(block) => ("[Image]".to_owned(), String::new(), Some(block)),
+            };
+            let id = self
+                .area
+                .insert_element(&buffer, TOKEN_KIND, Some(token_line(&buffer)));
+            self.tokens.push(Token {
+                id,
+                label: buffer.clone(),
+                buffer,
+                content,
+                block,
+                file: None,
+                details: String::new(),
+            });
+        }
+        self.renumber();
+    }
+
     /// Inserts withdrawn operator content at byte `at`, in front of the draft
     /// from there on, and returns the offset just past what it inserted.
     ///

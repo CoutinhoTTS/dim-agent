@@ -415,9 +415,21 @@ like `session_file_owners`, so output stays readable after the source is deleted
 | Method | Mode | Request | Reply |
 | --- | --- | --- | --- |
 | `put` | async | `{sessionId: string, name: string, content: string}`, where `content` is the bytes in base64 | `{fileId: string, path: string, bytes: u64}` |
+| `import` | async | `{sessionId: string, name: string, source: string}`; authorized absolute local source path | `{fileId: string, path: string, bytes: u64}` |
+| `read` | async | `{sessionId: string, fileId: string, offset: u64}` | `{data: string, eof: bool}`; base64 of at most 64 KiB, `eof` exactly when empty |
 | `register` | async | `{sessionId: string, path: string}` (ADR 013) | `{}`; a missing Session is `not_found` |
 | `owns` | async | `{sessionId: string, path: string}` | `{owned: bool}` |
 | `owned_paths` | async | `{sessionId: string}` | `{paths: string[]}`, a Session file's directory and each output path |
+
+`sessionFiles` is a data face: its catalog entry is shared and SessionStore publishes
+its dispatch at `host_key("sessionFiles")`. Native calls and wire calls use this owner.
+
+`import` applies the same Session, name, 16 MiB, pending/owned transaction,
+permissions and cancellation rules as `put`. FileStorage pins the source while
+copying with a 64 KiB buffer; source growth or truncation fails before publication.
+The caller authorizes source-path access. `read` resolves only immutable files
+owned by the supplied Session, returning `not_found` for a foreign file ID.
+Offsets at or beyond EOF return an empty chunk. Dropping a wire call cancels it.
 
 - `path` is absolute on the Session's resource node, the way `read` resolves it for the Session.
   `bytes` is the stored length.
@@ -768,3 +780,22 @@ impl FileStorage {
         -> Result<()>;
 }
 ```
+
+## File backup and restore
+
+`dim-app-server --backup DATABASE ARCHIVE` exports a closed current-format store
+into a new directory. It takes the database admission lease, snapshots SQLite,
+and streams every committed locally owned Session file into the archive. Missing
+files, ambiguous file directories and unavailable resource nodes fail the export.
+Ownership includes forked Sessions and compressed history.
+
+The archive's `manifest.json` has version 1, the native format, a database
+SHA-256/byte count, and one `{id, name, digest: {bytes, sha256}}` entry per file.
+`database.sqlite` and `files/<id>/<name>` carry the content. The manifest is written
+last; the completed private staging directory is published atomically.
+
+`dim-app-server --restore ARCHIVE DIRECTORY` requires a new destination. It verifies
+manifest version, database integrity, the complete ownership set, safe file names,
+byte counts and SHA-256 before publishing `DIRECTORY/dimcode.sqlite` and its Session
+files. A missing, duplicated or damaged file aborts restoration before a Session
+can open. The Rust storage bindings are `backup_store` and `restore_store`.

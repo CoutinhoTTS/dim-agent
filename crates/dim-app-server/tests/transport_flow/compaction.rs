@@ -565,14 +565,20 @@ async fn configured_compaction_uses_the_window_declared_in_the_model_file() {
                 .rpc("session.attach", json!({"sessionId":image_sid}))
                 .await,
         );
+        use base64::Engine;
+        let image_path = directory.join("image.png");
+        std::fs::write(&image_path, base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR42mP4zwAE/xkgFAAb8gP9PpddpAAAAABJRU5ErkJggg==").unwrap()).unwrap();
+        let imported = images.rpc("attachment.import", json!({"sessionId":image_sid,"path":image_path,"image":true})).await;
+        assert_ok(&imported);
+        let accepted = images.rpc("attachment.read", json!({"sessionId":image_sid,"fileId":imported["result"]["attachmentId"],"offset":0})).await;
+        assert_ok(&accepted);
         assert_ok(
             &images
                 .rpc(
                     "session.submit",
                     json!({"sessionId":image_sid,"branchId":"main","user":{"content":[
                         {"type": "text", "text": "look"},
-                        {"type": "image", "source": {"type": "base64", "mediaType": "image/png",
-                            "data": "aGVsbG8="}}
+                        {"type": "image", "source": imported["result"]["image"]}
                     ]}}),
                 )
                 .await,
@@ -594,7 +600,7 @@ async fn configured_compaction_uses_the_window_declared_in_the_model_file() {
             .find(|body| !body.to_string().contains(SUMMARIZER))
             .cloned()
             .unwrap();
-        assert!(request.to_string().contains("aGVsbG8="), "{request}");
+        assert!(request.to_string().contains(accepted["result"]["data"].as_str().unwrap()), "{request}");
 
         server.child.kill().await.unwrap();
         http.abort();

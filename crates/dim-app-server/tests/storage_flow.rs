@@ -8049,6 +8049,21 @@ fn v41_store_with_example_rows(database: &Database) -> Connection {
 async fn a_v41_store_interrupted_mid_delete_upgrades_and_keeps_its_orphans() {
     let database = Database::new();
     let connection = v41_store_with_example_rows(&database);
+    let owners: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM session_file_owners WHERE session_id='s1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let files: i64 = connection
+        .query_row("SELECT count(*) FROM session_files", [], |row| row.get(0))
+        .unwrap();
+    let changed = connection.execute(
+        "UPDATE timeline_events SET body=json_set(body, '$.record.event.data.user.content', json(?1)) WHERE session_id='s1' AND kind='input/message'",
+        [r#"[{"type":"image","source":{"type":"base64","mediaType":"image/png","data":"aW1hZ2U="}}]"#],
+    ).unwrap();
+    assert!(changed > 0);
     // The first chunk committed; the event chunks did not.
     connection
         .execute_batch(
@@ -8091,6 +8106,23 @@ async fn a_v41_store_interrupted_mid_delete_upgrades_and_keeps_its_orphans() {
         })
         .unwrap();
     assert!(dangling >= events, "the orphans still dangle");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM session_file_owners WHERE session_id='s1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        owners
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM session_files", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        files
+    );
 }
 
 /// #1421: the same for an interrupted `copy_fork_rows`, which writes the
@@ -8157,18 +8189,21 @@ async fn a_slow_store_upgrade_reports_progress_and_keeps_the_opening_alive() {
     set_upgrade_report_delay(Some(Duration::from_millis(200)));
     let note = startup_note(&database.0);
     let path = database.0.clone();
+    let inactivity_timeout = Duration::from_secs(5);
     let waiting = tokio::spawn(async move {
         let root = rutis::Ctx::root().unwrap();
         let view = root.plugin(dim_app_server::storage::SqliteStoragePlugin::new(path));
+        let started = Instant::now();
         let result = dim_agent_runtime::wait_active(
             &root,
             std::slice::from_ref(&view),
-            Duration::from_millis(1_000),
+            inactivity_timeout,
             &CancellationToken::new(),
         )
         .await;
+        let elapsed = started.elapsed();
         root.shutdown().await.unwrap();
-        result
+        (result, elapsed)
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut seen = None;
@@ -8190,10 +8225,12 @@ async fn a_slow_store_upgrade_reports_progress_and_keeps_the_opening_alive() {
         )),
         "{seen}"
     );
-    waiting
-        .await
-        .unwrap()
-        .expect("reported progress keeps the opening inside its inactivity bound");
+    let (result, elapsed) = waiting.await.unwrap();
+    result.expect("reported progress keeps the opening inside its inactivity bound");
+    assert!(
+        elapsed > inactivity_timeout,
+        "the upgrade must outlast the inactivity bound to exercise progress renewal: {elapsed:?}"
+    );
     assert!(
         !note.exists(),
         "a successful open removes the progress note"

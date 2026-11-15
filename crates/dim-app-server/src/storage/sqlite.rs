@@ -17,7 +17,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 48;
+pub const FORMAT: u32 = 50;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -56,7 +56,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 48))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 50))",
     ),
     (
         "settings_documents",
@@ -275,7 +275,7 @@ const V45_COLUMNS: &str = "ALTER TABLE worktree_directories ADD COLUMN last_used
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 34] = [
+const UPGRADES: [(u32, &[&str]); 36] = [
     (
         13,
         &[
@@ -404,6 +404,8 @@ const UPGRADES: [(u32, &[&str]); 34] = [
     (46, &["timeline_events_branch_interrupts"]),
     // #1496: task titles in strict exec/started and collaboration/request payloads.
     (47, &[]),
+    (48, &[]),
+    (49, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -1151,6 +1153,9 @@ impl SqliteStorage {
                 // the store documents, not damage.
                 violations_before = violations(&connection).map_err(storage)?;
                 for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= upgrade_from) {
+                    if *from == 49 {
+                        super::image_upgrade::upgrade(&connection, &path)?;
+                    }
                     if *from == 26 {
                         connection.execute_batch(V27_COLUMNS).map_err(storage)?;
                     }
@@ -1709,6 +1714,15 @@ pub struct StorageReport {
     pub database_bytes: u64,
     pub wal_bytes: u64,
     pub reclaimable_bytes: u64,
+}
+
+pub(super) fn validate_backup_schema(connection: &Connection) -> Result<()> {
+    if known_format(&schema(connection)?, Some(i64::from(FORMAT))) != Some(FORMAT)
+        || markers(connection)? != [i64::from(FORMAT)]
+    {
+        return Err(storage("Backup requires the current native storage schema"));
+    }
+    Ok(())
 }
 
 /// Reclaims free pages in an existing store by rewriting it with `VACUUM`

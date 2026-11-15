@@ -1314,6 +1314,10 @@ pub enum Update {
     /// for it; the message says why. The interface restores the invocation's
     /// first message, or reports it when a newer draft holds the composer.
     SubmitNotSent(String),
+    DraftNotSent {
+        parts: Vec<DraftPart>,
+        message: String,
+    },
     /// A newer version the user has not skipped, once per start.
     Upgrade(crate::update::Offer),
     Models(Result<ModelList, String>),

@@ -1,9 +1,11 @@
 mod arrays;
+mod backup;
 mod catalog;
 mod codec;
 mod export;
 mod files;
 mod identities;
+mod image_upgrade;
 mod members;
 mod metadata;
 mod query;
@@ -11,6 +13,7 @@ mod sqlite;
 mod text;
 mod timeline;
 
+pub use backup::{backup_store, restore_store};
 pub use catalog::initialize_session_catalog;
 pub(crate) use catalog::{ACTIVITY_KINDS, truncate_preview};
 #[cfg(feature = "testing")]

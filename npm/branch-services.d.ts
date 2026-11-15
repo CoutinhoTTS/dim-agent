@@ -141,9 +141,10 @@ export interface ToolHost {
   execute(call: { id: string; name: string; input: { [key: string]: unknown } }, caller: ToolExecutionContext, cancelled: () => void | Promise<void>): Promise<import('./plugin.js').ToolResult>
 }
 
-export type ImageSourceType = "base64" | "url"
+export type ImageSourceType = "base64" | "url" | "file"
 
 export interface ImageSource {
+  fileId?: string | null
   type: ImageSourceType
   mediaType: string
   data?: string | null
