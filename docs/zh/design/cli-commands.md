@@ -1036,7 +1036,9 @@ CLI 保留它，先等那个进程，不启动自己的守护进程。子进程�
 说明（最多 16 KiB，且只接受普通文件；Unix 上还要求属于当前用户、组和其他用户都没有
 权限）。Unix 上这套权限就是说明的保护，因为守护进程以 0600 写它；Windows 上 CLI 只
 检查普通文件、大小和首行，边界是 home 目录继承的 ACL。CLI 要求首行是
-`dimcode-startup-failure v1 pid=<child pid>`，去掉正文中除换行和制表符以外的控制字符，
+`dimcode-startup-failure v1 pid=<child pid>`，说明带有末尾
+`store-newer found=<marker> supported=<format>` 行时先去掉它，
+再去掉正文中除换行和制表符以外的控制字符，
 把正文作为命令的错误返回，并在后面加上 `Details: <native home>/daemon.log`。存储门禁在
 诊断出不兼容时写这份说明，写明库、标记、守护进程支持的格式、库是更新、标记与结构
 不符、无法识别还是过旧，以及恢复办法；库被另一个进程占用时也写同一类型，写明占用者，

@@ -163,7 +163,7 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 构建支持的格式和恢复办法，不复制历史日志，也不含业务内容或凭据。第一行是
 `dimcode-startup-failure v1 pid=<pid>`，后面是正文。只有“更新格式”这一类在正文之后追加
 机器可读的末行 `store-newer found=<marker> supported=<format>`，其中两个值为十进制整数。
-新版 CLI 去掉这行后展示正文，并可根据这行进入[启动恢复](../cli-commands.md#update-recovery-for-a-newer-store)。
+读取说明的 CLI 的行为由 [CLI 命令](../cli-commands.md#update-recovery-for-a-newer-store)定义。
 
 **为什么是旁路文件，而不是子进程 stderr。** CLI 以 detached 方式启动守护进程：
 `setsid`，stdin/stdout 为 null，stderr 直接追加到 `daemon.log`。守护进程比客户端

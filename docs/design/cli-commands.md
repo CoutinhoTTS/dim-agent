@@ -1727,7 +1727,9 @@ current user and offer no group or other permissions). On Unix that mode is the
 note's protection, since the daemon writes it 0600; on Windows the client checks
 only the regular file, its size and the header, and the private home's inherited
 ACL is the boundary. It requires the
-`dimcode-startup-failure v1 pid=<child pid>` header, removes control characters
+`dimcode-startup-failure v1 pid=<child pid>` header, removes the trailing
+`store-newer found=<marker> supported=<format>` line when the note carries one,
+removes control characters
 other than newline and tab from the body, and returns it as the command's error
 followed by `Details: <native home>/daemon.log`. The storage gate writes the
 note on a diagnosed incompatibility and names the store, its marker, the
