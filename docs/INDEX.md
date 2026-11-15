@@ -125,4 +125,4 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Release packaging and self-hosted workflows](release/README.md)
 - [Container image release](release/docker-image.md) (Draft): the proposed ghcr.io image for the Linux executable, its volumes, clients, build from original release archives and security boundary
 - [Tool origin read](design/tool-origin-read.md) — point lookup for tool arguments outside a transcript window.
-- [Pinned aimux source](../vendor/aimux/SOURCE.md) and [patches](../vendor/aimux/PATCHES.md)
+- [Aimux](../crates/dim-agent-aimux/README.md), the model protocol implementations from crates.io that the Agent calls

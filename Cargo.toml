@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/dim-agent-types", "crates/dim-agent-runtime", "crates/dim-agent-capabilities", "crates/dim-agent-aimux", "crates/dim-agent-attachments", "crates/dim-agent-questions", "crates/dim-agent-scheduler", "crates/dim-event-hub", "crates/dim-app-server", "crates/dim-client", "crates/dim-acp", "crates/dim-cli", "crates/dim-oauth", "crates/dim-session-title", "crates/dim-goal", "crates/dim-report", "crates/dim-codemode", "crates/dim-modality", "crates/dim-ocr", "crates/dim-modality-aimux", "crates/dimcode", "crates/dim-migration", "xtask", "tests/extension-a", "tests/extension-b", "tests/integration"]
-exclude = ["vendor/aimux", "vendor/grok-build"]
+exclude = ["vendor/grok-build"]
 
 [workspace.package]
 version = "0.1.0-alpha.18"
@@ -21,9 +21,9 @@ dim-agent-capabilities = { path = "crates/dim-agent-capabilities" }
 dim-agent-aimux = { path = "crates/dim-agent-aimux" }
 dim-agent-attachments = { path = "crates/dim-agent-attachments" }
 dim-agent-questions = { path = "crates/dim-agent-questions" }
-aimux-core = { path = "vendor/aimux/aimux-core" }
-aimux-provider-utils = { path = "vendor/aimux/aimux-provider-utils", features = ["ws"] }
-aimux-providers = { path = "vendor/aimux/aimux-providers", default-features = false }
+aimux-core = { version = "=0.6.1" }
+aimux-provider-utils = { version = "=0.6.1", features = ["ws"] }
+aimux-providers = { version = "=0.6.1", default-features = false }
 dim-app-server = { path = "crates/dim-app-server" }
 dim-session-title = { path = "crates/dim-session-title" }
 dim-event-hub = { path = "crates/dim-event-hub" }

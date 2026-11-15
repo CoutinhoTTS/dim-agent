@@ -62,9 +62,9 @@ try {
     mkdirSync(path.dirname(destination), { recursive: true });
     copyFileSync(path.join(repo, 'vendor/grok-build', file), destination);
   }
-  mkdirSync(path.join(output, 'licenses/aimux'), { recursive: true });
-  copyFileSync(path.join(repo, 'vendor/aimux/LICENSE'), path.join(output, 'licenses/aimux/LICENSE'));
   copyFileSync(path.join(repo, 'NOTICE'), path.join(output, 'NOTICE'));
+  mkdirSync(path.join(output, 'licenses/aimux'), { recursive: true });
+  copyFileSync(path.join(repo, 'licenses/aimux/LICENSE'), path.join(output, 'licenses/aimux/LICENSE'));
   copyFileSync(rustNotices, path.join(output, 'licenses/RUST-THIRD-PARTY-NOTICES.txt'));
   const toolchain = { rust: readFileSync(path.join(repo, 'rust-toolchain.toml'), 'utf8').match(/channel = "([^"]+)"/)[1] };
   const files = {};

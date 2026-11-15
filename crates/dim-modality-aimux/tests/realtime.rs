@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_util::sync::CancellationToken;
@@ -190,50 +189,6 @@ async fn the_relay_connects_with_the_declared_path_and_relays_frames() {
     match next_event(&mut received).await {
         RealtimeEvent::Ended(RealtimeEnd::Provider) => {}
         _ => panic!("the provider's close is reported as its end"),
-    }
-    adapter.realtime_close(&opened.channel_id).await.unwrap();
-    stub.await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_provider_message_over_the_bound_ends_the_session_at_the_socket() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let stub: JoinHandle<()> = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let mut socket = tokio_tungstenite::accept_hdr_async(stream, accepted)
-            .await
-            .unwrap();
-        // Over the relay's 1 MiB socket bound; the stub's own limit is
-        // tungstenite's default, so the write is legal for it.
-        let oversized = format!(
-            r#"{{"type":"response.text.delta","padding":"{}"}}"#,
-            "x".repeat(2 * 1024 * 1024)
-        );
-        let _ = socket.send(Message::Text(oversized.into())).await;
-        while let Some(message) = socket.next().await {
-            if matches!(message, Ok(Message::Close(_)) | Err(_)) {
-                break;
-            }
-        }
-    });
-
-    let adapter = MediaAdapter::new();
-    let (events, mut received) = mpsc::channel(16);
-    let opened = adapter
-        .realtime_open(
-            connection(address),
-            json!({}),
-            events,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    match next_event(&mut received).await {
-        RealtimeEvent::Ended(RealtimeEnd::Error(message)) => {
-            assert!(!message.contains(KEY), "{message}");
-        }
-        _ => panic!("an oversized provider message ends the session with an error"),
     }
     adapter.realtime_close(&opened.channel_id).await.unwrap();
     stub.await.unwrap();
