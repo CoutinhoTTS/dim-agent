@@ -26,6 +26,7 @@ pub(crate) struct Model {
 #[derive(Default, Clone)]
 pub(crate) struct Config {
     pub methods: HashSet<String>,
+    pub usage_providers: HashSet<String>,
     pub policy: Option<Policy>,
     pub model: Option<Configuration>,
     pub models: Vec<Model>,
@@ -160,6 +161,18 @@ impl Config {
         if config.methods.contains("session.model.update") && rpc.supports("provider.catalog") {
             config.catalog = true;
             config.models = models(rpc).await?;
+        }
+        if rpc.supports("account.providers") && rpc.supports("account.usage") {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Provider {
+                provider_id: String,
+            }
+            let providers: Vec<Provider> = rpc.typed("account.providers", json!({})).await?;
+            config.usage_providers = providers
+                .into_iter()
+                .map(|provider| provider.provider_id)
+                .collect();
         }
         Ok(config)
     }

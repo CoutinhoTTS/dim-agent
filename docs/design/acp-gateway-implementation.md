@@ -109,7 +109,7 @@ Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一
 
 可选：`session.list` / `session.summaries`、`session.close`、`session.delete`、`session.fork`、`session.permission.get/update`、`approval.respond`；临时 MCP 使用 `mcp.temporary.capabilities`、`session.mcp_temporary.attach/renew/detach`；每 Session 用 `session.methods` 发现 `session.input.withdraw`、`session.question.respond`、`session.context.usage` 和 `attachment.put`。缺少撤回时取消直接走现有 `session.stop`，并披露已接收输入可能保留的限制。
 
-模型选择只读取 `provider.list`、`provider.catalog`、`provider.selection` 的安全投影。Provider 管理已有独立插件和公开读写接口，接线及尚未满足的 ACP 合同见 §4.5；首版不通过这些接口写入共享产品配置。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用，不开放 `account.*` 代理、recover/logout/usage、settings、持久 MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
+模型选择只读取 `provider.list`、`provider.catalog`、`provider.selection` 的安全投影。Provider 管理已有独立插件和公开读写接口，接线及尚未满足的 ACP 合同见 §4.5；首版不通过这些接口写入共享产品配置。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用；§4.7 的 `/usage` 额外允许当前模型 provider 的 `account.usage` 安全读取。不开放 `account.*` 代理、recover/logout、settings、持久 MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
 
 ## 4. 稳定 ACP v1 方法逐项映射
 
@@ -230,7 +230,7 @@ directory/redirectUri 来自宿主现有登录配置和入口选择，不来自 
 
 EOF、插件卸载、用户取消或 `$/cancel_request` 结束本地认证等待、关闭 callback listener，并尽力 `account.login.cancel` 当前连接自己的 pending attempt；不调用 logout，不清除已存账户。若 browser.complete 已经提交，插件仍拥有被接受的交换与持久化，即使 Gateway 不再等待；断线后只能查询 status/attempt_status，不自动重发 complete 或 begin，也不能把取消等待说成回滚登录。迟到 callback 必须同时匹配 connection generation、provider 和 attempt，不能完成下一次登录。
 
-`logout` 和 `account.usage` 仍不在首版接入范围：有原生方法不等于 Gateway 公开通用账户管理。此认证接线不增加 App Server 接口或修改 OAuth 插件。
+`logout` 仍不接入；`account.usage` 仅供 §4.7 的订阅查询命令使用，不开放通用账户管理。此认证接线不增加 App Server 接口或修改 OAuth 插件。
 
 ### 4.5 Provider 管理与现有插件
 
@@ -272,6 +272,47 @@ CLI 的 Disconnect 是 `{credential:{action:"clear"},enabled:false}`，不适合
 Gateway 每十秒续租；native 重连后用相同 bindingId 幂等恢复资源，prompt 前核验绑定，过期则重建；不重放工具调用或模型输入。EOF/卸载先尽力释放自己的 MCP 绑定，再 detach viewer。强杀或无法恢复连接时，原生三十秒租约结束后卸载资源。新方法属于 MCP 插件，RPC 框架、Agent core 和持久 MCP 配置不变。
 
 会话配置读取同时消费 hello 中的内置 permission/model 方法与 session.methods 中的贡献方法，二者不能互相替代。
+
+### 4.7 原生命令交互
+
+`session/new`、load/resume、恢复连接以及采用配置改变时，通过标准
+`available_commands_update` 发布当前 Session 的命令，名字不带 `/`。
+`compact`、`goal`、`loop` 仅在 `session.methods` 声明相应操作时发布；
+`usage` 的查询可用性遵循 [Provider 的账户查询合同](appserver/provider-management.md#33-probe-preference-adoption-and-usage)，
+不以能登录代替能查询，也不探测或缓存额度。Goal 和 Loop 带参数 hint。
+
+只将一个 text block 中以完整命令词开头的输入识别为命令。`/compact`、
+`/usage` 不接受参数；Goal、Loop 使用下表的形式。带附件或多个 block、
+引用或正文中出现命令、`/goalkeeper` 等不是命令调用。已识别但不可用或
+参数不合法的命令返回可读提示，不退回 `session.submit`。命令回复使用
+`agent_message_chunk` 和普通 prompt 终态，通用 ACP 客户端无需专用面板。
+
+| 命令 | 交互与原生边界 |
+| --- | --- |
+| `/compact` | 调用 `session.context.compact`，由原生所有者决定执行中请求的排队/合并。等待原生结果；已有 compaction activity 唯一显示 completed/skipped/cancelled/failed，RPC 回复不重复打印终态。`session/cancel` 使用既有 main stop；取消完成返回 ACP cancelled。不能把命令文本作为普通聊天提交。 |
+| `/usage` | 捕获当前已采用模型的 providerId，仅向该账户按需读取 `account.status`、`account.usage`。未登录给出该 provider 的登录提示；空报告或读取失败明确报告不可用/错误，不借用另一账户。展示 plan 名称/状态、credits 剩余及用量、每个窗口的时长/used/total/reset，以及 feature 自有单位。缺失值省略、零值保留、显式 unlimited 不按零总额显示耗尽。不生成费用、百分比或原始账户 payload；与 `usage_update` 的 Session 上下文占用完全分开。 |
+| `/goal` | 裸命令通过 `session.goal.get` 显示当前目标和状态。支持 `set OBJECTIVE`、`edit OBJECTIVE`、`pause`、`resume`、`clear`；普通 OBJECTIVE 按 CLI 规则在 active/paused 时 edit，否则 set。`pause now` 等仍是 CLI 的普通目标文本，空 set/edit 是用法错误。变更后再次 get，展示 owner 已生效状态；不是从历史自行折叠，也不把 set/resume 的操作确认冒充目标执行完成。合同见 [Goal Appendix A](plugins/Goal.md#appendix-a-interface-details)。 |
+| `/loop` | 裸命令列出主线原生 loops；PROMPT 开始 self-paced，INTERVAL PROMPT 开始固定间隔，解析遵循 [Scheduler §12.6](plugins/Scheduler.md#126-interfaces)。`stop ID` 仅接受当前分支列表中的 ID；`stop` 只在恰好一个 running/waiting loop 时选择它，否则列出 ID 请用户明确选择。结果保留原生 ID；stop 返回未 settled 时明确说明仍在结算，不报告已经停止。 |
+
+```text
+/loop stop
+  -> one live loop: stop that native ID -> confirmation / still settling
+  -> several: list IDs -> user sends /loop stop ID
+  -> none: no live loop; no mutation
+```
+
+当前 ACP Session 只显示 `main`，以上操作都明确作用于该 Session 的 main，
+不选择 child branch，不增加分支切换协议。新的普通 prompt 与命令共用单个
+准入槽位；原生其他客户端或 Goal/Loop 启动的执行不因此被当作本地 prompt。
+Goal/Loop/usage 请求在取消时等待已发出的操作结算，但不再从预查询进入
+尚未发出的写操作或额度读取；已发送 Goal 变更仍读取其结果状态。
+取消 Goal/Loop/usage 命令不停止无关原生 turn。命令响应由 Session 的在途状态持有；
+Session 关闭或删除时立即结束该请求，不等待账户查询，迟到完成按命令身份
+丢弃。原生连接丢失时结束命令并阻止后续写入，不重放已接受的操作。
+关闭 ACP 连接不停止已接受的 Goal/Loop。
+所有业务状态仍归原生 owner；Gateway 仅拥有请求和显示状态，没有新的服务面、
+插件、计时器或存储。这里只提供标准 slash command，不声明 Lody Goal、
+rateLimits 或 scheduler 控制扩展。
 
 ## 5. Prompt、回放和响应关联
 
@@ -412,8 +453,8 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 | `_lody/session/usage_update` / usage / usageScopeId | 有 model/usage；aimux 保留输入/输出总量、可选 cache，丢失 reasoning/text 分区，cost/currency 为 None | 首版不支持。costUSD、reasoningOutputTokens、cacheCreationInputTokens 是可选，不因缺费用而禁用。实际缺口是必填 outputTokens 必须排除 reasoning，cacheReadInputTokens 也必填；上游未知分区不能补零或把总 completion 当文本。后续按 §8.4 从真实事实投影，无需新累计 RPC |
 | `_lody/rate_limits/get`、`_lody/rate_limits/update` / rateLimits | 有 account.usage；窗口能表达部分 quota，credits 是单位而非货币，完整 account/model 过滤尚未定义 | 首版暂不接，属于接线/交付范围，不能宣称 App Server 没有额度能力。以后复用真实 usage windows，cap>0 才算百分比，durationHours 转秒，过期时间转 epoch 秒；同长度窗口保留各自项，wallet 缺币种/金额时省略。get 是非 Session 绑定读取，不能强制要求 sessionId；不得造空列表掩盖读取失败 |
 | `_lody/session/steer`、`_lody/session/steer_applied`、prompt steer / steering | mode=steer 存在，但不能原子限定目标活跃 turn；空闲 steer 可驱动新 turn | 首版不支持。Core 允许 request/prompt、same/handoff、active/apply，不能把仅缺 same-turn 当作整个协议绝对不可实现。当前也没有已接入的“原生换 turn、同一 ACP prompt 继续承接并确认 injected”的 handoff 路径；不能把下一次 Queue 或闲时新 turn 冒充 handoff。请求报 method-not-found，prompt steer 控制在提交前报 unsupported |
-| `_lody/session/goal`、prompt goalControl、goal snapshot / goal | 有 session.goal.* 写入口；无旧 controller snapshot；自动继续跨原生 turns | 不支持。缺少与单 ACP prompt 对应的 Goal 完整结算合同；不能逐字转发方法或按第一次 turn/end 宣称目标结束。普通 Session 上已有 Goal 不因此被修改 |
-| `/loop`、prompt 里的 loop 控制 / loop | 有 `session.loop.start/list/stop` 与带 `kind="loop"` 标记的轮次输入 | 不支持。一轮 loop 在没有 ACP prompt 承接的情况下启动一个 turn，而一个 ACP prompt 对应一个受限的 turn 槽；与 `_lody/session/goal` 缺同一份结算合同。客户端不认 `/loop`，也不把 loop 轮次当成该连接 prompt 的一部分 |
+| `_lody/session/goal`、prompt goalControl、goal snapshot / goal | 有 session.goal.* 写入口与 goal.get 状态读取；自动继续跨原生 turns | 不支持 Lody 控制。标准 `/goal` 按 §4.7 确认操作和读取状态，不承诺与单 ACP prompt 对应的 Goal 完整结算；不能按第一次 turn/end 宣称目标结束 |
+| prompt 里的 loop 控制 / loop | 有 `session.loop.start/list/stop` 与带 `kind="loop"` 标记的轮次输入 | 不支持 Lody 控制。标准 `/loop` 按 §4.7 管理原生 loop；后续 loop 轮次不是该连接命令 prompt 的一部分，不把操作确认冒充多轮任务完成 |
 | `_lody/subagents/list`、`_lody/subagents/cancel`、`_lody/subagents/output` / subagents | 有 collaboration facts、member attach/history 和 addressed stop；查询/取消尚无已接入的执行级归属映射 | 首版不接这组查询/控制，不影响独立 subagentEvents。以后以 request 执行身份、父子归属和单 run 能力分别兑现 list/cancel/output；不能把 member session id 当 task id或取消其不属于当前执行的新工作 |
 | `_lody/subagents/event` / subagentEvents | request/delivered/result 能直接给出一次委派的开始、交付和终态 | 条件可接。双向 version 1；首版 snapshot-only，`support:{stream:[],progress:false,outputRead:"none",cancel:false}`，不要求先做完输出/查询/取消。request 关联 opaque runId，断线/观察丢失为 unknown/outputIncomplete；详细接线见 §8.3 |
 | `_meta.lody.task` / tasks.background / tasks.scheduled | BackgroundExec 已拥有 detached exec，提交 exec/started、exec/ended | 后台 exec 可接：新建该任务的标准 tool lifecycle，附 `{version:1,taskId,kind:"background",status}`；原生 task_id 为任务身份，父工具只作关联。scheduled 不声明，不把所有后台工作统称为已接入，见 §8.3 |
@@ -441,7 +482,7 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 
 [usage.ts](https://github.com/LodyAI/acp-extension-core/blob/11e0708df0669568f44e287f17626a3944921dc5/src/usage.ts) 定义 inputTokens/outputTokens/cacheReadInputTokens 为必填且 bucket 不重叠；reasoning、cache creation 和 cost 是可选。当前 aimux 的 input/output total 不足以保证这种分区，未知 cache read 也不能写 0；这是边界保真问题。累计读取 API 并非硬性前置：有完整真实计数时，可以按已提交 model/usage 的 request 身份去重投影 modelUsage，用新的 usageScopeId 区分观察生命周期，继承回放不作为新 delta，compaction/换模型不重置 scope；delta 已包含在 modelUsage，不能双加。未知费用省略，不估造价格。Core accumulator 明确为 process-local，客户端计量投影不等同于原生业务账本；首版不为它添加数据库。
 
-Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启动无人承接的运行；确认 injected 和 steer_applied 必须有真实采用依据。Goal 的可选统计字段可省略，不能因缺 tokenBudget 就一概拒绝；当前缺的是 owner 的可观察 goal snapshot、控制动作不启动 turn 的保证，以及 set/resume 对应的多 turn ACP prompt 完成合同。仅有返回 sequence 的 session.goal.* 不能满足这些要求。临时 Provider 覆盖和原生配置写入则按 §4.5 分别讨论，不从 Lody 的 Session 配置元数据推导共享 Provider 更新授权。
+Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启动无人承接的运行；确认 injected 和 steer_applied 必须有真实采用依据。Goal 的可选统计字段可省略，不能因缺 tokenBudget 就一概拒绝；owner 已提供 goal.get 状态读取，Lody 接线仍缺控制动作不启动 turn 的保证，以及 set/resume 对应的多 turn ACP prompt 完成合同。标准 `/goal` 的操作确认不能代替这些要求。临时 Provider 覆盖和原生配置写入则按 §4.5 分别讨论，不从 Lody 的 Session 配置元数据推导共享 Provider 更新授权。
 
 ## 9. 错误和恢复合同
 
@@ -568,11 +609,11 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 | 问题 / 为什么现有能力不足 | 将来可评估的通用合同 | 顺序影响 / 所有者 |
 | --- | --- | --- |
 | steer 没有预期 turn 条件；预查与 submit 之间会换 turn | 在输入所有者处明确“只向指定活跃行为投递”的原子语义，而不是 ACP 专用 if | 准入与写入必须同一决定；输入/Loop 所有者 |
-| Goal 方法只写输入，快照及跨轮 prompt 完成无现成合同 | 由 Goal 定义可观察状态和提交/终态关联；不在 Gateway 拥有第二个 Goal fold | 完成不能早于 owner 的决定；Goal，含 #422 的边界 |
+| Goal 已有状态读取，Lody 跨轮 prompt 完成仍无现成合同 | 由 Goal 定义提交/终态关联；不在 Gateway 拥有第二个 Goal fold | 完成不能早于 owner 的决定；Goal，含 #422 的边界 |
 | usage 缺 reasoning 明细，费用可能未知 | 由 Usage/模型适配保留真实计数；累计显示仍从已有事实投影 | 持久化兼容需单独决定；ModelProvider/aimux/types |
 | 未保存 buffer / client terminal 没有资源生命周期合同 | 沿既有 HostPlatform 方案明确资源所有权与启用方式；客户端 MCP 已由 TemporaryMcp 承接 | 断线不能泄漏进程或赋予权限；HostPlatform/#5 |
 | Provider 共享设置与 ACP 临时覆盖的产品语义尚未选择；只有后者缺现成覆盖接口，driver/auth 也固定 | 选择共享设置时复用已有管理合同；选择临时覆盖时才需明确模型连接覆盖的作用域、认证归属、采用时点和关闭语义 | 在实际模型连接采用处生效，退出不能覆盖其他写入；Provider/ModelHost 所有者。首版不提出变更要求 |
 | 新建 Session 已有模型参数，load/resume/fork 没有同等建立前配置覆盖 | 若需要该行为，由 Session 建立/恢复所有者明确允许覆盖的配置及采用原子性，不能先启用旧配置后补 update | 配置须在 native establishment 前采用；Session/ModelHost 所有者。首版仅接 new 的 model 选择 |
-| 额度管理面的只读暴露未定义 | 明确已有安全 usage read 的访问范围与过滤语义 | 不扩展为任意管理透传；Provider 所有者 |
+| Lody 非 Session 绑定的 rateLimits 过滤语义未定义 | 明确已有安全 usage read 在该扩展中的访问范围与过滤语义；标准 `/usage` 按 §4.7 绑定当前 provider | 不扩展为任意管理透传；Provider 所有者 |
 
 消融：保留一个 Gateway 插件、一个共享 RPC 实现和必要的连接/投影状态；不建 ACP daemon、第二套 Session store、业务账本、通用扩展注册框架、定时 quota poller、每个协议字段一个插件或 daemon 内的接线插件。共享 RPC crate 用于消除实现复制；每 Session slot/cursor、在途请求、writer 队列分别用于并发准入、history/live 合流、结果关联和可靠输出，不能删除其职责。
