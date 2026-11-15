@@ -4,6 +4,8 @@
 代码核对基线为 `8a5fe0980`；工作记录在 [#1629](https://github.com/arcships/dim/issues/1629)。
 本页是对现行设计的分析，不替代所属契约，不规定其他 Capability 必须采用同样的形式。
 
+后续的工具执行段模型及其余部件分析见 [逐项分析](timeline-capability-analysis.md)。
+
 ## 实际场景与边界
 
 模型发出工具调用，Loop 写 `step/tool-call`；ToolExecutor 解析已绑定的处理器和目标，

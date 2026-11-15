@@ -2,6 +2,7 @@
 
 This index is navigation. Delivery status lives in issues, not here.
 
+- [Timeline 关联部件逐项分析](design/examples/timeline-capability-analysis.md)（中文）：22 个候选部件、55 个事件的状态、恢复、交接与模型边界
 - [审批交接分析](design/examples/approval-handoff-analysis.md)（中文）：Permission、Approval 与 ToolExecutor 的准入边界和有限模型
 - [CLI feature list](feature-list.md)
 - [Model preferences and Agent configuration](design/model-configuration.md)
