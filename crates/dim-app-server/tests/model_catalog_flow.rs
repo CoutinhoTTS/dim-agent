@@ -841,10 +841,10 @@ fn a_plan_keeps_its_own_numbers_on_its_own_provider() {
     assert_ne!(numbers(&api), numbers(&plan));
 }
 
-/// A provider's stored list can lag the bundle by a model. When it does, the
-/// provider still answers for that model from its own family before any other
-/// seller does: the plan keeps its own window for `acme-5.5` rather than the
-/// vendor API entry the plan rule would otherwise prefer.
+/// A provider answers for its own family before another seller does, and the
+/// token step is what makes it once step 1 names nothing: the id is a dated
+/// form no row spells, so the plan keeps its own window for `acme-5.5` rather
+/// than the vendor API entry the plan rule would otherwise prefer.
 #[test]
 fn a_providers_own_family_answers_before_another_seller() {
     let catalog = catalog(json!([
@@ -860,17 +860,11 @@ fn a_providers_own_family_answers_before_another_seller() {
     let provider = ProviderProjection {
         provider_id: "acme-plan".into(),
         source: Some(ModelSource::Builtin),
-        models: catalog
-            .bundled_models("acme-plan")
-            .unwrap()
-            .iter()
-            .filter(|model| model.model_id != "acme-5.5")
-            .cloned()
-            .collect(),
+        models: catalog.bundled_models("acme-plan").unwrap().to_vec(),
         ..Default::default()
     };
     let entry = catalog
-        .project(&provider, &json!({ "id": "acme-5.5" }))
+        .project(&provider, &json!({ "id": "acme-5.5-20250801" }))
         .unwrap();
     assert_eq!(matched(&entry), ("acme-plan", "acme-5.5"));
     assert_eq!(
@@ -881,6 +875,7 @@ fn a_providers_own_family_answers_before_another_seller() {
         numbers(&entry),
         numbers(&bundled(&catalog, "acme", "acme-5.5"))
     );
+    assert_eq!(rule(&entry), "token");
 }
 
 /// A vendor row is an answer where an aggregator row alone is not: the merge
@@ -1660,8 +1655,8 @@ fn a_prefixed_id_without_the_statement_is_unidentified() {
 #[test]
 fn an_exact_row_still_wins_with_the_prefix_set() {
     let catalog = prefix_catalog();
-    // A stored list that carries the prefixed id itself, which is what step 1
-    // reads before any step breaks the id into tokens.
+    // The bundle carries only `acme-k3`, so step 1 has no `auto-acme-k3` row
+    // to read and answers from the model this provider added itself.
     let provider = ProviderProjection {
         provider_id: "acme".into(),
         source: Some(ModelSource::Builtin),

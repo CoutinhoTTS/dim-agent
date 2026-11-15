@@ -453,8 +453,8 @@ from `reasoning_options` today.
 
 The model is identified first, and the numbers are read from the entry that
 identification named. Identification runs over the catalog, and the first step
-that leaves one model wins: the provider's own list by exact id; then the whole
-qualified id, when the namespace it carries names the provider whose row
+that leaves one model wins: the provider's declarations by exact id; then the
+whole qualified id, when the namespace it carries names the provider whose row
 carries that id, so an aggregator's own house model is never answered by the
 unrelated row its final token happens to name; then a vendor entry whose own
 tokens are the head of the id, its tail no more than a date, `latest`, a tag
@@ -468,6 +468,15 @@ rows whose own id names the same model with the same tag, taken in the safe
 direction: the smallest window, the smallest output cap and the intersection of
 the effort choices. A provider default is not a declaration, so a row carrying
 the pair its provider writes across many of its rows declares no limit there.
+
+A declaration at that first step is the provider's own statement about an id,
+never something its listing produced. A builtin provider's declarations are its
+bundled rows and the models the user added to it; a custom provider declares
+nothing there. A row a listing wrote is that listing's output, so it answers for
+neither itself nor a sibling id: a listed id is identified against the catalog
+on every discovery and every read, not against the row an earlier listing left.
+What the user stated keeps applying on either kind of provider, through
+`capabilityOverrideFields` and the other user-owned state.
 
 A provider's record states a prefix its listed ids carry, and that prefix is
 stripped once, at the head of the id and case-insensitively, before the id is
