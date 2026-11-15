@@ -196,11 +196,35 @@ pub struct ProviderModel {
     pub metadata: Option<ModelMetadata>,
 }
 
-/// The error text for a model no source declares limits for.
-fn undeclared_limits(capabilities: &CatalogCapabilities) -> String {
+/// The error text for a model no source declares limits for: the entry, the
+/// limits it lacks and, when a step refused it, the rows that still disagree.
+/// Every provider kind declares a limit through `provider.models.edit`, which
+/// `ProviderService::update_model_config` serves by calling
+/// `BundledCatalog::merge_visible_edit` and storing the result in the record's
+/// `model_config_overrides`.
+fn undeclared_limits(provider_id: &str, model: &ProviderModel) -> String {
+    let missing = model.capabilities.missing_limits().join(" or ");
+    let candidates = model
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.identification.as_ref())
+        .filter(|identification| identification.rule == "ambiguous")
+        .map(|identification| {
+            identification
+                .candidates
+                .iter()
+                .map(|candidate| format!("{}/{}", candidate.provider_id, candidate.model_id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|candidates| !candidates.is_empty());
+    let disagreement = match candidates {
+        Some(candidates) => format!(", and the rows that name it disagree ({candidates})"),
+        None => String::new(),
+    };
     format!(
-        "Model has no declared {}",
-        capabilities.missing_limits().join(" or ")
+        "Model {provider_id}/{} declares no {missing}{disagreement}; declare the missing limits with provider.models.edit",
+        model.id
     )
 }
 
@@ -211,10 +235,9 @@ fn capability_snapshot(
     model: &ProviderModel,
     target: ModelId,
 ) -> Result<ModelCapabilitySnapshot, ProviderError> {
-    let capabilities = model
-        .capabilities
-        .declared()
-        .ok_or_else(|| ProviderError::InvalidConfig(undeclared_limits(&model.capabilities)))?;
+    let capabilities = model.capabilities.declared().ok_or_else(|| {
+        ProviderError::InvalidConfig(undeclared_limits(&target.provider_id, model))
+    })?;
     Ok(ModelCapabilitySnapshot {
         target,
         capabilities,
@@ -254,6 +277,12 @@ struct ProviderRecord {
     disabled_model_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     model_preferences: BTreeMap<String, ModelPreferences>,
+    /// The prefix this account's listed ids carry, as the user states it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    glued_prefix: Option<String>,
+    /// The listed ids this account states stand for another model.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_aliases: BTreeMap<String, String>,
     version: u32,
 }
 
@@ -336,6 +365,14 @@ pub struct StaticProviderRecord {
     #[serde(default)]
     disabled_model_ids: Vec<String>,
     enabled: bool,
+    /// The prefix this Provider's listed ids carry, as the user states it,
+    /// stripped once before an id is matched. Absent means the ids carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    glued_prefix: Option<String>,
+    /// The listed ids this Provider states stand for another model, keyed by
+    /// the id the Provider spells.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_aliases: BTreeMap<String, String>,
     #[serde(default)]
     definition_fingerprint: Option<String>,
     version: u32,
@@ -440,6 +477,10 @@ pub struct ProviderSummary {
     pub credential_configured: bool,
     /// Whether `provider.refresh` can list this provider's models.
     pub remote_model_list: bool,
+    /// The prefix this provider's listed ids carry, absent when they carry
+    /// none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glued_prefix: Option<String>,
     pub enabled: bool,
     pub version: u32,
 }
@@ -493,6 +534,12 @@ impl ProviderRecord {
     /// management view and the whole-set write all read this one derivation,
     /// so the toggle a view offers is the toggle the write governs.
     ///
+    /// The record's own statements about its ids are what identification reads:
+    /// its prefix and its aliases, on the same projection a static record
+    /// serves, so an account model is identified by the same steps, publishes
+    /// the same record of that answer and gains the limits of the row it stands
+    /// for exactly as a listed id on any other provider does.
+    ///
     /// The stored reason records the base entry: `limits_undeclared` is
     /// derived from the effective limits, so a supplied limit makes the
     /// model available again, while the stored value stays for the reset
@@ -503,6 +550,11 @@ impl ProviderRecord {
     /// stored reason (or the generic every-use one when the status alone is
     /// the cause) for both uses and neither selection lists it.
     pub(crate) fn effective_models(&self, bundled: &BundledCatalog) -> Vec<EffectiveModel<'_>> {
+        let projection = ProviderProjection {
+            glued_prefix: self.glued_prefix.clone(),
+            model_aliases: self.model_aliases.clone(),
+            ..Default::default()
+        };
         self.models
             .iter()
             .map(|source| {
@@ -514,7 +566,7 @@ impl ProviderRecord {
                     Some(replacement) => inherit_limits(replacement.clone(), &source.entry),
                     None => source.entry.clone(),
                 };
-                fill_bundled_limits(bundled, &mut entry);
+                bundled.identify_entry(&projection, &mut entry);
                 let missing_limits = entry.capabilities.missing_limits();
                 let unavailable = if source.excluded_from_every_use() {
                     // A stored limits reason is the weaker derived fact and
@@ -1019,6 +1071,8 @@ fn static_entries(
                     ModelSource::Custom
                 }),
                 models: models.clone(),
+                glued_prefix: record.glued_prefix.clone(),
+                model_aliases: record.model_aliases.clone(),
                 ..Default::default()
             },
             &models,
@@ -1167,6 +1221,7 @@ fn static_summary(
         remote_model_list,
         proxy_configured: record.network.proxy.is_some(),
         timeout_ms: record.network.timeout_ms,
+        glued_prefix: record.glued_prefix,
         enabled: record.enabled,
         version: record.version,
     }
@@ -1286,6 +1341,8 @@ fn bundled_seed(provider: &CatalogProvider) -> Result<StaticProviderRecord, Host
         endpoint_overrides: BTreeMap::new(),
         disabled_model_ids: Vec::new(),
         enabled: authority != CredentialAuthority::Static,
+        glued_prefix: None,
+        model_aliases: BTreeMap::new(),
         definition_fingerprint: Some(format!("{:x}", Sha256::digest(fingerprint))),
         version: 1,
     })
@@ -1489,21 +1546,6 @@ pub(crate) fn rewrite_stored_limits(
     Ok(())
 }
 
-/// The limits a model does not declare come from the bundled catalog, which
-/// owns the descriptors both the catalog and the management view publish.
-pub(crate) fn fill_bundled_limits(bundled: &BundledCatalog, model: &mut ModelEntry) {
-    if let Some(found) = bundled.fallback(&model.model_id) {
-        model.capabilities.context_window = model
-            .capabilities
-            .context_window
-            .or(found.capabilities.context_window);
-        model.capabilities.max_output_tokens = model
-            .capabilities
-            .max_output_tokens
-            .or(found.capabilities.max_output_tokens);
-    }
-}
-
 /// A stored reason other than the limit-derived one stands; otherwise an
 /// absent limit names `limits_undeclared`, so a supplied limit clears it.
 pub(crate) fn limits_reason(
@@ -1536,7 +1578,57 @@ fn selection_scope(cwd: Option<&Path>) -> Result<String, HostError> {
         Some(_) => Err(failure("Workspace path must be absolute")),
     }
 }
+/// Whether one resolution also applies the model's saved preferences.
+///
+/// A closed choice, so every caller of the shared core states which it means:
+/// a client adoption applies them, and every other caller withholds them, since
+/// a consumer model must not inherit what a person picked in `/models`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Saved {
+    /// Apply the saved value for each field the caller left unstated.
+    Apply,
+    /// Resolve at the model's declared defaults alone.
+    Withhold,
+}
+
 impl ProviderService {
+    /// The preferences saved for one model, `{providerId, modelId}`: the
+    /// per-model record `/models` writes, and nothing else.
+    ///
+    /// A static record keeps its own map; a managed one keeps it beside its
+    /// account. A Provider or model this build does not know answers empty, so
+    /// a disappeared record reads as no saved value rather than an error.
+    async fn saved_preferences(
+        self: &Arc<Self>,
+        provider_id: &str,
+        model_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<ModelPreferences, HostError> {
+        let managed = self
+            .oauth
+            .contains(provider_id, cancel)
+            .await
+            .map_err(failure)?;
+        let db = self.db.clone();
+        let (provider_id, model_id) = (provider_id.to_owned(), model_id.to_owned());
+        self.owned(cancel, move |_| {
+            Box::pin(async move {
+                db.run_read(move |connection| {
+                    let preferences = if managed {
+                        read_catalog(connection, &provider_id)?
+                            .and_then(|record| record.model_preferences.get(&model_id).cloned())
+                    } else {
+                        read_static(connection, &provider_id)?
+                            .and_then(|record| record.model_preferences.get(&model_id).cloned())
+                    };
+                    Ok(preferences.unwrap_or_default())
+                })
+                .await
+                .map_err(failure)
+            })
+        })
+        .await
+    }
     async fn account_available(
         self: &Arc<Self>,
         provider_id: &str,
@@ -1994,17 +2086,35 @@ impl ProviderService {
                                 .ok_or(ProviderError::Failed)?;
                             let old = old
                                 .filter(|record| same_account(&record.account, &catalog.account));
-                            let (disabled_model_ids, model_config_overrides, model_preferences) =
-                                old.map_or_else(
-                                    || (Vec::new(), Vec::new(), BTreeMap::new()),
-                                    |record| {
-                                        (
-                                            record.disabled_model_ids,
-                                            record.model_config_overrides,
-                                            record.model_preferences,
-                                        )
-                                    },
-                                );
+                            let (
+                                disabled_model_ids,
+                                model_config_overrides,
+                                model_preferences,
+                                glued_prefix,
+                                model_aliases,
+                            ) = old.map_or_else(
+                                || {
+                                    (
+                                        Vec::new(),
+                                        Vec::new(),
+                                        BTreeMap::new(),
+                                        None,
+                                        BTreeMap::new(),
+                                    )
+                                },
+                                |record| {
+                                    (
+                                        record.disabled_model_ids,
+                                        record.model_config_overrides,
+                                        record.model_preferences,
+                                        // A refresh rewrites the account's
+                                        // listings, not the user's own
+                                        // statements about their ids.
+                                        record.glued_prefix,
+                                        record.model_aliases,
+                                    )
+                                },
+                            );
                             let record = ProviderRecord {
                                 kind: ManagedRecordKind::Managed,
                                 account: catalog.account,
@@ -2012,6 +2122,8 @@ impl ProviderService {
                                 disabled_model_ids,
                                 model_config_overrides,
                                 model_preferences,
+                                glued_prefix,
+                                model_aliases,
                                 version,
                             };
                             save_catalog(&tx, &provider_id, &record)?;
@@ -2089,7 +2201,7 @@ impl ProviderService {
                 if model.missing_limits.is_empty() {
                     "Model is unavailable".into()
                 } else {
-                    undeclared_limits(&model.capabilities)
+                    undeclared_limits(&target.provider_id, model)
                 },
             ));
         }
@@ -2113,8 +2225,39 @@ impl ProviderService {
         preferences: ModelPreferences,
         cancel: &CancellationToken,
     ) -> Result<ModelSelection, HostError> {
-        self.configuration_with_limits(explicit, cwd, preferences, (None, None), cancel)
-            .await
+        self.configuration_with_limits(
+            explicit,
+            cwd,
+            preferences,
+            Saved::Apply,
+            (None, None),
+            cancel,
+        )
+        .await
+    }
+
+    /// The configuration a consumer model runs at: the model's declared
+    /// defaults alone, never the values a person saved in `/models`.
+    ///
+    /// The host port and every part that resolves a model for its own work
+    /// call this rather than [`configuration`], so a consumer never inherits a
+    /// chat preference. `sessions.launch` and Scheduler launches reach it
+    /// through the port.
+    pub(super) async fn configuration_at_defaults(
+        self: &Arc<Self>,
+        explicit: Option<ModelId>,
+        cwd: Option<&Path>,
+        cancel: &CancellationToken,
+    ) -> Result<ModelSelection, HostError> {
+        self.configuration_with_limits(
+            explicit,
+            cwd,
+            ModelPreferences::default(),
+            Saved::Withhold,
+            (None, None),
+            cancel,
+        )
+        .await
     }
 
     async fn configuration_with_limits(
@@ -2122,6 +2265,7 @@ impl ProviderService {
         explicit: Option<ModelId>,
         cwd: Option<&Path>,
         preferences: ModelPreferences,
+        saved: Saved,
         limits: (Option<u64>, Option<u64>),
         cancel: &CancellationToken,
     ) -> Result<ModelSelection, HostError> {
@@ -2180,8 +2324,22 @@ impl ProviderService {
             )
             .map_err(|error| failure(error.to_string()))?;
             let base = preferences::catalog_defaults(&model.config, &snapshot, protocol);
-            let config = preferences::configure(&preferences, &snapshot, protocol, &base)
-                .map_err(failure)?;
+            let config = match saved {
+                Saved::Apply => {
+                    let saved = self.saved_preferences(&id, &model.id, cancel).await?;
+                    preferences::effective(
+                        &preferences,
+                        &saved,
+                        &snapshot,
+                        protocol,
+                        &base,
+                        &id,
+                        &model.id,
+                    )
+                }
+                Saved::Withhold => preferences::configure(&preferences, &snapshot, protocol, &base),
+            }
+            .map_err(failure)?;
             return Ok(ModelSelection {
                 provider_id: id.clone(),
                 model_id: model.id.clone(),
@@ -2323,6 +2481,7 @@ impl ConnectionUse<'_> {
     fn select<'a>(
         &self,
         catalog: &'a ProviderCatalog,
+        provider_id: &str,
         model_id: &str,
     ) -> Result<&'a ProviderModel, HostError> {
         match self {
@@ -2332,7 +2491,7 @@ impl ConnectionUse<'_> {
                     .iter()
                     .find(|model| model.id == model_id)
                     .filter(|model| !model.missing_limits.is_empty())
-                    .map(|model| undeclared_limits(&model.capabilities))
+                    .map(|model| undeclared_limits(provider_id, model))
                     .unwrap_or_else(|| "Model is unavailable".into());
                 failure(message)
             }),
@@ -2552,7 +2711,7 @@ impl ProviderService {
             if let Some((window, output)) = use_.startup_limits() {
                 catalog.apply_startup_limits(Some(window), Some(output));
             }
-            let model = use_.select(&catalog, model_id)?;
+            let model = use_.select(&catalog, provider_id, model_id)?;
             let protocol = model
                 .endpoint
                 .ok_or_else(|| failure("Model is unavailable"))?;
@@ -2690,7 +2849,7 @@ impl ProviderService {
         if let Some((window, output)) = use_.startup_limits() {
             catalog.apply_startup_limits(Some(window), Some(output));
         }
-        let model = use_.select(&catalog, model_id)?;
+        let model = use_.select(&catalog, provider_id, model_id)?;
         let realtime = use_.realtime(model)?;
         let lease = self
             .oauth
@@ -2775,12 +2934,7 @@ impl ProductResolver {
         let owner = self.0.clone();
         Box::pin(async move {
             owner
-                .configuration(
-                    explicit,
-                    cwd.as_deref(),
-                    ModelPreferences::default(),
-                    &cancel,
-                )
+                .configuration_at_defaults(explicit, cwd.as_deref(), &cancel)
                 .await
         })
     }

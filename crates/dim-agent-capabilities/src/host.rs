@@ -759,7 +759,7 @@ pub trait ModalityRequests: Send + Sync + 'static {
 /// any language. Served beside `modalityRequest`: the endpoint reveals the
 /// route and the realtime declaration, and every request is performed by the
 /// owner, which is what keeps a credential out of the reply
-/// ([service faces §4.8](../../../docs/design/service-faces.md#48-宿主端口executionsettingshost-等六个)).
+/// ([service faces §4.10](../../../docs/design/service-faces.md#410-宿主端口executionsettingshost-等六个)).
 #[derive(Clone)]
 pub struct ModalityConnectionHost(pub Arc<dyn ModalityRequests>);
 

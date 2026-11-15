@@ -931,7 +931,7 @@ fn within_domains(host: &str, domains: &[String]) -> bool {
 
 fn host_group(url: &Url) -> String {
     let h = hostname(url);
-    h.strip_prefix("www.").unwrap_or(&h).to_owned()
+    h.trim_prefix("www.").to_owned()
 }
 
 fn status_reason(status: u16) -> &'static str {

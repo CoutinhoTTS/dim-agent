@@ -29,7 +29,7 @@ pub fn name_of<T: ?Sized>() -> String {
 
 /// [`name_of`] for a type known by its name ([`rutis::TypeKey::type_name`]).
 pub fn name_of_type(full: &str) -> String {
-    let full = full.strip_prefix("dyn ").unwrap_or(full);
+    let full = full.trim_prefix("dyn ");
     let path = full.split(['<', ' ']).next().unwrap_or(full);
     let ident = path.rsplit("::").next().unwrap_or(path);
     let chars: Vec<char> = ident.chars().collect();

@@ -82,7 +82,7 @@ async fn mounted() -> (tempfile::TempDir, Fixture) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ten_targets_never_run_more_than_eight_inputs() {
     let (_directory, fixture) = mounted().await;
-    let sessions: Vec<String> = (0..10).map(|index| format!("session-{index}")).collect();
+    let sessions: Vec<String> = Vec::from_fn(10, |index| format!("session-{index}"));
     let gate = fixture.sessions.gate();
     let producer = fixture.producer.clone();
     let targets: Vec<&str> = sessions.iter().map(String::as_str).collect();

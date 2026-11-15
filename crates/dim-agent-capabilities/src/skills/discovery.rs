@@ -110,8 +110,7 @@ impl Scan<'_> {
 /// Mirrors TS `getSkillId`.
 fn skill_id(skill_dir: &Path, root: &Path, kind: &RootKind) -> String {
     let rel = skill_dir
-        .strip_prefix(root)
-        .unwrap_or(skill_dir)
+        .trim_prefix(root)
         .components()
         .map(|part| part.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
