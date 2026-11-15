@@ -251,7 +251,7 @@ pub(crate) fn convert(
     // The OpenAI-compatible Chat model consumes the fields of its generic
     // schema and passes any other namespace field to the request body, which
     // is how the wire keeps `top_k`: its own `topK` switch stays off for the
-    // generic endpoint. The OpenAI Chat model reads `top_k` from the request.
+    // generic endpoint.
     if *kind == ProviderKind::OpenaiCompatible
         && let Some(top_k) = options.top_k.take()
     {
@@ -261,6 +261,13 @@ pub(crate) fn convert(
             .entry(preset.unwrap_or("openai").into())
             .or_default()
             .insert("top_k".into(), json!(top_k));
+    }
+    if *kind == ProviderKind::OpenaiChat && options.top_k.is_some() {
+        return Err(error(
+            request,
+            "config.topK",
+            "is not sent by the OpenAI Chat protocol; use kind \"openai-compatible\", which sends top_k",
+        ));
     }
     // A model the tag classifies as a reasoning model takes the request rules
     // main applied on both Chat protocols. The OpenAI Chat model applies the

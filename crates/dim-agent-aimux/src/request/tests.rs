@@ -256,7 +256,7 @@ async fn final_request_replays_multimodal_tool_history_and_only_model_readable_r
             {"role": "user", "content": "continue"}
         ],
         "tools": [tool(name)],
-        "config": {"maxTokens": 4096, "temperature": 0, "topP": 0, "topK": 1, "stopSequences": []},
+        "config": {"maxTokens": 4096, "temperature": 0, "topP": 0, "stopSequences": []},
         "metadata": {"sessionId": "session-local", "runId": "run-local", "requestId": "request-local"}
     })).unwrap();
     let prepared = convert(&request, &ProviderKind::OpenaiChat, None).unwrap();
@@ -312,12 +312,27 @@ async fn final_request_replays_multimodal_tool_history_and_only_model_readable_r
     assert_eq!(body["max_tokens"], 4096);
     assert_eq!(body["temperature"], 0.0);
     assert_eq!(body["top_p"], 0.0);
-    assert_eq!(body["top_k"], 1.0);
     assert_eq!(body["stop"], json!([]));
     // Both Chat models replay the reasoning text main replayed.
     let compatible = convert(&request, &ProviderKind::OpenaiCompatible, None).unwrap();
     let body = send(compatible.options, "openai").await;
     assert_eq!(body["messages"][3]["reasoning_content"], "plan");
+    // The generic compatible Chat model passes `top_k` through its provider
+    // namespace; the OpenAI Chat protocol has no such field and refuses it.
+    let mut sampled = request.clone();
+    sampled.config = Some(dim_agent_types::ModelConfig {
+        top_k: Some(1.0),
+        ..request.config.clone().unwrap_or_default()
+    });
+    let body = send(
+        convert(&sampled, &ProviderKind::OpenaiCompatible, None)
+            .unwrap()
+            .options,
+        "openai",
+    )
+    .await;
+    assert_eq!(body["top_k"], 1.0);
+    assert!(convert(&sampled, &ProviderKind::OpenaiChat, None).is_err());
     let body = send_chat(
         convert(&request, &ProviderKind::OpenaiChat, None)
             .unwrap()
