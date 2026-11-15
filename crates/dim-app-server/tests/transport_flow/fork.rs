@@ -547,14 +547,42 @@ async fn a_fork_is_refused_unless_the_cut_is_a_rest_point() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fork_checks_only_rest_point_facts_and_keeps_state_across_pages() {
+async fn fork_checks_rest_points_without_scanning_completed_history() {
     use dim_agent_runtime::{Timeline, TimelineKey};
     use dim_agent_types::{
-        ExtensionEvent, InputBlock, InputDeletedData, InputMessageData, InputMode, TurnEndData,
-        TurnStartData,
+        BranchResumeData, EventDraft, ExecEndedData, ExecStartedData, ExecStatus, ExtensionEvent,
+        InputAppliedData, InputBlock, InputConsumedData, InputDeletedData, InputHandover,
+        InputMessageData, InputMode, ToolResult, TurnEndData, TurnStartData,
     };
     use dim_app_server::storage::{SessionStore, SqliteStorage, SqliteTimelineStore};
 
+    let started_task = |id: &str| {
+        EventKind::ExecStarted(ExecStartedData {
+            turn_id: id.into(),
+            request_id: id.into(),
+            call_id: id.into(),
+            task_id: id.into(),
+            description: "completed fixture".into(),
+            title: None,
+            output_path: String::new(),
+        })
+    };
+    let ended_task = |id: &str| {
+        EventKind::ExecEnded(ExecEndedData {
+            task_id: id.into(),
+            status: ExecStatus::Completed,
+            result: ToolResult::text("done"),
+        })
+    };
+    let wake = |id: &str, ended: &str| {
+        let mut draft = EventDraft::from(EventKind::InputMessage(InputMessageData::text(
+            "done",
+            Some(InputMode::Steer),
+        )))
+        .with_id(id);
+        draft.tags = Some(vec![format!("exec-wake-result:{ended}")]);
+        draft
+    };
     let mut costs = Vec::new();
     for (noise, turns) in [(64, 1), (16_384, 1), (64, 2_050)] {
         let store = Store::new();
@@ -579,10 +607,20 @@ async fn fork_checks_only_rest_point_facts_and_keeps_state_across_pages() {
         )
         .await
         .unwrap();
+        timeline
+            .append(EventKind::BranchResume(BranchResumeData {}).into())
+            .unwrap();
+        timeline
+            .append(started_task("pending-task").into())
+            .unwrap();
         let pending = timeline
             .append(
                 EventKind::InputMessage(InputMessageData {
                     mode: Some(InputMode::Queue),
+                    handover: (turns > 1).then(|| InputHandover {
+                        turn_id: "pending-handover".into(),
+                        request_id: "pending-handover".into(),
+                    }),
                     blocks: vec![InputBlock::Raw {
                         text: "withdrawn after the historical cut".into(),
                         key: None,
@@ -595,28 +633,55 @@ async fn fork_checks_only_rest_point_facts_and_keeps_state_across_pages() {
             .unwrap();
         let mut facts = (0..noise)
             .map(|index| {
-                EventKind::Extension(
+                EventDraft::from(EventKind::Extension(
                     ExtensionEvent::new("fork-probe", "noise", json!({"index":index})).unwrap(),
-                )
+                ))
             })
             .collect::<Vec<_>>();
         for index in 0..turns {
-            facts.push(EventKind::TurnStart(TurnStartData {
-                turn_id: format!("completed-{index}"),
-            }));
-            facts.push(EventKind::TurnEnd(TurnEndData {
-                turn_id: format!("completed-{index}"),
-                outcome: dim_agent_types::TurnOutcome::Completed {
-                    reason: "done".into(),
-                },
-            }));
+            let id = format!("completed-{index}");
+            let ended = format!("ended-{index}");
+            let wake_id = format!("wake-{index}");
+            facts.extend([
+                EventDraft::from(EventKind::InputMessage(InputMessageData::text(
+                    "completed",
+                    Some(InputMode::Queue),
+                )))
+                .with_id(&id),
+                EventKind::InputApplied(InputAppliedData {
+                    input_id: id.clone(),
+                    mode: Some(InputMode::Queue),
+                })
+                .into(),
+                EventKind::InputConsumed(InputConsumedData {
+                    input_id: id.clone(),
+                })
+                .into(),
+                EventKind::TurnStart(TurnStartData {
+                    turn_id: id.clone(),
+                })
+                .into(),
+                started_task(&id).into(),
+                EventDraft::from(ended_task(&id)).with_id(&ended),
+                wake(&wake_id, &ended),
+                EventKind::InputApplied(InputAppliedData {
+                    input_id: wake_id.clone(),
+                    mode: Some(InputMode::Steer),
+                })
+                .into(),
+                EventKind::InputConsumed(InputConsumedData { input_id: wake_id }).into(),
+                EventKind::TurnEnd(TurnEndData {
+                    turn_id: id,
+                    outcome: dim_agent_types::TurnOutcome::Completed {
+                        reason: "done".into(),
+                    },
+                })
+                .into(),
+            ]);
         }
         for batch in facts.chunks(256) {
             timeline
-                .append_batch_registered(
-                    batch.iter().cloned().map(Into::into).collect(),
-                    |_| Ok(()),
-                )
+                .append_batch_registered(batch.to_vec(), |_| Ok(()))
                 .unwrap();
         }
         let retained = timeline
@@ -649,11 +714,30 @@ async fn fork_checks_only_rest_point_facts_and_keeps_state_across_pages() {
                 .into(),
             )
             .unwrap();
+        let ended = timeline.append(ended_task("pending-task").into()).unwrap();
+        timeline
+            .append_batch_registered(
+                vec![
+                    wake("pending-wake", &ended.id),
+                    EventKind::InputApplied(InputAppliedData {
+                        input_id: "pending-wake".into(),
+                        mode: Some(InputMode::Steer),
+                    })
+                    .into(),
+                    EventKind::InputConsumed(InputConsumedData {
+                        input_id: "pending-wake".into(),
+                    })
+                    .into(),
+                ],
+                |_| Ok(()),
+            )
+            .unwrap();
+        let rested_at = timeline.committed();
         tokio::time::timeout(
             Duration::from_secs(10),
             timeline
                 .watch()
-                .wait_for(|&(published, _)| published >= deleted.sequence),
+                .wait_for(|&(published, _)| published >= rested_at),
         )
         .await
         .unwrap()
@@ -671,26 +755,29 @@ async fn fork_checks_only_rest_point_facts_and_keeps_state_across_pages() {
                 .await,
         );
         let storage = server.service::<SessionStore>().unwrap();
-        storage.timeline_diagnostics().record_query_statistics();
-        let started = std::time::Instant::now();
-        let (code, message) = error(&fork(&mut client, &sid, waiting_at).await);
-        let elapsed = started.elapsed();
-        let statements = storage.timeline_diagnostics().take_query_statistics();
-        let steps: i64 = statements.iter().map(|stat| i64::from(stat.vm_steps)).sum();
-        assert_eq!(code, "session_invalid_input");
-        assert!(
-            message.contains("an input is waiting to be consumed"),
-            "{message}"
-        );
-        assert!(steps > 0, "the wire check must record native query work");
-        if turns == 1 {
-            costs.push(steps);
+        let mut scenario_costs = Vec::new();
+        for (at, cause) in [
+            (waiting_at, "an input is waiting to be consumed"),
+            (deleted.sequence, "a background task is running"),
+            (ended.sequence, "a background task has not woken the branch"),
+        ] {
+            storage.timeline_diagnostics().record_query_statistics();
+            let started = std::time::Instant::now();
+            let (code, message) = error(&fork(&mut client, &sid, at).await);
+            let elapsed = started.elapsed();
+            let statements = storage.timeline_diagnostics().take_query_statistics();
+            let steps: i64 = statements.iter().map(|stat| i64::from(stat.vm_steps)).sum();
+            assert_eq!(code, "session_invalid_input");
+            assert!(message.contains(cause), "{at}: {message}");
+            assert!(steps > 0, "the wire check must record native query work");
+            scenario_costs.push(steps);
+            eprintln!(
+                "fork rest-point check: noise={noise}, turns={turns}, cause={cause}, vm_steps={steps}, elapsed={elapsed:?}"
+            );
         }
-        eprintln!(
-            "fork rest-point check: noise={noise}, turns={turns}, vm_steps={steps}, elapsed={elapsed:?}"
-        );
+        costs.push(scenario_costs);
 
-        let fid = forked(&fork(&mut client, &sid, deleted.sequence).await);
+        let fid = forked(&fork(&mut client, &sid, rested_at).await);
         let target = agent.get_session(&fid).unwrap();
         let copied = history(&target, "main").await;
         assert_eq!(
@@ -699,12 +786,12 @@ async fn fork_checks_only_rest_point_facts_and_keeps_state_across_pages() {
                 .filter(|event| event.kind.key() == "fork-probe/noise")
                 .count(),
             noise,
-            "kind filtering must not change the store-side copy"
+            "rest-point queries must not change the store-side copy"
         );
         assert!(
             !copied
                 .iter()
-                .filter(|event| event.sequence > deleted.sequence)
+                .filter(|event| event.sequence > rested_at)
                 .any(|event| WORK.contains(&event.kind.key())),
             "the withdrawn input must not run in the fork"
         );
@@ -713,8 +800,11 @@ async fn fork_checks_only_rest_point_facts_and_keeps_state_across_pages() {
         server.join().await.unwrap();
     }
     assert!(
-        costs[1] <= costs[0] * 2,
-        "irrelevant history must not drive fork validation reads: {costs:?}"
+        costs.iter().all(|scenario| scenario
+            .iter()
+            .zip(&costs[0])
+            .all(|(steps, baseline)| *steps <= baseline * 2)),
+        "completed and irrelevant history must not drive fork validation reads: {costs:?}"
     );
 }
 

@@ -327,15 +327,19 @@ starts nothing. Append inputs may remain: they start no turn and join the next r
 right after `validate_context_boundary`, by reading those capabilities' facts (§14, §16 D1). The usual fork points, after a turn ends or before a user message, are rest
 points unless a background task was running.
 
-The rest-point read selects only `turn/start`, `turn/end`, `branch/start`, `branch/resume`,
-`stop/interrupt`, `input/message`, `input/applied`, `input/consumed`, `input/deleted`,
-`exec/started` and `exec/ended` through the fixed cut, using the existing
-[Timeline property query](../timeline-property-query.md). It folds the selected facts in position
-order, carrying state between pages. Branch start/resume facts reset the generation's closing
-state; interrupts and tagged wake inputs must remain in the same fold as task endings.
-The read volume is the number of these facts before the cut, not all historical events; it still
-grows with relevant input, turn and task history. Context compaction cannot truncate this read:
-an older input or background task may still be pending. The context-boundary check and storage-side
+The rest-point check uses the existing [Timeline property query](../timeline-property-query.md)
+at the same fixed `through = at` for every read: the latest turn transition and interrupt,
+then at most one blocking input, unfinished task or unposted wake. Input membership includes
+ordinary and handover inputs; the mode and application-after-interrupt predicates apply only
+to inputs still unconsumed and undeleted at the cut. The task and wake predicates follow
+BackgroundExec's reload contract, including the generation in which a task ended.
+
+These reads use the native store's [versioned member indexes](timeline-member-index.md) and
+[state-read indexes](timeline-state-read-indexes.md). They do not replay completed input, turn
+or task history, and each query returns at most one event. Input qualification can inspect the
+members still pending at the cut; this cost depends on that pending set, not the completed
+prefix. Later consumption, deletion, task endings or wakes cannot change an earlier cut.
+Context compaction cannot hide older pending work. The context-boundary check and storage-side
 copy keep their own contracts and costs.
 
 **Why `main` only.** A child branch's history is its ancestors' prefixes followed by its own events, and each branch
@@ -664,7 +668,7 @@ None to rutis. To the event format: the event kind `session/forked` (§13, rule 
 | To | Requirement | Status |
 | --- | --- | --- |
 | FileStorage | `remove` syncs the parent of the removed entry before it reports success, also when the entry was already absent, and returns `Unsynced` when that sync fails. Windows has no directory sync and relies on NTFS metadata journaling, as for `replace`. Needed so a delete's removal is durable before its commit (§4) | Implemented in S5c ([FileStorage](../../architecture/rust-agent/plugins/FileStorage.md#listing-and-removal)) |
-| Loop, InputQueue, BackgroundExec | A read-only rest-point check over a fixed prefix: no open turn, no Queue or Steer input waiting to drive a turn, every background task ended with its wake posted (§6.2). A capability whose reload rule comes to start work from other facts adds them to the check, so a fork keeps starting nothing | Implemented in Agents as a fold over these capabilities' public facts, with no change to them (§16 D1). Their owners keep those facts and extend `RestPoint` in [agents.rs](../../../crates/dim-app-server/src/agents.rs) when a reload rule comes to start work from other facts. Found on the way, for BackgroundExec's owner: its `rebuild` keeps `closing` from an earlier generation's branch close (a `session.close` or a graceful shutdown), so after a restore it does not repost a wake lost in a crash. `RestPoint` scopes that flag to the generation, as the live wake does, so a cut between such an `exec/ended` and its wake is refused |
+| Loop, InputQueue, BackgroundExec | A read-only rest-point check at a fixed cut: no open turn, no Queue or Steer input waiting to drive a turn, every background task ended with its wake posted (§6.2). A capability whose reload rule comes to start work from other facts adds them to the check, so a fork keeps starting nothing | Agents queries these capabilities' public facts through the Timeline face (§16 D1). Their owners extend the check in [agents/fork.rs](../../../crates/dim-app-server/src/agents/fork.rs) when a reload rule comes to start work from other facts. BackgroundExec owns the shared wake predicate, including generation boundaries |
 | Collaboration | When a branch rebuilds, a delivered request without a result is settled as failed without stopping its member unless the member's relation names this Session as its leader. In general, reload settlement acts only on resources its own Session holds. The rebuild stopped any loaded Session named in the fact ([collaboration.rs](../../../crates/dim-app-server/src/collaboration.rs) `rebuild`), so a fork of a leader would have stopped the source's member | Implemented ([#127](https://github.com/arcships/dim/issues/127)). Before #127 that reload stopped such a member if it was loaded. Now the member keeps whatever its own reload rules start, the leader has already settled the request as failed, and the member's `agent` messages to a fork of the leader are refused (`TeamMemberNotFound`) because no relation names the fork ([#97 review](https://github.com/arcships/dim/pull/97)). A restart keeps the Team: relations are rebuilt from the stored leaders ([Collaboration §6](../plugins/Collaboration.md#6-delegation-ownership-and-lifetime)). Acceptance 7 |
 | Goal (P5, [#69](https://github.com/arcships/dim/issues/69)) | A copied goal must not drive a turn in F or be F's goal. The fork writes `session/forked` after the copied facts in its transaction (§6.5); Goal folds `main` from after that fact and clears a copied live goal once ([Goal](../plugins/Goal.md) A11) | Implemented with Goal's acceptance ([#209](https://github.com/arcships/dim/pull/209)) |
 | S5b ([#60](https://github.com/arcships/dim/issues/60)) | Title metadata rows are removed in the delete transaction and not copied by a fork | Implemented in S5b ([#96](https://github.com/arcships/dim/pull/96), [title metadata §9](session-title-metadata.md#9-lifecycle)) |
@@ -708,10 +712,11 @@ stop would deadlock that reload, and delaying release would let a later member i
 11. A delete of a Session still building, a `session.create` and a `session.fork` held in a capability's apply after
     their rows commit and are listed, waits for the build, then replies `{deleted: true}`; no row and no loaded Session of the id
     remain (D6). An id that is not one path component is refused and removes nothing (D3).
-12. With a fixed compacted context tail, growing unrelated history does not grow the rest-point query work.
-    A pending input before that compaction still refuses a historical cut, including when relevant facts span
-    multiple pages; a cut after its withdrawal succeeds, preserves the copied history and starts no work.
-    Covered by `fork_checks_only_rest_point_facts_and_keeps_state_across_pages` in [fork.rs](../../../crates/dim-app-server/tests/transport_flow/fork.rs).
+12. With a fixed compacted context tail, growing unrelated facts or completed input, turn and task
+    history does not cause a rest-point prefix scan. Pending work older than that compaction still
+    refuses a historical cut, even after its deletion, task ending or wake is committed. The subsequent
+    rest point preserves the copied history and starts no work. Covered by
+    `fork_checks_rest_points_without_scanning_completed_history` in [fork.rs](../../../crates/dim-app-server/tests/transport_flow/fork.rs).
 
 Tests: 1 and 2 are `delete_closes_a_running_session_and_removes_what_it_stored` and
 `unloaded_and_damaged_sessions_are_deleted_by_id` in
@@ -746,7 +751,7 @@ S5c's own owners.
 
 | # | Change | Why |
 | --- | --- | --- |
-| D1 | The rest-point check is `RestPoint` in Agents, a read-only fold over the public facts of Loop, InputQueue and BackgroundExec on `main`'s prefix through `at`, instead of a check next to `validate_context_boundary` in the capabilities crate. Its input rule follows Loop's: a Queue or Steer input applied before the last `stop/interrupt` and not consumed is allowed, because a reload does not run it (it joins the next request, as an Append input does); an input InputQueue deleted on a withdrawal (`input/deleted`, S1) is never applied and does not count; any other input not yet applied is refused. A task's wake is required when the task ended outside a branch close of its own generation, as the live wake is posted | Every fact it needs is a public event, so it needs no API from those capabilities and no change to them. Requiring every such input to be consumed would refuse the cut right after a stopped turn, where nothing would run |
+| D1 | The rest-point check belongs to Agents and queries the public facts of Loop, InputQueue and BackgroundExec at the fixed cut on `main` (§6.2). Its input rule follows Loop's: a Queue or Steer input applied before the last `stop/interrupt` and not consumed is allowed, because a reload does not run it (it joins the next request, as an Append input does); an input InputQueue deleted on a withdrawal (`input/deleted`, S1) is never applied and does not count; any other input not yet applied is refused. A task's wake is required when the task ended outside a branch close of its own generation, as the live wake is posted | It consumes the existing Timeline query face; BackgroundExec supplies its wake predicate so live recovery and fork validation share that rule. Requiring every such input to be consumed would refuse the cut right after a stopped turn, where nothing would run |
 | D2 | `session.fork` needs the native store. A daemon without one (the mock profile without `--database`) does not list it in `hello.features` and answers `unknown_method` ("Method requires native storage"). `session.delete` is listed with `session.create` there too; without a store it closes the Session and forgets it | A fork copies stored rows; in-memory Timelines have no SessionStore to copy from |
 | D3 | `session.delete` refuses a `sessionId` that is not a single path component with `session_invalid_input`. An empty `sessionId` is refused before it, at the boundary every Session method shares, with `invalid_params` ("sessionId must not be empty"); the path-component rule covers the other ids. Agents checks it before it takes any admission state, and a delete that found nothing loaded or stored under the id keeps no slot for it; `session.close` of an id Agents does not know keeps none either | The id names `command-output/<id>`. Session ids are UUIDs; an id such as `<S>/.` would otherwise remove S's command output while deleting no row. Without the last two rules, deleting or closing arbitrary absent ids would add a slot each, without bound |
 | D4 | The fork transaction does not check the cut again: it copies `main`'s rows through `at`, and the runtime validates the fork's rows when it builds it. A copy that fails validation rolls back like any failed creation | Agents has checked the cut on the source (published head, batch end, context boundary, rest point), and rows through the cut never change, so a second check inside the transaction would repeat the validation every build already runs |
@@ -801,12 +806,6 @@ impl AgentIndex {
     ) -> dim_agent_runtime::Result<Session>;
     /// `session.fork`: acquire the source, check the cut, prepared creation (§6.5).
     pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session>;
-}
-/// The rest point of §6.2 over `main`'s prefix (D1), folded a page at a time.
-struct RestPoint;
-impl RestPoint {
-    fn page(&mut self, events: &[Arc<AgentEvent>]);
-    fn check(&self) -> Result<(), String>;
 }
 impl SessionStore {
     /// `ctx` gives each file step the node's FileStorage; `files_root` is the
