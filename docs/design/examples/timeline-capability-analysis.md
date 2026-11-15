@@ -230,9 +230,10 @@ java -cp /absolute/path/tla2tools.jar tlc2.TLC -workers 1 \
   docs/design/examples/tool-model/ToolSegments.tla
 ```
 
-继续使用 Approval 的模型和直接恢复等式；其他项的状态/转换模型如上。不为了凑齐 22 个
-TLC 文件而复制模型，也不把共同记号变成新运行时抽象。当前未找到的路径、文档差异与
-宿主依赖作为发现保留；分析覆盖不等于这些问题已修复。
+各部件的承诺已拆分到[有限模型检查清单](capability-models/README.md)，其中逐项列出模型动作、
+检查性质、实现入口及边界；[运行记录](capability-models/results.md)保留实际结果和模型摘要。
+共享协议复用模型，不把共同记号变成新运行时抽象。当前未找到的路径、文档差异与宿主依赖
+作为发现保留；分析和模型覆盖不等于这些问题已修复。
 
 ## 事件逐项检查索引
 
