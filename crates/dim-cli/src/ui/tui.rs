@@ -1189,8 +1189,8 @@ struct App {
     /// The shell-mode command running, at most one.
     shell: Option<crate::ui::shell::Running>,
     /// A Ctrl+Enter whose withdrawals and stop are out: the draft it merged
-    /// waits for the stop's reply, and no key submits anything until then.
-    send_now_pending: bool,
+    /// waits for the stop's reply, and no plain Enter submits until then.
+    send_now: Option<SendNow>,
     /// A Ctrl+V clipboard read in progress.
     clipboard: Option<ClipboardRead>,
     /// A pasted image path being read and scaled off the interface thread.
@@ -1412,6 +1412,14 @@ enum ClipboardRead {
     Terminal(crate::clipboard::terminal::Read),
 }
 
+/// A Ctrl+Enter that has withdrawn the queue and asked for a stop. At most one
+/// is in flight: its reply decides for the gesture the user last meant.
+struct SendNow {
+    /// Esc called off the submit. The stop still settles, and its reply
+    /// releases the gesture without submitting anything.
+    submit_cancelled: bool,
+}
+
 /// A pasted group whose image paths a thread is reading; the tokens go in
 /// at the cursor when its result arrives.
 struct ImageRead {
@@ -1523,7 +1531,7 @@ impl App {
             session_id: String::new(),
             initial: None,
             unsent: None,
-            send_now_pending: false,
+            send_now: None,
             permission_policy: dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
@@ -1865,11 +1873,15 @@ impl App {
     /// the next command runs, so the draft holds every recalled message by the
     /// time the stop replies.
     fn send_now(&mut self) {
-        if self.send_now_pending {
+        if let Some(pending) = &mut self.send_now {
+            pending.submit_cancelled = false;
+            self.notice = None;
             return;
         }
+        self.send_now = Some(SendNow {
+            submit_cancelled: false,
+        });
         self.recall_all_queued();
-        self.send_now_pending = true;
         self.host.send(Command::SubmitNow);
     }
 
@@ -2147,7 +2159,14 @@ impl App {
                 self.composer.restore(input);
             }
             Update::Stopped { error } => {
-                if !std::mem::replace(&mut self.send_now_pending, false) {
+                // A reply with no gesture waiting for it settles nothing.
+                let Some(pending) = self.send_now.take() else {
+                    if let Some(error) = error {
+                        self.notices.push(error);
+                    }
+                    return;
+                };
+                if pending.submit_cancelled {
                     if let Some(error) = error {
                         self.notices.push(error);
                     }
@@ -3140,7 +3159,10 @@ impl App {
         // asked for is still settling, neither key submits.
         let ctrl_enter = key.code == KeyCode::Enter && ctrl;
         let picker = self.composer.palette_open() || self.composer.mention_open();
-        if self.send_now_pending && key.code == KeyCode::Enter {
+        // A stop still settling sends no plain Enter: the draft it will submit
+        // must not leave first. Ctrl+Enter re-arms that submit (see
+        // `send_now`), so it is never lost to a cancelled one.
+        if self.send_now.is_some() && key.code == KeyCode::Enter && !ctrl_enter {
             return Outcome::Continue;
         }
         if ctrl_enter && !picker {
@@ -3240,10 +3262,11 @@ impl App {
                 return Outcome::Continue;
             }
             KeyCode::Esc if !self.composer.palette_open() && !self.composer.mention_open() => {
-                if self.send_now_pending {
-                    // The stop already went, so the run still ends; only the
-                    // submit is called off, and the draft stays as typed.
-                    self.send_now_pending = false;
+                if let Some(pending) = &mut self.send_now {
+                    // The stop already went, so the run still ends; only its
+                    // submit is called off, and the draft stays as typed. The
+                    // gesture waits for the reply it already has coming.
+                    pending.submit_cancelled = true;
                     self.set_notice(t("Send now cancelled; the draft was kept"));
                 } else if self.snapshot.as_mut().and_then(|s| s.side.take()).is_some() {
                     self.host.send(Command::CloseSide);
@@ -3307,6 +3330,17 @@ impl App {
     /// What a composer outcome does, the same for Enter and for the
     /// invocation's first message.
     fn dispatch_composer(&mut self, outcome: ComposerOutcome, mode: SubmitMode) -> Outcome {
+        // A draft waits for the stop its Ctrl+Enter asked for: no submit may
+        // overtake it until that stop's reply arrives, whichever key asked.
+        if self.send_now.is_some()
+            && self.line_draft.is_none()
+            && matches!(
+                outcome,
+                ComposerOutcome::Submit(_) | ComposerOutcome::SubmitDraft { .. }
+            )
+        {
+            return Outcome::Continue;
+        }
         match outcome {
             ComposerOutcome::Submit(text) if self.line_draft.is_some() => {
                 self.open_line(&text);
@@ -15989,6 +16023,106 @@ mod tests {
         assert!(
             rows.contains("Application keys"),
             "the report's heading is drawn: {rows}"
+        );
+    }
+
+    /// Esc calls off the submit of the stop it asked for, and a Ctrl+Enter
+    /// after it re-arms that submit rather than asking for a second stop. The
+    /// one reply still on its way then decides for the gesture the user last
+    /// meant, so two replies cannot settle each other's.
+    #[test]
+    fn esc_then_ctrl_enter_rearms_the_one_stop_in_flight() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "draft");
+        app.handle(ctrl_enter());
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit-now"],
+            "Esc sends no second stop"
+        );
+        app.handle(ctrl_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            ["submit-now"],
+            "the retry re-arms the stop in flight instead of sending another"
+        );
+        app.apply(Update::Stopped { error: None });
+        let sent_now = sent.borrow();
+        assert_eq!(
+            describe(&sent_now[1..]),
+            ["submit:queue:draft"],
+            "the re-armed gesture submits once that stop settled"
+        );
+        assert_eq!(
+            sent_now
+                .iter()
+                .filter(|command| {
+                    matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
+                })
+                .count(),
+            1,
+            "at most one submit"
+        );
+    }
+
+    /// A cancelled gesture whose stop fails keeps the draft and shows the
+    /// reason: cancelling does not hide the failure, and nothing is submitted.
+    #[test]
+    fn a_cancelled_stop_that_fails_keeps_the_draft() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "draft");
+        app.handle(ctrl_enter());
+        press(&mut app, KeyCode::Esc);
+        app.apply(Update::Stopped {
+            error: Some("the stop failed".into()),
+        });
+        assert!(
+            sent.borrow()
+                .iter()
+                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            "a cancelled submit sends nothing: {}",
+            describe(&sent.borrow()).join(", ")
+        );
+        assert_eq!(app.composer.text(), "draft");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.contains("the stop failed")),
+            "the failure is still shown: {:?}",
+            app.notices
+        );
+    }
+
+    /// A retry whose stop fails submits nothing: the failure of the stop it
+    /// waits for still prevents the submit.
+    #[test]
+    fn a_retry_whose_stop_fails_submits_nothing() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let (mut app, sent, _home) = session_with_queue(true, &[]);
+        typed(&mut app, "draft");
+        app.handle(ctrl_enter());
+        press(&mut app, KeyCode::Esc);
+        app.handle(ctrl_enter());
+        app.apply(Update::Stopped {
+            error: Some("the retry stop failed".into()),
+        });
+        assert!(
+            sent.borrow()
+                .iter()
+                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            "no submit follows the retry's failed stop: {}",
+            describe(&sent.borrow()).join(", ")
+        );
+        assert_eq!(app.composer.text(), "draft");
+        assert!(
+            app.notices
+                .iter()
+                .any(|notice| notice.contains("the retry stop failed")),
+            "the failure is shown: {:?}",
+            app.notices
         );
     }
 
