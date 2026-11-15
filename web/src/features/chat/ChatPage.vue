@@ -44,6 +44,13 @@ const questions = computed(() => view.value?.questions.filter((ask) => ask.branc
 const rulesAvailable = computed(() => connection.supports("permission.rules") && connection.supports("permission.set_rules"))
 const storesPastes = computed(() => view.value?.methods.includes("attachment.put") === true)
 const searchFiles = computed(() => view.value?.methods.includes("session.files.search") ? (query: string) => chat.searchFiles(props.sessionId, query) : undefined)
+/** The Skills the composer offers, once the Session serves `session.skills`; a Skill the operator may not invoke is left out. */
+const skills = ref<Array<{ name: string; description: string }>>([])
+watch(() => [view.value?.status, view.value?.methods.includes("session.skills")], async ([status, served]) => {
+  if (status !== "ready" || served !== true) { skills.value = []; return }
+  const found = await chat.sessionSkills(props.sessionId).catch((): Array<{ name: string; description: string; userInvocable: boolean }> => [])
+  skills.value = found.filter((skill) => skill.userInvocable).map(({ name, description }) => ({ name, description }))
+}, { immediate: true })
 const permissionControl = computed(() => {
   const session = view.value
   if (session?.status !== "ready" || !connection.supports("session.permission.get") || !connection.supports("session.permission.update")) return undefined
@@ -390,6 +397,7 @@ async function fork(): Promise<void> {
       :create-branch="canNewLine ? createBranch : undefined"
       :open-lines="branchable ? () => ui.openLines(sessionId) : undefined"
       :session-commands="sessionCommands"
+      :skills="skills"
     />
   </section>
 </template>

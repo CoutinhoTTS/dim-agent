@@ -806,6 +806,34 @@ fn a_compatible_preset_is_one_the_adapter_builds() {
     }
 }
 
+#[test]
+fn configured_top_k_on_the_openai_chat_protocol_names_the_setting_and_the_alternative() {
+    let configuration = |kind: &str, top_k: Option<f64>| {
+        let mut config = json!({
+            "defaultModel": {"providerId": "local", "modelId": "test-model"},
+            "providers": [{"id": "local", "kind": kind,
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "models": [{"id": "test-model", "contextWindow": 128_000,
+                    "maxOutputTokens": 4096,
+                    "config": {"maxTokens": 4096}}]}]
+        });
+        if let Some(top_k) = top_k {
+            config["providers"][0]["models"][0]["config"]["topK"] = json!(top_k);
+        }
+        serde_json::from_value::<ModelConfigFile>(config).unwrap()
+    };
+    // The OpenAI Chat protocol warns `topK` unsupported, which a strict stream
+    // fails the call on, so the setting is refused where it is stated.
+    let error = AimuxModels::from_config(configuration("openai-chat", Some(1.0)))
+        .expect_err("the OpenAI Chat protocol does not send top_k");
+    let message = error.to_string();
+    assert!(message.contains("config.topK"), "{message}");
+    assert!(message.contains("openai-compatible"), "{message}");
+    // Without the setting, and on the protocol that sends it, the profile loads.
+    AimuxModels::from_config(configuration("openai-chat", None)).unwrap();
+    AimuxModels::from_config(configuration("openai-compatible", Some(1.0))).unwrap();
+}
+
 struct OverrideRequest {
     remove_tools: bool,
     timeline: rutis::host::Key<Timeline>,

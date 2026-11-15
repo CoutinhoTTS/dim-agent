@@ -28,6 +28,7 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | [ClientView](ClientView.md) | per-connection viewed-line record in App Server | — | — | #1021, deferred for model state |
 | [AgentSettings](AgentSettings.md) | — | one `settings` tool: `list`, `get` | — | #1022 |
 | [Recall](Recall.md) | — | `recall` tool (tells the model its branch's history: turns, a turn, one thing in full, search) | — | M2; #129 |
+| [ImageUnderstanding](ImageUnderstanding.md) | — | `image_understand` tool; resolves an image reference in the calling branch and answers through Modality's `modality.image.understand` target | — | — |
 | [EventHub](EventHub.md) | the catalog of declared sources and event types, the subscriptions, publish and delivery, the `eventHub` service and the `eventhub` methods | the `events` tool, and the guide entry for `dim-event` and `dim-event-guide` | — | — |
 | [Hooks](Hooks.md) | `HooksSettings` in App Server: sources `hooks` (user), `hooks-projects` and `hooks-plugins`, the project file `.dimcode/hooks.json` read through FileStorage, `hooks.*` methods and plugin registration | hook catalog, runner, a submit check registered with `submitChecks` for the user-input entries (`UserPromptSubmit`) | tool advice, permission requests, post-tool (`PostToolUse`, `PostToolUseFailure`), Stop and Session-start hooks | M1; #755, #756, #757, #758 |
 | [Notifications](Notifications.md) | — | Session observer, `notify` tool | — | Withdrawn |
@@ -51,5 +52,5 @@ A plugin is split by the owner of its state into parts, each placed in its owner
 | Scope | Parts |
 | --- | --- |
 | Process parts | Provider (management supplement), Scheduler, Workflow, ExternalAgent, Modality, PluginManager, RuntimeManager, RemoteGateway, Skills (installation), PromptSuggestion (the Settings source), `CodeMode` when installed, light-ocr in the daemon, EventHub, Report; AcpGateway in its client host process; ClientView (the connection's viewed line) |
-| Session parts | Questions, ShellInput, Attachments, SessionTitle, Report, PromptSuggestion, Goal, Web, Recall, EventHub, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), Code Mode when enabled, SettingsTool (the one `settings` tool, registered by ExecutionSettings in v1) |
+| Session parts | Questions, ShellInput, Attachments, SessionTitle, Report, PromptSuggestion, Goal, Web, Recall, ImageUnderstanding, EventHub, Hooks, Scheduler, Workflow, PromptSources, Prompt (the entries table), Code Mode when enabled, SettingsTool (the one `settings` tool, registered by ExecutionSettings in v1) |
 | Branch parts | Goal (with Pursuit), ModelRecovery, Hooks, Prompt, Code Mode when enabled, EnvironmentClientsBranch (registered by Connection), SettingsSnapshotBranch (registered by ExecutionSettings) |

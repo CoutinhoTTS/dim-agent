@@ -77,6 +77,27 @@ fn chunk(kind: &str, text: String, updates: &mut Vec<Value>) {
 /// text: the gateway shows that block as one line, as every client does.
 const SKILL_BLOCK: &str = "<dim-skill name=\"";
 
+/// `text`, a chunk of the operator's own words, with each `/skill:<name>`
+/// token delimited so an editor draws it as one unit rather than as prose.
+/// The text itself is unchanged: the gateway repeats what the operator sent.
+fn with_tokens(text: &str) -> String {
+    let tokens: Vec<_> = dim_agent_types::skill_token::tokens(text).collect();
+    if tokens.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut at = 0;
+    for token in tokens {
+        out.push_str(&text[at..token.start]);
+        out.push('`');
+        out.push_str(&text[token.start..token.end]);
+        out.push('`');
+        at = token.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 fn loaded_skill(index: usize, text: &str) -> Option<String> {
     if markup::runtime_element(index, text) != Some("dim-skill") {
         return None;
@@ -230,7 +251,7 @@ impl Projection {
                                     &mut updates,
                                 ),
                                 None if markup::runtime_context(index, &text) => {}
-                                None => chunk("user_message_chunk", text, &mut updates),
+                                None => chunk("user_message_chunk", with_tokens(&text), &mut updates),
                             },
                             ContentBlock::Image { source } => {
                                 if let Some(file_id) = source.file_id {
@@ -397,6 +418,33 @@ mod tests {
             .map(|update| update["content"]["text"].as_str().unwrap())
             .collect();
         assert_eq!(texts, ["Explain the change", "\nSkill loaded: commit"]);
+    }
+
+    /// A `/skill:<name>` token reaches the editor as one delimited unit, its
+    /// text unchanged, so a client draws it as one piece rather than as prose.
+    #[test]
+    fn a_skill_token_replays_as_one_unit() {
+        let updates = replay(json!([
+            {"type":"text","text":"please /skill:commit it"},
+        ]));
+        let texts: Vec<&str> = updates
+            .iter()
+            .map(|update| update["content"]["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, ["please `/skill:commit` it"]);
+
+        let untouched = replay(json!([
+            {"type":"text","text":"a/skill:x stays prose"},
+        ]));
+        let texts: Vec<&str> = untouched
+            .iter()
+            .map(|update| update["content"]["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            texts,
+            ["a/skill:x stays prose"],
+            "a slash inside a word is not a token"
+        );
     }
 
     #[test]

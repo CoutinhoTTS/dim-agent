@@ -158,7 +158,7 @@ sequenceDiagram
   D-->>C: modality.realtime.ended 通知 { connection_id, reason }
 ```
 
-会话在以下情况结束：`close`；发起它的客户端连接结束，此时静默结束，因为已无处可写；提供方结束它；`direct` 连接的 `expires_at` 到期；连续 10 分钟既无 `send` 也无提供方事件（A9）；Modality 卸载，尽力以 `unloaded` 上报；以及进程退出。慢客户端会被传输的持有额度断开，其会话随之结束。会话没有任务记录、从不持久化，也不会在守护进程重启后恢复。帧有上限：`send` 的数据解码后超过 1 MiB 以 `invalid_input` 失败且会话保持打开，而提供方消息超过适配器的上限时会话以 `ended {reason: "error"}` 结束。每个进程至多四个会话；超过时 `open` 在任何提供方调用之前以 `realtime_limit` 失败。来自非发起连接的 `send` 与 `close` 以 `not_found` 拒绝。
+会话在以下情况结束：`close`；发起它的客户端连接结束，此时静默结束，因为已无处可写；提供方结束它；`direct` 连接的 `expires_at` 到期；连续 10 分钟既无 `send` 也无提供方事件（A9）；Modality 卸载，尽力以 `unloaded` 上报；以及进程退出。慢客户端会被传输的持有额度断开，其会话随之结束。会话没有任务记录、从不持久化，也不会在守护进程重启后恢复。帧有上限：`send` 的数据解码后超过 1 MiB 以 `invalid_input` 失败且会话保持打开，而提供方消息超过套接字自身的上限（WebSocket 库的默认值）属于套接字失败，会话以 `ended {reason: "error"}` 结束。每个进程至多四个会话；超过时 `open` 在任何提供方调用之前以 `realtime_limit` 失败。来自非发起连接的 `send` 与 `close` 以 `not_found` 拒绝。
 
 ### 3.4 Capability 列表与默认模型
 
@@ -223,6 +223,7 @@ sequenceDiagram
 | `modality.task.submit/status/list/wait/cancel/result` | 管理方法 | 任务生命周期；分块二进制结果取回 |
 | `modality.realtime.open/send/close`、`modality.realtime.event`、`modality.realtime.ended` | 管理方法及绑定连接的通知 | 实时会话 |
 | `modalityTasks` | 进程服务，无 key | 与任务方法相同的操作，供其他进程插件使用 |
+| `modalityTargets` | 进程服务，无 key | 向进程使用方回答某个操作当前解析到的目标，或它不可用的原因（§9.4）；无任务、无凭据 |
 | `modalityAdapter` | 进程服务，key 为适配器名；[#861](https://github.com/arcships/dim/issues/861) 落地后按任务按名解析，图像切片在此之前每次调用读取单个进程服务（§9.1） | 由提供方执行的类别 |
 | `ocrHelper` | 进程服务，无 key，由插件的进程行提供；Modality 每次调用时读取（§9.1） | `local/pp-ocr` 目标的描述：可执行文件、参数、可读路径（A.2.1） |
 | `modality` 设置文档 | 业务配置（Settings 来源，schema 由 Modality 声明，经 Settings 类型化操作写入） | 操作默认值、上限；使用时读取 |
@@ -274,7 +275,7 @@ sequenceDiagram
 | 不门控 Modality 的按任务适配器查找 | 运行时/装配，[#861](https://github.com/arcships/dim/issues/861) | [§9.1](#91-按任务适配器查找) |
 | Provider 提供可选模型及其声明能力的只读契约 | Provider，[#790](https://github.com/arcships/dim/issues/790) | [§9.2](#92-provider-只读契约) |
 | Provider 的非对话连接 | Provider，[#799](https://github.com/arcships/dim/issues/799) | [§9.3](#93-provider-非对话连接) |
-| `modality.image.understand` 的 Session 图像理解使用方 | Agent/Prompt 所有者，[#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-图像理解使用方) |
+| `modality.image.understand` 的 Session 图像理解使用方 | Modality 提供目标读取；Agent/Prompt 所有者拥有使用方，[#798](https://github.com/arcships/dim/issues/798) | [§9.4](#94-session-图像理解使用方) |
 
 Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列在 [overview 附录 B.2](../overview.md#b2-app-server-进程插件)。
 
@@ -308,9 +309,9 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 
 - **问题。** Modality 解析 `modality.image.understand`，但 Session 的图像理解路径（附件与 `read`）把图像发给 Session 采纳的模型；没有任何东西读取 Modality 的默认值。在该需求落地前，理解这一行只能解析与显示。
 - **现有机制。** `read` 把图像块返回给 Session 模型，`session.model.update` 与 Prompt 采纳的配置选择该模型。Session 路径到进程所有者默认值之间没有输入路径或类型化查找。在浏览器里选择正是该需求要排除的仅浏览器默认值。
-- **需要的能力。** Session 图像理解路径经 Modality 的 `modality.image.understand` 默认值（显式 → 默认值 → 自动）解析其模型，或等价的类型化交接。机制属于 Agent/Prompt。
-- **顺序影响。** 每次读取或附件时；无 Timeline 事件；在该需求落地前已有 Session 保持其行为；不重载。
-- **所有者/issue。** Agent/Prompt 所有者，[#798](https://github.com/arcships/dim/issues/798)。
+- **需要的能力。** Session 图像理解路径经 Modality 的 `modality.image.understand` 默认值（显式 → 默认值 → 自动）解析其模型，或等价的类型化交接。该交接是一次类型化读取：进程服务 `modalityTargets` 回答某个操作当前解析到的目标，或它不可用的原因，采用与 `modality.capabilities` 相同的优先级与原因措辞，按调用读取，既不门控也不重载 Modality，也不返回凭据。Modality 拥有并提供这次读取（它是 Modality 作用域的进程服务）；使用方是 [ImageUnderstanding](../../../design/plugins/ImageUnderstanding.md)，它拥有工具及其请求。
+- **顺序影响。** 每次工具调用；不新增事件类型（普通工具调用与结果事实）；在该需求落地前已有 Session 保持其行为；不重载。
+- **所有者/issue。** Modality 提供 `modalityTargets`；Agent/Prompt 所有者拥有使用方，[#798](https://github.com/arcships/dim/issues/798)。
 
 ## 附录 A. 接口细节
 
@@ -349,7 +350,7 @@ Settings 业务来源与 `pluginFiles` 补充是对其他插件的改动，列�
 
 `Job` 为 `{ task_id, category, operation, model: {providerId, modelId}, params, files: [{ name, media_type, path }], work_dir }`。内联输入的 `path` 是 Modality 存放在 `modality/tasks/<task_id>/input/<name>` 的文件的绝对路径；通过 `node_path` 给出的输入记录 Modality 得到的规范路径（最后一个组件不得是链接；更早的链接会被解析），Modality 只读取一次以取得 `bytes` 与 `sha256`，从不复制，执行方就地读取。`work_dir` 是任务的 `modality/tasks/<task_id>/work` 目录，调用前创建；每个结果文件解析为其中的普通文件。`ResolvedConnection` 是 Provider 非对话连接解析返回的数据形态（`kind`、`provider_id`、`model`、端点与凭据材料，以及 `realtime.*` 用途下目录条目的 `realtime: { protocol, path }` 声明），每次调用传入，从不存储或记录日志。该声明是 Provider 对条目 `metadata.raw.realtime` 的读取；条目未声明的模型，以及从不携带它的配置模型 profile，会在适配器被调用之前以 `unavailable` 拒绝，消息为 “The model declares no realtime transport”。中继从连接的 base URL、声明的 `path` 与模型 id 组合出套接字地址，因此路径由目录条目声明，从不推导。
 
-产品内置适配器是 `dim-modality-aimux` crate：aimux 的词汇留在适配器内部。它服务 `image.generate`、`image.edit`、`video.generate`、`speech.synthesize` 与 `speech.transcribe`，按目录提供方 id 绑定；并对任何条目声明了 openai-realtime 传输的模型服务 `realtime.voice`，因为实时会话由连接构建，而不是由厂商行决定。中继以连接的 base URL 加声明的路径和作为查询的模型 id 连接，`http` 与 `https` 变为 `ws` 与 `wss`；它发送连接的头部与 bearer、经连接的代理连接、在套接字处以 1 MiB 限制一条提供方消息、把文本帧写成 JSON 并把音频帧写成解码后的字节，并在提供方关闭、套接字失败或十秒内写不出一帧时结束会话。它不承载控制帧——控制帧属于 `direct` 传输。凡是其媒体模型由某个 aimux 厂商包执行的内建目录提供方都有一行（openai、google、xai、grok-build、elevenlabs、fal、deepgram、assemblyai、cartesia、gladia、groq、replicate、stability-ai、recraft、black-forest-labs、luma-ai、runway、kling、hume-ai、mistral-ai、rev-ai），每行只服务其包实际实现的操作。`image.edit` 只由读取编辑输入字节的包服务：openai、google、fal、replicate、black-forest-labs 会读取；stability-ai、recraft、luma-ai 只服务 `image.generate`；包对某个模型报告不接受文件输入时，该模型也不提供 edit。xAI 的图像模型因该包回答 `NoSuchModel` 而报 `adapter`，其转录与合成模型则被服务。自建提供方的 id 是规范 UUID，不匹配任何行，因此其媒体操作报 `adapter` 原因，`configure` 也以该原因拒绝其模型。其他 A.1 类别（音乐、音频、3D 资产、动作）没有对应行，保持 `build` 原因。内建目录没有为 Amazon Bedrock 声明任何媒体模型，因此 Bedrock 连接不服务媒体操作。安装后 `available` 即为 true；服务范围按模型由 `operations` 回答，端点不可达是某次调用的失败，而不是能力。视频是唯一可恢复的操作：`submit` 把提供方的操作引用存为句柄，`wait` 轮询它并把结果流式写入文件，因此重启恢复同一作业而不会重新发起；开始后一小时仍未结束的作业以 `provider_error` 失败，避免永不结束的作业一直占用调度槽位。该上限同样约束在途的状态请求与两次轮询之间的等待，因此挂起的请求会在截止时失败，而不是跑满连接更长的超时。aimux 对已启动的视频作业不提供取消，因此 `cancelRemote` 回答 `unsupported`，提供方作业会在其一侧跑完并计费。输出文件的媒体类型从返回字节读取，提供方返回与请求不同的格式时，按实际返回记录。
+产品内置适配器是 `dim-modality-aimux` crate：aimux 的词汇留在适配器内部。它服务 `image.generate`、`image.edit`、`video.generate`、`speech.synthesize` 与 `speech.transcribe`，按目录提供方 id 绑定；并对任何条目声明了 openai-realtime 传输的模型服务 `realtime.voice`，因为实时会话由连接构建，而不是由厂商行决定。中继以连接的 base URL 加声明的路径和作为查询的模型 id 连接，`http` 与 `https` 变为 `ws` 与 `wss`；它发送连接的头部与 bearer、经连接的代理连接、把文本帧写成 JSON 并把音频帧写成解码后的字节，并在提供方关闭、套接字失败或十秒内写不出一帧时结束会话。它不承载控制帧——控制帧属于 `direct` 传输。凡是其媒体模型由某个 aimux 厂商包执行的内建目录提供方都有一行（openai、google、xai、grok-build、elevenlabs、fal、deepgram、assemblyai、cartesia、gladia、groq、replicate、stability-ai、recraft、black-forest-labs、luma-ai、runway、kling、hume-ai、mistral-ai、rev-ai），每行只服务其包实际实现的操作。`image.edit` 只由读取编辑输入字节的包服务：openai、google、fal、replicate、black-forest-labs 会读取；stability-ai、recraft、luma-ai 只服务 `image.generate`；包对某个模型报告不接受文件输入时，该模型也不提供 edit。xAI 的图像模型因该包回答 `NoSuchModel` 而报 `adapter`，其转录与合成模型则被服务。自建提供方的 id 是规范 UUID，不匹配任何行，因此其媒体操作报 `adapter` 原因，`configure` 也以该原因拒绝其模型。其他 A.1 类别（音乐、音频、3D 资产、动作）没有对应行，保持 `build` 原因。内建目录没有为 Amazon Bedrock 声明任何媒体模型，因此 Bedrock 连接不服务媒体操作。安装后 `available` 即为 true；服务范围按模型由 `operations` 回答，端点不可达是某次调用的失败，而不是能力。视频是唯一可恢复的操作：`submit` 把提供方的操作引用存为句柄，`wait` 轮询它并把结果流式写入文件，因此重启恢复同一作业而不会重新发起；开始后一小时仍未结束的作业以 `provider_error` 失败，避免永不结束的作业一直占用调度槽位。该上限同样约束在途的状态请求与两次轮询之间的等待，因此挂起的请求会在截止时失败，而不是跑满连接更长的超时。aimux 对已启动的视频作业不提供取消，因此 `cancelRemote` 回答 `unsupported`，提供方作业会在其一侧跑完并计费。输出文件的媒体类型从返回字节读取，提供方返回与请求不同的格式时，按实际返回记录。
 
 `available` 在不重载的情况下报告运行时可用性（例如提供方端点不可达）。若某个操作的可用适配器都不服务已配置或显式指定的模型，则报告为“no adapter for the configured model”，其提交以 `unavailable` 失败。`image.understand` 不是适配器操作：它由一个可选的视觉模型服务，且只做选择。OCR 不是适配器：它是宿主任务，其目标是本构建提供的宿主目标之一 `local/apple-vision` 或 `local/pp-ocr`，两者都从目标发布的描述启动（A.2.1）；当 `local/pp-ocr` 未提供时，它不是选项，`modality.ocr` 仍解析 `local/apple-vision`。指明控制节点以外节点的任务以 `node_unavailable` 失败。`wait` 以 `task_id` 指名它等待的作业；当 `submit` 返回了 `remote_handle` 时，适配器可以改用它。带已存储 `remote_handle` 的 `wait` 必须能在新一代中工作；不返回句柄的适配器以 `task_id` 记录自己进行中的工作，且仅限同一代内，因此无法恢复。
 

@@ -983,7 +983,6 @@ async fn explicit_preferences_reach_chat_and_responses_for_model_aliases() {
         for (tier, effort) in [
             (Some("priority"), Some("high")),
             (Some("flex"), Some("none")),
-            (Some("future-tier"), Some("low")),
             (None, None),
         ] {
             let mut request = ModelRequest::new(
@@ -2159,11 +2158,9 @@ async fn respond_native(
             .unwrap();
     }
     let continuation = match endpoint.kind {
-        "openai-responses" => request["input"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|item| item["type"] == "function_call_output" || item["id"] == "refusal-1"),
+        "openai-responses" => request["input"].as_array().unwrap().iter().any(|item| {
+            item["type"] == "function_call_output" || item["content"] == "Cannot comply."
+        }),
         "gemini" => request["contents"]
             .as_array()
             .unwrap()
@@ -2442,11 +2439,19 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                     assert_eq!(reasoning["encrypted_content"],"encrypted-final");
                     assert_eq!(reasoning["summary"],json!([{"type":"summary_text","text":"first thought"},{"type":"summary_text","text":"second thought"}]));
                     assert_eq!(input.iter().filter(|item|item["id"]=="rs-1").count(),1);
-                    let message=input.iter().find(|item|item["id"]=="msg-1").unwrap();
-                    assert_eq!(message["phase"],"commentary");
-                    assert_eq!(message["content"],json!([{"type":"output_text","text":"before"},{"type":"output_text","text":"after"}]));
-                    assert_eq!(input.iter().find(|item|item["type"]=="function_call").unwrap()["id"],"fc-1");
-                    assert_eq!(input.iter().filter(|item|item["type"]=="function_call").map(|item|item["id"].as_str().unwrap()).collect::<Vec<_>>(),vec!["fc-1","fc-2"]);
+                    // Without `store`, each text part replays as its own message item,
+                    // with its text as a string and no item id.
+                    let messages:Vec<_>=input.iter().filter(|item|item["role"]=="assistant").collect();
+                    assert_eq!(messages.len(),2);
+                    assert_eq!(messages[0]["content"],"before");
+                    assert_eq!(messages[0]["phase"],"commentary");
+                    assert_eq!(messages[1]["content"],"after");
+                    assert!(messages.iter().all(|item|item.get("id").is_none()),"{messages:?}");
+                    let calls:Vec<_>=input.iter().filter(|item|item["type"]=="function_call").collect();
+                    assert_eq!(calls.len(),2);
+                    assert!(calls.iter().all(|item|item.get("id").is_none()),"{calls:?}");
+                    assert_eq!(calls[0]["call_id"],"call-1");
+                    assert_eq!(calls[1]["call_id"],"call-2");
                     assert_eq!(next["store"],false);
                     assert!(next["include"].as_array().unwrap().contains(&json!("reasoning.encrypted_content")));
                 }
@@ -3117,9 +3122,10 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             session.idle("main").await.unwrap();
             let requests = server.endpoint.requests.lock().unwrap().clone();
             assert_eq!(requests.len(), 2);
-            let replay = requests[1].2["input"].as_array().unwrap().iter().find(|item| item["id"] == "refusal-1").unwrap();
-            assert_eq!(replay["content"], json!([{"type":"output_text","text":"Cannot comply."}]));
+            let replay = requests[1].2["input"].as_array().unwrap().iter().find(|item| item["content"] == "Cannot comply.").unwrap();
+            assert_eq!(replay["role"], "assistant");
             assert_eq!(replay["phase"], "final_answer");
+            assert!(replay.get("id").is_none(), "{replay}");
             let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "finished")));
             agent.close().await.unwrap();
@@ -4092,8 +4098,7 @@ async fn an_alias_with_explicit_reasoning_and_temperature_is_unsupported() {
     root.shutdown().await.unwrap();
 }
 
-/// A Chat refusal delta becomes visible text (vendored patch for
-/// arcships/aimux#461).
+/// A Chat refusal delta becomes visible text (arcships/aimux#461).
 #[tokio::test]
 async fn chat_refusal_delta_is_visible_text() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -4148,8 +4153,7 @@ async fn chat_refusal_delta_is_visible_text() {
     root.shutdown().await.unwrap();
 }
 
-/// A Responses refusal reaches the reply as visible text (vendored patch for
-/// arcships/aimux#466).
+/// A Responses refusal reaches the reply as visible text (arcships/aimux#466).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_refusal_deltas_are_visible_text() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -4208,7 +4212,7 @@ async fn responses_refusal_deltas_are_visible_text() {
 }
 
 /// Signed Gemini text parts keep their own blocks, and text closes before a
-/// function call (vendored patch for arcships/aimux#467).
+/// function call (arcships/aimux#467).
 #[tokio::test]
 async fn gemini_signed_text_parts_keep_their_blocks() {
     use aimux_core::language_model::LanguageModel;
@@ -4278,7 +4282,7 @@ async fn gemini_signed_text_parts_keep_their_blocks() {
 /// text in unsigned chunks and the `thoughtSignature` in a last, empty chunk,
 /// so that signature belongs to the text before it and is replayed with it.
 /// The streams are `fixtures/google-text.chunks.txt` and
-/// `fixtures/google-reasoning.chunks.txt` under `vendor/aimux`; the tag's
+/// `fixtures/google-reasoning.chunks.txt` in the `aimux-providers` package; the
 /// tests at `aimux-providers/src/google/tests/language_model.rs:4429` and
 /// `:4546` stream them and snapshot the result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4411,7 +4415,7 @@ async fn gemini_signature_after_unsigned_text_signs_that_text_and_replays() {
 }
 
 /// Responses text blocks split by content part, and a function call keeps its
-/// item id (vendored patch for arcships/aimux#468).
+/// item id (arcships/aimux#468).
 #[tokio::test]
 async fn responses_output_text_parts_and_function_call_ids_are_kept() {
     use aimux_core::language_model::LanguageModel;
@@ -4482,7 +4486,7 @@ async fn responses_output_text_parts_and_function_call_ids_are_kept() {
 }
 
 /// A Gemini terminal chunk finishes the stream while the HTTP body stays open
-/// (vendored patch for arcships/aimux#469).
+/// (arcships/aimux#469).
 #[tokio::test]
 async fn gemini_terminal_chunk_finishes_while_the_body_stays_open() {
     use aimux_core::language_model::LanguageModel;

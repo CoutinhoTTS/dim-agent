@@ -170,6 +170,21 @@ export function readAck(value: unknown): void {
 }
 
 /** `session.methods` of one Session: the method names it serves. */
+/** `session.skills`: the Skills the palettes offer, with the operator-invocable flag. */
+export function readSessionSkills(value: unknown): Array<{ name: string; description: string; userInvocable: boolean }> {
+  const at = "session.skills"
+  const source = obj(value, at)
+  return arr(source.skills, `${at}.skills`).map((item, index) => {
+    const rowAt = `${at}.skills[${index}]`
+    const skill = obj(item, rowAt)
+    return {
+      name: str(skill, "name", rowAt),
+      description: str(skill, "description", rowAt),
+      userInvocable: skill.userInvocable === undefined ? true : bool(skill, "userInvocable", rowAt),
+    }
+  })
+}
+
 export function readSessionMethods(value: unknown): string[] {
   const at = "session.methods"
   return arr(obj(value, at).methods, `${at}.methods`).map((item, index) => str(obj(item, `${at}.methods[${index}]`), "name", `${at}.methods[${index}]`))
