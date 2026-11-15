@@ -405,7 +405,7 @@ impl Composer {
         self.command_query().is_some()
     }
 
-    fn palette_rows(&self) -> Vec<crate::ui::rows::Row> {
+    pub(crate) fn palette_rows(&self) -> Vec<crate::ui::rows::Row> {
         palette::rows_for(
             self.command_query().unwrap_or(""),
             self.context,
@@ -724,7 +724,9 @@ impl Composer {
             self.palette.set_query(&query);
             let rows = self.palette_rows();
             return match rows.get(self.palette.current(&rows)) {
-                None => true,
+                // No row matches, so `palette_key`'s `?` leaves the draft to the
+                // editor, which submits it or opens a new line.
+                None => !newline_key(key),
                 Some(row) => Self::row_command(row, &query).is_some(),
             };
         }

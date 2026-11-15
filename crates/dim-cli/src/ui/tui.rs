@@ -16321,7 +16321,7 @@ mod tests {
 
     /// The composer owns which keys act on the draft as a submit does, and the
     /// send-now guard asks it instead of reading the key's modifiers itself.
-    /// The matrix pins the two together: over four composer states and every
+    /// The matrix pins the two together: over five composer states and every
     /// Enter the interface routes to the composer, `submits` is true exactly
     /// when `handle_key` takes the draft out of it, and a pending send-now
     /// refuses exactly those keys and leaves the rest as they were.
@@ -16332,16 +16332,24 @@ mod tests {
             Draft,
             Hidden,
             Row,
+            NoRow,
             Picker,
         }
 
-        let states = [State::Draft, State::Hidden, State::Row, State::Picker];
+        let states = [
+            State::Draft,
+            State::Hidden,
+            State::Row,
+            State::NoRow,
+            State::Picker,
+        ];
         let state = |state: State| {
             let (mut app, sent, home) = session_with_queue(true, &[]);
             match state {
                 State::Draft => typed(&mut app, "draft"),
                 State::Hidden => app.composer.set_draft("/fast"),
                 State::Row => app.composer.set_draft("/"),
+                State::NoRow => app.composer.set_draft("/zzz"),
                 State::Picker => app.composer.set_draft("look @/"),
             }
             (app, sent, home)
@@ -16400,6 +16408,16 @@ mod tests {
             keys.push(ctrl_j.clone());
             for (name, key) in &keys {
                 let (mut app, _sent, _home) = state(which);
+                if matches!(which, State::NoRow) {
+                    // Enter only falls through to the editor when no row matches,
+                    // so the state must have none; a draft that did match would
+                    // make the case prove nothing.
+                    assert!(
+                        app.composer.palette_open() && app.composer.palette_rows().is_empty(),
+                        "{which:?}: the palette is open with no row, so the palette \
+                         leaves Enter to the editor"
+                    );
+                }
                 let submits = app.composer.submits(key);
                 let acts = matches!(
                     app.composer.handle_key(*key),
@@ -16447,6 +16465,7 @@ mod tests {
                     State::Draft => {}
                     State::Hidden => app.composer.set_draft("/fast"),
                     State::Row => app.composer.set_draft("/"),
+                    State::NoRow => app.composer.set_draft("/zzz"),
                     State::Picker => app.composer.set_draft("look @/"),
                 }
                 let during = describe(&sent.borrow());
