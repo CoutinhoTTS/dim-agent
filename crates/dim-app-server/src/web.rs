@@ -8,7 +8,7 @@ use crate::{
 use content::{convert, plain_text, redact};
 use dim_agent_capabilities::{
     host::{HostFuture, ToolExecutionContext},
-    tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
+    tool_registry::{ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
 use dim_agent_types::{ToolCall, ToolContent, ToolDefinition, ToolResult, ToolSource};
@@ -245,6 +245,11 @@ struct WebToolHandler {
 }
 
 impl ToolHandler for WebToolHandler {
+    /// A fetch or a search reads a remote page and writes only this Session's
+    /// private page cache.
+    fn concurrency(&self, _: &ToolCall) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
     fn execute(
         &self,
         call: ToolCall,
