@@ -1,5 +1,7 @@
 # TLC run record
 
+Historical artifacts: the hashes below refer to commit `c885c8eab`. WaitRuntime and NestedSettlement have since been expanded; use [the coverage-fill record](coverage-fill-results.json) for their current results. Unchanged artifacts retain the evidence below.
+
 Scope clarification: this is the original 34-configuration experiment, not a complete per-Capability coverage verdict. See the subsequent [coverage audit](coverage-audit.md) and its separate Wait selection probe; none of these recorded models/configurations was changed by that audit.
 
 Date: 2026-11-15. Code correspondence: `8a5fe0980`. Java 17.0.18, TLA+ tools release 1.7.4, TLC 2.19 (rev 5a47802), one worker, 2 GiB maximum heap.

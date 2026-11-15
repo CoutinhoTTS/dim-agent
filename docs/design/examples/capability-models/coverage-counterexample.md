@@ -1,5 +1,7 @@
 # Wait selection coverage counterexample
 
+Historical run at `5a78b2ed2`: the expanded WaitRuntime now passes the same observation probe; see [the follow-up](coverage-fill.md). The trace and original hashes below are preserved.
+
 This is a model-coverage counterexample, not an implementation defect. The probe observes the existing WaitRuntime transitions without restricting them. See [the coverage analysis](coverage-audit.md).
 
 TLC exit: 13. Search stopped at the counterexample: 676 generated, 427 distinct, depth 6, 275 states still queued. This is not an exhaustive passing run.

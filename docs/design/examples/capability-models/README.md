@@ -5,7 +5,8 @@
 代码对应基线为 `8a5fe0980`。实验的配置、模型摘要和结果见 [运行记录](results.md)。
 
 [承诺覆盖复查](coverage-audit.md)逐项列出 22 个部件尚未进入模型的业务场景。
-下表是已选取性质的检查清单，不是每个部件的完整承诺集；Wait 的独立观察探针给出了选择语义未覆盖的反例。
+[业务覆盖补充实验](coverage-fill.md)列出本轮补入的场景、源码入口和仍未覆盖的部分。
+下表是最初的检查清单；WaitRuntime、NestedSettlement 已扩展，以补充实验和新运行记录为准。
 
 ## 如何读结论
 
@@ -33,7 +34,7 @@
 | 2a Approval | 多个响应可以提交，只能一个取走 pending；自动结算不得越过已提交响应；持久发布前不返回准入 | [ApprovalOrdering](../approval-model/ApprovalOrdering.tla)，六个不变量；对应 pending take、捕获位置复核与发布等待 |
 | 2b Approval | 重载只选择未结束请求，补取消，不重新提问或执行工具 | 恢复选择，关联 approval_id；旧 native future 的退出仍依赖调用方取消，不由 pending 清空推出 |
 | 3a ToolExecutor | 准入可并行；运行必须等前段全部结算；Exclusive 不和别的调用同时运行 | [ToolSegments](../tool-model/ToolSegments.tla)：`Settle/Advance` 对应 Settled::drop/执行段推进；计数、前缀、顺序、排他及观察取消后的启动检查 |
-| 3b ToolExecutor | 取消保留已确认子结果 effects；父结果收集对应子结果，截止时间是明确例外 | [NestedSettlement](NestedSettlement.tla)：`ChildResult/ParentResult/Expire`；`ConfirmedEffectsRetained/ChildBeforeParentUnlessDeadline/CancellationIsNotRollback`。两个孩子属于同一个父调用，不验证任意嵌套树 |
+| 3b ToolExecutor | 取消保留已确认子结果 effects；父结果收集对应子结果，截止时间是明确例外 | [NestedSettlement](NestedSettlement.tla)：`ChildResult/ParentResult/Expire`；`ConfirmedEffectsRetained/ChildBeforeParentUnlessDeadline/CancellationIsNotRollback`。当前扩展为两个父调用、三个孩子，见补充实验；不验证任意嵌套树 |
 | 3c ToolExecutor | 恢复仅结算无 result 的 call_event_id，不重跑参数 | 恢复选择；嵌套结算模型检查确认效果的边界，不模拟五秒墙钟或不合作宿主的强制退出 |
 | 4a InputQueue | Queue 可 held，Steer/Append 可交接；普通输入交接后不能撤回，Append 不驱动回合；handover 不要求普通 applied | [InputQueue](InputQueue.tla)：`Arrive/Take/Withdraw/End` 对应 QueueState；检查交接、删除、消费集合及驱动位 |
 | 4b InputQueue | 首个控制决定生效；替代在删除之前且同批；恢复排除已交接/删除成员，不重复替代 | [InputRecovery](InputRecovery.tla)：`Apply/Withdraw/Replace/Restore`；检查 `AtomicReplacement/DecisionLast/NoRepeatReplacement/RestoreOnlyMembers`。replacement 正文是边界数据，不在模型内渲染 |
@@ -139,7 +140,8 @@ done
 ```
 
 原 34 个配置中，两个 `ExecLifecycle-Shell*` 预期返回 13（恢复活性反例），其余预期返回 0。
-新增的 `WaitSelectionCoverage` 也预期返回 13，但它是模型覆盖探针，不能计作运行时缺陷或合并进原运行记录。
+补覆盖后的 `WaitSelectionCoverage` 预期返回 0；旧模型的 exit 13 反例保留为历史证据。
+本轮新增配置均预期返回 0，精确范围见补充实验。
 任何解析错误、超时或新的反例都不是通过。禁用 deadlock 检查是为了允许已完成/等待环境的状态 stutter；
 只有声明了时序性质和相应公平性的模型才检查进度，不把安全性通过误报为“永不挂起”。
 
