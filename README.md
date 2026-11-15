@@ -27,7 +27,7 @@ npm install -g dimcode-alpha@alpha
 dima
 ```
 
-Sign in with `/login` or select a configured model with `/models`. Type `ls` in the chat and press Enter. In this session Dim asks to run `ls -la` in `runtime/plugins`. Choosing **Allow once** lets it list the three plugin directories.
+Add a provider with `/connect` (or `/provider`), sign in to DimAgent with `/login`, or select a configured model with `/models`. Type `ls` in the chat and press Enter. In this session Dim asks to run `ls -la` in `runtime/plugins`. Choosing **Allow once** lets it list the three plugin directories.
 
 <img src="docs/design/assets/cli-ls.gif" alt="A user sends ls in Dim chat, approves one directory listing, and gets goal, plugin-authoring and workflow." width="760">
 
