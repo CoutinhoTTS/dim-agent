@@ -1687,10 +1687,7 @@ impl Shared {
             return record;
         }
         if record.state == TaskState::Running {
-            if let Executor::Provider { provider, .. } = &record.executor
-                && record.remote_handle.is_some()
-                && self.adapter_serves(provider, &record.category, &record.operation)
-            {
+            if record.remote_handle.is_some() && self.record_serves(&record) {
                 return record;
             }
             return self
@@ -1729,17 +1726,20 @@ impl Shared {
         self.adapter_named(adapter)
     }
 
-    /// Whether the process adapter is available and serves the operation.
-    fn adapter_serves(&self, provider: &ModelId, category: &str, operation: &str) -> bool {
-        let Some((_, adapter)) = self.adapter_choice(&provider.provider_id) else {
+    /// Whether the adapter this task recorded is available and serves its
+    /// operation. Recovery asks the recorded copy, never a newly preferred
+    /// one: a handle is only meaningful to the copy that issued it (A.2).
+    fn record_serves(&self, record: &TaskRecord) -> bool {
+        let Executor::Provider { provider, .. } = &record.executor else {
+            return false;
+        };
+        let Some(adapter) = self.adapter_for(record) else {
             return false;
         };
         adapter.0.available()
-            && adapter
-                .0
-                .operations(provider)
-                .iter()
-                .any(|served| served.category == category && served.operation == operation)
+            && adapter.0.operations(provider).iter().any(|served| {
+                served.category == record.category && served.operation == record.operation
+            })
     }
 
     /// Writes `interrupted` over a record loaded at startup.
