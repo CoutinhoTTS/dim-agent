@@ -719,6 +719,9 @@ impl DynPlugin for AdapterPlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, rutis::Error>> {
         Box::pin(async move {
+            // One binding per name: a provider copy another adapter claims is
+            // one this adapter must not hold, so it provides the family copy
+            // and leaves every provider slot available (Modality A.2).
             ctx.provide(ModalityAdapterService(self.0.clone()))?;
             Ok(Effect::Done)
         })
