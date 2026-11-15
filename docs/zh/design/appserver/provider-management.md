@@ -62,7 +62,16 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`；每个连接新增 `gluedPrefix`，即其记录声明的前缀，每个模型新增 `alias`，即所列 id 所指的 catalog id；未设置时省略 | false | `Drain` |
 | `provider.list` | `{}` | 原 `{providers,errors}` 摘要；每项新增 `remoteModelList`，表示 `provider.refresh` 能否列举该 Provider 的模型，客户端据此在空 catalog 的提示行给出或省略该命令，以及 `gluedPrefix`，即其记录声明的前缀，未设置时省略 | false | `Drain` |
 | `provider.selection` | `{cwd?}` | 既有 `{selection}`，其 scope/version 独立。带 `cwd` 时只读该作用域的行，该文件夹没有行时返回 `null`；工作区优先于全局是一条 `configuration` 规则，不属于此读取 | false | `Drain` |
-| `provider.catalog` | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`，**不修改** | false | `Drain` |
+| `provider.catalog` | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`；每个模型的 `name` 在其 Provider 内唯一（见下方 §3.1） | false | `Drain` |
+
+`provider.catalog` 发布的 `name` 在所属 Provider 内唯一。重复判定覆盖该目录的全部行，
+停用或不可用的行也算在内，因此开关某一行不会改名其他行，各客户端读到的名字一致。名字按
+去除首尾空白后比较。名字唯一的行为保持原样；与其他行同名的行发布
+`<自身名字> · <限定词>`：限定词是该行列举结果声明的来源，即它携带的标签中最后一个
+` · ` 之后的文字（group 行为 `routing group`）；列举结果未声明来源、或该限定名也已被占用时，
+限定词改用该行的 id；id 限定名仍被占用时再加计数。这个名字在构建回复时计算，从不存储：
+所有 descriptor 和持久字段都保留 Provider 或用户声明的名字，因此保存编辑不会写回后缀，
+后缀也随其重复行一起消失。此规则适用于所有 Provider，包括两行同名的自定义 Provider。
 
 省略 ID 返回全部已知条目，包含未登录账号；指定 ID 返回该项或明确错误。
 管理读取独自提供编辑视图：version、模型 descriptor、管理说明来自同一 Provider 记录快照，

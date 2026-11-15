@@ -121,7 +121,21 @@ preference, workspace selection, account lease or secret file is created.
 | `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`; each connection adds `gluedPrefix`, the prefix its record states, and each model adds `alias`, the catalog id the listed id stands for; each is omitted when unset | false | `Drain` |
 | `provider.list` | `{}` | Existing `{providers, errors}` summary; each provider adds `remoteModelList`, whether `provider.refresh` can list its models, which clients use to offer or withhold that command in a row naming an empty catalog, and `gluedPrefix`, the prefix its record states, omitted when unset | false | `Drain` |
 | `provider.selection` | `{cwd?}` | Existing `{selection}` and its separate scope/version. A `cwd` reads only that scope's row and answers `null` when the folder has none; the workspace-over-global precedence is a `configuration` rule, not this read's | false | `Drain` |
-| `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; **unchanged** | false | `Drain` |
+| `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; each model's `name` is unique within its provider (§3.1 below) | false | `Drain` |
+
+`provider.catalog` publishes a `name` unique within its provider. Duplicates are
+found among all of that catalog's rows, a disabled or an unavailable one included,
+so switching a row on or off renames no other and every client reads the same
+names. Names compare after trimming. A row whose name is unique keeps it; a row
+that shares its name publishes `<its own name> · <qualifier>`, where the qualifier
+is the origin its listing states for that row — the text after the last ` · ` of
+the label it carries, `routing group` for a group row among them — or the row's id
+when the listing states no origin or the qualified name is taken too. An
+id-qualified name that is taken as well gains a counter. The name is computed when
+the reply is built and never stored: every descriptor and every persisted field
+keeps the name the provider or the user stated, so saving an edit never writes a
+suffix back and a suffix disappears with its duplicate. This holds for every
+provider, a custom one whose two rows state one name included.
 
 Without an ID, management returns all known entries, including signed-out accounts.
 With an ID, it returns that entry or a typed error. It is the sole edit-view read:
