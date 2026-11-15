@@ -159,7 +159,7 @@ Menu selection can still complete rather than dispatch an exact name: commands
 with inline arguments and `/goal` fill the composer for a separate submission.
 `Tab` only completes the selected row and never runs or sends it: a command
 fills its name, one that takes an argument also fills the space after it, and a
-Skill row fills its `$skill: <name> ` marker. A query matching nothing leaves the
+Skill row fills its `/skill:<name> ` token. A query matching nothing leaves the
 draft unchanged. A command without an argument runs on `Enter` only.
 The command menu lists `/permissions` as the permission entry. `/approvals` and `/approval`
 remain compatibility aliases when typed directly. Run, queue and steer keys are
@@ -168,14 +168,20 @@ picking an earlier message and scrolling to the top or bottom are also omitted;
 `Tab`, `Home` and `End` keep their fullscreen message-picker and scroll bindings
 outside the menu.
 
-A Skill row reads `$name` with its description. Only
-an enabled Skill that no other root shadows is listed; a name containing whitespace
-is not listed either, because a reference ends at the first whitespace. The list follows the
+A Skill row reads `/skill:<name>` with its description. Only an enabled, unshadowed,
+user-invocable Skill whose name the token can carry is listed: a name holding a character outside
+`A-Z`, `a-z`, `0-9`, `_`, `-` and `.`, or ending with a full stop, cannot be referenced, so it is
+not listed either. The list
+follows the
 Session's catalog: the client rereads it on attach, on a Session switch, after
 `/reload-skills`, and after a change in `/skills`. A daemon that does not serve
 `skills.catalog` shows the commands alone, without an error. Choosing a Skill row,
-with `Enter` or `Tab`, fills `$skill: <name> ` and never sends; the marker is part
-of the message text. Skills come after commands; a Skill leads only when its name
+with `Enter` or `Tab`, fills `/skill:<name> ` and never sends; the token is part
+of the message text and the draft draws it as one highlighted unit. Typing `/skill:`
+narrows the menu to Skills: the query after the `skill:` namespace matches Skill
+names only. A draft that begins with `/skill:` is sent as a message and never run as
+a command, and a token may stand mid-sentence as long as it starts the message or
+follows whitespace. Skills come after commands; a Skill leads only when its name
 starts with the query and no command name or alias does, so a name shared with a
 command keeps both rows, the command first. `/` is the only trigger: `@` stays the
 file picker.
@@ -419,7 +425,7 @@ first, so they cannot start a new run automatically. A text block after the firs
 that opens one of the runtime's own markers is context a capability appended
 rather than the operator's words, by the same rule the title and the catalog
 preview read (Hooks A.6.2, Skills §9), so it is not restored; a later operator
-block that only looks like one is. References such as `$skill: name` stay so
+block that only looks like one is. References such as `/skill:<name>` stay so
 resubmission loads fresh context. Adjacent operator text blocks are separated by
 newlines. Images and stored paste/file links are kept.
 Steering always uses the owner's full held input.
