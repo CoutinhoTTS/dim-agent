@@ -750,8 +750,8 @@ ModelCapabilities, reasoning?, serviceTier?}` — not a new model type: it alrea
 carries the model and provider identifiers and the declared capabilities, and it
 is the descriptor execution adopts. A selectable model always declares both
 limits (§3.5), so the existing `capability_snapshot` conversion always succeeds.
-The caller passes its cancellation token; cancelling it cancels the read and
-returns `Cancelled`.
+Abandoning the call cancels its owner read; dropping the reply is not a successful
+read. Errors use the public codes stated below.
 
 **Second operation: `selectableForModality`.** The same port carries one more
 process read, for non-conversational uses (Modality §9.2): operation
@@ -814,10 +814,9 @@ account-status read as `provider.catalog`. The reply is derived; a consumer must
 not persist it or treat it as an adopted snapshot. Adoption stays with model
 selection, which resolves a configuration once.
 
-**Errors.** The read has no error code of its own; it returns Provider's existing
-errors: `Cancelled` when the caller cancels the token it passed, `Failed` with
-`HostErrorKind::OwnerClosed` while Provider unloads, and `Failed` when Provider
-storage cannot be read. A provider whose own record or account status cannot be
+**Errors.** The public face and its Rust binding return `cancelled` when the caller
+cancels, `owner_closed` while Provider unloads, and `failed` when Provider storage
+cannot be read. A provider whose own record or account status cannot be
 read is omitted, as default resolution omits it; it never hides the others and the
 read returns no per-provider error list. A caller that needs a provider's
 diagnostic uses `provider.list` or `provider.management`.
@@ -848,29 +847,24 @@ client protocol and `PROTOCOL_VERSION`; persistence and its format; Timeline,
 Dispatcher, callbacks, Session and branch parts; and the driver, route and
 non-chat rules. The read adds no state, cache, notification, crate or module.
 
-**Rust binding.** The port is defined in `crates/dim-agent-capabilities/src/host.rs`
-beside `ModelSelectionHost`. Provider provides it in `ProviderPlugin::apply`, and
-the configured model profile (`dim-agent-aimux`) provides it from the entries of
-its model file, so both deployments answer the same reads; that profile declares
-no modality operation, so its `selectableForModality` read answers none
-([aimux](../../../crates/dim-agent-aimux/README.md)). The App Server catalog
-registers it as the Rust-only name `selectableModelsHost`
-(no cross-language binding before
-[#4](https://github.com/arcships/dim/issues/4)):
+**Rust binding.** The binding calls the typed operation directly, without JSON
+or a bridge task. It takes a `CancellationToken`; cancelling it returns
+`ModelPortError::Cancelled`. Each call owns a child token that is cancelled when
+the call completes or is abandoned, without cancelling the caller's token. The
+operation maps the owner's `HostError` into the public `ModelPortError` codes;
+the dispatcher invokes that same operation and encodes its reply or error.
 
-```rust
-pub trait SelectableModels: Send + Sync + 'static {
-    fn selectable(
-        &self,
-        cancel: CancellationToken,
-    ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>>;
-    fn selectable_for_modality(
-        &self,
-        cancel: CancellationToken,
-    ) -> HostFuture<'_, Vec<ModalityModelSnapshot>>;
-}
-pub struct SelectableModelsHost(pub Arc<dyn SelectableModels>);
-```
+The port is `SelectableModelsHost` in
+`crates/dim-agent-capabilities/src/host.rs` beside `ModelSelectionHost`. Its two
+reads are the operations §3.6 states: the port type holds the owner's closures,
+its dispatcher writes the wire shape, and a Rust reader calls the same
+operations through the binding. Provider provides it with
+`provide_selectable_models` in `ProviderPlugin::apply`, and the configured model
+profile (`dim-agent-aimux`) provides it from the entries of its model file, so
+both deployments answer the same reads; that profile declares no modality
+operation, so its `selectableForModality` read answers none
+([aimux](../../../crates/dim-agent-aimux/README.md)). The catalog registers the
+name shared ([service faces §4.10](../service-faces.md#410-宿主端口executionsettingshost-等五个)).
 
 The owner implementations are `ProviderService::selectable_models` and
 `ProviderService::selectable_modality_models`; `ProductResolver` delegates to
@@ -879,27 +873,22 @@ both. A consumer that needs the read declares
 that must load without Provider reads the name when it is provided and gates
 nothing (Collaboration's `models` action); it takes a snapshot at load, so a
 Provider reload does not reload it. No consumer reads `ProviderService` directly.
-A non-Rust consumer reaches the port by name when the runtime-services-by-name requirement
-([#4](https://github.com/arcships/dim/issues/4)) is delivered; that requirement is
-raised once in [Modality §9](../plugins/Modality.md#9-requirements-raised-to-mechanism-owners)
-and is not raised again here.
+A non-Rust consumer calls `selectableModelsHost` by name, with the operations §3.6
+states; the face delegates to the same owner read, so a consumer of either language
+gets the models execution would.
 
-**Connection contract: `resolveModalityConnection`.** The same owner resolves the
-connection one non-conversational call uses, so an adapter holds no Provider
-credential and reads no Provider record. It is a second process host port beside
-`ProviderConnectionResolver`, not a management method: operation
-`resolveModalityConnection`, asynchronous, request `{target: {providerId,
-modelId}, operation: string}`, reply `{connection, protocol, model, realtime}`.
+**Connection contract.** Provider resolves one non-conversational connection for a trusted
+in-process adapter. This is a native port beside `ProviderConnectionResolver`, not a
+management method or a named data face. It accepts a model identity and operation and
+returns one connection with its protocol, model and realtime declaration. The resolved
+connection includes credential material and remains in process for that adapter call.
 
-`connection` is the existing `ResolvedModelConnection` a chat call to the same
-model would get — the connection facts, the failure policy and, on a managed
-account, the credential recovery — so an adapter runs the same one-recovery rule
-execution does. `protocol` is the route the catalog carries for the model, and
-`model` is the id a request sends. Both ports run one resolution: it resolves the
-static or managed record, builds the catalog, selects and leases the managed
-credential in one place, and only the selectability rule and the request facts
-differ. The chat path's temporary startup connection and adopted capability
-snapshot do not apply; the caller passes a catalog identity and an operation.
+Both native connection ports use the same owner resolution: static or managed record
+read, catalog selection and credential lease. One modality call resolves once; its route
+facts and credential come from that resolution. The chat path's temporary startup
+connection and adopted capability snapshot do not apply. The owner does not add an HTTP
+executor to this port; media protocol and transport behavior remain with the existing
+adapters. A cross-language operation contract is tracked in [#1613](https://github.com/arcships/dim/issues/1613).
 
 **Rules.** It applies exactly the rules of the `selectableForModality` read —
 provider, account, model, route, credential and status — and additionally
@@ -931,24 +920,20 @@ route's base URL by that adapter.
 never persists it, never returns it to a client and never writes it to a task
 record, result, diagnostic or error. Its `Debug` prints the model, the route, the
 base URL, header names and whether a credential is present, and never a header
-value, bearer or key; `ModelConnection` implements no `Debug` today, so no other
-connection formats one. A managed account's connection carries the same
-`RecoverModelConnection` a chat call gets. `recovery::invoke` is the chat
-execution path over `ModelHost`, a `ModelRequest` and a `ModelStream`, so an
-adapter cannot reuse it as is; it runs the rule itself: map a provider rejection
-into the `HostError` the recovery interprets, ask `rejection` with the current
-phase, then `recover` once and retry on a recoverable rejection, or
-`finish_rejected` on a terminal one.
+value, bearer or key; `ModelConnection` implements no `Debug`, so no other
+connection formats one. A managed connection retains its recovery handle for
+trusted in-process use,
+but the in-tree media adapters do not invoke managed credential recovery. A media rejection is returned to the caller; automatic
+refresh and retry are not provided by this port. The chat recovery path is
+separate and does not establish a retry guarantee for non-conversational calls.
 
-**Rust binding.** The port is `ResolveModalityConnection` and
-`ModalityConnectionHost` in `dim-agent-capabilities`, with `ModalityTarget`
-carrying the model identity and the operation. Provider provides it in
-`ProviderPlugin::apply`, and the configured model profile provides it from its
-model file, whose entries declare no operation and therefore answer every target
-with the declaration refusal. The App Server catalog registers the Rust-only name
-`modalityConnectionHost`. The reply reuses `ResolvedModelConnection` and
-`ModelProtocol` and adds `RealtimeDeclaration`, the entry's declared transport;
-it adds no credential type.
+**Rust binding.** `ModalityConnectionHost` holds `Arc<dyn ResolveModalityConnection>`.
+`resolve_for_modality(target, cancel)` returns `ModalityConnection { resolved, protocol,
+model, realtime }`; `resolved` is `ResolvedModelConnection`, including its recovery
+handle where applicable. `ProviderPlugin::apply` provides the typed port. The configured
+model profile provides the same trait and refuses every operation because its entries
+have no modality declaration. The catalog name has no dispatcher. A caller passes its
+`CancellationToken` through the existing native resolution.
 
 ### 3.7 Offline validation of a stored selection
 
@@ -1348,7 +1333,7 @@ disposable database; see [the storage contract](native-storage-format.md#329-格
 | §4.5 | Owned related selections/models/preferences/routes commit together; existing adoption remains atomic |
 | §4.6 | Management data does not enter model context; only existing adoption paths change configuration |
 | §4.7 | Accounts use public methods; Modality reads selectable models through §3.6's core host port; Migration uses §3.7's Provider-owned judgment; other owners' references are not rewritten |
-| §4.8 | The error-data requirement below uses the method owner's generic error fields; §5 uses existing metadata and v19 top-level JSON; §3.6 and §3.7 add no requirement, and a non-Rust consumer uses [#4](https://github.com/arcships/dim/issues/4) already raised by Modality |
+| §4.8 | The error-data requirement below uses the method owner's generic error fields; §5 uses existing metadata and v19 top-level JSON; §3.6's read is a data face ([service faces §4.10](../service-faces.md#410-宿主端口executionsettingshost-等五个)), so a non-Rust consumer calls it by name; §3.7 adds no requirement |
 | §4.9 | No new Timeline event or pushed process notification |
 | §1 | Extend the existing process Provider; no Capability or wiring plugin |
 | ADR 002 D1 | Process records belong to Provider; adopted branch state to its owner; drafts to clients |

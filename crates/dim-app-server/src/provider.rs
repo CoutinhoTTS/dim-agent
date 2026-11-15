@@ -2820,6 +2820,42 @@ impl ResolveModelConnection for ProductResolver {
         })
     }
 }
+impl ProductResolver {
+    /// The model one request resolves to, resolved once. A caller's token
+    /// reaches the owner's read: dropping the call cancels it.
+    pub(crate) fn resolve(
+        &self,
+        explicit: Option<ModelId>,
+        cwd: Option<std::path::PathBuf>,
+        cancel: CancellationToken,
+    ) -> HostFuture<'static, ModelSelection> {
+        let owner = self.0.clone();
+        Box::pin(async move {
+            owner
+                .configuration_at_defaults(explicit, cwd.as_deref(), &cancel)
+                .await
+        })
+    }
+
+    /// Every model execution would accept, read under the caller's token.
+    pub(crate) fn selectable(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'static, Vec<ModelCapabilitySnapshot>> {
+        let owner = self.0.clone();
+        Box::pin(async move { owner.selectable_models(&cancel).await })
+    }
+
+    /// Every model a non-conversational use could select.
+    pub(crate) fn selectable_for_modality(
+        &self,
+        cancel: CancellationToken,
+    ) -> HostFuture<'static, Vec<ModalityModelSnapshot>> {
+        let owner = self.0.clone();
+        Box::pin(async move { owner.selectable_modality_models(&cancel).await })
+    }
+}
+
 impl ResolveModalityConnection for ProductResolver {
     fn resolve_for_modality(
         &self,
@@ -2846,36 +2882,6 @@ impl ResolveModalityConnection for ProductResolver {
                 realtime: resolution.realtime,
             })
         })
-    }
-}
-impl ResolveModelSelection for ProductResolver {
-    fn resolve(
-        &self,
-        explicit: Option<ModelId>,
-        cwd: Option<std::path::PathBuf>,
-        cancel: CancellationToken,
-    ) -> HostFuture<'_, ModelSelection> {
-        Box::pin(async move {
-            self.0
-                .configuration_at_defaults(explicit, cwd.as_deref(), &cancel)
-                .await
-        })
-    }
-}
-impl SelectableModels for ProductResolver {
-    fn selectable(
-        &self,
-        cancel: CancellationToken,
-    ) -> HostFuture<'_, Vec<ModelCapabilitySnapshot>> {
-        let owner = self.0.clone();
-        Box::pin(async move { owner.selectable_models(&cancel).await })
-    }
-    fn selectable_for_modality(
-        &self,
-        cancel: CancellationToken,
-    ) -> HostFuture<'_, Vec<ModalityModelSnapshot>> {
-        let owner = self.0.clone();
-        Box::pin(async move { owner.selectable_modality_models(&cancel).await })
     }
 }
 struct ManagedRecovery {
@@ -3159,9 +3165,23 @@ impl DynPlugin for ProviderPlugin {
             })?;
             let resolver = Arc::new(ProductResolver(service.clone()));
             ctx.provide(ProviderConnectionResolver(resolver.clone()))?;
-            ctx.provide(ModelSelectionHost(resolver.clone()))?;
+            let selection = resolver.clone();
+            dim_agent_capabilities::host::provide_model_selection(
+                ctx,
+                &ModelSelectionHost::new(Arc::new(move |explicit, cwd, cancel| {
+                    selection.resolve(explicit, cwd, cancel)
+                })),
+            )?;
             ctx.provide(ModalityConnectionHost(resolver.clone()))?;
-            ctx.provide(SelectableModelsHost(resolver))?;
+            let selectable = resolver.clone();
+            let modalities = resolver;
+            dim_agent_capabilities::host::provide_selectable_models(
+                ctx,
+                &SelectableModelsHost::new(
+                    Arc::new(move |cancel| selectable.selectable(cancel)),
+                    Arc::new(move |cancel| modalities.selectable_for_modality(cancel)),
+                ),
+            )?;
             let auxiliary = Arc::new(auxiliary::AuxiliaryModel {
                 owner: service.clone(),
                 host,

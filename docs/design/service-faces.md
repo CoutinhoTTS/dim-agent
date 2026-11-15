@@ -97,6 +97,8 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `collaborationConfig` | `collaborationConfig.get()` | 形状见 §4.8。 |
 | `worktreeAssociations` | `worktreeAssociations.associate` | 形状见 §4.8。 |
 
+宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost` 和 `modelSelectionHost`。名字不变，不新增 catalog 行。
+
 ### 3.3 所有者 API，已有数据兄弟
 
 本组统一迁移标签 `owner-api`。迁移批次先核对数据面能否覆盖原调用，再切换到同一组操作的绑定。
@@ -223,12 +225,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
-| `executionSettingsHost` | process | ExecutionSettings | legacy-no-consumer | 按 #1292 定义操作面 |
-| `toolchainSourceHost` | process | ToolchainSource | legacy-no-consumer | 按 #1292 定义操作面 |
-| `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | legacy-no-consumer | 按 #1292 定义操作面 |
-| `selectableModelsHost` | process | Provider | legacy-no-consumer | 按 #1292 定义操作面 |
-| `modelSelectionHost` | process | Provider | legacy-no-consumer | 按 #1292 定义操作面 |
-| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 按 #1292 定义操作面 |
+| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 按 [#1613](https://github.com/arcships/dim/issues/1613) 定义操作面；凭据连接不直接序列化 |
 | `collaborationSession` | session | CollaborationSession | legacy-no-consumer | 按 #1292 定义操作面 |
 
 ## 4. 批次契约（#1292）
@@ -380,6 +377,29 @@ eventSubscriptions.list {sessionId} -> reply
 `eventSubscriptions` 的 `sources`、`list` 在 dispatcher 里是 sync，其余是 async。测试：`crates/dim-agent-capabilities/tests/legacy_port_faces.rs`、`crates/dim-app-server/tests/legacy_port_faces.rs` 和 EventHub 的 `fixture_flow.rs` 证明 typed binding 与 wire 返回同一结果。
 
 `reservedMethods` 的 owner 是 App Server 的根值：它从 `process_value`（每个 Agent 一份）改为进程根上的一份，因为 shared 名字的 isolate 只覆盖 dispatcher key，而 `process_value` 的按 Agent 隔离覆盖的是类型 key；一份进程值对所有 Session 表等价，且只有一个 dispatcher。
+
+### 4.10 宿主端口：`executionSettingsHost` 等五个
+
+这五个读取端口持有 owner 的闭包，Rust 绑定直接调用类型化操作；dispatcher 只在跨语言边界解码请求、调用同一个操作并编码回复，不写第二份业务逻辑。Rust 调用不经过 JSON，也不为读取另起桥接任务。每次异步调用持有独立的子取消 token：取消或丢弃调用会取消该次 owner 读取，不取消调用方的父 token。跨语言回复使用 `cancellable_future`，放弃等待会丢弃同一个读取；owner 的生命周期仍约束其工作。
+
+```text
+executionSettingsHost.read({}) -> {sandbox, network}
+  -> error {code: failed, message}
+toolchainSourceHost.list({}) -> {toolchains: [{bin, root}]}          # sync
+  -> error {code: failed, message}
+promptSuggestionSettingsHost.read({}) -> {enabled, maxChars}
+  -> error {code: failed, message}
+selectableModelsHost.selectableModels({}) -> {models: [ModelCapabilitySnapshot]}
+selectableModelsHost.selectableForModality({}) -> {models: [ModalityModelSnapshot]}
+modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
+  -> error {code: cancelled | owner_closed | invalid_request | model_unavailable | failed, message}
+```
+
+- 每个 operation 只收一个请求对象；没有输入的写 `{}`（`provider-management.md` §3.6 的形状），多一个参数或未知字段都是 `invalid_request`。
+- 取消是协议动作：调用方丢弃等待，或被取消的绑定调用不再进入 owner；owner 自己的生命周期仍然约束它启动的 worker。
+- 回复就是 owner 的类型：`ExecutionSettings`、`PromptSuggestionSettings`、`ModelCapabilitySnapshot`、`ModalityModelSnapshot`、`ModelSelection` 都是 serde camelCase 数据。`InstalledToolchain` 的 `PathBuf` 换成 UTF-8 字符串（`{bin, root}`）：某个 runtime 的目录不是 UTF-8 时只跳过那一项，其余照常给子进程用；`cwd` 的请求方向同理，`ModelSelectionRequest::at` 是 Rust 调用方换字段的唯一一处。
+- 提供方仍是原来的部件（App Server 的 `ExecutionSettings`、`ToolchainSource`、`PromptSuggestionSettings`、`Provider`，以及 aimux 的 `ConfiguredModels`）：`provide` 一次给出类型键上的绑定和 `host_key(name)` 上的 face；没有适配层，也没有第二份业务逻辑。
+- 测试：`host_port_faces.rs` 比对 Rust binding 与 wire 的结果、请求形状、错误与取消；`provider_flow.rs` 等既有流程验证真实 owner 的读取。
 
 ## 5. 验证
 
