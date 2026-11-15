@@ -10083,7 +10083,10 @@ fn tui_ctrl_enter_interrupts_the_run_and_starts_a_new_one_with_the_draft() {
         wire.reply(&stop, json!({"sequence":11}));
         let sent = wire.read("session.submit");
         let text = sent["params"]["text"].as_str().expect("text submit");
-        assert_eq!(text, "now\nheld one", "the draft, then the held message");
+        assert_eq!(
+            text, "held one\nnow",
+            "the held message, then the draft that was typed"
+        );
         assert_eq!(sent["params"]["mode"], "queue");
         wire.reply(&sent, json!({"event":{}}));
         done.send(()).unwrap();
