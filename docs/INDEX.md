@@ -2,6 +2,7 @@
 
 This index is navigation. Delivery status lives in issues, not here.
 
+- [审批交接分析](design/examples/approval-handoff-analysis.md)（中文）：Permission、Approval 与 ToolExecutor 的准入边界和有限模型
 - [CLI feature list](feature-list.md)
 - [Model preferences and Agent configuration](design/model-configuration.md)
 - [Model startup](design/model-startup.md): temporary model, effort and multi-protocol connections with branch/member/compaction inheritance
