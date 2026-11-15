@@ -134,6 +134,8 @@ pub struct ExecStartedData {
     pub call_id: String,
     pub task_id: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub output_path: String,
 }
 
@@ -703,7 +705,7 @@ impl ModelFailureKind {
         let reason = reason
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
-            .map(|reason| reason.strip_suffix('.').unwrap_or(reason));
+            .map(|reason| reason.trim_suffix('.'));
         match reason {
             Some(reason) => format!("{}: {reason}. {}", self.meaning(), self.action()),
             None => format!("{}. {}", self.meaning(), self.action()),
@@ -1097,6 +1099,8 @@ pub struct CollaborationRequestData {
     pub call_id: String,
     pub target: CollaborationTarget,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// Payload of `collaboration/cancel` and `collaboration/close`.

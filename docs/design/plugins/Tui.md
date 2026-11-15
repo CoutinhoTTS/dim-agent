@@ -189,35 +189,26 @@ uses WorkspaceTools' optional C1 method `session.exec.output`. This UI consumes
 that read when provided; a profile without it displays an unavailable state. It never opens a
 daemon path or falls back to a tool call.
 
-Both interfaces also draw one row of the unfinished tasks above the composer, so
-work running apart from the turn is named without opening `/tasks`:
+Both interfaces draw one row per visible task above the composer, so work
+running apart from the turn is named without opening `/tasks`. Titles, Agent
+identity, truncation, completion fading and fullscreen clicks follow the
+[task presentation contract](../background-task-list.md#task-titles-and-composer-rows).
+There is no leading task count, horizontal concatenation or hidden-task summary:
 
 ```text
- ◐ 2 · cargo build 1m12s · cargo test 34s
+ ◐ Build the workspace                            1m12s
+ ◐ Inspect member code · Reviewer                   34s
  ╭─ · working…  3s ──────────────── provider / model ─╮
  │ › Ask anything... · Ctrl+J newline                  │
  ╰─────────────────────────────────────────────────────╯
 ```
 
-The count of running tasks leads the row, then each task's label and elapsed
-time. A label longer than the row is cut to fit one line; when the row cannot
-hold every task, the remaining ones read `· …`. A task that ends keeps its place
-for five seconds with `✓`, `⊘` when it was stopped or `✗` when it failed, before
-leaving the row, so its completion is not lost under the eye. With no task
-running the count has nothing to say, so the row starts at the first entry's
-mark and carries no leading separator:
-
-```text
- ✓ cargo build 1m12s
-```
-
-The row draws only while a task runs or one is still fading, so an idle Session
-keeps the space, and it reads the same `ViewSnapshot.tasks` the panel does. It
-adds interface-local fields of its own — the second the fade last drew, and
-whether the row was drawn then — but no Session state, read or event. `Enter` on
-an empty composer opens `/tasks` while the row shows, after the shell-run guard
-and the steer of a held message; the row itself selects and stops nothing, which
-the panel already does (`cli-commands.md` owns the key map).
+The rows read the same `ViewSnapshot.tasks` as the panel, with no additional
+Session state, read or event. With no visible task there is no task strip.
+`Enter` on an empty composer opens `/tasks` while the strip shows, after the
+shell-run guard and the steer of a held message (`cli-commands.md` owns the key
+map). Fullscreen task-row clicks open the existing detail; stops remain in the
+panel.
 
 ```text
 +-- Background tasks -------------------------------------------+
@@ -607,7 +598,7 @@ No loader row is added, so there is nothing to enable, disable or persist ([D4](
 
 The client tree runs trusted in-process code only; a plugin boundary is not a sandbox ([rule 11](../../../AGENTS.md)). `DaemonLink` keeps every existing check: private native home (0700, owner), private log file, `O_NOFOLLOW`, socket permission race, server link identity. A leaf's address is private to the user: a socket in the native home (0700, owned by the user, as for `daemon.sock`), accepted once and removed (on Windows a loopback address that requires a one-time token first). The daemon dials only addresses a local `ui.open` caller names; each side drops a far end whose handshake id is not the one it expects, and on loopback TCP the one-time token, sent before the handshake, is what authenticates the leaf. The daemon greets from a context where its session catalog is isolated, so the leaf can run no daemon plugin, and the leaf offers no catalog. The attach token for `ui.attach` travels only in `ui.open`'s reply, on the local connection; the daemon stores its SHA-256 digest, and nothing UI-specific is in any environment. Tokens are never logged or written to the Timeline.
 
-**What the leaf's session carries.** A rutis session exports every process-group name that crosses languages to its far end, and announces listener names in both directions ([rutis 0.19 upgrade M8](../rutis-0.19-upgrade.md#m8-the-ui-leaf-is-a-plugin-whose-life-is-a-session)). The [generated catalog](../../architecture/rust-agent/generated/catalog.md) lists those names, and the installed foreign process rows add the names they provide. Today they are `auxiliaryModel`, `managementMethods`, `partRegistry`, `pluginFiles`, `sessionMetadata`, `sessionPermissions`, `settings` and `workflowFiles`; `sessions`, whose methods `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle` and `delete` act on Sessions; and the enabled native Scheduler's `scheduleJobs` and, when Workflow is installed and enabled, its `workflowRuns`. Code in the leaf could therefore act on any Session, register management methods, and register Session parts whose copies run in the leaf; it could emit any event name a daemon listener has, and that listener would receive it. The leaf's code does none of this: its `Tui` uses protocol v4 only and emits no event. This is accepted because the leaf is reached only through a private address that a local `ui.open` caller names, and that caller already holds a local protocol v4 connection on `daemon.sock` reaching the same Sessions and management methods; the trust boundary stays the local user ([ADR 003](../../adr/003-approval-scope.md), [rule 11](../../../AGENTS.md)). These services are not isolated from the leaf: they are Dim's shared cross-language services, which the repository's own TypeScript plugins inject, and a session exports to every far end alike, the Node runtime's included.
+**What the leaf's session carries.** A rutis session exports every process-group name that crosses languages to its far end, and announces listener names in both directions ([rutis 0.19 upgrade M8](../rutis-0.19-upgrade.md#m8-the-ui-leaf-is-a-plugin-whose-life-is-a-session)). The [generated catalog](../../architecture/rust-agent/generated/catalog.md) lists those names, and the installed foreign process rows add the names they provide. Today they are `auxiliaryModel`, `managementMethods`, `partRegistry`, `pluginFiles`, `sessionMetadata`, `sessionPermissions`, `settings` and `workflowFiles`; `sessions`, whose methods `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle` and `delete` act on Sessions; and the enabled native Scheduler's `scheduleJobs` and `wakeups` and, when Workflow is installed and enabled, its `workflowRuns`. Code in the leaf could therefore act on any Session, register management methods, and register Session parts whose copies run in the leaf; it could emit any event name a daemon listener has, and that listener would receive it. The leaf's code does none of this: its `Tui` uses protocol v4 only and emits no event. This is accepted because the leaf is reached only through a private address that a local `ui.open` caller names, and that caller already holds a local protocol v4 connection on `daemon.sock` reaching the same Sessions and management methods; the trust boundary stays the local user ([ADR 003](../../adr/003-approval-scope.md), [rule 11](../../../AGENTS.md)). These services are not isolated from the leaf: they are Dim's shared cross-language services, which the repository's own TypeScript plugins inject, and a session exports to every far end alike, the Node runtime's included.
 
 Business traffic stays on protocol v4; the leaf's session is not the business channel. The sign-in link printed by `WebHold` or reported by the TUI is shown only when no browser took it, as today. Nothing here changes approval, permission or the product-home boundary.
 

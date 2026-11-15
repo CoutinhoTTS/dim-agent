@@ -7,19 +7,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "No queued messages." => "No hay mensajes en cola.",
         "Held · awaiting application" => "Retenido · pendiente de aplicación",
-        "Incorporating · awaiting model consumption" => {
-            "Incorporando · pendiente de procesamiento por el modelo"
-        }
         "Held" => "Retenido",
-        "Incorporating" => "Incorporando",
         "Unread" => "Sin leer",
-        "Unread · waiting for your next message" => "Sin leer · esperando tu próximo mensaje",
-        "/queue view · awaiting model consumption" => {
-            "/queue ver · pendiente de procesamiento por el modelo"
-        }
-        "/queue view · waiting for your next message" => {
-            "/queue ver · esperando tu próximo mensaje"
-        }
         "Enter export · Esc cancel" => "Enter exportar · Esc cancelar",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Los mensajes con archivos adjuntos permanecen en cola; usa /queue para hacer steer o eliminarlos"
@@ -399,8 +388,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "salir",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter elegir + predeterminado · ←/→ esfuerzo · Ctrl+X borrar guardado · Esc borrar/cerrar"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter elegir + predeterminado · ←/→ esfuerzo · Ctrl+B/F cursor · Ctrl+X borrar guardado · Esc borrar/cerrar"
         }
         "Default for new sessions in {folder}: {model}" => {
             "Modelo por defecto para sesiones nuevas en {folder}: {model}"
@@ -587,6 +576,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C borrar, dos veces salir · Ctrl+D salir con borrador vacío"
         }
+        "Shift+Tab cycle permissions (composer focused)" => {
+            "Shift+Tab cambiar permisos (con el foco en la entrada)"
+        }
+        "Shift+Tab newer target while picked · Esc return to composer" => {
+            "Con selección, Shift+Tab al siguiente elemento más reciente · Esc volver a la entrada"
+        }
+        "(shift+tab to cycle)" => "(Shift+Tab para cambiar)",
         "Fullscreen" => "Pantalla completa",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown desplazar · Home/End inicio o final (con el borrador vacío) · Tab elegir mensaje, e editar, q citar"

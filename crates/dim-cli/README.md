@@ -282,12 +282,13 @@ as `session-<unique-id>.md` or `.json`; success shows its absolute path and
 errors stay in the interface. The content matches `dimcode session export`'s
 fixed main-branch history. Existing files are never overwritten.
 
-`/queue` opens the shown line's unconsumed messages in either terminal mode.
-Up/Down selects a row; Enter steers a held message and `x` deletes it. Applied
-messages are labelled Incorporating while running, or Unread while idle with
-a hint that they wait for the next message, and cannot be withdrawn. Only a
-held selection advertises steer and delete; an applied-only strip offers viewing
-without edit or steer shortcuts. A raced operation
+`/queue` opens only the shown line's held messages in either terminal mode.
+Up/Down selects a row; Enter steers it and `x` deletes it. Applied messages
+appear only in the transcript, retaining their pending style until consumed.
+The strip counts only held messages and disappears when none remain, including
+after a stop. Unread applied messages use only the existing transcript styling;
+there is no extra status hint. An empty panel offers no actions.
+A raced operation
 reports that the input has already left the queue. Esc closes the panel.
 Shift+Left keeps messages with images or multiple content blocks queued with a
 notice rather than losing attachments. Esc interrupt withdraws every held message
@@ -298,7 +299,6 @@ blocks retain a newline separator. No held message starts another run.
 
 ```text
 Queue
-  first request       Incorporating · awaiting model consumption
 › follow-up           Held · awaiting application
 Enter steer · x delete held · Esc close
 ```
@@ -1003,13 +1003,14 @@ The interactive terminal UI has two modes over the same session. Scrollback (the
  user message
                           one normal separator row
  ◆ Thinking… · text
- ◐ 1 · cargo build 1m12s  the tasks running apart from the turn
+ ◐ Build the CLI                      1m12s
+ ◐ Review changes · Code Reviewer       34s
  ╭─ · thinking… ─────────────────────────────╮
  │ › Ask anything... · Ctrl+J newline        │   composer stays anchored
  ╰──────────────────────────────────────────╯
 ```
 
-The task row sits above the composer here as it does above the dock in fullscreen,
+The task rows sit above the composer here as they do above the dock in fullscreen,
 so the released space of a closing menu still returns below it and the composer
 keeps its place.
 
@@ -1024,10 +1025,11 @@ While a terminal resize is pending, scrollback pauses frame painting until the e
 Fullscreen takes the alternate screen, keeps the transcript itself and scrolls it in a viewport above a dock that never moves. A transcript shorter than the viewport sits on the dock and grows upwards:
 
 ```text
- ◐ 2 · cargo build 1m12s · cargo test 34s
  answer row                                                     ▁   scrollbar: last column,
  answer row (streaming tail scrolls with the transcript)        █   thumb in eighths of a row
                                                                 █
+ ◐ Build the CLI                                     1m12s
+ ◐ Review changes · Code Reviewer                      34s
  ╭─────────────────────────────── provider / model · effort ─╮      dock: queue, composer
  │ Ask anything... · Ctrl+J newline                           │      and panels stay pinned
  │                                                            │      to the bottom; the box
@@ -1035,22 +1037,34 @@ Fullscreen takes the alternate screen, keeps the transcript itself and scrolls i
  ╰─ · working…  3s  esc interrupt ──── ~/project (branch) ─╯      the status and the place
 ```
 
-The row above the composer names the tasks running apart from the turn, in both
-modes: `◐ <count> · <label> <elapsed>` for each, cut to one line, with `✓`, `⊘`
-for a stop or `✗` for a failure where a task that just ended keeps its place for
-five seconds. With nothing running the count is dropped, so the row starts at
-the first mark: `✓ cargo build 1m12s`. It reads the same Session task list
-`/tasks` shows and draws nothing while none runs. `Enter` on an empty composer
-opens `/tasks` while it shows, once no held message is left to steer.
+Tasks running apart from the turn appear above the composer in both modes, one
+row per task, with the status mark, task title, member Agent name when applicable,
+and elapsed time. Tasks are never combined into a count-led horizontal strip or
+replaced by a hidden-task summary. Titles shorten to fit the terminal width.
+These rows use the same Session task list as `/tasks`; empty-composer `Enter`
+opens that list, subject to the existing shell and queue actions. See
+[task titles and composer rows](../../docs/design/background-task-list.md#task-titles-and-composer-rows)
+for title fallbacks, terminal-result fading and viewport behavior.
+
+Both modes show the current permission below the composer: cyan `⏵⏵ Read only`,
+purple `⏵⏵ Workspace write`, or yellow `⏵⏵ Full access`, followed by muted
+`(shift+tab to cycle)`. With the composer focused, Shift+Tab cycles these three
+presets in that order, preserves the draft and remembers a successful selection
+for new Sessions. Prompts and menus keep their own keys; a picked fullscreen
+transcript target retains Shift+Tab navigation. See the
+[permission interaction contract](../../docs/design/cli-commands.md#permissions).
 
 | Fullscreen input | Effect |
 | --- | --- |
 | Mouse wheel, `PageUp` / `PageDown` | Scroll the transcript; new output does not move a scrolled view. A wheel notch scrolls three rows; a trackpad, once its dense reports are seen, one row per report; a fast streak speeds up to three (notch) or six (trackpad) times that |
+| Drag the scrollbar (last column) | Move the view with the thumb; a press on the track centres the thumb there first. Dragging to the bottom, or past it over the dock, follows new output again |
 | Sending a message | Follow the bottom again |
 | Mouse drag | Select transcript text; release copies it (OSC 52, plus `pbcopy` locally on macOS; inside tmux OSC 52 goes through passthrough, which needs `set -g allow-passthrough on`) |
 | Click a link | Opens it in the system browser (OSC 8 links, or a bare `http(s)://` URL); over SSH the status row shows the URL instead |
+| Click a task row above the composer | Opens that command's output or member conversation directly; `Esc` returns with the composer draft preserved. Press and release must hit the same cell and task without dragging; resizing or an open overlay cancels or blocks the click. Scrollback keeps keyboard-only task entry |
+| Click the model label | Opens `/models` without discarding the draft; `Esc` returns to it. See [model label interaction](../../docs/design/model-configuration.md#scrollback-interaction) |
 | Click a tool header or a thought's title | Toggles only that batch, codemode or call (`▸` / `▾`), or opens/closes a settled thought. Parent collapse hides children without resetting their choices. Hover and press affect only the title; release must hit the same valid target without dragging. Opening holds the view in place. Output and compare text remain selectable; links and the member-conversation entry are separate actions. `/tools` changes defaults for unchosen nodes, not manual choices; thinking has its own setting |
-| `Tab` / `Shift+Tab` | Pick older / newer transcript targets (`Up` / `Down` while one is picked), including committed tool headers; `Enter` / `Space` toggles only the focused tool node. Past the newest the pick ends. `Esc` ends it. On a user message, `e` puts the message in the composer to edit and send again; `b` opens a line of the shown line cut just before the message, with the message in the composer as its opening input (`Enter` opens it through `session.branch_create` and shows it, `Esc` cancels); `f`, on `main` only, asks, then forks the Session just before the message (`session.fork`) and attaches to the fork with the message in its composer. A `⑂ line` row, written where a line opened on the shown line, is picked too: `Enter` (or a click) shows that line ([timeline UI](../../docs/design/timeline-ui.md)); so is the load-more row at the top, which `Enter` loads |
+| `Tab` / `Shift+Tab` | Tab picks older transcript targets; Shift+Tab picks newer ones only while a target is picked, otherwise it cycles permissions. `Up` / `Down` also move while a target is picked, including committed tool headers; `Enter` / `Space` toggles only the focused tool node. Past the newest the pick ends. `Esc` ends it. On a user message, `e` puts the message in the composer to edit and send again; `b` opens a line of the shown line cut just before the message, with the message in the composer as its opening input (`Enter` opens it through `session.branch_create` and shows it, `Esc` cancels); `f`, on `main` only, asks, then forks the Session just before the message (`session.fork`) and attaches to the fork with the message in its composer. A `⑂ line` row, written where a line opened on the shown line, is picked too: `Enter` (or a click) shows that line ([timeline UI](../../docs/design/timeline-ui.md)); so is the load-more row at the top, which `Enter` loads |
 | `/`, `Ctrl+O`, `Ctrl+P` | Open the command palette centred over the dimmed transcript, with its own query row; a draft set aside by `Ctrl+O`/`Ctrl+P` returns when the command entry it opened ends (`Enter`, `Esc` or an emptied draft). With a question pending whose free-text answer is not being edited, the palette opens over it instead, and the question keeps its answers while the command's argument is typed |
 | `Home` / `End` | With an empty composer: scroll to the top / bottom of the transcript |
 | `Esc` | Interrupt the run |
@@ -1098,7 +1112,7 @@ answer text (including its retained streaming tail)
 · stopped
 ```
 
-The composer box: no prompt mark, the adopted model and, when its configuration carries one, the reasoning effort it sends (`provider / model · effort`) at the right of its top border, and in its bottom border the run status, the status slot (a notice, `esc interrupt`, `permission required`), the main branch's context reading (`1.8K / 256K`) and a non-default approvals mode at the left, the attached Session's workspace and its git branch at the right, with Home naming the launch directory. When that workspace differs from the CLI's `--cwd`, the `@` picker names the `--cwd` in its title, so local file completion still says which directory it lists. A box too narrow for the whole label drops the effort first, then the label. Fullscreen has no status row under it; scrollback keeps its status row and `›` prompt.
+The fullscreen composer box has no prompt mark. The adopted model and, when its configuration carries one, the reasoning effort it sends (`provider / model · effort`) sit at the right of its top border. Its bottom border keeps the run status, status slot (a notice, `esc interrupt`, `permission required`), goal and main branch context reading (`1.8K / 256K`) at the left, and the attached Session's workspace and git branch at the right, with Home naming the launch directory. The permission preset is not in that border: both modes show the live permission footer described above, without an `AGENT` prefix, with its hint in the selected interface language. Scrollback retains its other status information, right-aligned model label and `›` prompt. The live footer is not committed to transcript history. When the workspace differs from the CLI's `--cwd`, the `@` picker names the `--cwd` in its title, so local file completion still says which directory it lists. A box too narrow for the whole model label drops the effort first, then the label.
 
 The Git branch label follows branch switches in both modes, including switches made by tools or another terminal. At startup the client resolves the workspace's own Git `HEAD` path (including linked worktrees); the existing UI timer reads that file at most once every 10 seconds, without spawning more Git processes, and requests a repaint only when the name changes. Detached HEAD displays `HEAD`; a transient read failure keeps the last known name until the next check.
 
@@ -1321,7 +1335,9 @@ projection. An already-issued old page settles before another is sent, while
 its rows and queued retries are discarded.
 
 The same collection keeps all unfinished work and the latest 50 terminal facts,
-ordered by the terminal event timestamp and then branch/start-event identity.
+selected by the terminal event timestamp and then branch/start-event identity.
+Rows follow the [task list's dispatch order](../../docs/design/background-task-list.md);
+finishing a task does not move its row.
 Only actual command ends, delivery failures and delegation results finish rows.
 The status strip counts unfinished work beside the run status rather than in its
 place, so a running turn does not hide what it left running. A task that ends in

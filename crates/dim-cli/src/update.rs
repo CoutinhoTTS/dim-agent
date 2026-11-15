@@ -455,9 +455,10 @@ async fn run_install(installation: Install, tag: &str, legacy_exited: bool) -> c
     };
     if let Some(error) = output_error {
         return Err(match result {
-            Ok(()) => error.into(),
-            Err(install_error) => format!("{error}; {install_error}").into(),
-        });
+            Ok(_) => format!("{error}; the update itself had finished"),
+            Err(update) => format!("{error}; {update}"),
+        }
+        .into());
     }
     if interactive {
         crossterm::execute!(
@@ -466,8 +467,11 @@ async fn run_install(installation: Install, tag: &str, legacy_exited: bool) -> c
             crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
         )?;
     }
-    result?;
+    let warnings = result?;
     writeln!(stderr, "Updated {package} on the {tag} channel.")?;
+    for warning in warnings {
+        writeln!(stderr, "{warning}")?;
+    }
     Ok(())
 }
 
@@ -553,7 +557,7 @@ pub async fn install(
     install: Install,
     cancel: CancellationToken,
     legacy_exited: bool,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let own = LEASE.lock().unwrap().take();
     drop(own);
     let result = install_exclusive(&install, cancel, legacy_exited).await;
@@ -565,12 +569,14 @@ async fn install_exclusive(
     install: &Install,
     cancel: CancellationToken,
     legacy_exited: bool,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let lock = lease(install, legacy_exited)?;
     let result = match install.manager {
         #[cfg(unix)]
-        Manager::Staged => staged::update(install, cancel).await,
-        Manager::InPlace { .. } => run_manager(install, install.in_place_command(), cancel).await,
+        Manager::Staged => staged::update(install, &cancel).await,
+        Manager::InPlace { .. } => run_manager(install, install.in_place_command(), cancel)
+            .await
+            .map(|()| Vec::new()),
     };
     drop(lock);
     result

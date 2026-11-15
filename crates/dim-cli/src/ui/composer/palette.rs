@@ -308,21 +308,36 @@ pub fn render_overlay(
 ) -> Overlay {
     let inner = width.saturating_sub(4).max(1);
     let padded = max_rows >= 6;
-    let query_rows = if padded { 3 } else { 1 };
+    let query_in_border = max_rows < 4;
+    let query_rows = if padded {
+        3
+    } else {
+        usize::from(!query_in_border)
+    };
     let page = max_rows.saturating_sub(2 + query_rows).clamp(1, 16);
-    let query = truncate_cells(&state.query, inner.saturating_sub(2));
+    let query = truncate_cells(
+        &state.query,
+        inner.saturating_sub(if query_in_border { 4 } else { 2 }),
+    );
+    let query_line = format!("> {query}");
     let mut content = Vec::new();
     if padded {
         content.push(String::new());
     }
-    content.push(format!("> {query}"));
+    if !query_in_border {
+        content.push(query_line.clone());
+    }
     if padded {
         content.push(String::new());
     }
     content.extend(list(state, rows, inner, page, p));
     content.resize(query_rows + page, String::new());
     let title = paint(
-        t("Command Palette"),
+        if query_in_border {
+            &query_line
+        } else {
+            t("Command Palette")
+        },
         Paint {
             fg: Some(&p.accent),
             bold: true,
@@ -332,8 +347,15 @@ pub fn render_overlay(
     Overlay {
         rows: bordered(&content, width, None, &p.border, Some(&title), None),
         cursor: Some((
-            if padded { 2 } else { 1 },
-            (4 + crate::ui::text::display_width(&query)).min(width.saturating_sub(2)) as u16,
+            if query_in_border {
+                0
+            } else if padded {
+                2
+            } else {
+                1
+            },
+            (4 + usize::from(query_in_border) + crate::ui::text::display_width(&query))
+                .min(width.saturating_sub(2)) as u16,
         )),
     }
 }
@@ -445,6 +467,7 @@ mod tests {
             "export",
             "earlier",
             "goal",
+            "loop",
             "tasks",
             "rename",
             "web",
@@ -606,6 +629,7 @@ mod tests {
         ]
     }
 
+    /// A shared name is listed twice, the command first.
     #[test]
     fn skills_share_the_list_after_commands() {
         let skills = sample_skills();
@@ -625,20 +649,15 @@ mod tests {
         let panel = render(&state, &rows, 100, 18, &theme.palette);
         let text: Vec<String> = panel.iter().map(|r| strip(r)).collect();
         assert!(text.iter().any(|r| r.contains("2 / 3")), "{text:#?}");
-    }
 
-    /// A Skill and a command of the same name are both offered, the command
-    /// first.
-    #[test]
-    fn a_shared_name_offers_the_command_first() {
-        let skills = vec![Skill {
+        let shared = vec![Skill {
             name: "new".into(),
             description: "Start a fresh session".into(),
             display_name: None,
             display_description: None,
         }];
         for query in ["new", "ne"] {
-            let rows = rows_for(query, SCROLLBACK, &skills);
+            let rows = rows_for(query, SCROLLBACK, &shared);
             assert!(
                 matches!(rows[0].kind, Kind::Command(_)),
                 "{query}: {:?}",
@@ -646,7 +665,8 @@ mod tests {
             );
             assert!(
                 rows.iter()
-                    .any(|row| matches!(&row.kind, Kind::Skill(name) if name == "new"))
+                    .any(|row| matches!(&row.kind, Kind::Skill(name) if name == "new")),
+                "{query}: the skill is offered too"
             );
         }
     }

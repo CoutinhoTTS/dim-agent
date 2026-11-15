@@ -7,19 +7,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "No queued messages." => "Nenhuma mensagem na fila.",
         "Held · awaiting application" => "Retida · aguardando aplicação",
-        "Incorporating · awaiting model consumption" => {
-            "Incorporando · aguardando processamento pelo modelo"
-        }
         "Held" => "Retida",
-        "Incorporating" => "Incorporando",
         "Unread" => "Não lida",
-        "Unread · waiting for your next message" => "Não lida · aguardando sua próxima mensagem",
-        "/queue view · awaiting model consumption" => {
-            "/queue ver · aguardando processamento pelo modelo"
-        }
-        "/queue view · waiting for your next message" => {
-            "/queue ver · aguardando sua próxima mensagem"
-        }
         "Enter export · Esc cancel" => "Enter exportar · Esc cancelar",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Mensagens com anexos permanecem na fila; use /queue para fazer steer ou excluí-las"
@@ -389,8 +378,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "sair",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter selecionar + padrão · ←/→ esforço · Ctrl+X limpar salvos · Esc limpar/fechar"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter selecionar + padrão · ←/→ esforço · Ctrl+B/F cursor · Ctrl+X limpar salvos · Esc limpar/fechar"
         }
         "Default for new sessions in {folder}: {model}" => {
             "Modelo padrão para novas sessões em {folder}: {model}"
@@ -577,6 +566,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C limpar, duas vezes para sair · Ctrl+D sair com rascunho vazio"
         }
+        "Shift+Tab cycle permissions (composer focused)" => {
+            "Shift+Tab alternar permissões (com foco na entrada)"
+        }
+        "Shift+Tab newer target while picked · Esc return to composer" => {
+            "Com seleção, Shift+Tab para o alvo mais recente · Esc voltar à entrada"
+        }
+        "(shift+tab to cycle)" => "(Shift+Tab para alternar)",
         "Fullscreen" => "Tela cheia",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown rolar · Home/End topo ou fim (com rascunho vazio) · Tab escolher mensagem, e editar, q citar"

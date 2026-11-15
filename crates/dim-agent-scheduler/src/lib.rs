@@ -4,8 +4,10 @@
 //! The process owner keeps jobs in the `schedule` settings document and run
 //! history in `scheduler/runs.json`, and serves the `schedule` management
 //! namespace.
+mod clock;
 mod document;
 mod engine;
+mod loops;
 mod methods;
 mod runs;
 mod session;
@@ -28,6 +30,7 @@ use dim_agent_runtime::{AgentBuilder, Names};
 use rutis::host::DynPlugin;
 
 pub use document::ScheduleDocument;
+pub use loops::{LOOPS_FILE, Loop, LoopState, Loops};
 pub use methods::{ScheduleJobs, SchedulerPlugin};
 pub use runs::{RUNS_FILE, SchedulerError};
 pub use session::SchedulerSession;
@@ -62,15 +65,15 @@ pub fn install_with(builder: &mut AgentBuilder, texts: SchedulerTexts) -> Result
     install_inner(builder, texts, SchedulerPlugin::new)
 }
 
-/// [`install_with`] with the flow tests' holds in force (feature `testing`).
+/// [`install_with`] with the flow tests' seams in force (feature `testing`).
 #[cfg(feature = "testing")]
 pub fn install_with_testing(
     builder: &mut AgentBuilder,
     texts: SchedulerTexts,
-    holds: std::sync::Arc<testing::Holds>,
+    options: testing::TestingOptions,
 ) -> Result<(), String> {
     install_inner(builder, texts, move |names, texts| {
-        SchedulerPlugin::new_with_testing(names, texts, holds.clone())
+        SchedulerPlugin::new_with_testing(names, texts, options.clone())
     })
 }
 
@@ -86,8 +89,11 @@ fn install_inner(
     + 'static,
 ) -> Result<(), String> {
     let texts = std::sync::Arc::new(texts);
-    dim_agent_runtime::names::register::<ScheduleJobs>(builder.catalog_mut(), None);
-    dim_agent_runtime::names::register::<Wakeups>(builder.catalog_mut(), None);
+    builder
+        .catalog_mut()
+        .register_shared(dim_agent_runtime::names::name_of::<ScheduleJobs>())
+        .register_shared(dim_agent_runtime::names::name_of::<Wakeups>())
+        .register_shared(dim_agent_runtime::names::name_of::<Loops>());
     let deliveries = methods::DeliveryHolds::default();
     builder.optional_plugin(move |names| {
         let mut plugin = make(names, texts.clone())?;

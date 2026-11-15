@@ -13,9 +13,9 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use dim_agent_types::{ApprovalCallData, ApprovalDecision, ModelId};
+use dim_agent_types::{ApprovalCallData, ApprovalDecision, ModelId, ModelPreferences};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::args::Options;
@@ -23,14 +23,14 @@ use crate::client::{self, Client, Message};
 use crate::model::session::{
     ACCOUNT_NAMESPACE, Account, AccountDescriptor, Command, CompactReply, ContextReading,
     DIM_OAUTH_ID, DeleteOutcome, DeleteReply, DraftPart, EmptyProvider, EmptyReason,
-    ExecutionSnapshot, ManagementReply, ModelItem, ModelList, ModelPolicyUpdate,
+    ExecutionSnapshot, ManagementReply, ModelItem, ModelList, ModelOutcome, ModelPolicyUpdate,
     NeedsLimitsProvider, OauthEvent, OauthStart, PluginItem, PluginReply, PromptField,
     PromptSetting, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem, RuntimesError,
     SandboxBackend, SessionItem, SessionPort, SessionsScope, SubagentModelPolicy,
     SuggestionSetting, SwitchKind, Update, Usage, stored_title,
 };
 use crate::model::view::{
-    LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
+    Earlier, LineState, LineView, SideLine, TaskOutputState, TaskTarget, WorkflowInventory,
 };
 use crate::projection::Projection;
 use crate::wire::{
@@ -69,6 +69,7 @@ struct ProviderSummary {
     auth: serde_json::Value,
     base_url: String,
     credential_configured: bool,
+    glued_prefix: Option<String>,
     enabled: bool,
     version: u32,
     account: Option<AccountDescriptor>,
@@ -112,6 +113,8 @@ struct ManagementConnection {
     auth: serde_json::Value,
     base_url: String,
     credential_configured: bool,
+    #[serde(default)]
+    glued_prefix: Option<String>,
 }
 #[derive(Deserialize)]
 struct ProviderManagement {
@@ -262,6 +265,7 @@ struct Worker {
     approval_details: std::collections::BTreeMap<u64, MemberDetailRead>,
     /// Highest event sequence applied; replayed or duplicate events are skipped.
     cursors: std::collections::HashMap<String, u64>,
+    tool_origins: std::collections::VecDeque<(String, String, String)>,
     projection_id: u64,
     focus: String,
     /// The line the side panel follows.
@@ -294,6 +298,12 @@ struct Worker {
     shell_stops: Vec<u64>,
     /// The model the session adopted, for the preference commands.
     model: Option<Configuration>,
+    /// The model Home previews, which the first message's Session adopts.
+    preview: Option<Configuration>,
+    /// The preference Home chose for that model: the members it named, which
+    /// the server applies over the model's saved values. Dropped once Home
+    /// shows another model or the Session starts.
+    pending: Option<(ModelId, ModelPreferences)>,
     model_session: Option<String>,
     /// The MCP sign-in waiting for its callback.
     mcp_attempt: Option<McpAttempt>,
@@ -305,6 +315,7 @@ struct Worker {
     login: Option<Login>,
     /// Browser callbacks its local listener captured.
     login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
+    opening_reads: Vec<(u64, OpeningRead)>,
     /// The composer's context reading is out of date: a model request on main
     /// finished, a run on main ended, a compaction result arrived on main, or
     /// the session or its model changed.
@@ -342,6 +353,30 @@ struct MemberDetailRead {
 struct OutputWatch {
     target: TaskTarget,
     poll_at: Option<tokio::time::Instant>,
+}
+
+enum OpeningRead {
+    Catalog(ModelId),
+    Permissions,
+    Skills,
+}
+
+fn catalog_features(entry: Option<CatalogModel>) -> Update {
+    let images = entry.as_ref().is_none_or(|entry| {
+        entry.capabilities.vision || entry.capabilities.modalities.iter().any(|m| m == "image")
+    });
+    let service_tiers = entry
+        .and_then(|entry| entry.metadata?.service_tier)
+        .is_some_and(|tier| {
+            tier.supported
+                && ["priority", "default"]
+                    .iter()
+                    .all(|value| tier.options.iter().any(|option| option == value))
+        });
+    Update::ModelFeatures {
+        images,
+        service_tiers,
+    }
 }
 
 struct Login {
@@ -657,6 +692,7 @@ impl Worker {
             question_responses: Vec::new(),
             approval_details: Default::default(),
             cursors: Default::default(),
+            tool_origins: Default::default(),
             projection_id: 0,
             focus: "main".into(),
             side: None,
@@ -679,11 +715,14 @@ impl Worker {
             ui_id: None,
             shell_stops: Vec::new(),
             model: None,
+            preview: None,
+            pending: None,
             mcp_attempt: None,
             mcp_callbacks: unbounded_channel(),
             mcp_required: Default::default(),
             login: None,
             login_callbacks: unbounded_channel(),
+            opening_reads: Vec::new(),
             context_stale: false,
             context_request: None,
             last_usage: None,
@@ -757,12 +796,14 @@ impl Worker {
             self.client.typed("session.model.preview", params).await
         })
         .await??;
-        self.send(Update::Ready(Configuration {
+        let configuration = Configuration {
             provider_id: preview.model.provider_id,
             model_id: preview.model.model_id,
             capability_snapshot: None,
             model_preferences: preview.model_preferences,
-        }));
+        };
+        self.preview = Some(configuration.clone());
+        self.send(Update::Ready(configuration));
         Ok(())
     }
 
@@ -781,7 +822,24 @@ impl Worker {
             crate::add_creation_worktree(&self.client, &self.options, &mut params)?;
             params
         };
-        let mut preferences = params.get("modelPreferences").cloned();
+        // A choice made at Home came after the launch flag, so it replaces
+        // that flag's member and leaves the rest of the creation's
+        // preferences alone. `modelFromSession` denies the member entirely.
+        let from_session =
+            self.model_session.is_some() && self.client.offers("session.create.modelFromSession");
+        if let (false, Some((_, pending))) = (from_session, &self.pending) {
+            let mut preferences = params["modelPreferences"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            if let Some(effort) = &pending.reasoning_effort {
+                preferences.insert("reasoningEffort".into(), json!(effort));
+            }
+            if let Some(tier) = &pending.service_tier {
+                preferences.insert("serviceTier".into(), json!(tier));
+            }
+            params["modelPreferences"] = serde_json::Value::Object(preferences);
+        }
         let mut target = if initial {
             self.options
                 .provider
@@ -807,19 +865,13 @@ impl Worker {
                         .client
                         .typed("provider.management", json!({}))
                         .await?;
-                    let configured = snapshot
+                    snapshot
                         .providers
                         .into_iter()
                         .find(|entry| entry.provider_id == provider)
                         .ok_or_else(|| format!("{cannot_copy}, or select a configured Provider model before starting a new Session"))?;
-                    preferences = configured.preferences.get(&model).cloned();
-                } else {
-                    preferences = saved_model_preferences(&mut self.client, &provider, &model).await?;
                 }
                 target = Some((provider, model));
-            }
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
             }
             match self.client.typed::<Created>("session.create", params).await {
                 Ok(created) => Ok(created),
@@ -827,9 +879,6 @@ impl Worker {
                     &mut self.client,
                     target.as_ref().map(|(p, m)| (p.as_str(), m.as_str())),
                     error,
-                    preferences
-                        .as_ref()
-                        .filter(|_| !initial || self.options.effort.is_none()),
                 )
                 .await),
             }
@@ -936,7 +985,12 @@ impl Worker {
         self.register_ui().await?;
         self.mcp_required.clear();
         self.model = Some(configuration.clone());
+        self.preview = None;
+        self.pending = None;
         self.discover_branch("main");
+        if self.client.offers("session.history.display.transcript") {
+            self.task_history.get_mut("main").unwrap().window.through = Some(attached.sequence);
+        }
         if self.client.supports(&["session.branches"]) {
             let directory: dim_client::wire::BranchDirectory = self
                 .client
@@ -944,77 +998,113 @@ impl Worker {
                 .await?;
             for entry in directory.branches {
                 self.projection.directory(&entry);
-                self.discover_branch(&entry.branch_id);
+                if entry.state == "ended" {
+                    let history = self.task_history.entry(entry.branch_id).or_default();
+                    history.ended = true;
+                    history.done = true;
+                } else {
+                    self.discover_branch(&entry.branch_id);
+                }
             }
         }
         self.poll_task_history().await?;
-        let features = self.model_features(&model).await;
         self.send(Update::Ready(configuration));
-        self.send(features);
-        if self.client.supports(&permission::PRESET_METHODS) {
-            let policy = permission::read(&mut self.client, &session_id)
-                .await
-                .map(|state| state.policy)
-                .map_err(|error| format!("permission: unavailable ({error})"));
-            self.send(Update::Permissions(policy));
-        }
+        self.send(catalog_features(None));
+        self.send(Update::Skills(Vec::new()));
         self.send(Update::Switched {
-            session_id,
+            session_id: session_id.clone(),
             kind,
             cwd: self.session_cwd.clone(),
         });
-        self.refresh_skills().await;
+        let mut reads = Vec::new();
+        if self.client.offers("provider.catalog") {
+            reads.push((
+                "provider.catalog",
+                json!({"providerId":model.provider_id}),
+                OpeningRead::Catalog(model),
+            ));
+        }
+        if self.client.supports(&permission::PRESET_METHODS) {
+            reads.push((
+                "session.permission.get",
+                json!({"sessionId":session_id,"branchId":"main"}),
+                OpeningRead::Permissions,
+            ));
+        }
+        if self.client.offers("skills.catalog") {
+            match &self.session_cwd {
+                Some(cwd) => {
+                    reads.push(("skills.catalog", json!({"cwd":cwd}), OpeningRead::Skills))
+                }
+                None => self.send(Update::Notice(
+                    "Skills unavailable: the daemon did not report the Session workspace".into(),
+                )),
+            }
+        }
+        for (method, params, kind) in reads {
+            match self.client.send(method, params).await {
+                Ok(id) => self.opening_reads.push((id, kind)),
+                Err(error) => self.send(Update::Notice(format!("{method}: {error}"))),
+            }
+        }
         self.context_stale = true;
         self.publish();
         Ok(())
     }
 
-    async fn refresh_skills(&mut self) {
-        if !self.client.supports(&["skills.catalog"]) {
-            self.send(Update::Skills(Vec::new()));
-            return;
-        }
-        let Some(cwd) = self.session_cwd.clone() else {
-            self.send(Update::Notice(
-                "Skills unavailable: the daemon did not report the Session workspace".into(),
-            ));
-            return;
-        };
-        match crate::management::skills::catalog(&mut self.client, &cwd).await {
-            Ok(catalog) => self.send(Update::Skills(catalog.entries)),
-            Err(error)
-                if error.downcast_ref::<client::RpcError>().and_then(app_error)
-                    == Some("unknown_method") =>
-            {
-                self.send(Update::Skills(Vec::new()))
+    fn opening_reply(&mut self, kind: OpeningRead, result: Result<Value, client::RpcError>) {
+        match kind {
+            OpeningRead::Catalog(model) => {
+                if !self.model.as_ref().is_some_and(|current| {
+                    current.provider_id == model.provider_id && current.model_id == model.model_id
+                }) {
+                    return;
+                }
+                let entry = result
+                    .ok()
+                    .and_then(|value| serde_json::from_value::<ProviderCatalogSnapshot>(value).ok())
+                    .and_then(|snapshot| snapshot.catalog)
+                    .and_then(|catalog| {
+                        catalog
+                            .models
+                            .into_iter()
+                            .find(|entry| entry.id == model.model_id)
+                    });
+                self.send(catalog_features(entry));
             }
-            Err(error) => self.send(Update::Notice(format!("Skills unavailable: {error}"))),
+            OpeningRead::Permissions => {
+                let policy = result
+                    .map_err(|error| error.to_string())
+                    .and_then(|value| {
+                        serde_json::from_value::<permission::State>(value)
+                            .map_err(|error| error.to_string())
+                    })
+                    .map(|state| state.policy)
+                    .map_err(|error| format!("permission: unavailable ({error})"));
+                self.send(Update::Permissions(policy));
+            }
+            OpeningRead::Skills => {
+                if result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|error| error.code == -32601)
+                {
+                    self.send(Update::Skills(Vec::new()));
+                    return;
+                }
+                match result.map_err(|error| error.to_string()).and_then(|value| {
+                    serde_json::from_value::<crate::management::skills::Catalog>(value)
+                        .map_err(|error| error.to_string())
+                }) {
+                    Ok(catalog) => self.send(Update::Skills(catalog.entries)),
+                    Err(error) => self.send(Update::Notice(format!("Skills unavailable: {error}"))),
+                }
+            }
         }
     }
 
-    /// Whether the model takes image input, from its catalog entry:
-    /// `vision`, or `image` among its modalities. `None` when the server
-    /// has no catalog or it does not answer in time.
-    /// The model's catalog entry as [`Update::ModelFeatures`]. Unknown
-    /// capabilities leave images as they are, sent as images, and offer
-    /// no service tiers.
     async fn model_features(&mut self, model: &ModelId) -> Update {
-        let entry = self.catalog_entry(model).await;
-        let images = entry.as_ref().is_none_or(|entry| {
-            entry.capabilities.vision || entry.capabilities.modalities.iter().any(|m| m == "image")
-        });
-        let service_tiers = entry
-            .and_then(|entry| entry.metadata?.service_tier)
-            .is_some_and(|tier| {
-                tier.supported
-                    && ["priority", "default"]
-                        .iter()
-                        .all(|value| tier.options.iter().any(|option| option == value))
-            });
-        Update::ModelFeatures {
-            images,
-            service_tiers,
-        }
+        catalog_features(self.catalog_entry(model).await)
     }
 
     async fn catalog_entry(&mut self, model: &ModelId) -> Option<CatalogModel> {
@@ -1499,6 +1589,7 @@ impl Worker {
             Command::Rename(title) => self.rename(title).await,
             Command::Earlier => self.earlier(),
             Command::Goal(request) => self.goal(request).await,
+            Command::Loop(request) => self.loop_command(request).await,
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
                     self.client.typed("web.toggle", json!({})).await;
@@ -1780,7 +1871,11 @@ impl Worker {
             Command::SetPermission(change) => {
                 let result = if self.session_id.is_empty() {
                     Ok(dim_agent_types::PermissionPolicy {
-                        preset: change,
+                        preset: change.resolve(
+                            self.options
+                                .permission
+                                .unwrap_or(dim_agent_types::PermissionPreset::WorkspaceWrite),
+                        ),
                         ..Default::default()
                     })
                 } else {
@@ -1789,9 +1884,9 @@ impl Worker {
                         .await
                         .map_err(|error| error.to_string())
                 };
-                if result.is_ok() {
-                    self.options.permission = Some(change);
-                    self.send(Update::PermissionSelected(change));
+                if let Ok(policy) = &result {
+                    self.options.permission = Some(policy.preset);
+                    self.send(Update::PermissionSelected(policy.preset));
                 }
                 self.send(Update::Permissions(result));
             }
@@ -1960,8 +2055,12 @@ impl Worker {
             }
             Command::SetLocale(language) => crate::management::use_language(language),
             Command::Configure(text) => {
-                if self.session_id.is_empty() && configure::needs_session(&text) {
-                    self.report(NO_SESSION.to_owned(), true);
+                if self.session_id.is_empty() {
+                    if configure::needs_session(&text) {
+                        self.report(NO_SESSION.to_owned(), true);
+                    } else {
+                        self.configure_home(&text).await;
+                    }
                     return Ok(());
                 }
                 let model = self.model.clone();
@@ -2039,6 +2138,35 @@ impl Worker {
             } => {
                 if projection_id == self.projection_id {
                     self.watch_task_output(target);
+                }
+            }
+            Command::ToolOrigin {
+                session_id,
+                projection_id,
+                branch_id,
+                request_id,
+                call_id,
+            } => {
+                if session_id == self.session_id
+                    && projection_id == self.projection_id
+                    && self.methods.contains("session.tool.get")
+                {
+                    let key = (branch_id.clone(), request_id.clone(), call_id.clone());
+                    let queued = self.tool_origins.contains(&key)
+                        || self.task_history_request.as_ref().is_some_and(|read| {
+                            read.is_tool_origin(&branch_id, &request_id, &call_id)
+                        });
+                    let needed = transcript_mut(&mut self.projection, &mut self.lines, &branch_id)
+                        .is_some_and(|projection| {
+                            projection.rows().iter().any(|row| {
+                                row.batch.as_deref() == Some(&request_id)
+                                    && row.call_id.as_deref() == Some(&call_id)
+                                    && !row.tool_lookup_done
+                            })
+                        });
+                    if needed && !queued {
+                        self.tool_origins.push_back(key);
+                    }
                 }
             }
             Command::CompactionDetails {
@@ -2314,6 +2442,85 @@ impl Worker {
         match result {
             Ok(report) => self.report(report, false),
             Err(error) => self.report(format!("Goal: {error}"), true),
+        }
+    }
+
+    /// `/loop`: show the shown line's loops, start one, or stop one, and print
+    /// the owner's answer into the transcript. The pattern is `goal` above:
+    /// the command calls a session method and the report is one transcript
+    /// line.
+    async fn loop_command(&mut self, request: crate::loop_view::Request) {
+        if self.session_id.is_empty() {
+            self.report(format!("Loop: {NO_SESSION}"), true);
+            return;
+        }
+        if !crate::loop_command::available(&mut self.client, &self.session_id).await {
+            self.report(crate::loop_view::NOT_AVAILABLE.into(), true);
+            return;
+        }
+        let branch = self.focus.clone();
+        let result = async {
+            match request {
+                crate::loop_view::Request::Show => {
+                    let loops =
+                        crate::loop_command::list(&mut self.client, &self.session_id, &branch)
+                            .await?;
+                    Ok::<_, crate::Error>(crate::loop_view::report(&branch, &loops).join("\n"))
+                }
+                crate::loop_view::Request::Start {
+                    prompt,
+                    every_seconds,
+                } => {
+                    let created = self
+                        .client
+                        .rpc(
+                            "session.loop.start",
+                            crate::loop_command::start_request(
+                                &self.session_id,
+                                &branch,
+                                &prompt,
+                                every_seconds,
+                            ),
+                        )
+                        .await?;
+                    let id = created["loop"]["loopId"].as_str().unwrap_or_default();
+                    Ok(format!(
+                        "Loop {id} started on {branch} ({}).",
+                        crate::loop_view::cadence_text(every_seconds)
+                    ))
+                }
+                crate::loop_view::Request::Stop(loop_id) => {
+                    let loop_id = match loop_id {
+                        Some(id) => id,
+                        None => match crate::loop_command::only_live(
+                            &mut self.client,
+                            &self.session_id,
+                            &branch,
+                        )
+                        .await?
+                        {
+                            Some(id) => id,
+                            None => {
+                                return Ok(format!(
+                                    "No single live loop on {branch}; name one with /loop stop ID."
+                                ));
+                            }
+                        },
+                    };
+                    self.client
+                        .rpc(
+                            "session.loop.stop",
+                            json!({"sessionId": self.session_id, "loopId": loop_id}),
+                        )
+                        .await?;
+                    Ok(format!("Loop {loop_id} stopped."))
+                }
+            }
+        }
+        .await;
+        match result {
+            Ok(report) => self.report(report, false),
+            Err(error) => self.report(format!("Loop: {error}"), true),
         }
     }
 
@@ -3083,6 +3290,7 @@ impl Worker {
                 custom: summary.source == "custom",
                 base_url: Some(summary.base_url).filter(|url| !url.is_empty()),
                 api_key_preview: summary.credential_configured.then(|| "••••••••".into()),
+                glued_prefix: summary.glued_prefix,
                 id: summary.provider_id,
                 version: summary.version,
                 name: summary.display_name,
@@ -3117,6 +3325,7 @@ impl Worker {
                         auth: connection.auth,
                         base_url: connection.base_url,
                         credential_configured: connection.credential_configured,
+                        glued_prefix: connection.glued_prefix,
                         enabled: entry
                             .enabled
                             .ok_or("Static Provider enable flag is missing")?,
@@ -3177,6 +3386,7 @@ impl Worker {
                 api_key,
                 base_url,
                 enabled,
+                glued_prefix,
             } => {
                 let probe = api_key.is_some() || base_url.is_some();
                 let mut patch = json!({});
@@ -3188,6 +3398,14 @@ impl Worker {
                 }
                 if let Some(enabled) = enabled {
                     patch["enabled"] = json!(enabled);
+                }
+                if let Some(prefix) = glued_prefix {
+                    // The patch's own "clear it" is a null, and its "leave it
+                    // alone" is the omitted field.
+                    patch["gluedPrefix"] = match prefix {
+                        Some(prefix) => json!(prefix),
+                        None => json!(null),
+                    };
                 }
                 let notice = if probe {
                     "Connected"
@@ -3358,6 +3576,11 @@ impl Worker {
             };
             let preferences = self.saved_preferences(&provider_id).await;
             let total = catalog.models.len();
+            let ambiguous: Vec<crate::wire::CatalogPreferences> = catalog
+                .models
+                .iter()
+                .filter_map(|model| model.metadata.clone())
+                .collect();
             let undeclared = catalog
                 .models
                 .iter()
@@ -3416,14 +3639,37 @@ impl Worker {
                             efforts,
                             default_effort,
                             saved_effort,
+                            outcome: model_outcome(model.metadata.as_ref(), &provider_id),
                         }
                     }),
             );
             if undeclared > 0 {
+                let mut candidates: Vec<String> = ambiguous
+                    .iter()
+                    .flat_map(|metadata| {
+                        metadata
+                            .identification
+                            .as_ref()
+                            .filter(|identification| identification.rule == "ambiguous")
+                            .map(|identification| {
+                                identification
+                                    .candidates
+                                    .iter()
+                                    .map(|candidate| {
+                                        format!("{}/{}", candidate.provider_id, candidate.model_id)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                candidates.sort();
+                candidates.dedup();
                 limits.push(NeedsLimitsProvider {
                     provider_id: provider_id.clone(),
                     provider_name: provider_name.clone(),
                     count: undeclared,
+                    candidates,
                 });
             }
             if models.len() == before {
@@ -3592,10 +3838,125 @@ impl Worker {
         Ok(())
     }
 
+    /// `/effort`, `/reasoning` and `/fast` at Home: the configuration
+    /// commands act on the model the footer shows, which is the one the first
+    /// message's Session adopts. A value is held as that model's pending
+    /// `modelPreferences` member for `start_session`; it sends no RPC and
+    /// writes no default. Bare `/agent` lists profiles, which names no
+    /// Session, so it keeps the ordinary path.
+    async fn configure_home(&mut self, text: &str) {
+        let command = text.split_whitespace().next().unwrap_or_default();
+        let bare_effort = matches!(text, "/effort" | "/reasoning");
+        if command == "/agent" {
+            match configure::run(&mut self.client, "", None, text).await {
+                Ok(report) => self.report(report.lines.join("\n"), false),
+                Err(error) => self.report(error.to_string(), true),
+            }
+            return;
+        }
+        let shown = self.model.clone().or_else(|| self.preview.clone());
+        let Some(shown) = shown else {
+            // Home shows no model, so the dialog says what to do instead of
+            // waiting for choices that cannot come.
+            if bare_effort {
+                self.send(Update::EffortChoices(Err(configure::NO_MODEL.into())));
+            } else {
+                self.report(configure::NO_MODEL.to_owned(), true);
+            }
+            return;
+        };
+        let result = configure::preference(&mut self.client, &shown, text).await;
+        if bare_effort {
+            self.send(Update::EffortChoices(
+                result
+                    .map(|preference| match preference {
+                        configure::Preference::List {
+                            effort: Some(effort),
+                            ..
+                        } => effort,
+                        configure::Preference::List { effort: None, .. }
+                        | configure::Preference::Apply { .. } => {
+                            unreachable!("bare /effort lists choices")
+                        }
+                    })
+                    .map_err(|error| error.to_string()),
+            ));
+            return;
+        }
+        let preferences = match result {
+            Ok(configure::Preference::List { line, .. }) => return self.report(line, false),
+            Ok(configure::Preference::Apply { preferences, value }) => {
+                // `/new` after a Session inherits that Session's model
+                // through `modelFromSession`, which a creation's preferences
+                // cannot accompany: the choice would silently never arrive.
+                if self.model_session.is_some()
+                    && self.client.offers("session.create.modelFromSession")
+                {
+                    self.report(
+                        "The next Session inherits its model; run the command there.".into(),
+                        true,
+                    );
+                    return;
+                }
+                self.report(
+                    format!(
+                        "{} for the first Session: {value}",
+                        if command == "/fast" {
+                            "Service tier"
+                        } else {
+                            "Reasoning effort"
+                        }
+                    ),
+                    false,
+                );
+                preferences
+            }
+            Err(error) => return self.report(error.to_string(), true),
+        };
+        // The other member keeps what the shown model already carries: the
+        // saved value the preview reported, else the choice Home made before.
+        let held = self
+            .pending
+            .as_ref()
+            .filter(|(pending, _)| {
+                pending.provider_id == shown.provider_id && pending.model_id == shown.model_id
+            })
+            .map(|(_, held)| held);
+        let saved = shown.model_preferences.as_ref();
+        let preferences = ModelPreferences {
+            reasoning_effort: preferences.reasoning_effort.or_else(|| {
+                held.and_then(|held| held.reasoning_effort.clone())
+                    .or_else(|| saved.and_then(|saved| saved.reasoning_effort.clone()))
+            }),
+            service_tier: preferences.service_tier.or_else(|| {
+                held.and_then(|held| held.service_tier.clone())
+                    .or_else(|| saved.and_then(|saved| saved.service_tier.clone()))
+            }),
+        };
+        self.pending = Some((
+            ModelId {
+                provider_id: shown.provider_id.clone(),
+                model_id: shown.model_id.clone(),
+            },
+            preferences.clone(),
+        ));
+        let configuration = Configuration {
+            model_preferences: Some(preferences),
+            ..shown
+        };
+        self.preview = Some(configuration.clone());
+        // Home's shown model may be the one `/models` picked, which the first
+        // creation reads; its label draws the pending choice too.
+        if self.model.is_some() {
+            self.model = Some(configuration.clone());
+        }
+        self.send(Update::Ready(configuration));
+    }
+
     /// Switches the session's model, or at home the one the first message
     /// starts a session on, then makes it the default for new ones.
-    /// A cycled `reasoning_effort` is saved first, then sent with the model's
-    /// other saved preferences. `label` is the picker row's text, which the
+    /// A cycled `reasoning_effort` is saved first, so the server reads it when
+    /// it adopts the model. `label` is the picker row's text, which the
     /// default's confirmation names back.
     async fn select_model(
         &mut self,
@@ -3612,16 +3973,12 @@ impl Worker {
             self.save_reasoning_effort(&provider_id, &model_id, effort)
                 .await?;
         }
-        let mut preferences =
-            saved_model_preferences(&mut self.client, &provider_id, &model_id).await?;
-        if let Some(effort) = &reasoning_effort {
-            let value = preferences.get_or_insert_with(|| json!({}));
-            if let Some(object) = value.as_object_mut() {
-                object.insert("reasoningEffort".to_owned(), json!(effort));
-            }
-        }
         let model = if self.session_id.is_empty() {
             self.model_session = None;
+            // `/models` at Home may have saved an effort for the model it
+            // picked; that value is the new model's saved one, and the choice
+            // Home held belonged to the model it replaced.
+            self.pending = None;
             let model = ModelId {
                 provider_id,
                 model_id,
@@ -3634,15 +3991,13 @@ impl Worker {
                 model_preferences: None,
             };
             self.model = Some(configuration.clone());
+            self.preview = Some(configuration.clone());
             self.send(Update::Ready(configuration));
             self.send(features);
             model
         } else {
             let target = (provider_id.clone(), model_id.clone());
-            let mut params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
-            if let Some(preferences) = &preferences {
-                params["modelPreferences"] = preferences.clone();
-            }
+            let params = json!({"sessionId":self.session_id,"branchId":"main","providerId":provider_id,"modelId":model_id});
             let updated: Updated = match self.client.typed("session.model.update", params).await {
                 Ok(updated) => updated,
                 Err(error) => {
@@ -3650,7 +4005,6 @@ impl Worker {
                         &mut self.client,
                         Some((target.0.as_str(), target.1.as_str())),
                         error,
-                        preferences.as_ref(),
                     )
                     .await);
                 }
@@ -4046,6 +4400,15 @@ impl Worker {
         id: u64,
         result: Result<serde_json::Value, client::RpcError>,
     ) -> crate::Result<()> {
+        if let Some(index) = self
+            .opening_reads
+            .iter()
+            .position(|(request, _)| *request == id)
+        {
+            let (_, kind) = self.opening_reads.remove(index);
+            self.opening_reply(kind, result);
+            return Ok(());
+        }
         if self.owns_compaction(id) {
             self.compaction_reply(result);
             return Ok(());
@@ -4064,6 +4427,9 @@ impl Worker {
                     Some("context_not_configured") => {
                         "Context usage is known once a model has answered in this session"
                             .to_owned()
+                    }
+                    Some("context_usage_unavailable") => {
+                        "Context usage will be available after the next model request".into()
                     }
                     Some("context_model_failed") => {
                         "Context usage needs the model's capabilities; select the model again"
@@ -4365,6 +4731,8 @@ impl Worker {
         if branch_id == "main"
             && let EventContent::PermissionChanged(data) = &event.content
         {
+            self.opening_reads
+                .retain(|(_, kind)| !matches!(kind, OpeningRead::Permissions));
             self.send(Update::Permissions(Ok(data.policy.clone())));
         }
         if branch_id == "main"
@@ -4564,7 +4932,8 @@ impl Worker {
         snapshot.history_complete = self
             .task_history
             .get(&self.focus)
-            .is_some_and(|branch| branch.done);
+            .is_some_and(|branch| branch.window_complete);
+        snapshot.earlier = self.earlier_view();
         snapshot.task_history_loading = self
             .task_history
             .values()
@@ -4617,6 +4986,42 @@ fn group(n: u64) -> String {
     out
 }
 
+/// What identification made of one entry's id, in the words its row shows.
+///
+/// A merge is the one rule whose numbers come from several rows rather than
+/// from one declaration, so it reads as inferred from them; every other rule
+/// named one row, and the entry's `matchedProviderId` and `matchedModelId` say
+/// which.
+fn model_outcome(
+    metadata: Option<&crate::wire::CatalogPreferences>,
+    listed_by: &str,
+) -> ModelOutcome {
+    let Some(metadata) = metadata else {
+        return ModelOutcome::Unidentified;
+    };
+    let Some(identification) = metadata.identification.as_ref() else {
+        return ModelOutcome::Unidentified;
+    };
+    if identification.rule == "ambiguous" {
+        return ModelOutcome::Ambiguous {
+            candidates: identification
+                .candidates
+                .iter()
+                .map(|candidate| format!("{}/{}", candidate.provider_id, candidate.model_id))
+                .collect(),
+        };
+    }
+    ModelOutcome::Identified {
+        provider_id: metadata
+            .matched_provider_id
+            .as_deref()
+            .unwrap_or(listed_by)
+            .to_owned(),
+        model_id: metadata.matched_model_id.clone().unwrap_or_default(),
+        inferred: identification.rule == "merge",
+    }
+}
+
 fn effort_choices(
     capabilities: &dim_agent_types::CatalogCapabilities,
     reasoning: Option<&dim_agent_types::ModelReasoning>,
@@ -4650,12 +5055,10 @@ pub(crate) async fn adopt_startup(
     if let Some(model) = &options.model {
         params["modelId"] = json!(model);
     }
-    let mut saved = None;
-    if let (Some(provider), Some(model)) = (&options.provider, &options.model) {
+    if let Some(provider) = &options.provider {
         params["providerId"] = json!(provider);
-        saved = saved_model_preferences(client, provider, model).await?;
     }
-    if let Some(preferences) = options.creation_preferences(saved) {
+    if let Some(preferences) = options.creation_preferences() {
         params["modelPreferences"] = preferences;
     }
     client
@@ -4684,25 +5087,6 @@ fn selection_version(reply: serde_json::Value) -> crate::Result<Option<u32>> {
     let current: Current =
         serde_json::from_value(reply).map_err(|_| "Invalid provider.selection response")?;
     Ok(current.selection.map(|selection| selection.version))
-}
-
-pub(crate) async fn saved_model_preferences(
-    client: &mut Client,
-    provider_id: &str,
-    model_id: &str,
-) -> crate::Result<Option<serde_json::Value>> {
-    if !client.offers("provider.management") {
-        return Ok(None);
-    }
-    let snapshot: ProviderManagement = client
-        .typed("provider.management", json!({"providerId":provider_id}))
-        .await?;
-    let provider = snapshot
-        .providers
-        .into_iter()
-        .next()
-        .ok_or("Provider management entry is missing")?;
-    Ok(provider.preferences.get(model_id).cloned())
 }
 
 pub(crate) async fn clear_model_preferences(
@@ -5021,6 +5405,95 @@ fn runtime_calls(action: &RuntimeAction) -> Vec<(&'static str, serde_json::Value
             vec![("runtime.configure", configure)]
         }
     }
+}
+
+/// The methods every test worker's daemon advertises: enough for `hello`, and
+/// a bounded window read.
+#[cfg(all(test, unix))]
+const TEST_FEATURES: [&str; 3] = [
+    "session.create",
+    "session.history",
+    "session.history.latestTurn",
+];
+
+/// A worker on a daemon that advertises `features` and answers nothing: the
+/// test supplies each reply itself, through `Worker::message`. Every request
+/// the worker sends is recorded, in order, for the tests that assert on one.
+#[cfg(all(test, unix))]
+async fn test_worker(
+    features: &[&str],
+) -> (
+    Worker,
+    mpsc::Receiver<Update>,
+    std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+) {
+    use rutis::host::CtxHost;
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let home = tempfile::tempdir().unwrap();
+    let endpoint = home.path().join("daemon.sock");
+    let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+    std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let options =
+        Options::parse(["--home".into(), home.path().to_str().unwrap().to_owned()].into_iter())
+            .unwrap();
+    let advertised: Vec<String> = features
+        .iter()
+        .map(|feature| (*feature).to_owned())
+        .collect();
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = std::sync::Arc::clone(&sent);
+    tokio::spawn(async move {
+        let _home = home;
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+                return;
+            };
+            if request["method"] != "hello" {
+                recorded.lock().unwrap().push(request);
+                continue;
+            }
+            let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                "instanceId":"earlier-test","serverVersion":"test","protocolVersion":4,
+                "features":advertised,"daemonProfile":{"kind":"product"}
+            }});
+            if writer
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    let client = Client::connect(&dim_client::ConnectionConfig {
+        endpoint,
+        server: dim_client::Server {
+            program: std::env::current_exe().unwrap(),
+            embedded: false,
+        },
+        profile: None,
+        client_kind: "cli",
+        client_name: "dim-cli-test",
+        protocol_version: 4,
+    })
+    .await
+    .unwrap();
+    let (updates, receiver) = mpsc::channel();
+    let worker = Worker::new(
+        options,
+        client,
+        updates,
+        rutis::Ctx::root().unwrap(),
+        tokio::sync::oneshot::channel().0,
+    );
+    (worker, receiver, sent)
 }
 
 #[cfg(test)]

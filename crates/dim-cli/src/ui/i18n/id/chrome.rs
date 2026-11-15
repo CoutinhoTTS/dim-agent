@@ -7,21 +7,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "No queued messages." => "Tidak ada pesan dalam antrean.",
         "Held · awaiting application" => "Ditahan · menunggu penerapan",
-        "Incorporating · awaiting model consumption" => {
-            "Sedang dimasukkan · menunggu pemrosesan oleh model"
-        }
         "Held" => "Ditahan",
-        "Incorporating" => "Sedang dimasukkan",
         "Unread" => "Belum dibaca",
-        "Unread · waiting for your next message" => {
-            "Belum dibaca · menunggu pesan Anda berikutnya"
-        }
-        "/queue view · awaiting model consumption" => {
-            "/queue lihat · menunggu pemrosesan oleh model"
-        }
-        "/queue view · waiting for your next message" => {
-            "/queue lihat · menunggu pesan Anda berikutnya"
-        }
         "Enter export · Esc cancel" => "Enter ekspor · Esc batal",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Pesan dengan lampiran tetap dalam antrean; gunakan /queue untuk steer atau menghapusnya"
@@ -381,8 +368,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "keluar",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter pilih + default · ←/→ upaya · Ctrl+X hapus simpanan · Esc hapus/tutup"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter pilih + default · ←/→ upaya · Ctrl+B/F kursor · Ctrl+X hapus simpanan · Esc hapus/tutup"
         }
         "Default for new sessions in {folder}: {model}" => {
             "Model default untuk sesi baru di {folder}: {model}"
@@ -571,6 +558,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C hapus, 2x untuk keluar · Ctrl+D keluar jika draf kosong"
         }
+        "Shift+Tab cycle permissions (composer focused)" => {
+            "Shift+Tab ganti izin (saat kolom masukan aktif)"
+        }
+        "Shift+Tab newer target while picked · Esc return to composer" => {
+            "Saat dipilih, Shift+Tab ke target lebih baru · Esc kembali ke masukan"
+        }
+        "(shift+tab to cycle)" => "(Shift+Tab untuk beralih)",
         "Fullscreen" => "Layar penuh",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown gulir · Home/End atas/bawah (saat draf kosong) · Tab pilih pesan, e edit, q kutip"

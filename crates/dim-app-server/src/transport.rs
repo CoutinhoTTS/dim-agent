@@ -272,10 +272,48 @@ fn pipe_bind(name: &str, first: bool) -> io::Result<LocalStream> {
     }
 }
 /// Addresses actually bound by the transport plugin.
-pub(crate) struct ListenAddresses {
+pub struct ListenAddresses {
     pub unix_path: Option<PathBuf>,
     pub pipe_name: Option<String>,
     pub websocket_address: Option<SocketAddr>,
+}
+
+/// The `read` reply: the addresses as UTF-8 text, as every path that crosses
+/// is ([service faces §1](../../../docs/design/service-faces.md#1-规则)).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoundAddresses {
+    pub unix_path: Option<String>,
+    pub pipe_name: Option<String>,
+    pub websocket_address: Option<String>,
+}
+
+/// What `listenAddresses.read` fails with: `{code, message}`.
+#[derive(Debug, serde::Serialize, thiserror::Error)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum ListenAddressesError {
+    #[error("{message}")]
+    InvalidPath { message: String },
+}
+
+#[rutis::service]
+impl ListenAddresses {
+    /// The addresses this process bound, if any.
+    pub fn read(&self) -> std::result::Result<BoundAddresses, ListenAddressesError> {
+        let unix_path = match &self.unix_path {
+            Some(path) => Some(path.to_str().map(str::to_owned).ok_or_else(|| {
+                ListenAddressesError::InvalidPath {
+                    message: format!("unix socket path is not UTF-8: {}", path.display()),
+                }
+            })?),
+            None => None,
+        };
+        Ok(BoundAddresses {
+            unix_path,
+            pipe_name: self.pipe_name.clone(),
+            websocket_address: self.websocket_address.map(|address| address.to_string()),
+        })
+    }
 }
 
 /// Owns the listeners and accept tasks. Accepting starts once the server is
@@ -748,6 +786,7 @@ async fn run_connection(
                                             "session.branches",
                                             "session.branch.get",
                                             "session.turn.get",
+                                            "session.turn.get.inputId",
                                             "session.submit",
                                             "session.stop",
                                             "session.keys",
@@ -760,6 +799,7 @@ async fn run_connection(
                                             "session.branch_end",
                                             "session.create.origin",
                                             "session.language",
+                                            "session.attach.expectedCwd",
                                         ]);
                                         if hub.config().database_path.is_some()
                                             && hub.config().product_home.is_some()
@@ -781,6 +821,10 @@ async fn run_connection(
                                         if hub.config().database_path.is_some() {
                                             features.push("session.fork");
                                             features.push("session.history.latestTurn");
+                                            if params.protocol_version >= 3 {
+                                                features.push("session.history.display.tail");
+                                                features.push("session.history.display.transcript");
+                                            }
                                         }
                                     }
                                     if trusted && hub.config().local_execution() {

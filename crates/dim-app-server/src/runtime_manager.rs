@@ -1529,7 +1529,7 @@ async fn run(mut command: tokio::process::Command, what: &str) -> Result<String,
         .await
         .map_err(|e| format!("{what}: {e}"))?;
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        return Ok(String::from_utf8_lossy_owned(output.stdout));
     }
     let text = String::from_utf8_lossy(&output.stderr);
     let tail: Vec<&str> = text.lines().rev().take(5).collect();

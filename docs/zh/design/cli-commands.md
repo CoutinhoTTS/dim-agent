@@ -49,7 +49,8 @@ Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页
 
 当通常的历史保留空间使实时区域不足八行时，实时控件优先：两种渲染器都可为实时区域使用最多八行，
 但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
-重叠。草稿编辑器在剩余行数内滚动，保持光标可见且不丢弃文字。其他情况下保留通常的历史空间。
+重叠。命令面板只剩三行时，查询放在顶边框内，保留选中命令，不遮挡输入框或权限页脚。
+草稿编辑器在剩余行数内滚动，保持光标可见且不丢弃文字。其他情况下保留通常的历史空间。
 
 列表面板同样遵守行数预算：绘制的行数不超过分给它的行数；分到不足两行时什么都不画，因为仅两条
 边框就要占满预算。列表占用其余部分留下的行。
@@ -89,15 +90,15 @@ Commands
 ```
 
 ```text
-Fullscreen, 8 rows             Scrollback, 8 rows
-+- Command Palette -------+
-| >                       |   +- input -----------------+
-| /new                    |   | > /                     |
-+-------------------------+   +-------------------------+
-                              +-------------------------+
-+- input -----------------+   | /new                    |
-|                         |   +-------------------------+
-+-------------------------+   AGENT
+Fullscreen, 8 rows                           Scrollback, 8 rows
++- > -------------------------------+
+| /new                              |       +- input ---------------------------+
++-----------------------------------+       | > /                               |
+                                            +-----------------------------------+
++- input ---------------------------+       +-----------------------------------+
+|                                   |       | /new                              |
++-----------------------------------+       +-----------------------------------+
+ ⏵⏵ Read only (Shift+Tab 切换)                 ⏵⏵ Read only (Shift+Tab 切换)
 ```
 
 ## 运行按键与排队
@@ -137,6 +138,9 @@ shell 运行拦截，再是 steer 最早的排队消息，只有在没有排队�
 正在显示，即有任务在运行、或有刚结束的任务仍在淡出；后台没有任何任务时，这个按键既不
 提交也不打开。
 
+输入框上方的任务展示遵循[后台任务标题与行布局](../../design/background-task-list.md#task-titles-and-composer-rows)：
+两种终端模式下都一项任务一行，不再横向拼接多个任务的说明。
+
 - 排队消息在当前运行结束后运行，每次运行一条。被 steer 的消息在当前运行的下一个轮次边界并入该运行。
 - 取回消息和中断都通过 `session.input.withdraw` 撤回消息。文字只在撤回被删除后才进入草稿。
   已离开队列的消息不会放回，其文字也不会再次发送。
@@ -147,20 +151,24 @@ shell 运行拦截，再是 steer 最早的排队消息，只有在没有排队�
 
 ### 队列条
 
-有消息排队时，输入框上方的队列条显示消息和状态，待处理消息按排队顺序排列。运行中，
+有消息排队时，输入框上方的队列条和 `/queue` 面板只显示尚未采用、仍可操作的消息，按排队顺序排列。
+已采用的消息只保留在正文中，不再重复显示 `Incorporating`，也不计入队列数量。运行中，
 草稿为空时，`Shift+Left` 把最新排队的消息取回输入框编辑。队列条根据默认发送模式，
 提示草稿为空时 steer 最早排队消息的快捷键。`/queue` 打开队列面板。没有排队消息时，
 草稿为空的 Enter 在任务行显示期间打开 `/tasks`，见[运行按键](#运行按键与排队)。
 
 ```text
-┌─ Queue (2) ───────────────────────────────────────────────────────┐
-│ › Incorporating · fix the failing test                            │
+  › fix the failing test
+┌─ Queue (1) ───────────────────────────────────────────────────────┐
 │ › Held · then update the design note                              │
 │ /queue manage · Shift+← edit last · empty draft: Ctrl+S steer     │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 队列条最多显示五条消息，未显示的数量加在提示前，并在队列排空前保持已达到的高度。
+没有尚未采用的消息时，队列条消失。停止后若仍有已采用但未消费的消息，只保留正文现有样式，
+不增加“未读取”提示，不重复消息内容、不显示队列操作。
+这里只改变展示，不改变底层输入状态、事件或恢复语义。
 
 ## 用量报告
 
@@ -290,7 +298,7 @@ Goal cleared on main.
  ╭──────────────────────────────────────────────────────────────────────────────╮
  │ › _                                                                          │
  ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
-  AGENT  ⏵⏵ Workspace write  ◎ goal active  1.8K / 256K              provider/model
+  ⏵⏵ Workspace write (Shift+Tab 切换)  ◎ goal active  1.8K / 256K
 ```
 
 fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
@@ -298,7 +306,37 @@ fullscreen 把同一元素画在输入框的下边框，位于运行状态旁：
 ```text
  ╭──────────────────────────────────────────────────────────────────────────────╮
  │ › _                                                                          │
- ╰──── ◎ goal paused   Full access   1.8K / 256K ───── ● main · after message 4 ─╯
+ ╰──── ◎ goal paused   1.8K / 256K ────────────────── ● main · after message 4 ─╯
+  ⏵⏵ Full access (Shift+Tab 切换)
+```
+
+## Loop
+
+`/loop` 按节奏重复一个 prompt，并读取 Scheduler 保存的 loop。记录、轮次与节奏属于
+[Scheduler §12](plugins/Scheduler.md#12-loop)；本节只规定原生客户端怎么用它。命令与 `/goal` 一起列在面板里。
+
+| 形式 | 调用 |
+| --- | --- |
+| `/loop` | 无：先打印用法，随后显示所示线上的 loop，或说它没有 |
+| `/loop PROMPT` | `session.loop.start`，带 prompt |
+| `/loop INTERVAL PROMPT` | `session.loop.start`，带间隔与 prompt |
+| `/loop stop` | `session.loop.stop`，作用于该线唯一存活的 loop |
+| `/loop stop ID` | `session.loop.stop`，作用于该 loop |
+
+`INTERVAL` 是一个数字加 `s`、`m`、`h` 或 `d`，例如 `30s`、`5m`、`2h`、`1d`。它只在行首且能解析时才算间隔，
+否则整行都是 prompt，因此 `/loop check the deploy` 与 `/loop 5m check the deploy` 是同一命令的两种形式。
+
+行模式打印用法与 loop；两种终端 UI 模式选中时只填入 `/loop `，提交才分发，与 `/goal` 相同。回复给出 loop、
+状态、轮次，以及已安排时的下次到期时刻：
+
+```text
+palette: loop + Enter -> /loop |          (completion only)
+/loop check the deploy + Enter -> 开始自定节奏 loop
+/loop stop + Enter             -> 停止该线唯一存活的 loop
+
+Usage: /loop [PROMPT | INTERVAL PROMPT | stop [ID]]
+Loops on main (1):
+7f2 running round 12 next 2026-11-13T09:41:00.000Z check the deploy
 ```
 
 ## 提供方账号
@@ -729,13 +767,14 @@ Ctrl+R 读取该领域，并在提供方的 actions 含 `refresh` 时先发送 `
 Select a model
 > Ready / flash              ZDR  ‹ high ›  current
   Ready / plain              low
+  Ready / sonnet             —
   Edit models                Ready  ready
   Other / model-x
   Edit models                Other  other
   Manual: no models · add a model with provider.models.create
   Edit models                Manual  manual
   Subagent models: Agent choice
-Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 ```
 
 `dimcode models PROVIDER remove MODEL` 不经面板的确认直接移除；`dimcode models PROVIDER inspect MODEL` 打印详情显示的那些行。
@@ -978,7 +1017,8 @@ queue/steer 规则；启动之后不再有任何一层重新解析命令行。
 图片 token 作为未发送的草稿留在 composer 里，旁边是 Home/登录提示或启动错误，而不是被
 丢弃。若用户在此期间已经开始了新的草稿，则保留较新的草稿，并提示首条消息未发送，而不
 覆盖它。这种情况界面不会退出。没有 `-p` 时沿用现有的启动规则：恢复的 Session 无法启动时
-显示错误并以非零码退出，而 Home 上的创建失败后 Home 仍然可用。
+显示错误并以非零码退出，而 Home 上的创建失败后 Home 仍然可用。启动失败时关闭已打开的面板，
+让失败原因在退出前或恢复后的草稿旁可见。
 
 ### 守护进程启动失败
 
@@ -1305,27 +1345,42 @@ alpha 使用 `alpha`，beta 使用 `beta`，稳定版使用 `latest`。按可执
 然后以非零状态返回。安装失败显示安装器错误，未知安装布局（包括源码构建）显示手动
 安装或重建说明。
 
-npm 安装到安装目录内的暂存目录 `<prefix>/.dimcode-staging/staging-<pid>/`，因此中断
-或失败的安装只破坏暂存目录，已装的命令仍可运行。更新在开始前会清除上一次留下的暂存
-目录，此时它持有排他锁。暂存安装显式传入 `--globalconfig <prefix>/etc/npmrc`：只给
-`--prefix` 会让 npm 读暂存目录自己的 `etc/npmrc`，丢掉操作者用 `npm config set -g`
-保存的 registry、镜像与凭据。需要安装走镜像时，请配置 `.npmrc` 或 `npm config`。
+npm 安装到安装目录内的暂存目录 `<prefix>/.dimcode-staging/<package>/staging-<pid>/`，
+因此中断或失败的安装只破坏暂存目录，已装的命令仍可运行。暂存目录按包分开：一次更新只
+读写它所更新的那个包的目录，同一前缀下的两个包身份互不触碰对方的目录。更新在开始前会
+清除本包上一次留下的暂存目录，此时它持有该安装的排他锁。暂存安装显式传入
+`--globalconfig <prefix>/etc/npmrc`：只给 `--prefix` 会让 npm 读暂存目录自己的
+`etc/npmrc`，丢掉操作者用 `npm config set -g` 保存的 registry、镜像与凭据。需要安装走
+镜像时，请配置 `.npmrc` 或 `npm config`。
 
 包管理器成功退出后，更新要求暂存 `package.json` 的版本比已装版本更新且属于同一渠道，
-要求该包安装的每个命令都存在于暂存包内，并要求暂存包旁存在平台包。任一项不满足就保持
-已装版本并以非零状态退出，因此退出却不写入、或写入已装版本的包管理器算失败，而不是
-静默成功。
+要求暂存包旁存在平台包，并从包管理器在暂存 `bin/` 目录中创建的链接取得命令，而不是从
+清单里的键取得：npm 在链接前会规范化 `bin` 键，因此声明 `../bin2/escape` 的包装成
+`bin/escape`。这样取得的每个命令名都必须是单个路径组件，每个链接都必须指向暂存包内的
+文件，因此存活路径不会被拼到 `<prefix>/bin` 之外。新版本要安装的某个命令如果在存活
+`bin/` 中已有链接，该链接必须指向本包的存活目录；指向别处的链接属于另一个包，更新会
+指出该命令及其目标后失败，正如 npm 对这种安装报 `EEXIST`。任一项不满足就保持已装版本
+并以非零状态退出，因此退出却不写入、或写入已装版本的包管理器算失败，而不是静默成功。
 
 随后暂存包以一次原子交换替换当前包：macOS 用 `renamex_np(..., RENAME_SWAP)`，Linux 用
 `renameat2(..., RENAME_EXCHANGE)`。新版本自证可用之前，旧版本只存在于暂存目录。更新把
-新包安装的每个命令指向新包，目标本来就正确的命令保持不变，删除旧版本安装而新版本不再
-安装的链接，然后对每个已安装命令执行 `--version`，要求输出包声明的版本。该项校验失败，或命令在
-30 秒内没有应答时，同一次交换把旧版本放回，更新以非零状态退出，并在消息中指出该命令。
-交换期间崩溃只会留下一个完整的版本和暂存目录里的另一个，不会两个都不在。只有当文件系统
-拒绝交换（`ENOTSUP`、`EINVAL`、`ENOSYS`）时，更新才退回两次 rename，两者之间有几个
-系统调用的窗口；在该窗口内崩溃会把旧版本留在
-`<prefix>/.dimcode-staging/staging-<pid>/retired`，恢复命令为
-`mv <prefix>/.dimcode-staging/staging-<pid>/retired <prefix>/lib/node_modules/<package>`。
+新包安装的每个命令指向新包，目标本来就正确的命令保持不变，并删除旧版本声明而新版本不再
+声明的命令。可删除的集合是旧版本 `package.json` 中 `bin` 声明的命令，按 npm 链接前的规范
+化处理后，与 `<prefix>/bin` 中解析到本包的链接取交集；不在此集合中的链接一律不动，因此
+操作者给本包启动器加的别名在更新后仍在。旧版本 `package.json` 无法读取或解析时，更新不
+删除任何命令并说明该情况。随后对每个已安装命令执行 `--version`，要求输出包声明的版本。
+该项校验失败、命令在 30 秒内没有应答，或校验进行中收到 Ctrl+C 或 SIGTERM 时，校验启动的
+整个进程树先被结束并等待清理，因此它启动的进程不会存活到更新之后；随后同一次交换把旧版本
+放回，更新以非零状态退出，消息指出该命令或说明被中断，并说明旧版本已恢复。交换期间崩溃只会留下一个完整的版本和暂存目录里的另一个，不会两个都不在。只有当
+文件系统拒绝交换（`ENOTSUP`、`EINVAL`、`ENOSYS`）时，更新才退回两次 rename，两者之间
+有几个系统调用的窗口；在该窗口内崩溃会把旧版本留在
+`<prefix>/.dimcode-staging/<package>/staging-<pid>/retired`，恢复命令为
+`mv <prefix>/.dimcode-staging/<package>/staging-<pid>/retired <prefix>/lib/node_modules/<package>`。
+
+采用哪一种取决于前缀所在文件系统，而不是本文档的选择。`renamex_np` 的 `RENAME_SWAP`
+文档写明只在通过 `getattrlist(2)` 报告 `VOL_CAP_INT_RENAME_SWAP` 的文件系统上原子交换两个
+名字；`renameat2` 的 `RENAME_EXCHANGE` 文档写明文件系统不支持该标志时返回 `EINVAL`。
+因此前缀所在文件系统两者都不支持时，更新走两次 rename 的回退路径，并保留它的窗口。
 
 bun、pnpm、yarn 与 volta 仍原地安装，因此仍存在命令缺失的窗口。Windows 同样保持原样：
 npm 装在 `<prefix>\node_modules` 下并把命令 shim 直接放在 `<prefix>`，而运行中的更新
@@ -1469,7 +1524,8 @@ $ dimcode exec -p 'Explain this project' --json > run.jsonl
 退出码为 3。它不改变 `SessionConfig.interactive`。以非交互方式创建的
 Session 保留 Approval 现有的所有者侧策略（#98 D10）。`--permission` 选择包含文件范围和风险判定的旧策略；
 仍需审批的调用照样被拒绝（[无头执行](#无头执行)）。其他退出码保持原生 CLI 合同，包括回合失败为 2、
-中断为 130。传输失败不重试提交。重复的 `--image` 参数遵循无头附件合同：先文本，再按参数顺序放入
+中断为 130。运行的结局就是回合的结局：回合从失败步骤中续接成功，以及以 `output_limit` 为 reason 结算
+为已完成的回合，都退出 0，同时仍然打印该步骤的失败行。传输失败不重试提交。重复的 `--image` 参数遵循无头附件合同：先文本，再按参数顺序放入
 经过校验的原始图片字节，路径相对于调用进程。只有图片的调用是有效的。连接仍在时，提交错误保持
 "结果不确定"的诊断/退出路径，除非其 `error.data.appError` 是七种
 [保证在提交前拒绝](../../../crates/dim-app-server/README.md#session-submission-errors)之一：
@@ -1621,9 +1677,11 @@ Assistant: ...
 [permission] main branch preset: workspace-write  <- 由其他客户端修改
 ```
 
-滚动回显客户端在编辑器下方画一行状态行：代理标记与当前权限预设、目标标记、
-上下文对窗口的占用，以及一个显示当前状态的槽位——通知、需要回答或审批、`esc interrupt` 或后台任务数。
-模型（放得下时连同推理强度）靠右对齐；整行按终端宽度截断。
+两种 TUI 模式都在输入框下方绘制实时权限页脚，不带 `AGENT` 前缀；预设、颜色、本地化快捷键提示与
+按键行为见 [`/permissions`](#permissions)。页脚不提交到正文历史。
+Scrollback 在同一行保留目标标记、上下文对窗口的占用，以及一个显示当前状态的槽位——通知、需要回答
+或审批、`esc interrupt` 或后台任务数。模型（放得下时连同推理强度）靠右对齐；整行按终端宽度截断。
+Fullscreen 则在输入框下边框保留运行状态、状态槽、目标与上下文信息，不再把权限预设放进边框。
 
 ### 提交检查的警告
 
@@ -1689,6 +1747,33 @@ Process isolation 行链接到 Settings 的进程隔离控件；Esc 返回本面
 Command rules 行打开[命令规则领域](#命令规则领域)的管理面板，在那里列出、添加和删除规则；
 Esc 返回本面板并保持 Command rules 行的焦点。两种 TUI 模式都保留返回时的焦点，包括从 Settings
 打开 Permissions 的情况。
+
+两种 TUI 模式都在输入框下方靠左常驻显示生效的权限预设：
+
+```text
+ ╭──────────────────────────────────────────────────────────╮
+ │ › _                                                      │
+ ╰──────────────────────────────────────────────────────────╯
+  ⏵⏵ Read only (Shift+Tab 切换)
+  ⏵⏵ Workspace write (Shift+Tab 切换)
+  ⏵⏵ Full access (Shift+Tab 切换)
+```
+
+上面三行是互斥示例，实际只显示当前生效的预设。快捷键提示随界面语言翻译。Read only 为青色，
+Workspace write 为紫色，Full access 为黄色，快捷键提示为灰色。浅色主题用更深的颜色保证对比度，
+有限色终端使用青、品红、黄调色板。窄终端优先保留权限名称，再显示提示与其他状态内容。
+Fullscreen 的运行、目标、上下文和通知信息仍在输入框边框内。
+Scrollback 中提示排在最末：先画权限名称，只有在整行仍放得下时才画提示，
+需要的空间不足时提示让出的宽度留给其余内容。需要用户回应或报告问题的槽位——
+通知、断连文本、`answer required` 与 `permission required`——优先于右对齐的模型：
+模型先去掉 effort，再在该槽位显示期间让出位置。`esc interrupt`、目标、上下文和后台任务文字
+仍让位于模型，模型先占位，它们再被裁剪。
+
+输入框拥有按键时，Shift+Tab 按 Read only → Workspace write → Full access → Read only 循环，
+不提交或修改草稿，运行中同样可用。它复用选择器的预设选择操作与记住的偏好；快速连按按顺序处理，
+每一步根据执行时生效的策略计算下一档，不使用过期的界面副本。只有操作成功后才更新标签。
+弹窗、命令菜单和提及菜单保留原来的 Shift+Tab 行为。Fullscreen 中 Tab 开始浏览历史；有历史选中项时，
+Shift+Tab 仍向较新的项移动，Esc 返回输入框。
 
 终端 UI 中 `/permissions` 后面的参数改为打开该面板，而不是被忽略；面板打开时就带着一行说明参数在哪里生效——行内提示符与 `dimcode permissions`——这行一直显示在面板的答复之上，直到用户在这里按下第一个键，无论首次读取要多久；紧凑语法属于行内提示符。
 
@@ -1830,8 +1915,12 @@ write 授权也允许读取，read 授权从不允许写入，分叉不继承源
    工具目录，拼错的名字会被接受却不起作用。`allowedTools` 还会对某个工具的每次调用绕过预设，而预设和
    命令规则已经能更窄地表达这些需求。CLI 每次更新都保留已有列表。
 3. **CLI 只写 `main`**（见上文分支语义）。
-4. **不提供 Shift+Tab 循环切换。** 按键解码器属于空闲草稿编辑器，它只返回发送或退出；运行中的回合读取
-   普通行。循环切换需要编辑器返回动作结果和独立交互设计。`/permissions` 已覆盖切换。
+4. **Shift+Tab 只在 TUI 输入框中循环切换。** full 和 scrollback 都在输入框下方常驻显示当前权限和
+   灰色快捷键提示（简体中文为 `(Shift+Tab 切换)`）：Read only 为青色、Workspace write 为紫色、Full access 为黄色；
+   浅色主题使用更深的颜色，有限色终端使用青、品红、黄调色板。循环顺序为只读 → 工作区写入 → 完全访问
+   → 只读，复用预设选择操作并记住新 Session 的偏好；成功后才更新显示，保留草稿，运行中也可切换。
+   弹窗、命令菜单和提及菜单保留原键位。full 中 Tab 开始浏览历史，已有历史选中项时 Shift+Tab 仍向新项
+   移动，Esc 返回输入框。行客户端没有此快捷键，仍使用 `/permissions` 及其确认流程。
 5. **`/permissions` 也能添加规则。** F2 §8 把添加列为面板的一部分；在产品存储下，规则位于用户无法当作
    文件编辑的数据库行中，没有 `add` 就无法从 CLI 创建 deny 规则。
 6. **只在结果不取决于读取内容时重试。** 启动预设和添加规则可在重新读取并保留未修改字段后
@@ -1845,7 +1934,6 @@ write 授权也允许读取，read 授权从不允许写入，分叉不继承源
 | --- | --- |
 | 由审阅模型代替用户回答审批 | 一个通过 Approval 公开的回答操作作答的审批回答者，带自己的模型调用和设计，类似 Collaboration 的领导者路径；不是 CLI 改动 |
 | 只在一个 Session 内记住的允许 | 一条记录下来的事实，或 Session 作用域的规则来源（F2 §10.2 暂缓了按工作区的用户规则）；CLI 进程内的记忆会在没有记录决定的情况下代为回答 |
-| Shift+Tab 循环切换 | 只涉及 CLI：编辑器动作结果和确认路径（决定 4） |
 | `--allowed-tools`/`--disallowed-tools` | 一个工具目录读取接口，用于在参数边界校验名字（决定 2） |
 | 回合运行中使用 `/permissions` | 只涉及 CLI：运行中的回合读取普通行并回答审批；面板调用需要加入它的多路复用循环 |
 

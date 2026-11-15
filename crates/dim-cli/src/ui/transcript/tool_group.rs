@@ -151,12 +151,23 @@ pub struct ToolGroup {
     interactive: bool,
     /// The delegations its member cards show, by request event id.
     pub cards: Vec<String>,
+    pub(crate) source: String,
+    pub(crate) awaiting_origins: bool,
+    pub(crate) known_origins: usize,
     collapsed: Vec<Line>,
     summary: Vec<Line>,
     expanded: Vec<Line>,
 }
 
 impl ToolGroup {
+    pub(crate) fn is_open(&self, node: &str) -> bool {
+        self.lines().iter().any(|line| {
+            line.disclosure
+                .as_ref()
+                .is_some_and(|(id, open)| id == node && *open)
+        })
+    }
+
     fn lines(&self) -> &[Line] {
         if self.interactive {
             return &self.expanded;
@@ -400,6 +411,16 @@ fn project(
         .iter()
         .filter_map(|item| Some(item.call().member?.task.id.clone()))
         .collect();
+    let source = rows[0].row_id.clone();
+    let known_origins = rows
+        .iter()
+        .filter(|row| row.tool_lookup_done || row.tool_name.is_some() && row.tool_input.is_some())
+        .count();
+    let awaiting_origins = rows.iter().any(|row| {
+        !row.pending
+            && !row.tool_lookup_done
+            && (row.tool_name.is_none() || row.tool_input.is_none())
+    });
     if interactive {
         let open = choices
             .and_then(|choices| choices.get(&id).copied())
@@ -436,6 +457,9 @@ fn project(
             id,
             interactive,
             cards,
+            source,
+            known_origins,
+            awaiting_origins,
             collapsed: Vec::new(),
             summary: Vec::new(),
             expanded,
@@ -503,6 +527,9 @@ fn project(
         id,
         interactive,
         cards,
+        source,
+        known_origins,
+        awaiting_origins,
         collapsed,
         summary,
         expanded,
@@ -728,7 +755,11 @@ fn append_interactive(
                 Overflow::Wrap,
             ));
         }
-        let foldable = content.len() > 1 || children > 0;
+        let foldable = content.len() > 1
+            || children > 0
+            || !row.pending
+                && !row.tool_lookup_done
+                && (row.tool_name.is_none() || row.tool_input.is_none());
         let id = format!("call:{}", row.row_id);
         let open = choices
             .and_then(|choices| choices.get(&id).copied())
@@ -875,7 +906,7 @@ fn classify(call: Call<'_>) -> Item<'_> {
             let output = call.exit_code.filter(|code| *code != 0).and_then(|code| {
                 let note = format!("Command exited with code {code}.");
                 call.result
-                    .map(|text| text.strip_suffix(note.as_str()).unwrap_or(text).trim_end())
+                    .map(|text| text.trim_suffix(note.as_str()).trim_end())
             });
             let read_only = if call.background() {
                 None
@@ -1320,10 +1351,11 @@ fn append_card(lines: &mut Vec<Line>, call: &Call<'_>, now: u64, detail: Detail)
     let provider = task.kind == TaskKind::Member(MemberTarget::Provider);
     let action =
         matches!(task.kind, TaskKind::Member(MemberTarget::Session(_))).then(|| task.id.clone());
+    let agent = safe(task.agent.as_deref().expect("member task names its Agent"));
     let who = if provider {
-        tf("Provider member: {name}", &[("name", &safe(&card.agent))])
+        tf("Provider member: {name}", &[("name", &agent)])
     } else {
-        tf("Agent: {name}", &[("name", &safe(&card.agent))])
+        tf("Agent: {name}", &[("name", &agent)])
     };
     let model = if provider || refused {
         None
@@ -1365,22 +1397,21 @@ fn append_card(lines: &mut Vec<Line>, call: &Call<'_>, now: u64, detail: Detail)
         action: action.clone(),
         ..body_line(4, text, tone, overflow)
     };
+    let heading = vec![
+        span(first(&task.label), Tone::Text),
+        span(format!(" · {who}"), Tone::Muted),
+    ];
     if detail == Detail::Collapsed {
-        let mut spans = vec![span(who, Tone::Text)];
-        let label = first(&card.prompt);
-        if !label.is_empty() {
-            spans.push(span(format!(" · {label}"), Tone::Muted));
-        }
         lines.push(Line {
             action: action.clone(),
-            ..header_line(2, mark, spans)
+            ..header_line(2, mark, heading)
         });
         lines.push(line(meta, Tone::Muted, Overflow::Truncate));
         return;
     }
     lines.push(Line {
         action: action.clone(),
-        ..header_line(2, mark, vec![span(who, Tone::Text)])
+        ..header_line(2, mark, heading)
     });
     lines.push(Line {
         hang: 6,

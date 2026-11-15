@@ -217,7 +217,9 @@
 //!   wall clock from the first submission; both stop the run. `budget.window`
 //!   is the context window the scenario is written for and is checked, not
 //!   set: the window is the model's declared limit, so a run whose Session
-//!   declares another one is a failed run.
+//!   declares another one is a failed run. The Session reports it only after
+//!   its first request has counted the context, so the check waits for the
+//!   run to settle; a run that starts no request has no window to check.
 //! - A `must_show` probe passes when the judge finds that the run shows it; a
 //!   `must_not_show` probe passes when the run does not, and a run that shows
 //!   it is a violation.
@@ -412,6 +414,7 @@ const RUN_TOOLS: &[&str] = &[
     "branch",
     "events",
     "goal_update",
+    "loop",
     "member_approval_allow",
     "member_approval_reject",
     "recall",
@@ -1179,7 +1182,7 @@ fn parse_selection(value: &str) -> Result<(&str, &str, usize)> {
     if arm != "current" && arm != "candidate" {
         return Err(format!("--run {value}: an arm is current or candidate").into());
     }
-    let index = run.strip_prefix("run-").unwrap_or(run);
+    let index = run.trim_prefix("run-");
     let run = index
         .parse::<usize>()
         .map_err(|_| format!("--run {value}: {run} is not a run index"))?;
@@ -2444,22 +2447,39 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
     outcome
 }
 
+/// The settings the native probe child serves: a model configuration rather
+/// than a product home, the run's boundary and overrides, and no `plugin`
+/// tool.
+fn native_probe_settings(
+    model_config: PathBuf,
+    socket: PathBuf,
+    boundary: Option<FileToolBoundary>,
+    overrides: Overrides,
+) -> RunSettings {
+    RunSettings {
+        overrides,
+        model_config: Some(model_config),
+        unix_path: Some(socket),
+        defaults: None,
+        node: None,
+        js_runtime: None,
+        boundary,
+        plugin_tools: false,
+    }
+}
+
 /// The native probe child: the assembly served as a run child is served —
 /// the same home, workspace and boundary — but without the plugin defaults,
 /// and one probe Session whose declared set the child prints for the
 /// parent's runs. The probe's one turn is answered by the child's own
 /// loopback provider and calls no tool.
 async fn native_probe_child(params: &ChildParams) -> Result<Vec<(String, ToolSource)>> {
-    let settings = RunSettings {
-        overrides: child_overrides(&params.overrides),
-        model_config: Some(params.model_config.clone()),
-        unix_path: Some(params.socket.clone()),
-        defaults: None,
-        node: None,
-        js_runtime: None,
-        boundary: params.boundary.clone(),
-        plugin_tools: false,
-    };
+    let settings = native_probe_settings(
+        params.model_config.clone(),
+        params.socket.clone(),
+        params.boundary.clone(),
+        child_overrides(&params.overrides),
+    );
     let server = app_server::serve_home(
         &params.home,
         &params.workspace,
@@ -2838,7 +2858,7 @@ async fn product_probe(
     dim_app_server::storage::export_timeline(database.to_path_buf(), &probe, &mut export)
         .await
         .map_err(|error| format!("the product probe Session's export failed: {error}"))?;
-    let export = String::from_utf8_lossy(&export).into_owned();
+    let export = String::from_utf8_lossy_owned(export);
     requested_tools(&export)
 }
 
@@ -4329,7 +4349,7 @@ async fn drive_once(
     .await
     {
         Ok(()) => {
-            let export = String::from_utf8_lossy(&export).into_owned();
+            let export = String::from_utf8_lossy_owned(export);
             let (turns, failed_turn) = turns_in_export(&export);
             driven.turns = turns;
             if let Some(error) = failed_turn
@@ -4500,6 +4520,16 @@ struct Driven {
     error: Option<String>,
 }
 
+/// Why a Session whose window is not the scenario's cannot be measured, or `None`.
+fn window_mismatch(window: Option<f64>, declared: u64) -> Option<String> {
+    (window != Some(declared as f64)).then(|| {
+        format!(
+            "the Session declares a context window of {}, and the scenario declares {declared}",
+            window.map_or_else(|| "none".to_owned(), |window| window.to_string())
+        )
+    })
+}
+
 /// Drives one Session through the App Server's client methods, as a client
 /// does: create, attach, submit the script, and wait for idle or a budget.
 /// `tools` is the Session's mount list; `None` is the tools-check
@@ -4564,6 +4594,7 @@ async fn drive(
         driven.error = Some(format!("session.attach failed: {error}"));
         return driven;
     }
+    let mut window_deferred = false;
     match client
         .rpc(
             "session.context.usage",
@@ -4574,15 +4605,14 @@ async fn drive(
         Ok(usage) => {
             let window = usage["contextWindow"].as_f64();
             driven.window = window;
-            if window != Some(scenario.budget.window as f64) {
+            if let Some(error) = window_mismatch(window, scenario.budget.window) {
                 driven.stop = "error";
-                driven.error = Some(format!(
-                    "the Session declares a context window of {}, and the scenario declares {}",
-                    window.map_or_else(|| "none".to_owned(), |window| window.to_string()),
-                    scenario.budget.window
-                ));
+                driven.error = Some(error);
                 return driven;
             }
+        }
+        Err(error) if dim_client::app_error(&error) == Some("context_usage_unavailable") => {
+            window_deferred = true;
         }
         Err(error) => {
             driven.stop = "error";
@@ -4843,6 +4873,25 @@ async fn drive(
                            "reason": format!("budget: {}", driven.stop)}),
                 )
                 .await;
+        }
+    }
+    if window_deferred && driven.error.is_none() {
+        match client
+            .rpc(
+                "session.context.usage",
+                json!({"sessionId":session,"branchId":"main"}),
+            )
+            .await
+        {
+            Ok(usage) => {
+                driven.window = usage["contextWindow"].as_f64();
+                driven.error = window_mismatch(driven.window, scenario.budget.window);
+            }
+            Err(error) if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
+            Err(error) => driven.error = Some(format!("Context window check failed: {error}")),
+        }
+        if driven.error.is_some() {
+            driven.stop = "error";
         }
     }
     driven
@@ -12956,6 +13005,213 @@ mod tests {
         assert!(
             !offered.iter().any(|tool| tool == "plugin"),
             "the member declares no plugin tool: {offered:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_tools_tests {
+    use super::*;
+    use dim_agent_runtime::{Feature, SessionConfig};
+    use std::path::{Path, PathBuf};
+
+    /// The probe Session's tool registry, once its parts have assembled.
+    #[derive(Clone, Default)]
+    struct RegistryProbe(Arc<Mutex<Option<Arc<ToolRegistry>>>>);
+
+    fn probe_part(names: &Names<'_>, probe: RegistryProbe) -> rutis::Result<Box<dyn DynPlugin>> {
+        Ok(Box::new(RegistryProbePart {
+            tools: names.key()?,
+            probe,
+        }) as Box<dyn DynPlugin>)
+    }
+
+    struct RegistryProbePart {
+        tools: Key<ToolRegistry>,
+        probe: RegistryProbe,
+    }
+
+    impl DynPlugin for RegistryProbePart {
+        fn name(&self) -> &str {
+            "RunToolsProbe"
+        }
+        fn injects(&self) -> Vec<TypeKey> {
+            vec![self.tools.erase()]
+        }
+        fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+            Box::pin(async move {
+                let tools = ctx.require_at(&self.tools)?;
+                *self.probe.0.lock().unwrap() = Some(tools);
+                Ok(Effect::Done)
+            })
+        }
+    }
+
+    /// The tool names one Session of `server` declares; the server is shut
+    /// down afterwards. No turn runs, so `model` is resolved but never called.
+    async fn declared_tools(
+        server: RunningServer,
+        probe: RegistryProbe,
+        cwd: &Path,
+        model: ModelSelection,
+    ) -> BTreeSet<String> {
+        let agent = server
+            .agent()
+            .expect("the served profile has a default Agent");
+        let session = agent
+            .create_session(SessionConfig {
+                cwd: cwd.to_string_lossy().into_owned(),
+                tools: None,
+                model,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let registry = probe
+            .0
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the probe part assembled with the profile's Session");
+        let declared: BTreeSet<String> = registry
+            .definitions()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        let _ = session.close().await;
+        server.shutdown();
+        let _ = server.join().await;
+        declared
+    }
+
+    /// A model configuration over an unreachable base URL: the profile is
+    /// served, never called.
+    fn fixture_models(directory: &Path) -> PathBuf {
+        let path = directory.join("models.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "defaultModel": {"providerId": "local", "modelId": "fixture"},
+                "providers": [{
+                    "id": "local",
+                    "kind": "openai-chat",
+                    "baseUrl": "http://127.0.0.1:1/v1",
+                    "models": [{
+                        "id": "fixture",
+                        "contextWindow": 24_000,
+                        "maxOutputTokens": 200,
+                        "config": {"maxTokens": 200}
+                    }]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
+    /// A socket path short enough to bind: a profile's endpoint is a unix
+    /// socket path, and the platform bounds its length (`SUN_LEN`), which the
+    /// scratch directory's own path overruns. The test never connects to it;
+    /// `serve_home` only binds it.
+    fn socket_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("dim-run-tools-{label}-{}.sock", std::process::id()))
+    }
+
+    fn difference_message(
+        profile: &str,
+        declared: &BTreeSet<String>,
+        expected: &BTreeSet<String>,
+    ) -> String {
+        let unlisted: Vec<&String> = declared.difference(expected).collect();
+        let unserved: Vec<&String> = expected.difference(declared).collect();
+        format!(
+            "the {profile} profile offers tools its run list does not name: {unlisted:?}; \
+             its run list names tools the profile does not offer: {unserved:?}"
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_run_list_is_the_probes_tool_set_and_the_product_serves_it_with_plugin() {
+        let directory = app_server::scratch("run-tools").unwrap();
+        let workspace = directory.join("workspace");
+        private_directory(&workspace).unwrap();
+        let models = fixture_models(&directory);
+        let probe = RegistryProbe::default();
+        let serving = probe.clone();
+        let server = app_server::serve_home(
+            &directory.join("probe-home"),
+            &workspace,
+            directory.join("probe-output"),
+            native_probe_settings(models, socket_path("probe"), None, Overrides::default()),
+            move |builder| {
+                builder.require_feature(
+                    Feature::new("RunToolsProbe").session("RunToolsProbe", move |names| {
+                        probe_part(names, serving.clone())
+                    }),
+                );
+            },
+        )
+        .await
+        .unwrap();
+        let probe_tools = declared_tools(
+            server,
+            probe,
+            &workspace,
+            ModelSelection {
+                provider_id: "local".into(),
+                model_id: "fixture".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            },
+        )
+        .await;
+        let expected: BTreeSet<String> = RUN_TOOLS.iter().map(|name| (*name).to_owned()).collect();
+        assert!(
+            probe_tools == expected,
+            "{}",
+            difference_message("native probe", &probe_tools, &expected)
+        );
+        assert!(
+            !probe_tools.contains(PLUGIN_TOOL),
+            "the native probe profile turns plugin_tools off, so it offers no \
+             {PLUGIN_TOOL} tool: {probe_tools:?}"
+        );
+        let product = RegistryProbe::default();
+        let serving = product.clone();
+        let server = app_server::serve_product(&directory.join("product"), move |builder| {
+            builder.require_feature(
+                Feature::new("RunToolsProbe").session("RunToolsProbe", move |names| {
+                    probe_part(names, serving.clone())
+                }),
+            );
+        })
+        .await
+        .unwrap();
+        let product_tools = declared_tools(
+            server,
+            product,
+            &directory.join("product"),
+            ModelSelection {
+                provider_id: "mock".into(),
+                model_id: "deterministic".into(),
+                capability_snapshot: None,
+                config: None,
+                metadata: None,
+            },
+        )
+        .await;
+        let with_plugin: BTreeSet<String> = expected
+            .iter()
+            .cloned()
+            .chain(std::iter::once(PLUGIN_TOOL.to_owned()))
+            .collect();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(
+            product_tools == with_plugin,
+            "{}",
+            difference_message("product", &product_tools, &with_plugin)
         );
     }
 }

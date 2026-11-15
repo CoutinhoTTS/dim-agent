@@ -7,13 +7,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "No queued messages." => "キューにメッセージはありません。",
         "Held · awaiting application" => "保留中 · 適用待ち",
-        "Incorporating · awaiting model consumption" => "取り込み中 · モデルの読み取り待ち",
         "Held" => "保留中",
-        "Incorporating" => "取り込み中",
         "Unread" => "未読",
-        "Unread · waiting for your next message" => "未読 · 次のメッセージ待ち",
-        "/queue view · awaiting model consumption" => "/queue 表示 · モデルの読み取り待ち",
-        "/queue view · waiting for your next message" => "/queue 表示 · 次のメッセージ待ち",
         "Enter export · Esc cancel" => "Enter エクスポート · Esc キャンセル",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "添付ファイル付きのメッセージはキューに残ります。/queue で steer または削除してください"
@@ -357,8 +352,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "終了",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選択して既定に設定 · ←/→ 推論強度 · Ctrl+X 保存消去 · Esc 消去/閉じる"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 選択して既定に設定 · ←/→ 推論強度 · Ctrl+B/F カーソル · Ctrl+X 保存消去 · Esc 消去/閉じる"
         }
         "Default for new sessions in {folder}: {model}" => {
             "新規セッションの {folder} での既定モデル：{model}"
@@ -543,6 +538,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C クリア、2 回で終了 · 空なら Ctrl+D で終了"
         }
+        "Shift+Tab cycle permissions (composer focused)" => {
+            "Shift+Tab 権限を切り替え（入力欄にフォーカス時）"
+        }
+        "Shift+Tab newer target while picked · Esc return to composer" => {
+            "選択中は Shift+Tab で新しい項目へ · Esc 入力欄に戻る"
+        }
+        "(shift+tab to cycle)" => "(Shift+Tab で切替)",
         "Fullscreen" => "全画面",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown スクロール · Home/End 先頭/末尾 (下書きが空の場合) · Tab メッセージ選択、e 編集、q 引用"

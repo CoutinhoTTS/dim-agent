@@ -18,7 +18,7 @@ use crate::model::session::{
 use crate::model::shell::Outcome as ShellOutcome;
 use crate::model::shell::ShellRun;
 use crate::model::view::{
-    CompactionState, LineState, LineView, RowKind, SideLine, TaskFinish, TaskOutcome, TaskTarget,
+    CompactionState, Earlier, LineState, LineView, RowKind, SideLine, TaskOutcome, TaskTarget,
     ViewRow, ViewSnapshot,
 };
 use crate::ui::Env;
@@ -244,6 +244,7 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
     let mut status = Reporter::from_env();
     let mut screen = Screen::new(terminal.size(), synchronized);
     let mut full = None;
+    let mut leader_full = None;
     if surroundings.fullscreen {
         if terminal.set_fullscreen(true).is_err() {
             return terminal.lost();
@@ -282,6 +283,7 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
     );
     app.fullscreen = full.is_some();
     app.initial = surroundings.initial;
+    app.awaiting_window = surroundings.resume;
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
@@ -297,6 +299,17 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
     let code = loop {
         for update in app.host.drain() {
             app.apply(update);
+            dirty = true;
+        }
+        if full.is_some() && app.shows_member() != leader_full.is_some() {
+            if app.shows_member() {
+                leader_full = full.replace(FullScreen::new(terminal.size(), synchronized));
+            } else {
+                full = leader_full.take();
+                if let Some(full) = &mut full {
+                    full.invalidate();
+                }
+            }
             dirty = true;
         }
         // A management panel may ask for the editor with its first view, as
@@ -372,11 +385,9 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
         }
         let now = Instant::now();
         let current = terminal.size();
-        let laid_out = match &full {
+        let laid_out = match &mut full {
             Some(full) => {
-                if full.size() != current {
-                    dirty = true;
-                }
+                dirty |= full.resize(current);
                 (full.layout_cols(), current.1)
             }
             None => screen.size(),
@@ -463,6 +474,7 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
             // A jump the frame itself landed (a `/timeline` target or a
             // loaded page) moves the view once its blocks are laid out.
             if let Some(full) = &mut full
+                && !app.shows_member()
                 && let Some(jump) = app.jump.take()
             {
                 apply_jump(full, &app, jump);
@@ -473,7 +485,12 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
             (true, Some(at)) if !terminal.writing() => {
                 FRAME_INTERVAL.saturating_sub(now.duration_since(at))
             }
-            _ if app.running() => FRAME_INTERVAL,
+            _ if app.running()
+                || terminal.writing()
+                || app.failure.is_none() && app.awaiting_window =>
+            {
+                FRAME_INTERVAL
+            }
             _ => SESSION_POLL,
         };
         // The first message waits for the first frame so it follows the
@@ -501,6 +518,7 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
             }
             Wait::Event(InputEvent::Mouse(event)) => {
                 let Some(full) = &mut full else { continue };
+                dirty |= full.resize(terminal.size());
                 match full.mouse(event, &app) {
                     MouseOutcome::Ignored => {}
                     MouseOutcome::Redraw => dirty = true,
@@ -522,6 +540,14 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
                             return code;
                         }
                         app.set_notice(t("Copied to clipboard"));
+                        dirty = true;
+                    }
+                    MouseOutcome::Task(task) => {
+                        app.open_task(&task);
+                        dirty = true;
+                    }
+                    MouseOutcome::Models => {
+                        app.run_command("models", "");
                         dirty = true;
                     }
                     MouseOutcome::Click {
@@ -552,6 +578,26 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
                 }
             }
             Wait::Event(InputEvent::Key(key))
+                if app.shows_member()
+                    && full.as_ref().is_some_and(|full| {
+                        key.code == KeyCode::Esc
+                            || matches!(key.code, KeyCode::Home | KeyCode::End)
+                            || !full.focused() && matches!(key.code, KeyCode::Up | KeyCode::Down)
+                    }) =>
+            {
+                let Some(full) = &mut full else { continue };
+                match key.code {
+                    KeyCode::Up => full.scroll(-1),
+                    KeyCode::Down => full.scroll(1),
+                    KeyCode::Home => full.scroll_to_top(),
+                    KeyCode::End => full.follow(),
+                    _ => {
+                        app.handle(InputEvent::Key(key));
+                    }
+                }
+                dirty = true;
+            }
+            Wait::Event(InputEvent::Key(key))
                 if key.code == KeyCode::Esc && full.as_ref().is_some_and(FullScreen::selecting) =>
             {
                 if let Some(full) = &mut full {
@@ -561,8 +607,8 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
             }
             Wait::Event(InputEvent::Key(key))
                 if full.is_some()
-                    && app.keyboard_free()
-                    && (matches!(key.code, KeyCode::Tab | KeyCode::BackTab)
+                    && (app.keyboard_free() || app.shows_member())
+                    && ((key.code == KeyCode::Tab && key.mods.0 == 0)
                         || full.as_ref().is_some_and(FullScreen::focused)) =>
             {
                 let Some(full) = &mut full else { continue };
@@ -629,20 +675,21 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
             }
             Wait::Event(InputEvent::Key(key))
                 if full.is_some()
-                    && app.keyboard_free()
+                    && (app.keyboard_free() || app.shows_member())
                     && key.mods.0 == 0
                     && (matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
                         || (matches!(key.code, KeyCode::Home | KeyCode::End)
                             && app.composer.is_empty())) =>
             {
                 if let Some(full) = &mut full {
-                    if key.code == KeyCode::PageUp && full.at_top() {
-                        app.host.send(Command::Earlier);
-                    }
-                    match key.code {
-                        KeyCode::Home => full.scroll_to_top(),
-                        KeyCode::End => full.follow(),
-                        code => full.page(code == KeyCode::PageDown),
+                    if key.code == KeyCode::PageUp && full.at_top() && !app.shows_member() {
+                        app.show_earlier();
+                    } else {
+                        match key.code {
+                            KeyCode::Home => full.scroll_to_top(),
+                            KeyCode::End => full.follow(),
+                            code => full.page(code == KeyCode::PageDown),
+                        }
                     }
                 }
                 dirty = true;
@@ -650,6 +697,8 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
             Wait::Event(event) => match app.handle(event) {
                 Outcome::Continue => {
                     if let Some(full) = &mut full
+                        && leader_full.is_none()
+                        && !app.shows_member()
                         && let Some(jump) = app.jump.take()
                     {
                         apply_jump(full, &app, jump);
@@ -1019,6 +1068,11 @@ struct App {
     /// lay it out again from here (a scrollback rewrite, the fullscreen
     /// virtual list). Bounded by `HISTORY_MAX_BLOCKS`.
     history: std::collections::VecDeque<Block>,
+    member_history: std::collections::VecDeque<Block>,
+    member_choices: HashMap<String, bool>,
+    member_expansions: HashMap<String, bool>,
+    member_rewrites: u64,
+    result_blocks: HashMap<usize, String>,
     /// Blocks dropped from the front of `history` so far.
     dropped: usize,
     /// The history id of the block the newest stream batch began; its next
@@ -1065,6 +1119,10 @@ struct App {
     history_floor: usize,
     /// Fullscreen owes its load-more row before the next transcript commit.
     load_more: bool,
+    /// An earlier read whose page is to be revealed when it lands: set by
+    /// `show_earlier`, cleared once the page is shown or the read ends
+    /// without one.
+    reveal_pending: bool,
     /// The user message a `/timeline` jump or a loaded page lands on, once
     /// drawn: `(row id, pick it)`.
     landing: Option<(String, bool)>,
@@ -1242,7 +1300,7 @@ impl ForkAsk {
     fn handle_key(&mut self, key: KeyEvent) -> Effect {
         match key.code {
             KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
-                self.create = !self.create;
+                self.create.toggle();
                 Effect::None
             }
             KeyCode::Enter if self.create => Effect::Fork,
@@ -1328,13 +1386,13 @@ fn live_panel_rows(live_budget: usize, composer_rows: usize, status_rows: usize)
 }
 
 /// The rows a fullscreen overlay gives a panel: the terminal less the
-/// composer and two rows on either side, never under six unless the terminal
-/// cannot hold that.
+/// composer, status row and two rows on either side, never under six unless
+/// the terminal cannot hold that.
 fn overlay_panel_rows(terminal_rows: usize, composer_rows: usize) -> usize {
     terminal_rows
-        .saturating_sub(composer_rows + 2 + 2)
+        .saturating_sub(composer_rows + 1 + 2 + 2)
         .max(6)
-        .min(terminal_rows.saturating_sub(composer_rows + 1))
+        .min(terminal_rows.saturating_sub(composer_rows + 2))
         .min(OVERLAY_MAX_ROWS)
 }
 
@@ -1440,6 +1498,11 @@ impl App {
             side_rows: 0,
             last_pulse: 0,
             history: Default::default(),
+            member_history: Default::default(),
+            member_choices: HashMap::new(),
+            member_expansions: HashMap::new(),
+            member_rewrites: 0,
+            result_blocks: HashMap::new(),
             dropped: 0,
             stream_block: None,
             rewrites: 0,
@@ -1463,6 +1526,7 @@ impl App {
             window_floor: 0,
             history_floor: 0,
             load_more: false,
+            reveal_pending: false,
             landing: None,
             awaiting_window: false,
             pending_boundary: None,
@@ -2087,9 +2151,13 @@ impl App {
                     }
                 }
                 self.runs.observe(&snapshot);
-                self.snapshot = Some(*snapshot);
+                let previous = self.snapshot.replace(*snapshot);
+                self.follow_floors(previous.as_ref());
+                self.apply_earlier(previous.as_ref());
                 self.refresh_compactions();
                 self.refresh_cards();
+                self.refresh_tool_origins();
+                self.sync_tool_origins();
                 if self.running() && !was_running {
                     self.run_started = Some(Instant::now());
                     self.last_pulse = 0;
@@ -2792,6 +2860,7 @@ impl App {
                 self.restore_unsent();
             }
             Update::StartupFailed { message, resumable } => {
+                self.prompt = None;
                 self.failure = Some(message);
                 self.failure_resumable = resumable;
                 // A first message the invocation supplied has no Session
@@ -2950,9 +3019,7 @@ impl App {
                 Prompt::Tasks(p) => p.handle_key(key),
                 Prompt::Lines(p) => p.handle_key(key),
                 Prompt::Timeline(p) => p.handle_key(key),
-                Prompt::Queue(p) => {
-                    p.handle_key(key, self.snapshot.as_ref().expect("attached queue"))
-                }
+                Prompt::Queue(p) => p.handle_key(key),
                 Prompt::Export(p) => match p.handle_key(key) {
                     ListEvent::Pick { id: format, .. } => Effect::Export(if format == "markdown" {
                         crate::export::Format::Markdown
@@ -3029,6 +3096,16 @@ impl App {
             }
         }
         match key.code {
+            KeyCode::BackTab | KeyCode::Tab
+                if self.keyboard_free()
+                    && (key.mods == Modifiers::SHIFT
+                        || (key.code == KeyCode::BackTab && key.mods == Modifiers::NONE)) =>
+            {
+                self.host.send(Command::SetPermission(
+                    crate::permission::PresetSelection::Next,
+                ));
+                return Outcome::Continue;
+            }
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
                 self.open_palette();
                 return Outcome::Continue;
@@ -3861,7 +3938,9 @@ impl App {
             }
             Effect::SetPermission(preset) => {
                 self.prompt = None;
-                self.host.send(Command::SetPermission(preset));
+                self.host.send(Command::SetPermission(
+                    crate::permission::PresetSelection::Preset(preset),
+                ));
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
@@ -4025,6 +4104,9 @@ impl App {
             _ => None,
         };
         if member != self.member_target {
+            self.member_history.clear();
+            self.member_choices.clear();
+            self.member_expansions.clear();
             let projection_id = member
                 .as_ref()
                 .or(self.member_target.as_ref())
@@ -4087,6 +4169,115 @@ impl App {
                 targets: next.1.clone(),
             });
             self.compaction_targets = (!next.1.is_empty()).then_some(next);
+        }
+    }
+
+    fn sync_tool_origins(&self) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        for (index, row) in snapshot.rows.iter().enumerate() {
+            if row.kind != RowKind::ToolCall || !opens_group(&snapshot.rows, index) {
+                continue;
+            }
+            let rows = group_rows(&snapshot.rows, index);
+            if rows.iter().all(|call| {
+                call.pending
+                    || call.tool_lookup_done
+                    || call.tool_name.is_some() && call.tool_input.is_some()
+            }) {
+                continue;
+            }
+            let group = self.fullscreen.then(|| {
+                project_fullscreen_group(
+                    &rows,
+                    self.tool_detail,
+                    self.tool_choices.get(&self.tool_scope()),
+                )
+            });
+            if group.is_none() && self.tool_detail != Detail::Expanded {
+                continue;
+            }
+            let single_root = rows
+                .iter()
+                .filter(|call| call.parent_call_id.is_none())
+                .count()
+                == 1;
+            for call in rows {
+                if call.pending
+                    || call.tool_lookup_done
+                    || call.tool_name.is_some() && call.tool_input.is_some()
+                {
+                    continue;
+                }
+                if let Some(group) = &group {
+                    let node = if single_root
+                        && call.parent_call_id.is_none()
+                        && call.tool_name.as_deref() == Some("codemode")
+                    {
+                        group.id.clone()
+                    } else {
+                        format!("call:{}", call.row_id)
+                    };
+                    if !group.is_open(&node) {
+                        continue;
+                    }
+                }
+                if let (Some(request_id), Some(call_id)) = (&call.batch, &call.call_id) {
+                    self.host.send(Command::ToolOrigin {
+                        session_id: snapshot.session_id.clone(),
+                        projection_id: snapshot.projection_id,
+                        branch_id: snapshot.focus.clone(),
+                        request_id: request_id.clone(),
+                        call_id: call_id.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn refresh_tool_origins(&mut self) {
+        let choices = self.tool_choices.get(&self.tool_scope());
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let mut changed = Vec::new();
+        for (index, block) in self.history.iter_mut().enumerate() {
+            let Block::ToolGroup(group) = block else {
+                continue;
+            };
+            if !group.awaiting_origins {
+                continue;
+            }
+            let Some(source) = snapshot
+                .rows
+                .iter()
+                .position(|row| row.row_id == group.source)
+            else {
+                continue;
+            };
+            let rows = group_rows(&snapshot.rows, source);
+            if rows
+                .iter()
+                .filter(|row| {
+                    row.tool_lookup_done || row.tool_name.is_some() && row.tool_input.is_some()
+                })
+                .count()
+                != group.known_origins
+            {
+                *group = if self.fullscreen {
+                    project_fullscreen_group(&rows, self.tool_detail, choices)
+                } else {
+                    project_group(&rows, group.detail)
+                };
+                changed.push(index + self.dropped);
+            }
+        }
+        if !changed.is_empty() {
+            for index in changed {
+                self.mark_rewritten(index);
+            }
+            self.request_reflow();
         }
     }
 
@@ -4364,7 +4555,7 @@ impl App {
                 self.open_settings(setting);
             }
             Setting::Notify => {
-                self.notify = !self.notify;
+                self.notify.toggle();
                 let key = crate::ui::notify::NOTIFY_KEY;
                 if let Some(error) = crate::ui::config::write(&self.home, key, self.notify.into()) {
                     self.set_notice(error);
@@ -4409,7 +4600,7 @@ impl App {
                 self.open_settings(setting);
             }
             Setting::Mouse => {
-                self.mouse = !self.mouse;
+                self.mouse.toggle();
                 let value = if self.mouse { "on" } else { "off" };
                 if let Some(error) = crate::ui::config::write(&self.home, MOUSE_KEY, value.into()) {
                     self.set_notice(error);
@@ -4455,6 +4646,7 @@ impl App {
         self.refresh_tool_choices();
         self.request_reflow();
         self.sync_compaction_details();
+        self.sync_tool_origins();
         if let Some(error) =
             crate::ui::config::write(&self.home, TOOL_DETAILS_KEY, detail.label().into())
         {
@@ -4841,7 +5033,11 @@ impl App {
                 Outcome::Continue
             }
             "earlier" => {
-                self.host.send(Command::Earlier);
+                if self.fullscreen {
+                    self.show_earlier();
+                } else {
+                    self.host.send(Command::Earlier);
+                }
                 Outcome::Continue
             }
             "export" => {
@@ -4879,6 +5075,16 @@ impl App {
                     Some(request) => self.host.send(Command::Goal(request)),
                     None => self.reports.push(Block::Status {
                         text: crate::goal::USAGE.to_owned(),
+                        tone: Tone::Muted,
+                    }),
+                }
+                Outcome::Continue
+            }
+            "loop" => {
+                match crate::loop_view::request(args) {
+                    Some(request) => self.host.send(Command::Loop(request)),
+                    None => self.reports.push(Block::Status {
+                        text: crate::loop_view::USAGE.to_owned(),
                         tone: Tone::Muted,
                     }),
                 }
@@ -5385,18 +5591,13 @@ impl App {
                 .as_ref()
                 .into_iter()
                 .flat_map(|snapshot| &snapshot.queued)
+                .filter(|input| input.held)
                 .map(|input| {
                     (
                         input.id.clone(),
                         format!(
                             "{} · {}",
-                            t(if input.held {
-                                "Held"
-                            } else if self.running() {
-                                "Incorporating"
-                            } else {
-                                "Unread"
-                            }),
+                            t("Held"),
                             input.display.as_deref().unwrap_or(&input.text)
                         ),
                     )
@@ -5410,17 +5611,11 @@ impl App {
                 self.queue_rows.max(queued.len().min(QUEUE_ROWS))
             };
             if self.queue_rows > 0 {
-                let hint = if !self.queued().is_empty() {
-                    let key = match self.default_send_mode {
-                        SubmitMode::Queue => "Ctrl+S",
-                        SubmitMode::Steer => "Enter",
-                    };
-                    tf(QUEUE_HINT, &[("key", key)])
-                } else if self.running() {
-                    t("/queue view · awaiting model consumption").to_owned()
-                } else {
-                    t("/queue view · waiting for your next message").to_owned()
+                let key = match self.default_send_mode {
+                    SubmitMode::Queue => "Ctrl+S",
+                    SubmitMode::Steer => "Enter",
                 };
+                let hint = tf(QUEUE_HINT, &[("key", key)]);
                 live.extend(queue_strip(
                     &queued,
                     self.queue_rows,
@@ -5463,22 +5658,25 @@ impl App {
             let margin = " ".repeat(MARGIN);
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
-        // The tasks running apart from the turn sit on one row above the
-        // composer, in both interfaces; a task that just ended keeps its place
-        // for TASK_FADE seconds so it does not vanish from under the eye. No
-        // task draws no row, so an idle Session keeps the space. It goes above
-        // the anchor, so the row and the executor it names give their space
-        // back rather than moving the composer up.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let task_start = live.len();
         if self.prompt.is_none()
             && let Some(snapshot) = &self.snapshot
-            && let Some(line) =
-                task_line(shown_tasks(&snapshot.tasks, now), now, width, &self.palette)
         {
-            live.push(format!("{}{line}", " ".repeat(MARGIN)));
+            let tasks = shown_tasks(&snapshot.tasks, now);
+            frame.task_rows = tasks
+                .iter()
+                .enumerate()
+                .map(|(row, (task, _))| (live.len() + row, task.id.clone()))
+                .collect();
+            live.extend(
+                task_lines(tasks, now, width, &self.palette)
+                    .into_iter()
+                    .map(|line| format!("{}{line}", " ".repeat(MARGIN))),
+            );
         }
         frame.anchor = live.len();
         let live_budget = crate::ui::render::live_row_budget(
@@ -5489,10 +5687,11 @@ impl App {
                 crate::ui::render::screen::MIN_HISTORY_ROWS as usize
             },
         );
-        let status_rows = usize::from(!self.fullscreen);
+        let status_rows = 1;
         let input_budget = live_budget
             .saturating_sub(
                 3 + status_rows
+                    + (live.len() - task_start)
                     + if !self.fullscreen && self.composer.palette_open() {
                         3
                     } else {
@@ -5649,6 +5848,12 @@ impl App {
                 .as_ref()
                 .and_then(|label| label.fitted(|text| left + width_of(text) + 3 < room))
                 .map(|label| fg(&label, &p.highlight));
+            if self.prompt.is_none()
+                && let Some(model) = &model
+            {
+                let end = MARGIN + outer - 3;
+                frame.model_label = Some((box_top, end - width_of(model)..end));
+            }
             let title = title.map(|(text, label)| label(text));
             let docked = self.dock_status(status.as_deref());
             let place = self.composer_place(docked.as_deref(), outer);
@@ -5738,6 +5943,7 @@ impl App {
                 cols.saturating_sub(4).min(OVERLAY_LIST_WIDTH)
             };
             frame.overlay = match &self.prompt {
+                Some(Prompt::Tasks(prompt)) if prompt.shows_member() && !palette_overlay => None,
                 _ if palette_overlay => {
                     let width = cols.saturating_sub(4).min(OVERLAY_PALETTE_WIDTH);
                     self.composer.palette_overlay(width, budget, p)
@@ -5795,6 +6001,7 @@ impl App {
             };
         }
         let panel = match &self.prompt {
+            _ if self.shows_member() => None,
             _ if frame.overlay.is_some() => None,
             Some(Prompt::Ask(_)) if command_entry => {
                 self.composer.palette_panel(outer, panel_rows, p)
@@ -5837,9 +6044,7 @@ impl App {
         if let Some(panel) = panel {
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
-        if !self.fullscreen {
-            live.push(self.status_line(cols));
-        }
+        live.push(self.status_line(cols));
         let composer_cursor = (
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
@@ -5856,7 +6061,78 @@ impl App {
         };
         frame.live = live;
         self.sync_compaction_details();
+        if self.shows_member() {
+            self.project_member(cols);
+            let Some(Prompt::Tasks(panel)) = &self.prompt else {
+                unreachable!()
+            };
+            let (_, bar) = panel.member_chrome(cols, &self.palette);
+            frame = Frame {
+                live: bar,
+                ..Frame::default()
+            };
+        }
         frame
+    }
+
+    fn shows_member(&self) -> bool {
+        self.fullscreen
+            && matches!(&self.prompt, Some(Prompt::Tasks(panel)) if panel.shows_member())
+    }
+
+    fn active_history(&self) -> &std::collections::VecDeque<Block> {
+        if self.shows_member() {
+            &self.member_history
+        } else {
+            &self.history
+        }
+    }
+
+    fn project_member(&mut self, cols: usize) {
+        let Some(Prompt::Tasks(panel)) = &self.prompt else {
+            return;
+        };
+        let Some(snapshot) = panel.member_snapshot() else {
+            return;
+        };
+        let (title, _) = panel.member_chrome(cols, &self.palette);
+        self.member_history.clear();
+        self.member_history.push_back(Block::Boundary(title));
+        if snapshot.rows.is_empty() {
+            self.member_history
+                .push_back(Block::Note(t("No conversation yet").to_owned()));
+        }
+        for (index, row) in snapshot.rows.iter().enumerate() {
+            if row.kind == RowKind::ToolCall && !opens_group(&snapshot.rows, index) {
+                continue;
+            }
+            let detail = if row.kind == RowKind::Thinking {
+                self.thinking_detail
+            } else {
+                self.tool_detail
+            };
+            let mut block = match row.kind {
+                RowKind::ToolCall => Block::ToolGroup(project_fullscreen_group(
+                    &group_rows(&snapshot.rows, index),
+                    self.tool_detail,
+                    Some(&self.member_choices),
+                )),
+                RowKind::StreamingAssistant => Block::Assistant(row.text.clone()),
+                _ => project_row(&snapshot.rows, index, detail),
+            };
+            if let Some(expanded) = self.member_expansions.get(&row.row_id) {
+                match &mut block {
+                    Block::Thinking { expanded: open, .. }
+                    | Block::Hook { expanded: open, .. }
+                    | Block::MemberResult { expanded: open, .. }
+                    | Block::Compaction { expanded: open, .. }
+                    | Block::Error { expanded: open, .. } => *open = *expanded,
+                    _ => {}
+                }
+            }
+            self.member_history.push_back(block);
+        }
+        self.member_rewrites += 1;
     }
 
     fn arm_window(&mut self) -> bool {
@@ -6329,6 +6605,7 @@ impl App {
         self.window_floor = 0;
         self.history_floor = 0;
         self.load_more = false;
+        self.reveal_pending = false;
         self.landing = None;
         self.window_info = (0, 0);
         self.history_request = None;
@@ -6343,6 +6620,7 @@ impl App {
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
+            self.result_blocks.clear();
             self.stream_block = None;
             self.jump = Some(Jump::Bottom);
         }
@@ -6409,6 +6687,7 @@ impl App {
         self.window_floor = 0;
         self.history_floor = 0;
         self.load_more = false;
+        self.reveal_pending = false;
         self.landing = None;
         self.window_info = (0, 0);
         self.history_request = None;
@@ -6432,6 +6711,7 @@ impl App {
         if self.fullscreen {
             self.dropped += self.history.len();
             self.history.clear();
+            self.result_blocks.clear();
             self.stream_block = None;
             self.banner_committed = false;
             self.jump = Some(Jump::Bottom);
@@ -6515,6 +6795,76 @@ impl App {
         self.rebuild_window(start);
     }
 
+    /// Shows what comes before the drawn top, for PageUp at that top, the
+    /// load-more row and fullscreen `/earlier`: loaded rows first, a read from
+    /// the daemon when none are loaded, and nothing at the branch start.
+    fn show_earlier(&mut self) {
+        if self.hidden_messages() > 0 {
+            self.load_earlier();
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        match snapshot.earlier {
+            Earlier::Unread => {
+                self.host.send(Command::Earlier);
+                self.reveal_pending = true;
+            }
+            Earlier::Reading => self.reveal_pending = true,
+            Earlier::AtStart => {}
+        }
+    }
+
+    /// Message rows loaded above `window_floor`, which the drawn window hides.
+    fn hidden_messages(&self) -> usize {
+        let Some(snapshot) = &self.snapshot else {
+            return 0;
+        };
+        snapshot.rows[..self.window_floor.min(snapshot.rows.len())]
+            .iter()
+            .filter(|row| row.kind.is_message())
+            .count()
+    }
+
+    /// Reveals the page an earlier read just prepended, keeping the oldest
+    /// drawn message at the top of the view.
+    fn reveal_prepended(&mut self) {
+        if self.hidden_messages() > 0 {
+            self.load_earlier();
+        }
+        self.reveal_pending = false;
+    }
+
+    /// The pending reveal, once a snapshot arrived. A prepended page is shown;
+    /// a read that ended without one drops the request, so a later unrelated
+    /// prepend is not revealed by it. A live-turn snapshot during the read
+    /// changes nothing, which is why `Earlier::Reading` keeps it.
+    fn apply_earlier(&mut self, previous: Option<&ViewSnapshot>) {
+        if !self.reveal_pending {
+            return;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        // Rows were prepended when the old first row now sits below the top: a
+        // front trim changes the first row too and must not count.
+        let prepended = previous.is_some_and(|previous| {
+            previous.rows.first().is_some_and(|first| {
+                snapshot
+                    .rows
+                    .iter()
+                    .position(|row| row.row_id == first.row_id)
+                    .is_some_and(|index| index > 0)
+            })
+        });
+        if prepended {
+            self.reveal_prepended();
+        } else if snapshot.earlier != Earlier::Reading {
+            self.reveal_pending = false;
+        }
+    }
+
     /// Entering fullscreen: the shown line is drawn again from its window,
     /// earlier history scrollback drew page by page in order under the
     /// load-more row, so nothing else scrollback committed (an earlier
@@ -6539,7 +6889,49 @@ impl App {
         self.message_blocks.clear();
         self.dropped += self.history.len();
         self.history.clear();
+        self.result_blocks.clear();
         self.stream_block = None;
+    }
+
+    /// Keeps the drawn window on the rows it showed, after the handler has
+    /// stored a new snapshot: each floor takes the new index of the row it
+    /// named, a floor of 0 included. Identity covers a prepend, an append and a
+    /// page trimmed from the front by the same rule (timeline UI §4.6).
+    ///
+    /// Nothing moves while a window is not armed: a line or session switch
+    /// resets both floors and `arm_window` sets them from scratch, so an
+    /// unarmed floor belongs to no row of this snapshot.
+    ///
+    /// When the floor's row is gone, the first row after it that survives takes
+    /// over, which covers a front trim; when none survives, 0, which covers a
+    /// trim that removed the whole window and the rows after it.
+    fn follow_floors(&mut self, previous: Option<&ViewSnapshot>) {
+        if self.awaiting_window {
+            return;
+        }
+        let (Some(previous), Some(snapshot)) = (previous, &self.snapshot) else {
+            return;
+        };
+        let index_of = |id: &str| snapshot.rows.iter().position(|row| row.row_id == id);
+        let moved = |floor: usize| -> usize {
+            let Some(rows) = previous.rows.get(floor..).filter(|rows| !rows.is_empty()) else {
+                return floor.min(snapshot.rows.len());
+            };
+            if let Some(index) = index_of(&rows[0].row_id) {
+                return index;
+            }
+            let present: std::collections::HashSet<&str> = snapshot
+                .rows
+                .iter()
+                .map(|row| row.row_id.as_str())
+                .collect();
+            rows.iter()
+                .find(|row| present.contains(row.row_id.as_str()))
+                .and_then(|row| index_of(&row.row_id))
+                .unwrap_or(0)
+        };
+        self.window_floor = moved(self.window_floor.min(previous.rows.len()));
+        self.history_floor = moved(self.history_floor.min(previous.rows.len()));
     }
 
     /// The block id a drawn user message `row` became.
@@ -6554,6 +6946,18 @@ impl App {
 
     /// Remembers a committed block (bounded, newest last).
     fn record(&mut self, mut source: Block) {
+        if let Block::MemberResult { label, body, .. } = &source
+            && let Some(snapshot) = &self.snapshot
+            && let Some(row) = snapshot.rows.iter().find(|row| {
+                row.kind == RowKind::MemberResult
+                    && row.text == *body
+                    && row.display == *label
+                    && !self.result_blocks.values().any(|id| id == &row.row_id)
+            })
+        {
+            self.result_blocks
+                .insert(self.dropped + self.history.len(), row.row_id.clone());
+        }
         if let Block::Compaction {
             target,
             detail: Some(detail),
@@ -6571,6 +6975,7 @@ impl App {
         self.history.push_back(source);
         if self.history.len() > HISTORY_MAX_BLOCKS {
             self.history.pop_front();
+            self.result_blocks.remove(&self.dropped);
             self.dropped += 1;
         }
     }
@@ -6582,16 +6987,57 @@ impl App {
     /// that group. Whether it did.
     fn click(&mut self, block: Option<usize>, row: usize, cols: usize) -> bool {
         if let Some((node, open)) = self.tool_disclosure(block, row, cols) {
+            if self.shows_member() {
+                self.member_choices.insert(node, !open);
+                self.project_member(cols);
+                return true;
+            }
             self.tool_choices
                 .entry(self.tool_scope())
                 .or_default()
                 .insert(node, !open);
             self.refresh_tool_choices();
+            self.sync_tool_origins();
             return true;
         }
         let Some(id) = block else { return false };
         if row != 1 {
             return false;
+        }
+        if self.shows_member() {
+            let Some(Prompt::Tasks(panel)) = &self.prompt else {
+                return false;
+            };
+            let Some(snapshot) = panel.member_snapshot() else {
+                return false;
+            };
+            let Some(source) = id.checked_sub(1).and_then(|at| {
+                snapshot
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, row)| {
+                        row.kind != RowKind::ToolCall || opens_group(&snapshot.rows, *index)
+                    })
+                    .nth(at)
+                    .map(|(_, row)| row.row_id.clone())
+            }) else {
+                return false;
+            };
+            let Some(
+                Block::Thinking { expanded, .. }
+                | Block::Hook { expanded, .. }
+                | Block::MemberResult { expanded, .. }
+                | Block::Compaction { expanded, .. }
+                | Block::Error { expanded, .. },
+            ) = self.member_history.get_mut(id)
+            else {
+                return false;
+            };
+            *expanded = !*expanded;
+            self.member_expansions.insert(source, *expanded);
+            self.member_rewrites += 1;
+            return true;
         }
         let index = id.checked_sub(self.dropped);
         match index.and_then(|index| self.history.get_mut(index)) {
@@ -6601,7 +7047,7 @@ impl App {
                 detail,
                 ..
             }) => {
-                *expanded = !*expanded;
+                expanded.toggle();
                 if !*expanded && detail.is_some() {
                     *text = "".into();
                 }
@@ -6609,8 +7055,9 @@ impl App {
             Some(
                 Block::Thinking { expanded, .. }
                 | Block::Hook { expanded, .. }
+                | Block::MemberResult { expanded, .. }
                 | Block::Error { expanded, .. },
-            ) => *expanded = !*expanded,
+            ) => expanded.toggle(),
             _ => return false,
         }
         self.mark_rewritten(id);
@@ -6637,12 +7084,14 @@ impl App {
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         let (group, row) = match block {
             Some(id) => {
-                let Block::ToolGroup(group) = self.history.get(id.checked_sub(self.dropped)?)?
+                let Block::ToolGroup(group) =
+                    self.active_history().get(id.checked_sub(self.dropped())?)?
                 else {
                     return None;
                 };
                 (group, row.checked_sub(1)?)
             }
+            None if self.shows_member() => return None,
             None => self
                 .tail_groups
                 .iter()
@@ -6745,15 +7194,27 @@ impl App {
         }
     }
 
-    /// Fullscreen redraws a committed user row the model has consumed since;
-    /// scrollback keeps what it printed (timeline UI §4.8).
+    /// Refreshes result titles from restored task identities. Fullscreen also
+    /// redraws user rows the model has consumed (timeline UI §4.8).
     fn refresh_messages(&mut self) {
-        if !self.fullscreen || self.message_blocks.is_empty() {
-            return;
-        }
         let Some(snapshot) = &self.snapshot else {
             return;
         };
+        let mut changed = Vec::new();
+        for (id, source) in &self.result_blocks {
+            let Some(Block::MemberResult { label, .. }) = id
+                .checked_sub(self.dropped)
+                .and_then(|index| self.history.get_mut(index))
+            else {
+                continue;
+            };
+            if let Some(row) = snapshot.rows.iter().find(|row| row.row_id == *source)
+                && *label != row.display
+            {
+                *label = row.display.clone();
+                changed.push(*id);
+            }
+        }
         let settled: Vec<usize> = self
             .message_blocks
             .iter()
@@ -6778,6 +7239,15 @@ impl App {
                 })
             })
             .collect();
+        for id in &changed {
+            self.mark_rewritten(*id);
+        }
+        if !self.fullscreen {
+            if !changed.is_empty() {
+                self.request_reflow();
+            }
+            return;
+        }
         for index in settled {
             let Some(at) = index.checked_sub(self.dropped) else {
                 continue;
@@ -6828,7 +7298,14 @@ impl App {
             if rows
                 .iter()
                 .filter_map(|row| row.member.as_ref())
-                .any(|card| card.task.finished.is_none())
+                .any(|card| {
+                    card.task.finished.is_none()
+                        || card
+                            .task
+                            .agent_id
+                            .as_ref()
+                            .is_some_and(|id| snapshot.pending_agent_names.contains(id))
+                })
             {
                 open.push(*id);
             }
@@ -6853,13 +7330,25 @@ impl App {
         }
     }
 
-    /// Opens a delegation card's member: its read-only conversation, or its
-    /// result when there is no member Session to read.
+    fn open_task(&mut self, id: &str) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        let Some(task) = snapshot.tasks.iter().find(|task| task.id == id) else {
+            return;
+        };
+        let mut panel = TasksPanel::new(snapshot);
+        match panel.open_card(task.clone()) {
+            Effect::Notice(text) => self.set_notice(text),
+            _ => self.prompt = Some(Prompt::Tasks(panel)),
+        }
+    }
+
     /// Opens what a picked or clicked card stands for: a delegation's
     /// member, or the line a marker opened.
     fn open_card(&mut self, request_event_id: &str) {
         if request_event_id == LOAD_MORE {
-            self.load_earlier();
+            self.show_earlier();
             return;
         }
         let Some(snapshot) = &self.snapshot else {
@@ -6983,6 +7472,17 @@ impl App {
         }
     }
 
+    fn slot_outranks_model(&self) -> bool {
+        match &self.notice {
+            Some(_) => true,
+            None if self.failure.is_some() => true,
+            None => matches!(
+                &self.snapshot,
+                Some(s) if !s.questions.is_empty() || !s.approvals.is_empty()
+            ),
+        }
+    }
+
     /// How many tasks the Session runs apart from the turn, as its own
     /// status segment: none while every task has ended, so an idle Session
     /// with nothing in the background draws no segment at all.
@@ -7053,8 +7553,7 @@ impl App {
     }
 
     /// Fullscreen's bottom border label, the status corner: the run
-    /// status, the slot (a notice in the highlight colour), the approvals
-    /// mode when it is not the default one and the context use.
+    /// status, the slot (a notice in the highlight colour) and the context use.
     fn dock_status(&self, run: Option<&str>) -> Option<String> {
         let p = &self.palette;
         let mut parts: Vec<String> = Vec::new();
@@ -7074,9 +7573,6 @@ impl App {
         }
         if let Some(goal) = self.goal_label() {
             parts.push(fg(goal, &p.muted));
-        }
-        if self.permission_policy.preset == dim_agent_types::PermissionPreset::FullAccess {
-            parts.push(fg("\u{23f5}\u{23f5} Full access", &p.muted));
         }
         if let Some(context) = self.context_label() {
             let color = if self.context_near() {
@@ -7124,74 +7620,113 @@ impl App {
     }
 
     fn status_line(&self, cols: usize) -> String {
-        let slot = self.slot();
-        let approval = permission_label(self.permission_policy.preset);
-        let mut left = format!("{}AGENT  \u{23f5}\u{23f5} {}", " ".repeat(MARGIN), approval);
-        if let Some(goal) = self.goal_label() {
-            left.push_str("  ");
-            left.push_str(goal);
-        }
-        if let Some(context) = self.context_label() {
-            left.push_str("  ");
-            left.push_str(&context);
-        }
-        if let Some(slot) = slot {
-            left.push_str("  ");
-            left.push_str(&slot);
-        }
-        if let Some(background) = self.background_label() {
-            left.push_str("  ");
-            left.push_str(&background);
-        }
-        let total = cols.saturating_sub(2);
-        let label = self
-            .label
-            .as_ref()
-            .and_then(|label| label.fitted(|text| width_of(&left) + 2 + width_of(text) <= total));
-        let line = match label {
-            Some(label) => {
-                let gap = total - width_of(&left) - width_of(&label);
-                format!("{left}{}{label}", " ".repeat(gap))
-            }
-            None => clip(&left, total).0,
+        use dim_agent_types::PermissionPreset;
+        let p = &self.palette;
+        let preset = self.permission_policy.preset;
+        let color = match preset {
+            PermissionPreset::ReadOnly => &p.permission_read,
+            PermissionPreset::WorkspaceWrite => &p.permission_write,
+            PermissionPreset::FullAccess => &p.permission_full,
         };
-        if let Some((text, _)) = &self.notice
-            && let Some(at) = line.find(text.as_str())
-        {
-            let (before, rest) = line.split_at(at);
-            let (notice, after) = rest.split_at(text.len().min(rest.len()));
-            return format!(
-                "{}{}{}",
-                fg(before, &self.palette.muted),
-                fg(notice, &self.palette.highlight),
-                fg(after, &self.palette.muted)
-            );
+        let permission = fg(&format!("⏵⏵ {}", permission_label(preset)), color);
+        let hint = fg(t("(shift+tab to cycle)"), &p.muted);
+        let total = cols.saturating_sub(2);
+        let prefix = format!("{}{permission}", " ".repeat(MARGIN));
+        if self.fullscreen {
+            return clip(&format!("{prefix} {hint}"), total).0;
         }
-        if self.context_near()
-            && let Some(context) = self.context_label()
-            && let Some(at) = line.find(&context)
-        {
-            let (before, rest) = line.split_at(at);
-            let (context, after) = rest.split_at(context.len().min(rest.len()));
-            return format!(
-                "{}{}{}",
-                fg(before, &self.palette.muted),
-                fg(context, &self.palette.warning),
-                fg(after, &self.palette.muted)
-            );
+        let goal = self
+            .goal_label()
+            .map(|goal| fg(&format!("  {goal}"), &p.muted));
+        let context = self.context_label().map(|context| {
+            let color = if self.context_near() {
+                &p.warning
+            } else {
+                &p.muted
+            };
+            fg(&format!("  {context}"), color)
+        });
+        let slot = self.slot().map(|slot| {
+            let color = if self.notice.is_some() {
+                &p.highlight
+            } else {
+                &p.muted
+            };
+            fg(&format!("  {slot}"), color)
+        });
+        let background = self
+            .background_label()
+            .map(|background| fg(&format!("  {background}"), &p.muted));
+        let width = |part: &Option<String>| part.as_ref().map_or(0, |text| width_of(text));
+        let prefix_width = width_of(&prefix);
+        let kept = if self.slot_outranks_model() {
+            width(&slot)
+        } else {
+            0
+        };
+        let label = self.label.as_ref().and_then(|label| {
+            label.fitted(|text| prefix_width + kept + 2 + width_of(text) <= total)
+        });
+        let render = |with_hint: bool| {
+            let mut head = prefix.clone();
+            if with_hint {
+                head.push_str(&format!(" {hint}"));
+            }
+            let head_width = width_of(&head);
+            let label_width = label.as_ref().map_or(0, |text| width_of(text) + 2);
+            let room = total.saturating_sub(head_width + label_width);
+            let lead: String = [goal.clone(), context.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
+            let lead = if kept == 0 {
+                lead
+            } else {
+                clip(&lead, room.saturating_sub(kept + width(&background))).0
+            };
+            let mut rest = lead;
+            rest.push_str(slot.as_deref().unwrap_or_default());
+            rest.push_str(background.as_deref().unwrap_or_default());
+            let (rest, rest_used) = clip(&rest, room);
+            let content = head_width + rest_used;
+            let line = format!("{head}{rest}");
+            match label {
+                Some(ref text) => {
+                    let gap = total - content - width_of(text);
+                    let line = format!(
+                        "{line}{}{}",
+                        " ".repeat(gap),
+                        fg(text, &self.palette.highlight)
+                    );
+                    (line, content)
+                }
+                None => (line, content),
+            }
+        };
+        let (line, used) = render(false);
+        let label_room = label.as_ref().map_or(0, |text| 2 + width_of(text));
+        if used + 1 + width_of(&hint) + label_room <= total {
+            render(true).0
+        } else {
+            line
         }
-        fg(&line, &self.palette.muted)
     }
 }
 
 impl Document for App {
     fn disclosure(&self, block: Option<usize>, cols: usize, row: usize) -> Option<String> {
         let (node, _) = self.tool_disclosure(block, row, cols)?;
+        if self.shows_member() {
+            return Some(
+                serde_json::to_string(&(self.member_target.as_ref(), node))
+                    .expect("tool identity is JSON"),
+            );
+        }
         Some(serde_json::to_string(&(self.tool_scope(), node)).expect("tool identity is JSON"))
     }
 
     fn tool_rows(&self, index: usize, cols: usize) -> Vec<usize> {
-        let Block::ToolGroup(group) = &self.history[index] else {
+        let Block::ToolGroup(group) = &self.active_history()[index] else {
             return Vec::new();
         };
         disclosure_rows(group, cols.saturating_sub(2 + MARGIN).max(1), &self.palette)
@@ -7201,6 +7736,9 @@ impl Document for App {
     }
 
     fn rewritten(&self, since: u64) -> (u64, Option<Vec<usize>>) {
+        if self.shows_member() {
+            return (self.member_rewrites, None);
+        }
         let count = (self.rewrites - since) as usize;
         let ids = (count <= self.rewrite_log.len())
             .then(|| self.rewrite_log.iter().rev().take(count).copied().collect());
@@ -7208,6 +7746,9 @@ impl Document for App {
     }
 
     fn cards(&self, index: usize) -> Vec<String> {
+        if self.shows_member() {
+            return Vec::new();
+        }
         match &self.history[index] {
             Block::ToolGroup(group) => card_actions(group).into_iter().map(str::to_owned).collect(),
             Block::Line { id, .. } => vec![id.clone()],
@@ -7217,6 +7758,9 @@ impl Document for App {
     }
 
     fn card_rows(&self, index: usize, cols: usize, card: &str) -> Option<(usize, usize)> {
+        if self.shows_member() {
+            return None;
+        }
         let group = match &self.history[index] {
             Block::ToolGroup(group) => group,
             Block::Line { .. } | Block::LoadMore(_) => {
@@ -7230,6 +7774,9 @@ impl Document for App {
     }
 
     fn card_at(&self, index: usize, cols: usize, row: usize) -> Option<String> {
+        if self.shows_member() {
+            return None;
+        }
         let group = match &self.history[index] {
             Block::ToolGroup(group) => group,
             Block::Line { id, .. } => return (row > 0).then(|| id.clone()),
@@ -7241,19 +7788,19 @@ impl Document for App {
     }
 
     fn dropped(&self) -> usize {
-        self.dropped
+        if self.shows_member() { 0 } else { self.dropped }
     }
 
     fn len(&self) -> usize {
-        self.history.len()
+        self.active_history().len()
     }
 
     fn rows(&self, index: usize, cols: usize) -> Vec<String> {
-        raw_rows(&self.render_source(&self.history[index], cols)).collect()
+        raw_rows(&self.render_source(&self.active_history()[index], cols)).collect()
     }
 
     fn estimate(&self, index: usize, cols: usize) -> usize {
-        match &self.history[index] {
+        match &self.active_history()[index] {
             Block::Assistant(text) => {
                 let width = cols.saturating_sub(2 + MARGIN).max(1);
                 1 + text
@@ -7266,6 +7813,9 @@ impl Document for App {
     }
 
     fn message(&self, index: usize) -> Option<&str> {
+        if self.shows_member() {
+            return None;
+        }
         match &self.history[index] {
             Block::User { text, .. } => Some(text),
             _ => None,
@@ -7273,6 +7823,9 @@ impl Document for App {
     }
 
     fn cut(&self, index: usize) -> Option<u64> {
+        if self.shows_member() {
+            return None;
+        }
         match &self.history[index] {
             Block::User { cut, .. } => *cut,
             _ => None,
@@ -7386,69 +7939,63 @@ fn shown_tasks(
         .collect()
 }
 
-/// The line of tasks running apart from the turn: `◐ 2 · cargo build 1m12s ·
-/// cargo test 34s` while both run, with `✓`, `✗` or `⊘` in place of the
-/// elapsed time's lead once one ends. Without a running task the count has
-/// nothing to say, so the row starts at the first entry's mark:
-/// `✓ cargo build 1m12s`. A single row, cut to `width` cells; `None` when
-/// there is nothing to show.
-fn task_line(
+fn task_lines(
     tasks: Vec<(&crate::model::view::TaskView, Option<u64>)>,
     now: u64,
     width: usize,
     p: &Palette,
-) -> Option<String> {
+) -> Vec<String> {
     use crate::ui::text::truncate_cells;
-    if tasks.is_empty() {
-        return None;
-    }
-    let running = tasks.iter().filter(|(_, end)| end.is_none()).count();
-    let head = (running > 0).then(|| format!("\u{25d0} {running}"));
-    let mut row = head.clone().unwrap_or_default();
-    let mut room = width.saturating_sub(display_width(&row));
-    for (shown, (task, end)) in tasks.iter().enumerate() {
+    let mut rows = Vec::new();
+    for (task, end) in tasks {
         let started = task.started_at / 1000;
         let at = end.unwrap_or(now).max(started);
         let elapsed = task_elapsed(at - started);
         let label = crate::sanitize::safe(&task.label);
         let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mark = task
-            .finished
-            .as_ref()
-            .map_or("", |finish| finish.outcome.mark());
-        let lead = if shown == 0 && head.is_none() {
-            ""
-        } else {
-            " · "
-        };
-        let entry = format!("{lead}{mark}{label} {elapsed}");
-        let fits = display_width(&entry) <= room;
-        if !fits {
-            if shown == 0 {
-                // The first entry still names what runs, shortened to fit.
-                let tail = format!(" {elapsed}");
-                let fixed = display_width(lead) + display_width(mark) + tail.len();
-                let label = truncate_cells(&label, room.saturating_sub(fixed).max(1));
-                row.push_str(&format!("{lead}{mark}{label}{tail}"));
-            } else {
-                row.push_str(&truncate_cells(" · …", room.max(1)));
+        let (mark, color) = match &task.finished {
+            Some(finish) => (
+                finish.outcome.mark(),
+                match finish.outcome {
+                    TaskOutcome::Completed => &p.success,
+                    TaskOutcome::Failed => &p.danger,
+                    TaskOutcome::Stopped => &p.muted,
+                },
+            ),
+            None if task.kind
+                == crate::model::view::TaskKind::Member(
+                    crate::model::view::MemberTarget::Starting,
+                ) =>
+            {
+                ("◌ ", &p.activity)
             }
-            break;
-        }
-        row.push_str(&entry);
-        room -= display_width(&entry);
+            None => ("◐ ", &p.activity),
+        };
+        let room = width.saturating_sub(display_width(mark) + elapsed.len() + 2);
+        let agent = task.agent.as_deref().map_or(String::new(), |name| {
+            let name = crate::sanitize::safe(name);
+            let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+            let name = truncate_cells(&name, (room / 3).saturating_sub(3));
+            if name.is_empty() {
+                String::new()
+            } else {
+                format!(" · {name}")
+            }
+        });
+        let label = truncate_cells(&label, room.saturating_sub(display_width(&agent)));
+        let padding = width.saturating_sub(
+            display_width(mark) + display_width(&label) + display_width(&agent) + elapsed.len(),
+        );
+        rows.push(format!(
+            "{}{}{}{}{}",
+            fg(mark, color),
+            fg(&label, &p.text),
+            fg(&agent, &p.muted),
+            " ".repeat(padding),
+            fg(&elapsed, &p.muted),
+        ));
     }
-    let failed = tasks
-        .iter()
-        .any(|(task, end)| end.is_some() && task.finished.as_ref().is_some_and(TaskFinish::failed));
-    let color = if running > 0 {
-        &p.activity
-    } else if failed {
-        &p.danger
-    } else {
-        &p.success
-    };
-    Some(fg(&truncate_cells(&row, width.max(1)), color))
+    rows
 }
 
 /// The side panel's line drawn as its transcript, without the opening
@@ -7813,10 +8360,7 @@ fn goodbye_panel(resume: Option<&str>) -> Vec<String> {
 
 /// The rows of a committed chunk (its closing newline ends the last row).
 fn raw_rows(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.strip_suffix('\n')
-        .unwrap_or(text)
-        .split('\n')
-        .map(str::to_owned)
+    text.trim_suffix('\n').split('\n').map(str::to_owned)
 }
 
 /// Paints plain text with a colour.
@@ -8073,6 +8617,27 @@ mod tests {
                             );
                         }
                         drawn.key(KeyCode::Down);
+                    }
+                    if fullscreen {
+                        drawn
+                            .app
+                            .composer
+                            .set_draft(&format!("/{}", "abcdefghij".repeat(4)));
+                        let frame = drawn.app.frame(size);
+                        let bytes = FullScreen::new(size, true).render(
+                            &frame,
+                            size,
+                            &drawn.app.palette,
+                            &drawn.app,
+                        );
+                        let mut emu =
+                            crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                        emu.feed(&bytes);
+                        let text = emu.rows_text().join("\n");
+                        assert!(
+                            text.contains("> abcdefghij"),
+                            "long query visible: {size:?}: {text}"
+                        );
                     }
                 }
             }
@@ -8639,6 +9204,7 @@ mod tests {
         i18n::set(i18n::Locale::En);
     }
 
+    /// An empty composer shows the locale's placeholder; typing replaces it.
     #[test]
     fn short_composers_keep_the_caret_and_the_complete_draft() {
         for fullscreen in [false, true] {
@@ -8646,11 +9212,7 @@ mod tests {
             drawn.app.fullscreen = fullscreen;
             let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             drawn.app.host = Box::new(Recorder(sent.clone()));
-            for (locale, hint) in [
-                (i18n::Locale::En, "Ask anything... · Ctrl+J newline"),
-                (i18n::Locale::ZhCn, "输入你的问题… · Ctrl+J 换行"),
-            ] {
-                i18n::set(locale);
+            let caret_row = |drawn: &mut Drawn| -> String {
                 let frame = drawn.app.frame(drawn.size);
                 let bytes = if fullscreen {
                     FullScreen::new(drawn.size, true).render(
@@ -8664,11 +9226,34 @@ mod tests {
                 };
                 let mut emu = crate::ui::render::testterm::Emu::new(80, 24);
                 emu.feed(&bytes);
+                emu.row(emu.cy).replace('\0', "")
+            };
+            for locale in [i18n::Locale::En, i18n::Locale::ZhCn] {
+                i18n::set(locale);
+                let caret = caret_row(&mut drawn);
+                let inside = caret
+                    .split('│')
+                    .nth(1)
+                    .map(str::trim)
+                    .map(|text| text.trim_start_matches('›').trim().to_owned())
+                    .unwrap_or_default();
+                let placeholder = inside
+                    .trim_prefix(drawn.app.composer.text())
+                    .trim()
+                    .to_owned();
                 assert!(
-                    emu.row(emu.cy).replace('\0', "").contains(hint),
-                    "fullscreen={fullscreen}: {:?}",
-                    emu.rows_text()
+                    !placeholder.is_empty(),
+                    "{locale:?} fullscreen={fullscreen}: the composer's row holds no \
+                     placeholder: {caret:?}"
                 );
+                typed(&mut drawn.app, "ask");
+                let caret = caret_row(&mut drawn);
+                assert!(
+                    caret.contains("ask") && !caret.contains(&placeholder),
+                    "{locale:?} fullscreen={fullscreen}: typing replaces the placeholder: \
+                     {caret:?}"
+                );
+                drawn.app.composer.clear();
             }
             i18n::set(i18n::Locale::En);
             typed(&mut drawn.app, "first line");
@@ -8688,8 +9273,8 @@ mod tests {
                     .frame(drawn.size)
                     .live
                     .join("\n")
-                    .contains("Ctrl+J"),
-                "typing replaces the placeholder"
+                    .contains(t(COMPOSER_PLACEHOLDER)),
+                "the draft replaces the placeholder"
             );
             let draft = (0..12)
                 .map(|n| format!("line {n:02}"))
@@ -8752,21 +9337,23 @@ mod tests {
         );
     }
 
+    /// The branch label follows the workspace the interface shows.
     #[test]
     fn composer_tracks_git_switches_in_repositories_and_worktrees() {
         let root = tempfile::tempdir().unwrap();
         let theme = test_theme();
+        let launch = root.path().to_string_lossy().into_owned();
         for fullscreen in [false, true] {
             let mut app = App::new(
                 Box::new(Idle),
                 MarkdownRenderer::new(&theme),
                 theme.palette.clone(),
                 root.path().join("home"),
-                root.path().to_string_lossy().into_owned(),
+                launch.clone(),
             );
             app.fullscreen = fullscreen;
             let frame = app.frame((160, 30));
-            let cwd = crate::ui::tilde(&root.path().to_string_lossy());
+            let cwd = crate::ui::tilde(&launch);
             let row = frame
                 .live
                 .iter()
@@ -8830,62 +9417,61 @@ mod tests {
                     MarkdownRenderer::new(&theme),
                     theme.palette.clone(),
                     root.path().join("home"),
-                    cwd.to_string_lossy().into_owned(),
+                    launch.clone(),
                 );
                 app.fullscreen = fullscreen;
+                app.apply(Update::Switched {
+                    session_id: "s1".into(),
+                    kind: SwitchKind::Resumed,
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                });
                 assert!(
                     app.frame((160, 30))
                         .live
                         .iter()
-                        .any(|row| row.contains(&format!("({expected})")))
+                        .any(|row| row.contains(&format!("({expected})"))),
+                    "{cwd:?} must name {expected}"
                 );
                 apps.push(app);
             }
         }
-        git(&repo, &["switch", "-q", "-c", "feature/updated"]);
-        git(&linked, &["switch", "-q", "-c", "feature/linked-updated"]);
-        for (expected, linked_expected) in [
-            ("feature/updated", "feature/linked-updated"),
-            ("HEAD", "HEAD"),
-            ("feature/updated", "feature/linked-updated"),
-        ] {
-            if expected == "HEAD" {
-                git(&repo, &["switch", "-q", "--detach"]);
-                git(&linked, &["switch", "-q", "--detach"]);
+        let check = |app: &mut App, expected: &str| {
+            app.git_checked = Instant::now();
+            assert!(!app.tick(), "a Git switch must wait for the next check");
+            app.git_checked -= GIT_BRANCH_POLL;
+            assert!(app.tick(), "a Git switch must request a repaint");
+            let frame = app.frame((160, 30));
+            let mut emu = crate::ui::render::testterm::Emu::new(160, 30);
+            let bytes = if app.fullscreen {
+                FullScreen::new((160, 30), true).render(&frame, (160, 30), &app.palette, app)
             } else {
-                git(&repo, &["switch", "-q", expected]);
-                git(&linked, &["switch", "-q", linked_expected]);
-            }
-            for (index, app) in apps.iter_mut().enumerate() {
-                app.git_checked = Instant::now();
-                assert!(!app.tick(), "a Git switch must wait for the next check");
-                app.git_checked -= GIT_BRANCH_POLL;
-                assert!(app.tick(), "a Git switch must request a repaint");
-                let expected = if index < 2 { expected } else { linked_expected };
-                let frame = app.frame((160, 30));
-                let mut emu = crate::ui::render::testterm::Emu::new(160, 30);
-                let bytes = if app.fullscreen {
-                    FullScreen::new((160, 30), true).render(&frame, (160, 30), &app.palette, app)
-                } else {
-                    Screen::new((160, 30), true).render(&frame, (160, 30))
-                };
-                emu.feed(&bytes);
-                assert!(
-                    emu.rows_text()
-                        .iter()
-                        .any(|row| row.contains(&format!("({expected})"))),
-                    "composer must show {expected}"
-                );
-            }
+                Screen::new((160, 30), true).render(&frame, (160, 30))
+            };
+            emu.feed(&bytes);
+            assert!(
+                emu.rows_text()
+                    .iter()
+                    .any(|row| row.contains(&format!("({expected})"))),
+                "the composer must show the shown workspace's {expected}: {:?}",
+                emu.rows_text()
+            );
+        };
+        git(&repo, &["switch", "-q", "-c", "feature/updated"]);
+        for app in apps.iter_mut().take(2) {
+            check(app, "feature/updated");
+        }
+        git(&linked, &["switch", "-q", "-c", "linked-updated"]);
+        for app in apps.iter_mut().skip(2) {
+            check(app, "linked-updated");
+        }
+        git(&repo, &["switch", "-q", "--detach"]);
+        for app in apps.iter_mut().take(2) {
+            check(app, "HEAD");
         }
         for (index, app) in apps.iter_mut().enumerate() {
+            let last = if index < 2 { "HEAD" } else { "linked-updated" };
             app.git_checked -= GIT_BRANCH_POLL;
             assert!(!app.tick(), "an unchanged HEAD must not request a repaint");
-            let expected = if index < 2 {
-                "feature/updated"
-            } else {
-                "feature/linked-updated"
-            };
             let head = app.git_head.clone().unwrap();
             let saved = std::fs::read(&head).unwrap();
             std::fs::remove_file(&head).unwrap();
@@ -8899,8 +9485,8 @@ mod tests {
                     app.frame((160, 30))
                         .live
                         .iter()
-                        .any(|row| row.contains(&format!("({expected})"))),
-                    "a missing or empty HEAD must preserve the last branch label"
+                        .any(|row| row.contains(&format!("({last})"))),
+                    "a missing or empty HEAD must preserve the last branch label {last}"
                 );
             }
             std::fs::write(&head, saved).unwrap();
@@ -9148,24 +9734,23 @@ mod tests {
             row
         };
         // The `@` picker for `@note`: the panel's title row and the file
-        // names it offers, read from one frame once the walk reports that it
-        // has finished.
+        // names it offers. One frame starts the walk, the loop polls until
+        // the walk reports that it has finished, and the rows are read from
+        // a frame drawn after that.
         let picker = |app: &mut App, cols: u16| -> (String, Vec<String>) {
             let names = ["launch-note.txt", "session-note.txt"];
             typed(app, "@note");
+            let _ = app.frame((cols, 30));
             let started = Instant::now();
-            let rows = loop {
-                let frame = app.frame((cols, 30));
-                let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
-                if !app.composer.mention_searching() {
-                    break rows;
-                }
+            while app.composer.mention_searching() {
                 assert!(
                     started.elapsed() < Duration::from_secs(10),
                     "the `@` walk did not finish"
                 );
                 std::thread::sleep(Duration::from_millis(5));
-            };
+            }
+            let frame = app.frame((cols, 30));
+            let rows: Vec<String> = frame.live.iter().map(|row| strip_escapes(row)).collect();
             app.composer.clear();
             // The title row is where the panel writes its heading: the row
             // carrying the `Files` title, whatever its box draws above it.
@@ -9736,7 +10321,11 @@ mod tests {
                 task_id: id.into(),
             }),
             label: label.into(),
+            command: Some(label.into()),
+            agent: None,
+            agent_id: None,
             started_at: 0,
+            dispatch: None,
             finished: None,
         }
     }
@@ -9778,137 +10367,6 @@ mod tests {
     }
 
     #[test]
-    fn the_task_line_names_running_tasks_and_fades_an_ended_one() {
-        use crate::ui::render::panel::strip_escapes;
-        let p = &test_theme().palette;
-        let now = 1_000;
-        let running = background_task("t1", "cargo build");
-        let mut running = running;
-        running.started_at = (now - 72) * 1000;
-        let line = task_line(shown_tasks(&[running.clone()], now), now, 60, p)
-            .expect("a running task draws a line");
-        let plain = strip_escapes(&line);
-        assert_eq!(plain, "◐ 1 · cargo build 1m12s", "{plain}");
-
-        let mut second = background_task("t2", "cargo test");
-        second.started_at = (now - 34) * 1000;
-        let line = task_line(
-            shown_tasks(&[running.clone(), second.clone()], now),
-            now,
-            60,
-            p,
-        )
-        .expect("two tasks draw one line");
-        let plain = strip_escapes(&line);
-        assert_eq!(plain, "◐ 2 · cargo build 1m12s · cargo test 34s", "{plain}");
-
-        let ended = ended_at(running, now * 1000);
-        let both = [ended.clone(), second.clone()];
-        let shown = shown_tasks(&both, now);
-        let plain = strip_escapes(&task_line(shown.clone(), now, 60, p).expect("a line"));
-        assert!(plain.starts_with("◐ 1 · ✓ cargo build 1m12s"), "{plain}");
-        assert!(plain.contains("cargo test 34s"), "{plain}");
-
-        // An ended task that has not faded yet is the only one the row
-        // shows, so it carries no count.
-        let ended_now = |task, outcome| {
-            let mut task = finished(task, outcome);
-            task.finished.as_mut().expect("a finish").at = now * 1000;
-            task
-        };
-        let mut failed = ended_now(background_task("t3", "cargo build"), TaskOutcome::Failed);
-        failed.started_at = (now - 72) * 1000;
-        let plain =
-            strip_escapes(&task_line(shown_tasks(&[failed], now), now, 60, p).expect("a line"));
-        assert!(plain.starts_with("✗ cargo build 1m12s"), "{plain}");
-
-        let mut stopped = ended_now(background_task("t4", "cargo test"), TaskOutcome::Stopped);
-        stopped.started_at = (now - 12) * 1000;
-        let plain =
-            strip_escapes(&task_line(shown_tasks(&[stopped], now), now, 60, p).expect("a line"));
-        assert_eq!(plain, "⊘ cargo test 12s", "{plain}");
-
-        // Five seconds after the end the ended task leaves; nothing else runs.
-        let later = now + TASK_FADE;
-        assert!(
-            shown_tasks(&[ended], later).is_empty(),
-            "an ended task fades out"
-        );
-        assert!(task_line(Vec::new(), later, 60, p).is_none());
-    }
-
-    /// With nothing running the count has nothing to say, so the row starts
-    /// at the first entry's mark and carries no leading separator; a narrow
-    /// row still names that task.
-    #[test]
-    fn a_row_of_ended_tasks_starts_at_the_first_mark_without_a_count() {
-        use crate::ui::render::panel::{strip_escapes, visible_width};
-        let p = &test_theme().palette;
-        let now = 1_000;
-        let ended_now = |task, outcome| {
-            let mut task = finished(task, outcome);
-            task.finished.as_mut().expect("a finish").at = now * 1000;
-            task
-        };
-        let mut first = ended_now(
-            background_task("t1", "cargo build --all-targets --locked"),
-            TaskOutcome::Completed,
-        );
-        first.started_at = (now - 72) * 1000;
-        let mut second = ended_now(
-            background_task("t2", "cargo test --workspace --locked"),
-            TaskOutcome::Stopped,
-        );
-        second.started_at = (now - 34) * 1000;
-
-        let tasks = [first.clone(), second.clone()];
-        let plain =
-            strip_escapes(&task_line(shown_tasks(&tasks, now), now, 100, p).expect("a line"));
-        assert_eq!(
-            plain,
-            "✓ cargo build --all-targets --locked 1m12s · ⊘ cargo test --workspace --locked 34s",
-            "{plain}"
-        );
-
-        for width in [20, 30, 40, 100] {
-            let line = strip_escapes(
-                &task_line(shown_tasks(&[first.clone()], now), now, width, p).expect("a line"),
-            );
-            assert!(!line.starts_with(" ·"), "{width}: {line:?}");
-            assert!(line.starts_with("✓ "), "{width}: {line:?}");
-            assert!(visible_width(&line) <= width, "{width}: {line:?}");
-            assert!(line.contains("cargo"), "{width}: {line:?}");
-        }
-    }
-
-    #[test]
-    fn a_narrow_task_line_cuts_labels_and_still_names_the_first_task() {
-        use crate::ui::render::panel::{strip_escapes, visible_width};
-        let p = &test_theme().palette;
-        let now = 100;
-        let mut first = background_task("t1", "cargo build --all-targets --locked");
-        first.started_at = 0;
-        let mut second = background_task("t2", "cargo test --workspace --locked");
-        second.started_at = 0;
-        for width in [20, 30, 40, 120] {
-            let line = task_line(
-                shown_tasks(&[first.clone(), second.clone()], now),
-                now,
-                width,
-                p,
-            )
-            .expect("a line");
-            assert!(
-                visible_width(&line) <= width,
-                "{width}: too wide: {:?}",
-                strip_escapes(&line)
-            );
-            let plain = strip_escapes(&line);
-            assert!(plain.contains("cargo"), "{width}: {plain:?}");
-        }
-    }
-
-    #[test]
     fn the_dock_draws_the_task_line_above_the_composer_and_enter_opens_the_tasks() {
         use crate::model::session::Command;
         use crate::ui::render::panel::strip_escapes;
@@ -9944,7 +10402,7 @@ mod tests {
                 .collect();
             let line = rows
                 .iter()
-                .position(|row| row.contains("cargo build 1m12s"))
+                .position(|row| row.contains("cargo build"))
                 .unwrap_or_else(|| panic!("{fullscreen}: no task line in {rows:?}"));
             let composer = rows
                 .iter()
@@ -9953,6 +10411,242 @@ mod tests {
             assert!(line < composer, "{fullscreen}: the line sits above it");
         }
 
+        let mut member = background_task("m1", "Review runtime ownership");
+        member.kind = crate::model::view::TaskKind::Member(
+            crate::model::view::MemberTarget::Session("member-session".into()),
+        );
+        member.agent = Some("Code Reviewer".into());
+        member.started_at = (now - 34) * 1000;
+        let mut starting = member.clone();
+        starting.id = "m2".into();
+        starting.label = "Inspect integration coverage".into();
+        starting.agent = Some("Test Explorer".into());
+        starting.kind =
+            crate::model::view::TaskKind::Member(crate::model::view::MemberTarget::Starting);
+        let mut stopped = ended_at(member.clone(), now * 1000);
+        stopped.finished.as_mut().unwrap().outcome = TaskOutcome::Stopped;
+        let mut failed = ended_at(starting.clone(), now * 1000);
+        failed.finished.as_mut().unwrap().outcome = TaskOutcome::Failed;
+        let mut types = member.clone();
+        types.id = "m3".into();
+        types.label = "Check generated types".into();
+        types.agent = Some("Type Checker".into());
+        let mut audit = member.clone();
+        audit.id = "m4".into();
+        audit.label = "Audit cancellation paths".into();
+        audit.agent = Some("Safety Reviewer".into());
+        audit.kind = crate::model::view::TaskKind::Member(
+            crate::model::view::MemberTarget::Session("audit-session".into()),
+        );
+        let cases = [
+            vec![member.clone(), starting.clone()],
+            vec![task.clone(), member.clone()],
+            vec![ended_at(task.clone(), now * 1000), stopped, failed],
+            vec![
+                task.clone(),
+                member.clone(),
+                starting.clone(),
+                member.clone(),
+            ],
+            vec![task.clone(), member, starting, types, audit],
+        ];
+        for fullscreen in [false, true] {
+            for size in [(32, 8), (44, 12), (44, 30), (80, 30), (120, 30)] {
+                for tasks in &cases {
+                    app.fullscreen = fullscreen;
+                    app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                        session_id: "s1".into(),
+                        focus: "main".into(),
+                        tasks: tasks.clone(),
+                        ..ViewSnapshot::default()
+                    })));
+                    let frame = app.frame(size);
+                    let rows: Vec<_> = frame.live[frame.dock..frame.anchor]
+                        .iter()
+                        .map(|row| strip_escapes(row))
+                        .collect();
+                    assert_eq!(rows.len(), tasks.len(), "{rows:?}");
+                    let task_rows = if size.1 >= 30 {
+                        rows.as_slice()
+                    } else {
+                        &rows[rows.len() - 1..]
+                    };
+                    for (row, task) in rows.iter().zip(tasks) {
+                        assert!(display_width(row) <= size.0 as usize, "{row}");
+                        let prefix: String = task.label.chars().take(4).collect();
+                        assert!(row.contains(&prefix), "{row}");
+                        assert_eq!(
+                            row.matches('◐').count()
+                                + row.matches('◌').count()
+                                + row.matches('✓').count()
+                                + row.matches('⊘').count()
+                                + row.matches('✗').count(),
+                            1,
+                            "{row}"
+                        );
+                        if size.0 >= 80 {
+                            if let Some(agent) = &task.agent {
+                                assert!(row.contains(agent), "{row}");
+                            }
+                            let elapsed = row.split_whitespace().last().unwrap();
+                            assert!(
+                                elapsed.ends_with('s')
+                                    && elapsed.starts_with(|c: char| c.is_ascii_digit()),
+                                "{row}"
+                            );
+                        }
+                    }
+                    let bytes = if fullscreen {
+                        FullScreen::new(size, true).render(&frame, size, &app.palette, &app)
+                    } else {
+                        Screen::new(size, true).render(&frame, size)
+                    };
+                    let mut emu =
+                        crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                    emu.feed(&bytes);
+                    let rendered = emu.rows_text().join("\n");
+                    assert!(
+                        rendered.contains("Ask anything"),
+                        "{fullscreen} {size:?}: {rendered}"
+                    );
+                    for row in task_rows {
+                        assert!(
+                            rendered.contains(row.trim_end().rsplit_once(' ').unwrap().0.trim()),
+                            "{fullscreen} {size:?}: {rendered}"
+                        );
+                    }
+                    assert!(emu.cursor_visible, "{fullscreen} {size:?}: {rendered}");
+
+                    app.composer.set_draft(
+                        "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nlast draft line",
+                    );
+                    let frame = app.frame(size);
+                    let bytes = if fullscreen {
+                        FullScreen::new(size, true).render(&frame, size, &app.palette, &app)
+                    } else {
+                        Screen::new(size, true).render(&frame, size)
+                    };
+                    let mut emu =
+                        crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+                    emu.feed(&bytes);
+                    let rendered = emu.rows_text().join("\n");
+                    assert!(
+                        rendered.contains("last draft line"),
+                        "{fullscreen} {size:?}: {rendered}"
+                    );
+                    for row in task_rows {
+                        assert!(
+                            rendered.contains(row.trim_end().rsplit_once(' ').unwrap().0.trim()),
+                            "{fullscreen} {size:?}: {rendered}"
+                        );
+                    }
+                    assert!(emu.cursor_visible, "{fullscreen} {size:?}: {rendered}");
+                    app.composer.set_draft("");
+                }
+            }
+        }
+
+        app.fullscreen = true;
+        app.composer.set_draft("keep this draft");
+        for size in [(80, 30), (44, 12)] {
+            use crate::ui::render::fullscreen::MouseOutcome;
+            use crate::ui::terminal::{MouseEvent, MouseKind};
+            let mut screen = FullScreen::new(size, true);
+            let frame = app.frame(size);
+            let mut emu = crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
+            emu.feed(&screen.render(&frame, size, &app.palette, &app));
+            let row = emu
+                .rows_text()
+                .iter()
+                .position(|row| row.contains("Audit cancellation"))
+                .unwrap() as u16;
+            let event = |kind| MouseEvent {
+                kind,
+                column: 4,
+                row,
+            };
+            screen.mouse(event(MouseKind::Press), &app);
+            app.snapshot
+                .as_mut()
+                .unwrap()
+                .tasks
+                .last_mut()
+                .unwrap()
+                .started_at -= 1000;
+            screen.render(&app.frame(size), size, &app.palette, &app);
+            assert_eq!(
+                screen.mouse(event(MouseKind::Release), &app),
+                MouseOutcome::Task("m4".into())
+            );
+            app.open_task("m4");
+            let detail = app.frame(size);
+            let mut member_screen = FullScreen::new(size, true);
+            emu.feed(&member_screen.render(&detail, size, &app.palette, &app));
+            let rendered = emu.rows_text().join("\n");
+            if size.0 >= 80 {
+                assert!(rendered.contains("Audit cancellation"), "{rendered}");
+            }
+            assert!(rendered.contains("Read-only"), "{rendered}");
+            assert!(rendered.contains("Esc back"), "{rendered}");
+            assert!(!rendered.contains("keep this draft"), "{rendered}");
+            assert_eq!(
+                member_screen.mouse(event(MouseKind::Press), &app),
+                MouseOutcome::Ignored
+            );
+            assert!(matches!(
+                member_screen.mouse(event(MouseKind::Release), &app),
+                MouseOutcome::Click { .. } | MouseOutcome::Ignored
+            ));
+            app.handle_input(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+                KeyCode::Esc,
+                Modifiers::NONE,
+            )));
+            assert!(app.prompt.is_none());
+            assert_eq!(app.composer.text(), "keep this draft");
+
+            screen.invalidate();
+            screen.render(&app.frame(size), size, &app.palette, &app);
+            screen.mouse(event(MouseKind::Press), &app);
+            screen.mouse(event(MouseKind::Drag), &app);
+            assert_ne!(
+                screen.mouse(event(MouseKind::Release), &app),
+                MouseOutcome::Task("m4".into())
+            );
+            screen.mouse(event(MouseKind::Press), &app);
+            app.snapshot.as_mut().unwrap().tasks.swap(1, 4);
+            screen.render(&app.frame(size), size, &app.palette, &app);
+            assert_eq!(
+                screen.mouse(event(MouseKind::Release), &app),
+                MouseOutcome::Ignored
+            );
+            app.snapshot.as_mut().unwrap().tasks.swap(1, 4);
+            screen.render(&app.frame(size), size, &app.palette, &app);
+            screen.mouse(event(MouseKind::Press), &app);
+            let resized = (size.0 - 1, size.1);
+            screen.render(&app.frame(resized), resized, &app.palette, &app);
+            assert_eq!(
+                screen.mouse(event(MouseKind::Release), &app),
+                MouseOutcome::Ignored
+            );
+        }
+        app.open_task("t1");
+        app.sync_task_details();
+        let frame = app.frame((80, 30));
+        assert!(
+            frame
+                .overlay
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .any(|row| row.contains("Loading output..."))
+        );
+        assert!(sent.borrow().iter().any(|command| matches!(command, Command::WatchTaskOutput { target: Some(target), .. } if target.task_id == "t1")));
+        app.handle_input(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Esc,
+            Modifiers::NONE,
+        )));
+        app.composer.set_draft("");
         app.fullscreen = false;
         app.handle_input(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
             KeyCode::Enter,
@@ -9975,6 +10669,8 @@ mod tests {
     /// erases the row, so the composer never keeps a row nothing draws into.
     #[test]
     fn the_pulse_asks_for_the_frame_that_erases_an_ended_task_row() {
+        use crate::ui::render::panel::strip_escapes;
+
         let theme = test_theme();
         let home = tempfile::tempdir().unwrap();
         let mut app = App::new(
@@ -9995,25 +10691,42 @@ mod tests {
                 ..ViewSnapshot::default()
             }))
         };
+        let drawn = |app: &mut App| -> String {
+            app.frame((80, 30))
+                .live
+                .iter()
+                .map(|row| strip_escapes(row))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         let fading = ended_at(background_task("t1", "cargo build"), (now - 1) * 1000);
         app.apply(snapshot(vec![fading]));
-        assert!(app.task_line_shown(), "an ended task stays while it fades");
         assert!(app.tick(), "the pulse repaints the fading row");
-        assert!(app.task_row, "the frame it asked for drew the row");
+        let rows = drawn(&mut app);
+        assert!(
+            rows.contains("cargo build"),
+            "the fading row is drawn: {rows}"
+        );
 
-        // The end is older than the fade: nothing draws the row, and the
-        // pulse still asks for the frame that erases what it last drew. The
-        // pulse runs once a second, so the recorded second is moved back the
-        // way the clock would.
         let gone = ended_at(
             background_task("t2", "cargo test"),
             (now - TASK_FADE) * 1000,
         );
         app.apply(snapshot(vec![gone]));
-        assert!(!app.task_line_shown(), "an ended task leaves");
-        app.task_second -= 1;
-        assert!(app.tick(), "the pulse asks for the erasing frame");
-        assert!(!app.task_row, "and then stops asking");
+        let started = Instant::now();
+        while !app.tick() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the pulse never asked for the erasing frame"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let rows = drawn(&mut app);
+        assert!(
+            !rows.contains("cargo "),
+            "the erasing frame draws no task row: {rows}"
+        );
+        assert!(!app.tick(), "and then it stops asking");
     }
 
     /// A task whose end a read of recorded history applied, as the attach
@@ -10280,6 +10993,103 @@ mod tests {
     /// A session that keeps every command the interface sends.
     struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<Command>>>);
 
+    /// An 80-column scrollback app carrying `provider / model` with `effort`.
+    fn status_app(provider: &str, model: &str, effort: Option<&str>) -> (App, tempfile::TempDir) {
+        let theme = test_theme();
+        let home = tempfile::tempdir().unwrap();
+        let mut app = App::new(
+            Box::new(Idle),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            home.path().to_path_buf(),
+            "/work".into(),
+        );
+        app.apply(Update::Ready(Configuration {
+            provider_id: provider.into(),
+            model_id: model.into(),
+            model_preferences: effort.map(|effort| dim_agent_types::ModelPreferences {
+                reasoning_effort: Some(effort.into()),
+                ..Default::default()
+            }),
+            capability_snapshot: None,
+        }));
+        (app, home)
+    }
+
+    fn status_rows(app: &App) -> String {
+        use crate::ui::render::panel::strip_escapes;
+        strip_escapes(&app.status_line(80))
+    }
+
+    #[test]
+    fn a_slot_that_asks_the_user_keeps_its_text_before_the_shortcut_hint() {
+        let (mut app, _home) = status_app("test", "model", None);
+        app.set_notice("Press Ctrl+C again to exit");
+        let line = status_rows(&app);
+        assert!(line.contains("Press Ctrl+C again to exit"), "{line}");
+        assert!(line.contains("test / model"), "{line}");
+        assert!(!line.contains("(shift+tab to cycle)"), "{line}");
+        assert!(line.starts_with(" ⏵⏵ Workspace write"), "{line}");
+
+        app.set_notice("/rename needs a session");
+        let line = status_rows(&app);
+        assert!(line.contains("/rename needs a session"), "{line}");
+        assert!(line.contains("test / model"), "{line}");
+        assert!(!line.contains("(shift+tab to cycle)"), "{line}");
+    }
+
+    #[test]
+    fn a_slot_that_asks_the_user_outranks_a_long_model_label() {
+        let (mut app, _home) = status_app("deepseek", "deepseek-v4.1-flash", Some("max"));
+        app.set_notice("Press Ctrl+C again to exit");
+        let line = status_rows(&app);
+        assert!(line.contains("Press Ctrl+C again to exit"), "{line}");
+        assert!(
+            !line.contains("deepseek / deepseek-v4.1-flash"),
+            "the model name gives up its cells and then its place: {line}"
+        );
+    }
+
+    #[test]
+    fn a_run_state_slot_still_yields_to_the_model_label() {
+        let (mut app, _home) = status_app("deepseek", "deepseek-v4.1-flash", Some("max"));
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            ..ViewSnapshot::default()
+        })));
+        let line = status_rows(&app);
+        assert!(line.contains("esc interrupt"), "{line}");
+        assert!(
+            line.contains("deepseek / deepseek-v4.1-flash · max"),
+            "the model keeps its place and its effort: {line}"
+        );
+
+        let (mut wide, _home) =
+            status_app("anthropic", "gpt-5-codex-long-context-preview-2026", None);
+        wide.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            ..ViewSnapshot::default()
+        })));
+        let line = status_rows(&wide);
+        assert!(
+            line.contains("anthropic / gpt-5-codex-long-context-preview-2026"),
+            "a run state yields to the model label: {line}"
+        );
+    }
+
+    #[test]
+    fn a_wide_status_line_shows_the_hint_the_model_and_the_slot() {
+        use crate::ui::render::panel::strip_escapes;
+        let (mut app, _home) = status_app("test", "model", None);
+        app.set_notice("Press Ctrl+C again to exit");
+        let line = strip_escapes(&app.status_line(160));
+        assert!(line.contains("(shift+tab to cycle)"), "{line}");
+        assert!(line.contains("Press Ctrl+C again to exit"), "{line}");
+        assert!(line.contains("test / model"), "{line}");
+    }
+
     impl SessionPort for Recorder {
         fn send(&self, command: Command) {
             self.0.borrow_mut().push(command);
@@ -10288,6 +11098,118 @@ mod tests {
             Vec::new()
         }
         fn shutdown(self: Box<Self>) {}
+    }
+
+    #[test]
+    fn model_labels_share_highlighting_and_fullscreen_clicks_open_the_picker() {
+        use crate::ui::render::panel::strip_escapes;
+        use crate::ui::terminal::{MouseEvent, MouseKind};
+
+        for fullscreen in [false, true] {
+            for cols in [100, 26, 18] {
+                let size = (cols, 24);
+                let mut drawn = Drawn::new(size, None, true);
+                let app = &mut drawn.app;
+                app.fullscreen = fullscreen;
+                app.apply(Update::Ready(Configuration {
+                    provider_id: "test".into(),
+                    model_id: "model".into(),
+                    model_preferences: Some(dim_agent_types::ModelPreferences {
+                        reasoning_effort: Some("high".into()),
+                        ..Default::default()
+                    }),
+                    capability_snapshot: None,
+                }));
+                app.composer.set_draft("keep draft");
+                let frame = app.frame(size);
+                let label = frame.live.iter().find_map(|row| {
+                    let text = strip_escapes(row);
+                    text.find("test / model").map(|start| {
+                        let label = if text[start..].contains("· high") {
+                            "test / model · high"
+                        } else {
+                            "test / model"
+                        };
+                        assert!(row.contains(&fg(label, &app.palette.highlight)), "{row:?}");
+                        label
+                    })
+                });
+                assert_eq!(
+                    label,
+                    match (fullscreen, cols) {
+                        (_, 100) => Some("test / model · high"),
+                        (true, 26) => Some("test / model"),
+                        _ => None,
+                    }
+                );
+                if !fullscreen || label.is_none() {
+                    assert!(frame.model_label.is_none());
+                    continue;
+                }
+                let mut screen = FullScreen::new(size, true);
+                let mut emu = crate::ui::render::testterm::Emu::new(cols as usize, 24);
+                emu.feed(&screen.render(&frame, size, &app.palette, app));
+                let rows = emu.rows_text();
+                let row = rows
+                    .iter()
+                    .position(|row| row.contains(label.unwrap()))
+                    .unwrap();
+                let column = rows[row].chars().position(|ch| ch == 't').unwrap();
+                let event = |kind, column| MouseEvent {
+                    kind,
+                    column: column as u16,
+                    row: row as u16,
+                };
+                for column in [column - 1, column + label.unwrap().chars().count()] {
+                    screen.mouse(event(MouseKind::Press, column), app);
+                    assert_ne!(
+                        screen.mouse(event(MouseKind::Release, column), app),
+                        MouseOutcome::Models
+                    );
+                }
+                screen.mouse(event(MouseKind::Press, column), app);
+                screen.mouse(event(MouseKind::Drag, column), app);
+                assert_ne!(
+                    screen.mouse(event(MouseKind::Release, column), app),
+                    MouseOutcome::Models
+                );
+                screen.mouse(event(MouseKind::Press, column), app);
+                let resized = (cols - 1, 24);
+                screen.resize(resized);
+                assert_ne!(
+                    screen.mouse(event(MouseKind::Release, column), app),
+                    MouseOutcome::Models
+                );
+                screen.mouse(event(MouseKind::Press, column), app);
+                assert_ne!(
+                    screen.mouse(event(MouseKind::Release, column), app),
+                    MouseOutcome::Models
+                );
+                screen.render(&app.frame(size), size, &app.palette, app);
+                for column in [column, column + label.unwrap().chars().count() - 1] {
+                    screen.mouse(event(MouseKind::Press, column), app);
+                    screen.render(&app.frame(size), size, &app.palette, app);
+                    assert_eq!(
+                        screen.mouse(event(MouseKind::Release, column), app),
+                        MouseOutcome::Models
+                    );
+                }
+                app.run_command("models", "");
+                let frame = app.frame(size);
+                emu.feed(&screen.render(&frame, size, &app.palette, app));
+                assert!(emu.rows_text().join("\n").contains("Select a model"));
+                assert_ne!(
+                    screen.mouse(event(MouseKind::Press, column), app),
+                    MouseOutcome::Models
+                );
+                assert_ne!(
+                    screen.mouse(event(MouseKind::Release, column), app),
+                    MouseOutcome::Models
+                );
+                press(app, KeyCode::Esc);
+                assert_eq!(app.composer.text(), "keep draft");
+            }
+        }
     }
 
     #[test]
@@ -10959,7 +11881,9 @@ mod tests {
         app.handle_input(key(KeyCode::Enter));
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::SetPermission(PermissionPreset::WorkspaceWrite))
+            Some(Command::SetPermission(
+                crate::permission::PresetSelection::Preset(PermissionPreset::WorkspaceWrite)
+            ))
         ));
         app.apply(Update::PermissionSelected(PermissionPreset::WorkspaceWrite));
         let saved: serde_json::Value = serde_json::from_str(
@@ -12106,6 +13030,73 @@ mod tests {
         );
     }
 
+    /// The reviewer's case on a real 80x24 frame: thirty replacements keep the
+    /// target line and the choices on screen, and the keys reach the last entry,
+    /// in both renderers.
+    #[test]
+    fn a_long_edit_approval_fits_an_80x24_frame_and_reaches_its_last_entry() {
+        use crate::model::view::ApprovalView;
+
+        let size = (80, 24);
+        let edits: Vec<_> = (1..=30)
+            .map(|n| serde_json::json!({"oldText": format!("old {n}"), "newText": format!("new {n}")}))
+            .collect();
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new(size, None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                approvals: vec![ApprovalView {
+                    member: None,
+                    request_id: "approval-1".into(),
+                    branch_id: "main".into(),
+                    reason: "source: tool_rule".into(),
+                    tool_name: "edit".into(),
+                    tool_input: serde_json::json!({"path": "src/lib.rs", "edits": edits}),
+                    always: None,
+                }],
+                ..ViewSnapshot::default()
+            })));
+            let screen_text = |drawn: &mut Drawn| -> String {
+                if fullscreen {
+                    let frame = drawn.app.frame(size);
+                    let mut full = FullScreen::new(size, true);
+                    let bytes = full.render(&frame, size, &drawn.app.palette, &drawn.app);
+                    let mut emu = crate::ui::render::testterm::Emu::new(80, 24);
+                    emu.feed(&bytes);
+                    emu.rows_text().join("\n")
+                } else {
+                    drawn.draw();
+                    drawn.emu.rows_text().join("\n")
+                }
+            };
+            let first = screen_text(&mut drawn);
+            for shown in [
+                "# source: tool_rule",
+                "$ edit 30 replacements in src/lib.rs",
+                "1 · old 1 → new 1",
+                "Allow once",
+            ] {
+                assert!(first.contains(shown), "{fullscreen}: {shown:?} in {first}");
+            }
+            for _ in 0..30 {
+                let _ = drawn
+                    .app
+                    .handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+                        KeyCode::Down,
+                        Modifiers::NONE,
+                    )));
+            }
+            let last = screen_text(&mut drawn);
+            for shown in ["30 · old 30 → new 30", "# source: tool_rule", "Allow once"] {
+                assert!(
+                    last.contains(shown),
+                    "{fullscreen}: after scrolling, {shown:?} in {last}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_window_topic_stays_mains_message_while_a_line_is_shown() {
         let mut drawn = Drawn::new((80, 40), None, true);
@@ -12516,6 +13507,40 @@ mod tests {
         toggle(&mut drawn.app, "Ran code · 2 tool calls", 80);
         assert!(text(&mut drawn.app, 80).contains("deep output"));
         assert!(!text(&mut drawn.app, 80).contains("second child"));
+
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        drawn.app.host = Box::new(Recorder(sent.clone()));
+        let mut orphaned = vec![
+            call("lazy", "a", None, "alpha-tool", "alpha result"),
+            call("lazy", "b", None, "beta-tool", "beta result"),
+        ];
+        for row in &mut orphaned {
+            std::sync::Arc::make_mut(row).tool_input = None;
+        }
+        show(&mut drawn, orphaned.clone());
+        assert!(
+            sent.borrow().is_empty(),
+            "closed call details do not fetch origins"
+        );
+        toggle(&mut drawn.app, "Alpha-tool", 80);
+        assert!(matches!(sent.borrow().as_slice(), [Command::ToolOrigin {
+            request_id, call_id, ..
+        }] if request_id == "lazy" && call_id == "a"));
+        let resolved = std::sync::Arc::make_mut(&mut orphaned[0]);
+        resolved.tool_input = Some(serde_json::json!({"text": "loaded alpha argument"}));
+        resolved.tool_lookup_done = true;
+        sent.borrow_mut().clear();
+        show(&mut drawn, orphaned);
+        let visible = text(&mut drawn.app, 80);
+        assert!(visible.contains("loaded alpha argument"), "{visible}");
+        assert!(
+            !visible.contains("beta result"),
+            "origin arrival preserves sibling disclosure"
+        );
+        assert!(
+            sent.borrow().is_empty(),
+            "origin arrival does not fetch closed siblings"
+        );
     }
 
     #[test]
@@ -12711,8 +13736,8 @@ mod tests {
             let (block, row) = rows
                 .iter()
                 .find_map(|(block, row, line)| {
-                    strip_escapes(line)
-                        .contains("code")
+                    let line = strip_escapes(line);
+                    (line.contains("Ran code") || line.contains("Running code"))
                         .then_some((*block, *row))
                 })
                 .unwrap();
@@ -13721,6 +14746,7 @@ mod tests {
         i18n::set(i18n::Locale::En);
     }
 
+    /// `/timeline`'s jump reaches earlier history in scrollback and in fullscreen.
     #[test]
     fn a_timeline_jump_in_scrollback_draws_earlier_history_from_the_message() {
         let mut drawn = Drawn::new((80, 40), None, true);
@@ -13749,6 +14775,26 @@ mod tests {
         assert_eq!(
             drawn.app.notice.as_ref().map(|(text, _)| text.as_str()),
             Some(t("Already on screen above; /tui jumps to it"))
+        );
+
+        let mut full = Drawn::new((80, 40), None, true);
+        full.app.fullscreen = true;
+        resume_asks(&mut full, 120);
+        full.app.run_command("timeline", "");
+        full.key(KeyCode::Home);
+        full.key(KeyCode::Down);
+        full.key(KeyCode::Enter);
+        full.key(KeyCode::Enter);
+        let picked = full
+            .app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::User { text, .. } if text == "ask 1"))
+            .expect("the message is drawn");
+        assert_eq!(
+            full.app.jump,
+            Some(Jump::Block(full.app.dropped + picked)),
+            "fullscreen picks the drawn message rather than scrolling to it"
         );
     }
 
@@ -13789,28 +14835,6 @@ mod tests {
                 .history
                 .iter()
                 .any(|block| matches!(block, Block::User { text, .. } if text == "ask 0"))
-        );
-    }
-
-    #[test]
-    fn a_fullscreen_timeline_jump_picks_the_message_drawing_it_first() {
-        let mut drawn = Drawn::new((80, 40), None, true);
-        drawn.app.fullscreen = true;
-        resume_asks(&mut drawn, 120);
-        drawn.app.run_command("timeline", "");
-        drawn.key(KeyCode::Home);
-        drawn.key(KeyCode::Down);
-        drawn.key(KeyCode::Enter);
-        drawn.key(KeyCode::Enter);
-        let picked = drawn
-            .app
-            .history
-            .iter()
-            .position(|block| matches!(block, Block::User { text, .. } if text == "ask 1"))
-            .expect("the message is drawn");
-        assert_eq!(
-            drawn.app.jump,
-            Some(Jump::Block(drawn.app.dropped + picked))
         );
     }
 
@@ -14395,6 +15419,67 @@ mod tests {
     }
 
     #[test]
+    fn queue_display_keeps_applied_inputs_only_in_the_transcript() {
+        use crate::ui::render::panel::strip_escapes;
+
+        for locale in [i18n::Locale::En, i18n::Locale::ZhCn] {
+            i18n::set(locale);
+            for fullscreen in [false, true] {
+                for width in [44, 100] {
+                    let (mut app, _sent, _home) = session_with_queue(
+                        true,
+                        &[("applied", "find the leak"), ("held", "then add a test")],
+                    );
+                    app.fullscreen = fullscreen;
+                    let mut snapshot = app.snapshot.as_ref().unwrap().clone();
+                    snapshot.rows = vec![message(true)];
+                    snapshot.queued[0].held = false;
+                    snapshot.queued[0].recallable = false;
+                    let mut draw = |snapshot: &ViewSnapshot| {
+                        app.apply(Update::Snapshot(Box::new(snapshot.clone())));
+                        let frame = app.frame((width, 30));
+                        let rendered = app.reflow_history(width as usize).join("\n")
+                            + "\n"
+                            + &frame.live.join("\n");
+                        strip_escapes(&rendered)
+                    };
+                    let mixed = draw(&snapshot);
+                    assert!(
+                        mixed.contains(&tf("Queue ({count})", &[("count", "1")])),
+                        "{mixed}"
+                    );
+                    assert_eq!(mixed.matches("find the leak").count(), 1, "{mixed}");
+                    assert!(mixed.contains("then add a test"), "{mixed}");
+                    snapshot.queued.pop();
+                    let applied = draw(&snapshot);
+                    assert!(!applied.contains(t("Queue")), "{applied}");
+                    assert!(!applied.contains(t("Unread")), "{applied}");
+                    assert_eq!(applied.matches("find the leak").count(), 1, "{applied}");
+                    snapshot.running = false;
+                    snapshot.main_running = false;
+                    snapshot.rows.push(stopped());
+                    let idle = draw(&snapshot);
+                    assert!(!idle.contains(t("Queue")), "{idle}");
+                    assert_eq!(idle.matches("find the leak").count(), 1, "{idle}");
+                    assert!(!idle.contains(t("Unread")), "{idle}");
+                    snapshot.running = true;
+                    snapshot.main_running = true;
+                    let resumed = draw(&snapshot);
+                    assert!(!resumed.contains(t("Unread")), "{resumed}");
+                    snapshot.running = false;
+                    snapshot.main_running = false;
+                    snapshot.queued.clear();
+                    snapshot.rows[0] = message(false);
+                    let consumed = draw(&snapshot);
+                    assert!(!consumed.contains(t("Unread")), "{consumed}");
+                    assert_eq!(consumed.matches("find the leak").count(), 1, "{consumed}");
+                }
+            }
+        }
+        i18n::set(i18n::Locale::En);
+    }
+
+    #[test]
     fn choosing_goal_completes_before_dispatch_in_both_modes() {
         for fullscreen in [false, true] {
             for query in ["/go", "/goal"] {
@@ -14424,6 +15509,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn every_loop_form_completes_then_dispatches_its_request_in_both_modes() {
+        for fullscreen in [false, true] {
+            for (words, expected) in [
+                ("", crate::loop_view::Request::Show),
+                (
+                    "check the deploy",
+                    crate::loop_view::Request::Start {
+                        prompt: "check the deploy".into(),
+                        every_seconds: None,
+                    },
+                ),
+                (
+                    "5m check the deploy",
+                    crate::loop_view::Request::Start {
+                        prompt: "check the deploy".into(),
+                        every_seconds: Some(300),
+                    },
+                ),
+                ("stop", crate::loop_view::Request::Stop(None)),
+                ("7f2", crate::loop_view::Request::Stop(Some("7f2".into()))),
+            ] {
+                let (mut app, sent, _home) = session_with_queue(false, &[]);
+                app.fullscreen = fullscreen;
+                typed(&mut app, "/loop");
+                // Selection completes the command and does not dispatch it.
+                press(&mut app, KeyCode::Enter);
+                assert_eq!(app.composer.text(), "/loop ");
+                if words == "7f2" {
+                    typed(&mut app, "stop ");
+                }
+                typed(&mut app, words);
+                press(&mut app, KeyCode::Enter);
+                assert!(
+                    matches!(sent.borrow().as_slice(), [Command::Loop(request)] if *request == expected),
+                    "{words:?} dispatches {expected:?}"
+                );
+                assert!(app.composer.is_empty());
+            }
+        }
+    }
+
+    /// An argument the command needs is refused when it is missing, so a bare
+    /// `/rename` or `/branch` never reaches its handler with an empty value.
+    /// Only `/loop` runs on its own, and its argument is declared optional.
+    #[test]
+    fn a_command_that_needs_its_argument_refuses_a_bare_submission() {
+        for (command, needed) in [
+            ("/rename", "/rename needs <title>"),
+            ("/branch", "/branch needs <prompt>"),
+        ] {
+            let (mut app, sent, _home) = session_with_queue(false, &[]);
+            // The palette completes the command and its argument hint first;
+            // the submission that matters is the second Enter.
+            typed(&mut app, command);
+            press(&mut app, KeyCode::Enter);
+            press(&mut app, KeyCode::Enter);
+            assert!(
+                sent.borrow().is_empty(),
+                "{command} alone dispatches nothing"
+            );
+            // A refused submission lands in the status notice, not the
+            // transcript (`tui.rs:3171`, `:1781-1783`).
+            let frame = app.frame((100, 16)).live.join("\n");
+            assert!(
+                frame.contains(needed),
+                "{command} alone prints {needed}: {frame}"
+            );
+        }
+    }
+
+    /// A second `stop` word is a usage error, which leaves the composer alone
+    /// and prints the usage rather than dispatching.
+    #[test]
+    fn an_unreadable_loop_form_prints_usage_and_dispatches_nothing() {
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        typed(&mut app, "/loop stop two words");
+        press(&mut app, KeyCode::Enter);
+        assert!(sent.borrow().is_empty(), "no command is dispatched");
+        assert!(
+            app.reports.iter().any(
+                |block| matches!(block, Block::Status { text, .. } if text.contains("Usage: /loop"))
+            ),
+            "the usage is printed"
+        );
     }
 
     fn describe(commands: &[Command]) -> Vec<String> {
@@ -16530,5 +17702,402 @@ mod tests {
                 "open {open} ends on the repository's page without a second loading line"
             );
         }
+    }
+
+    /// `count` message rows `u0..u{count-1}`, the way a loaded window holds them.
+    fn window_rows(count: usize) -> Vec<std::sync::Arc<ViewRow>> {
+        (0..count)
+            .map(|n| {
+                std::sync::Arc::new(ViewRow {
+                    row_id: format!("u{n}"),
+                    provisional_id: None,
+                    kind: RowKind::UserMessage,
+                    display: None,
+                    text: format!("ask {n}"),
+                    streaming: false,
+                    elapsed_ms: None,
+                    tone: None,
+                    call_id: None,
+                    tool_lookup_done: false,
+                    tool_name: None,
+                    tool_input: None,
+                    batch: None,
+                    parent_call_id: None,
+                    pending: false,
+                    parked: false,
+                    result_text: None,
+                    result_is_error: false,
+                    diff: None,
+                    exit_code: None,
+                    member: None,
+                    cut: Some(n as u64),
+                    line: None,
+                    parent_row: None,
+                    compaction: None,
+                    failure: None,
+                    reportable: false,
+                })
+            })
+            .collect()
+    }
+
+    /// Older rows `old0..old{count-1}`, distinct from `window_rows`.
+    fn older_rows(count: usize) -> Vec<std::sync::Arc<ViewRow>> {
+        (0..count)
+            .map(|n| {
+                let mut row = (*window_rows(1)[0]).clone();
+                row.row_id = format!("old{n}");
+                row.text = format!("older {n}");
+                std::sync::Arc::new(row)
+            })
+            .collect()
+    }
+
+    /// A fullscreen app showing one window of rows, armed, its floor at 0.
+    fn fullscreen_app() -> (App, std::rc::Rc<std::cell::RefCell<Vec<Command>>>) {
+        let theme = test_theme();
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut app = App::new(
+            Box::new(Recorder(sent.clone())),
+            MarkdownRenderer::new(&theme),
+            theme.palette.clone(),
+            std::path::PathBuf::from("/tmp"),
+            "/work".into(),
+        );
+        app.fullscreen = true;
+        app.snapshot = Some(ViewSnapshot {
+            session_id: "s1".into(),
+            rows: window_rows(HISTORY_WINDOW),
+            focus: "main".into(),
+            history_complete: true,
+            ..ViewSnapshot::default()
+        });
+        app.window_floor = 0;
+        app.history_floor = 0;
+        (app, sent)
+    }
+
+    /// Publishes `rows` as `s1`'s snapshot. The first call arms the window
+    /// over the newest `HISTORY_WINDOW` messages, as a resume does.
+    fn show_window(drawn: &mut Drawn, rows: Vec<std::sync::Arc<ViewRow>>) {
+        // The host keeps publishing `earlier` until the read ends, so the
+        // fixture carries it from one snapshot to the next.
+        let earlier = drawn
+            .app
+            .snapshot
+            .as_ref()
+            .map_or(Earlier::AtStart, |snapshot| snapshot.earlier);
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            history_complete: true,
+            earlier,
+            ..ViewSnapshot::default()
+        })));
+    }
+
+    fn drawn_messages(app: &App) -> Vec<(String, String)> {
+        let snapshot = app.snapshot.as_ref().expect("a drawn window");
+        snapshot
+            .rows
+            .iter()
+            .filter(|row| row.kind.is_message())
+            .skip(app.hidden_messages())
+            .map(|row| (row.row_id.clone(), row.text.clone()))
+            .collect()
+    }
+
+    fn drawn_top(app: &App) -> String {
+        drawn_messages(app)
+            .into_iter()
+            .next()
+            .expect("a drawn page")
+            .1
+    }
+
+    fn row_index(app: &App, id: &str) -> usize {
+        app.snapshot
+            .as_ref()
+            .expect("a drawn window")
+            .rows
+            .iter()
+            .position(|row| row.row_id == id)
+            .unwrap_or_else(|| panic!("{id} is not in the snapshot"))
+    }
+
+    #[test]
+    fn follow_floors_keeps_each_floor_on_its_row_through_prepend_append_and_trim() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn.app.fullscreen = true;
+        drawn
+            .app
+            .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+        show_window(&mut drawn, window_rows(2 * HISTORY_WINDOW));
+        drawn.draw();
+        assert_eq!(
+            drawn_top(&drawn.app),
+            "ask 100",
+            "the window opens on the newest page"
+        );
+        assert_eq!(drawn.app.hidden_messages(), HISTORY_WINDOW);
+        let mut rows = older_rows(HISTORY_WINDOW);
+        rows.extend(window_rows(2 * HISTORY_WINDOW));
+        show_window(&mut drawn, rows);
+        assert_eq!(drawn_top(&drawn.app), "ask 100", "a prepend moves no row");
+        assert_eq!(drawn.app.hidden_messages(), 2 * HISTORY_WINDOW);
+        let mut rows = older_rows(HISTORY_WINDOW);
+        rows.extend(window_rows(2 * HISTORY_WINDOW + 1));
+        show_window(&mut drawn, rows.clone());
+        assert_eq!(drawn_top(&drawn.app), "ask 100", "an append moves no row");
+        let trimmed = HISTORY_WINDOW / 2;
+        show_window(&mut drawn, rows[trimmed..].to_vec());
+        assert_eq!(drawn_top(&drawn.app), "ask 100", "a trim moves no row");
+        assert_eq!(
+            row_index(&drawn.app, "u100"),
+            2 * HISTORY_WINDOW - trimmed,
+            "the top message moved down by the number of rows trimmed"
+        );
+        show_window(&mut drawn, window_rows(HISTORY_WINDOW));
+        assert_eq!(drawn.app.hidden_messages(), 0);
+        assert_eq!(drawn_top(&drawn.app), "ask 0", "the first row is drawn");
+        let mut rows = older_rows(HISTORY_WINDOW);
+        rows.extend(window_rows(HISTORY_WINDOW));
+        show_window(&mut drawn, rows);
+        assert_eq!(
+            drawn_top(&drawn.app),
+            "ask 0",
+            "the first row follows a prepend"
+        );
+        assert_eq!(drawn.app.hidden_messages(), HISTORY_WINDOW);
+        let mut gone = Drawn::new((80, 40), None, true);
+        gone.app
+            .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+        let mut rows = older_rows(HISTORY_WINDOW);
+        rows.extend(window_rows(2 * HISTORY_WINDOW));
+        let survived = rows[2 * HISTORY_WINDOW + 3].text.clone();
+        show_window(&mut gone, rows.clone());
+        gone.draw();
+        assert_eq!(drawn_top(&gone.app), "ask 100");
+        show_window(&mut gone, rows[2 * HISTORY_WINDOW + 3..].to_vec());
+        assert_eq!(
+            drawn_top(&gone.app),
+            survived,
+            "the first surviving row after the gone one takes over"
+        );
+        assert_eq!(gone.app.hidden_messages(), 0);
+    }
+
+    #[test]
+    fn follow_floors_leaves_an_unarmed_window_alone() {
+        let page = |rows: Vec<std::sync::Arc<ViewRow>>| {
+            let mut drawn = Drawn::new((80, 40), None, true);
+            drawn.app.fullscreen = true;
+            drawn
+                .app
+                .switch_session("s1".into(), crate::model::session::SwitchKind::Resumed);
+            show_window(&mut drawn, window_rows(2 * HISTORY_WINDOW));
+            show_window(&mut drawn, rows);
+            drawn.draw();
+            drawn_messages(&drawn.app)
+        };
+        let straight = page(window_rows(2 * HISTORY_WINDOW));
+        let mut rows = older_rows(HISTORY_WINDOW);
+        rows.extend(window_rows(2 * HISTORY_WINDOW));
+        assert_eq!(
+            page(rows),
+            straight,
+            "a prepend before the first frame draws the same page"
+        );
+    }
+
+    /// `/earlier` at the drawn top asks for the page and draws it when it lands.
+    #[test]
+    fn show_earlier_requests_unread_history_and_does_nothing_at_the_start() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn.app.fullscreen = true;
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        drawn.app.host = Box::new(Recorder(sent.clone()));
+        drawn.app.snapshot = Some(ViewSnapshot {
+            session_id: "s1".into(),
+            rows: window_rows(HISTORY_WINDOW),
+            focus: "main".into(),
+            history_complete: true,
+            earlier: Earlier::Unread,
+            ..ViewSnapshot::default()
+        });
+        drawn.draw();
+        assert_eq!(drawn.app.hidden_messages(), 0);
+        let before = drawn.transcript();
+        drawn.app.show_earlier();
+        assert_eq!(sent.borrow().len(), 1, "an unread prefix is requested");
+        assert!(matches!(sent.borrow()[0], Command::Earlier));
+        drawn.draw();
+        assert_eq!(drawn.transcript(), before, "the request draws nothing");
+        let mut rows = window_rows(HISTORY_WINDOW);
+        let mut live = (*window_rows(1)[0]).clone();
+        live.row_id = "live".into();
+        live.text = "streamed".into();
+        rows.push(std::sync::Arc::new(live));
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            history_complete: true,
+            earlier: Earlier::Reading,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        assert!(
+            !drawn.transcript().contains("older "),
+            "a live snapshot draws no page: {}",
+            drawn.transcript()
+        );
+        let mut rows = older_rows(HISTORY_WINDOW);
+        rows.extend(window_rows(HISTORY_WINDOW));
+        let mut live = (*window_rows(1)[0]).clone();
+        live.row_id = "live".into();
+        live.text = "streamed".into();
+        rows.push(std::sync::Arc::new(live));
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            history_complete: true,
+            earlier: Earlier::Unread,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        let text = drawn.transcript();
+        assert!(text.contains("older 0"), "the landed page is drawn: {text}");
+        assert_eq!(
+            drawn.app.hidden_messages(),
+            0,
+            "the page is drawn, nothing left hidden"
+        );
+        assert_eq!(drawn_top(&drawn.app), "older 0");
+        sent.borrow_mut().clear();
+        drawn.app.snapshot.as_mut().unwrap().earlier = Earlier::Reading;
+        drawn.app.show_earlier();
+        assert!(sent.borrow().is_empty(), "a read in flight is not repeated");
+
+        // At the start nothing earlier exists and no read is in flight: a
+        // window opened on a short Session whose page it has not drawn yet.
+        // The call's frame is the window's first, so a floor it moved still
+        // changes the page; the twin draws without the call.
+        let at_start = || {
+            let mut drawn = Drawn::new((80, 40), None, true);
+            drawn.app.fullscreen = true;
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+            drawn.app.snapshot = Some(ViewSnapshot {
+                session_id: "s1".into(),
+                rows: window_rows(HISTORY_WINDOW),
+                focus: "main".into(),
+                history_complete: true,
+                earlier: Earlier::AtStart,
+                ..ViewSnapshot::default()
+            });
+            (drawn, sent)
+        };
+        let (mut untouched, _) = at_start();
+        untouched.draw();
+        let page = untouched.transcript();
+        assert!(page.contains("ask 0"), "the window draws its page: {page}");
+        let (mut no_op, sent) = at_start();
+        no_op.app.show_earlier();
+        assert!(sent.borrow().is_empty(), "AtStart sends nothing");
+        no_op.draw();
+        assert_eq!(no_op.transcript(), page, "AtStart draws nothing");
+
+        // A page that lands afterwards draws what it draws without the call:
+        // the no-op armed no reveal.
+        let mut rows = older_rows(HISTORY_WINDOW);
+        rows.extend(window_rows(HISTORY_WINDOW));
+        let later = |drawn: &mut Drawn| {
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                rows: rows.clone(),
+                focus: "main".into(),
+                history_complete: true,
+                earlier: Earlier::AtStart,
+                ..ViewSnapshot::default()
+            })));
+            drawn.draw();
+            drawn.transcript()
+        };
+        let text = later(&mut no_op);
+        assert!(
+            !text.contains("older ") && text.contains("ask 0"),
+            "the no-op armed no reveal: {text}"
+        );
+        assert_eq!(
+            text,
+            later(&mut untouched),
+            "a page landing after the no-op draws what it draws without it"
+        );
+    }
+
+    #[test]
+    fn a_page_longer_than_one_window_leaves_the_rest_behind_the_load_more_row() {
+        let (mut app, sent) = fullscreen_app();
+        app.snapshot.as_mut().unwrap().earlier = Earlier::Unread;
+        app.show_earlier();
+        assert_eq!(sent.borrow().len(), 1);
+        // A page of one window plus ten messages lands.
+        let mut rows = older_rows(HISTORY_WINDOW + 10);
+        rows.extend(window_rows(HISTORY_WINDOW));
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            history_complete: true,
+            earlier: Earlier::Unread,
+            ..ViewSnapshot::default()
+        })));
+        app.frame((80, 40));
+        assert_eq!(app.hidden_messages(), 10, "one window of the page is drawn");
+        let at = app
+            .history
+            .iter()
+            .position(|block| matches!(block, Block::LoadMore(_)))
+            .expect("the load-more row");
+        assert!(
+            matches!(app.history[at], Block::LoadMore(10)),
+            "the load-more row names the ten the window does not draw"
+        );
+        assert!(
+            matches!(&app.history[at + 1], Block::User { text, .. } if text == "older 10"),
+            "the page is drawn from the first row the window does not hide"
+        );
+        app.show_earlier();
+        assert_eq!(sent.borrow().len(), 1, "no second read is requested");
+        assert_eq!(app.hidden_messages(), 0, "the rest of the page is drawn");
+    }
+
+    #[test]
+    fn a_line_jump_to_a_message_that_earlier_read_prints_it() {
+        let (mut app, _sent) = fullscreen_app();
+        app.fullscreen = false;
+        // `/earlier` prepends a page of rows the scrollback has not printed.
+        let mut rows = older_rows(HISTORY_WINDOW);
+        rows.extend(window_rows(HISTORY_WINDOW));
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            rows,
+            focus: "main".into(),
+            history_complete: true,
+            ..ViewSnapshot::default()
+        })));
+        assert_eq!(
+            app.history_floor, HISTORY_WINDOW,
+            "the scrollback floor followed its row below the prepended page"
+        );
+        app.jump_to(0);
+        assert_eq!(
+            app.history_request,
+            Some((0, HISTORY_WINDOW)),
+            "the jump schedules the page instead of saying it is already shown"
+        );
     }
 }

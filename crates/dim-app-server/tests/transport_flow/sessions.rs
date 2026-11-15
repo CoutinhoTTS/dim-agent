@@ -2207,3 +2207,198 @@ async fn node_crash_resubmission_gets_the_original_receipt() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// `sessions.pending` answers session-access §2's rule at the published head:
+/// an input admitted behind a busy branch is pending, the same input once a
+/// turn consumed it is not, a withdrawn input is not, and an id the branch
+/// never held is not. `input/consumed` is what ends it
+/// (`crates/dim-agent-capabilities/src/input_queue.rs:86-96`); `input/applied`
+/// alone does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_follows_the_queue_until_an_input_is_consumed_or_deleted() {
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_sessions(None).await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = awaiting_approval(&sessions, &agent).await;
+    let at = json!({"sessionId":session.id(),"branchId":"main"});
+    let ask = |input: &Value| {
+        let mut request = at.clone();
+        request["inputId"] = input["inputId"].clone();
+        request
+    };
+
+    // The turn stays open on its approval, so a Queue input waits behind it
+    // and is pending.
+    let held = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:pending",
+                json!([{"type":"text","text":"later"}]),
+            ),
+        )
+        .await;
+    assert_eq!(
+        sessions.ok("pending", ask(&held)).await,
+        json!({"pending":true})
+    );
+
+    // A turn consumes the held input, and from then on it is not pending.
+    sessions.ok("stop", at.clone()).await;
+    sessions.ok("idle", at.clone()).await;
+    sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:drain",
+                json!([{"type":"text","text":"keep going"}]),
+            ),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if sessions.ok("pending", ask(&held)).await == json!({"pending":false}) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the held input is consumed by a turn");
+
+    // A withdrawn input is not pending, and neither is an id the branch never
+    // held.
+    let deleted = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:deleted",
+                json!([{"type":"text","text":"drop me"}]),
+            ),
+        )
+        .await;
+    sessions.ok("withdraw", ask(&deleted)).await;
+    assert_eq!(
+        sessions.ok("pending", ask(&deleted)).await,
+        json!({"pending":false})
+    );
+    assert_eq!(
+        sessions
+            .ok(
+                "pending",
+                json!({"sessionId":session.id(),"branchId":"main","inputId":"unknown"})
+            )
+            .await,
+        json!({"pending":false})
+    );
+
+    let mut no_branch = ask(&held);
+    no_branch["branchId"] = json!("missing");
+    assert_eq!(sessions.error("pending", no_branch).await, "branch_missing");
+    assert_eq!(
+        sessions
+            .error(
+                "pending",
+                json!({"sessionId":session.id(),"branchId":"main","inputId":""})
+            )
+            .await,
+        "rejected"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// #1449: a consumer model does not inherit. The same default model carries a
+/// saved effort for the person's own Sessions, and `sessions.launch` still
+/// starts at the model's declared defaults.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_launch_does_not_inherit_a_saved_preference() {
+    let store = Store::new();
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        database: Some(store.database()),
+        home: Some(store.0.clone()),
+        ..Default::default()
+    })
+    .await;
+    let provider = "018ec73f-0000-7000-8000-0000000000b1";
+    let reasoning = json!({"supported":true,"effortOptions":["low","high"],"effort":"high",
+        "off":{"kind":"thinking_type","value":"disabled"}});
+    assert_ok(
+        &client
+            .rpc(
+                "provider.create",
+                json!({"providerId":provider,"displayName":"Saved effort fixture",
+                    "connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1",
+                        "auth":{"type":"anonymous"}},
+                    "models":[{"modelId":"fixture","displayName":"fixture","status":"active",
+                        "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
+                        "metadata":{"reasoning":reasoning}}],
+                    "enabled":true}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "provider.preferences.update",
+                json!({"providerId":provider,"expectedVersion":1,"modelId":"fixture",
+                    "patch":{"reasoningEffort":{"action":"set","value":"low"}}}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":provider,"modelId":"fixture"}),
+            )
+            .await,
+    );
+    // A client Session applies the saved effort, so the fixture proves the
+    // saved value reaches a person's Session.
+    let mine = client_session(&mut client, &agent, host_policy()).await;
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":mine.id()}))
+        .await;
+    assert_eq!(
+        attached["result"]["modelPreferences"],
+        json!({"reasoningEffort":"low"}),
+        "the client Session applies the saved effort: {attached}"
+    );
+    // A launch of the same model keeps the declared default.
+    let launched = sessions
+        .ok("launch", json!({"cwd":std::env::temp_dir()}))
+        .await;
+    let attached = client
+        .rpc(
+            "session.attach",
+            json!({"sessionId":launched["sessionId"].as_str().unwrap()}),
+        )
+        .await;
+    assert_eq!(
+        attached["result"]["model"]["modelId"], "fixture",
+        "{attached}"
+    );
+    assert_eq!(
+        attached["result"]["modelPreferences"],
+        json!({"reasoningEffort":"high"}),
+        "a launched Session keeps the model's declared default, not the saved low: {attached}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}

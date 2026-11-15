@@ -7,13 +7,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "No queued messages." => "대기열에 메시지가 없습니다.",
         "Held · awaiting application" => "보류 중 · 적용 대기",
-        "Incorporating · awaiting model consumption" => "반영 중 · 모델 읽기 대기",
         "Held" => "보류 중",
-        "Incorporating" => "반영 중",
         "Unread" => "읽지 않음",
-        "Unread · waiting for your next message" => "읽지 않음 · 다음 메시지 대기",
-        "/queue view · awaiting model consumption" => "/queue 보기 · 모델 읽기 대기",
-        "/queue view · waiting for your next message" => "/queue 보기 · 다음 메시지 대기",
         "Enter export · Esc cancel" => "Enter 내보내기 · Esc 취소",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "첨부 파일이 있는 메시지는 대기열에 남습니다. /queue에서 steer하거나 삭제하세요"
@@ -341,8 +336,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "종료",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 선택 및 기본 설정 · ←/→ 추론 강도 · Ctrl+X 저장값 지우기 · Esc 지우기/닫기"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 선택 및 기본 설정 · ←/→ 추론 강도 · Ctrl+B/F 커서 · Ctrl+X 저장값 지우기 · Esc 지우기/닫기"
         }
         "Default for new sessions in {folder}: {model}" => "새 세션의 {folder} 기본 모델: {model}",
         "Default for new sessions: {model}" => "새 세션 기본 모델: {model}",
@@ -525,6 +520,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 지우기, 두 번 누르면 종료 · 빈 초안에서 Ctrl+D 종료"
         }
+        "Shift+Tab cycle permissions (composer focused)" => {
+            "Shift+Tab 권한 순환 전환 (입력창에 포커스가 있을 때)"
+        }
+        "Shift+Tab newer target while picked · Esc return to composer" => {
+            "선택 중 Shift+Tab으로 더 최근 항목 선택 · Esc 입력창으로 돌아가기"
+        }
+        "(shift+tab to cycle)" => "(Shift+Tab으로 전환)",
         "Fullscreen" => "전체 화면",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown 스크롤 · Home/End 맨 위/아래 (초안이 비어 있을 때) · Tab 메시지 선택, e 편집, q 인용"

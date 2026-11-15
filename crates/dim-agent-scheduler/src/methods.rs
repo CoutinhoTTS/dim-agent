@@ -1,7 +1,9 @@
 //! The process owner: the `schedule` management namespace over the `schedule`
 //! settings document and the delivery history file ([design §1.3, A.3](../../../docs/design/plugins/Scheduler.md)).
 use crate::{
+    clock::Clock,
     document::{Job, MAX_TOOL_JOBS_PER_SESSION, Mode, Origin, Schedule, Target, canonical_instant},
+    loops::Lookup,
     runs::{self, Delivery, DeliveryState, SchedulerError, SessionOrigin, stamp},
 };
 use chrono::{DateTime, Duration, Utc};
@@ -22,8 +24,10 @@ use dim_app_server::{
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
-use rutis_bridge::session::{HostDispatch, host_key};
-use serde::Deserialize;
+use rutis_bridge::session::{
+    Error as BridgeError, HostDispatch, Reference, Reply, Value as BridgeValue, host_key,
+};
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -45,8 +49,9 @@ pub struct SchedulerPlugin {
     sessions: Key<dyn HostDispatch>,
     parts: Key<PartRegistry>,
     texts: Arc<crate::SchedulerTexts>,
+    clock: Arc<dyn Clock>,
     #[cfg(feature = "testing")]
-    holds: Option<Arc<crate::testing::Holds>>,
+    testing: Option<crate::testing::TestingOptions>,
 }
 
 impl SchedulerPlugin {
@@ -60,21 +65,23 @@ impl SchedulerPlugin {
             sessions: host_key("sessions"),
             parts: names.key()?,
             texts,
+            clock: Arc::new(crate::clock::SystemClock),
             #[cfg(feature = "testing")]
-            holds: None,
+            testing: None,
         })
     }
 
-    /// [`SchedulerPlugin::new`] with the flow tests' holds (feature
+    /// [`SchedulerPlugin::new`] with the flow tests' seams and clock (feature
     /// `testing`).
     #[cfg(feature = "testing")]
     pub fn new_with_testing(
         names: &Names<'_>,
         texts: Arc<crate::SchedulerTexts>,
-        holds: Arc<crate::testing::Holds>,
+        testing: crate::testing::TestingOptions,
     ) -> rutis::Result<Self> {
         Ok(Self {
-            holds: Some(holds),
+            clock: testing.clock.clone(),
+            testing: Some(testing),
             ..Self::new(names, texts)?
         })
     }
@@ -110,6 +117,7 @@ impl DynPlugin for SchedulerPlugin {
             let shared = Arc::new(Shared {
                 ctx: ctx.clone(),
                 activity,
+                clock: self.clock.clone(),
                 deliveries: self.deliveries.clone(),
                 sessions,
                 settings,
@@ -117,12 +125,17 @@ impl DynPlugin for SchedulerPlugin {
                 pruning: tokio::sync::Mutex::new(()),
                 settling: tokio::sync::Mutex::new(()),
                 wakeups: tokio::sync::Mutex::new(()),
+                loops: tokio::sync::Mutex::new(()),
+                live_loops: std::sync::atomic::AtomicBool::new(false),
+                loop_lookup: std::sync::atomic::AtomicBool::new(false),
                 stop: ctx.cancellation_token(),
                 tasks: TaskTracker::new(),
                 retention: Default::default(),
                 watch: crate::watch::Watchers::default(),
                 #[cfg(feature = "testing")]
-                holds: self.holds.clone(),
+                holds: self.testing.as_ref().map(|testing| testing.holds.clone()),
+                #[cfg(feature = "testing")]
+                signals: self.testing.as_ref().map(|testing| testing.signals.clone()),
             });
             let cleanup = shared.clone();
             ctx.effect(move || async move {
@@ -148,13 +161,27 @@ impl DynPlugin for SchedulerPlugin {
                         }
                     })?;
             }
-            ctx.provide_as::<ScheduleJobs>(Arc::new(ScheduleJobs {
+            let jobs = Arc::new(ScheduleJobs {
                 shared: shared.clone(),
-            }))?;
+            });
+            ctx.provide_as::<ScheduleJobs>(jobs.clone())?;
+            ctx.provide_at(host_key("scheduleJobs"), Arc::new(ScheduleJobsFace(jobs)))?;
             let wakeups = Arc::new(crate::wakeups::Wakeups {
                 shared: shared.clone(),
             });
             ctx.provide_as::<crate::wakeups::Wakeups>(wakeups.clone())?;
+            ctx.provide_at(
+                host_key("wakeups"),
+                Arc::new(crate::wakeups::WakeupsFace(wakeups.clone())),
+            )?;
+            let loops = Arc::new(crate::loops::Loops {
+                shared: shared.clone(),
+            });
+            ctx.provide_as::<crate::loops::Loops>(loops.clone())?;
+            ctx.provide_at(
+                host_key("loops"),
+                Arc::new(crate::loops::LoopsFace(loops.clone())),
+            )?;
             methods.register(
                 ctx,
                 NAMESPACE,
@@ -200,6 +227,16 @@ impl DynPlugin for SchedulerPlugin {
                     format!("scheduler wakeups: {error}").into(),
                 ))
             })?;
+            // The same rule for a loop file: an invalid v1 fails the row and
+            // the bytes stay unchanged. This read is also where the live-loop
+            // flag starts: a daemon whose file holds no live loop takes no
+            // loop work at all.
+            let looped = crate::loops::read(&shared.files).await.map_err(|error| {
+                rutis::Error::from(rutis::host::ErrorKind::PluginFailed(
+                    format!("scheduler loops: {error}").into(),
+                ))
+            })?;
+            loops.note_live(&looped);
             // A delivery still in flight when the previous process stopped
             // keeps its record; only a launch record this design wrote has a
             // stop timer to resume (§3.2). A record written by an earlier
@@ -214,11 +251,16 @@ impl DynPlugin for SchedulerPlugin {
                     .collect(),
             );
             // Every `delivering` record is settled by lookup at the next
-            // start, before any window writes again (A.6).
+            // start, before any window writes again (A.6). A lookup that
+            // answers nothing leaves the round unsettled for as long as the
+            // answer is missing, so the timer repeats the pass on its next
+            // tick rather than waiting for the minute-long one (§12.1).
             {
                 let startup = shared.clone();
+                let loops_startup = loops.clone();
                 shared.spawn(async move {
                     crate::engine::settle_delivering(&startup).await;
+                    note_loop_lookup(&startup, loops_startup.settle_delivering().await);
                 });
             }
             shared.spawn(crate::engine::prune(shared.clone()));
@@ -237,19 +279,44 @@ impl DynPlugin for SchedulerPlugin {
             let timer = shared.clone();
             shared.spawn(async move {
                 let mut ticks = 0u32;
-                while timer.pause(std::time::Duration::from_secs(1)).await {
+                loop {
+                    let until = timer.now() + std::time::Duration::from_secs(1);
+                    // A flow test's `step` advances the clock to the instant the
+                    // timer is about to wait for, so the timer publishes that
+                    // instant before it waits. Feature `testing` only.
+                    #[cfg(feature = "testing")]
+                    if let Some(signals) = &timer.signals {
+                        signals.timer_wait(u64::from(ticks), until);
+                    }
+                    if !timer.pause_until(until).await {
+                        break;
+                    }
                     if let Err(error) = crate::engine::tick(&timer).await {
                         tracing::warn!(%error, "scheduler tick failed");
                     }
                     if let Err(error) = wakeups.evaluate().await {
                         tracing::warn!(%error, "scheduler wakeup pass failed");
                     }
+                    if let Err(error) = loops.evaluate().await {
+                        tracing::warn!(%error, "scheduler loop pass failed");
+                    }
                     ticks += 1;
-                    if ticks.is_multiple_of(60) {
+                    let minute = ticks.is_multiple_of(60);
+                    if minute {
                         crate::engine::settle_delivering(&timer).await;
-                        if timer.retention_pending() {
-                            crate::engine::prune(timer.clone()).await;
-                        }
+                    }
+                    if minute || timer.loop_lookup_pending() {
+                        note_loop_lookup(&timer, loops.settle_delivering().await);
+                    }
+                    if minute && timer.retention_pending() {
+                        crate::engine::prune(timer.clone()).await;
+                    }
+                    // A flow test that crosses a tick waits on the whole
+                    // pass, not on the tick that started it. Feature
+                    // `testing` only.
+                    #[cfg(feature = "testing")]
+                    if let Some(signals) = &timer.signals {
+                        signals.tick();
                     }
                 }
             });
@@ -263,6 +330,8 @@ pub(crate) struct Shared {
     /// Session's channel (design §11).
     pub(crate) ctx: Ctx,
     pub(crate) activity: Arc<ProcessActivity>,
+    /// The instant this generation reads and the waits it crosses (#1536).
+    pub(crate) clock: Arc<dyn Clock>,
     pub(crate) deliveries: DeliveryHolds,
     pub(crate) sessions: Arc<dyn HostDispatch>,
     pub(crate) settings: Arc<SettingsService>,
@@ -276,6 +345,29 @@ pub(crate) struct Shared {
     /// record level: a cancel that takes it first prevents the input, one
     /// that takes it after reports the settled state (design §10.3).
     pub(crate) wakeups: tokio::sync::Mutex<()>,
+    /// Serializes every read-modify-write of the loop records and every
+    /// refresh of `live_loops`: the timer pass, recovery, `start` and `change`
+    /// for `next` and `stop` hold it for the whole operation, so they are one
+    /// serial order at the record level (design §12.3), and the flag can only
+    /// ever store a snapshot no later write has superseded.
+    ///
+    /// A holder may await only these external calls, and none of them takes
+    /// this lock: `sessions.pending` reads the branch's InputQueue,
+    /// `sessions.lookup` reads the Timeline by submission id, and
+    /// `sessions.input` in queue mode returns once the input is published.
+    /// Reads and writes of the loop file through `pluginFiles` never take it
+    /// either. A holder must never await a round's turn, or anything else
+    /// that can take this lock; a new external call under it joins this list
+    /// first.
+    pub(crate) loops: tokio::sync::Mutex<()>,
+    /// Whether any live loop exists. A daemon with none does no loop work, so
+    /// the pass takes no process hold and reads no file (design 12.2). Every
+    /// write under `loops` recomputes it.
+    pub(crate) live_loops: std::sync::atomic::AtomicBool,
+    /// Whether the last loop lookup pass left a round whose answer says the
+    /// service is not ready yet. While it holds, the timer runs the pass again
+    /// on its next tick instead of a minute later (§12.1).
+    pub(crate) loop_lookup: std::sync::atomic::AtomicBool,
     /// Cancelled when this generation starts to unload.
     pub(crate) stop: CancellationToken,
     /// The timer, delivery tasks and retention passes; cleanup waits for them.
@@ -288,6 +380,9 @@ pub(crate) struct Shared {
     /// The flow tests' holds (feature `testing`).
     #[cfg(feature = "testing")]
     pub(crate) holds: Option<Arc<crate::testing::Holds>>,
+    /// The flow tests' pass signals (feature `testing`).
+    #[cfg(feature = "testing")]
+    pub(crate) signals: Option<Arc<crate::testing::Signals>>,
 }
 
 impl Shared {
@@ -302,15 +397,48 @@ impl Shared {
         self.retention.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Whether the last loop lookup pass settled on [`Lookup::NextTick`], so the
+    /// timer repeats it on its next tick instead of a minute later.
+    pub(crate) fn loop_lookup_pending(&self) -> bool {
+        self.loop_lookup.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Waits `delay`; `false` once the owner is unloading, when the caller
     /// stops and leaves an unsettled delivery to the next generation's
     /// recovery.
     pub(crate) async fn pause(&self, delay: std::time::Duration) -> bool {
-        tokio::select! {
-            _ = self.stop.cancelled() => false,
-            _ = tokio::time::sleep(delay) => true,
-        }
+        self.pause_until(self.now() + Duration::from_std(delay).unwrap())
+            .await
     }
+
+    /// Waits until `until`, so a caller that holds a deadline waits for that
+    /// deadline and no other; `false` once the owner is unloading.
+    pub(crate) async fn pause_until(&self, until: DateTime<Utc>) -> bool {
+        self.clock.wait_until(until, &self.stop).await
+    }
+
+    pub(crate) fn now(&self) -> DateTime<Utc> {
+        self.clock.now()
+    }
+}
+
+/// Records the cadence the loop lookup pass settled on: only a round whose
+/// answer says the service is not ready yet keeps the retry pending, so the
+/// timer runs the pass on its next tick instead of a minute later (§12.1). Any
+/// other unresolved answer waits for the minute pass, and a pass that failed as
+/// a whole does the same.
+fn note_loop_lookup(shared: &Shared, answer: Result<Lookup, SchedulerError>) {
+    let tick = match answer {
+        Ok(Lookup::NextTick) => true,
+        Ok(Lookup::Settled | Lookup::NextMinute) => false,
+        Err(error) => {
+            tracing::warn!(%error, "scheduler loop lookup pass failed");
+            false
+        }
+    };
+    shared
+        .loop_lookup
+        .store(tick, std::sync::atomic::Ordering::Release);
 }
 
 fn handler(shared: Arc<Shared>) -> Handler {
@@ -496,7 +624,7 @@ fn not_found(job_id: &str) -> SchedulerError {
 /// first window: the first window after it is the job's next window. An `at`
 /// job with no delivery has an open start, so a past instant is recorded
 /// `missed`.
-pub(crate) fn window_after(job: &Job, runs: &[Delivery]) -> DateTime<Utc> {
+pub(crate) fn window_after(shared: &Shared, job: &Job, runs: &[Delivery]) -> DateTime<Utc> {
     let last = runs
         .iter()
         .filter(|run| run.job_id == job.id)
@@ -511,7 +639,7 @@ pub(crate) fn window_after(job: &Job, runs: &[Delivery]) -> DateTime<Utc> {
             .and_then(canonical_instant)
             .map(|anchor| anchor - Duration::milliseconds(1))
     })
-    .unwrap_or_else(Utc::now)
+    .unwrap_or_else(|| shared.now())
 }
 
 async fn list(shared: &Shared, cancel: &CancellationToken) -> Result<Value, SchedulerError> {
@@ -527,7 +655,7 @@ async fn list(shared: &Shared, cancel: &CancellationToken) -> Result<Value, Sche
                     .cmp(&a.created_at)
                     .then(b.run_id.cmp(&a.run_id))
             });
-            let (next, issue) = match job.next_window(window_after(job, &runs)) {
+            let (next, issue) = match job.next_window(window_after(shared, job, &runs)) {
                 Ok(next) => (next.map(stamp), None),
                 Err(error) => (None, Some(error)),
             };
@@ -671,7 +799,7 @@ async fn save_job(
     }
     let previous = position.map(|index| document.jobs[index].clone());
     let input = make(previous.as_ref())?;
-    let job = build_job(input, previous.as_ref(), origin, Utc::now())?;
+    let job = build_job(input, previous.as_ref(), origin, shared.now())?;
     match position {
         Some(index) => document.jobs[index] = job.clone(),
         None => document.jobs.push(job.clone()),
@@ -801,7 +929,7 @@ async fn set_enabled(
         .iter()
         .position(|job| job.id == input.job_id)
         .ok_or_else(|| not_found(&input.job_id))?;
-    let now = Utc::now();
+    let now = shared.now();
     let job = &mut document.jobs[index];
     job.enabled_at = match (input.enabled, job.enabled) {
         (false, _) => None,
@@ -894,6 +1022,8 @@ struct JobPatch {
 }
 
 /// The saving branch: the target a tool create saves (A.2, §2.1).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Caller {
     pub session_id: String,
     pub branch_id: String,
@@ -1162,4 +1292,150 @@ fn truncate(text: &str, limit: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+pub(crate) struct ScheduleJobsFace(Arc<ScheduleJobs>);
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JobRequestWire {
+    action: ToolAction,
+    #[serde(default, rename = "job_id")]
+    job_id: Option<String>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    job: Option<JobPatch>,
+    caller: Caller,
+}
+
+impl HostDispatch for ScheduleJobsFace {
+    fn methods(&self) -> Option<Value> {
+        Some(json!({ "call": "async" }))
+    }
+
+    fn invoke(&self, method: &str, args: BridgeValue) -> Reply {
+        if method != "call" {
+            return Err(BridgeError::Value(format!(
+                "unknown scheduleJobs method {method}"
+            )));
+        }
+        let (request, cancelled) = match face_arguments::<JobRequestWire>(args, "schedule_invalid")
+        {
+            Ok(args) => args,
+            Err(error) => return face_failure(error),
+        };
+        let jobs = self.0.clone();
+        let interruptible = matches!(
+            request.action,
+            ToolAction::List | ToolAction::Get | ToolAction::History
+        );
+        Ok(face_call(
+            &jobs.shared.clone(),
+            cancelled,
+            interruptible,
+            async move {
+                let reply = jobs
+                    .call(
+                        ToolRequest {
+                            action: request.action,
+                            job_id: request.job_id,
+                            enabled: request.enabled,
+                            limit: request.limit,
+                            job: request.job,
+                        },
+                        request.caller,
+                    )
+                    .await?;
+                Ok(json!({ "content": reply.content, "records": reply.records }))
+            },
+        ))
+    }
+}
+
+pub(crate) fn face_arguments<T: DeserializeOwned>(
+    args: BridgeValue,
+    code: &'static str,
+) -> Result<(T, Option<Reference>), SchedulerError> {
+    let invalid = |error: String| SchedulerError::new(code, error);
+    let mut args = args
+        .list()
+        .map_err(|error| invalid(error.to_string()))?
+        .into_iter();
+    let request = args
+        .next()
+        .ok_or_else(|| invalid("request is required".into()))?;
+    let cancelled = match args.next() {
+        None | Some(BridgeValue::Signal) => None,
+        Some(BridgeValue::Reference(reference)) if reference.is_future() => Some(reference),
+        Some(_) => return Err(invalid("expected a cancellation signal or promise".into())),
+    };
+    if args.next().is_some() {
+        return Err(invalid("too many arguments".into()));
+    }
+    let request = request.json().map_err(|error| invalid(error.to_string()))?;
+    Ok((
+        serde_json::from_value(request).map_err(|error| invalid(error.to_string()))?,
+        cancelled,
+    ))
+}
+
+pub(crate) fn face_failure(error: SchedulerError) -> Reply {
+    Ok(json!({"code": error.code, "message": error.message}).into())
+}
+
+pub(crate) fn face_call(
+    shared: &Arc<Shared>,
+    cancelled: Option<Reference>,
+    interruptible: bool,
+    operation: impl Future<Output = Result<serde_json::Value, SchedulerError>> + Send + 'static,
+) -> BridgeValue {
+    let cancel = shared.stop.child_token();
+    let guard = cancel.clone().drop_guard();
+    let stopped = cancel.clone();
+    let shared = shared.clone();
+    BridgeValue::cancellable_future(async move {
+        let _guard = guard;
+        let signal = async {
+            match cancelled {
+                Some(reference) => {
+                    let _ = reference.wait_async().await;
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let task = async move {
+            let task = shared.tasks.spawn(async move {
+                if stopped.is_cancelled() {
+                    return Err(SchedulerError::new("cancelled", "call cancelled before handover"));
+                }
+                if interruptible {
+                    tokio::select! {
+                        biased;
+                        _ = stopped.cancelled() => Err(SchedulerError::new("cancelled", "call cancelled")),
+                        result = operation => result,
+                    }
+                } else {
+                    operation.await
+                }
+            });
+            task.await
+        };
+        let mut task = std::pin::pin!(task);
+        let result = tokio::select! {
+            biased;
+            _ = signal => {
+                cancel.cancel();
+                task.await
+            }
+            result = &mut task => result,
+        };
+        match result {
+            Ok(Ok(reply)) => Ok(reply.into()),
+            Ok(Err(error)) => face_failure(error),
+            Err(error) => Err(BridgeError::Value(error.to_string())),
+        }
+    })
 }

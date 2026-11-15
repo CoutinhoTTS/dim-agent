@@ -8,12 +8,15 @@ use crate::{
     display::Display,
     export, goal_command,
     input::Input,
-    mcp,
+    loop_command, mcp,
     model::session::RenameReply,
     permission, permission_command,
     question::line::Questions,
 };
 use dim_agent_types::{ApprovalCallData, ContentBlock, PermissionPolicy, UserInput};
+
+/// The branch a line-mode command acts on: the prompt shows `main`.
+const MAIN_BRANCH: &str = "main";
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -221,7 +224,6 @@ pub async fn chat(
         id.clone()
     } else {
         let params = crate::session_create_from_options(client, options).await?;
-        let preferences = params.get("modelPreferences").cloned();
         let created: Created = match client.typed("session.create", params).await {
             Ok(created) => created,
             Err(error) => {
@@ -229,7 +231,6 @@ pub async fn chat(
                     client,
                     options.provider.as_deref().zip(options.model.as_deref()),
                     error,
-                    preferences.as_ref().filter(|_| options.effort.is_none()),
                 )
                 .await;
                 return Err(format!("Cannot create session: {error}. Configure a provider or use --model-config PATH with an API-key environment reference").into());
@@ -390,6 +391,23 @@ pub async fn chat(
                     let text = text.as_deref().expect("plain goal command");
                     if let Err(error) =
                         goal_command::command(client, &session_id, text, &mut display, &mut interrupts).await
+                    {
+                        display.record(&format!("Error: {error}"))?;
+                    }
+                    draft.clear();
+                    continue;
+                }
+                Some("/loop") => {
+                    let text = text.as_deref().expect("plain loop command");
+                    if let Err(error) = loop_command::command(
+                        client,
+                        &session_id,
+                        MAIN_BRANCH,
+                        text,
+                        &mut display,
+                        &mut interrupts,
+                    )
+                    .await
                     {
                         display.record(&format!("Error: {error}"))?;
                     }
@@ -1253,8 +1271,8 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             let event = &params["event"];
             if method == "session.event"
                 && params["branchId"] == "main"
-                && ((event["type"] == "turn" && event["name"] == "end")
-                    || (event["type"] == "step" && event["name"] == "model-output-end"))
+                && event["type"] == "turn"
+                && event["name"] == "end"
                 && event["data"]["status"] == "failed"
             {
                 display.failed = true;

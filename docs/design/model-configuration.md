@@ -156,9 +156,14 @@ daemon rejects the new request form normally; the client does not retry with a
 guessed complete selection.
 
 `/effort VALUE`, alias `/reasoning VALUE`, sends `reasoningEffort` without a target.
-The `/models` picker cycles a model's advertised efforts with ←/→. Enter saves a
+The `/models` picker cycles a model's advertised efforts with ←/→, including while
+filtering. Ctrl+B/F moves the filter cursor without changing effort. It draws the
+effort the row would send: the cycled one, then the saved one, then the entry's
+declared default, and `—` when the row advertises efforts and has none of the
+three. A row advertising no effort draws no cell. Enter saves a
 cycled effort as that model's `reasoningEffort`, then adopts the model with its
-saved preferences. Enter also writes the default the next Session in the launch
+saved preferences — the server reads the value just saved, which is why the save
+completes before the adoption is sent. Enter also writes the default the next Session in the launch
 workspace reads — the workspace's own row when the folder has one, else `global`
 ([provider management §4](appserver/provider-management.md#4-client-integration)).
 Values come from declared `effortOptions` and the existing reasoning-off declaration.
@@ -334,13 +339,18 @@ configuration with defaults. This adds no service key, runtime state, persisted
 field or second adopted-configuration type.
 
 [Provider management](appserver/provider-management.md#33-probe-preference-adoption-and-usage)
-stores per-model `ModelPreferences`. Clients read them and explicitly pass chosen
-preferences through the existing Session adoption methods. The server never
-applies them automatically. Clients include the exact `{providerId, modelId}`
-with saved preferences for that pair; an unavailable target fails without retrying
-with an implicit selection. `/fast` changes only the current Session. A saved
-`serviceTier` takes effect only when a client passes it; no persisted `fast`
-boolean or additional F3 adoption path is introduced.
+stores per-model `ModelPreferences`. The server applies them on a client
+adoption: for each field the request leaves unstated, `session.create`,
+`session.model.preview` and a targeted `session.model.update` take the value saved
+for that `{providerId, modelId}`, then the model's declared default. A stated field
+wins. A saved value the model no longer accepts is dropped for that field and the
+declared default stands, with one warning; a stated value it rejects still fails
+the adoption. Clients include the exact `{providerId, modelId}`; an unavailable
+target fails without retrying with an implicit selection. `/fast` changes only the
+current Session. A saved `serviceTier` takes effect on the same terms as a saved
+effort; no persisted `fast` boolean or additional F3 adoption path is introduced.
+`sessions.launch` and every other consumer model keep catalog defaults and do not
+inherit these preferences.
 
 ## Clearing one preference
 
@@ -539,11 +549,46 @@ configuration-superseded, reload/interruption and Session-closed contracts.
 
 ## Scrollback interaction
 
+Both native TUI modes draw the model label and its effective reasoning effort
+in the theme's highlight colour. Scrollback keeps this label in its bottom status
+row; fullscreen keeps it on the composer's top border. With fullscreen mouse
+reporting enabled, clicking the visible model label opens the existing `/models`
+picker without discarding the draft. Only a press and release on the same label
+cell counts; dragging, resizing, a hidden label or an open overlay cannot activate
+it. Esc closes the picker and returns to the draft.
+
+```text
+╭────────────────────── provider / model · high ─╮
+│ draft                 [click model label]     │
+╰───────────────────────────────────────────────╯
+                         ↓
+               /models picker · Esc returns
+```
+
 Commands run at the existing idle prompt. Bare `/effort` and `/fast` read the
 adopted provider/model identity from public `context/configured` history/notifications
 and show supported choices from the existing `provider.catalog` response, without
 mutation or a new query method. Bare `/agent` uses existing `agent.list` IDs, names
 and descriptions; selection uses an exact ID. Empty/unavailable choices are explicit.
+
+At Home there is no adopted model yet: the footer's preview is the model the first
+message's Session adopts, so the same commands act on it. Bare `/effort` and `/fast`
+list that model's advertised choices, and a value is held for the Session the first
+message creates instead of writing the shown one. The preview reported the model's
+saved reasoning effort, which the dialog marks current; a value chosen here replaces
+that member and leaves the other one alone. The first creation carries the held
+members as its `modelPreferences`, over the member `--effort` named, because the
+Home choice came after the launch flag. An inherited model (`/new` after a Session)
+keeps its `modelFromSession` creation, which states no preferences: a valued form
+there is refused with `The next Session inherits its model; run the command there.`,
+while the bare forms still list the shown model's choices. Nothing is saved as a
+default at Home: neither a choice nor the dialog writes provider preferences.
+The held value is dropped once the Session exists, and by a `/models` pick at Home,
+because it was chosen for the model that pick replaced. Until then it stays held: a
+second value for the same member replaces the first and keeps the other member, and
+a first message whose creation fails leaves it held, so the next message's creation
+carries it. A Home showing no model at all answers that there is nothing to configure
+and names `/login` and `/models`.
 
 In both native TUI modes, bare `/effort` (alias `/reasoning`) opens an inline
 single-choice dialog in place of the composer, using the AskUser prompt's border

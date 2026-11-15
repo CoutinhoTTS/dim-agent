@@ -76,6 +76,7 @@ flowchart LR
   p35 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p44
   p35 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p44
   p35 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p44
+  p40 -->|"dim_agent_capabilities::context_preparation::ContextPreparation@main"| p43
   p21 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p43
   p21 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p43
   p21 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p43
@@ -85,6 +86,8 @@ flowchart LR
   p35 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p43
   p35 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p43
   p35 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p43
+  p31 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p42
+  p35 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p42
   p35 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p42
   p35 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p42
   p21 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p41
@@ -105,6 +108,7 @@ flowchart LR
   p28 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p39
   p31 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p39
   p35 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p39
+  p21 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p39
   p35 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p39
   p35 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p39
   p35 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p39

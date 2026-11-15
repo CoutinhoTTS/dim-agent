@@ -515,6 +515,42 @@ fn wait(mut child: Child) -> Output {
     child.wait_with_output().unwrap()
 }
 
+/// A process a flow starts and must end. A `Child` does not end when it is
+/// dropped, so a flow that fails between its spawn and the step that ends it
+/// would leave it running after the test home is gone; this ends it there.
+struct OwnedChild(Option<Child>);
+impl OwnedChild {
+    fn spawn(command: &mut Command) -> Self {
+        Self(Some(command.spawn().unwrap_or_else(|error| {
+            panic!(
+                "could not start {:?} {:?}: {error}",
+                command.get_program(),
+                command.get_args().collect::<Vec<_>>()
+            )
+        })))
+    }
+    fn id(&self) -> u32 {
+        self.0.as_ref().unwrap().id()
+    }
+    /// Waits for the process to end, so its output can be read.
+    fn wait(mut self) -> Output {
+        wait(self.0.take().unwrap())
+    }
+}
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.take() else {
+            return;
+        };
+        // A process that already exited reports its status here; one that
+        // did not is killed. Neither may panic: this runs while unwinding.
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 #[test]
 fn empty_management_lists_explain_the_result() {
     for (area, method, reply, message) in [
@@ -601,8 +637,8 @@ while [ -L "$target" ]; do
     *) target=$(dirname "$target")/$link ;;
   esac
 done
-directory=$(cd "$(dirname "$target")" && pwd)
-while [ ! -f "$directory/package.json" ]; do directory=$(dirname "$directory"); done
+directory=$(cd "$(dirname "$target")" && pwd) || exit 1
+while [ ! -f "$directory/package.json" ] && [ "$directory" != / ]; do directory=$(dirname "$directory"); done
 sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$directory/package.json"
 "#;
 
@@ -679,6 +715,8 @@ cp -R "$live" "$staged"
 if [ "$name" = dimcode-alpha ]; then command=dima; else command=dim; fi
 printf '{"name":"%s","version":"%s","bin":{"%s":"bin/report"}}\n' \
   "$name" "$next" "$command" > "$staged/package.json"
+mkdir -p "$prefix/bin"
+ln -sfn "../lib/node_modules/$name/bin/report" "$prefix/bin/$command"
 echo 'Installed package'
 "#,
     )
@@ -1860,6 +1898,114 @@ fn line_mode_reports_each_retry_attempt_once_on_stderr() {
         stderr.contains("The provider reported a server error: The server is overloaded"),
         "{stderr}"
     );
+}
+
+#[test]
+fn exec_exits_zero_when_the_turn_completed_at_its_output_limit() {
+    for json_mode in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.start(false);
+            let submit = wire.read("session.submit");
+            wire.reply(&submit, json!({"event":{}}));
+            let idle = wire.read("session.idle");
+            // An output-limit stop: the request keeps its failure fact with
+            // its presentation, and the turn ends Completed.
+            wire.event(
+                9,
+                "model-output-end",
+                json!({
+                    "turn_id": "turn", "request_id": "model-request", "status": "failed",
+                    "error": "Model local/fixture stopped at max_tokens",
+                    "presentation": {
+                        "source": "local", "reason": "max_tokens",
+                        "serverMessage": "Model local/fixture stopped at max_tokens",
+                        "action": "Increase the output token limit and retry.",
+                    },
+                    "failure": {
+                        "kind": "output_limit", "reason": "stopped at max_tokens",
+                        "attempts": 1, "waitedMs": 0,
+                    },
+                }),
+            );
+            wire.end(json!({"turn_id":"turn","status":"completed","reason":"output_limit"}));
+            wire.reply(&idle, json!({"sequence":3}));
+            wire.detach();
+        });
+        let mut args = vec!["exec", "-p", "go"];
+        if json_mode {
+            args.push("--json");
+        }
+        let output = home.command().args(&args).output().unwrap();
+        daemon.join().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "json {json_mode}: status {:?} stdout {} stderr {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Line mode writes the human line to stderr; `--json` writes the events
+        // to stdout and keeps stderr for the daemon notes.
+        let (shown, other) = if json_mode {
+            (
+                String::from_utf8_lossy_owned(output.stdout),
+                String::from_utf8_lossy_owned(output.stderr),
+            )
+        } else {
+            (
+                String::from_utf8_lossy_owned(output.stderr),
+                String::from_utf8_lossy_owned(output.stdout),
+            )
+        };
+        if json_mode {
+            assert!(
+                shown.contains("\"model-output-end\"") || shown.contains("step"),
+                "{shown}"
+            );
+        } else {
+            assert!(
+                shown.contains("stopped at max_tokens"),
+                "no failure line: {shown:?}"
+            );
+            assert_eq!(
+                shown.matches("[failed]").count(),
+                1,
+                "one failure line, no turn repeat: {shown}"
+            );
+        }
+        assert!(other.is_empty() || other.contains("workspace:"), "{other}");
+    }
+}
+
+#[test]
+fn exec_keeps_exit_two_for_a_failure_with_no_calls() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(
+            9,
+            "model-output-end",
+            json!({
+                "turn_id": "turn", "request_id": "model-request", "status": "failed",
+                "error": "The provider rejected the request: bad tool schema.",
+                "failure": {
+                    "kind": "invalid_request", "reason": "bad tool schema",
+                    "attempts": 1, "waitedMs": 0,
+                },
+            }),
+        );
+        wire.end(json!({"turn_id":"turn","status":"failed","error":"The provider rejected the request: bad tool schema."}));
+        wire.reply(&idle, json!({"sequence":2}));
+        wire.detach();
+    });
+    let output = home.command().args(["exec", "-p", "go"]).output().unwrap();
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
@@ -3047,8 +3193,10 @@ fn line_client_history_names_a_loaded_skill_and_a_hooks_context() {
                 {"id":"hooked-consumed","sequence":8,"create_at":1,"type":"input","name":"consumed",
                  "data":{"input_id":"hooked"}},
                 {"id":"follow-up","sequence":9,"create_at":1,"type":"input","name":"message",
-                 "data":{"blocks":[{"type":"raw","text":"<dim-hooks kind=\"follow-up\">\nrun the suite\n</dim-hooks>"}],"mode":"queue"}}],
-                "through":9,"nextAfter":9,"done":true}),
+                 "data":{"blocks":[{"type":"raw","text":"<dim-hooks kind=\"follow-up\">\nrun the suite\n</dim-hooks>"}],"mode":"queue"}},
+                {"id":"compact-start","sequence":10,"create_at":1,"type":"context","name":"compaction-start","data":{"trigger":"manual","through":9,"strategy":"summary"}},
+                {"id":"compact","sequence":11,"create_at":1,"type":"display","name":"compaction","data":{"start":10,"strategy":"summary"}}],
+                "through":11,"nextAfter":11,"done":true}),
         );
         // The client settles the queue and reads the context gauge in either
         // order, so answer by method until it leaves.
@@ -3082,6 +3230,7 @@ fn line_client_history_names_a_loaded_skill_and_a_hooks_context() {
     // history held, so a missing context line fails at its own assertion
     // rather than at a wait.
     terminal.until("> why does the parser stall?");
+    terminal.until("[context] Compacted");
     terminal.until("\n> ");
     home.kill(&terminal);
     terminal.wait();
@@ -3580,6 +3729,24 @@ impl Terminal {
             utf8_pending: Vec::new(),
             consumed: 0,
         }
+    }
+    fn resize(&self, cols: u16, rows: u16) {
+        let size = libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::ioctl(
+                    self.master.as_ref().unwrap().as_raw_fd(),
+                    libc::TIOCSWINSZ,
+                    &size,
+                )
+            },
+            0
+        );
     }
     fn record(&mut self, bytes: &[u8]) {
         self.utf8_pending.extend_from_slice(bytes);
@@ -5017,6 +5184,9 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     terminal.write(b"/agent profile-id\n");
     terminal.until("Session tools unchanged.");
     terminal.until("\n> ");
+    terminal.write(b"/agent a b\n");
+    terminal.until("Error: Usage: /agent [VALUE]");
+    terminal.until("\n> ");
     terminal.write(b"after configuration\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
@@ -5030,10 +5200,10 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
 #[test]
 fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client() {
     for (tui, leaf) in [(true, true), (true, false), (false, false)] {
-        for (environment, argument, expected) in [
-            (None, None, "high"),
-            (Some("low"), None, "low"),
-            (Some("low"), Some("medium"), "medium"),
+        for (environment, argument, stated) in [
+            (None, None, None),
+            (Some("low"), None, Some("low")),
+            (Some("low"), Some("medium"), Some("medium")),
         ] {
             let home = Home::new();
             let daemon = home.daemon(move |wire| {
@@ -5047,13 +5217,21 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
                 let providers = wire.read("account.providers");
                 wire.reply(&providers, json!([]));
             }
-            let management = wire.read("provider.management");
-            assert_eq!(management["params"], json!({"providerId":"fixture"}));
-            wire.reply(&management, json!({"providers":[{"providerId":"fixture","source":"custom","displayName":"Fixture","enabled":true,"version":1,"connection":null,"preferences":{"fixture-model":{"reasoningEffort":"high","serviceTier":"priority"}}}],"errors":[]}));
             let create = wire.read("session.create");
             assert_eq!(create["params"]["model"], json!({"provider":"fixture","modelId":"fixture-model"}));
             assert_eq!(create["params"]["startup"], json!({}));
-            assert_eq!(create["params"]["modelPreferences"], json!({"reasoningEffort":expected,"serviceTier":"priority"}));
+            match stated {
+                Some(effort) => assert_eq!(
+                    create["params"]["modelPreferences"],
+                    json!({"reasoningEffort":effort}),
+                    "a stated effort is the only preference the client sends"
+                ),
+                None => assert!(
+                    create["params"].get("modelPreferences").is_none(),
+                    "nothing is stated, so the server applies the saved pair: {}",
+                    create["params"]
+                ),
+            }
             wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"fixture stops here","data":{"appError":"provider_failed"}}}));
             if tui {
                 let catalog = wire.read("provider.catalog");
@@ -5308,9 +5486,10 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
             .iter()
             .find(|call| call["method"] == "session.create")
             .expect("the Session was created");
-        assert_eq!(
-            create["params"]["modelPreferences"],
-            json!({"reasoningEffort":"high"})
+        assert!(
+            create["params"].get("modelPreferences").is_none(),
+            "nothing is stated, so the server applies the saved effort: {}",
+            create["params"]
         );
         assert_eq!(
             calls
@@ -5703,8 +5882,8 @@ fn repicking_the_current_model_keeps_the_effort() {
         .unwrap_or_else(|| panic!("the model was re-picked: {calls:?}"));
     assert_eq!(
         update["params"],
-        json!({"sessionId":"session","branchId":"main","providerId":"test","modelId":"model",
-            "modelPreferences":{"reasoningEffort":"high"}})
+        json!({"sessionId":"session","branchId":"main","providerId":"test","modelId":"model"}),
+        "Enter sends the target alone; the server applies the saved effort"
     );
 }
 
@@ -5944,7 +6123,9 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::resume_tui(home.command());
+    let mut command = home.command();
+    sized(&mut command, 120, 24);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"!echo recorded\r");
     terminal.until("live-out");
@@ -6193,14 +6374,14 @@ fn tui_agent_without_a_session_answers_the_no_session_notice_and_sends_nothing()
 }
 
 #[test]
-fn tui_effort_without_a_session_answers_the_no_session_notice_and_sends_nothing() {
+fn tui_valued_effort_at_home_without_a_model_says_what_to_do_and_sends_nothing() {
     let home = Home::new();
     let (quieted, quiet_done) = std::sync::mpsc::channel();
     let daemon = no_session_daemon(&home, quieted);
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("Ask anything...");
     terminal.write(b"/effort high\r");
-    terminal.until("Sign in with /login");
+    terminal.until("No model to configure");
     quiet_done.recv_timeout(PATIENCE).unwrap();
     home.kill(&terminal);
     terminal.wait();
@@ -8782,7 +8963,11 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         assert!(hello.get("result").is_some(), "{hello}");
         wire
     }
-    fn post(events: &std::sync::mpsc::Receiver<(String, Value)>, marker: &str) -> Value {
+    fn post(
+        events: &std::sync::mpsc::Receiver<(String, Value)>,
+        marker: &str,
+        effort: Option<&str>,
+    ) -> Value {
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
             let (key, body) = events
@@ -8793,7 +8978,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
                     key.as_str(),
                     "Bearer first-key" | "Bearer second-key"
                 ));
-                assert_eq!(body["reasoning_effort"], "high");
+                assert_eq!(body["reasoning_effort"].as_str(), effort, "{body}");
                 return json!({"key":key,"body":body});
             }
         }
@@ -8956,7 +9141,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"first-provider-message\r");
     terminal.until("provider-first-reply");
     assert_eq!(
-        post(&events, "first-provider-message")["key"],
+        post(&events, "first-provider-message", Some("high"))["key"],
         "Bearer first-key"
     );
     terminal.write(b"/connect\r");
@@ -8973,7 +9158,9 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
         .get("result")
         .is_some()
     );
-    terminal.write(b"second-key\r\r");
+    // From the API key: Enter moves to the model id prefix, the next to Test +
+    // apply, and the third presses it.
+    terminal.write(b"second-key\r\r\r");
     terminal.until("Provider changed");
     terminal.write(b"\r");
     terminal.until("Connected Provider flow");
@@ -8990,7 +9177,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"updated-provider-message\r");
     terminal.until("provider-updated-reply");
     assert_eq!(
-        post(&events, "updated-provider-message")["key"],
+        post(&events, "updated-provider-message", Some("high"))["key"],
         "Bearer second-key"
     );
     home.kill(&terminal);
@@ -9011,7 +9198,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"restored-provider-message\r");
     terminal.until("provider-updated-reply");
     assert_eq!(
-        post(&events, "restored-provider-message")["key"],
+        post(&events, "restored-provider-message", Some("high"))["key"],
         "Bearer second-key"
     );
     let mut wire = connect(&home);
@@ -9028,11 +9215,18 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
     terminal.write(b"Provider flow\r");
-    terminal.until("Model adoption with saved preferences");
+    terminal.until("Default for new sessions: Provider flow / fixture-model");
+    terminal.write(b"stale-effort-message\r");
+    terminal.until("provider-updated-reply");
+    assert_eq!(
+        post(&events, "stale-effort-message", None)["key"],
+        "Bearer second-key"
+    );
     let retained = rpc(&mut wire, "provider.management", json!({"providerId":id}));
     assert_eq!(
         retained["result"]["providers"][0]["preferences"]["fixture-model"]["reasoningEffort"],
-        "high"
+        "high",
+        "the model no longer advertises `high`, so the adoption dropped it from its own configuration and kept the saved record: {retained}"
     );
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
@@ -9077,7 +9271,9 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("disabled");
     terminal.write(b"Provider flow\r");
     terminal.until("Connect ");
-    terminal.write(b"\r\r");
+    // From the API key: Enter moves to the model id prefix, the next to
+    // Disconnect, and the third presses it.
+    terminal.write(b"\r\r\r");
     terminal.until("Disconnected Provider flow");
     home.kill(&terminal);
     terminal.wait();
@@ -9148,8 +9344,11 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("disabled");
     terminal.write(b"Kimi For Coding\r");
     terminal.until("Connect kimi-for-coding");
+    // Up from the API key reaches the Base URL to replace it; from there the
+    // URL's Enter moves to the API key, the key's to the model id prefix, the
+    // next to Test + apply, and the last presses it.
     terminal.write(b"\x1b[A\x15");
-    terminal.write(format!("http://{address}/v1\rfirst-key\r\r").as_bytes());
+    terminal.write(format!("http://{address}/v1\rfirst-key\r\r\r").as_bytes());
     terminal.until("Connected Kimi For Coding");
     assert_eq!(
         events.recv_timeout(Duration::from_secs(8)).unwrap(),
@@ -9419,7 +9618,7 @@ fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
 }
 
 #[test]
-fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
+fn tui_queue_panel_deletes_steers_and_moves_applied_inputs_to_the_transcript() {
     for fullscreen in [false, true] {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
@@ -9477,16 +9676,28 @@ fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
         terminal.until("steer this");
         terminal.write(b"\r");
         terminal.until("already left the queue");
-        terminal.until("Incorporating");
+        terminal.until("No queued messages.");
         terminal.until("\x1b[?2026l");
+        let applied_start = terminal.transcript.len();
         terminal.write(b"\x1b");
-        terminal.until("/queue view");
+        terminal.until("steer this");
+        terminal.until("\x1b[?2026l");
+        let applied = strip_ansi(&terminal.transcript[applied_start..]);
+        assert!(
+            !applied.contains("Queue (") && !applied.contains("Incorporating"),
+            "{applied}"
+        );
+        let stopped_start = terminal.transcript.len();
         terminal.write(b"\x1b");
-        terminal.until("Unread");
-        terminal.until("waiting for your next message");
+        terminal.until("\x1b[?2026l");
+        let stopped = strip_ansi(&terminal.transcript[stopped_start..]);
+        assert!(
+            !stopped.contains("Unread") && !stopped.contains("Queue ("),
+            "{stopped}"
+        );
         let panel_start = terminal.transcript.len();
         terminal.write(b"/queue\r");
-        terminal.until("Unread · waiting for your next message");
+        terminal.until("No queued messages.");
         terminal.until("\x1b[?2026l");
         let panel = strip_ansi(&terminal.transcript[panel_start..]);
         assert!(
@@ -9494,7 +9705,7 @@ fn tui_queue_panel_deletes_steers_and_keeps_unconsumed_inputs_visible() {
             "{panel}"
         );
         terminal.write(b"x\r\x1b");
-        terminal.until("/queue view");
+        terminal.until("\x1b[?2026l");
         terminal.write(b"next input\r/queue\r");
         terminal.until("No queued messages.");
         let shown = strip_ansi(&terminal.transcript);
@@ -9762,7 +9973,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.until("first");
     terminal.until("background task finished");
     terminal.write(b"second\r");
-    terminal.until("Queue (3)");
+    terminal.until("Queue (1)");
     assert!(
         !terminal.transcript.contains("Queue (0)"),
         "{}",
@@ -9777,7 +9988,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     );
     terminal.write(b"\x13");
     terminal.write(b"third\r");
-    terminal.until("Queue (4)");
+    terminal.until("Queue (1)");
     terminal.until("Held · third");
     terminal.write(b"\x1b[1;2D");
     terminal.until("third");
@@ -10203,7 +10414,9 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::resume_tui(home.command());
+    let mut command = home.command();
+    sized(&mut command, 120, 24);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"go\r");
     terminal.until("Agent: reviewer");
@@ -10215,14 +10428,15 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("Cancelled");
     terminal.write(b"\x1b[27u/tasks\r");
     terminal.until("Survey the crates");
-    terminal.write(b"\r");
+    terminal.write(b"\x1b[B\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
     terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
     terminal.write(b"\x1b[27ucontinue the leader\r");
-    terminal.until("agent result: Other agent completed normally.");
+    terminal.until("agent result · Check the docs · writer");
+    terminal.until("Other agent completed normally.");
     terminal.write(b"/tasks\r");
     terminal.until("Check the docs");
     home.kill(&terminal);
@@ -10295,6 +10509,7 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
         }
     });
     let mut terminal = Terminal::resume_tui(home.command());
+    terminal.resize(160, 32);
     terminal.until("test / model");
     terminal.write(b"/approvals\r");
     terminal.until("Full access");
@@ -10412,7 +10627,9 @@ fn tui_approval_alias_selects_presets_and_remembers_them() {
             line.clear();
         }
     });
-    let mut terminal = Terminal::resume_tui(home.command());
+    let mut command = home.command();
+    sized(&mut command, 120, 24);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/approval\r");
     terminal.until("Full access");
@@ -10429,6 +10646,125 @@ fn tui_approval_alias_selects_presets_and_remembers_them() {
         serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
     assert_eq!(config["permission"], "workspace-write");
     assert!(config.get("permissionPreset").is_none());
+}
+
+#[test]
+fn tui_shift_tab_cycles_permissions_and_preserves_the_draft_in_both_modes() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (submitted, wait_submitted) = std::sync::mpsc::channel();
+        let (controls, wait_controls) = std::sync::mpsc::channel();
+        let (checked, wait_checked) = std::sync::mpsc::channel();
+        let (burst, wait_burst) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.permission.get", "session.permission.update"]);
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let history = wire.read("session.history");
+            wire.reply(&history, json!({"events":[
+                {"id":"input","sequence":1,"create_at":1,"type":"input","name":"message","data":{"user":{"content":[{"type":"text","text":"earlier message"}]},"mode":"queue"}},
+                {"id":"adopted","sequence":2,"create_at":1,"type":"input","name":"applied","data":{"input_id":"input","mode":"queue"}}
+            ],"through":8,"nextAfter":8,"done":true}));
+            let mut policy = json!({"preset":"read-only","allowedTools":["read"],"disallowedTools":["blocked"]});
+            let read = wire.read("session.permission.get");
+            wire.reply(&read, json!({"version":1,"policy":policy}));
+            wire.no_context();
+            let providers = wire.read("account.providers");
+            wire.reply(&providers, json!([]));
+            wait_controls.recv_timeout(PATIENCE).unwrap();
+            wire.quiet(Duration::from_millis(200));
+            checked.send(()).unwrap();
+            for (version, preset) in [(1, "workspace-write"), (2, "full-access"), (3, "read-only")] {
+                let read = wire.read("session.permission.get");
+                wire.reply(&read, json!({"version":version,"policy":policy}));
+                policy["preset"] = json!(preset);
+                let update = wire.read("session.permission.update");
+                assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":version,"policy":policy}));
+                wire.reply(&update, json!({"version":version + 1}));
+            }
+            for (version, preset) in [(4, "workspace-write"), (5, "full-access"), (6, "read-only")] {
+                let read = wire.read("session.permission.get");
+                if version == 4 {
+                    wait_burst.recv_timeout(PATIENCE).unwrap();
+                }
+                wire.reply(&read, json!({"version":version,"policy":policy}));
+                policy["preset"] = json!(preset);
+                let update = wire.read("session.permission.update");
+                assert_eq!(update["params"], json!({"sessionId":"session","branchId":"main","expectedVersion":version,"policy":policy}));
+                wire.reply(&update, json!({"version":version + 1}));
+            }
+            let read = wire.read("session.permission.get");
+            wire.reply(&read, json!({"version":7,"policy":policy}));
+            let update = wire.read("session.permission.update");
+            wire.send(json!({"jsonrpc":"2.0","id":update["id"],"error":{"code":-32000,"message":"permission update refused"}}));
+            let read = wire.read("session.permission.get");
+            wire.reply(&read, json!({"version":7,"policy":policy}));
+            policy["preset"] = json!("workspace-write");
+            let update = wire.read("session.permission.update");
+            assert_eq!(update["params"]["policy"], policy);
+            wire.reply(&update, json!({"version":8}));
+            let submit = wire.read("session.submit");
+            assert_eq!(submit["params"]["text"], "keep this draft");
+            wire.reply(&submit, json!({"event":{}}));
+            submitted.send(()).unwrap();
+            assert!(wire.trailing_request().is_none());
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        command
+            .env("COLORTERM", "truecolor")
+            .env("DIM_TERMINAL_APPEARANCE", "dark");
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.resize(160, 32);
+        terminal.until("test / model");
+        terminal.until_anywhere("⏵⏵ Read only");
+        terminal.until_anywhere("(shift+tab to cycle)");
+        if fullscreen {
+            terminal.write(b"\t\x1b[Z");
+        }
+        terminal.write(b"/permissions\r");
+        terminal.until("Permission mode");
+        terminal.write(b"\x1b[Z\x1b");
+        controls.send(()).unwrap();
+        wait_checked.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"keep this draft");
+        for (preset, label, color) in [
+            ("workspace-write", "Workspace write", "177;139;255"),
+            ("full-access", "Full access", "255;204;0"),
+            ("read-only", "Read only", "117;216;227"),
+        ] {
+            terminal.write(b"\x1b[Z");
+            terminal.until(&format!("Permission: {preset} (also for new sessions)"));
+            terminal.until_anywhere(&format!("\x1b[38;2;{color}m⏵⏵ {label}"));
+            let config: Value =
+                serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap())
+                    .unwrap();
+            assert_eq!(config["permission"], preset);
+        }
+        terminal.write(b"\x1b[Z\x1b[Z\x1b[Zx");
+        terminal.until("keep this draftx");
+        terminal.write(b"\x7f");
+        let config: Value =
+            serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
+        assert_eq!(config["permission"], "read-only");
+        burst.send(()).unwrap();
+        terminal.write(b"\x1b[Z");
+        terminal.until("permission update refused");
+        let config: Value =
+            serde_json::from_str(&fs::read_to_string(home.0.join("config.json")).unwrap()).unwrap();
+        assert_eq!(config["permission"], "read-only");
+        terminal.write(b"\x1b[Z");
+        terminal.until("Permission: workspace-write (also for new sessions)");
+        terminal.write(b"\r");
+        wait_submitted.recv_timeout(PATIENCE).unwrap();
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }
 
 /// The terminal's program status (OSC 7501) follows a run through a
@@ -11005,7 +11341,9 @@ fn tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_
             line.clear();
         }
     });
-    let mut terminal = Terminal::resume_tui(home.command());
+    let mut command = home.command();
+    sized(&mut command, 120, 24);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("179.9K / 256K");
     assert!(
         !terminal
@@ -11619,7 +11957,9 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
             wire.reply(&request, result);
         }
     });
-    let mut terminal = Terminal::resume_tui(home.command());
+    let mut command = home.command();
+    sized(&mut command, 120, 24);
+    let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/models\r");
     terminal.until("Subagent models: Agent choice");
@@ -11810,8 +12150,8 @@ fn tui_models_picker_cycles_reasoning_effort() {
         .expect("the model was adopted");
     assert_eq!(
         adopted["params"],
-        json!({"sessionId":"session","branchId":"main","providerId":"test","modelId":"model",
-            "modelPreferences":{"reasoningEffort":"none","serviceTier":"priority"}})
+        json!({"sessionId":"session","branchId":"main","providerId":"test","modelId":"model"}),
+        "Enter sends the target alone; the server applies the saved effort"
     );
 }
 

@@ -16,10 +16,10 @@ fn next_version() -> String {
     format!("{head}.{}", tail.parse::<u64>().unwrap() + 1)
 }
 
-fn package_json(version: &str, bins: &[&str]) -> String {
+fn package_json(version: &str, bins: &[(&str, &str)]) -> String {
     let map = bins
         .iter()
-        .map(|command| format!("\"{command}\":\"bin/dimcode.mjs\""))
+        .map(|(key, file)| format!("\"{key}\":\"{file}\""))
         .collect::<Vec<_>>()
         .join(",");
     format!("{{\"name\":\"dimcode-alpha\",\"version\":\"{version}\",\"bin\":{{{map}}}}}")
@@ -36,12 +36,38 @@ while [ -L "$target" ]; do
     *) target=$(dirname "$target")/$link ;;
   esac
 done
-directory=$(cd "$(dirname "$target")" && pwd)
-while [ ! -f "$directory/package.json" ]; do directory=$(dirname "$directory"); done
+directory=$(cd "$(dirname "$target")" && pwd) || exit 1
+while [ ! -f "$directory/package.json" ] && [ "$directory" != / ]; do directory=$(dirname "$directory"); done
 sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$directory/package.json"
 "#;
 
-/// A global npm installation of `dimcode-alpha` at `version`.
+/// A command that fails, so the post-switch check has something to catch.
+const BREAKS: &str = "#!/bin/sh\nexit 1\n";
+
+/// A command that reports its package's version only after it has printed a
+/// marker and waited, so a flow can interrupt the update while it checks. The
+/// wait happens only for the CLI the flow gave `UPDATE_SLOW`, so the test's own
+/// version reads stay quick.
+const SLOW_VERSION: &str = r#"#!/bin/sh
+target=$0
+while [ -L "$target" ]; do
+  link=$(readlink "$target")
+  case $link in
+    /*) target=$link ;;
+    *) target=$(dirname "$target")/$link ;;
+  esac
+done
+directory=$(cd "$(dirname "$target")" && pwd) || exit 1
+while [ ! -f "$directory/package.json" ] && [ "$directory" != / ]; do directory=$(dirname "$directory"); done
+if [ -n "$UPDATE_SLOW" ]; then
+  printf 'checking %s\n' "$directory" >> "$UPDATE_CHECKING"
+  sleep 2
+fi
+sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$directory/package.json"
+"#;
+
+/// A global npm installation of `dimcode-alpha` at `version`, with `commands`
+/// linked into its `bin` directory.
 struct Installed {
     updater: PathBuf,
     prefix: PathBuf,
@@ -49,7 +75,7 @@ struct Installed {
 }
 
 impl Installed {
-    fn new(version: &str, bins: &[&str]) -> Self {
+    fn new(version: &str, commands: &[&str]) -> Self {
         let home = Home::new();
         fs::remove_dir_all(home.0.join("rust")).unwrap();
         let prefix = home.0.join("node prefix");
@@ -65,8 +91,12 @@ impl Installed {
         let launcher = package.join("bin/dimcode.mjs");
         fs::write(&launcher, REPORTS_VERSION).unwrap();
         fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::write(package.join("package.json"), package_json(version, bins)).unwrap();
-        for command in bins {
+        fs::write(
+            package.join("package.json"),
+            package_json(version, &[("dima", "bin/dimcode.mjs")]),
+        )
+        .unwrap();
+        for command in commands {
             std::os::unix::fs::symlink(
                 "../lib/node_modules/dimcode-alpha/bin/dimcode.mjs",
                 prefix.join("bin").join(command),
@@ -80,6 +110,17 @@ impl Installed {
         }
     }
 
+    /// Rewrites the live package's manifest so it declares `bins`, which is the
+    /// set the update may retire.
+    fn declare(&self, bins: &[(&str, &str)]) {
+        fs::write(
+            self.prefix
+                .join("lib/node_modules/dimcode-alpha/package.json"),
+            package_json(CURRENT, bins),
+        )
+        .unwrap();
+    }
+
     /// npm is taken from `<prefix>/bin/npm`, so the fake one goes there.
     fn mock_npm(&self) {
         let npm = self.prefix.join("bin/npm");
@@ -88,8 +129,13 @@ impl Installed {
     }
 
     /// The real `update` command with the settings the fake npm reads.
-    fn update(&self, version: &str, bins: &[&str], settings: &[(&str, &str)]) -> Command {
+    fn update(&self, version: &str, bins: &[(&str, &str)], settings: &[(&str, &str)]) -> Command {
         let mut command = Command::new(&self.updater);
+        let links = bins
+            .iter()
+            .map(|(key, file)| format!("{key}={file}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         command
             .args([
                 "--home",
@@ -101,6 +147,7 @@ impl Installed {
             .env("UPDATE_ARGS", self.home.0.join("install-args"))
             .env("UPDATE_VERSION", version)
             .env("UPDATE_PACKAGE_JSON", package_json(version, bins))
+            .env("UPDATE_BINS", links)
             .env("UPDATE_GATE", self.home.0.join("gate"))
             .env("UPDATE_WAITING", self.home.0.join("waiting"));
         for (name, value) in settings {
@@ -159,7 +206,7 @@ impl Installed {
     }
 
     fn staging(&self) -> PathBuf {
-        self.prefix.join(".dimcode-staging")
+        self.prefix.join(".dimcode-staging").join("dimcode-alpha")
     }
 
     /// The arguments of the last manager run, one per line. A flag's value
@@ -176,9 +223,8 @@ impl Installed {
 /// A fake npm. It records its arguments with the values of `--prefix` and
 /// `--globalconfig` after a tab, retires the package it replaces under that
 /// prefix the way arborist's reify does, writes a marker, then waits at its gate
-/// and writes the new package. `UPDATE_FAIL` exits before writing anything, an
-/// empty `UPDATE_VERSION` exits 0 without writing, and `UPDATE_BREAK` writes a
-/// command that exits nonzero.
+/// and writes the new package with a link for every command it declares. An
+/// empty `UPDATE_VERSION` exits 0 without writing anything.
 const MOCK_NPM: &str = r#"#!/bin/sh
 : > "$UPDATE_ARGS"
 prefix=
@@ -195,27 +241,47 @@ package="$prefix/lib/node_modules/dimcode-alpha"
 retired="$prefix/lib/node_modules/.dimcode-alpha.retired"
 rm -rf "$retired"
 if [ -d "$package" ]; then mv "$package" "$retired"; fi
-if [ -L "$prefix/bin/dima" ]; then mv "$prefix/bin/dima" "$prefix/bin/.dima.retired"; fi
 : > "$UPDATE_WAITING"
-while [ ! -f "$UPDATE_GATE" ]; do sleep 0.1; done
+# The gate lives in the test's own home: a fresh directory made for this test
+# alone, removed only when this test ends. The loop can end only after its own
+# test has ended, so no other test's home can end it early.
+home=${UPDATE_GATE%/*}
+while [ ! -f "$UPDATE_GATE" ]; do
+  [ -d "$home" ] || exit 1
+  sleep 0.1
+done
 if [ "$UPDATE_FAIL" = 1 ]; then exit 143; fi
 if [ -z "$UPDATE_VERSION" ]; then echo 'Installed package'; exit 0; fi
 payload="$package/node_modules/${UPDATE_PLATFORM_PACKAGE:-dimcode-darwin-arm64}"
-mkdir -p "$package/bin" "$payload/bin"
-if [ "$UPDATE_BREAK" = 1 ]; then
-  printf '#!/bin/sh\nexit 1\n' > "$package/bin/dimcode.mjs"
-  printf '#!/bin/sh\nexit 1\n' > "$payload/bin/dimcode"
-else
-  printf '%s' "$UPDATE_COMMAND" > "$package/bin/dimcode.mjs"
-  printf '%s' "$UPDATE_COMMAND" > "$payload/bin/dimcode"
-fi
-chmod 700 "$package/bin/dimcode.mjs" "$payload/bin/dimcode"
-if [ -n "$UPDATE_NATIVE" ]; then cp "$UPDATE_NATIVE" "$package/bin/dimcode"; fi
-printf '%s\n' "$UPDATE_PACKAGE_JSON" > "$package/package.json"
+mkdir -p "$payload/bin"
+printf '%s' "$UPDATE_COMMAND" > "$payload/bin/dimcode"
+chmod 700 "$payload/bin/dimcode"
 if [ -n "$UPDATE_RELEASE_MANIFEST" ]; then
   printf '%s\n' "$UPDATE_RELEASE_MANIFEST" > "$payload/release-manifest.json"
 fi
-rm -rf "$retired" "$prefix/bin/.dima.retired"
+printf '%s\n' "$UPDATE_PACKAGE_JSON" > "$package/package.json"
+# npm links each command under the normalized manifest key, not under the key
+# as written: bin-links/lib/link-bins.js normalizes the manifest first, and
+# npm-normalize-package-bin/lib/index.js:normalizeObject keeps the basename of
+# the key with '\' and ':' read as '/'.
+mkdir -p "$prefix/bin"
+printf '%s\n' "$UPDATE_BINS" | while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  key=${line%%=*}
+  file=${line#*=}
+  name=$(printf '%s' "$key" | tr '\\:' '//' | sed 's|.*/||')
+  [ -n "$name" ] || continue
+  mkdir -p "$(dirname "$package/$file")"
+  printf '%s' "$UPDATE_COMMAND" > "$package/$file"
+  chmod 700 "$package/$file"
+  ln -sfn "../lib/node_modules/dimcode-alpha/$file" "$prefix/bin/$name"
+done
+if [ -n "$UPDATE_NATIVE" ]; then
+  mkdir -p "$package/bin"
+  cp "$UPDATE_NATIVE" "$package/bin/dimcode"
+  chmod 700 "$package/bin/dimcode"
+fi
+rm -rf "$retired"
 echo 'Installed package'
 "#;
 
@@ -315,7 +381,11 @@ printf 'Replacement launcher started\n'
             .env("UPDATE_ARGS", installed.home.0.join("install-args"))
             .env("UPDATE_GATE", installed.home.0.join("gate"))
             .env("UPDATE_WAITING", installed.home.0.join("waiting"))
-            .env("UPDATE_PACKAGE_JSON", package_json(&version, &["dima"]))
+            .env(
+                "UPDATE_PACKAGE_JSON",
+                package_json(&version, &[("dima", "bin/dimcode.mjs")]),
+            )
+            .env("UPDATE_BINS", "dima=bin/dimcode.mjs")
             .env("UPDATE_COMMAND", launcher)
             .env(
                 "UPDATE_RELEASE_MANIFEST",
@@ -407,18 +477,18 @@ fn an_interrupted_staged_update_keeps_the_installed_command() {
         installed.mock_npm();
         let mut command = installed.update(
             &next_version(),
-            &["dima"],
+            &[("dima", "bin/dimcode.mjs")],
             &[
                 ("UPDATE_COMMAND", REPORTS_VERSION),
                 ("UPDATE_FAIL", if dies { "1" } else { "0" }),
             ],
         );
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = OwnedChild::spawn(
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        );
         installed.until_waiting();
         assert_eq!(
             installed.try_version("dima").as_deref(),
@@ -429,8 +499,8 @@ fn an_interrupted_staged_update_keeps_the_installed_command() {
             assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
         }
         installed.release();
-        let output = wait(child);
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let output = child.wait();
+        let stderr = String::from_utf8_lossy_owned(output.stderr);
         assert!(!output.status.success(), "{case}: {stderr}");
         if !dies {
             assert!(stderr.contains("Update interrupted"), "{case}: {stderr}");
@@ -455,7 +525,7 @@ fn an_interrupted_staged_update_keeps_the_installed_command() {
         let output = installed
             .update(
                 &next_version(),
-                &["dima"],
+                &[("dima", "bin/dimcode.mjs")],
                 &[("UPDATE_COMMAND", REPORTS_VERSION), ("UPDATE_FAIL", "1")],
             )
             .output()
@@ -478,10 +548,14 @@ fn an_update_that_installs_nothing_keeps_the_installed_command() {
         installed.mock_npm();
         installed.release();
         let output = installed
-            .update(&version, &["dima"], &[("UPDATE_COMMAND", REPORTS_VERSION)])
+            .update(
+                &version,
+                &[("dima", "bin/dimcode.mjs")],
+                &[("UPDATE_COMMAND", REPORTS_VERSION)],
+            )
             .output()
             .unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = String::from_utf8_lossy_owned(output.stderr);
         assert!(!output.status.success(), "{case}: {stderr}");
         assert!(!stderr.contains("Updated "), "{case}: {stderr}");
         assert!(
@@ -503,18 +577,19 @@ fn an_update_that_installs_nothing_keeps_the_installed_command() {
 #[test]
 fn a_staged_update_switches_the_package_its_commands_and_the_global_config() {
     let installed = Installed::new(CURRENT, &["dima", "retired"]);
+    installed.declare(&[("dima", "bin/dimcode.mjs"), ("retired", "bin/dimcode.mjs")]);
     installed.mock_npm();
     installed.release();
     let version = next_version();
     let output = installed
         .update(
             &version,
-            &["dima", "added"],
+            &[("dima", "bin/dimcode.mjs"), ("added", "bin/dimcode.mjs")],
             &[("UPDATE_COMMAND", REPORTS_VERSION)],
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(stderr.contains("Updated dimcode-alpha"), "{stderr}");
     assert_eq!(installed.installed(), version);
@@ -562,12 +637,12 @@ fn a_staged_update_whose_new_command_fails_puts_the_previous_version_back() {
     let output = installed
         .update(
             &next_version(),
-            &["dima"],
-            &[("UPDATE_COMMAND", REPORTS_VERSION), ("UPDATE_BREAK", "1")],
+            &[("dima", "bin/dimcode.mjs")],
+            &[("UPDATE_COMMAND", BREAKS)],
         )
         .output()
         .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(!stderr.contains("Updated "), "{stderr}");
     assert_eq!(
@@ -576,4 +651,398 @@ fn a_staged_update_whose_new_command_fails_puts_the_previous_version_back() {
         "an update whose new command does not run must put the previous version back"
     );
     assert!(!installed.staging().exists(), "{stderr}");
+}
+
+#[test]
+fn a_command_the_manager_renames_takes_the_name_of_its_link() {
+    let installed = Installed::new(CURRENT, &["dima"]);
+    installed.mock_npm();
+    installed.release();
+    let version = next_version();
+    let output = installed
+        .update(
+            &version,
+            &[
+                ("dima", "bin/dimcode.mjs"),
+                ("../bin2/escape", "bin/dimcode.mjs"),
+            ],
+            &[("UPDATE_COMMAND", REPORTS_VERSION)],
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(
+        installed.version("escape"),
+        version,
+        "the command the manager linked is the one that must run: {stderr}"
+    );
+    assert!(
+        !installed.prefix.join("bin2").exists(),
+        "every command must stay directly inside the bin directory: {stderr}"
+    );
+}
+
+#[test]
+fn a_command_another_package_owns_is_never_taken() {
+    let installed = Installed::new(CURRENT, &["dima"]);
+    installed.mock_npm();
+    installed.release();
+    let other = installed.prefix.join("lib/node_modules/other-cli");
+    fs::create_dir_all(other.join("bin")).unwrap();
+    let launcher = other.join("bin/other.mjs");
+    fs::write(&launcher, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    let shared = installed.prefix.join("bin/shared-cli");
+    std::os::unix::fs::symlink("../lib/node_modules/other-cli/bin/other.mjs", &shared).unwrap();
+    let output = installed
+        .update(
+            &next_version(),
+            &[
+                ("dima", "bin/dimcode.mjs"),
+                ("shared-cli", "bin/dimcode.mjs"),
+            ],
+            &[("UPDATE_COMMAND", REPORTS_VERSION)],
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("shared-cli") && stderr.contains("other-cli"),
+        "the failure must name the command and its owner: {stderr}"
+    );
+    assert!(!stderr.contains("Updated "), "{stderr}");
+    assert_eq!(
+        fs::read_link(&shared).unwrap(),
+        Path::new("../lib/node_modules/other-cli/bin/other.mjs"),
+        "a command another package owns must still point into it"
+    );
+    assert!(
+        launcher.is_file(),
+        "the other package's launcher must still be there"
+    );
+    assert_eq!(installed.installed(), CURRENT, "{stderr}");
+    assert!(
+        !installed.staging().exists(),
+        "the refused update must leave no staging directory"
+    );
+}
+
+#[test]
+fn one_packages_staging_survives_the_others_update() {
+    // A stable update interrupted in the two-rename window leaves its only copy
+    // at its own staging root. An alpha update of the same prefix must not read
+    // or remove it.
+    let installed = Installed::new(CURRENT, &["dima"]);
+    installed.mock_npm();
+    installed.release();
+    let stable = installed.staging().parent().unwrap().join("dimcode");
+    let retired = stable.join("staging-4242/retired");
+    fs::create_dir_all(retired.join("bin")).unwrap();
+    fs::write(
+        retired.join("package.json"),
+        "{\"name\":\"dimcode\",\"version\":\"0.1.0-alpha.1\"}",
+    )
+    .unwrap();
+    let payload = retired.join("bin/dim");
+    fs::write(&payload, "stable payload\n").unwrap();
+    let before = fs::read(&payload).unwrap();
+    let version = next_version();
+    let output = installed
+        .update(
+            &version,
+            &[("dima", "bin/dimcode.mjs")],
+            &[("UPDATE_COMMAND", REPORTS_VERSION)],
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(installed.installed(), version, "{stderr}");
+    assert_eq!(
+        fs::read(&payload).ok().as_deref(),
+        Some(&before[..]),
+        "the other package's only copy must be byte-identical afterwards: {stderr}"
+    );
+    assert!(
+        retired.is_dir(),
+        "an alpha update must not remove the stable package's staging: {stderr}"
+    );
+
+    // The stable update with the same residue still refuses, and names the one
+    // move that restores its package. It runs from a recognised installation
+    // whose `dimcode` package is the one the residue holds, so the live package
+    // is missing, as it is after the interrupted fallback.
+    let stable_updater = installed.prefix.join("lib/node_modules/dimcode-alpha/bin");
+    let updater = stable_updater.join("dim-stable");
+    fs::copy(env!("CARGO_BIN_EXE_dimcode"), &updater).unwrap();
+    fs::set_permissions(&updater, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut command = Command::new(fs::canonicalize(updater).unwrap());
+    command
+        .args([
+            "--home",
+            installed.home.0.to_str().unwrap(),
+            "update",
+            "--confirm-legacy-exited",
+        ])
+        .env("DIMCODE_NPM_PACKAGE", "dimcode")
+        .env("UPDATE_ARGS", installed.home.0.join("install-args"))
+        .env("UPDATE_VERSION", &version)
+        .env(
+            "UPDATE_PACKAGE_JSON",
+            "{\"name\":\"dimcode\",\"version\":\"9.9.9\"}",
+        )
+        .env("UPDATE_BINS", "dim=bin/dimcode.mjs")
+        .env("UPDATE_GATE", installed.home.0.join("gate"))
+        .env("UPDATE_WAITING", installed.home.0.join("waiting"))
+        .env("UPDATE_COMMAND", REPORTS_VERSION);
+    let output = command.output().unwrap();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("An earlier update left dimcode at"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("mv {}", retired.display())),
+        "the refusal must name the one move that restores the package: {stderr}"
+    );
+    assert_eq!(
+        fs::read(&payload).ok().as_deref(),
+        Some(&before[..]),
+        "the refusal must keep the only copy: {stderr}"
+    );
+}
+
+#[test]
+fn an_interruption_during_the_post_switch_check_puts_the_previous_version_back() {
+    let installed = Installed::new(CURRENT, &["dima"]);
+    installed.mock_npm();
+    installed.release();
+    let checking = installed.home.0.join("checking");
+    let mut command = installed.update(
+        &next_version(),
+        &[("dima", "bin/dimcode.mjs")],
+        &[("UPDATE_COMMAND", SLOW_VERSION), ("UPDATE_SLOW", "1")],
+    );
+    command.env("UPDATE_CHECKING", &checking);
+    let child = OwnedChild::spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    let deadline = Instant::now() + HANG_GUARD;
+    while !checking.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the switched-in command never reached its check"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) },
+        0,
+        "the flow must be able to interrupt the update while it checks"
+    );
+    let output = child.wait();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("interrupted while checking"),
+        "an interrupted check must say so: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Updated "),
+        "an interrupted check must not report success: {stderr}"
+    );
+    assert_eq!(
+        installed.installed(),
+        CURRENT,
+        "the previous version must be live again: {stderr}"
+    );
+    assert!(
+        !installed.staging().exists(),
+        "an interrupted check must clear its staging directory: {stderr}"
+    );
+}
+
+#[test]
+fn an_alias_the_package_never_declared_survives_an_update() {
+    let installed = Installed::new(CURRENT, &["dima"]);
+    installed.mock_npm();
+    installed.release();
+    let alias = installed.prefix.join("bin/mydima");
+    std::os::unix::fs::symlink("../lib/node_modules/dimcode-alpha/bin/dimcode.mjs", &alias)
+        .unwrap();
+    let version = next_version();
+    let output = installed
+        .update(
+            &version,
+            &[("dima", "bin/dimcode.mjs")],
+            &[("UPDATE_COMMAND", REPORTS_VERSION)],
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        alias.is_symlink(),
+        "an alias the package never declared is not the update's to remove: {stderr}"
+    );
+    assert_eq!(
+        installed.version("mydima"),
+        version,
+        "the alias must run the new version: {stderr}"
+    );
+}
+
+#[test]
+fn a_declared_command_the_new_version_drops_is_retired() {
+    let installed = Installed::new(CURRENT, &["dima", "dropped"]);
+    installed.declare(&[("dima", "bin/dimcode.mjs"), ("dropped", "bin/dimcode.mjs")]);
+    installed.mock_npm();
+    installed.release();
+    let output = installed
+        .update(
+            &next_version(),
+            &[("dima", "bin/dimcode.mjs")],
+            &[("UPDATE_COMMAND", REPORTS_VERSION)],
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        !installed.prefix.join("bin/dropped").exists(),
+        "a command the previous version declared and the new one drops must be retired: {stderr}"
+    );
+}
+
+#[test]
+fn a_live_manifest_that_cannot_be_read_retires_nothing_and_the_update_goes_on() {
+    let installed = Installed::new(CURRENT, &["dima", "dropped"]);
+    installed.mock_npm();
+    installed.release();
+    let manifest = installed
+        .prefix
+        .join("lib/node_modules/dimcode-alpha/package.json");
+    fs::write(&manifest, "{").unwrap();
+    let version = next_version();
+    let output = installed
+        .update(
+            &version,
+            &[("dima", "bin/dimcode.mjs")],
+            &[("UPDATE_COMMAND", REPORTS_VERSION)],
+        )
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("Updated dimcode-alpha"),
+        "a live manifest the update cannot read must not fail it: {stderr}"
+    );
+    assert!(
+        stderr.contains("no command was retired"),
+        "the update must say what it left alone: {stderr}"
+    );
+    assert_eq!(
+        installed.installed(),
+        version,
+        "the new version must be live and its command must run it: {stderr}"
+    );
+    assert!(
+        fs::symlink_metadata(installed.prefix.join("bin/dropped")).is_ok(),
+        "nothing may be retired when the previous commands are unknown: {stderr}"
+    );
+}
+
+/// A command that starts a child which records its pid and then, a second later,
+/// writes a marker if it is still alive. The command waits on it long past any
+/// bound the update has, so a flow can check that nothing the check started
+/// outlives the update.
+const CHECK_WITH_CHILD: &str = r#"#!/bin/sh
+target=$0
+while [ -L "$target" ]; do
+  link=$(readlink "$target")
+  case $link in
+    /*) target=$link ;;
+    *) target=$(dirname "$target")/$link ;;
+  esac
+done
+directory=$(cd "$(dirname "$target")" && pwd) || exit 1
+while [ ! -f "$directory/package.json" ] && [ "$directory" != / ]; do directory=$(dirname "$directory"); done
+if [ -n "$UPDATE_SLOW" ]; then
+  printf 'checking %s\n' "$directory" >> "$UPDATE_CHECKING"
+  # The loop ends only at this test's own `Home` drop; see the gate loop in MOCK_NPM.
+  sh -c 'echo $$ > "$UPDATE_CHECK_CHILD"; sleep 1; echo survived > "$UPDATE_CHECK_MARKER"; home=${UPDATE_CHECK_MARKER%/*}; while [ -d "$home" ]; do sleep 0.2; done' &
+  wait
+fi
+sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$directory/package.json"
+"#;
+
+#[test]
+fn an_interrupted_check_ends_every_process_it_started() {
+    let installed = Installed::new(CURRENT, &["dima"]);
+    installed.mock_npm();
+    installed.release();
+    let checking = installed.home.0.join("checking");
+    let started = installed.home.0.join("check-child");
+    let marker = installed.home.0.join("check-marker");
+    let mut command = installed.update(
+        &next_version(),
+        &[("dima", "bin/dimcode.mjs")],
+        &[("UPDATE_COMMAND", CHECK_WITH_CHILD), ("UPDATE_SLOW", "1")],
+    );
+    command
+        .env("UPDATE_CHECKING", &checking)
+        .env("UPDATE_CHECK_CHILD", &started)
+        .env("UPDATE_CHECK_MARKER", &marker);
+    let child = OwnedChild::spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    let deadline = Instant::now() + HANG_GUARD;
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the checked command never started its own child"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let started: i32 = fs::read_to_string(&started)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::kill(child.id() as i32, libc::SIGTERM) },
+        0,
+        "the flow must be able to interrupt the update while it checks"
+    );
+    let output = child.wait();
+    let stderr = String::from_utf8_lossy_owned(output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(!stderr.contains("Updated "), "{stderr}");
+    assert_eq!(
+        unsafe { libc::kill(started, 0) },
+        -1,
+        "the process the check started, {started}, must be gone before the update exits: {stderr}"
+    );
+    assert_eq!(
+        installed.installed(),
+        CURRENT,
+        "the previous version must be live again: {stderr}"
+    );
+    // The child writes its marker a second after it started, so a survivor
+    // would have written it by now.
+    thread::sleep(Duration::from_millis(2000));
+    assert!(
+        !marker.exists(),
+        "nothing the check started may write after the update exited: {stderr}"
+    );
 }

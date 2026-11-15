@@ -105,6 +105,17 @@ Owner: [tool_executor.rs](../../../../crates/dim-agent-capabilities/src/tool_exe
 Executes a committed tool batch against pinned handlers after approval, isolates
 individual call failures and publishes correlated results.
 
+The claim of a call exists before its batch is published: Loop asks each
+handler for one immediately before appending `step/tool-call`
+([Questions §2.1](../../../design/plugins/Questions.md#21-the-claim-before-the-fact)),
+and ToolBinding holds the claims with the request's tool snapshot. AgentLoop
+drops them with that snapshot, so a batch that never dispatches releases every
+claim without a separate step; a claim that reaches execution is taken from the
+binding and consumed by `ToolClaim::dispatch`, which runs the call as resolved
+and approved and keeps whatever the handler registered until it settles. An `execute` without a claim, which is the
+rebuilt batch after a reload, claims for itself through the same handler
+callback.
+
 Before admitting a `write_filesystem` call, the pinned handler's `resolve_write`
 may resolve its target using metadata only. Approval and execution receive that
 same resolved call; the committed model call is unchanged. A resolver cannot
@@ -144,7 +155,12 @@ settle after the outer result. Child events are execution facts:
 child batches first as errors, then settles an open outer batch with the
 confirmed effects of terminal child results; child results keep their effects. Reload-settled results make Loop fail the turn. Recovery selects
 batch identities without a matching `call_event_id` result, reads their turn,
-request, call and parent identities, and does not read tool arguments. Interrupt
+request, call and parent identities, and does not read tool arguments.
+For an unfinished outer batch, one query selects child result effects for its
+known parent call IDs. Each parent receives only its own children's effects;
+arguments and result text are not read. During cancellation this query omits
+parents whose returned result already contains effects, and is skipped when
+none need it. State is not cached beyond settlement. Interrupt
 state comes from the latest interrupt or turn boundary at the same fixed read
 boundary. Cancellation is not rollback of a tool's completed side effect.
 

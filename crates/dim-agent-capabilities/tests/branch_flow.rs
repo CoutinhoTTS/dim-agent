@@ -1028,7 +1028,17 @@ async fn a_restart_completes_an_end_without_its_result() {
     let info = commands
         .info("grand".into())
         .expect("an ended line keeps its record");
-    assert_eq!(info.source, Some(options("grandchild").source));
+    assert_eq!(info.source, None);
+    assert_eq!(
+        commands
+            .display("grand".into())
+            .await
+            .unwrap()
+            .entry
+            .info
+            .source,
+        Some(options("grandchild").source)
+    );
     soon(agent.close()).await.unwrap();
 }
 
@@ -1519,7 +1529,7 @@ async fn a_restore_reads_a_line_end_in_one_page_and_no_range() {
             ancestor: None,
         }]
     );
-    let pages = counting.pages("B", &["branch/end"]);
+    let pages = counting.pages("B", &["branch/start", "branch/end"]);
     assert_eq!(
         pages, 1,
         "a line with no end costs one page, whatever its length; the restore asked {pages} times"
@@ -2674,6 +2684,23 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
         .unwrap();
     soon(session.idle("main")).await.unwrap();
     let high = session.sequence("main").unwrap();
+    let fixed = soon(session.branch("main".into(), high, options("fixed head")))
+        .await
+        .unwrap();
+    soon(session.idle(&fixed)).await.unwrap();
+    let fixed_create = create_event(&branch_events(&session, "main", ..).await.unwrap());
+    assert!(matches!(&fixed_create.kind, EventKind::BranchCreate(data)
+        if data.at == BranchCreateAt::Sequence { sequence: high }));
+    assert_eq!(
+        session
+            .branches()
+            .iter()
+            .find(|info| info.id == fixed)
+            .unwrap()
+            .branch_point,
+        Some(high),
+        "a caller's head remains a fixed cut while the parent can advance"
+    );
     *probe.rewrite.lock().unwrap() = Rewrite::Business(
         BranchCreateAt::Sequence { sequence: 1 },
         "final prompt".into(),
@@ -2776,7 +2803,7 @@ async fn final_prompt_position_and_fixed_ancestor_prefix_drive_creation() {
     );
     assert_eq!(
         probe.child_builds.load(Ordering::SeqCst),
-        3,
+        4,
         "inherited create events must not be dispatched"
     );
     soon(agent.close()).await.unwrap();
@@ -2827,10 +2854,11 @@ async fn delayed_create_uses_its_anchor_and_survives_an_abandoned_waiter() {
     soon(session.idle(&child.id)).await.unwrap();
     assert_eq!(
         (child.branch_point, child.create_anchor),
-        (Some(create.sequence), Some(create.sequence))
+        (Some(high), Some(create.sequence))
     );
     let prefix = chain_events(&session, &child.id, ..=0).await.unwrap();
-    assert_eq!(prefix.last().unwrap().id, create.id);
+    assert_eq!(prefix.last().unwrap().sequence, high);
+    assert!(!prefix.iter().any(|event| event.id == create.id));
     assert!(!prefix.iter().any(|event| event.id == later.id));
     soon(agent.close()).await.unwrap();
 }
@@ -5707,14 +5735,13 @@ async fn an_ending_line_and_main_get_no_parent_block() {
     let session = soon(agent.restore_session("saved".into())).await.unwrap();
     until_branch(&session, "main").await;
     soon(session.idle("main")).await.unwrap();
+    until_branch(&session, "line").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
-    if session.sequence("line").is_ok() {
-        let events = local_events(&session, "line").await;
-        assert!(
-            parent_block_events(&events).is_empty(),
-            "an ending line gets no block: {events:#?}"
-        );
-    }
+    let events = local_events(&session, "line").await;
+    assert!(
+        parent_block_events(&events).is_empty(),
+        "an ending line gets no block: {events:#?}"
+    );
     let events = local_events(&session, "main").await;
     assert!(parent_block_events(&events).is_empty(), "main gets none");
     soon(agent.close()).await.unwrap();
@@ -5779,6 +5806,7 @@ async fn the_creating_turn_alone_does_not_tell_the_line() {
     let child = open_line(&session, "watch the tests").await;
     soon(session.idle("main")).await.unwrap();
     soon(session.idle(&child)).await.unwrap();
+    // Stands in for the parent-block writer handling the creating turn's end.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let events = local_events(&session, &child).await;
     assert!(
@@ -5853,6 +5881,7 @@ async fn a_line_message_answered_with_text_tells_the_line_nothing() {
     assert_eq!(result.is_error, None, "{:?}", result.content);
     soon(session.idle("main")).await.unwrap();
     soon(session.idle(&child)).await.unwrap();
+    // Stands in for the parent-block writer handling the creating turn's end.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let events = local_events(&session, &child).await;
     assert!(
@@ -6009,6 +6038,7 @@ async fn a_host_line_cut_at_the_start_is_not_told_what_happened_before_it() {
     let (agent, session, host, tool, _) = a_host_line_opened_after_main_moved(&probe, false).await;
     steer_main_from(&session, &tool).await;
     quiet(&session, &host).await;
+    // Stands in for the parent-block writer handling the parent's turn end.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let events = local_events(&session, &host).await;
     assert!(
@@ -6086,6 +6116,7 @@ async fn a_host_line_cut_before_it_was_opened_is_not_told_about_the_gap() {
     );
     steer_main_from(&session, &tool).await;
     quiet(&session, &host).await;
+    // Stands in for the parent-block writer handling the parent's turn end.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let events = local_events(&session, &host).await;
     assert!(
@@ -7020,7 +7051,16 @@ async fn a_stop_settles_the_branch_tool_while_the_tree_still_builds_the_child() 
             _ => None,
         })
         .unwrap();
-    assert_eq!(result.is_error, Some(true));
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "the stopped call is an error: {:?}",
+        result.content
+    );
+    assert_eq!(
+        result.content,
+        ToolContent::Text("stopped waiting; the branch creation continues".into())
+    );
     assert!(events.iter().any(|event| matches!(&event.kind,
         EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Cancelled { .. }))));
     assert!(
@@ -7158,6 +7198,9 @@ async fn an_ancestors_end_closes_a_pending_end_whose_delivery_was_held() {
                 .await
         })
     };
+    // Stands in for the ancestor's end reaching the child's held end: its own
+    // commit only proves `end()` was polled, and the cascade that waits for
+    // the child runs on a task spawned from that commit's delivery.
     tokio::time::sleep(Duration::from_millis(300)).await;
     gate.release.notify_one();
     tokio::time::timeout(Duration::from_secs(8), ender)

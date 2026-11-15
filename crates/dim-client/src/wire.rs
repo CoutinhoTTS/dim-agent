@@ -447,11 +447,27 @@ pub struct PendingDelegations {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FinishedTasks {
+    pub branch_id: String,
+    pub through: u64,
+    pub tasks: Vec<dim_agent_types::FinishedExec>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FinishedDelegations {
+    pub branch_id: String,
+    pub through: u64,
+    pub requests: Vec<dim_agent_types::FinishedDelegation>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TurnRead {
     pub branch_id: String,
     pub through: u64,
     pub turn: Option<TurnBoundary>,
     pub output: Option<dim_agent_types::ActiveOutput>,
+    #[serde(default)]
+    pub input_deleted: bool,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -459,6 +475,8 @@ pub struct TurnBoundary {
     pub turn_id: String,
     pub sequence: u64,
     pub ended: bool,
+    #[serde(default)]
+    pub outcome: Option<dim_agent_types::TurnOutcome>,
 }
 
 #[derive(Deserialize)]

@@ -7,21 +7,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "No queued messages." => "Aucun message en file d’attente.",
         "Held · awaiting application" => "Retenu · en attente d’application",
-        "Incorporating · awaiting model consumption" => {
-            "Intégration en cours · en attente de traitement par le modèle"
-        }
         "Held" => "Retenu",
-        "Incorporating" => "Intégration en cours",
         "Unread" => "Non lu",
-        "Unread · waiting for your next message" => {
-            "Non lu · en attente de votre prochain message"
-        }
-        "/queue view · awaiting model consumption" => {
-            "/queue voir · en attente de traitement par le modèle"
-        }
-        "/queue view · waiting for your next message" => {
-            "/queue voir · en attente de votre prochain message"
-        }
         "Enter export · Esc cancel" => "Enter exporter · Esc annuler",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Les messages avec pièces jointes restent en file ; utilisez /queue pour orienter ou les supprimer"
@@ -387,8 +374,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "quitter",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter choisir + défaut · ←/→ effort · Ctrl+X oublier · Esc effacer/fermer"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter choisir + défaut · ←/→ effort · Ctrl+B/F curseur · Ctrl+X oublier · Esc effacer/fermer"
         }
         "Default for new sessions in {folder}: {model}" => {
             "Modèle par défaut des nouvelles sessions dans {folder} : {model}"
@@ -577,6 +564,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C effacer, deux fois pour quitter · Ctrl+D quitter si brouillon vide"
         }
+        "Shift+Tab cycle permissions (composer focused)" => {
+            "Shift+Tab changer les permissions (zone de saisie active)"
+        }
+        "Shift+Tab newer target while picked · Esc return to composer" => {
+            "Sélection active : Shift+Tab vers une cible plus récente · Esc retour à la saisie"
+        }
+        "(shift+tab to cycle)" => "(Shift+Tab pour changer)",
         "Fullscreen" => "Plein écran",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown défiler · Home/End haut ou bas (brouillon vide) · Tab choisir un message, e modifier, q citer"

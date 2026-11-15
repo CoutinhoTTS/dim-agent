@@ -442,6 +442,9 @@ const V40_ADDITIONS: &[&str] = &[
     "CREATE INDEX timeline_events_source_positions ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.epoch'),json_extract(body,'$.record.event.data.current.at.branch'),json_extract(body,'$.record.event.data.current.at.sequence'),sequence) WHERE kind='context-usage/recovered'",
 ];
 fn drop_v40(connection: &Connection) {
+    connection
+        .execute_batch("DROP INDEX IF EXISTS timeline_events_branch_interrupts")
+        .unwrap();
     for sql in V40_ADDITIONS.iter().rev() {
         let mut words = sql.split_whitespace();
         words.next();
@@ -498,6 +501,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V37_ADDITIONS.iter().filter(|_| version >= 37))
         .chain(V39_ADDITIONS.iter().filter(|_| version >= 39))
         .chain(V40_ADDITIONS.iter().filter(|_| version >= 40))
+        .chain(["CREATE INDEX timeline_events_branch_interrupts ON timeline_events(session_id, branch_id, sequence) WHERE kind = 'stop/interrupt' AND json_extract(body, '$.record.event.data.scope') = 'branch'"].iter().filter(|_| version >= 47))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
         .map(|sql| {
@@ -2068,7 +2072,7 @@ async fn conditional_steer_recovers_checked_candidates_once_and_preserves_old_in
             let retry = session
                 .service::<InputQueue>("main")
                 .unwrap()
-                .withdraw(withdraw(id, Some(checked(text))))
+                .withdraw_checked(withdraw(id, Some(checked(text))))
                 .await
                 .unwrap();
             assert_eq!(retry, (Withdrawal::NotHeld, None));
@@ -5198,12 +5202,13 @@ async fn owned_session_creation_and_plugin_shutdown_keep_one_resource_owner() {
 #[tokio::test]
 async fn sqlite_close_releases_ownership_while_a_spawned_child_inherits_descriptors() {
     use std::{
+        ffi::c_void,
         io::{Read, Write},
         os::{fd::AsRawFd, unix::net::UnixStream, unix::process::CommandExt},
     };
     unsafe extern "C" {
-        fn read(fd: i32, buffer: *mut u8, count: usize) -> isize;
-        fn write(fd: i32, buffer: *const u8, count: usize) -> isize;
+        fn read(fd: i32, buffer: *mut c_void, count: usize) -> isize;
+        fn write(fd: i32, buffer: *const c_void, count: usize) -> isize;
     }
 
     let database = Database::new();
@@ -5221,7 +5226,9 @@ async fn sqlite_close_releases_ownership_while_a_spawned_child_inherits_descript
         unsafe {
             command.pre_exec(move || {
                 let mut byte = 1_u8;
-                if write(fd, &byte, 1) != 1 || read(fd, &mut byte, 1) != 1 {
+                if write(fd, (&raw const byte).cast(), 1) != 1
+                    || read(fd, (&raw mut byte).cast(), 1) != 1
+                {
                     return Err(std::io::Error::from_raw_os_error(5));
                 }
                 Ok(())
@@ -7834,6 +7841,68 @@ async fn a_v31_store_upgrades_in_place_once() {
     upgrades_in_place_once(&database, connection, 31).await;
 }
 
+#[tokio::test]
+async fn main_and_resume_formats_upgrade_once_preserving_rows_and_accepting_automation() {
+    for (version, timeline) in [
+        (42, false),
+        (42, true),
+        (43, false),
+        (43, true),
+        (44, false),
+        (44, true),
+        (45, false),
+        (46, false),
+    ] {
+        let database = Database::new();
+        let connection = Connection::open(&database.0).unwrap();
+        let mut statements = if timeline {
+            schema_of(44)
+                .into_iter()
+                .chain(["CREATE INDEX timeline_events_branch_interrupts ON timeline_events(session_id, branch_id, sequence) WHERE kind = 'stop/interrupt' AND json_extract(body, '$.record.event.data.scope') = 'branch'".to_owned()])
+                .map(|sql| {
+                    let sql = sql.replace("(version = 44)", &format!("(version = {version})"));
+                    if version == 42 {
+                        sql.replace(AGENT_SESSIONS_V42, AGENT_SESSIONS_V30)
+                    } else {
+                        sql
+                    }
+                })
+                .collect()
+        } else {
+            schema_of(version)
+        };
+        statements.sort_by_key(|sql| {
+            !sql.starts_with("CREATE TABLE ") && !sql.starts_with("CREATE VIRTUAL TABLE ")
+        });
+        for sql in statements {
+            connection.execute_batch(&sql).unwrap();
+        }
+        connection
+            .execute("INSERT INTO agent_store_format VALUES (?1)", [version])
+            .unwrap();
+        upgrades_in_place_once(&database, connection, version).await;
+        let connection = Connection::open(&database.0).unwrap();
+        connection.execute("INSERT INTO agent_sessions (session_id, config, created_at_ms, origin) SELECT 'automation', config, created_at_ms, 'automation' FROM agent_sessions WHERE session_id='s1'", []).unwrap();
+        assert!(
+            connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE name='timeline_events_branch_interrupts'",
+                    [],
+                    |_| Ok(())
+                )
+                .is_ok()
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+}
+
 /// #1421: the step that rebuilds `agent_sessions` for the `automation` origin
 /// keeps every business row and every Session `internal`, recreates each
 /// object `SCHEMA` places on the table, and leaves the SQL of the tables that
@@ -8080,18 +8149,11 @@ async fn a_slow_store_upgrade_reports_progress_and_keeps_the_opening_alive() {
     use dim_app_server::storage::set_upgrade_report_delay;
     use tokio_util::sync::CancellationToken;
 
-    /// Clears the delay even when an assertion fails.
-    struct Delay;
-    impl Drop for Delay {
-        fn drop(&mut self) {
-            set_upgrade_report_delay(None);
-        }
-    }
-
     let database = Database::new();
     drop(v13_store(&database.0));
 
-    let _delay = Delay;
+    // Clears the delay even when an assertion fails.
+    let _delay = std::mem::DropGuard::new((), |()| set_upgrade_report_delay(None));
     set_upgrade_report_delay(Some(Duration::from_millis(200)));
     let note = startup_note(&database.0);
     let path = database.0.clone();
@@ -8754,6 +8816,8 @@ async fn main_and_branch_formats_upgrade_to_the_current_format_without_reinterpr
         (43, false),
         (44, false),
         (45, false),
+        (46, false),
+        (47, false),
     ] {
         let database = Database::new();
         let connection = Connection::open(&database.0).unwrap();
@@ -8834,9 +8898,13 @@ async fn main_and_branch_formats_upgrade_to_the_current_format_without_reinterpr
             "facts changed: v{version}, main={main_layout}"
         );
         assert_eq!(rows(&connection, "session_owners"), owners);
-        if version == 42 {
+        if matches!(version, 42 | 46 | 47) {
             for (table, expected) in &business {
-                assert_eq!(rows(&connection, table), *expected, "v42 rows in {table}");
+                assert_eq!(
+                    rows(&connection, table),
+                    *expected,
+                    "v{version} rows in {table}"
+                );
             }
         }
         assert_eq!(schema(&connection), schema_of(STORE_FORMAT));

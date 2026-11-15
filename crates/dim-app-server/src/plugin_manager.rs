@@ -125,7 +125,7 @@ fn module(id: &str, dir: &Path, code: &record::Code) -> String {
     if code.entry.extension().and_then(|e| e.to_str()) != Some("py") {
         return code.entry.to_string_lossy().into_owned();
     }
-    let relative = code.entry.strip_prefix(dir).unwrap_or(&code.entry);
+    let relative = code.entry.trim_prefix(dir);
     let module: Vec<_> = relative
         .with_extension("")
         .components()

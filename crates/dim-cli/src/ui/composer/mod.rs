@@ -235,7 +235,7 @@ impl Composer {
     /// Returns whether the draft changed.
     pub fn quote(&mut self, text: &str) -> bool {
         let text = text.replace("\r\n", "\n");
-        let text = text.strip_suffix('\n').unwrap_or(&text);
+        let text = text.trim_suffix('\n');
         if self.shell.is_some() || text.is_empty() {
             return false;
         }
@@ -509,8 +509,8 @@ impl Composer {
         self.mention_open() && self.mentions.as_mut().is_some_and(|m| m.changed())
     }
 
-    /// Whether the `@` index is still being walked. It is false before the
-    /// first draft starts a walk and after the walk has finished one.
+    /// Whether the `@` index still owes a walk: true before the first draft
+    /// starts one, while it runs, and false once one has finished.
     pub fn mention_searching(&self) -> bool {
         self.mentions.as_ref().is_some_and(|m| m.searching())
     }
@@ -639,6 +639,7 @@ impl Composer {
             {
                 if let Some(argument) = command.argument
                     && args.is_empty()
+                    && !command.argument_optional
                 {
                     return Outcome::Rejected(tf(
                         "/{name} needs {argument}",

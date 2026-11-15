@@ -1443,12 +1443,21 @@ async fn leader_delegates_and_team_members_communicate() {
     say(
         &mut client,
         &lead,
-        tool(json!({"action": "request", "agentId": default_agent, "prompt": "hello"})),
+        tool(json!({"action": "request", "agentId": default_agent, "prompt": "hello", "title": "Review greeting"})),
         "queue",
     )
     .await;
     returned(&mut client, &lead, &lead_session, 1).await;
     let timeline = events(&lead_session).await;
+    let request = timeline
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::CollaborationRequest(data) => Some(data),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(request.title.as_deref(), Some("Review greeting"));
+    assert_eq!(request.prompt, "hello");
     let (_, first) = results(&timeline)[0].clone();
     let first: Value = serde_json::from_str(&first).unwrap();
     assert_eq!(first["status"], "running");
@@ -1535,11 +1544,27 @@ async fn leader_delegates_and_team_members_communicate() {
         &lead,
         tool(
             json!({"action": "request", "agentId": default_agent, "sessionId": member,
-            "prompt": "tool:wait {\"millis\":60000}"}),
+            "prompt": "tool:wait {\"millis\":60000}", "title": "Wait for review"}),
         ),
         "queue",
     )
     .await;
+    idle(&mut client, &lead).await;
+    let pending = client
+        .rpc(
+            "session.collaboration.pending",
+            json!({"sessionId": lead, "branchId": "main"}),
+        )
+        .await;
+    assert_ok(&pending);
+    assert_eq!(
+        pending["result"]["requests"][0]["request"]["title"],
+        "Wait for review"
+    );
+    assert_eq!(
+        pending["result"]["requests"][0]["request"]["prompt"],
+        "tool:wait {\"millis\":60000}"
+    );
     say(
         &mut client,
         &lead,
@@ -1848,7 +1873,7 @@ async fn leader_delegates_and_team_members_communicate() {
     )
     .unwrap();
     for (action, required) in [
-        ("request", json!(["action", "prompt", "agentId"])),
+        ("request", json!(["action", "prompt", "title", "agentId"])),
         ("cancel", json!(["action", "agentId", "sessionId"])),
         ("close", json!(["action", "agentId", "sessionId"])),
         (
@@ -1879,14 +1904,23 @@ async fn leader_delegates_and_team_members_communicate() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|variant| variant["required"] == json!(["action", "prompt", "profile"]))
+            .any(|variant| variant["required"] == json!(["action", "prompt", "title", "profile"]))
     );
+    for variant in schema["anyOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|variant| variant["properties"]["action"]["enum"][0] == "request")
+    {
+        assert_eq!(variant["properties"]["title"]["minLength"], 1);
+        assert!(variant["properties"]["title"].get("pattern").is_none());
+    }
     let validator = jsonschema::validator_for(&schema).unwrap();
     assert!(!validator.is_valid(&json!({"action":"cancel","agentId":"exec-unknown"})));
     assert!(!validator.is_valid(&json!({"action":"list","agentId":"unexpected"})));
     assert!(!validator.is_valid(&json!({"action":"request","prompt":"work","agentId":default_agent,"profile":{"name":"worker","description":"","systemPrompt":"work","tools":[]}})));
     assert!(validator.is_valid(
-        &json!({"action":"request","prompt":"work","agentId":default_agent,"sessionId":member})
+        &json!({"action":"request","prompt":"work","title":"Review change","agentId":default_agent,"sessionId":member})
     ));
     assert!(validator.is_valid(
         &json!({"action":"read","agentId":default_agent,"sessionId":member,"after":1,"limit":2})
@@ -1894,7 +1928,35 @@ async fn leader_delegates_and_team_members_communicate() {
     assert!(
         validator.is_valid(&json!({"action":"cancel","agentId":default_agent,"sessionId":member}))
     );
-    assert!(validator.is_valid(&json!({"action":"request","prompt":"work","profile":{"name":"worker","description":"","systemPrompt":"work","tools":[]}})));
+    assert!(validator.is_valid(&json!({"action":"request","prompt":"work","title":"Review change","profile":{"name":"worker","description":"","systemPrompt":"work","tools":[]}})));
+    assert!(
+        !validator.is_valid(&json!({"action":"request","prompt":"work","agentId":default_agent}))
+    );
+    for (title, schema_valid) in [
+        (json!(""), false),
+        (json!("  "), true),
+        (json!("two\nlines"), true),
+        (json!("trailing\n"), true),
+        (json!("two\rlines"), true),
+        (json!("two\u{0085}lines"), true),
+        (json!("two\u{2028}lines"), true),
+        (json!("two\u{2029}lines"), true),
+        (json!(null), false),
+        (json!(7), false),
+    ] {
+        let input =
+            json!({"action":"request","prompt":"work","title":title,"agentId":default_agent});
+        assert_eq!(validator.is_valid(&input), schema_valid, "{input}");
+        let before = facts(&lead_session).await;
+        say(&mut client, &lead, tool(input), "queue").await;
+        idle(&mut client, &lead).await;
+        assert!(last_error(&events(&lead_session).await).starts_with("invalid_input"));
+        assert_eq!(
+            facts(&lead_session).await,
+            before,
+            "invalid title must not create a request"
+        );
+    }
     let before = facts(&lead_session).await;
     say(
         &mut client,
@@ -2416,6 +2478,112 @@ async fn members_cancel_close_and_leave_the_team() {
     let (error, text) = results(&events(&lead_session).await).pop().unwrap();
     assert!(!error && text.contains("still running"), "{text}");
 
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn finished_delegations_exclude_failed_non_request_deliveries_before_the_limit() {
+    let (server, agent) = launch_team().await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    let lead = leader(&mut client, allowed()).await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let default_agent = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": default_agent, "prompt": "done"})),
+        "queue",
+    )
+    .await;
+    returned(&mut client, &lead, &lead_session, 1).await;
+    for index in 0..49 {
+        say(
+            &mut client,
+            &lead,
+            tool(json!({"action": "request", "agentId": "no-such-agent",
+                "prompt": format!("failed delegation {index}")})),
+            "queue",
+        )
+        .await;
+        idle(&mut client, &lead).await;
+    }
+    let before = client
+        .rpc(
+            "session.collaboration.finished",
+            json!({"sessionId": lead, "branchId": "main"}),
+        )
+        .await;
+    assert_ok(&before);
+    let expected = before["result"]["requests"].as_array().unwrap();
+    assert_eq!(expected.len(), 50);
+    assert!(
+        expected[..49]
+            .iter()
+            .all(|item| item["result"].is_null() && item["start"]["delivery"]["status"] == "error")
+    );
+    assert_eq!(expected[49]["result"]["status"], "completed");
+    for index in 0..51 {
+        let action = ["message", "cancel", "close"][index % 3];
+        let mut input = json!({"action": action, "agentId": default_agent,
+            "sessionId": "no-such-member"});
+        if action == "message" {
+            input["content"] = json!("not a delegation");
+        }
+        say(&mut client, &lead, tool(input), "queue").await;
+        idle(&mut client, &lead).await;
+        assert!(last_error(&events(&lead_session).await).starts_with("team_member_not_found"));
+    }
+    let timeline = events(&lead_session).await;
+    assert_eq!(
+        timeline
+            .iter()
+            .filter(
+                |event| matches!(&event.kind, EventKind::CollaborationDelivered(data)
+                if matches!(&data.delivery, CollaborationDelivery::Error { .. }))
+            )
+            .count(),
+        100,
+        "49 refused delegations and 51 refused message/cancel/close operations were delivered"
+    );
+    let after = client
+        .rpc(
+            "session.collaboration.finished",
+            json!({"sessionId": lead, "branchId": "main"}),
+        )
+        .await;
+    assert_ok(&after);
+    assert_eq!(after["result"]["requests"], before["result"]["requests"]);
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": "no-such-agent", "prompt": "newest failure"})),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    let newest = client
+        .rpc(
+            "session.collaboration.finished",
+            json!({"sessionId": lead, "branchId": "main"}),
+        )
+        .await;
+    assert_ok(&newest);
+    let newest = newest["result"]["requests"].as_array().unwrap();
+    assert_eq!(newest.len(), 50);
+    assert_eq!(newest[0]["start"]["request"]["prompt"], "newest failure");
+    assert_eq!(&newest[1..], &expected[..49]);
+    let cutoff = client
+        .rpc(
+            "session.collaboration.finished",
+            json!({"sessionId": lead, "branchId": "main", "through": before["result"]["through"]}),
+        )
+        .await;
+    assert_ok(&cutoff);
+    assert_eq!(cutoff["result"], before["result"]);
     server.shutdown();
     server.join().await.unwrap();
 }
@@ -3501,6 +3669,7 @@ async fn a_client_cancel_from_another_branch_leaves_the_owning_branch_turn_runni
                         session_id: member.clone(),
                     },
                     prompt: "later".into(),
+                    title: None,
                 })
                 .into(),
                 EventKind::Extension(
@@ -4045,25 +4214,41 @@ async fn a_client_cancel_refuses_a_new_request_to_the_member_until_it_returns() 
         }
     );
 
-    // Once the held read returns, the wait ends one way or another — with the
-    // stop, or from the request's own ending when its turn got there first —
-    // and the mark clears, so the member takes new work.
+    // Releasing the read wakes the carry-out task, which drops the stopping
+    // mark only at its next check, so a request can still be answered `busy`.
     release_read.release();
-    let accepted = count(&lead_session, false).await;
-    say(
-        &mut client,
-        &lead,
-        tool(
-            json!({"action": "request", "agentId": holder, "sessionId": member,
-            "prompt": "tool:echo {\"text\":\"after\"}"}),
-        ),
-        "queue",
-    )
-    .await;
-    poll("the request after the cancel is accepted", async || {
-        (count(&lead_session, false).await > accepted).then_some(())
+    let asked = async |client: &mut Client| {
+        let before = deliveries(&lead_session).await.len();
+        say(
+            client,
+            &lead,
+            tool(
+                json!({"action": "request", "agentId": holder, "sessionId": member,
+                "prompt": "tool:echo {\"text\":\"after\"}"}),
+            ),
+            "queue",
+        )
+        .await;
+        poll("the request after the cancel is decided", async || {
+            let seen = deliveries(&lead_session).await;
+            (seen.len() > before).then(|| seen.last().cloned().expect("a new delivery"))
+        })
+        .await
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match asked(&mut client).await {
+                CollaborationDelivery::Ok { .. } => return,
+                CollaborationDelivery::Error { error } => assert_eq!(
+                    error,
+                    dim_agent_types::CollaborationErrorCode::Busy,
+                    "the request after the cancel is accepted"
+                ),
+            }
+        }
     })
-    .await;
+    .await
+    .unwrap_or_else(|_| panic!("deadline: the request after the cancel is accepted"));
 
     server.shutdown();
     server.join().await.unwrap();
@@ -6319,6 +6504,7 @@ async fn an_operation_of_a_turn_interrupted_before_a_reload_is_refused() {
                 call_id: "late".into(),
                 target: dim_agent_types::CollaborationTarget::Agent { agent_id },
                 prompt: "hello".into(),
+                title: None,
             })
             .into(),
         )
@@ -8087,6 +8273,7 @@ async fn missing_permission_state_refuses_a_committed_member_request_without_cre
         let request = timeline.append(EventKind::CollaborationRequest(dim_agent_types::CollaborationRequestData {
             turn_id: "sampling-failure".into(), request_id: "sampling-failure".into(), call_id: "sampling-failure".into(),
             target: dim_agent_types::CollaborationTarget::Agent { agent_id }, prompt: "hello".into(),
+            title: None,
         }).into()).unwrap();
         let plugins = ctx.diagnostics().plugins;
         let parent = plugins.iter().find(|plugin| plugin.instance == ctx.instance()).unwrap().parent;

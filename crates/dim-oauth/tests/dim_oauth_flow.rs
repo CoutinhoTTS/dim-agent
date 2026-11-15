@@ -19,13 +19,15 @@ use dim_agent_types::{
 };
 use dim_app_server::{
     managed_provider::{
-        AccountSnapshot, ManagedProviderBinding, ManagedProviders, ManagedProvidersPlugin,
+        AccountSnapshot, ManagedModel, ManagedProviderBinding, ManagedProviders,
+        ManagedProvidersPlugin,
         management::{
             BrowserLoginBegin, LoginBegin, LoginState, ManagedBrowserLoginComplete,
             ManagedLoginAttempt,
         },
     },
-    provider::{ProviderPlugin, ProviderService},
+    model_catalog::{BundledCatalog, ProviderProjection, raw_kind},
+    provider::{ProviderError, ProviderPlugin, ProviderService},
     storage::SqliteStoragePlugin,
 };
 use dim_oauth::{ClientIds, DimOAuthPlugin};
@@ -33,6 +35,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberState, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, atomic::Ordering},
@@ -659,6 +662,146 @@ async fn a_relay_model_without_declared_limits_is_published_as_undeclared() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The distinct model ids the shipped catalog lists, in catalog order. A case
+/// picks the id it asserts on from here by property, never by name.
+fn listed_ids(catalog: &BundledCatalog) -> Vec<String> {
+    let mut seen = HashSet::new();
+    catalog
+        .providers()
+        .flat_map(|provider| provider.models.iter().map(|model| model.model_id.clone()))
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
+/// The shipped id a case uses as a media-only name: the lookup takes it with
+/// no kind, its own kind is not `chat`, and stating it as `chat` leaves no row
+/// to join. Every account serving asserts that a listing of this name takes no
+/// limit from the media rows it matches.
+fn media_only_id(catalog: &BundledCatalog) -> String {
+    let projection = ProviderProjection::default();
+    listed_ids(catalog)
+        .into_iter()
+        .find(|id| {
+            let Some(entry) = catalog.fallback(&projection, id, None) else {
+                return false;
+            };
+            entry.capabilities.missing_limits().is_empty()
+                && entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| raw_kind(&metadata.raw))
+                    .is_some_and(|kind| kind != "chat")
+                && catalog.fallback(&projection, id, Some("chat")).is_none()
+        })
+        .expect("a shipped id whose name matches only media rows")
+}
+
+/// The shipped id a case uses as a chat-only name: the lookup takes it with no
+/// kind, its own kind is `chat`, and stating it as an image-generation model
+/// leaves no row to join.
+fn chat_only_id(catalog: &BundledCatalog) -> String {
+    let projection = ProviderProjection::default();
+    listed_ids(catalog)
+        .into_iter()
+        .find(|id| {
+            let Some(entry) = catalog.fallback(&projection, id, None) else {
+                return false;
+            };
+            entry.capabilities.missing_limits().is_empty()
+                && entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| raw_kind(&metadata.raw))
+                    .as_deref()
+                    == Some("chat")
+                && catalog
+                    .fallback(&projection, id, Some("image-generation"))
+                    .is_none()
+        })
+        .expect("a shipped id whose name matches only chat rows")
+}
+
+/// The model one account listing publishes for `id`. The listing states
+/// `endpoint_type` and no limit and no reasoning, so a limit the published
+/// model carries can only have come from a bundled row the lookup found. Each
+/// serving needs its own process, because a listing cannot carry one id twice.
+async fn published_account_model(id: &str, mut dim: Value) -> ManagedModel {
+    dim["id"] = json!(id);
+    let fixture = oauth::start().await;
+    *fixture.service.models.lock().unwrap() = Some(json!({"data":[{"id":id,"dim":dim}]}));
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    login(&providers, &fixture.base).await;
+    let catalog = providers.catalog(PROVIDER, &cancel()).await.unwrap();
+    let model = catalog
+        .models
+        .into_iter()
+        .find(|model| model.entry.model_id == id)
+        .unwrap();
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+    model
+}
+
+/// The `type` the account published for a model, read as the one reader reads
+/// any stated kind.
+fn published_kind(model: &ManagedModel) -> Option<String> {
+    model
+        .entry
+        .metadata
+        .as_ref()
+        .and_then(|metadata| raw_kind(&metadata.raw))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_model_stating_chat_takes_no_media_row() {
+    let id = media_only_id(&BundledCatalog::load().unwrap());
+    let model = published_account_model(&id, json!({"endpoint_type":"openai","type":"chat"})).await;
+    assert_eq!(
+        model.entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"],
+        "a listing that states chat takes no limit from the media rows its name matches"
+    );
+    assert_eq!(published_kind(&model).as_deref(), Some("chat"));
+    assert_eq!(
+        model.unavailable_reason.as_deref(),
+        Some("limits_undeclared")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_model_stating_chat_under_raw_takes_no_media_row() {
+    let id = media_only_id(&BundledCatalog::load().unwrap());
+    let model =
+        published_account_model(&id, json!({"endpoint_type":"openai","raw":{"type":"chat"}})).await;
+    assert_eq!(
+        model.entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"],
+        "a listing that states chat under raw takes no limit from the media rows its name matches"
+    );
+    assert_eq!(published_kind(&model).as_deref(), Some("chat"));
+    assert_eq!(
+        model.unavailable_reason.as_deref(),
+        Some("limits_undeclared")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_model_flagged_for_image_generation_takes_no_chat_row() {
+    let id = chat_only_id(&BundledCatalog::load().unwrap());
+    let model = published_account_model(
+        &id,
+        json!({"endpoint_type":"openai","imageGeneration":true}),
+    )
+    .await;
+    assert_eq!(
+        model.entry.capabilities.missing_limits(),
+        ["contextWindow", "maxOutputTokens"],
+        "a listing flagged for image generation takes no limit from the chat rows its name matches"
+    );
+    assert_eq!(published_kind(&model).as_deref(), Some("image-generation"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejected_credentials_recover_once_and_only_the_owner_signs_out() {
     let fixture = oauth::start().await;
@@ -1133,6 +1276,112 @@ async fn provider_process(home: &Path) -> Process {
         active(view).await;
     }
     process
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn managed_catalog_writes_distinguish_account_changes_from_version_conflicts() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = provider_process(&home).await;
+    let mut account = login(&providers, &fixture.base).await;
+    let provider = root.get::<ProviderService>().unwrap();
+    let catalog = provider.refresh(PROVIDER.into(), &cancel()).await.unwrap();
+    let mut version = catalog.version;
+
+    let revision = auth(&home)["dimAccountState"]["credentialRevision"]
+        .as_u64()
+        .unwrap();
+    let lease = providers
+        .credential(PROVIDER, "fixture-model", &cancel())
+        .await
+        .unwrap();
+    let rotated = providers.recover(&lease, &cancel()).await.unwrap();
+    assert_eq!(rotated.account, account);
+    assert_eq!(
+        auth(&home)["dimAccountState"]["credentialRevision"],
+        revision + 1
+    );
+    let written = provider
+        .set_enabled_models(PROVIDER.into(), version, vec![], &cancel())
+        .await
+        .unwrap();
+    version = written.version;
+    drop((lease, rotated));
+
+    for recover in [false, true] {
+        let next = if recover {
+            let mut doc = auth(&home);
+            doc["dimAccountState"]["tokenDigest"] = json!("0".repeat(64));
+            std::fs::write(home.join("auth.json"), serde_json::to_vec(&doc).unwrap()).unwrap();
+            let next = providers
+                .recover_account(PROVIDER, &cancel())
+                .await
+                .unwrap();
+            assert_ne!(next.credential_epoch, account.credential_epoch);
+            next
+        } else {
+            let next = login(&providers, &fixture.base).await;
+            assert_eq!(next.credential_epoch, account.credential_epoch);
+            assert_eq!(next.generation, account.generation + 1);
+            next
+        };
+        assert_eq!(next.account, account.account);
+        account = next;
+        assert!(matches!(
+            provider
+                .set_enabled_models(PROVIDER.into(), version - 1, vec![], &cancel())
+                .await,
+            Err(ProviderError::Conflict(_))
+        ));
+        let stale = provider
+            .set_enabled_models(PROVIDER.into(), version, vec![], &cancel())
+            .await
+            .unwrap_err();
+        match stale {
+            ProviderError::CatalogStale {
+                provider_id,
+                expected_version,
+                current_version,
+                issuer,
+                subject,
+            } => {
+                assert_eq!(provider_id, PROVIDER);
+                assert_eq!(expected_version, version);
+                assert_eq!(current_version, version);
+                let identity = account.account.as_ref().unwrap();
+                assert_eq!(issuer.as_deref(), Some(identity.issuer.as_str()));
+                assert_eq!(subject.as_deref(), Some(identity.subject.as_str()));
+            }
+            other => panic!("expected a stale catalog after account change: {other:?}"),
+        }
+        let refreshed = provider.refresh(PROVIDER.into(), &cancel()).await.unwrap();
+        assert_eq!(refreshed.version, version + 1);
+        let written = provider
+            .set_enabled_models(PROVIDER.into(), refreshed.version, vec![], &cancel())
+            .await
+            .unwrap();
+        assert_eq!(written.version, version + 2);
+        version = written.version;
+    }
+
+    providers.logout(PROVIDER, &cancel()).await.unwrap();
+    assert!(matches!(
+        provider
+            .set_enabled_models(PROVIDER.into(), version, vec![], &cancel())
+            .await,
+        Err(ProviderError::CatalogStale {
+            issuer: None,
+            subject: None,
+            ..
+        })
+    ));
+    let read = provider
+        .management(Some(PROVIDER.into()), &cancel())
+        .await
+        .unwrap();
+    assert_eq!(read.providers[0].version, Some(version));
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 /// A managed bundle's media model leases for its non-conversational use, and

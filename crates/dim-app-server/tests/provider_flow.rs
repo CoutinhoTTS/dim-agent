@@ -18,11 +18,12 @@ use dim_agent_runtime::{Names, names::ServiceCatalog};
 use dim_agent_types::{Message, ModelId, ModelRequest, Role};
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
-    model_catalog::{BundledCatalog, ModelEntry, ModelStatus},
+    model_catalog::{BundledCatalog, ModelEntry, ModelStatus, ProviderRole},
     provider::{
         ConnectionInput, CreateProvider, CredentialUpdate, LegacyRow, ModelPreferences,
-        ProviderError, ProviderPlugin, ProviderService, StaticAuth, StaticProviderRecord,
-        StoredSelectionError, convert_legacy_provider, parse_static, stored_selection,
+        ProviderError, ProviderModel, ProviderPlugin, ProviderService, StaticAuth,
+        StaticProviderRecord, StoredSelectionError, convert_legacy_provider, parse_static,
+        stored_selection,
     },
     storage::SqliteStoragePlugin,
 };
@@ -237,6 +238,7 @@ fn input(
         },
         models: vec![model("same", max)],
         enabled: true,
+        glued_prefix: None,
     }
 }
 fn target(provider: &str) -> ModelId {
@@ -256,6 +258,33 @@ fn stored_record(home: &Path, provider_id: &str) -> StaticProviderRecord {
         )
         .unwrap();
     parse_static(provider_id, version, &body).unwrap()
+}
+
+/// One stored record's own JSON, for the fields the record owner keeps
+/// private to its module.
+fn stored_record_json(home: &Path, provider_id: &str) -> String {
+    let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    db.query_row(
+        "SELECT record FROM providers WHERE provider_id=?1",
+        [provider_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// The prefix a stored record carries, read from the record's own JSON: the
+/// field is the record owner's, and the store is where the statement lives.
+fn stored_prefix(home: &Path, provider_id: &str) -> Option<String> {
+    let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let body: String = db
+        .query_row(
+            "SELECT record FROM providers WHERE provider_id=?1",
+            [provider_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let value: Value = serde_json::from_str(&body).unwrap();
+    value["gluedPrefix"].as_str().map(str::to_owned)
 }
 
 #[tokio::test]
@@ -1166,6 +1195,359 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     root.shutdown().await.unwrap();
     server.abort();
     std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The effort list a model's metadata declares, as stated: `None` when it
+/// states no list, `Some([])` when it declares an empty one.
+fn declared_efforts(
+    metadata: Option<&dim_app_server::model_catalog::ModelMetadata>,
+) -> Option<Vec<String>> {
+    metadata
+        .and_then(|metadata| metadata.reasoning.as_ref())
+        .and_then(|reasoning| reasoning.effort_options.clone())
+}
+
+/// The effort list one bundled row declares for `id`.
+fn bundled_efforts(catalog: &BundledCatalog, provider_id: &str, id: &str) -> Vec<String> {
+    catalog
+        .bundled_models(provider_id)
+        .unwrap()
+        .iter()
+        .find(|model| model.model_id == id)
+        .and_then(|model| declared_efforts(model.metadata.as_ref()))
+        .unwrap()
+}
+
+const LISTED: &str = "00000000-0000-4000-8000-000000000022";
+
+/// One served listing and the Provider that listed it, closed by the case.
+struct ServedListing {
+    provider: Arc<ProviderService>,
+    catalog: dim_app_server::provider::ProviderCatalog,
+    root: Ctx,
+    server: tokio::task::JoinHandle<()>,
+    home: PathBuf,
+    cancel: CancellationToken,
+}
+
+impl ServedListing {
+    /// Serves `models` at `/v1/models`, refreshes the Provider, and keeps the
+    /// catalog the refresh wrote.
+    async fn refreshed(models: Value) -> Self {
+        use axum::{
+            http::{StatusCode, Uri},
+            routing::get,
+        };
+        use tokio::sync::{mpsc, oneshot};
+        type Exchange = (Uri, oneshot::Sender<(StatusCode, Json<Value>)>);
+        let (send, mut requests) = mpsc::channel::<Exchange>(8);
+        let app = Router::new().route(
+            "/{*path}",
+            get(move |uri: Uri| {
+                let send = send.clone();
+                async move {
+                    let (reply, response) = oneshot::channel();
+                    send.send((uri, reply)).await.unwrap();
+                    response
+                        .await
+                        .unwrap_or((StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let home = std::env::temp_dir().join(format!("provider-efforts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        let root = Ctx::root().unwrap();
+        root.plugin(
+            dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+                .unwrap(),
+        );
+        root.plugin(FileStoragePlugin::new(vec![home.clone()]));
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+        root.plugin(ManagedProvidersPlugin);
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+        root.plugin(dim_agent_aimux::AimuxPlugin);
+        let view = root.plugin(provider_part(ProviderPlugin::new));
+        tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
+            .await
+            .unwrap();
+        let provider = root.get::<ProviderService>().unwrap();
+        let cancel = CancellationToken::new();
+        provider
+            .create(
+                input(
+                    LISTED,
+                    &format!("{base}/v1"),
+                    StaticAuth::Bearer,
+                    Some("efforts-key"),
+                    "efforts",
+                    1000,
+                ),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let refresh = {
+            let provider = provider.clone();
+            let cancel = cancel.clone();
+            tokio::spawn(async move { provider.refresh_for(LISTED.into(), &cancel).await })
+        };
+        requests
+            .recv()
+            .await
+            .unwrap()
+            .1
+            .send((StatusCode::OK, Json(json!({ "data": models }))))
+            .unwrap();
+        let catalog = refresh.await.unwrap().unwrap();
+        Self {
+            provider,
+            catalog,
+            root,
+            server,
+            home,
+            cancel,
+        }
+    }
+
+    /// The efforts `id` offers, as the refresh reply reports them.
+    fn served(&self, id: &str) -> Option<Vec<String>> {
+        declared_efforts(
+            self.catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap()
+                .metadata
+                .as_ref(),
+        )
+    }
+
+    /// The same, as `provider.management` reports them from the stored record.
+    async fn read_back(&self, id: &str) -> Option<Vec<String>> {
+        let management = self
+            .provider
+            .management(Some(LISTED.into()), &self.cancel)
+            .await
+            .unwrap();
+        let models = management.providers[0].models.as_ref().unwrap();
+        declared_efforts(
+            models
+                .iter()
+                .find(|model| model.model.model_id == id)
+                .unwrap()
+                .model
+                .metadata
+                .as_ref(),
+        )
+    }
+
+    async fn close(self) {
+        self.root.shutdown().await.unwrap();
+        self.server.abort();
+        std::fs::remove_dir_all(self.home).unwrap();
+    }
+}
+
+/// A listing's `reasoning_levels` is the model's effort list, in the listing's
+/// order, even where its id identifies at a bundled row that declares a
+/// different one: `gpt-5.5` identifies at `openai`, whose row declares
+/// `effortOptions` without `max`.
+#[tokio::test]
+async fn a_listings_reasoning_levels_become_the_models_efforts() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5.5","reasoning":true,"reasoning_levels":["low","medium","high","xhigh","max"]},
+        {"id":"devin/swe-2","reasoning":true,"reasoning_levels":[" medium ",7,"","high","medium"]}
+    ]))
+    .await;
+    let named = listing
+        .catalog
+        .models
+        .iter()
+        .find(|model| model.id == "gpt-5.5")
+        .unwrap()
+        .metadata
+        .clone()
+        .unwrap();
+    assert_eq!(
+        (
+            named.matched_provider_id.as_deref(),
+            named.matched_model_id.as_deref()
+        ),
+        (Some("openai"), Some("gpt-5.5")),
+        "the row the listing's id identifies"
+    );
+    let bundled = BundledCatalog::load().unwrap();
+    assert_ne!(
+        bundled_efforts(&bundled, "openai", "gpt-5.5"),
+        ["low", "medium", "high", "xhigh", "max"].map(str::to_owned),
+        "the identified row declares a different list"
+    );
+    assert_eq!(
+        listing.served("gpt-5.5").unwrap(),
+        ["low", "medium", "high", "xhigh", "max"].map(str::to_owned)
+    );
+    // Trimmed, a non-string and an empty string dropped, a repeated value kept
+    // once in its first position.
+    assert_eq!(
+        listing.served("devin/swe-2").unwrap(),
+        ["medium", "high"].map(str::to_owned)
+    );
+    listing.close().await;
+}
+
+/// A listing's `supported_reasoning_levels` is the model's effort list the
+/// same way, from each item's `effort`.
+#[tokio::test]
+async fn a_listings_supported_reasoning_levels_become_the_models_efforts() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5-mini","reasoning":true,
+         "supported_reasoning_levels":[{"effort":"minimal"},{"effort":"low"},{"effort":"high"}]}
+    ]))
+    .await;
+    let bundled = BundledCatalog::load().unwrap();
+    assert_ne!(
+        bundled_efforts(&bundled, "openai", "gpt-5-mini"),
+        ["minimal", "low", "high"].map(str::to_owned),
+        "the identified row declares a different list"
+    );
+    assert_eq!(
+        listing.served("gpt-5-mini").unwrap(),
+        ["minimal", "low", "high"].map(str::to_owned)
+    );
+    listing.close().await;
+}
+
+/// A listing that states several shapes is read in the order the document
+/// names: `reasoning_options` first, as it was already read, then
+/// `supported_reasoning_levels` before `reasoning_levels`.
+#[tokio::test]
+async fn supported_reasoning_levels_win_over_reasoning_levels() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5.4-mini","reasoning":true,"reasoning_levels":["low"],
+         "supported_reasoning_levels":[{"effort":" medium "},{"effort":"max"},{"effort":"medium"},{"effort":""}]},
+        {"id":"gpt-5.4","reasoning":true,"reasoning_levels":["low"],
+         "supported_reasoning_levels":[{"effort":"medium"}],
+         "reasoning_options":[{"type":"effort","values":["high"]},{"type":"level","values":["low"]}]}
+    ]))
+    .await;
+    assert_eq!(
+        listing.served("gpt-5.4-mini").unwrap(),
+        ["medium", "max"].map(str::to_owned)
+    );
+    assert_eq!(
+        listing.served("gpt-5.4").unwrap(),
+        ["high"].map(str::to_owned),
+        "reasoning_options is read first, as it was before"
+    );
+    listing.close().await;
+}
+
+/// An explicitly empty list is a declaration: the model offers no effort
+/// choice, and the row it identifies at does not fill one. The stored record
+/// keeps the empty list, so the declaration survives a later read.
+#[tokio::test]
+async fn an_empty_declared_list_is_not_filled_from_the_identified_row() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5-nano","reasoning":true,"reasoning_levels":[]}
+    ]))
+    .await;
+    let bundled = BundledCatalog::load().unwrap();
+    assert!(
+        !bundled_efforts(&bundled, "openai", "gpt-5-nano").is_empty(),
+        "the identified row declares a list, which must not fill a declared empty one"
+    );
+    assert_eq!(listing.served("gpt-5-nano"), Some(Vec::new()));
+    let stored: Value = serde_json::from_str(&stored_record_json(&listing.home, LISTED)).unwrap();
+    assert_eq!(
+        stored["models"][0]["metadata"]["reasoning"]["effortOptions"],
+        json!([]),
+        "the stored record states the empty list"
+    );
+    assert_eq!(
+        listing.read_back("gpt-5-nano").await,
+        Some(Vec::new()),
+        "the second read still declares no effort"
+    );
+    listing.close().await;
+}
+
+/// A listing that declares no effort keeps today's behaviour: the identified
+/// row's list fills the descriptor, on the refresh reply and on a later read
+/// of the stored entry. The fill's limits are pinned with the bundled rows
+/// that supply them by `a_bundled_match_declares_both_limits_and_an_unmatched_descriptor_has_none`
+/// for the numbers and by `an_undeclared_model_limit_is_refused_until_a_source_declares_it`
+/// for the limits; no existing test pins the efforts alone.
+#[tokio::test]
+async fn an_undeclared_list_keeps_the_identified_rows_efforts() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5.4","reasoning":true},
+        {"id":"gpt-5.2","reasoning":false,"reasoning_levels":["low","high"]}
+    ]))
+    .await;
+    let bundled = BundledCatalog::load().unwrap();
+    let row = bundled_efforts(&bundled, "openai", "gpt-5.4");
+    assert!(!row.is_empty());
+    assert_eq!(listing.served("gpt-5.4").unwrap(), row);
+    assert_eq!(
+        listing.read_back("gpt-5.4").await.unwrap(),
+        row,
+        "the stored entry carries the fill too"
+    );
+    assert_eq!(
+        listing.served("gpt-5.2"),
+        None,
+        "declared levels never give a model that says it does not reason any"
+    );
+    listing.close().await;
+}
+
+/// A saved effort is validated against the model's declared list, so a level
+/// only the listing states is accepted. The rejection of an undeclared level
+/// is pinned by `public_static_provider_selection_resolution_execution_and_lifecycle_flow`.
+#[tokio::test]
+async fn a_saved_effort_is_validated_against_the_listings_levels() {
+    let listing = ServedListing::refreshed(json!([
+        {"id":"gpt-5.5","reasoning":true,"reasoning_levels":["low","medium","high","xhigh","max"]}
+    ]))
+    .await;
+    let saved = listing
+        .provider
+        .update_preferences(
+            LISTED.into(),
+            listing.catalog.version,
+            "gpt-5.5".into(),
+            serde_json::from_value(json!({"reasoningEffort":{"action":"set","value":"max"}}))
+                .unwrap(),
+            &listing.cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        saved.preferences["gpt-5.5"].reasoning_effort.as_deref(),
+        Some("max"),
+        "a level only the listing states is accepted"
+    );
+    let refused = listing
+        .provider
+        .update_preferences(
+            LISTED.into(),
+            saved.version.unwrap(),
+            "gpt-5.5".into(),
+            serde_json::from_value(json!({"reasoningEffort":{"action":"set","value":"none"}}))
+                .unwrap(),
+            &listing.cancel,
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(ProviderError::InvalidConfig(_))),
+        "a level only the identified row states is refused: {refused:?}"
+    );
+    listing.close().await;
 }
 
 #[tokio::test]
@@ -5081,7 +5463,19 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         )
         .await
         .unwrap();
-    assert_eq!(implicit.config.unwrap().reasoning, None);
+    assert_eq!(
+        implicit
+            .config
+            .as_ref()
+            .unwrap()
+            .reasoning
+            .as_ref()
+            .unwrap()
+            .effort
+            .as_deref(),
+        Some("high"),
+        "a client that states nothing applies the saved effort: {implicit:?}"
+    );
     let adopted = provider
         .configuration(
             Some(preference_target),
@@ -7712,11 +8106,14 @@ async fn legacy_import_keeps_the_builtin_seed_through_a_restart() {
 }
 
 /// #522: the bundle is a listing, so an entry declares a limit only where its
-/// `metadata.raw` does. The 128000/16384 pair earlier formats assumed for the
-/// entries that declare nothing is not a declaration: the model is listed with
-/// both limits missing and cannot be selected.
+/// `metadata.raw` does, and the 128000/16384 pair earlier formats assumed for
+/// the entries that declare nothing is not a declaration. Such an entry takes
+/// the numbers of the row its id identifies; an entry whose identified row
+/// declares nothing keeps both limits missing and cannot be selected.
 #[tokio::test]
-async fn a_bundled_entry_that_declares_no_limit_reports_it_missing() {
+async fn a_bundled_entry_without_limits_takes_the_identified_numbers_or_reports_them_missing() {
+    const QWEN: &str = "Qwen/Qwen3-VL-235B-A22B-Instruct";
+    const SUPPLIER: (&str, &str) = ("openrouter", "qwen/qwen3-vl-235b-a22b-instruct");
     let home = std::env::temp_dir().join(format!("provider-bundle-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&home).unwrap();
     let home = home.canonicalize().unwrap();
@@ -7755,59 +8152,674 @@ async fn a_bundled_entry_that_declares_no_limit_reports_it_missing() {
         )
         .await
         .unwrap();
-    for (provider_id, model_id, reason) in [
-        ("openai", "whisper-1", "provider_unavailable"),
+
+    // The row declares nothing and the catalog does know the model, so the
+    // numbers are the identified entry's own declaration rather than the pair
+    // the earlier format assumed for it.
+    let catalog = provider
+        .catalog_for("siliconflow".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == QWEN)
+        .expect("siliconflow lists the Qwen row");
+    let bundled = BundledCatalog::load().unwrap();
+    let supplier = bundled
+        .bundled_models(SUPPLIER.0)
+        .unwrap()
+        .iter()
+        .find(|row| row.model_id == SUPPLIER.1)
+        .expect("the catalog holds the entry that identifies it");
+    let numbers = (
+        model.capabilities.context_window,
+        model.capabilities.max_output_tokens,
+    );
+    assert_eq!(
+        numbers,
         (
-            "siliconflow",
-            "Qwen/Qwen3-VL-235B-A22B-Instruct",
-            "limits_undeclared",
+            supplier.capabilities.context_window,
+            supplier.capabilities.max_output_tokens
         ),
+        "{QWEN}: the numbers are {}'s {} row",
+        SUPPLIER.0,
+        SUPPLIER.1
+    );
+    assert_ne!(numbers.0, Some(128_000), "{QWEN}: the assumed window");
+    assert_ne!(numbers.1, Some(16_384), "{QWEN}: the assumed output cap");
+    assert!(model.missing_limits.is_empty(), "{QWEN}");
+    assert_eq!(model.unavailable_reason, None, "{QWEN}");
+    let identification = model
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "provider-exact", "{QWEN}");
+    assert_eq!(identification.filled.len(), 2, "{identification:?}");
+    for (limit, field, value) in [
+        (&identification.filled[0], "contextWindow", numbers.0),
+        (&identification.filled[1], "maxOutputTokens", numbers.1),
     ] {
-        let catalog = provider
-            .catalog_for(provider_id.into(), &cancel)
-            .await
-            .unwrap()
-            .unwrap();
-        let model = catalog
-            .models
-            .iter()
-            .find(|model| model.id == model_id)
-            .unwrap();
-        assert_eq!(model.capabilities.context_window, None, "{model_id}");
-        assert_eq!(model.capabilities.max_output_tokens, None, "{model_id}");
+        assert_eq!(limit.field, field, "{QWEN}: {identification:?}");
+        assert_eq!(Some(limit.value), value, "{QWEN}: {field}");
         assert_eq!(
-            model.missing_limits,
-            ["contextWindow", "maxOutputTokens"],
-            "{model_id}"
-        );
-        assert_eq!(
-            model.unavailable_reason.as_deref(),
-            Some(reason),
-            "{model_id}"
-        );
-        match provider
-            .select(
-                None,
-                ModelId {
-                    provider_id: provider_id.into(),
-                    model_id: model_id.into(),
-                },
-                None,
-                &cancel,
-            )
-            .await
-        {
-            Err(ProviderError::InvalidConfig(message)) => assert_eq!(
-                message, "Model has no declared contextWindow or maxOutputTokens",
-                "{model_id}"
+            (
+                limit.provider_id.as_str(),
+                limit.model_id.as_str(),
+                limit.rule.as_str()
             ),
-            other => panic!("{model_id}: {other:?}"),
-        }
+            (SUPPLIER.0, SUPPLIER.1, "merge"),
+            "{QWEN}: {field} came from this entry by this rule"
+        );
+    }
+    provider
+        .select(
+            None,
+            ModelId {
+                provider_id: "siliconflow".into(),
+                model_id: QWEN.into(),
+            },
+            None,
+            &cancel,
+        )
+        .await
+        .expect("a filled entry is selectable");
+
+    // #522's other half: a listed row that declares nothing and whose
+    // identified entry, its own row, declares nothing either keeps both limits
+    // missing, so it cannot be selected.
+    let catalog = provider
+        .catalog_for("openai".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == "whisper-1")
+        .unwrap();
+    assert_eq!(model.capabilities.context_window, None, "whisper-1");
+    assert_eq!(model.capabilities.max_output_tokens, None, "whisper-1");
+    assert_eq!(
+        model.missing_limits,
+        ["contextWindow", "maxOutputTokens"],
+        "whisper-1"
+    );
+    assert_eq!(
+        model.unavailable_reason.as_deref(),
+        Some("provider_unavailable"),
+        "whisper-1"
+    );
+    match provider
+        .select(
+            None,
+            ModelId {
+                provider_id: "openai".into(),
+                model_id: "whisper-1".into(),
+            },
+            None,
+            &cancel,
+        )
+        .await
+    {
+        Err(ProviderError::InvalidConfig(message)) => assert_eq!(
+            message,
+            "Model openai/whisper-1 declares no contextWindow or maxOutputTokens; declare the missing limits with provider.models.edit",
+            "whisper-1"
+        ),
+        other => panic!("whisper-1: {other:?}"),
     }
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// An id several rows still disagree on is refused, and the refusal names the
+/// rows rather than leaving the client to find them. A relay's own list names
+/// nothing, so the catalog's own ambiguous id reaches the refusal.
+#[tokio::test]
+async fn a_refused_ambiguity_names_the_rows_that_disagree() {
+    let home = std::env::temp_dir().join(format!("provider-ambiguous-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    const RELAY: &str = "00000000-0000-4000-8000-000000000041";
+    const AMBIGUOUS: &str = "ark-code-latest";
+    let mut relay = input(
+        RELAY,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("relay-key"),
+        "ambiguous",
+        1,
+    );
+    // The relay lists the id and declares nothing for it, which is the entry a
+    // gateway that ships no list of its own gives the catalog to identify.
+    relay.models = vec![
+        serde_json::from_value(json!({
+            "modelId":AMBIGUOUS, "displayName":AMBIGUOUS, "status":"active",
+            "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,
+                "structuredOutput":true,"vision":false,"audio":false,"reasoning":false}
+        }))
+        .unwrap(),
+    ];
+    provider.create(relay, &cancel).await.unwrap();
+    let catalog = provider
+        .catalog_for(RELAY.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == AMBIGUOUS)
+        .expect("the relay lists the id it did not declare");
+    let identification = model
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.identification.as_ref())
+        .expect("the entry carries what identification found");
+    assert_eq!(identification.rule, "ambiguous", "{identification:?}");
+    let candidates: Vec<String> = identification
+        .candidates
+        .iter()
+        .map(|candidate| format!("{}/{}", candidate.provider_id, candidate.model_id))
+        .collect();
+    assert!(candidates.len() > 1, "{identification:?}");
+    match provider
+        .select(
+            None,
+            ModelId {
+                provider_id: RELAY.into(),
+                model_id: AMBIGUOUS.into(),
+            },
+            None,
+            &cancel,
+        )
+        .await
+    {
+        Err(ProviderError::InvalidConfig(message)) => {
+            assert!(
+                message.starts_with(&format!("Model {RELAY}/{AMBIGUOUS} declares no ")),
+                "{message}"
+            );
+            for candidate in &candidates {
+                assert!(
+                    message.contains(candidate.as_str()),
+                    "{message} does not name {candidate}"
+                );
+            }
+        }
+        other => panic!("{AMBIGUOUS}: {other:?}"),
+    }
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A provider states the prefix its ids carry, and the statement is what makes
+/// a prefixed id resolve: the stripped id answers through the same steps, the
+/// reply carries the statement back, and clearing it puts the id back where it
+/// was.
+#[tokio::test]
+async fn a_provider_states_the_prefix_its_ids_carry_and_that_statement_resolves_them() {
+    let home = std::env::temp_dir().join(format!("provider-prefix-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    const PREFIXED: &str = "00000000-0000-4000-8000-000000000051";
+    const PREFIXED_ID: &str = "auto-kimi-k3";
+    let mut relay = input(
+        PREFIXED,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("relay-key"),
+        "prefix",
+        1,
+    );
+    relay.models = vec![
+        serde_json::from_value(json!({
+            "modelId":PREFIXED_ID, "displayName":PREFIXED_ID, "status":"active",
+            "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,
+                "structuredOutput":true,"vision":false,"audio":false,"reasoning":false}
+        }))
+        .unwrap(),
+    ];
+    provider.create(relay, &cancel).await.unwrap();
+    // Without the statement the prefixed id names nothing, which is the entry
+    // a relay's own spelling gives the catalog today.
+    let catalog = provider
+        .catalog_for(PREFIXED.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == PREFIXED_ID)
+        .expect("the relay lists the id it did not declare");
+    assert_eq!(
+        model.missing_limits,
+        ["contextWindow", "maxOutputTokens"],
+        "nothing names the prefixed id yet"
+    );
+    assert!(
+        model.metadata.as_ref().unwrap().identification.is_none(),
+        "nothing named the model"
+    );
+    // The statement is one write, and the reply carries it back.
+    let stated = provider
+        .update(
+            PREFIXED.into(),
+            catalog.version,
+            serde_json::from_value(json!({"gluedPrefix":"auto"})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stated
+            .connection
+            .as_ref()
+            .expect("the record is static")
+            .glued_prefix
+            .as_deref(),
+        Some("auto")
+    );
+    assert_eq!(
+        stored_prefix(&home, PREFIXED).as_deref(),
+        Some("auto"),
+        "the statement is in the record, not only in the reply"
+    );
+    // The stored id is what the provider lists, and the entry now names the
+    // model it stands for with that model's own numbers.
+    let catalog = provider
+        .catalog_for(PREFIXED.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == PREFIXED_ID)
+        .expect("the stored id is the provider's own spelling");
+    assert!(model.missing_limits.is_empty(), "{model:?}");
+    assert_eq!(model.capabilities.context_window, Some(1_048_576));
+    assert_eq!(model.capabilities.max_output_tokens, Some(1_048_576));
+    let identification = model
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .expect("the entry carries what identification found");
+    assert_eq!(identification.rule, "token");
+    assert_eq!(
+        model.metadata.as_ref().unwrap().matched_model_id.as_deref(),
+        Some("kimi-k3")
+    );
+    // Clearing the statement is one write too, and puts the id back where it
+    // was rather than leaving the record in a shape no client can undo.
+    let cleared = provider
+        .update(
+            PREFIXED.into(),
+            catalog.version,
+            serde_json::from_value(json!({"gluedPrefix":null})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cleared
+            .connection
+            .as_ref()
+            .expect("the record is static")
+            .glued_prefix,
+        None
+    );
+    assert_eq!(stored_prefix(&home, PREFIXED), None);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The prefix is one statement about a provider's ids, so creation accepts it
+/// on the same terms as the partial update: the created record stores it,
+/// `provider.list` and `provider.management` read it back, and the id it
+/// prefixes is identified from the first read rather than after a second
+/// write.
+#[tokio::test]
+async fn a_created_provider_states_the_prefix_its_ids_carry() {
+    let home = std::env::temp_dir().join(format!("provider-created-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    const CREATED: &str = "00000000-0000-4000-8000-000000000052";
+    const CREATED_ID: &str = "auto-kimi-k3";
+    let mut relay = input(
+        CREATED,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("relay-key"),
+        "created",
+        1,
+    );
+    relay.models = vec![
+        serde_json::from_value(json!({
+            "modelId":CREATED_ID, "displayName":CREATED_ID, "status":"active",
+            "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,
+                "structuredOutput":true,"vision":false,"audio":false,"reasoning":false}
+        }))
+        .unwrap(),
+    ];
+    relay.glued_prefix = Some("auto".into());
+    let created = provider.create(relay, &cancel).await.unwrap();
+    assert_eq!(
+        created
+            .connection
+            .as_ref()
+            .expect("the record is static")
+            .glued_prefix
+            .as_deref(),
+        Some("auto"),
+        "the reply carries the statement the creation made"
+    );
+    assert_eq!(stored_prefix(&home, CREATED).as_deref(), Some("auto"));
+    let listed = provider
+        .list(&cancel)
+        .await
+        .unwrap()
+        .providers
+        .into_iter()
+        .find(|provider| provider.provider_id == CREATED)
+        .expect("the created provider is in the list");
+    assert_eq!(listed.glued_prefix.as_deref(), Some("auto"));
+    let managed = provider
+        .management(Some(CREATED.into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    assert_eq!(
+        managed
+            .connection
+            .as_ref()
+            .expect("the record is static")
+            .glued_prefix
+            .as_deref(),
+        Some("auto")
+    );
+    // The statement is in force from the creation: the model the id names
+    // answers with that row's numbers without a second write.
+    let catalog = provider
+        .catalog_for(CREATED.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == CREATED_ID)
+        .expect("the provider lists the id it prefixed");
+    assert!(model.missing_limits.is_empty(), "{model:?}");
+    assert_eq!(
+        model.metadata.as_ref().unwrap().matched_model_id.as_deref(),
+        Some("kimi-k3")
+    );
+    // A blank statement is no statement, the same as the patch's empty one.
+    let mut blank = input(
+        "00000000-0000-4000-8000-000000000053",
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("relay-key"),
+        "created",
+        1,
+    );
+    blank.glued_prefix = Some("   ".into());
+    let blank = provider.create(blank, &cancel).await.unwrap();
+    assert_eq!(
+        blank
+            .connection
+            .as_ref()
+            .expect("the record is static")
+            .glued_prefix,
+        None
+    );
+    // A padded statement is the statement it surrounds, as the alias edit
+    // stores it: the record keeps `auto`, not the padding it arrived in.
+    const PADDED: &str = "00000000-0000-4000-8000-000000000054";
+    let mut padded = input(
+        PADDED,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("relay-key"),
+        "created",
+        1,
+    );
+    padded.glued_prefix = Some("  auto  ".into());
+    let padded = provider.create(padded, &cancel).await.unwrap();
+    assert_eq!(
+        padded
+            .connection
+            .as_ref()
+            .expect("the record is static")
+            .glued_prefix
+            .as_deref(),
+        Some("auto"),
+        "the stored and returned statement is the trimmed prefix"
+    );
+    assert_eq!(stored_prefix(&home, PADDED).as_deref(), Some("auto"));
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// `provider.models.edit` sets and clears a model's alias on the record, and an
+/// alias is not a descriptor override: the edit writes none, so the reset path
+/// has nothing to leave behind and the id becomes selectable while the alias
+/// stands.
+///
+/// The reply is the target's rule and numbers, because the alias resolves
+/// through the pipeline rather than beside it.
+#[tokio::test]
+async fn a_model_edit_sets_an_alias_on_the_record_and_creates_no_override() {
+    let home = std::env::temp_dir().join(format!("provider-alias-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    const ALIASED: &str = "00000000-0000-4000-8000-000000000061";
+    const ALIASED_ID: &str = "ark-code-latest";
+    let mut relay = input(
+        ALIASED,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("relay-key"),
+        "alias",
+        1,
+    );
+    relay.models = vec![
+        serde_json::from_value(json!({
+            "modelId":ALIASED_ID, "displayName":ALIASED_ID, "status":"active",
+            "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,
+                "structuredOutput":true,"vision":false,"audio":false,"reasoning":false}
+        }))
+        .unwrap(),
+    ];
+    provider.create(relay, &cancel).await.unwrap();
+    let catalog = provider
+        .catalog_for(ALIASED.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        catalog.models[0].missing_limits,
+        ["contextWindow", "maxOutputTokens"],
+        "the rows that name the id disagree, so none supplies numbers"
+    );
+    // Setting the alias is one edit, and it writes the record's map rather
+    // than a descriptor override.
+    let aliased = provider
+        .update_model_config(
+            ALIASED.into(),
+            catalog.version,
+            ALIASED_ID.into(),
+            serde_json::from_value(
+                json!({"alias":{"action":"set","value":"ark-code/ark-code-latest"}}),
+            )
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let record: Value = serde_json::from_str(&stored_record_json(&home, ALIASED)).unwrap();
+    assert_eq!(
+        record["modelAliases"][ALIASED_ID],
+        json!("ark-code/ark-code-latest"),
+        "the statement is on the record"
+    );
+    let managed = provider
+        .management(Some(ALIASED.into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    assert_eq!(
+        managed.models.as_ref().unwrap()[0].alias.as_deref(),
+        Some("ark-code/ark-code-latest"),
+        "the management reply says what the entry stands for"
+    );
+    assert_eq!(
+        record["modelConfigOverrides"],
+        json!([]),
+        "an alias edit writes no override for the reset path to leave behind"
+    );
+    // The id is selectable now, with the target's own numbers and rule.
+    let model = &aliased.models[0];
+    assert!(model.missing_limits.is_empty(), "{model:?}");
+    assert_eq!(model.capabilities.context_window, Some(204_800));
+    assert_eq!(model.capabilities.max_output_tokens, Some(60_000));
+    let identification = model
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap();
+    assert_eq!(identification.rule, "token");
+    provider
+        .select(
+            None,
+            ModelId {
+                provider_id: ALIASED.into(),
+                model_id: ALIASED_ID.into(),
+            },
+            None,
+            &cancel,
+        )
+        .await
+        .expect("the aliased id is selectable");
+    // Clearing it is one edit too, and the id goes back to the ambiguity it
+    // had, with the candidates it named.
+    let cleared = provider
+        .update_model_config(
+            ALIASED.into(),
+            aliased.version,
+            ALIASED_ID.into(),
+            serde_json::from_value(json!({"alias":{"action":"clear"}})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let record: Value = serde_json::from_str(&stored_record_json(&home, ALIASED)).unwrap();
+    assert_eq!(record.get("modelAliases"), None);
+    let model = &cleared.models[0];
+    assert_eq!(model.missing_limits, ["contextWindow", "maxOutputTokens"]);
+    assert_eq!(
+        model
+            .metadata
+            .as_ref()
+            .unwrap()
+            .identification
+            .as_ref()
+            .unwrap()
+            .rule,
+        "ambiguous"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
 /// #522: a v25 store holds the seed with the assumed pair, because its daemon
 /// copied the bundle as it was. The v26 upgrade and the next start's reseed
 /// leave the same record a fresh home seeds: the bundle's current models and
@@ -8038,5 +9050,661 @@ async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
         .await
         .unwrap();
     root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A merged row is editable: the merge supplies numbers the row declares
+/// nowhere, and an edit declares one of them, so the edited value answers the
+/// catalog and a selection while the other limit keeps the merged value. The
+/// edit drops the record of the limit it declares, and the other limit still
+/// names the seller the merge adopted it from.
+#[tokio::test]
+async fn an_edited_merged_limit_stays_edited() {
+    const ID: &str = "openai/gpt-oss-20b";
+    const RELAY: &str = "00000000-0000-4000-8000-000000000051";
+    let home = std::env::temp_dir().join(format!("provider-merged-edit-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.canonicalize().unwrap();
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    let plugins = [
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
+        root.plugin(ManagedProvidersPlugin),
+        root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
+        root.plugin(provider_part(ProviderPlugin::new)),
+        root.plugin(dim_agent_aimux::AimuxPlugin),
+    ];
+    for plugin in &plugins {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let cancel = CancellationToken::new();
+    let mut relay = input(
+        RELAY,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("relay-key"),
+        "merged",
+        1,
+    );
+    // The relay lists the id and declares no limit for it, so its numbers are
+    // the merge an aggregator-only id gets.
+    relay.models = vec![
+        serde_json::from_value(json!({
+            "modelId":ID, "displayName":ID, "status":"active",
+            "capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,
+                "structuredOutput":true,"vision":false,"audio":false,"reasoning":false}
+        }))
+        .unwrap(),
+    ];
+    provider.create(relay, &cancel).await.unwrap();
+    // What a relay outside the catalog projects for the same id: the merge,
+    // read from the catalog rather than restated here.
+    let merged = BundledCatalog::load()
+        .unwrap()
+        .fallback(&Default::default(), ID, None)
+        .unwrap();
+    let merged = (
+        merged.capabilities.context_window,
+        merged.capabilities.max_output_tokens,
+    );
+    assert!(
+        merged.0.is_some() && merged.1.is_some(),
+        "{ID}: the merge supplied both limits, got {merged:?}"
+    );
+    let numbers = |catalog: &dim_app_server::provider::ProviderCatalog| {
+        let model = catalog
+            .models
+            .iter()
+            .find(|model| model.id == ID)
+            .expect("the relay lists the id");
+        (
+            model.capabilities.context_window,
+            model.capabilities.max_output_tokens,
+        )
+    };
+    let catalog = provider
+        .catalog_for(RELAY.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(numbers(&catalog), merged, "{ID}: the merged numbers");
+    let identification = catalog
+        .models
+        .iter()
+        .find(|model| model.id == ID)
+        .unwrap()
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .clone()
+        .unwrap();
+    assert_eq!(identification.rule, "merge", "{ID}");
+    let suppliers: Vec<_> = identification
+        .filled
+        .iter()
+        .map(|limit| (limit.field.as_str(), limit.provider_id.as_str()))
+        .collect();
+    assert_eq!(
+        suppliers,
+        [("contextWindow", "aihubmix"), ("maxOutputTokens", "qiniu")],
+        "{ID}: the merge names the seller of each limit"
+    );
+
+    // A window the merge never supplied, so the assertion separates an edit
+    // from the merged value.
+    let edited = merged.0.unwrap() + 1_000;
+    let catalog = provider
+        .update_model_config(
+            RELAY.into(),
+            catalog.version,
+            ID.into(),
+            serde_json::from_value(json!({ "contextWindow": edited })).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(numbers(&catalog), (Some(edited), merged.1), "{ID}: edited");
+    let model = catalog.models.iter().find(|model| model.id == ID).unwrap();
+    assert!(model.missing_limits.is_empty(), "{ID}");
+    assert_eq!(model.unavailable_reason, None, "{ID}");
+    let suppliers: Vec<_> = model
+        .metadata
+        .as_ref()
+        .unwrap()
+        .identification
+        .as_ref()
+        .unwrap()
+        .filled
+        .iter()
+        .map(|limit| (limit.field.as_str(), limit.provider_id.as_str()))
+        .collect();
+    assert_eq!(
+        suppliers,
+        [("maxOutputTokens", "qiniu")],
+        "{ID}: the edit dropped the window's record and kept the other's"
+    );
+
+    let selection = provider
+        .configuration(
+            Some(ModelId {
+                provider_id: RELAY.into(),
+                model_id: ID.into(),
+            }),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let snapshot = selection.capability_snapshot.unwrap();
+    assert_eq!(snapshot.capabilities.context_window, edited, "{ID}");
+    assert_eq!(
+        snapshot.capabilities.max_output_tokens,
+        merged.1.unwrap(),
+        "{ID}: the other limit keeps its merged value"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// An endpoint that serves one listing body on every path, so a run of refreshes
+/// reads the same listing.
+async fn listing_server(body: Value) -> (String, tokio::task::JoinHandle<()>) {
+    use axum::{
+        http::{StatusCode, Uri},
+        routing::get,
+    };
+    let app = Router::new().route(
+        "/{*path}",
+        get(move |_: Uri| {
+            let body = body.clone();
+            async move { (StatusCode::OK, Json(body)) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, server)
+}
+
+fn temp_home(prefix: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    home.canonicalize().unwrap()
+}
+
+/// The Provider owner over a store of the test's own.
+async fn provider_root(home: &Path) -> (Ctx, Arc<ProviderService>) {
+    let root = Ctx::root().unwrap();
+    root.plugin(
+        dim_app_server::methods::ManagementMethodsPlugin::typed(&dim_app_server::catalog())
+            .unwrap(),
+    );
+    root.plugin(FileStoragePlugin::new(vec![home.to_path_buf()]));
+    root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
+    root.plugin(ManagedProvidersPlugin);
+    root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
+    root.plugin(dim_agent_aimux::AimuxPlugin);
+    let view = root.plugin(provider_part(ProviderPlugin::new));
+    tokio::time::timeout(std::time::Duration::from_secs(30), active(&view))
+        .await
+        .unwrap();
+    let provider = root.get::<ProviderService>().unwrap();
+    (root, provider)
+}
+
+/// Points the empty-bundle builtin at a listing endpoint. Its bundle holds no
+/// row, so the record starts with an empty stored list and the refresh is what
+/// fills it.
+async fn listed_provider(
+    provider: &Arc<ProviderService>,
+    endpoint: &str,
+    cancel: &CancellationToken,
+) {
+    let view = provider
+        .management(Some(LISTED_PROVIDER.into()), cancel)
+        .await
+        .unwrap();
+    let updated = provider
+        .update(
+            LISTED_PROVIDER.into(),
+            view.providers[0].version.expect("the seeded record"),
+            serde_json::from_value(json!({
+                "baseUrl":endpoint,
+                "enabled":true,
+                "credential":{"action":"set","value":"listing-key"}
+            }))
+            .unwrap(),
+            cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&updated).unwrap()["modelsListed"],
+        json!("bundled"),
+        "{LISTED_PROVIDER}: the bundle declares its rows, so the connection write lists nothing"
+    );
+    assert!(
+        updated.models.as_ref().is_none_or(Vec::is_empty),
+        "{LISTED_PROVIDER}: the empty bundle leaves the stored list empty"
+    );
+}
+
+/// One stored model row, by id, read from the record's own JSON: the record
+/// owner keeps the field private to its module, and the store is where a refresh
+/// writes what discovery projected.
+fn stored_row(home: &Path, provider_id: &str, id: &str) -> Value {
+    let record: Value = serde_json::from_str(&stored_record_json(home, provider_id)).unwrap();
+    record["models"]
+        .as_array()
+        .expect("the record lists its models")
+        .iter()
+        .find(|row| row["modelId"] == json!(id))
+        .unwrap_or_else(|| panic!("{provider_id} stored {id}"))
+        .clone()
+}
+
+/// The bundled vendor row an id names, found by its exact id, so the expected
+/// provider, row, efforts and limits are the catalog's own values rather than
+/// literals.
+fn vendor_row(id: &str) -> (String, ModelEntry) {
+    let catalog = BundledCatalog::load().unwrap();
+    catalog
+        .providers()
+        .filter(|provider| catalog.role(&provider.provider_id) == Some(ProviderRole::Vendor))
+        .find_map(|provider| {
+            provider
+                .models
+                .iter()
+                .find(|row| row.model_id == id)
+                .map(|row| (provider.provider_id.clone(), row.clone()))
+        })
+        .unwrap_or_else(|| panic!("a vendor row names {id}"))
+}
+
+fn entry_efforts(row: &ModelEntry) -> Vec<String> {
+    row.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.reasoning.as_ref())
+        .map(|reasoning| reasoning.offered_efforts())
+        .unwrap_or_default()
+}
+
+fn entry_limits(row: &ModelEntry) -> (Option<u64>, Option<u64>) {
+    (
+        row.capabilities.context_window,
+        row.capabilities.max_output_tokens,
+    )
+}
+
+fn served<'a>(models: impl IntoIterator<Item = &'a ProviderModel>, id: &str) -> &'a ProviderModel {
+    models
+        .into_iter()
+        .find(|model| model.id == id)
+        .unwrap_or_else(|| panic!("{id} is served"))
+}
+
+fn served_rule(model: &ProviderModel) -> &str {
+    model
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.identification.as_ref())
+        .map(|found| found.rule.as_str())
+        .unwrap_or("-")
+}
+
+fn served_matched(model: &ProviderModel) -> (&str, &str) {
+    let metadata = model.metadata.as_ref().expect("the entry carries metadata");
+    (
+        metadata.matched_provider_id.as_deref().unwrap_or("-"),
+        metadata.matched_model_id.as_deref().unwrap_or("-"),
+    )
+}
+
+fn served_efforts(model: &ProviderModel) -> Vec<String> {
+    model
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.reasoning.as_ref())
+        .map(|reasoning| reasoning.offered_efforts())
+        .unwrap_or_default()
+}
+
+fn served_limits(model: &ProviderModel) -> (Option<u64>, Option<u64>) {
+    (
+        model.capabilities.context_window,
+        model.capabilities.max_output_tokens,
+    )
+}
+
+/// The rule and the row `provider.management` names, whose reply carries the
+/// `ModelEntry` rather than the served model.
+fn entry_answer(entry: &ModelEntry) -> (String, String, String) {
+    let metadata = entry.metadata.as_ref().expect("the entry carries metadata");
+    (
+        metadata
+            .identification
+            .as_ref()
+            .map(|found| found.rule.clone())
+            .unwrap_or_else(|| "-".into()),
+        metadata
+            .matched_provider_id
+            .clone()
+            .unwrap_or_else(|| "-".into()),
+        metadata
+            .matched_model_id
+            .clone()
+            .unwrap_or_else(|| "-".into()),
+    )
+}
+
+const LISTED_PROVIDER: &str = "ollama";
+const LISTED_ID: &str = "claude-opus-5-5";
+
+/// A listed id on a provider whose bundled entry is empty is identified against
+/// the catalog, never against the row an earlier listing wrote: on the refresh
+/// that stores it, on the next refresh, and on a later read.
+#[tokio::test]
+async fn a_listed_id_is_identified_against_the_catalog_on_a_refresh_and_a_read() {
+    let (endpoint, server) = listing_server(json!({"data":[{"id": LISTED_ID}]})).await;
+    let home = temp_home("provider-listed");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    listed_provider(&provider, &format!("{endpoint}/v1"), &cancel).await;
+    let (vendor_provider, vendor) = vendor_row(LISTED_ID);
+    let matched = (vendor_provider.as_str(), vendor.model_id.as_str());
+    let efforts = entry_efforts(&vendor);
+    assert!(
+        !efforts.is_empty(),
+        "{LISTED_ID}: the vendor row declares efforts, so the answer is visible"
+    );
+
+    // The first refresh stores the listing's row; the second is where that
+    // stored row used to answer for itself.
+    let first = provider
+        .refresh_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        served(&first.models, LISTED_ID).id,
+        LISTED_ID,
+        "the first refresh stores the listing"
+    );
+    let second = provider
+        .refresh_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap();
+
+    // What discovery wrote on the second refresh is the vendor's answer, so the
+    // row a later refresh reads carries no identity of its own. This is the
+    // discovery half of the answer: it reads only what `discover` projected.
+    let written = stored_row(&home, LISTED_PROVIDER, LISTED_ID);
+    let written = &written["metadata"];
+    assert_ne!(
+        written["identification"]["rule"],
+        json!("provider-exact"),
+        "{LISTED_ID}: discovery does not accept the stored row as a declaration"
+    );
+    assert_eq!(
+        written["matchedProviderId"],
+        json!(vendor_provider),
+        "{LISTED_ID}: discovery names the row that answered"
+    );
+    assert_eq!(
+        written["matchedModelId"],
+        json!(vendor.model_id),
+        "{LISTED_ID}"
+    );
+
+    // The read half: a later read of the stored list answers the same, not from
+    // the row the listing left.
+    let catalog = provider
+        .catalog_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let read = served(&catalog.models, LISTED_ID);
+    assert_ne!(
+        served_rule(read),
+        "provider-exact",
+        "{LISTED_ID}: a read does not accept the stored row as a declaration"
+    );
+    assert_eq!(served_matched(read), matched, "{LISTED_ID}");
+    assert_eq!(served_efforts(read), efforts, "{LISTED_ID}");
+    assert_eq!(served_limits(read), entry_limits(&vendor), "{LISTED_ID}");
+
+    // The refresh's own reply says the same.
+    let answered = served(&second.models, LISTED_ID);
+    assert_ne!(
+        served_rule(answered),
+        "provider-exact",
+        "{LISTED_ID}: a refresh does not accept the stored row as a declaration"
+    );
+    assert_eq!(served_matched(answered), matched, "{LISTED_ID}");
+    assert_eq!(
+        served_efforts(answered),
+        efforts,
+        "{LISTED_ID}: the answered row's efforts"
+    );
+    assert_eq!(
+        served_limits(answered),
+        entry_limits(&vendor),
+        "{LISTED_ID}"
+    );
+
+    // The picker reads provider.management, which answers the same.
+    let managed = provider
+        .management(Some(LISTED_PROVIDER.into()), &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    let managed = managed
+        .models
+        .as_ref()
+        .expect("static management lists models")
+        .iter()
+        .find(|listed| listed.model.model_id == LISTED_ID)
+        .expect("management lists the id the provider serves");
+    let (rule, provider_id, model_id) = entry_answer(&managed.model);
+    assert_ne!(rule, "provider-exact", "{LISTED_ID}");
+    assert_eq!(
+        (provider_id.as_str(), model_id.as_str()),
+        matched,
+        "{LISTED_ID}"
+    );
+
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A builtin provider declares its bundled rows and the models the user added,
+/// so both still answer at step 1 for themselves.
+#[tokio::test]
+async fn a_builtin_bundle_and_a_user_model_still_answer_for_themselves() {
+    const BUNDLED: &str = "gpt-5.6";
+    const ADDED: &str = "my-declared-model";
+    let home = temp_home("provider-declared");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let view = provider
+        .management(Some("openai".into()), &cancel)
+        .await
+        .unwrap();
+    provider
+        .create_model(
+            "openai".into(),
+            view.providers[0].version.expect("the seeded record"),
+            model(ADDED, 4_096),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = provider
+        .catalog_for("openai".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    for (id, source) in [
+        (BUNDLED, "the bundled row"),
+        (ADDED, "the model the user added"),
+    ] {
+        let entry = served(&catalog.models, id);
+        assert_eq!(
+            served_rule(entry),
+            "provider-exact",
+            "{id}: {source} is a declaration, so step 1 answers it"
+        );
+        assert_eq!(
+            served_matched(entry),
+            ("openai", id),
+            "{id}: {source} answers for itself"
+        );
+    }
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A custom provider declares nothing at step 1, so every id it lists, including
+/// the one the user added, is identified by the later steps.
+#[tokio::test]
+async fn a_custom_providers_ids_are_identified_through_the_later_steps() {
+    const CUSTOM: &str = "00000000-0000-4000-8000-000000000071";
+    const ADDED: &str = "claude-sonnet-5-5";
+    let home = temp_home("provider-custom-identified");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let mut config = input(
+        CUSTOM,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("custom-key"),
+        "custom",
+        4_096,
+    );
+    config.models = vec![model(LISTED_ID, 4_096)];
+    let created = provider.create(config, &cancel).await.unwrap();
+    let (vendor_provider, vendor) = vendor_row(LISTED_ID);
+    let catalog = provider
+        .catalog_for(CUSTOM.into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    let listed = served(&catalog.models, LISTED_ID);
+    assert_ne!(
+        served_rule(listed),
+        "provider-exact",
+        "{LISTED_ID}: a custom provider declares nothing at step 1"
+    );
+    assert_eq!(
+        served_matched(listed),
+        (vendor_provider.as_str(), vendor.model_id.as_str()),
+        "{LISTED_ID}"
+    );
+    assert_eq!(
+        served_efforts(listed),
+        entry_efforts(&vendor),
+        "{LISTED_ID}"
+    );
+
+    let (added_provider, added_row) = vendor_row(ADDED);
+    let catalog = provider
+        .create_model(
+            CUSTOM.into(),
+            created.version.expect("the created record"),
+            model(ADDED, 4_096),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let added = served(&catalog.models, ADDED);
+    assert_ne!(
+        served_rule(added),
+        "provider-exact",
+        "{ADDED}: a model the user added to a custom provider runs the later steps"
+    );
+    assert_eq!(
+        served_matched(added),
+        (added_provider.as_str(), added_row.model_id.as_str()),
+        "{ADDED}"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A limit the user declared on a listed id keeps its value: the answering row
+/// supplies the limit the entry leaves undeclared, and the mark the edit writes
+/// keeps the one it declared, through a refresh too.
+#[tokio::test]
+async fn an_edited_limit_on_a_listed_id_survives_the_answer_and_a_refresh() {
+    let (endpoint, server) = listing_server(json!({"data":[{"id": LISTED_ID}]})).await;
+    let home = temp_home("provider-listed-edit");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    listed_provider(&provider, &format!("{endpoint}/v1"), &cancel).await;
+    let (_, vendor) = vendor_row(LISTED_ID);
+    let (window, output) = entry_limits(&vendor);
+    let declared = window.expect("the vendor row declares a window") + 1_000;
+
+    let catalog = provider
+        .refresh_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap();
+    let edited = provider
+        .update_model_config(
+            LISTED_PROVIDER.into(),
+            catalog.version,
+            LISTED_ID.into(),
+            serde_json::from_value(json!({ "contextWindow": declared })).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        served_limits(served(&edited.models, LISTED_ID)).0,
+        Some(declared),
+        "{LISTED_ID}: the edit is what the read serves"
+    );
+    let refreshed = provider
+        .refresh_for(LISTED_PROVIDER.into(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        served_limits(served(&refreshed.models, LISTED_ID)),
+        (Some(declared), output),
+        "{LISTED_ID}: the declared window stands and the answer supplies the other limit"
+    );
+    // The declaration is the user's, so it lives on the record beside the
+    // listing and the refresh replaces only the listing.
+    let record: Value = serde_json::from_str(&stored_record_json(&home, LISTED_PROVIDER)).unwrap();
+    let declared_row = record["modelConfigOverrides"]
+        .as_array()
+        .expect("the record lists its overrides")
+        .iter()
+        .find(|row| row["modelId"] == json!(LISTED_ID))
+        .expect("the edit is on the record");
+    assert_eq!(
+        declared_row["capabilities"]["contextWindow"],
+        json!(declared),
+        "{LISTED_ID}: the refresh keeps the declared value"
+    );
+    assert!(
+        declared_row["metadata"]["capabilityOverrideFields"]
+            .as_array()
+            .expect("the override marks what it declares")
+            .contains(&json!("contextWindow")),
+        "{LISTED_ID}: the declaration stays marked"
+    );
+    root.shutdown().await.unwrap();
+    server.abort();
     std::fs::remove_dir_all(home).unwrap();
 }

@@ -69,6 +69,9 @@ impl ProviderService {
         } else {
             client(&record.network)?
         };
+        // Discovery writes the ids the provider reports, so it reads the
+        // bundle without the record's prefix: a prefix is the user's statement
+        // about the ids they see, not something a listing may infer.
         let projection = ProviderProjection {
             provider_id: provider_id.to_owned(),
             source: Some(if record.kind == StaticRecordKind::Builtin {
@@ -76,7 +79,7 @@ impl ProviderService {
             } else {
                 ModelSource::Custom
             }),
-            models: record.models.clone(),
+            models: record.user_models.clone(),
             ..Default::default()
         };
         let mut models = Vec::new();
@@ -282,7 +285,7 @@ fn project(
         .filter(|id| !id.is_empty())
         .ok_or_else(|| failure("Invalid remote model ID"))?;
     let id = if driver == "gemini" {
-        id.strip_prefix("models/").unwrap_or(id)
+        id.trim_prefix("models/")
     } else {
         id
     };

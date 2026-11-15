@@ -116,7 +116,7 @@ mod tests {
                 "Prompt suggestion",
                 "Prompt suggestion: {error}",
                 "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume.",
-                "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close",
+                "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close",
                 "Default for new sessions in {folder}: {model}",
                 "Default for new sessions: {model}",
                 "Hook context · {count} line",
@@ -150,6 +150,41 @@ mod tests {
         set(previous);
     }
 
+    /// The two `edit` preview keys and the two keys the scrolling panel adds,
+    /// translated in every locale with the tool name literal and every
+    /// argument kept.
+    #[test]
+    fn every_locale_translates_the_edit_preview_strings() {
+        let previous = active();
+        for (locale, code, _) in LOCALES {
+            if locale == Locale::En {
+                continue;
+            }
+            set(locale);
+            for (key, count) in [
+                ("edit {count} replacement in {path}", "1"),
+                ("edit {count} replacements in {path}", "2"),
+            ] {
+                assert!(table(locale, key).is_some(), "{code} lacks {key:?}");
+                let text = tf(key, &[("count", count), ("path", "fixture-path")]);
+                assert!(text.contains("fixture-path"), "{code} drops the path");
+                assert!(text.contains(count), "{code} drops the count");
+                assert!(text.contains("edit"), "{code} translates the tool name");
+            }
+            for key in ["↑↓ scroll", "replacements {from}-{to} of {count}"] {
+                assert!(table(locale, key).is_some(), "{code} lacks {key:?}");
+            }
+            let text = tf(
+                "replacements {from}-{to} of {count}",
+                &[("from", "2"), ("to", "9"), ("count", "30")],
+            );
+            for value in ["2", "9", "30"] {
+                assert!(text.contains(value), "{code} drops {value} from the window");
+            }
+        }
+        set(previous);
+    }
+
     /// The locale's own table, without the English fallback `t` applies.
     fn table(locale: Locale, english: &str) -> Option<&'static str> {
         let lookup: fn(&str) -> Option<&'static str> = match locale {
@@ -166,6 +201,68 @@ mod tests {
             Locale::PtPt => pt_pt::lookup,
         };
         lookup(english)
+    }
+
+    /// The identification and prefix strings, translated in every locale with
+    /// their arguments kept.
+    #[test]
+    fn every_locale_translates_the_identification_strings() {
+        let previous = active();
+        for (locale, code, _) in LOCALES {
+            if locale == Locale::En {
+                continue;
+            }
+            for key in [
+                "Model id prefix",
+                "(none)",
+                "identified: {model} at {provider}",
+                "inferred from several rows: {model} at {provider}",
+                "ambiguous: {candidates}",
+                "unidentified",
+                "Identified {rule}",
+                "from the Provider's own list",
+                "from the whole qualified id",
+                "by its tokens",
+                "by its canonical id or display name",
+                "from the custom-provider list",
+                "by merging the rows that name it",
+                "ambiguous",
+                "{field} {value} supplied by {provider}/{model}",
+            ] {
+                assert!(table(locale, key).is_some(), "{code} lacks {key:?}");
+            }
+            set(locale);
+            for (key, args) in [
+                (
+                    "identified: {model} at {provider}",
+                    vec![("model", "fixture-model"), ("provider", "fixture-provider")],
+                ),
+                (
+                    "inferred from several rows: {model} at {provider}",
+                    vec![("model", "fixture-model"), ("provider", "fixture-provider")],
+                ),
+                (
+                    "ambiguous: {candidates}",
+                    vec![("candidates", "fixture-candidate")],
+                ),
+                ("Identified {rule}", vec![("rule", "fixture-rule")]),
+                (
+                    "{field} {value} supplied by {provider}/{model}",
+                    vec![
+                        ("field", "fixture-field"),
+                        ("value", "fixture-value"),
+                        ("provider", "fixture-provider"),
+                        ("model", "fixture-model"),
+                    ],
+                ),
+            ] {
+                let text = tf(key, &args);
+                for (_, value) in args {
+                    assert!(text.contains(value), "{code} drops {value} from {key:?}");
+                }
+            }
+        }
+        set(previous);
     }
 
     #[test]

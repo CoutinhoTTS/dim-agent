@@ -118,6 +118,10 @@ pub enum MouseOutcome {
     Overlay(isize),
     /// A click landed on a link: its target, to open.
     Open(String),
+    /// A click landed on a dock task row: its stable task id.
+    Task(String),
+    /// A click landed on the composer's model label.
+    Models,
     /// A click landed elsewhere in the transcript: on row `row` of block
     /// `block` (stable id), or on row `row` of the live tail when `None`.
     Click {
@@ -281,6 +285,8 @@ pub struct FullScreen {
     cache: HashMap<usize, Vec<String>>,
     /// The live tail of the last frame (streaming answer, running tools).
     tail: Vec<String>,
+    task_rows: HashMap<usize, String>,
+    model_label: Option<(usize, std::ops::Range<usize>)>,
     /// Where the last press landed and the row it showed: a click counts
     /// only while that row still shows the same text at the release, so
     /// output that moves the transcript in between cannot redirect it.
@@ -305,6 +311,9 @@ pub struct FullScreen {
     /// The last frame had an overlay: the wheel belongs to it.
     overlay_open: bool,
     selection: Option<Selection>,
+    /// While the scrollbar thumb is dragged: the viewport row it was grabbed
+    /// on and the top row the view had then.
+    thumb_drag: Option<(usize, usize)>,
     /// Block id of the user message or member card picked with Tab.
     focus: Option<usize>,
     /// The picked member card in that block, by delegation id.
@@ -330,6 +339,8 @@ impl FullScreen {
             starts: vec![0],
             cache: HashMap::new(),
             tail: Vec::new(),
+            task_rows: HashMap::new(),
+            model_label: None,
             press: None,
             pointer: None,
             hovered: None,
@@ -341,6 +352,7 @@ impl FullScreen {
             wheel: Wheel::default(),
             overlay_open: false,
             selection: None,
+            thumb_drag: None,
             focus: None,
             focus_card: None,
             focus_tool: None,
@@ -351,9 +363,20 @@ impl FullScreen {
         }
     }
 
-    /// The terminal size of the last frame.
-    pub fn size(&self) -> (u16, u16) {
-        self.size
+    /// Cancels gestures and stale task hits immediately, before deferred reflow.
+    pub fn resize(&mut self, size: (u16, u16)) -> bool {
+        if size == self.size {
+            return false;
+        }
+        self.size = size;
+        self.press = None;
+        self.selection = None;
+        self.thumb_drag = None;
+        self.clicks = None;
+        self.task_rows.clear();
+        self.model_label = None;
+        self.invalidate();
+        true
     }
 
     /// The width the transcript is laid out for.
@@ -386,7 +409,7 @@ impl FullScreen {
     }
 
     /// Forgets what is on screen: the next frame paints every row.
-    fn invalidate(&mut self) {
+    pub fn invalidate(&mut self) {
         self.painted.clear();
         self.cursor_at = None;
         self.cursor_visible = true;
@@ -671,6 +694,54 @@ impl FullScreen {
             .flatten()
     }
 
+    /// A press on the scrollbar grabs the thumb where it is; on the track
+    /// beside it the thumb centres on the press first. The drag starts from
+    /// that row and view.
+    fn grab_thumb(&mut self, column: usize, row: usize) -> bool {
+        let content = self.content_rows();
+        let Some(thumb) = Thumb::new(self.view_rows, content) else {
+            return false;
+        };
+        if column + 1 != self.size.0 as usize || row >= self.view_rows {
+            return false;
+        }
+        let start = thumb.start(self.top(), self.view_rows, content);
+        if !(row * 8 < start + thumb.size && start < row * 8 + 8) {
+            let centre = (row * 8 + 4).saturating_sub(thumb.size / 2);
+            self.pin(thumb.top_at(centre, self.view_rows, content));
+        }
+        self.thumb_drag = Some((row, self.top()));
+        true
+    }
+
+    /// Moves the view of a drag that started on row `from` at top row `top`
+    /// as far as the thumb moves with the pointer, now on row `row`. The
+    /// starting row keeps the starting view, so a drag along it never
+    /// scrolls; the first and the last transcript row snap to the top and
+    /// the bottom, and so does the dock below them.
+    fn drag_thumb(&mut self, row: usize, (from, top): (usize, usize)) {
+        let content = self.content_rows();
+        let Some(thumb) = Thumb::new(self.view_rows, content) else {
+            return;
+        };
+        let max_top = content - self.view_rows;
+        let next = if row >= self.view_rows {
+            max_top
+        } else if row == from || thumb.room == 0 {
+            top
+        } else if row == 0 {
+            0
+        } else if row + 1 == self.view_rows {
+            max_top
+        } else {
+            let rows = (row as isize - from as isize) * 8 * max_top as isize;
+            let room = thumb.room as isize;
+            let delta = (rows + rows.signum() * room / 2) / room;
+            (top as isize + delta).clamp(0, max_top as isize) as usize
+        };
+        self.pin(next);
+    }
+
     fn hover(&mut self, doc: &dyn Document) -> bool {
         let next = if self.overlay_open || self.selecting() {
             None
@@ -694,6 +765,25 @@ impl FullScreen {
         let row = event.row as usize;
         let column = event.column as usize;
         self.pointer = Some((column, row));
+        if let Some(start) = self.thumb_drag {
+            match event.kind {
+                MouseKind::Drag => {
+                    self.drag_thumb(row, start);
+                    return MouseOutcome::Redraw;
+                }
+                MouseKind::Release => {
+                    self.thumb_drag = None;
+                    return if self.hover(doc) {
+                        MouseOutcome::Redraw
+                    } else {
+                        MouseOutcome::Ignored
+                    };
+                }
+                // Motion or a press without a release first: the terminal
+                // lost it (the button came up outside the window).
+                _ => self.thumb_drag = None,
+            }
+        }
         let hovered = self.hover(doc);
         if self.overlay_open {
             return match event.kind {
@@ -722,11 +812,45 @@ impl FullScreen {
                 self.scroll(rows);
                 MouseOutcome::Redraw
             }
+            MouseKind::Press if self.grab_thumb(column, row) => {
+                self.press = None;
+                self.selection = None;
+                self.clicks = None;
+                MouseOutcome::Redraw
+            }
             MouseKind::Press => {
                 let shown = self.selection.take().is_some_and(|s| s.dragged)
                     || hovered
                     || self.press.as_ref().is_some_and(|p| p.target.is_some());
                 self.press = None;
+                let action = if self
+                    .model_label
+                    .as_ref()
+                    .is_some_and(|(y, columns)| *y == row && columns.contains(&column))
+                {
+                    Some(MouseOutcome::Models)
+                } else if column < content_width(self.size.0 as usize)
+                    && let Some(task) = self.task_rows.get(&row)
+                {
+                    Some(MouseOutcome::Task(task.clone()))
+                } else {
+                    None
+                };
+                if let Some(spot) = action {
+                    self.clicks = None;
+                    self.press = Some(Press {
+                        spot,
+                        text: String::new(),
+                        target: None,
+                        link: None,
+                        cell: (column, row),
+                    });
+                    return if shown {
+                        MouseOutcome::Redraw
+                    } else {
+                        MouseOutcome::Ignored
+                    };
+                }
                 let Some((index, text)) = self
                     .pointer_index()
                     .and_then(|index| Some((index, self.row(index)?.to_owned())))
@@ -791,6 +915,11 @@ impl FullScreen {
                 }
             }
             MouseKind::Drag => {
+                if self.press.as_ref().is_some_and(|press| {
+                    matches!(press.spot, MouseOutcome::Task(_) | MouseOutcome::Models)
+                }) {
+                    self.press = None;
+                }
                 let Some(selection) = self.selection else {
                     return MouseOutcome::Ignored;
                 };
@@ -820,6 +949,35 @@ impl FullScreen {
             }
             MouseKind::Release => {
                 let press = self.press.take();
+                if let Some(Press {
+                    spot: MouseOutcome::Models,
+                    cell,
+                    ..
+                }) = &press
+                {
+                    return if *cell == (column, row)
+                        && self
+                            .model_label
+                            .as_ref()
+                            .is_some_and(|(y, columns)| *y == row && columns.contains(&column))
+                    {
+                        MouseOutcome::Models
+                    } else {
+                        MouseOutcome::Ignored
+                    };
+                }
+                if let Some(Press {
+                    spot: MouseOutcome::Task(task),
+                    cell,
+                    ..
+                }) = &press
+                {
+                    return if *cell == (column, row) && self.task_rows.get(&row) == Some(task) {
+                        MouseOutcome::Task(task.clone())
+                    } else {
+                        MouseOutcome::Ignored
+                    };
+                }
                 let changed = hovered || press.as_ref().is_some_and(|p| p.target.is_some());
                 let Some(selection) = self.selection else {
                     return if changed {
@@ -872,13 +1030,7 @@ impl FullScreen {
         palette: &Palette,
         doc: &dyn Document,
     ) -> Vec<u8> {
-        if size != self.size {
-            self.size = size;
-            self.press = None;
-            self.selection = None;
-            self.clicks = None;
-            self.invalidate();
-        }
+        self.resize(size);
         let (cols, rows) = (size.0 as usize, size.1.max(1) as usize);
         let width = content_width(cols);
         self.sync(doc);
@@ -894,6 +1046,29 @@ impl FullScreen {
             .max(1);
         let dock_skip = dock.len().saturating_sub(dock_rows);
         self.view_rows = rows - dock_rows.min(rows);
+        let model_label = frame.model_label.as_ref().and_then(|(row, columns)| {
+            row.checked_sub(split + dock_skip)
+                .filter(|row| *row < dock_rows)
+                .map(|row| (self.view_rows + row, columns.clone()))
+        });
+        if self.model_label != model_label
+            && self
+                .press
+                .as_ref()
+                .is_some_and(|press| press.spot == MouseOutcome::Models)
+        {
+            self.press = None;
+        }
+        self.model_label = model_label;
+        self.task_rows = frame
+            .task_rows
+            .iter()
+            .filter_map(|(row, task)| {
+                row.checked_sub(split + dock_skip)
+                    .filter(|row| *row < dock_rows)
+                    .map(|row| (self.view_rows + row, task.clone()))
+            })
+            .collect();
         self.load(doc);
         let top = self.top();
         if self.pinned.is_none() {
@@ -904,12 +1079,19 @@ impl FullScreen {
         self.overlay_open = dim;
         if dim {
             self.press = None;
+            self.thumb_drag = None;
             self.clicks = None;
             self.clicked = None;
         }
         self.hover(doc);
         if self.press.as_ref().is_some_and(|press| {
+            if press.spot == MouseOutcome::Models {
+                return false;
+            }
             let (_, row) = press.cell;
+            if let MouseOutcome::Task(task) = &press.spot {
+                return self.task_rows.get(&row) != Some(task);
+            }
             row >= self.view_rows
                 || self.at(row).is_none_or(|index| {
                     self.spot(index) != press.spot
@@ -980,37 +1162,22 @@ impl FullScreen {
                                     && self.press.as_ref().is_some_and(|p| {
                                         p.target == target && self.hovered == target
                                     });
-                                if pressed || focused {
+                                if pressed
+                                    || focused
+                                    || target.is_some()
+                                        && (self.hovered == target || self.clicked == target)
+                                {
+                                    let background = palette
+                                        .surface
+                                        .as_deref()
+                                        .or(palette.tool_hover.as_deref());
                                     header_feedback(
                                         &row,
                                         Paint {
-                                            fg: Some(&palette.on_accent),
-                                            bg: Some(&palette.accent),
-                                            bold: true,
-                                            ..Paint::default()
-                                        },
-                                    )
-                                } else if target.is_some() && self.hovered == target {
-                                    header_feedback(
-                                        &row,
-                                        Paint {
-                                            fg: Some(&palette.highlight),
-                                            bg: palette
-                                                .surface
-                                                .as_deref()
-                                                .or(palette.tool_hover.as_deref()),
-                                            ..Paint::default()
-                                        },
-                                    )
-                                } else if target.is_some() && self.clicked == target {
-                                    header_feedback(
-                                        &row,
-                                        Paint {
-                                            fg: Some(&palette.text_soft),
-                                            bg: palette
-                                                .surface
-                                                .as_deref()
-                                                .or(palette.tool_hover.as_deref()),
+                                            fg: Some(&palette.text),
+                                            bg: background,
+                                            bold: pressed || focused,
+                                            underline: background.is_none(),
                                             ..Paint::default()
                                         },
                                     )
@@ -1592,7 +1759,7 @@ fn focus_row(row: &str, offset: usize, last: usize, cols: usize, p: &Palette) ->
 /// A row of the picked member card: an accent bar in its margin column,
 /// the row itself unchanged.
 fn card_focus_row(row: &str, width: usize, p: &Palette) -> String {
-    let rest = row.strip_prefix(' ').unwrap_or(row);
+    let rest = row.trim_prefix(' ');
     format!(
         "{}{}",
         fg("▌", &p.accent),
@@ -1729,19 +1896,52 @@ fn cells(text: &str, start: usize, end: usize) -> String {
     out
 }
 
+/// The scrollbar thumb of a viewport of `view` rows over `content` rows, in
+/// eighths of a row: its length and how far its start can travel down the
+/// track. `None` when everything fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Thumb {
+    size: usize,
+    room: usize,
+}
+
+impl Thumb {
+    fn new(view: usize, content: usize) -> Option<Self> {
+        if content <= view || view == 0 {
+            return None;
+        }
+        let total = view * 8;
+        let size = (total * view / content).max(8);
+        Some(Self {
+            size,
+            room: total - size,
+        })
+    }
+
+    /// The eighth the thumb starts at for a view whose top row is `top`.
+    fn start(self, top: usize, view: usize, content: usize) -> usize {
+        self.room * top / (content - view)
+    }
+
+    /// The top row that draws the thumb starting at eighth `start`, rounded
+    /// to the nearest.
+    fn top_at(self, start: usize, view: usize, content: usize) -> usize {
+        match self.room {
+            0 => 0,
+            room => (start.min(room) * (content - view) + room / 2) / room,
+        }
+    }
+}
+
 /// The scrollbar column for a viewport of `view` rows over `content` rows
 /// starting at `top`, one cell per row, in eighths of a row; `None` when
 /// everything fits.
 fn scrollbar(view: usize, content: usize, top: usize, palette: &Palette) -> Option<Vec<String>> {
-    if content <= view || view == 0 {
-        return None;
-    }
+    let bar = Thumb::new(view, content)?;
     let track = &palette.scroll_track;
     let thumb = &palette.scroll_thumb;
-    let total = view * 8;
-    let size = (total * view / content).max(8);
-    let start = (total - size) * top / (content - view);
-    let end = start + size;
+    let start = bar.start(top, view, content);
+    let end = start + bar.size;
     let cell = |text: &str, fg: &str, bg: &str| {
         paint(
             text,
@@ -1902,92 +2102,107 @@ mod tests {
 
     #[test]
     fn disclosure_feedback_only_repaints_the_exact_header_and_deduplicates_motion() {
-        let (mut screen, mut emu) = setup();
-        let mut doc = Doc::new();
-        doc.say(&["parent", " child", "body"]);
-        doc.headers.insert((Some(0), 1), "parent".into());
-        doc.headers.insert((Some(0), 2), "child".into());
-        let f = frame(&[], &DOCK);
-        draw(&mut screen, &mut emu, &f, &doc);
-        let before = emu.rows_text();
-        let at = |kind, row| MouseEvent {
-            kind,
-            column: 2,
-            row,
-        };
-        let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
-        assert_eq!(
-            screen.mouse(at(MouseKind::Move, 4), &doc),
-            MouseOutcome::Redraw
-        );
-        let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
-        assert!(
-            bytes.contains(&paint(
-                " child",
-                Paint {
-                    fg: Some(&palette.highlight),
-                    bg: palette.surface.as_deref().or(palette.tool_hover.as_deref()),
-                    ..Paint::default()
+        for (mode, appearance, id, style) in [
+            (ColorMode::Ansi16, Appearance::Dark, "system", "4"),
+            (ColorMode::Ansi16, Appearance::Light, "system", "4"),
+            (
+                ColorMode::TrueColor,
+                Appearance::Dark,
+                "system",
+                "48;2;28;28;28",
+            ),
+            (
+                ColorMode::TrueColor,
+                Appearance::Light,
+                "system",
+                "48;2;245;245;245",
+            ),
+            (ColorMode::Ansi256, Appearance::Dark, "system", "48;5;234"),
+            (ColorMode::Ansi256, Appearance::Light, "system", "48;5;255"),
+            (
+                ColorMode::TrueColor,
+                Appearance::Dark,
+                "carsar",
+                "38;2;228;228;228;48;2;36;36;36",
+            ),
+        ] {
+            let palette = crate::ui::theme::Theme::named(id, mode, appearance, None).palette;
+            let draw = |screen: &mut FullScreen, emu: &mut Emu, f: &Frame, doc: &Doc| {
+                let bytes = screen.render(f, SIZE, &palette, doc);
+                emu.feed(&bytes);
+                bytes
+            };
+            let (mut screen, mut emu) = setup();
+            let mut doc = Doc::new();
+            doc.say(&["parent", " child", "body"]);
+            doc.headers.insert((Some(0), 1), "parent".into());
+            doc.headers.insert((Some(0), 2), "child".into());
+            let f = frame(&[], &DOCK);
+            draw(&mut screen, &mut emu, &f, &doc);
+            let before = emu.rows_text();
+            let at = |kind, row| MouseEvent {
+                kind,
+                column: 2,
+                row,
+            };
+            assert_eq!(
+                screen.mouse(at(MouseKind::Move, 4), &doc),
+                MouseOutcome::Redraw
+            );
+            let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
+            assert!(
+                bytes.contains(&format!("\x1b[{style}m child\x1b[0m")),
+                "{id} {mode:?} {appearance:?}: {bytes:?}"
+            );
+            assert!(
+                !bytes.contains("parent") && !bytes.contains("body"),
+                "{bytes:?}"
+            );
+            assert_eq!(
+                screen.mouse(at(MouseKind::Move, 4), &doc),
+                MouseOutcome::Ignored
+            );
+            assert!(draw(&mut screen, &mut emu, &f, &doc).is_empty());
+            assert_eq!(
+                screen.mouse(at(MouseKind::Press, 4), &doc),
+                MouseOutcome::Redraw
+            );
+            let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
+            assert!(
+                bytes.contains(&format!("\x1b[1;{style}m child\x1b[0m")),
+                "{id} {mode:?} {appearance:?}: {bytes:?}"
+            );
+            assert_eq!(
+                screen.mouse(at(MouseKind::Release, 4), &doc),
+                MouseOutcome::Click {
+                    block: Some(0),
+                    row: 2
                 }
-            )),
-            "{bytes:?}"
-        );
-        assert!(
-            !bytes.contains("parent") && !bytes.contains("body"),
-            "{bytes:?}"
-        );
-        assert_eq!(
-            screen.mouse(at(MouseKind::Move, 4), &doc),
-            MouseOutcome::Ignored
-        );
-        assert!(draw(&mut screen, &mut emu, &f, &doc).is_empty());
-        assert_eq!(
-            screen.mouse(at(MouseKind::Press, 4), &doc),
-            MouseOutcome::Redraw
-        );
-        let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
-        assert!(
-            bytes.contains(&paint(
-                " child",
-                Paint {
-                    fg: Some(&palette.on_accent),
-                    bg: Some(&palette.accent),
-                    bold: true,
-                    ..Paint::default()
-                }
-            )),
-            "{bytes:?}"
-        );
-        assert_eq!(
-            screen.mouse(at(MouseKind::Release, 4), &doc),
-            MouseOutcome::Click {
-                block: Some(0),
-                row: 2
-            }
-        );
-        screen.mouse(at(MouseKind::Move, 5), &doc);
-        let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
-        assert!(
-            bytes.contains(&paint(
-                " child",
-                Paint {
-                    fg: Some(&palette.text_soft),
-                    bg: palette.surface.as_deref().or(palette.tool_hover.as_deref()),
-                    ..Paint::default()
-                }
-            )),
-            "{bytes:?}"
-        );
-        assert!(
-            !bytes.contains("parent") && !bytes.contains("body"),
-            "{bytes:?}"
-        );
-        assert_eq!(emu.rows_text(), before);
-        doc.headers.remove(&(Some(0), 2));
-        let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
-        assert!(bytes.contains("\x1b[2K child"), "{bytes:?}");
-        screen.mouse(at(MouseKind::Move, 4), &doc);
-        assert!(draw(&mut screen, &mut emu, &f, &doc).is_empty());
+            );
+            screen.mouse(at(MouseKind::Move, 5), &doc);
+            let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
+            assert!(
+                bytes.contains(&format!("\x1b[{style}m child\x1b[0m")),
+                "{id} {mode:?} {appearance:?}: {bytes:?}"
+            );
+            assert!(
+                !bytes.contains("parent") && !bytes.contains("body"),
+                "{bytes:?}"
+            );
+            assert_eq!(emu.rows_text(), before);
+            screen.focus_older(&doc);
+            assert_eq!(screen.focused_tool(), Some((Some(0), 2)));
+            let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
+            assert!(
+                bytes.contains(&format!("\x1b[1;{style}m child\x1b[0m")),
+                "{id} {mode:?} {appearance:?}: {bytes:?}"
+            );
+            doc.headers.remove(&(Some(0), 2));
+            let bytes = String::from_utf8(draw(&mut screen, &mut emu, &f, &doc)).unwrap();
+            assert!(bytes.contains("\x1b[2K child"), "{bytes:?}");
+            screen.mouse(at(MouseKind::Move, 4), &doc);
+            assert!(draw(&mut screen, &mut emu, &f, &doc).is_empty());
+        }
     }
 
     #[test]
@@ -2525,7 +2740,7 @@ mod tests {
         let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
         for n in 0..6 {
-            let rows: Vec<String> = (0..4).map(|r| format!("block {n} row {r}")).collect();
+            let rows: Vec<String> = Vec::from_fn(4, |r| format!("block {n} row {r}"));
             let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
             doc.say(&rows);
         }
@@ -2660,6 +2875,105 @@ mod tests {
     }
 
     #[test]
+    fn dragging_the_scrollbar_thumb_moves_the_view_with_the_pointer() {
+        let (mut screen, mut emu) = setup();
+        let mut doc = Doc::new();
+        for i in 0..10 {
+            doc.say(&[&format!("row {i}")]);
+        }
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        let bar = SIZE.0 - 1;
+        let at = |kind, column, row| MouseEvent { kind, column, row };
+        // 20 rows in a 6-row view: the followed thumb ends on row 5.
+        assert!(emu.row(5).ends_with('█'));
+        assert_eq!(
+            screen.mouse(at(MouseKind::Press, bar, 5), &doc),
+            MouseOutcome::Redraw
+        );
+        assert_eq!(screen.top(), 14, "grabbing does not move the view");
+        screen.mouse(at(MouseKind::Drag, bar, 0), &doc);
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        assert_eq!(screen.top(), 0);
+        assert!(emu.row(1).starts_with("row 0"), "{:?}", emu.rows_text());
+        // Off the column the drag still follows the pointer's row.
+        screen.mouse(at(MouseKind::Drag, 10, 3), &doc);
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        assert_eq!(screen.top(), 7, "{:?}", emu.rows_text());
+        assert!(!screen.selecting());
+        // Over the dock it stops at the bottom and follows new output again.
+        screen.mouse(at(MouseKind::Drag, bar, 7), &doc);
+        assert!(screen.pinned.is_none());
+        screen.mouse(at(MouseKind::Release, bar, 7), &doc);
+        assert_eq!(
+            screen.mouse(at(MouseKind::Drag, bar, 0), &doc),
+            MouseOutcome::Ignored,
+            "the release ends the drag"
+        );
+        assert!(screen.pinned.is_none());
+    }
+
+    #[test]
+    fn a_track_press_centres_the_thumb_and_a_lost_release_ends_the_drag() {
+        let (mut screen, mut emu) = setup();
+        let mut doc = Doc::new();
+        for i in 0..10 {
+            doc.say(&[&format!("row {i}")]);
+        }
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        let bar = SIZE.0 - 1;
+        let at = |kind, column, row| MouseEvent { kind, column, row };
+        screen.mouse(at(MouseKind::Press, bar, 0), &doc);
+        assert_eq!(screen.top(), 0, "the first track row is the top");
+        screen.mouse(at(MouseKind::Release, bar, 0), &doc);
+        screen.mouse(at(MouseKind::Press, bar, 1), &doc);
+        assert_eq!(screen.top(), 0, "a press on the thumb holds it");
+        // The button came up outside the window: no release, only motion.
+        screen.mouse(at(MouseKind::Move, 5, 1), &doc);
+        assert_eq!(
+            screen.mouse(at(MouseKind::Drag, bar, 5), &doc),
+            MouseOutcome::Ignored
+        );
+        assert_eq!(screen.top(), 0);
+        // A transcript that fits has no scrollbar to grab.
+        let mut short = Doc::new();
+        short.say(&["only"]);
+        let (mut screen, mut emu) = setup();
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &short);
+        screen.mouse(at(MouseKind::Press, bar, 5), &short);
+        assert_eq!(screen.thumb_drag, None);
+    }
+
+    #[test]
+    fn a_partly_covered_thumb_moves_only_as_far_as_the_pointer() {
+        let (mut screen, mut emu) = setup();
+        let mut doc = Doc::new();
+        for i in 0..1_000 {
+            doc.say(&[&format!("row {i}")]);
+        }
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        screen.scroll(-994);
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        assert_eq!(screen.top(), 1000);
+        let bar = SIZE.0 - 1;
+        let at = |kind, column, row| MouseEvent { kind, column, row };
+        // 2,000 rows: a one-row thumb covers the lower half of row 2 and the
+        // upper half of row 3 (the same glyph, colours swapped).
+        let thumb_on = |emu: &Emu, row: usize| emu.row(row).ends_with('▄');
+        assert!(thumb_on(&emu, 2) && thumb_on(&emu, 3) && !thumb_on(&emu, 4));
+        screen.mouse(at(MouseKind::Press, bar, 2), &doc);
+        screen.mouse(at(MouseKind::Drag, bar - 3, 2), &doc);
+        assert_eq!(screen.top(), 1000, "a sideways drag never scrolls");
+        screen.mouse(at(MouseKind::Drag, bar, 3), &doc);
+        draw(&mut screen, &mut emu, &frame(&[], &DOCK), &doc);
+        assert_eq!(screen.top(), 1399, "one row of track");
+        assert!(!thumb_on(&emu, 2) && thumb_on(&emu, 3) && thumb_on(&emu, 4));
+        screen.mouse(at(MouseKind::Drag, bar, 2), &doc);
+        assert_eq!(screen.top(), 1000, "back to the grab row, back to its view");
+        screen.mouse(at(MouseKind::Drag, bar, 0), &doc);
+        assert_eq!(screen.top(), 0);
+    }
+
+    #[test]
     fn scrollbar_thumb_tracks_the_view_in_eighths() {
         let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
         let plain = |bar: Vec<String>| -> String { bar.iter().map(|c| strip_escapes(c)).collect() };
@@ -2766,6 +3080,8 @@ mod tests {
                         let frame = Frame {
                             commits: Vec::new(),
                             live,
+                            task_rows: Vec::new(),
+                            model_label: None,
                             cursor,
                             dock,
                             anchor: dock,

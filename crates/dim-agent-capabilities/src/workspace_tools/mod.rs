@@ -15,6 +15,7 @@ pub mod file_reads;
 pub mod files;
 pub mod mentions;
 mod pending;
+pub use pending::call_positions;
 
 use crate::{
     host::{HostError, HostFuture, SessionFilesHost, ToolDriver, ToolExecutionContext, ToolHost},
@@ -41,11 +42,9 @@ const OUTPUT_METHOD: &str = "session.exec.output";
 /// `session.exec.output.page`: the tail's sibling, reading the task's
 /// registered output file by byte cursor.
 const PAGE_OUTPUT_METHOD: &str = "session.exec.output.page";
-/// Default page and largest page `session.exec.output.page` serves; a
-/// caller's `limit` clamps to the latter, following `session.files.search`'s
-/// own clamp.
-const OUTPUT_PAGE_BYTES: u64 = 1024 * 1024;
-const OUTPUT_PAGE_BYTES_MAX: u64 = 4 * 1024 * 1024;
+/// Default page `session.exec.output.page` serves; the owner clamps a
+/// caller's `limit` to its largest page.
+const OUTPUT_PAGE_BYTES: u64 = background::OUTPUT_PAGE_BYTES;
 /// The `session.files` namespace: the files an `@` mention offers.
 const FILES_NAMESPACE: &str = "session.files";
 const SEARCH_METHOD: &str = "session.files.search";
@@ -452,6 +451,20 @@ impl DynPlugin for WorkspaceToolsPlugin {
                     Box::pin(async move { pending::read(&tree, call.params, &cancel).await })
                 }),
             )?;
+            let finished_tree = tools.tree.clone();
+            methods.register(
+                ctx,
+                "session.exec.finished",
+                vec![MethodDecl::new(
+                    "session.exec.finished",
+                    false,
+                    Interruption::Report,
+                )],
+                Arc::new(move |call, cancel, _| {
+                    let tree = finished_tree.clone();
+                    Box::pin(async move { pending::finished(&tree, call.params, &cancel).await })
+                }),
+            )?;
             let tree = tools.tree.clone();
             methods.register(
                 ctx,
@@ -486,17 +499,11 @@ impl DynPlugin for WorkspaceToolsPlugin {
                                     "sessionId, branchId and taskId must not be empty",
                                 ));
                             }
-                            let limit = match limit {
-                                Some(0) => {
-                                    return Err(RpcError::invalid("limit must be at least 1"))
-                                }
-                                Some(limit) => limit.clamp(1, OUTPUT_PAGE_BYTES_MAX),
-                                None => OUTPUT_PAGE_BYTES,
-                            };
+                            let limit = limit.unwrap_or(OUTPUT_PAGE_BYTES);
                             let page = tree
                                 .get(&branch_id)?
                                 .service::<background::BackgroundExec>()?
-                                .output_page(&task_id, cursor.unwrap_or(0), limit as usize)
+                                .output_page(task_id, cursor.unwrap_or(0), limit)
                                 .await
                                 .map_err(|error| match error {
                                     background::OutputPageError::Unknown => RpcError::app(
@@ -510,6 +517,10 @@ impl DynPlugin for WorkspaceToolsPlugin {
                                         "The task's output file is no longer available; it was removed or its Session was deleted",
                                     ),
                                     background::OutputPageError::Closed => RpcError::reloading(),
+                                    background::OutputPageError::InvalidLimit => {
+                                        RpcError::invalid("limit must be at least 1")
+                                    }
+                                    background::OutputPageError::Read(error) => error.into(),
                                 })?;
                             return reply(page);
                         }
@@ -533,7 +544,7 @@ impl DynPlugin for WorkspaceToolsPlugin {
                         let text = tree
                             .get(&branch_id)?
                             .service::<background::BackgroundExec>()?
-                            .output(&task_id)
+                            .output(task_id)
                             .await
                             .map_err(|error| match error {
                                 background::TaskError::Unknown => RpcError::app(
@@ -542,6 +553,7 @@ impl DynPlugin for WorkspaceToolsPlugin {
                                     "No live output is available for this task",
                                 ),
                                 background::TaskError::Closed => RpcError::reloading(),
+                                background::TaskError::Read(error) => error.into(),
                             })?;
                         Ok(serde_json::json!({"text":text}))
                     })

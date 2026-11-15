@@ -5,14 +5,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter steer · x delete held · Esc close" => "Enter steer · x 删除暂存消息 · Esc 关闭",
         "No queued messages." => "队列中没有消息。",
         "Held · awaiting application" => "暂存中 · 等待应用",
-        "Incorporating · awaiting model consumption" => "纳入中 · 等待模型读取",
-        "Unread · waiting for your next message" => "未读取 · 等待你的下一条消息",
         "Unread" => "未读取",
-        "/queue view · awaiting model consumption" => "/queue 查看 · 等待模型读取",
-        "/queue view · waiting for your next message" => "/queue 查看 · 等待你的下一条消息",
         "+{count} more · {hint}" => "还有 {count} 条 · {hint}",
         "Held" => "暂存中",
-        "Incorporating" => "纳入中",
         "Enter export · Esc cancel" => "Enter 导出 · Esc 取消",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "带附件的消息会留在队列中；使用 /queue 对其执行 steer 或删除"
@@ -108,6 +103,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Delete failed" => "删除失败",
         "This daemon does not support deleting Sessions" => "此守护进程不支持删除会话",
         "Starting" => "启动中",
+        "agent result" => "子 agent 结果",
+        "Read-only: you can watch this agent or stop it." => "只读：可以查看这个 agent，或终止它。",
+        "Read-only: this agent has finished." => "只读：这个 agent 已结束。",
+        "Esc back · x stop agent · ↑↓ PgUp PgDn scroll · Home/End jump" => {
+            "Esc 返回 · x 终止 agent · ↑↓ PgUp PgDn 滚动 · Home/End 跳转"
+        }
+        "Esc back · ↑↓ PgUp PgDn scroll · Home/End jump" => {
+            "Esc 返回 · ↑↓ PgUp PgDn 滚动 · Home/End 跳转"
+        }
         "Delegation result" => "委派结果",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
             "Enter 详情 · x 停止所选任务 · Ctrl+X 停止全部 · Esc 关闭"
@@ -378,8 +382,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓/Tab move · Enter select · Esc close" => "↑↓/Tab 切换 · Enter 选择 · Esc 关闭",
         "exit" => "退出应用",
 
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 选择并设为默认 · ←/→ 推理强度 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 选择并设为默认 · ←/→ 推理强度 · Ctrl+B/F 移动光标 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
         }
         "Default for new sessions in {folder}: {model}" => "新会话在 {folder} 的默认模型：{model}",
         "Default for new sessions: {model}" => "新会话的默认模型：{model}",
@@ -565,6 +569,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 清空，连按两次退出 · 草稿为空时 Ctrl+D 退出"
         }
+        "Shift+Tab cycle permissions (composer focused)" => {
+            "Shift+Tab 循环切换权限（输入框聚焦时）"
+        }
+        "Shift+Tab newer target while picked · Esc return to composer" => {
+            "选中历史项时 Shift+Tab 选择较新项 · Esc 返回输入框"
+        }
+        "(shift+tab to cycle)" => "(Shift+Tab 切换)",
         "Fullscreen" => "全屏",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown 滚动 · Home/End 到顶部或底部 (草稿为空时) · Tab 选择消息，e 编辑，q 引用"

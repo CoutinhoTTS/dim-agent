@@ -5,13 +5,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter steer · x delete held · Esc close" => "Enter steer · x 刪除暫存訊息 · Esc 關閉",
         "No queued messages." => "佇列中沒有訊息。",
         "Held · awaiting application" => "暫存中 · 等待套用",
-        "Incorporating · awaiting model consumption" => "納入中 · 等待模型讀取",
-        "Unread · waiting for your next message" => "未讀取 · 等待你的下一則訊息",
         "Unread" => "未讀取",
-        "/queue view · awaiting model consumption" => "/queue 檢視 · 等待模型讀取",
-        "/queue view · waiting for your next message" => "/queue 檢視 · 等待你的下一則訊息",
         "Held" => "暫存中",
-        "Incorporating" => "納入中",
         "Enter export · Esc cancel" => "Enter 匯出 · Esc 取消",
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "附有附件的訊息會留在佇列中；使用 /queue 對其執行 steer 或刪除"
@@ -109,6 +104,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Delete failed" => "刪除失敗",
         "This daemon does not support deleting Sessions" => "此守護進程不支援刪除工作階段",
         "Starting" => "啟動中",
+        "agent result" => "子 agent 結果",
+        "Read-only: you can watch this agent or stop it." => "唯讀：可以查看這個 agent，或終止它。",
+        "Read-only: this agent has finished." => "唯讀：這個 agent 已結束。",
+        "Esc back · x stop agent · ↑↓ PgUp PgDn scroll · Home/End jump" => {
+            "Esc 返回 · x 終止 agent · ↑↓ PgUp PgDn 捲動 · Home/End 跳轉"
+        }
+        "Esc back · ↑↓ PgUp PgDn scroll · Home/End jump" => {
+            "Esc 返回 · ↑↓ PgUp PgDn 捲動 · Home/End 跳轉"
+        }
         "Delegation result" => "委派結果",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
             "Enter 詳細資料 · x 停止所選 · Ctrl+X 全部停止 · Esc 關閉"
@@ -325,8 +329,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "離開",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選擇並設為預設 · ←/→ 推理強度 · Ctrl+X 清除已儲存 · Esc 清除/關閉"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 選擇並設為預設 · ←/→ 推理強度 · Ctrl+B/F 移動游標 · Ctrl+X 清除已儲存 · Esc 清除/關閉"
         }
         "Default for new sessions in {folder}: {model}" => {
             "新工作階段在 {folder} 的預設模型：{model}"
@@ -503,6 +507,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 清除，按兩次離開 · 草稿為空時 Ctrl+D 離開"
         }
+        "Shift+Tab cycle permissions (composer focused)" => {
+            "Shift+Tab 循環切換權限（輸入框聚焦時）"
+        }
+        "Shift+Tab newer target while picked · Esc return to composer" => {
+            "選取歷史項時 Shift+Tab 選擇較新項 · Esc 返回輸入框"
+        }
+        "(shift+tab to cycle)" => "(Shift+Tab 切換)",
         "Fullscreen" => "全螢幕",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown 捲動 · Home/End 至頂端或底端 (草稿為空時) · Tab 選擇訊息，e 編輯，q 引用"

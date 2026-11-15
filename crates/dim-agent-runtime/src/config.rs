@@ -7,7 +7,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
     pub name: String,
@@ -24,6 +24,14 @@ impl Default for AgentConfig {
                 model_id: "deterministic".into(),
             },
         }
+    }
+}
+#[service]
+impl AgentConfig {
+    /// The Agent's identity and default model as data, for parts in other
+    /// languages.
+    pub fn get(&self) -> AgentConfig {
+        self.clone()
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,7 +422,7 @@ impl SessionLifecycle {
             return None;
         }
         self.holds
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |holds| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |holds| {
                 (holds & RELEASING == 0).then_some(holds + 1)
             })
             .ok()?;

@@ -28,6 +28,9 @@ pub enum RowKind {
     /// One muted status row where the input was written, with the same detail
     /// setting as a hook's context, and never a message either.
     HookFollowUp,
+    /// A member's completed delegation result: a header naming the task and
+    /// its Markdown body, folded to a preview unless expanded.
+    MemberResult,
     Error,
     Status,
     /// A row kind the UI does not draw specially; it falls back to a status
@@ -205,12 +208,6 @@ pub enum CompactionState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberCard {
     pub task: TaskView,
-    /// The temporary profile's name, or a native Agent's name once
-    /// `agent.list` named it; its ID until then.
-    pub agent: String,
-    /// The native Agent `agent.list` can name; none for a temporary profile
-    /// or a provider member.
-    pub agent_id: Option<String>,
     pub prompt: String,
     /// Member activity, not a claim about the model that ran this task: an
     /// ended card keeps the last observation made while it ran.
@@ -302,8 +299,27 @@ pub struct TaskView {
     pub branch_id: String,
     pub kind: TaskKind,
     pub label: String,
+    pub command: Option<String>,
+    /// The member Agent's name, or its id until `agent.list` names it.
+    pub agent: Option<String>,
+    /// An existing native Agent that `agent.list` can name.
+    pub agent_id: Option<String>,
     pub started_at: u64,
+    /// The model request and call that dispatched it, with its start event's
+    /// sequence; a Workflow run has none.
+    pub dispatch: Option<Dispatch>,
     pub finished: Option<TaskFinish>,
+}
+
+/// Where a command or delegation was dispatched: the list orders tasks by
+/// it, so finishing never moves a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dispatch {
+    pub request_id: String,
+    pub call_id: String,
+    /// The call's index in its model response, when that response was read.
+    pub position: Option<u32>,
+    pub sequence: u64,
 }
 
 /// How a task ended, as the owner that ended it classified it: a stop is not
@@ -373,6 +389,20 @@ pub enum MemberConversationState {
     Closed,
 }
 
+/// Whether the shown line has history older than the loaded window, and
+/// whether an earlier read for it is requested or in flight.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Earlier {
+    /// The shown line's first event is loaded, or no window has loaded yet:
+    /// nothing earlier to read.
+    #[default]
+    AtStart,
+    /// Older history exists and is not loaded.
+    Unread,
+    /// An earlier read is requested or in flight. It follows `Unread` only.
+    Reading,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskKind {
     /// Read and stopped on the originating branch.
@@ -436,6 +466,10 @@ pub struct ViewSnapshot {
     pub projection_id: u64,
     /// The shown line's history has loaded: its transcript can be laid out.
     pub history_complete: bool,
+    /// Whether history older than the loaded window exists, and whether an
+    /// earlier read is in flight; `/earlier`, PageUp at the drawn top and the
+    /// load-more row act on it.
+    pub earlier: Earlier,
     /// Shared with the worker's projection: publishing copies pointers.
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,
@@ -453,6 +487,8 @@ pub struct ViewSnapshot {
     pub queued: Vec<QueuedInput>,
     /// Unfinished tasks followed by the latest 50 terminal facts.
     pub tasks: Vec<TaskView>,
+    /// Native Agent identities whose shared name lookup has not settled.
+    pub pending_agent_names: Vec<String>,
     pub task_history_loading: usize,
     pub task_history_errors: Vec<String>,
     pub workflow: WorkflowInventory,

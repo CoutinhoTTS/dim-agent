@@ -89,10 +89,10 @@ flowchart LR
   p60 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p76
   p60 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p76
   p43 -->|"dim_agent_capabilities::host::PromptHost@session"| p75
+  p74 -->|"dim_agent_capabilities::prompt::Prompt@main"| p75
   p44 -->|"dim_agent_capabilities::prompt_sources::SessionLanguage@session"| p75
   p60 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p75
   p74 -->|"dim_agent_runtime::state::StateCell<dim_agent_capabilities::prompt_state::PromptSnapshot>@main"| p75
-  p74 -->|"dyn dim_agent_runtime::contracts::ConfigureControl@main"| p75
   p66 -->|"dim_agent_capabilities::context_preparation::ConfigurationPublisher@main"| p74
   p43 -->|"dim_agent_capabilities::host::PromptHost@session"| p74
   p43 -->|"dim_agent_capabilities::prompt::InitialPromptConfiguration@session"| p74
@@ -112,6 +112,7 @@ flowchart LR
   p60 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p72
   p60 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p72
   p60 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p72
+  p66 -->|"dim_agent_capabilities::context_preparation::ContextPreparation@main"| p71
   p33 -->|"dim_agent_capabilities::history::HistoryRenderer@session"| p71
   p33 -->|"dim_agent_capabilities::host::CompactionStrategyHost@session"| p71
   p33 -->|"dim_agent_capabilities::host::ContextModelHost@session"| p71
@@ -121,6 +122,8 @@ flowchart LR
   p60 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p71
   p60 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p71
   p60 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p71
+  p52 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p70
+  p60 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p70
   p60 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p70
   p60 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p70
   p63 -->|"dim_agent_capabilities::approval::Approval@main"| p69
@@ -150,6 +153,7 @@ flowchart LR
   p42 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p65
   p52 -->|"dim_agent_capabilities::timeline_tree::TreeCommands@session"| p65
   p60 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p65
+  p33 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p65
   p60 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p65
   p60 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p65
   p60 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p65

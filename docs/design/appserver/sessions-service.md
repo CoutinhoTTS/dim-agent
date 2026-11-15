@@ -476,6 +476,14 @@ no effect on idle unload. It exists for consumers that must reconcile their own 
 without polling a close that must not look like a deletion (EventHub §3.4). An Agents reload answers `reloading`;
 a caller keeps its records and asks again later.
 
+### 6.10 pending
+
+`{sessionId, branchId, inputId}` → `{pending}`; errors `rejected`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`.
+
+The read answers whether the input is still pending on that branch under the rule of [session access §2](../contracts/session-access.md#2-data-and-state): pending from its `input/message` until `input/applied` followed by `input/consumed`, or `input/deleted`, references it. The branch's own InputQueue holds exactly that set, so the method reads it with `Session::service::<InputQueue>(branch)` — the path `withdraw` uses (§6.6) — and reads no Timeline. It acquires the Session like every method except `launch`, `delete` and `exists`, so an unloaded branch is restored for the answer.
+
+An `inputId` the branch does not hold answers `false`; that covers both an id that was consumed or deleted and one a restart lost. A fixed loop reads this before it delivers its next window, so a round still held behind a running turn defers that window instead of queueing a second one.
+
 ## 7. Sequence
 
 A run with one input, a second input withdrawn while it is held, and the wait:
@@ -828,7 +836,7 @@ Each change stays within S2 (roadmap §5.3); the contract's `sessions` part is u
 | # | Change | Why |
 | --- | --- | --- |
 | 1 | `withdraw` waits for the publication of `input/deleted` before replying `deleted`, and can reply `publication_unknown` | S1 replies once the deletion is committed, not once it is dispatched as §14.1 asked. Without the wait, `history {atLeast: sequence}` right after the reply could fail |
-| 2 | The binding uses S1's merged names: `Withdrawal` and `InputQueue::withdraw(InputWithdrawData, None)`, not `WithdrawOutcome` and `withdraw(input_id, reason)` | The shape S1 merged (§14.1) |
+| 2 | The binding uses S1's merged names: `Withdrawal` and `InputQueue::withdraw(InputWithdrawData { input_id, reason, steer: None }) -> Result<Withdrawal, AgentError>`, not `WithdrawOutcome` and `withdraw(input_id, reason)` | The shape S1 merged (§14.1) |
 | 3 | Each typed method takes the request type of its wire shape (`LookupRequest`, `WithdrawRequest`, `StopRequest`) instead of positional arguments | One type per shape; the named service only decodes and encodes |
 | 4 | `history` rejects `atLeast` together with `through`, and returns every event unfiltered | The two set `through` in conflicting ways. A filtered page could end inside a batch, and the next `after` would be rejected |
 | 5 | A failed `stop` or `idle` wait that is not a closed Session, a missing branch or a reload replies `failed` | Those failures are the branch's dispatch failures. Mapping a handler's `InvalidInput` to `rejected` would blame the caller |
@@ -934,6 +942,8 @@ pub struct WithdrawRequest {
     pub session_id: String, pub branch_id: String,
     pub input_id: String, pub reason: Option<String>,
 }
+pub struct PendingRequest { pub session_id: String, pub branch_id: String, pub input_id: String }
+pub struct PendingReply { pub pending: bool }
 pub struct StopRequest { pub session_id: String, pub branch_id: String, pub reason: Option<String> }
 pub struct SessionsError { pub code: SessionsErrorCode, pub message: String }  // retryable() follows the code
 
@@ -943,6 +953,8 @@ impl AgentIndex {
     pub async fn lookup(&self, request: LookupRequest) -> Result<LookupReply, SessionsError>;
     pub async fn history(&self, request: HistoryRequest) -> Result<HistoryPage, SessionsError>;
     pub async fn withdraw(&self, request: WithdrawRequest) -> Result<Withdrawal, SessionsError>; // Withdrawal from S1
+    /// Whether the input is still pending on the branch (§6.10).
+    pub async fn pending(&self, request: PendingRequest) -> Result<PendingReply, SessionsError>;
     pub async fn stop(&self, request: StopRequest) -> Result<u64, SessionsError>;
     pub async fn idle(&self, at: SessionRef) -> Result<u64, SessionsError>;
     /// S5c's delete, served as `sessions.delete {sessionId}` (§6.8).

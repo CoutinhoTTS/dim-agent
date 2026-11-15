@@ -681,13 +681,41 @@ pub trait ResolveModelSelection: Send + Sync + 'static {
 }
 pub struct ModelSelectionHost(pub Arc<dyn ResolveModelSelection>);
 
-/// The environment variable names the owner reads credentials from. The
-/// owner answers from its current state on every call, so a later owner can
-/// add a name without a consumer change.
-pub trait CredentialVariables: Send + Sync + 'static {
-    fn credential_variables(&self) -> std::collections::BTreeSet<String>;
+/// The environment variable names the owner reads credentials from, bound as
+/// the face's one operation. It answers from the owner's current state on
+/// every call, so a later owner can add a name without a consumer change.
+pub type CredentialVariableNames =
+    Arc<dyn Fn() -> std::collections::BTreeSet<String> + Send + Sync>;
+
+/// The `variables` reply: the names only, never a credential value.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CredentialVariablesReply {
+    pub variables: std::collections::BTreeSet<String>,
 }
-pub struct CredentialVariablesHost(pub Arc<dyn CredentialVariables>);
+
+/// The `credentialVariablesHost` face: the names of the environment variables
+/// the owner reads credentials from. The owner binds its read; a Rust reader
+/// calls [`Self::variables`] directly and a part of another language calls the
+/// same operation by name.
+pub struct CredentialVariablesHost(CredentialVariableNames);
+
+impl CredentialVariablesHost {
+    /// Binds an owner's read as the face's operation.
+    pub fn new(variables: CredentialVariableNames) -> Self {
+        Self(variables)
+    }
+}
+
+#[rutis::service]
+impl CredentialVariablesHost {
+    /// The names, in the owner's set order.
+    pub fn variables(&self) -> CredentialVariablesReply {
+        CredentialVariablesReply {
+            variables: (self.0)(),
+        }
+    }
+}
 
 /// Enumerates the models the owner would serve: the same selectability rules as
 /// execution, one read, no live request. The caller passes its cancellation
@@ -783,7 +811,39 @@ pub trait ModelDriver: Send + Sync + 'static {
 }
 pub struct ModelHost(pub Arc<dyn ModelDriver>);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The caller's cancellation as a function it passes, the form a data method
+/// takes it in ([service faces §1](../../../docs/design/service-faces.md#1-规则)):
+/// it completes when the caller cancels the call, and the result the call
+/// produces after observing it stands.
+pub type CancelledFn = Arc<
+    dyn Fn() -> rutis::host::BoxFuture<'static, std::result::Result<(), rutis::Error>>
+        + Send
+        + Sync,
+>;
+
+/// Runs `call`, which observes `cancel`, until it returns or the caller's
+/// `cancelled` function completes: then `cancel` ends the call and the call's
+/// own result is the answer.
+pub async fn call_until_cancelled<'a, T, E, F>(
+    cancelled: CancelledFn,
+    cancel: CancellationToken,
+    call: F,
+) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>> + Send + 'a,
+{
+    tokio::pin!(call);
+    tokio::select! {
+        result = &mut call => result,
+        _ = cancelled() => {
+            cancel.cancel();
+            call.await
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ToolExecutionContext {
     pub turn_id: String,
     pub request_id: String,
@@ -806,6 +866,33 @@ pub trait ToolDriver: Send + Sync + 'static {
     ) -> HostFuture<'_, ToolResult>;
 }
 pub struct ToolHost(pub Arc<dyn ToolDriver>);
+
+#[rutis::service]
+impl ToolHost {
+    /// Runs one call through the host's tools as `caller` names the branch's
+    /// execution. The driver is the implementation; this is the `toolHost`
+    /// face ([tool contributions §2.1](../../../docs/architecture/rust-agent/tool-contributions.md#21-宿主工具的-toolhost-数据面)).
+    ///
+    /// This is raw driver execution: it does not resolve write targets or run
+    /// Permission or Approval. The caller owns admission; model-driven calls
+    /// must use the branch ToolExecutor flow before reaching the driver.
+    /// `caller` identifies execution context and does not grant authority.
+    pub async fn execute(
+        &self,
+        call: ToolCall,
+        caller: ToolExecutionContext,
+        cancelled: CancelledFn,
+    ) -> Result<ToolResult, HostError> {
+        let cancel = CancellationToken::new();
+        let _dropped = cancel.clone().drop_guard();
+        call_until_cancelled(
+            cancelled,
+            cancel.clone(),
+            self.0.execute(call, caller, cancel),
+        )
+        .await
+    }
+}
 
 /// What ContextPolicy hands a strategy: the entries from the previous cut
 /// on, the previous result, the request whose context is compacted and the

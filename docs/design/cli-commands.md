@@ -93,12 +93,22 @@ updates do not invalidate a press on the same stable header.
 
 Hover highlights only the actionable title, pressed feedback is stronger without
 moving its text, and a successful click retains a subtle position indication.
+Tool-title feedback uses normal text on the theme's subtle surface, falling back
+to a neutral gray background where the terminal palette supports one. Without a
+subtle background, titles use an underline. Pressed and keyboard-focused titles
+also use bold text instead of accent colors.
 Neither feedback nor new output changes expansion. A click requires release on
 the same still-valid target without a drag. Text selection, safe links and the
 explicit member-conversation entry keep separate actions; the member's tool
 header toggles its details instead of navigating. Existing Tab/Shift+Tab
 transcript traversal includes committed tool headers; Enter/Space toggles only
-the focused tool. Mouse-off retains native
+the focused tool. A press on the scrollbar column drags the view instead of
+selecting: the view moves as far as the thumb moves with the pointer, so a
+drag along the grabbed row keeps the view; a press on the track centres the
+thumb there first. The first and last transcript rows reach the top and the
+bottom, and dragging past the last one follows new output again. Motion without
+the button, or another press, ends a drag whose release the terminal lost.
+Mouse-off retains native
 terminal selection. Free-motion reports are enabled and restored with fullscreen
 mouse mode; unsupported terminals retain click and keyboard operation.
 
@@ -182,7 +192,9 @@ size.
 When the usual history reservation leaves fewer than eight live rows,
 live controls take priority: either renderer can use up to eight rows for
 the live region, limited by terminal height. Fullscreen reduces the composer's empty padding
-and the palette's query padding before overlapping either input. The draft
+and the palette's query padding before overlapping either input. When only three rows remain
+for the palette, its query occupies the top border, leaving the selected command visible
+without covering the composer or permission footer. The draft
 editor scrolls within the remaining rows and keeps its caret visible without
 discarding text. Otherwise the usual history reservation is retained.
 
@@ -229,15 +241,15 @@ Commands
 ```
 
 ```text
-Fullscreen, 8 rows             Scrollback, 8 rows
-+- Command Palette -------+
-| >                       |   +- input -----------------+
-| /new                    |   | > /                     |
-+-------------------------+   +-------------------------+
-                              +-------------------------+
-+- input -----------------+   | /new                    |
-|                         |   +-------------------------+
-+-------------------------+   AGENT
+Fullscreen, 8 rows                           Scrollback, 8 rows
++- > -------------------------------+
+| /new                              |       +- input ---------------------------+
++-----------------------------------+       | > /                               |
+                                            +-----------------------------------+
++- input ---------------------------+       +-----------------------------------+
+|                                   |       | /new                              |
++-----------------------------------+       +-----------------------------------+
+ ⏵⏵ Read only (shift+tab to cycle)            ⏵⏵ Read only (shift+tab to cycle)
 ```
 
 ## Run keys and queue
@@ -285,6 +297,10 @@ queued message, and only with nothing held. The task line must show, as it does
 while a task runs or an ended one still fades; with nothing in the background
 the key submits nothing and opens nothing.
 
+Tasks above the composer use the
+[background-task title and row layout](background-task-list.md#task-titles-and-composer-rows)
+in both modes: one task per row, not a horizontal list of labels.
+
 - A queued message runs after the current run ends, one message per run. A
   steered message joins the current run at its next turn boundary.
 - Taking a message back, and interrupting, withdraw the message through
@@ -298,10 +314,9 @@ the key submits nothing and opens nothing.
 
 ### Queued messages
 
-`/queue` requires an attached Session and opens the shown line's unconsumed
-messages in both terminal modes. Applied-but-unconsumed messages are labelled
-`Incorporating` while running and `Unread · waiting for your next message` while
-idle; unapplied messages are labelled `Held`. Up/Down selects a row,
+`/queue` requires an attached Session and opens only the shown line's held
+messages in both terminal modes, labelled `Held`. Applied messages remain in
+the transcript, not the queue panel or strip. Up/Down selects a row,
 Enter steers it and `x` deletes it through the existing withdrawal operation.
 Only held messages can change; `notHeld` is a notice, not a failed run. Esc
 closes the panel without interrupting. Committed events refresh the panel,
@@ -316,10 +331,11 @@ nothing. A failed request leaves the held input available for retry.
 With an empty draft and no held messages, Enter retains the task-line shortcut
 defined in [Run keys and queue](#run-keys-and-queue).
 
-The panel advertises steer and delete only when the selected message is held.
-An applied-only strip offers `/queue` to view the messages, not held-only edit
-or steer shortcuts. While idle it explains that the next message will carry the
-unread input; it neither discards the input nor starts a run automatically.
+The panel advertises steer and delete only when a message is selected.
+When no held messages remain, the strip disappears. Applied-but-unconsumed
+messages keep only their existing transcript style, including after a stop;
+there is no additional unread hint. This presentation neither discards input nor
+starts a run.
 
 Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
@@ -336,9 +352,9 @@ Steering always uses the owner's full held input.
 
 ### Queue strip
 
-The strip and `/queue` read the same unconsumed input projection: incorporating
-messages in transcript order, then held messages oldest first. Each strip row
-names its state. During a run, `Shift+Left` on an empty draft recalls the newest
+The strip and `/queue` show only held messages from the existing unconsumed
+input projection, oldest first; the strip count excludes applied messages.
+During a run, `Shift+Left` on an empty draft recalls the newest
 held message subject to the attachment rule above. The strip shows the shortcut
 that steers the oldest held message from an empty draft for the selected mode.
 With nothing held, the empty-composer Enter opens `/tasks` while the task line
@@ -346,8 +362,8 @@ shows, as the [run keys](#run-keys-and-queue) state. Up/Down remain input
 history outside the panel.
 
 ```text
-┌─ Queue (2) ───────────────────────────────────────────────────────┐
-│ › Incorporating · fix the failing test                            │
+  › fix the failing test
+┌─ Queue (1) ───────────────────────────────────────────────────────┐
 │ › Held · then update the design note                              │
 │ /queue manage · Shift+← edit last · empty draft: Ctrl+S steer     │
 └───────────────────────────────────────────────────────────────────┘
@@ -355,14 +371,12 @@ history outside the panel.
 
 A queued message the strip does not show adds its count to the hint. The strip shows at most five messages and keeps the height it reached while the queue drains.
 
-After a stop, an applied-only queue remains visible without held-input actions:
+After a stop, an unread applied message remains in the transcript without a
+queue strip when nothing is held:
 
 ```text
+  › fix the failing test
   stopped
-┌─ Queue (1) ──────────────────────────────────────────────┐
-│ › Unread · fix the failing test                          │
-│ /queue view · waiting for your next message              │
-└──────────────────────────────────────────────────────────┘
 ```
 
 ## Usage report
@@ -510,7 +524,7 @@ blocked or cleared one:
  ╭──────────────────────────────────────────────────────────────────────────────╮
  │ › _                                                                          │
  ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
-  AGENT  ⏵⏵ Workspace write  ◎ goal active  1.8K / 256K              provider/model
+  ⏵⏵ Workspace write (shift+tab to cycle)  ◎ goal active  1.8K / 256K
 ```
 
 Fullscreen draws the same element in the composer's bottom border, beside the run status:
@@ -518,7 +532,40 @@ Fullscreen draws the same element in the composer's bottom border, beside the ru
 ```text
  ╭──────────────────────────────────────────────────────────────────────────────╮
  │ › _                                                                          │
- ╰──── ◎ goal paused   Full access   1.8K / 256K ───── ● main · after message 4 ─╯
+ ╰──── ◎ goal paused   1.8K / 256K ────────────────── ● main · after message 4 ─╯
+  ⏵⏵ Full access (shift+tab to cycle)
+```
+
+## Loop
+
+`/loop` runs a prompt on a rhythm and reads the loops Scheduler keeps. The record, the rounds and the
+cadences belong to [Scheduler §12](plugins/Scheduler.md#12-loop); this section owns what the native
+clients do with them. The command is listed in the palette beside `/goal`.
+
+| Form | Call |
+| --- | --- |
+| `/loop` | none: usage, then the loops of the shown line, or that it has none |
+| `/loop PROMPT` | `session.loop.start` with the prompt |
+| `/loop INTERVAL PROMPT` | `session.loop.start` with the interval and the prompt |
+| `/loop stop` | `session.loop.stop` for the line's only live loop |
+| `/loop stop ID` | `session.loop.stop` for that loop |
+
+`INTERVAL` is a number and one of `s`, `m`, `h` or `d`, such as `30s`, `5m`, `2h` or `1d`. It counts
+only as the first token of the line and only when it parses; otherwise the whole line is the prompt,
+so `/loop check the deploy` and `/loop 5m check the deploy` are two forms of the same command.
+
+The line-mode prompt prints usage and the loops; both TUI modes fill `/loop ` on selection and
+dispatch only on submission, as `/goal` does. A reply names the loop, its state, its round and, when
+one is armed, its next due time:
+
+```text
+palette: loop + Enter -> /loop |          (completion only)
+/loop check the deploy + Enter -> start a self-paced loop
+/loop stop + Enter             -> stop the line's only live loop
+
+Usage: /loop [PROMPT | INTERVAL PROMPT | stop [ID]]
+Loops on main (1):
+7f2 running round 12 next 2026-11-13T09:41:00.000Z check the deploy
 ```
 
 ## Provider accounts
@@ -1193,13 +1240,14 @@ picker, and Esc there closes the area to the prompt, not back to the picker.
 Select a model
 > Ready / flash              ZDR  ‹ high ›  current
   Ready / plain              low
+  Ready / sonnet             —
   Edit models                Ready  ready
   Other / model-x
   Edit models                Other  other
   Manual: no models · add a model with provider.models.create
   Edit models                Manual  manual
   Subagent models: Agent choice
-Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 ```
 
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode
@@ -1209,8 +1257,10 @@ Enter also writes the default a new Session in this folder reads ([provider mana
 §4](appserver/provider-management.md#4-client-integration)).
 
 Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
-modes; explicit-value forms and the line client keep their command behavior. The selection
-contract is owned by [model configuration](model-configuration.md#scrollback-interaction).
+modes; explicit-value forms and the line client keep their command behavior. At Home the
+picker and the explicit-value forms act on the footer's preview, the model the first
+message's Session adopts. The selection contract is owned by [model
+configuration](model-configuration.md#scrollback-interaction).
 
 ### The Workflow area
 
@@ -1650,7 +1700,8 @@ draft is kept and the interface reports that the first message was not sent
 instead of restoring it. The interface does not exit for that case. Without
 `-p` the existing startup rule stands: a resumed Session that cannot start
 shows the error and exits nonzero, and Home remains available after a failed
-creation.
+creation. A startup failure dismisses any open panel so the cause is visible before
+exit or beside the restored draft.
 
 ### Daemon startup failure
 
@@ -2237,35 +2288,58 @@ exits nonzero with the installer's error. An unknown installation layout, includ
 source checkout, fails with manual installation or rebuild instructions.
 
 Under npm the manager installs the new version into a staging directory inside the
-installation, `<prefix>/.dimcode-staging/staging-<pid>/`, so an interrupted or failed
-install damages only staging and the installed command keeps running. An update clears a
-staging directory an earlier one left behind before it starts, while it holds the
-exclusive lock. The staged install passes `--globalconfig <prefix>/etc/npmrc`, because
-`--prefix` alone points npm at the staging directory's own `etc/npmrc` and would drop the
-registry, mirror and credentials an operator saved with `npm config set -g`. An
+installation, `<prefix>/.dimcode-staging/<package>/staging-<pid>/`, so an interrupted or
+failed install damages only staging and the installed command keeps running. Staging is
+per package: an update reads and removes only the directory of the package it updates, so
+the two identities in one prefix never touch each other's trees. An update clears what an
+earlier one of its own package left behind before it starts, while it holds the exclusive
+lock on the installation. The staged install passes `--globalconfig <prefix>/etc/npmrc`,
+because `--prefix` alone points npm at the staging directory's own `etc/npmrc` and would
+drop the registry, mirror and credentials an operator saved with `npm config set -g`. An
 installation that should use a mirror configures it in `.npmrc` or with `npm config`.
 
 When the manager exits successfully the update requires the staged `package.json` to name
-a newer version of this build's channel than the installed one, requires every command
-the package installs to exist inside the staged package, and requires a platform package
-beside it. Failing any check leaves the installed version in place and exits nonzero, so
-a manager that exits without writing, or that writes the version already installed, is a
+a newer version of this build's channel than the installed one, requires a platform
+package beside it, and takes the commands from the links the manager created in the
+staging `bin/` directory rather than from the manifest: npm normalizes a package's `bin`
+keys before linking them, so a package that declares `../bin2/escape` is installed as
+`bin/escape`. Every command name so taken must be a single path component, and every link
+must resolve to a file inside the staged package, so no live path is ever built outside
+`<prefix>/bin`. A live link for a command the new version installs must resolve into this
+package's live directory; one that resolves elsewhere belongs to another package, and the
+update fails naming the command and its target, as npm refuses that install with
+`EEXIST`. Failing any check leaves the installed version in place and exits nonzero, so a
+manager that exits without writing, or that writes the version already installed, is a
 failed update rather than a silent success.
 
 The staged package then replaces the live one in a single atomic exchange:
 `renamex_np(..., RENAME_SWAP)` on macOS and `renameat2(..., RENAME_EXCHANGE)` on Linux.
 The previous version exists only in staging until the new one has proved itself. The
 update points every command the new package installs at the new package, leaves a command
-whose target is already correct alone, removes a link of the old version that the new one
-no longer installs, and then runs each installed command with `--version`, requiring the
-version the package declares. When that check fails, or a command does not answer within
-30 seconds, the same exchange puts the previous version back and the update exits nonzero
-with a message naming the command. A crash during the exchange leaves one version
-complete and the other in staging, never neither. Only where the filesystem refuses the
-exchange (`ENOTSUP`, `EINVAL`, `ENOSYS`) does the update fall back to two renames, with a
-window of a few system calls between them; a crash in that window leaves the previous
-version at `<prefix>/.dimcode-staging/staging-<pid>/retired`, and restoring it is
-`mv <prefix>/.dimcode-staging/staging-<pid>/retired <prefix>/lib/node_modules/<package>`.
+whose target is already correct alone, and removes a command the previous version declared
+and the new one no longer does. The set it may remove is the previous version's declared
+commands, normalized as npm normalizes them before linking, intersected with the links in
+`<prefix>/bin` that resolve into this package; a link outside that set is never touched, so
+an alias an operator added to the package's own launcher survives the update. When the live
+`package.json` cannot be read or parsed, the update removes no command and says so. The
+update then runs each installed command with `--version`, requiring the version the package
+declares. When that check fails, when a command does not answer within 30 seconds, or when
+Ctrl+C or SIGTERM arrives while the check runs, the check's whole process tree is ended and
+waited for, so nothing it started outlives the update, and the same exchange puts the
+previous version back; the update exits nonzero with a message that names the command or
+states the interruption, and says that the previous version is back. A crash during the exchange leaves one version complete and
+the other in staging, never neither. Only where the filesystem refuses the exchange
+(`ENOTSUP`, `EINVAL`, `ENOSYS`) does the update fall back to two renames, with a window of
+a few system calls between them; a crash in that window leaves the previous version at
+`<prefix>/.dimcode-staging/<package>/staging-<pid>/retired`, and restoring it is
+`mv <prefix>/.dimcode-staging/<package>/staging-<pid>/retired <prefix>/lib/node_modules/<package>`.
+
+Which of the two the update uses is a property of the prefix's filesystem, not of this
+document. `renamex_np` with `RENAME_SWAP` is documented to swap the two names only on
+filesystems that report `VOL_CAP_INT_RENAME_SWAP` through `getattrlist(2)`, and
+`renameat2` with `RENAME_EXCHANGE` to return `EINVAL` when the filesystem does not support
+the flag, so a prefix on a filesystem that reports neither takes the two-rename fallback
+and keeps its window.
 
 bun, pnpm, yarn and volta keep the in-place install and so keep the window in which the
 command is absent. Windows keeps it too: npm installs under `<prefix>\node_modules` with
@@ -2455,7 +2529,10 @@ It does not change
 `--permission` selects a preset, including its file scope and risk decisions; a call that still asks is denied
 the same way ([headless execution](#headless-execution)).
 Other exit codes retain the native CLI contract, including 2 for turn failure
-and 130 for interruption. A transport failure does not retry a submission.
+and 130 for interruption. The run's own outcome is the turn's: a failed model
+step that the turn recovered from, and a turn that completed at its output limit
+with reason `output_limit`, both exit 0 while still printing that step's failure
+line. A transport failure does not retry a submission.
 Repeated `--image` arguments follow the headless attachment contract: text first,
 then validated original image bytes in argument order, with paths relative to the
 invoking process. An image-only invocation is valid. A submission error on a live
@@ -2654,11 +2731,14 @@ Assistant: ...
 [permission] main branch preset: workspace-write  <- changed by another client
 ```
 
-The scrollback client draws a status line under the composer: the agent marker and the
-permission preset, the goal marker, the context use against
-its window, and one slot for the state in force — a notice, a required answer or permission,
-`esc interrupt`, or the background task count. The model, with its effort when both fit, is
-right-aligned on the same line; the line is clipped to the terminal width.
+Both TUI modes draw a live permission footer under the composer, without an `AGENT` prefix;
+the preset, colors, localized shortcut hint and key behavior are defined in
+[`/permissions`](#permissions). It is not committed to transcript history.
+Scrollback keeps the goal marker, context use against its window, and one slot for the state
+in force — a notice, a required answer or permission, `esc interrupt`, or the background task
+count — on the same line. The model, with its effort when both fit, is right-aligned there;
+the line is clipped to the terminal width. Fullscreen instead keeps run status, the status
+slot, goal and context information in the composer border, not the permission preset.
 
 ### Submit check warnings
 
@@ -2806,6 +2886,38 @@ The Command rules row opens the management panel
 of [The command rules area](#the-command-rules-area), where the rules are listed, added and
 removed; Esc there returns to this panel with Command rules focused. Both TUI modes preserve
 focus on return, including when Permissions was opened from Settings.
+
+Both TUI modes always show the effective preset below the composer, aligned at the left:
+
+```text
+ ╭──────────────────────────────────────────────────────────╮
+ │ › _                                                      │
+ ╰──────────────────────────────────────────────────────────╯
+  ⏵⏵ Read only (shift+tab to cycle)
+  ⏵⏵ Workspace write (shift+tab to cycle)
+  ⏵⏵ Full access (shift+tab to cycle)
+```
+
+The three rows above are alternatives: only the effective preset appears. The shortcut hint
+is translated into the selected interface language. Read only is cyan,
+Workspace write is purple and Full access is yellow; the shortcut hint is muted. Light themes
+use darker shades for contrast, and limited-color terminals use their cyan, magenta and yellow
+slots. The permission label takes priority over the hint and other status content on narrow
+terminals. Fullscreen retains run, goal, context and notice information in the composer border.
+In scrollback the hint ranks last: the permission label is drawn first and the hint only when
+the whole line still fits with it, so the hint's cells go to the rest when they are needed. A
+slot that asks the user something or reports a problem, which is a notice, the disconnected
+text, `answer required` and `permission required`, outranks the right-aligned model: the model
+gives up its effort first, then its place while that slot shows. `esc interrupt`, goal, context
+and background text still yield to the model, which keeps its space before they are clipped.
+
+With the composer owning the keys, Shift+Tab cycles Read only → Workspace write → Full access
+→ Read only without submitting or changing the draft, including during a running turn. It
+uses the same selection operation and remembered preference as the picker; rapid presses are
+processed in order against the policy in force when each operation runs, not a stale UI copy.
+The label changes only when the operation succeeds. Prompts, command and mention menus keep their existing
+Shift+Tab behavior. In fullscreen, Tab starts transcript navigation; while a transcript target
+is picked, Shift+Tab still moves to the newer target, and Esc returns to the composer.
 
 Arguments after `/permissions` in the terminal UI open that panel instead of being ignored, and
 it opens holding one line that says where arguments work — the line prompt and `dimcode
@@ -2980,9 +3092,9 @@ authorizes a write, and a fork starts without the source's grants.
    nothing. `allowedTools` also bypasses the preset for every call of a tool, which presets and
    command rules already express more narrowly. The CLI keeps existing lists on every update.
 3. **The CLI writes `main` only** (branch semantics above).
-4. **No Shift+Tab cycle.** The key decoder belongs to the idle draft editor, which returns only
-   send or exit; a running turn reads plain lines. A cycle needs an editor action result and a
-   separate interaction design. `/permissions` covers switching.
+4. **Shift+Tab cycles in the TUI composer only.** Both TUI modes use the preset selection
+   operation above; transcript navigation and modal controls retain their keys. The line
+   client has no cycling shortcut and continues to use `/permissions` and its confirmation.
 5. **`/permissions` also adds rules.** F2 §8 lists adding as part of the panel, and with product
    storage the rules live in a database row that the user cannot edit as a file; without `add`
    a deny rule could not be created from the CLI.
@@ -2997,7 +3109,6 @@ authorizes a write, and a fork starts without the source's grants.
 | Item | What it needs |
 | --- | --- |
 | A reviewer model that answers approvals for the user | An approval answerer that responds through Approval's public respond operation, with its own model call and design, like the Collaboration leader route; not a CLI change |
-| Shift+Tab cycle | CLI only: an editor action result and a confirmation path (decision 4) |
 | `--allowed-tools`/`--disallowed-tools` | A tool catalog read to validate names at the argument boundary (decision 2) |
 | `/permissions` during a running turn | CLI only: the running turn reads plain lines and answers approvals; panel calls would join its multiplexed loop |
 
@@ -3252,3 +3363,9 @@ older requested rows
 initial window
 live output
 ```
+
+### Pending terminal frames
+
+While the initial transcript window is loading or a frame is queued to the terminal writer, the event loop rechecks at the frame interval. Once loading and writing finish and no frame is owed, the existing idle polling interval applies. This bounds a queued frame's extra scheduling delay without increasing steady idle polling.
+
+The CLI checks its newly spawned daemon after 5 ms, then backs off to 10/20/40/50 ms while opening. Existing startup deadlines and progress handling are unchanged. It does not impose an initial 50 ms delay on an already ready daemon.
