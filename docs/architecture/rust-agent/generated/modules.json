@@ -3263,6 +3263,26 @@
       ]
     },
     {
+      "id": "dim_app_server::provider::naming",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/naming.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_app_server::provider::naming::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider::naming",
+      "file": "crates/dim-app-server/src/provider/naming.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "json",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::new_api",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -30313,6 +30333,14 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::naming",
+      "references": [
+        "mod naming",
+        "path naming::unique"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::new_api",
       "references": [
         "mod new_api"
@@ -30820,6 +30848,39 @@
       ]
     },
     {
+      "from": "dim_app_server::provider::naming",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path ModelEntry",
+        "path ModelMetadata",
+        "use crate::model_catalog::ModelEntry",
+        "use crate::model_catalog::ModelMetadata"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::naming",
+      "to": "dim_app_server::provider::naming::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::naming::tests",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path ModelEntry",
+        "path ModelMetadata",
+        "path crate::model_catalog::ModelStatus::Unavailable"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::naming::tests",
+      "to": "dim_app_server::provider::naming",
+      "references": [
+        "path unique"
+      ]
+    },
+    {
       "from": "dim_app_server::provider::new_api",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -31199,6 +31260,13 @@
       "to": "dim_app_server::provider::models",
       "references": [
         "path models"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::provider::naming",
+      "references": [
+        "path naming::unique"
       ]
     },
     {

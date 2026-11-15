@@ -6,6 +6,7 @@ mod editing;
 mod legacy;
 pub(crate) mod management;
 mod models;
+pub(crate) mod naming;
 mod new_api;
 mod preferences;
 mod remote;
@@ -592,38 +593,41 @@ impl ProviderRecord {
     }
 
     fn catalog(&self, bundled: &BundledCatalog) -> ProviderCatalog {
+        let effective = self.effective_models(bundled);
+        let names = naming::unique(effective.iter().map(|model| &model.entry));
+        let models = effective
+            .into_iter()
+            .zip(names)
+            .map(|(model, name)| {
+                let (unavailable_reason, modality_unavailable_reason) =
+                    catalog_reasons(&model.unavailable);
+                ProviderModel {
+                    id: model.entry.model_id,
+                    name,
+                    endpoint: Some(model.source.protocol),
+                    config: ModelConfig {
+                        max_tokens: model.entry.capabilities.declared().map(|capabilities| {
+                            output_allowance(
+                                capabilities.context_window,
+                                capabilities.max_output_tokens,
+                            ) as f64
+                        }),
+                        ..Default::default()
+                    },
+                    capabilities: model.entry.capabilities,
+                    missing_limits: model.missing_limits,
+                    unavailable_reason,
+                    modality_unavailable_reason,
+                    zdr: model.source.zdr,
+                    metadata: model.entry.metadata,
+                }
+            })
+            .collect();
         ProviderCatalog {
             account: Some(self.account.clone()),
             version: self.version,
             disabled_model_ids: self.disabled_model_ids.clone(),
-            models: self
-                .effective_models(bundled)
-                .into_iter()
-                .map(|model| {
-                    let (unavailable_reason, modality_unavailable_reason) =
-                        catalog_reasons(&model.unavailable);
-                    ProviderModel {
-                        id: model.entry.model_id,
-                        name: model.entry.display_name,
-                        endpoint: Some(model.source.protocol),
-                        config: ModelConfig {
-                            max_tokens: model.entry.capabilities.declared().map(|capabilities| {
-                                output_allowance(
-                                    capabilities.context_window,
-                                    capabilities.max_output_tokens,
-                                ) as f64
-                            }),
-                            ..Default::default()
-                        },
-                        capabilities: model.entry.capabilities,
-                        missing_limits: model.missing_limits,
-                        unavailable_reason,
-                        modality_unavailable_reason,
-                        zdr: model.source.zdr,
-                        metadata: model.entry.metadata,
-                    }
-                })
-                .collect(),
+            models,
         }
     }
 }
@@ -1094,9 +1098,12 @@ fn static_models(
     record: &StaticProviderRecord,
     account_available: bool,
 ) -> Vec<ProviderModel> {
-    static_entries(bundled, provider_id, record)
+    let entries = static_entries(bundled, provider_id, record);
+    let names = naming::unique(&entries);
+    entries
         .into_iter()
-        .map(|entry| {
+        .zip(names)
+        .map(|(entry, name)| {
             let missing_limits = entry.capabilities.missing_limits();
             let status_unavailable =
                 matches!(entry.status, crate::model_catalog::ModelStatus::Unavailable);
@@ -1129,7 +1136,7 @@ fn static_models(
             let endpoint = record.routes.get(&entry.model_id).copied();
             ProviderModel {
                 id: entry.model_id,
-                name: entry.display_name,
+                name,
                 endpoint,
                 config: ModelConfig {
                     max_tokens: entry.capabilities.declared().map(|capabilities| {

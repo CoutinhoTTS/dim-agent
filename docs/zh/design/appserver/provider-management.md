@@ -59,10 +59,26 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 
 | 方法 | 请求 | 回复 | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`；每个连接新增 `gluedPrefix`，即其记录声明的前缀，每个模型新增 `alias`，即所列 id 所指的 catalog id；未设置时省略 | false | `Drain` |
+| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`；每个连接新增 `gluedPrefix`，即其记录声明的前缀，每个模型新增 `alias`，即所列 id 所指的 catalog id，以及 `catalogName`，即 `provider.catalog` 为该行发布的名字；未设置时省略 | false | `Drain` |
 | `provider.list` | `{}` | 原 `{providers,errors}` 摘要；每项新增 `remoteModelList`，表示 `provider.refresh` 能否列举该 Provider 的模型，客户端据此在空 catalog 的提示行给出或省略该命令，以及 `gluedPrefix`，即其记录声明的前缀，未设置时省略 | false | `Drain` |
 | `provider.selection` | `{cwd?}` | 既有 `{selection}`，其 scope/version 独立。带 `cwd` 时只读该作用域的行，该文件夹没有行时返回 `null`；工作区优先于全局是一条 `configuration` 规则，不属于此读取 | false | `Drain` |
-| `provider.catalog` | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`，**不修改** | false | `Drain` |
+| `provider.catalog` | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`；每个模型的 `name` 在其 Provider 内唯一（见下方 §3.1） | false | `Drain` |
+
+`provider.catalog` 发布的 `name` 在所属 Provider 内唯一。重复判定覆盖该目录的全部行，
+停用或不可用的行也算在内，因此开关某一行不会改名其他行，各客户端读到的名字一致。名字按
+去除首尾空白后比较。名字唯一的行为保留原文。与其他行同名的行发布其标签候选名
+`<自身名字> · <列举结果为该行声明的来源>`，来源取它携带的标签中最后一个 ` · ` 之后的
+文字（group 行为 `routing group`）；仅当没有其他行得到同一候选名、且没有行自身声明该名字
+时才采用它。同组的其他行改在末尾追加自己的 id，因此两行共用的标签不能命名其中任何一行；
+列举结果未声明来源的行没有候选名，同样追加 id。计算所得的名字均由去除空白后的片段拼成，
+追加的 id 也算在内，因此仅在空白上不同的两个 id 得到同一个名字。没有任何其他行得到、也没有行
+自身声明的追加 id 名字照原样保留，这样保留的名字（标签或 id）都在分配计数之前占位，因此计数
+不会抢走其他行自己发布的名字。此后仍被占用的名字再加计数，剩下的行按同一顺序取号：先按 id 名，
+再按 id，最后按声明的名字。只有这一步可能受列举顺序影响，且有了该顺序后只有共用同一个 id 与
+同一个声明名字的行才会走到，因此同一批行换序后每行得到的名字相同。
+这个名字在构建回复时计算，从不存储：所有 descriptor 和持久字段都保留 Provider 或用户声明
+的名字，因此保存编辑不会写回后缀，后缀也随其重复行一起消失。此规则适用于所有 Provider，
+包括两行同名的自定义 Provider。
 
 省略 ID 返回全部已知条目，包含未登录账号；指定 ID 返回该项或明确错误。
 管理读取独自提供编辑视图：version、模型 descriptor、管理说明来自同一 Provider 记录快照，
@@ -79,7 +95,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `account` | 可选 `{namespace, loginMethods, state}`；namespace 为 `account` / `account.codex` / `account.grok`，登录方式为 `browser` / `device`，state 沿该 namespace 现有公开 status 回复；静态 authority 不含该字段 |
 | `actions` | 当前可用操作名：`update`、`delete`、`refresh`、`models.create`、`models.edit`、`models.reset`、`models.delete`、`models.set_enabled`、`preferences.update`、`login`、`logout`、`usage`；没有逐操作原因代码 |
 | `connection` | 下表静态记录安全连接；连接配置只在可选账号包内时为 `null` |
-| `models` | `{model:ModelEntry,source:"default"\|"override"\|"user",enabled:boolean,endpoint:ModelProtocol\|null,unavailableReason:string\|null,missingLimits:("contextWindow"\|"maxOutputTokens")[],actions:string[],endpointOverride?:NewApiEndpoint}[]`；路由覆盖限 §6 可执行子集。仅账号无本地目录记录时为 `null`，坏目录报错。`missingLimits` 指出没有任何来源声明的上限（§3.5），否则为空。模型操作为 `set_enabled`、`edit`、`reset`、`delete`，按来源/authority 限制；`set_enabled` 只出现在没有 `unavailableReason` 的条目上，因为集合会保留不可用条目的启用状态 |
+| `models` | `{model:ModelEntry,source:"default"\|"override"\|"user",enabled:boolean,endpoint:ModelProtocol\|null,unavailableReason:string\|null,missingLimits:("contextWindow"\|"maxOutputTokens")[],actions:string[],endpointOverride?:NewApiEndpoint}[]`；路由覆盖限 §6 可执行子集。仅账号无本地目录记录时为 `null`，坏目录报错。`missingLimits` 指出没有任何来源声明的上限（§3.5），否则为空。`catalogName` 是 `provider.catalog` 为该行发布的名字，仅当它不同于 `model.displayName` 时出现；字段缺失表示显示名就是应显示的名字。它是计算所得，因此 `model.displayName` 始终是 Provider 或用户声明的名字，编辑也不会把计算出的名字写回。模型操作为 `set_enabled`、`edit`、`reset`、`delete`，按来源/authority 限制；`set_enabled` 只出现在没有 `unavailableReason` 的条目上，因为集合会保留不可用条目的启用状态 |
 | `preferences` | model ID 到既有 `ModelPreferences` 的映射 |
 | `modelsListed` | 读取和不改 `baseUrl`、`credential`、`headers` 的更新不含该字段；其余更新说明本次写入如何处理记录自身的模型：`listed`、`bundled`、`unsupported` 或 `disabled` |
 
