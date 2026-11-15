@@ -303,10 +303,13 @@ A submit during a run says where the message went. A queued draft shows
 the transcript as soon as the input is applied, marked pending until the model
 consumes it, so the user already sees the message in the running turn.
 
-`Ctrl+Enter` is `Esc` then `Enter` as one key. It withdraws every held message
-oldest first, stops the run, and submits the combined draft — the returned
-messages followed by what was typed — as one new message. Its withdrawals reach
-the session before the stop, and its submit is sent only after the stop's reply,
+`Ctrl+Enter` is `Esc` then `Enter` as one key. It withdraws every held user
+message oldest first, stops the run, and submits the combined draft — the
+returned messages followed by what was typed — as one new message. A held
+automatic input, such as a scheduled delivery, is outside the user queue for
+both keys: neither withdraws it, so it stays pending while the typed draft goes
+out alone. Its withdrawals reach the session before the stop, and its submit is
+sent only after the stop's reply,
 because an input written before the last interrupt does not start a run after
 it. A message that already left the queue is not sent again. If the stop fails,
 the combined draft stays in the composer with a notice, so nothing typed is
