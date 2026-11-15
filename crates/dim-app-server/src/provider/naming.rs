@@ -71,13 +71,9 @@ pub(crate) fn unique<'a>(entries: impl IntoIterator<Item = &'a ModelEntry>) -> V
         *reached.entry(candidate.as_str()).or_default() += 1;
     }
 
-    // A name one row states is published as it stands, so every computed name
-    // avoids it: the answer names a row by its own name wherever it can.
-    let mut claimed: HashSet<String> = entries
-        .iter()
-        .filter(|entry| stated[entry.display_name.trim()] == 1)
-        .map(|entry| entry.display_name.clone())
-        .collect();
+    // Every name a row states is claimed: a computed name may not equal one
+    // after trimming either, or two rows would publish one name.
+    let mut claimed: HashSet<String> = stated.keys().map(|name| (*name).to_owned()).collect();
     let keeps_label: Vec<bool> = candidates
         .iter()
         .map(|candidate| {
@@ -292,6 +288,21 @@ mod tests {
                 "the same rows in another order name each row the same"
             );
         }
+    }
+
+    #[test]
+    fn a_stated_name_that_differs_only_by_trimming_still_collides() {
+        let entries = vec![
+            entry("a", "GLM-5.3", None),
+            entry("b", "GLM-5.3", None),
+            entry("c", "GLM-5.3 · b ", None),
+        ];
+        assert_eq!(
+            unique(&entries),
+            ["GLM-5.3 · a", "GLM-5.3 · b 2", "GLM-5.3 · b "],
+            "the row stating the name keeps it, space and all, so the id the \
+             other row would take is already read as taken"
+        );
     }
 
     #[test]
