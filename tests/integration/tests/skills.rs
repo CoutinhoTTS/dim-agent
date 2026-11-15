@@ -509,6 +509,86 @@ async fn enablement_changes_the_list_and_loading() {
     env.agent.close().await.unwrap();
 }
 
+/// `disable-model-invocation` keeps a Skill out of the model's list and makes
+/// the `skill` tool refuse it; `user-invocable: false` keeps it out of the
+/// operator's list and loads nothing, while the tool still loads it. A value
+/// that is neither true nor false is an invalid manifest, as a missing field is
+/// ([Skills §9](../../../docs/design/plugins/Skills.md#9-references-load-with-the-operators-input)).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invocation_flags_narrow_who_may_load_a_skill() {
+    let dirs = Dirs::new();
+    let layout = layout(&dirs);
+    dirs.write(
+        &layout.project.join("model-only/SKILL.md"),
+        "---\nname: model-only\ndescription: Operator only\ndisable-model-invocation: true\n---\nMODEL-ONLY-BODY\n",
+    );
+    dirs.write(
+        &layout.project.join("user-only/SKILL.md"),
+        "---\nname: user-only\ndescription: Model only\nuser-invocable: false\n---\nUSER-ONLY-BODY\n",
+    );
+    dirs.write(
+        &layout.project.join("broken/SKILL.md"),
+        "---\nname: broken\ndescription: Bad flag\ndisable-model-invocation: yes\n---\nBROKEN-BODY\n",
+    );
+    let env = env(&dirs, Options::default()).await;
+    let session = env.session(&layout.cwd, "").await.unwrap();
+    run(&session, "first").await;
+    run(&session, "second").await;
+
+    let listed = lists(&session).await.pop().flatten().unwrap_or_default();
+    assert!(listed.contains("- b: "), "{listed}");
+    assert!(
+        !listed.contains("model-only"),
+        "the model may not invoke it: {listed}"
+    );
+    assert!(
+        listed.contains("user-only"),
+        "the model still loads what the operator may not: {listed}"
+    );
+    assert!(
+        !listed.contains("broken"),
+        "a malformed flag is an invalid manifest: {listed}"
+    );
+
+    let refused = result_text(&load(&env, &session, "model-only").await);
+    assert!(refused.contains("operator-only"), "{refused}");
+    assert!(result_text(&load(&env, &session, "user-only").await).contains("USER-ONLY-BODY"));
+    assert_eq!(
+        result_text(&load(&env, &session, "broken").await),
+        "Unknown skill: broken"
+    );
+
+    let model = session.service::<SkillsBranch>("main").unwrap().session();
+    let summaries = model.list().unwrap();
+    let invocable = |name: &str| {
+        summaries
+            .iter()
+            .find(|summary| summary.name == name)
+            .is_some_and(|summary| summary.user_invocable)
+    };
+    assert!(!invocable("user-only"), "the palettes leave it out");
+    assert!(invocable("model-only"), "the operator still invokes it");
+
+    let view = model.current().unwrap();
+    let broken = view
+        .list
+        .as_deref()
+        .is_some_and(|list| list.contains("broken"));
+    assert!(!broken, "an invalid manifest is not in the catalog");
+
+    let catalog = env.catalog().query(Some(&layout.cwd)).await.unwrap();
+    let issue = catalog
+        .issues
+        .iter()
+        .find(|issue| matches!(issue, SkillIssue::InvalidManifest { path, .. } if path.ends_with("broken/SKILL.md")))
+        .expect("the frontmatter error is reported");
+    assert!(
+        format!("{issue:?}").contains("disable-model-invocation"),
+        "{issue:?}"
+    );
+    env.agent.close().await.unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unreadable_root_keeps_the_view() {

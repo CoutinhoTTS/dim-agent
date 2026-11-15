@@ -67,6 +67,7 @@ impl SessionSkills {
                 id: skill.id.clone(),
                 name: skill.name.clone(),
                 description: skill.description.clone(),
+                user_invocable: skill.user_invocable,
             })
             .collect())
     }
@@ -422,6 +423,10 @@ impl CheckSubmission for SkillSubmitCheck {
                 let Some(skill) = view.skills.get(&name) else {
                     continue;
                 };
+                // `user-invocable: false` is the model's alone to load.
+                if !skill.user_invocable {
+                    continue;
+                }
                 blocks.push(crate::context_block::element(
                     "dim-skill",
                     &[("name", skill.name.as_str())],
@@ -542,6 +547,11 @@ impl ToolHandler for SkillTool {
                 }
                 None => return Ok(failure(format!("Unknown skill: {name}"))),
             };
+            if !skill.model_invocable {
+                return Ok(failure(format!(
+                    "Skill {name} is operator-only: ask the operator to invoke it with /skill:{name}"
+                )));
+            }
             let content = skill_text(&skill);
             let structured = serde_json::json!({
                 "success": true,

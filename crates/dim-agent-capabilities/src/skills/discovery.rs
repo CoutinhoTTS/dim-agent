@@ -153,6 +153,8 @@ fn parse_skill(
     };
     let name = field("name").ok_or_else(|| invalid("missing name"))?;
     let description = field("description").ok_or_else(|| invalid("missing description"))?;
+    let model_invocable = !flag(&data, "disable-model-invocation", &invalid)?.unwrap_or(false);
+    let user_invocable = flag(&data, "user-invocable", &invalid)?.unwrap_or(true);
     if body.is_empty() {
         return Err(invalid("empty body"));
     }
@@ -164,9 +166,29 @@ fn parse_skill(
         name,
         description,
         allowed_tools: normalize_allowed_tools(data.get("allowedTools")),
+        model_invocable,
+        user_invocable,
         file_path: manifest.to_owned(),
         body,
     })
+}
+
+/// A frontmatter flag as written, or `None` when it is absent or empty. A value
+/// that is neither `true` nor `false` is an invalid manifest, like a missing
+/// `name`: the frontmatter is the author's declaration and no default fills a
+/// misspelling. An empty value is `null` in YAML and leaves the caller's
+/// default in place.
+fn flag(
+    data: &BTreeMap<String, Yaml>,
+    key: &str,
+    invalid: &impl Fn(&str) -> SkillIssue,
+) -> Result<Option<bool>, SkillIssue> {
+    match data.get(key) {
+        None | Some(Yaml::Other) => Ok(None),
+        Some(Yaml::Bool(value)) => Ok(Some(*value)),
+        Some(Yaml::Str(value)) if value.trim().is_empty() => Ok(None),
+        Some(Yaml::Str(_) | Yaml::List(_)) => Err(invalid(&format!("{key} must be true or false"))),
+    }
 }
 
 /// Mirrors TS `normalizeAllowedTools`; descriptive only.
@@ -206,6 +228,9 @@ fn normalize_allowed_tools(raw: Option<&Yaml>) -> Vec<String> {
 enum Yaml {
     Str(String),
     List(Vec<String>),
+    /// `true` or `false`, told apart from the other non-string scalars.
+    Bool(bool),
+    /// A number, `null` or `~`: a scalar no field reads as text.
     Other,
 }
 
@@ -331,8 +356,11 @@ fn collect_indented_block(lines: &[&str], start: usize) -> (Vec<String>, usize) 
 }
 
 fn parse_scalar(raw: &str) -> Yaml {
-    if matches!(raw, "true" | "false" | "null" | "~") {
-        return Yaml::Other;
+    match raw {
+        "true" => return Yaml::Bool(true),
+        "false" => return Yaml::Bool(false),
+        "null" | "~" => return Yaml::Other,
+        _ => {}
     }
     let unquoted = unquote(raw);
     if unquoted.len() != raw.len() {

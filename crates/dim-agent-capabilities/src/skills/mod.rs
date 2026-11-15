@@ -110,6 +110,14 @@ pub struct SkillDefinition {
     pub description: String,
     /// Descriptive only; never grants permissions.
     pub allowed_tools: Vec<String>,
+    /// `disable-model-invocation: true`: the model may not invoke the Skill, so
+    /// it is left out of the model's list and the `skill` tool refuses it. The
+    /// operator still loads it with `/skill:<name>`.
+    pub model_invocable: bool,
+    /// `user-invocable: false`: the operator may not invoke the Skill, so the
+    /// palettes leave it out and a token naming it loads nothing. The `skill`
+    /// tool still loads it.
+    pub user_invocable: bool,
     pub file_path: PathBuf,
     pub body: String,
 }
@@ -293,15 +301,19 @@ pub struct SkillView {
     pub version: String,
     pub skills: BTreeMap<String, Arc<SkillDefinition>>,
     pub disabled: BTreeSet<String>,
-    /// Rendered list state; `None` when no Skill is enabled.
+    /// Rendered list state of the Skills the model may invoke; `None` when no
+    /// such Skill is enabled.
     pub list: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillSummary {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// `user-invocable: false`: the palettes leave the Skill out.
+    pub user_invocable: bool,
 }
 
 const METADATA_BUDGET_CHARS: usize = 4000;
@@ -311,13 +323,20 @@ impl SkillView {
         skills: BTreeMap<String, Arc<SkillDefinition>>,
         disabled: BTreeSet<String>,
     ) -> Self {
-        let list = (!skills.is_empty()).then(|| render_skill_metadata(&skills));
+        let listed: BTreeMap<_, _> = skills
+            .iter()
+            .filter(|(_, skill)| skill.model_invocable)
+            .map(|(name, skill)| (name.clone(), skill.clone()))
+            .collect();
+        let list = (!listed.is_empty()).then(|| render_skill_metadata(&listed));
         let identity = serde_json::json!({
             "skills": skills.values().map(|skill| serde_json::json!([
                 skill.id,
                 skill.name,
                 skill.description,
                 skill.allowed_tools,
+                skill.model_invocable,
+                skill.user_invocable,
                 skill.file_path.to_string_lossy(),
                 skill.body,
             ])).collect::<Vec<_>>(),
