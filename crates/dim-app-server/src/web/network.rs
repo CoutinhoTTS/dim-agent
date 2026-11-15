@@ -1,21 +1,11 @@
-use bytes::Bytes;
 use flate2::{Decompress, FlushDecompress, Status, write::GzDecoder};
-use http_body_util::{BodyExt, Empty};
-use hyper_util::rt::TokioIo;
-use rustls::pki_types::ServerName;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    pin::Pin,
-    sync::{Arc, OnceLock},
-    task::{Context, Poll},
+    net::{IpAddr, Ipv4Addr},
+    sync::OnceLock,
     time::Duration,
-};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
-    net::TcpStream,
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -483,161 +473,6 @@ async fn resolve_addresses(
     Ok(resolved)
 }
 
-pub trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncStream for T {}
-
-struct PrebufferedStream<S> {
-    prefix: Bytes,
-    inner: S,
-}
-
-impl<S: AsyncRead + Unpin> AsyncRead for PrebufferedStream<S> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if !self.prefix.is_empty() {
-            let n = self.prefix.len().min(buf.remaining());
-            buf.put_slice(&self.prefix.split_to(n));
-            return Poll::Ready(Ok(()));
-        }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
-impl<S: AsyncWrite + Unpin> AsyncWrite for PrebufferedStream<S> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-}
-
-fn tls_config() -> Result<Arc<rustls::ClientConfig>, WebError> {
-    static CONFIG: OnceLock<Result<Arc<rustls::ClientConfig>, WebError>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut store = rustls::RootCertStore::empty();
-            store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            for cert in rustls_native_certs::load_native_certs().certs {
-                let _ = store.add(cert);
-            }
-            let provider = Arc::new(rustls::crypto::ring::default_provider());
-            let config = rustls::ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .map_err(|_| {
-                    WebError::new("tls_failed", "TLS verification or negotiation failed.")
-                })?
-                .with_root_certificates(store)
-                .with_no_client_auth();
-            Ok(Arc::new(config))
-        })
-        .clone()
-}
-
-async fn connect_tls(
-    stream: Box<dyn AsyncStream>,
-    host: &str,
-) -> Result<Box<dyn AsyncStream>, WebError> {
-    let config = tls_config()?;
-    let connector = tokio_rustls::TlsConnector::from(config);
-    let server_name = ServerName::try_from(host.to_owned())
-        .map_err(|_| WebError::new("tls_failed", "TLS verification or negotiation failed."))?;
-    let tls_stream = connector
-        .connect(server_name, stream)
-        .await
-        .map_err(|_| WebError::new("tls_failed", "TLS verification or negotiation failed."))?;
-    Ok(Box::new(tls_stream))
-}
-
-async fn open_tunnel(proxy: &Url, authority: &str) -> Result<Box<dyn AsyncStream>, WebError> {
-    let proxy_host = hostname(proxy);
-    let proxy_port = proxy
-        .port_or_known_default()
-        .ok_or_else(|| WebError::new("connect_failed", "The configured proxy is unusable."))?;
-    let proxy_ip = if let Ok(pip) = proxy_host.parse::<IpAddr>() {
-        pip
-    } else {
-        tokio::net::lookup_host((proxy_host.as_str(), proxy_port))
-            .await
-            .map_err(|_| WebError::new("connect_failed", "The connection failed."))?
-            .next()
-            .map(|addr| addr.ip())
-            .ok_or_else(|| WebError::new("connect_failed", "The connection failed."))?
-    };
-    let tcp = TcpStream::connect(SocketAddr::new(proxy_ip, proxy_port))
-        .await
-        .map_err(|_| WebError::new("connect_failed", "The connection failed."))?;
-    let mut stream: Box<dyn AsyncStream> = if proxy.scheme() == "https" {
-        connect_tls(Box::new(tcp), &proxy_host).await?
-    } else {
-        Box::new(tcp)
-    };
-    let req = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n");
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|_| WebError::new("connect_failed", "The connection failed."))?;
-    stream
-        .flush()
-        .await
-        .map_err(|_| WebError::new("connect_failed", "The connection failed."))?;
-    let mut buf = Vec::with_capacity(256);
-    let mut scratch = [0u8; 1024];
-    let header_end = loop {
-        if buf.len() > 16 * 1024 {
-            return Err(WebError::new(
-                "connect_failed",
-                "The proxy refused the tunnel.",
-            ));
-        }
-        let n = stream
-            .read(&mut scratch)
-            .await
-            .map_err(|_| WebError::new("connect_failed", "The proxy refused the tunnel."))?;
-        if n == 0 {
-            return Err(WebError::new(
-                "connect_failed",
-                "The proxy refused the tunnel.",
-            ));
-        }
-        buf.extend_from_slice(&scratch[..n]);
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            break pos + 4;
-        }
-    };
-    let head_str = std::str::from_utf8(&buf[..header_end])
-        .map_err(|_| WebError::new("connect_failed", "The proxy refused the tunnel."))?;
-    let status_line = head_str.lines().next().unwrap_or_default();
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    if status != 200 {
-        return Err(WebError::new(
-            "connect_failed",
-            "The proxy refused the tunnel.",
-        ));
-    }
-    let remainder = Bytes::copy_from_slice(&buf[header_end..]);
-    Ok(Box::new(PrebufferedStream {
-        prefix: remainder,
-        inner: stream,
-    }))
-}
-
 pub struct Response {
     pub status: u16,
     pub content_type: String,
@@ -816,157 +651,121 @@ pub async fn get(
         config.block_private_addresses,
         diagnostics,
     )?;
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| WebError::new("invalid_input", "Expected an absolute HTTP or HTTPS URL."))?;
-    let connect_phase = async {
-        if cancel.is_cancelled() {
-            return Err(WebError::new("cancelled", "Call cancelled."));
-        }
-        let secure = async |stream| {
-            if url.scheme() == "https" {
-                connect_tls(stream, &host).await
-            } else {
-                Ok(stream)
-            }
-        };
-        if let Some((proxy, true)) = &config.proxy
-            && let Some(url::Host::Domain(domain)) = url.host()
-        {
-            let stream = open_tunnel(proxy, &format!("{domain}:{port}")).await?;
-            return secure(stream).await;
-        }
-        let ips = resolve_addresses(&host, cancel).await?;
-        policy.check(&ips, matches!(url.host(), Some(url::Host::Domain(_))))?;
-        let mut last_err = WebError::new("connect_failed", "The connection failed.");
-        for ip in ips {
-            let attempt = async {
-                let address = SocketAddr::new(ip, port);
-                let base_stream: Box<dyn AsyncStream> = if let Some((proxy, _)) = &config.proxy {
-                    open_tunnel(proxy, &address.to_string()).await?
-                } else {
-                    let tcp = TcpStream::connect(address)
-                        .await
-                        .map_err(|_| WebError::new("connect_failed", "The connection failed."))?;
-                    Box::new(tcp)
-                };
-                secure(base_stream).await
-            };
-            match attempt.await {
-                Ok(stream) => return Ok(stream),
-                Err(err) => {
-                    if cancel.is_cancelled() {
-                        return Err(WebError::new("cancelled", "Call cancelled."));
-                    }
-                    last_err = err;
-                }
-            }
-        }
-        Err(last_err)
-    };
-    let stream = tokio::select! {
-        _ = cancel.cancelled() => return Err(WebError::new("cancelled", "Call cancelled.")),
-        res = tokio::time::timeout(CONNECT_TIMEOUT, connect_phase) => {
-            res.map_err(|_| WebError::new("timeout", "Connection timed out."))??
-        }
-    };
-    if cancel.is_cancelled() {
-        return Err(WebError::new("cancelled", "Call cancelled."));
-    }
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-        .await
-        .map_err(|_| WebError::new("connect_failed", "The connection failed."))?;
-    let conn_task = tokio::spawn(async move {
-        let _ = conn.await;
-    });
-    let result = async {
-        let path_and_query = match url.query() {
-            Some(q) => format!("{}?{q}", url.path()),
-            None => url.path().to_owned(),
-        };
-        let host_header = match url.port() {
-            Some(p) => format!("{}:{p}", url.host_str().unwrap_or_default()),
-            None => url.host_str().unwrap_or_default().to_owned(),
-        };
-        let mut builder = http::Request::builder()
-            .method("GET")
-            .uri(path_and_query)
-            .header("Host", host_header)
-            .header(
-                "User-Agent",
-                format!("dim-web/{}", env!("CARGO_PKG_VERSION")),
-            )
-            .header(
-                "Accept",
-                "text/html, text/plain, application/json, application/xml;q=0.9, */*;q=0.1",
-            )
-            .header("Accept-Encoding", "gzip, deflate, identity")
-            .header("Connection", "close");
-        for (k, v) in headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let req = builder
-            .body(Empty::<Bytes>::new())
-            .map_err(|_| WebError::new("connect_failed", "The connection failed."))?;
-        let response = tokio::select! {
+    let domain = matches!(url.host(), Some(url::Host::Domain(_)));
+    // A proxy that resolves hostname targets owns the lookup; the local answer
+    // would be a Fake-IP address the policy cannot judge.
+    let delegated = matches!(&config.proxy, Some((_, true))) && domain;
+    let mut pinned = None;
+    if config.block_private_addresses && !delegated {
+        let ips = tokio::select! {
             _ = cancel.cancelled() => return Err(WebError::new("cancelled", "Call cancelled.")),
-            res = sender.send_request(req) => res.map_err(|_| WebError::new("connect_failed", "The connection failed."))?,
-        };
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(http::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
-        let location = response
-            .headers()
-            .get(http::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-        if !(200..300).contains(&status) {
-            return Ok(Response {
-                status,
-                content_type,
-                location,
-                body: Vec::new(),
-                download_limited: false,
-            });
-        }
-        let encoding = response
-            .headers()
-            .get(http::header::CONTENT_ENCODING)
-            .and_then(|v| v.to_str().ok());
-        let mut decoder = Decoder::new(encoding, DOWNLOAD_LIMIT)?;
-        let mut body_stream = response.into_body();
-        loop {
-            let next_frame = tokio::select! {
-                _ = cancel.cancelled() => return Err(WebError::new("cancelled", "Call cancelled.")),
-                frame = body_stream.frame() => frame,
-            };
-            let Some(frame) = next_frame else {
-                break;
-            };
-            let frame =
-                frame.map_err(|_| WebError::new("connect_failed", "The connection failed."))?;
-            if let Ok(data) = frame.into_data()
-                && decoder.push(&data)?
-            {
-                break;
+            res = tokio::time::timeout(CONNECT_TIMEOUT, resolve_addresses(&host, cancel)) => {
+                res.map_err(|_| WebError::new("timeout", "Connection timed out."))??
             }
+        };
+        policy.check(&ips, domain)?;
+        if domain {
+            let port = url.port_or_known_default().ok_or_else(|| {
+                WebError::new("invalid_input", "Expected an absolute HTTP or HTTPS URL.")
+            })?;
+            pinned = Some(std::net::SocketAddr::new(ips[0], port));
         }
-        let (body, download_limited) = decoder.finish()?;
-        Ok(Response {
+    }
+    let client = client_for(config, &host, pinned)?;
+    attempt(&client, url, cancel, headers).await
+}
+
+fn client_for(
+    config: &NetworkConfig,
+    host: &str,
+    pinned: Option<std::net::SocketAddr>,
+) -> Result<reqwest::Client, WebError> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .http1_only()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .user_agent(format!("dim-web/{}", env!("CARGO_PKG_VERSION")));
+    if let Some((proxy, _)) = &config.proxy {
+        builder =
+            builder.proxy(reqwest::Proxy::all(proxy.as_str()).map_err(|_| {
+                WebError::new("connect_failed", "The configured proxy is unusable.")
+            })?);
+    }
+    if let Some(pinned) = pinned {
+        builder = builder.resolve(host, pinned);
+    }
+    builder
+        .build()
+        .map_err(|_| WebError::new("connect_failed", "The connection failed."))
+}
+
+async fn attempt(
+    client: &reqwest::Client,
+    url: &Url,
+    cancel: &CancellationToken,
+    headers: &HashMap<String, String>,
+) -> Result<Response, WebError> {
+    let mut request = client
+        .get(url.as_str())
+        .header(
+            reqwest::header::ACCEPT,
+            "text/html, text/plain, application/json, application/xml;q=0.9, */*;q=0.1",
+        )
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip, deflate, identity")
+        .header(reqwest::header::CONNECTION, "close");
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let mut response = tokio::select! {
+        _ = cancel.cancelled() => return Err(WebError::new("cancelled", "Call cancelled.")),
+        res = request.send() => res.map_err(|_| WebError::new("connect_failed", "The connection failed."))?,
+    };
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    if !(200..300).contains(&status) {
+        return Ok(Response {
             status,
             content_type,
             location,
-            body,
-            download_limited,
-        })
+            body: Vec::new(),
+            download_limited: false,
+        });
     }
-    .await;
-    conn_task.abort();
-    result
+    let encoding = response
+        .headers()
+        .get(reqwest::header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok());
+    let mut decoder = Decoder::new(encoding, DOWNLOAD_LIMIT)?;
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => return Err(WebError::new("cancelled", "Call cancelled.")),
+            chunk = response.chunk() => chunk.map_err(|_| WebError::new("connect_failed", "The connection failed."))?,
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        if decoder.push(&chunk)? {
+            break;
+        }
+    }
+    let (body, download_limited) = decoder.finish()?;
+    Ok(Response {
+        status,
+        content_type,
+        location,
+        body,
+        download_limited,
+    })
 }
 
 #[cfg(test)]
@@ -1071,28 +870,34 @@ mod tests {
                         let stop = stop.clone();
                         tokio::spawn(async move {
                             let (head, rest) = read_head(&mut client).await;
-                            let target = head
-                                .lines()
-                                .next()
-                                .unwrap()
-                                .split_whitespace()
-                                .nth(1)
-                                .unwrap()
-                                .to_owned();
+                            let request_line = head.lines().next().unwrap_or_default().to_owned();
+                            let mut parts = request_line.split_whitespace();
+                            let method = parts.next().unwrap_or_default().to_owned();
+                            let target = parts.next().unwrap_or_default().to_owned();
                             targets.lock().unwrap().push(target.clone());
-                            if target.starts_with("[::1]:") {
-                                let _ = client
-                                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                                    .await;
-                                return;
-                            }
                             let mut upstream = TcpStream::connect(origin).await.unwrap();
-                            client
-                                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                                .await
-                                .unwrap();
-                            if !rest.is_empty() {
-                                upstream.write_all(&rest).await.unwrap();
+                            if method == "CONNECT" {
+                                client
+                                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                                    .await
+                                    .unwrap();
+                                if !rest.is_empty() {
+                                    upstream.write_all(&rest).await.unwrap();
+                                }
+                            } else {
+                                // The request arrives in absolute form; the origin
+                                // wants origin form.
+                                let path = target
+                                    .split_once("://")
+                                    .and_then(|(_, authority)| authority.find('/').map(|i| &authority[i..]))
+                                    .unwrap_or("/");
+                                let version = parts.next().unwrap_or("HTTP/1.1");
+                                let tail = head.split_once("\r\n").map(|(_, tail)| tail).unwrap_or("");
+                                let rewritten = format!("{method} {path} {version}\r\n{tail}");
+                                upstream.write_all(rewritten.as_bytes()).await.unwrap();
+                                if !rest.is_empty() {
+                                    upstream.write_all(&rest).await.unwrap();
+                                }
                             }
                             tokio::select! {
                                 _ = stop.cancelled() => {}
@@ -1165,7 +970,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_and_proxy_fetches_pin_the_resolved_address() {
+    async fn direct_and_proxied_fetches_reach_the_origin() {
         let (origin_listener, origin_addr, seen) = origin().await;
         let origin_stop = CancellationToken::new();
         let origin_task = serve_origin(origin_listener, seen.clone(), origin_stop.clone());
@@ -1189,7 +994,11 @@ mod tests {
         .unwrap();
         assert_eq!(direct.status, 200);
         assert_eq!(direct.body, b"pinned");
-        assert_eq!(test_dns::hits("pinned.test"), 1);
+        assert_eq!(
+            test_dns::hits("pinned.test"),
+            1,
+            "the policy check resolves once"
+        );
         let host = seen.lock().unwrap().clone();
         assert!(
             host.to_ascii_lowercase()
@@ -1211,36 +1020,7 @@ mod tests {
         assert_eq!(test_dns::hits("pinned.test"), 2);
         assert_eq!(
             targets.lock().unwrap().as_slice(),
-            [format!("127.0.0.1:{}", origin_addr.port())]
-        );
-
-        let _fallback = dns("pinned.test", &["::1", "127.0.0.1"]);
-        let again = get(
-            &Url::parse(&format!(
-                "http://pinned.test:{}/fallback",
-                origin_addr.port()
-            ))
-            .unwrap(),
-            &config("pinned.test", Some(&proxy_base)),
-            &cancel,
-            &mut diagnostics,
-            &HashMap::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(again.body, b"pinned");
-        assert_eq!(
-            test_dns::hits("pinned.test"),
-            1,
-            "fallback reuses one lookup"
-        );
-        assert_eq!(
-            targets.lock().unwrap().as_slice(),
-            [
-                format!("127.0.0.1:{}", origin_addr.port()),
-                format!("[::1]:{}", origin_addr.port()),
-                format!("127.0.0.1:{}", origin_addr.port()),
-            ]
+            [format!("http://pinned.test:{}/proxy", origin_addr.port())]
         );
         origin_stop.cancel();
         proxy_stop.cancel();
@@ -1282,7 +1062,7 @@ mod tests {
         else {
             panic!("TLS requires a completed handshake");
         };
-        assert_eq!(err.code, "tls_failed", "{err}");
+        assert_eq!(err.code, "connect_failed", "{err}");
         handshake.await.unwrap();
         assert_eq!(test_dns::hits("fake-tls.test"), 0);
     }

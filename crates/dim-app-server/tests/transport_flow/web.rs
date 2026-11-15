@@ -770,9 +770,24 @@ async fn web_fetch_blocks_untrusted_targets_and_follows_same_host_redirects() {
                             }
                         };
                         let head = String::from_utf8_lossy(&header[..end]);
-                        let target = head.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("").to_owned();
+                        let request_line = head.lines().next().unwrap_or("");
+                        let mut parts = request_line.split_whitespace();
+                        let method = parts.next().unwrap_or("");
+                        let raw = parts.next().unwrap_or("");
+                        // CONNECT names the authority; an absolute-form request
+                        // names a URL. Record the authority for both.
+                        let (target, path) = if method == "CONNECT" {
+                            (raw.to_owned(), None)
+                        } else {
+                            match raw.split_once("://").and_then(|(_, rest)| {
+                                rest.find('/').map(|i| (&rest[..i], &rest[i..]))
+                            }) {
+                                Some((authority, path)) => (authority.to_owned(), Some(path.to_owned())),
+                                None => (raw.to_owned(), Some("/".to_owned())),
+                            }
+                        };
                         tunnel_log.lock().unwrap().push(target.clone());
-                        if target == "pending.invalid:80" {
+                        if target == "pending.invalid:80" || target == "pending.invalid" {
                             entered.notify_one();
                             assert_eq!(client.read(&mut chunk).await.unwrap(), 0);
                             closed.notify_one();
@@ -785,7 +800,17 @@ async fn web_fetch_blocks_untrusted_targets_and_follows_same_host_redirects() {
                             return;
                         }
                         let mut upstream = tokio::net::TcpStream::connect(origin_addr).await.unwrap();
-                        client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.unwrap();
+                        match path {
+                            Some(path) => {
+                                let version = parts.next().unwrap_or("HTTP/1.1");
+                                let tail = head.split_once("\r\n").map(|(_, tail)| tail).unwrap_or("");
+                                let rewritten = format!("{method} {path} {version}\r\n{tail}");
+                                upstream.write_all(rewritten.as_bytes()).await.unwrap();
+                            }
+                            None => {
+                                client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.unwrap();
+                            }
+                        }
                         if end < header.len() {
                             upstream.write_all(&header[end..]).await.unwrap();
                         }
@@ -1016,8 +1041,8 @@ async fn web_fetch_blocks_untrusted_targets_and_follows_same_host_redirects() {
     idle(&mut client, &id).await;
     let refused = result(&session).await;
     assert!(
-        text(&refused).contains("connect_failed: The proxy refused the tunnel."),
-        "{refused:?}"
+        text(&refused).contains("http_status: HTTP 502"),
+        "a proxy refusal surfaces as its status: {refused:?}"
     );
     submit(
         &mut client,
@@ -1041,7 +1066,7 @@ async fn web_fetch_blocks_untrusted_targets_and_follows_same_host_redirects() {
     assert_eq!(result(&session).await.is_error, Some(true));
     assert_eq!(
         &tunnels.lock().unwrap()[3..],
-        ["refused.invalid:80", "pending.invalid:80"]
+        ["refused.invalid", "pending.invalid"]
     );
     assert_eq!(hits.load(Ordering::SeqCst), before);
 

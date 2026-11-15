@@ -190,7 +190,7 @@ Web 不写标记、不贡献 guide 条目；它的声明没有 policy 文本。
 
 home 存在时，App Server 登记进程 row `web`。其 apply 向 `partRegistry` 登记 Settings 来源 `web`（用户文件 `web.json`，无项目文件）和 Session 部件 `Web`。每个 Session 挂载该部件。部件注入 `settings`、`toolRegistry` 与 `managedProviders`。其 apply 只登记资源清理和两个工具，在调用发生前不做 I/O。Rust 形式见附录 G。
 
-该 row 登记的来源 schema，`userOnly` 路径为 `/searchService`、`/allowPrivateHosts`、`/blockPrivateAddresses`、`/proxyDns` 与 `/proxy`：
+该 row 登记的来源 schema，`userOnly` 路径为 `/searchService`、`/allowPrivateHosts`、`/blockPrivateAddresses` 与 `/proxyDns`（`proxy` 是 `writeOnly`，不是仅用户）：
 
 ```json
 {
@@ -232,7 +232,7 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 - 无环境权限：仅 `GET`；不带 cookie、已存站点凭据或客户端证书；除模型写出的 URL 外不携带 Session 中的任何内容（A8）。
 - API 密钥：每次调用随文档读取；从不出现在声明、结果、`structuredContent`、诊断或错误中。
 - 经 URL 外泄是 `network` 类别的固有风险，由准入控制。
-- 使用 `proxy` 时，`CONNECT` 目标遵循 A.4；两种 DNS 模式下，TLS 证书校验、SNI 和 `Host` 头均使用原 URL 的主机。
+- 使用 `proxy` 时，目标形式遵循 A.4（`https` 用 `CONNECT`，`http` 用 absolute-form）；证书校验、SNI 和 `Host` 头均使用原 URL 的主机。
 
 ## 8. 规则检查
 
@@ -334,17 +334,17 @@ Characters: <start>-<end> of <total>
 
 | 规则 | 内容 |
 | --- | --- |
-| 解析 | Web 解析主机名，按 DNS 顺序尝试解析出的地址，直到连接成功或达到共享连接时限（固定），直连或经 `proxy` 都一样 |
+| 解析 | `blockPrivateAddresses: true` 时，Web 解析一次主机名、检查每个解析结果，并把第一个允许的地址固定给本次请求。关闭时由客户端自行解析 |
 | 策略默认 | 关闭：`web_fetch` 能到达主机能路由的任何地址，本地代理、TUN 设备或 Fake-IP 答案都不需要例外。`blockPrivateAddresses: true` 才恢复下表的封禁 |
 | `blockPrivateAddresses: true` 时封禁 | 回环（`127.0.0.0/8`、`::1`）、未指定地址、RFC 1918、链路本地（`169.254.0.0/16`、`fe80::/10`，含云元数据）、CGNAT `100.64.0.0/10`、唯一本地 `fc00::/7`、组播、广播、包含基准测试段 `198.18.0.0/15` 的保留范围，以及这些地址的 IPv4 映射与 IPv4 兼容 IPv6 形式 |
-| 字面 IP | 仅在策略开启时按相同规则检查；字面 IP 从不委托解析 |
+| 字面 IP | 仅在策略开启时按相同规则检查；字面 IP 按原样使用 |
 | 端口 | 任意端口（A12） |
 | 例外 | `allowPrivateHosts`：精确主机名或 CIDR；默认为空。这是仅限用户的字段：经客户端方法 `settings.update` 写入，从不由 Web 写入（S8b）。Settings 只检查它是字符串数组；Web 在使用时解析每一项，忽略既不是主机名也不是 CIDR 的项并作为诊断报告 |
-| 代理 | 依次选取：配置的 `proxy`；否则环境变量 `HTTPS_PROXY`、`ALL_PROXY`、`HTTP_PROXY` 中的会话代理；否则桌面设置（GNOME `org.gnome.system.proxy` 的 `manual` 模式）。`DIM_WEB_SYSTEM_PROXY=off` 可关闭后两级回退 |
-| 代理 DNS | `proxyDns: true`（默认）时，主机名 URL 使用 `CONNECT <主机名>:<端口>`，目标解析完全交给代理。`false` 时 Web 在本机解析并校验，再发 `CONNECT <地址>:<端口>`。两种模式共享连接时限与取消；代理拒绝隧道时以 `connect_failed` 失败（A15），不回退直连。没有任何代理时该开关不起作用 |
+| 代理 | 依次选取：配置的 `proxy`；否则环境变量 `HTTPS_PROXY`、`ALL_PROXY`、`HTTP_PROXY` 中的会话代理；否则桌面设置（GNOME `org.gnome.system.proxy` 的 `manual` 模式）。`DIM_WEB_SYSTEM_PROXY=off` 可关闭后两级回退。`https` 目标用 `CONNECT <主机>:<端口>`，`http` 目标以 absolute-form 交给代理，因此代理能看到完整 URL |
+| 代理 DNS | `proxyDns: true`（默认）时由代理解析目标：主机名出现在 `CONNECT` 行或 absolute-form 请求行里。`false` 时 Web 在本机解析，并固定它检查过的地址。代理拒绝隧道时以 `connect_failed` 失败（A15）；代理直接作答时按其状态码报告。没有任何代理时该开关不起作用 |
 | 代理 DNS 信任 | 启用 `proxyDns` 时由代理解析目标主机名，如果代理允许，主机名可能到达私网或元数据地址。策略开启时 Web 仍拒绝 `localhost` 和 `*.localhost`，除非按主机名显式放行。CIDR 例外只作用于 Web 检查的地址 |
 
-策略关闭时，Fake-IP DNS 答案只是普通地址。开启 `blockPrivateAddresses` 会恢复保留范围的拦截；而 `proxyDns: true` 时由代理解析，Web 根本看不到本机答案，因此 Fake-IP 网段同样不需要例外。
+Fake-IP DNS 答案就是普通地址。经代理且 `proxyDns: true` 时它根本不会到达 Web，因为由代理解析；策略开启且无代理时，它和其他保留范围一样被拒绝。
 
 ### A.5 业务配置（Settings 来源 `web`）
 
@@ -353,7 +353,7 @@ Characters: <start>-<end> of <total>
 | `searchService` | `{ kind: "<built-in adapter id>", endpoint?: string, apiKey?: string }` 或缺省；仅用户 | 缺省（已登录时经 `managedProviders` 使用 `dim-oauth`；否则 `web_search` 返回 `search_unavailable`） |
 | `allowPrivateHosts` | string[]；仅用户 | `[]` |
 | `blockPrivateAddresses` | boolean；仅用户 | `false` |
-| `proxy` | string（URL）；仅用户；缺省表示使用会话自带的代理（A.4） | 缺省 |
+| `proxy` | string（URL）；`writeOnly`；缺省表示使用会话自带的代理（A.4） | 缺省 |
 | `proxyDns` | boolean；仅用户 | `true` |
 
 每次调用时读取，按交付的样子使用：Settings 在写入和读取持久化文件时按 Web 声明的 schema 校验文档并应用默认值，Web 不再校验。Web 没有写配置的工具，因此文档只经客户端方法写入（S8b）。变更是带通知的数据更新，从不触发重载。row 的结构性启停状态归 PluginManager 所有（§6）。内置适配器 id 是实现选择（A13）。API 密钥是 `searchService.apiKey`（§1）。
@@ -401,7 +401,7 @@ Characters: <start>-<end> of <total>
 | --- | --- |
 | `invalid_input` | 参数违反附录 A |
 | `blocked_address` | Web 按 A.4 拒绝请求或重定向的目标。消息只指明规则 |
-| `dns_failed`、`connect_failed`、`tls_failed` | 网络错误；`connect_failed` 包括 `proxy` 配置值无法解析、`proxyDns: true` 却未配置代理，或代理拒绝 `CONNECT` |
+| `dns_failed`、`connect_failed` | 网络错误；`connect_failed` 包括 `proxy` 配置值无法解析、隧道被拒绝，或 TLS 失败 |
 | `timeout` | 达到连接或整个调用的时限 |
 | `http_status` | 最终状态非 2xx |
 | `too_many_redirects` | 同主机跳转超过 5 次 |
@@ -448,19 +448,19 @@ Characters: <start>-<end> of <total>
 | A12 | 公网地址上任意端口 | 判断 | 限制为 80/443 |
 | A13 | 内置适配器列表是实现选择 | overview 未指定服务 | 由 overview 固定某个服务 |
 | A14 | 抓取内容周围不加框定文本 | 判断 | 需要定义模型可见的框定 |
-| A15 | 配置的代理支持对 A.4 选定形式的目标做 HTTP `CONNECT`，`http` 和 `https` 都支持 | 默认的 IP 固定保证由维护者确认。[#1161](https://github.com/arcships/dim/issues/1161) 提议通过 `proxyDns` 使用主机名 `CONNECT` | 代理拒绝选定的目标形式时无法使用 |
+| A15 | 配置的代理接受目标的两种形式：`https` 用 `CONNECT <主机>:<端口>`，`http` 用 absolute-form 请求 | [ADR 024](../../adr/024-web-fetch-transport.md) | 只接受一种形式的代理无法同时服务两种 scheme |
 | A16 | 初始来源只声明用户文件 `web.json`，按 user scope 读取；无隐式项目合并 | 维护者决定 | 先定义项目来源与合并业务语义，再配置既有 projectFile |
 
 ## 附录 F. 实施边界
 
 | 问题 | 当前边界 |
 | --- | --- |
-| 初始范围 | 工具参数、默认网络策略、内容策略、A1–A14、A15 的默认 IP 固定保证与 A16 均已由维护者确认。Web 是内置进程 row `web` 及其 Session 部件。可选包的产品安装仍属于 PluginManager。 |
+| 初始范围 | 工具参数、默认网络策略、内容策略、A1–A14、A15 的代理目标形式与 A16 均已由维护者确认。Web 是内置进程 row `web` 及其 Session 部件。可选包的产品安装仍属于 PluginManager。 |
 | 配置诊断 | 非致命且仅供 UI/持久化的配置诊断放入 ToolResult.structuredContent；模型需要采取动作的信息仍必须放在 content，不新增通道 |
 | HTML 转文本 | 扫描器，不是浏览器。后面出现 `>` 的 `<` 即开始一个标签，正文里单独的 `<` 也算。script、style 与导航在这次扫描之前用正则去掉。 |
 | 内容编码 | 解码 `gzip`、`deflate` 与 `identity`。`br` 与其他编码以 `connect_failed` 失败。不完整的 gzip、带 zlib 封装的 deflate 或原始 deflate 流均以 `connect_failed` 失败；若已经达到下载上限，则返回截断后的正文并带 `download_limited`。服务器省略 zlib 封装时回退为原始 deflate。 |
 | User-Agent | `dim-web/` 加上 `dim-app-server` 的包版本 |
-| 传输 | `web/network.rs` 自己建连：自建 TCP/TLS、两种 scheme 都自建 `CONNECT`、统一的连接时限与固定后的地址。中间不夹请求库，因为那会改变代理看到的内容，以及地址检查与连接的关系；见 [ADR 024](../../adr/024-web-fetch-transport.md) |
+| 传输 | `reqwest`，仅 HTTP/1，关闭重定向，10 秒连接时限，手工 gzip/deflate 解码与 5 MiB 上限。地址策略在请求之前执行，开启时固定第一个允许的地址（[ADR 024](../../adr/024-web-fetch-transport.md)） |
 
 ## 附录 G. Rust 绑定
 

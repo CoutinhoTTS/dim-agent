@@ -31,7 +31,7 @@ original text.
 | [021 — A read follows the object that owns the state](021-reads-follow-the-state-owner.md) | Proposed | Supersedes 020 D6's unloaded-Session clause; refines 019 D1 for the ended-line read |
 | [022 — Timeline 属性查询与正文重建](022-event-property-queries.md) | Proposed | Supersedes 019's event-only results, skip-based paging and start-only positions, and 020's single-predicate limit; retains 021's read ownership |
 | [023 — 上下文用量由独立分支部件维护](023-context-usage.md) | Accepted | Follows 021 and 022; separates context usage statistics from request preparation |
-| [024 — Web 抓取层保留自有传输，不换成请求库](024-web-fetch-transport.md) | Proposed | Follows 006 D1; records why A.4/A.15 的传输与地址保证优先于代码体量 |
+| [024 — Web 抓取层使用请求库，地址策略在请求之前执行](024-web-fetch-transport.md) | Accepted | Follows 006 D1; replaces the hand-written transport and narrows the address policy to a pre-request check |
 
 Source baseline: [initial foundation parent](https://github.com/arcships/dim/commit/aaaffa5768e031d781abb73e45b1915b05dc2aa0).
 This baseline includes lifecycle fixes not necessarily present on the default branch.
