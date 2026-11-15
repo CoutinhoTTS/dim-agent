@@ -1069,7 +1069,9 @@ CLI 保留它，先等那个进程，不启动自己的守护进程。子进程�
 说明（最多 16 KiB，且只接受普通文件；Unix 上还要求属于当前用户、组和其他用户都没有
 权限）。Unix 上这套权限就是说明的保护，因为守护进程以 0600 写它；Windows 上 CLI 只
 检查普通文件、大小和首行，边界是 home 目录继承的 ACL。CLI 要求首行是
-`dimcode-startup-failure v1 pid=<child pid>`，去掉正文中除换行和制表符以外的控制字符，
+`dimcode-startup-failure v1 pid=<child pid>`，说明带有末尾
+`store-newer found=<marker> supported=<format>` 行时先去掉它，
+再去掉正文中除换行和制表符以外的控制字符，
 把正文作为命令的错误返回，并在后面加上 `Details: <native home>/daemon.log`。存储门禁在
 诊断出不兼容时写这份说明，写明库、标记、守护进程支持的格式、库是更新、标记与结构
 不符、无法识别还是过旧，以及恢复办法；库被另一个进程占用时也写同一类型，写明占用者，
@@ -1078,7 +1080,7 @@ CLI 保留它，先等那个进程，不启动自己的守护进程。子进程�
 没有匹配的说明时，内嵌守护进程保留现有的 `App Server exited (<status>); see ...`，
 `--server` 指定的程序则报出该选项必须指向独立的 `dim-app-server` 二进制。失败的启动读完后
 删除说明；连接成功也删除任何说明。CLI 从不打印 `daemon.log`，从不删除、重建、降级或
-改写库，并以 1 退出。
+改写库。启动失败以 1 退出，符合下方条件时进入更新恢复。
 
 格式升级运行期间，守护进程把同一份说明写成进度类型：首行
 `dimcode-startup-progress v1 pid=<pid>`，正文
@@ -1108,6 +1110,38 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 交互式导出解析器读取格式词，把行的其余部分当作字面路径（包括空格），不做 shell 求值或引号展开。
 缺少路径或格式不支持时打印用法并回到提示符，不提交输入。`/exit` 不带参数。只拦截这些确切的命令名；
 其他文本走普通输入路径。子命令不建立插件命令注册表。
+
+#### 本地库较新时的启动恢复
+
+交互式 TUI 启动时，如果内置守护进程在[启动说明](../../design/appserver/native-storage-format.md#启动不兼容诊断)
+中明确报告本地库格式更新，macOS 和 Linux 上经 npm 全局安装的发行构建先显示诊断，
+再检查一次发布渠道，遵循自动更新开关和跳过版本的设置。
+恢复在 TUI 接管终端前运行，输出写到 stderr，且只在 stderr 是终端时进行，
+因此无终端启动保留诊断，也不会说明它没有运行的更新。
+其他安装方式、外置守护进程、非交互命令及其他启动失败沿用原报错路径。
+
+`DIMCODE_STARTUP_RETRY` 是循环保护：恢复后的调用会设置它，环境里已有这个变量时
+禁用恢复并保留诊断，而不是反复重启。
+CLI 按当前渠道标签暂存新版，与[更新命令](#更新对话框)一致，因此 npm 用与安装相同的
+仓库配置解析版本；`DIMCODE_NPM_REGISTRY` 仍然只决定可用性检查用哪个仓库，不必与
+安装用的仓库一致。[更新命令](#更新对话框)负责安装锁、旧消费者退出确认、进度和取消。
+替换前检查暂存的平台发行清单，要求声明它实际暂存的版本，并列出本地库的格式。
+缺少声明或格式不受支持时，恢复在替换当前安装前停止。
+
+切换验证通过后，用同样的参数和工作目录重新执行已安装的入口。
+新版继续打开同一 home，并通过正常的守护进程启动和握手进入 TUI。
+环境标记限制本次调用只尝试一次恢复。查找、安装或重启失败时显示具体原因。
+数据库能否打开仍由正常的存储门禁决定。
+
+```text
+$ dima
+Cannot open native store <home>/rust/dimcode.sqlite.
+  Store format: v46
+  Daemon format: v38
+  ...
+Checking dimcode-alpha on the alpha channel...
+Error: Startup update failed: 0.1.0-alpha.23 does not declare support for native store v46.
+```
 
 ### `/resume` 选择面板
 
