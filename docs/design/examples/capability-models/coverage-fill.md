@@ -31,8 +31,9 @@
 Goal 需要 pending、任务和评估身份。这些状态都决定可观察结果，不能再作为无结构的“输入有效”前提省略。
 同时，有限模型通过只说明这些题设下的公式成立，不等于 Rust 的全部 await、错误和析构分支已经被证明。
 
-## 仍须保留的缺口
+## 第一轮结束时的缺口
 
+本节保留第一轮实验边界；后续逐项对应和有限取值见[第二轮补充](coverage-completion.md)。
 本次没有把原覆盖表整行改为“完成”。Approval 多 pending 与写失败，InputQueue FIFO/跨 turn handover，
 ToolExecutor claim/resolve_write/结果身份，Loop 的完整输入组成，ModelOutput 的半截 ToolUse，Tree 的 opening receipt，
 BranchLine 的角色/idle 资格，Collaboration 的 member/request/operation 身份，Exec/Shell 的多类停止竞争，

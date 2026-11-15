@@ -4,8 +4,9 @@
 题设是各部件**对 Timeline 的交接、状态和恢复承诺**；文件解析、网络、PTY、模型服务等内部实现仍由其所属模块负责。
 代码对应基线为 `8a5fe0980`。实验的配置、模型摘要和结果见 [运行记录](results.md)。
 
-[承诺覆盖复查](coverage-audit.md)逐项列出 22 个部件尚未进入模型的业务场景。
+[承诺覆盖复查](coverage-audit.md)保留首次复查发现的 22 个部件的业务缺项。
 [业务覆盖补充实验](coverage-fill.md)列出本轮补入的场景、源码入口和仍未覆盖的部分。
+[第二轮缺项对应表](coverage-completion.md)及[运行记录](coverage-completion-results.md)接续第一轮，逐条对应原审计的具体场景。
 下表是最初的检查清单；WaitRuntime、NestedSettlement 已扩展，以补充实验和新运行记录为准。
 
 ## 如何读结论
