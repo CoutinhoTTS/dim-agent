@@ -27,7 +27,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag || steps.main.outputs.tag }}
       sha: ${{ steps.release.outputs.sha || github.sha }}
       version: ${{ steps.release.outputs.version || steps.main.outputs.version }}
-      stamp: ${{ steps.main.outputs.version != '' || steps.release.outputs.stamp == 'true' }}
+      stamp: ${{ steps.release.outputs.stamp == 'true' }}
       reused: ${{ steps.main.outputs.reused }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -58,6 +58,7 @@ jobs:
             echo "reused=$previous" >> "$GITHUB_OUTPUT"
           else
             version=$(node scripts/alpha-version.mjs)
+            node scripts/alpha-version.mjs --verify "$version"
             echo "version=$version" >> "$GITHUB_OUTPUT"
             echo "tag=v$version" >> "$GITHUB_OUTPUT"
             echo "Selected $version for main $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
@@ -100,7 +101,7 @@ jobs:
         if: steps.main.outputs.version != '' || steps.release.outputs.version != ''
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version || steps.main.outputs.version }}
-          STAMP: ${{ steps.main.outputs.version != '' || steps.release.outputs.stamp == 'true' }}
+          STAMP: ${{ steps.release.outputs.stamp == 'true' }}
         shell: bash
         run: |
           set -euo pipefail

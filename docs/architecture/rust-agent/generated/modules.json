@@ -427,6 +427,28 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_agent_capabilities::build",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities",
+      "file": "crates/dim-agent-capabilities/src/build.rs",
+      "unexpandedMacros": [
+        "env",
+        "format",
+        "matches",
+        "option_env"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::build::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::build",
+      "file": "crates/dim-agent-capabilities/src/build.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::context_block",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities",
@@ -6713,28 +6735,6 @@
       ]
     },
     {
-      "id": "dim_cli::version",
-      "crate": "dim_cli",
-      "parent": "dim_cli",
-      "file": "crates/dim-cli/src/version.rs",
-      "unexpandedMacros": [
-        "env",
-        "format",
-        "matches",
-        "option_env"
-      ]
-    },
-    {
-      "id": "dim_cli::version::tests",
-      "crate": "dim_cli",
-      "parent": "dim_cli::version",
-      "file": "crates/dim-cli/src/version.rs",
-      "unexpandedMacros": [
-        "assert",
-        "assert_eq"
-      ]
-    },
-    {
       "id": "dim_cli::web_install",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -8987,6 +8987,13 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::build",
+      "references": [
+        "mod build"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::context_block",
       "references": [
         "mod context_block"
@@ -10187,6 +10194,13 @@
         "use dim_agent_types::EventDraft",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::InputMessageData"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::build",
+      "to": "dim_agent_capabilities::build::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -28296,6 +28310,13 @@
     },
     {
       "from": "dim_app_server::mcp::server",
+      "to": "dim_agent_capabilities::build",
+      "references": [
+        "path dim_agent_capabilities::build::current"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::server",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path HostPlatform",
@@ -34324,6 +34345,15 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_agent_capabilities::build",
+      "references": [
+        "path dim_agent_capabilities::build::RELEASE",
+        "path dim_agent_capabilities::build::VERSION",
+        "path dim_agent_capabilities::build::current"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::args",
       "references": [
         "mod args",
@@ -34779,16 +34809,6 @@
     },
     {
       "from": "dim_cli",
-      "to": "dim_cli::version",
-      "references": [
-        "mod version",
-        "path version::RELEASE",
-        "path version::VERSION",
-        "path version::current"
-      ]
-    },
-    {
-      "from": "dim_cli",
       "to": "dim_cli::web_install",
       "references": [
         "mod web_install",
@@ -35040,6 +35060,13 @@
     },
     {
       "from": "dim_cli::client",
+      "to": "dim_agent_capabilities::build",
+      "references": [
+        "path dim_agent_capabilities::build::RELEASE"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -35084,13 +35111,6 @@
       "to": "dim_cli::locale",
       "references": [
         "path crate::locale::Locale"
-      ]
-    },
-    {
-      "from": "dim_cli::client",
-      "to": "dim_cli::version",
-      "references": [
-        "path crate::version::RELEASE"
       ]
     },
     {
@@ -47231,6 +47251,13 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_agent_capabilities::build",
+      "references": [
+        "path dim_agent_capabilities::build::current"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_agent_types::goal",
       "references": [
         "path crate::goal::Status::Active",
@@ -48427,13 +48454,6 @@
     },
     {
       "from": "dim_cli::ui::tui",
-      "to": "dim_cli::version",
-      "references": [
-        "path crate::version::current"
-      ]
-    },
-    {
-      "from": "dim_cli::ui::tui",
       "to": "dim_client::question",
       "references": [
         "path crate::question::Reply::Accepted",
@@ -49025,6 +49045,14 @@
     },
     {
       "from": "dim_cli::update",
+      "to": "dim_agent_capabilities::build",
+      "references": [
+        "path dim_agent_capabilities::build::RELEASE",
+        "path dim_agent_capabilities::build::VERSION"
+      ]
+    },
+    {
+      "from": "dim_cli::update",
       "to": "dim_agent_capabilities::host_platform",
       "references": [
         "path dim_agent_capabilities::host_platform::ProcessTree::spawn"
@@ -49060,11 +49088,10 @@
       ]
     },
     {
-      "from": "dim_cli::update",
-      "to": "dim_cli::version",
+      "from": "dim_cli::update::staged",
+      "to": "dim_agent_capabilities::build",
       "references": [
-        "path crate::version::RELEASE",
-        "path crate::version::VERSION"
+        "path dim_agent_capabilities::build::VERSION"
       ]
     },
     {
@@ -49095,13 +49122,6 @@
       ]
     },
     {
-      "from": "dim_cli::update::staged",
-      "to": "dim_cli::version",
-      "references": [
-        "path crate::version::VERSION"
-      ]
-    },
-    {
       "from": "dim_cli::update::staged::tests",
       "to": "dim_cli::update::staged",
       "references": [
@@ -49114,13 +49134,6 @@
       "references": [
         "path ALPHA_PACKAGE",
         "path installer"
-      ]
-    },
-    {
-      "from": "dim_cli::version",
-      "to": "dim_cli::version::tests",
-      "references": [
-        "mod tests"
       ]
     },
     {
@@ -52549,6 +52562,14 @@
     },
     {
       "from": "dim_report::render",
+      "to": "dim_agent_capabilities::build",
+      "references": [
+        "path build::current",
+        "use dim_agent_capabilities::build"
+      ]
+    },
+    {
+      "from": "dim_report::render",
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path RpcError",
@@ -52563,9 +52584,7 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path PROTOCOL_VERSION",
-        "path SERVER_VERSION",
-        "use dim_app_server::protocol::PROTOCOL_VERSION",
-        "use dim_app_server::protocol::SERVER_VERSION"
+        "use dim_app_server::protocol::PROTOCOL_VERSION"
       ]
     },
     {
