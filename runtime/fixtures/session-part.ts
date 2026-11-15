@@ -50,7 +50,8 @@ export const part = definePlugin({
       },
       async (call: Call, cancelled: Promise<void>) => {
         alive()
-        calls++        if (call.arguments.text === 'malformed') return { content: { invalid: true } }
+        calls++
+        if (call.arguments.text === 'malformed') return { content: { invalid: true } }
         if (call.arguments.text === 'declares') {
           return {
             content: 'declared',
