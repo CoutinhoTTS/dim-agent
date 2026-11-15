@@ -312,10 +312,14 @@ it. A message that already left the queue is not sent again. If the stop fails,
 the combined draft stays in the composer with a notice, so nothing typed is
 lost. It takes the guards `Enter` has: with a shell command running and a shell
 line in the draft it shows `A shell command is already running` and sends
-nothing, and with an empty draft and nothing held it does nothing. While the
-stop it asked for is still settling, `Enter` and `Ctrl+Enter` send nothing, so
-one draft is never submitted twice; `Esc` there calls off only the submit and
-keeps the draft, because the stop it asked for has already gone.
+nothing, and with an empty draft and nothing held it does nothing; while a
+clipboard or image read has not landed in the draft it asks for the wait and
+sends neither the withdrawals nor the stop. While the stop it asked for is
+still settling, `Enter` sends nothing, so one draft is never submitted twice;
+`Esc` there calls off only the submit and keeps the draft, because the stop it
+asked for has already gone. At most one stop is in flight: a `Ctrl+Enter`
+after that cancellation asks for no second stop and re-arms the submit
+instead, so the one reply still on its way decides the outcome.
 
 A terminal without the kitty keyboard protocol or xterm modifyOtherKeys cannot
 tell `Ctrl+Enter` from `Enter`, so there it submits in the default mode and `Esc`
