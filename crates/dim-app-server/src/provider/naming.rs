@@ -21,60 +21,111 @@ fn label_qualifier(metadata: &ModelMetadata) -> Option<&str> {
     })
 }
 
+/// The name a row publishes when it keeps the origin its listing states for it:
+/// its own name, trimmed, followed by that origin.
+fn label_candidate(entry: &ModelEntry) -> Option<String> {
+    let qualifier = entry.metadata.as_ref().and_then(label_qualifier)?;
+    Some(format!(
+        "{}{SEPARATOR}{qualifier}",
+        entry.display_name.trim()
+    ))
+}
+
 /// The name each of one provider's complete rows publishes, in their order,
 /// each unique within that provider. Every row takes part — a disabled or an
 /// unavailable one too — so switching a row on or off renames no other, and
 /// every client reads the same names.
 ///
 /// A name compares after trimming. A row whose name no other row states keeps
-/// it as stated. Every row that states a shared name publishes `<its own name> ·
-/// <qualifier>`: the origin its gateway states for it, else its id. A qualified
-/// name another row publishes falls back to the id, and an id-qualified name
-/// that is taken too gains a counter, so any input reaches unique names.
+/// it as stated. A row that states a shared name publishes its label candidate
+/// — `<its own name> · <the origin its gateway states for it>` — but only while
+/// no other row reaches the same candidate and no row states that name itself;
+/// every other row of the group appends its id instead, so a label two rows
+/// carry apart names neither of them. A name that is still taken gains a
+/// counter: that is the one step a listing order can decide, and only rows
+/// sharing an id reach it. Everything else is read off the whole set before any
+/// name is assigned, so listing the same rows in another order names each row
+/// the same.
 pub(crate) fn unique<'a>(entries: impl IntoIterator<Item = &'a ModelEntry>) -> Vec<String> {
     let entries: Vec<&ModelEntry> = entries.into_iter().collect();
     let mut stated: HashMap<&str, usize> = HashMap::new();
     for entry in &entries {
         *stated.entry(entry.display_name.trim()).or_default() += 1;
     }
-    // A name one entry states publishes as it stands, so every qualified name
-    // avoids it: the answer names an entry by its own name wherever it can.
-    let mut taken: HashSet<String> = entries
+
+    // A shared row's candidate, and how many rows reach it. Both are read from
+    // the whole set first, so what one row publishes cannot depend on the order
+    // the rows arrive in.
+    let candidates: Vec<Option<String>> = entries
+        .iter()
+        .map(|entry| {
+            if stated[entry.display_name.trim()] > 1 {
+                label_candidate(entry)
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut reached: HashMap<&str, usize> = HashMap::new();
+    for candidate in candidates.iter().flatten() {
+        *reached.entry(candidate.as_str()).or_default() += 1;
+    }
+
+    // A name one row states is published as it stands, so every computed name
+    // avoids it: the answer names a row by its own name wherever it can.
+    let mut claimed: HashSet<String> = entries
         .iter()
         .filter(|entry| stated[entry.display_name.trim()] == 1)
         .map(|entry| entry.display_name.clone())
         .collect();
+    let keeps_label: Vec<bool> = candidates
+        .iter()
+        .map(|candidate| {
+            candidate.as_ref().is_some_and(|candidate| {
+                reached[candidate.as_str()] == 1 && !claimed.contains(candidate.as_str())
+            })
+        })
+        .collect();
+    // A candidate a shared row keeps is claimed before any other row is named,
+    // so an id a row appends cannot take it first.
+    for (index, candidate) in candidates.iter().enumerate() {
+        if keeps_label[index] {
+            claimed.insert(candidate.clone().expect("a kept candidate is present"));
+        }
+    }
+
     let mut names = Vec::with_capacity(entries.len());
-    for entry in entries {
-        if stated[entry.display_name.trim()] == 1 {
+    for (index, entry) in entries.iter().enumerate() {
+        let own = entry.display_name.trim();
+        if stated[own] == 1 {
             names.push(entry.display_name.clone());
             continue;
         }
-        let name = qualify(entry, &taken);
-        taken.insert(name.clone());
+        let name = match keeps_label[index] {
+            true => candidates[index]
+                .clone()
+                .expect("a kept candidate is present"),
+            false => {
+                let base = format!("{own}{SEPARATOR}{}", entry.model_id);
+                let name = free(&base, &claimed);
+                claimed.insert(name.clone());
+                name
+            }
+        };
         names.push(name);
     }
     names
 }
 
-/// The name one entry publishes when another entry states its name too.
-fn qualify(entry: &ModelEntry, taken: &HashSet<String>) -> String {
-    let own = entry.display_name.trim();
-    let qualified = |qualifier: &str| format!("{own}{SEPARATOR}{qualifier}");
-    if let Some(qualifier) = entry.metadata.as_ref().and_then(label_qualifier) {
-        let name = qualified(qualifier);
-        if !taken.contains(&name) {
-            return name;
-        }
-    }
-    let name = qualified(&entry.model_id);
-    if !taken.contains(&name) {
-        return name;
+/// `base`, or the first `<base> <n>` no row publishes yet.
+fn free(base: &str, claimed: &HashSet<String>) -> String {
+    if !claimed.contains(base) {
+        return base.to_owned();
     }
     let mut count = 2;
     loop {
-        let candidate = format!("{name} {count}");
-        if !taken.contains(&candidate) {
+        let candidate = format!("{base} {count}");
+        if !claimed.contains(&candidate) {
             return candidate;
         }
         count += 1;
@@ -85,6 +136,7 @@ fn qualify(entry: &ModelEntry, taken: &HashSet<String>) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     /// One listed row: its id, the name the listing states, and the label the
     /// gateway states for it when it states one.
@@ -120,6 +172,16 @@ mod tests {
             ),
             entry("zhipu/glm-5.3", "GLM-5.3", Some("GLM-5.3 · Zhipu")),
         ]
+    }
+
+    /// The name each row publishes, by id, so an answer can be compared across
+    /// the listing orders that hold the same rows.
+    fn by_id(entries: &[ModelEntry]) -> BTreeMap<String, String> {
+        unique(entries)
+            .into_iter()
+            .zip(entries)
+            .map(|(name, entry)| (entry.model_id.clone(), name))
+            .collect()
     }
 
     #[test]
@@ -184,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_whose_labels_collide_take_their_ids() {
+    fn rows_whose_labels_collide_all_take_their_ids() {
         let entries = vec![
             entry(
                 "siliconflow/glm-5.3",
@@ -195,9 +257,41 @@ mod tests {
         ];
         assert_eq!(
             unique(&entries),
-            ["GLM-5.3 · SiliconFlow", "GLM-5.3 · proxy/glm-5.3"],
-            "the second row's id is what tells it apart"
+            ["GLM-5.3 · siliconflow/glm-5.3", "GLM-5.3 · proxy/glm-5.3",],
+            "both rows carry the label, so it names neither and both take ids"
         );
+    }
+
+    #[test]
+    fn the_names_do_not_depend_on_the_order_of_the_rows() {
+        for mut entries in [
+            vec![
+                entry(
+                    "siliconflow/glm-5.3",
+                    "GLM-5.3",
+                    Some("GLM-5.3 · SiliconFlow"),
+                ),
+                entry("proxy/glm-5.3", "GLM-5.3", Some("GLM-5.3 · SiliconFlow")),
+            ],
+            vec![
+                entry("a", "GLM-5.3", None),
+                entry("b", "GLM-5.3", None),
+                entry("c", "GLM-5.3 · b", None),
+            ],
+            vec![
+                entry("flash", "Flash", Some("Flash · Dim")),
+                entry("other", "Flash", None),
+            ],
+            gateway(),
+        ] {
+            let forward = by_id(&entries);
+            entries.reverse();
+            assert_eq!(
+                forward,
+                by_id(&entries),
+                "the same rows in another order name each row the same"
+            );
+        }
     }
 
     #[test]
