@@ -512,8 +512,10 @@ export interface Wait {
    * The caller cancels the call with `cancelled`; the wait then ends as
    * [`WaitResult::Interrupted`] and that answer stands. A caller that
    * drops the native Rust future releases the single-wait slot. A bridge
-   * caller must signal `cancelled` before abandoning its reply.
-   * @throws {AlreadyWaitingThrown}
+   * caller must signal `cancelled` before abandoning its reply. An ended
+   * service generation refuses new calls and ends active calls with
+   * [`WaitCallError::Reloading`].
+   * @throws {WaitCallErrorThrown}
    */
   wait(taskId: string | null, timeoutMs: number | bigint, cancelled: () => void | Promise<void>): Promise<WaitResult>
 }
@@ -1102,9 +1104,6 @@ export interface UiResources {
 /** What a method returning `Err(AgentError)` throws. */
 export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "BranchEnded" | "Storage" | "PublicationUnknown" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "PartialSubmission" | "Fault" | "Framework" | "Multiple", undefined>
 
-/** What a method returning `Err(AlreadyWaiting)` throws. */
-export type AlreadyWaitingThrown = RustError<"AlreadyWaiting", "AlreadyWaiting", undefined>
-
 /** What a method returning `Err(ApprovalRespondError)` throws. */
 export type ApprovalRespondErrorThrown = RustError<"ApprovalRespondError", "Unknown" | "Cancelled" | "Closed", undefined>
 
@@ -1134,6 +1133,9 @@ export type SessionsErrorThrown = RustError<"SessionsError", "rejected" | "agent
 
 /** What a method returning `Err(TaskError)` throws. */
 export type TaskErrorThrown = RustError<"TaskError", "read" | "unknown" | "closed", TaskError>
+
+/** What a method returning `Err(WaitCallError)` throws. */
+export type WaitCallErrorThrown = RustError<"WaitCallError", "AlreadyWaiting" | "Reloading", undefined>
 
 /** What a method returning `Err(WaitError)` throws. */
 export type WaitErrorThrown = RustError<"WaitError", "read" | "unknown" | "closed" | "timeout", WaitError>

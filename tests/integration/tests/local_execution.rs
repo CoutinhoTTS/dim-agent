@@ -2500,6 +2500,180 @@ async fn wait_ends_on_a_steer_or_a_stop_and_refuses_a_second_wait() {
     harness.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_reload_settles_the_tool_call_without_a_user_stop() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs": 60000}))])
+        .await;
+    until(&session, "wait call dispatched", |events| {
+        count(events, "step/tool-call") == 1
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let old = session.service::<wait::Wait>("main").unwrap();
+    assert_eq!(
+        old.wait(None, 0, Arc::new(|| Box::pin(std::future::pending())))
+            .await,
+        Err(wait::WaitCallError::AlreadyWaiting),
+        "the real model call must be waiting before reload"
+    );
+    let id = session
+        .branch_diagnostics("main")
+        .unwrap()
+        .plugins
+        .iter()
+        .find(|part| part.name == "WaitBranch")
+        .unwrap()
+        .id;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        harness.seen.ctx("main").view(id).unwrap().restart(),
+    )
+    .await
+    .expect("reload drains the accepted wait without a user stop")
+    .unwrap();
+    let events = until(&session, "reload settles the turn", |events| {
+        count(events, "turn/end") == 1
+    })
+    .await;
+    let result = &results(&events)[0];
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(
+        result.structured_content.as_ref().unwrap()["settlement"],
+        CAPABILITY_RELOADING
+    );
+    assert!(text(result).contains(CAPABILITY_RELOADING));
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::TurnEnd(data) if matches!(data.outcome, TurnOutcome::Failed { .. }))));
+    assert_eq!(
+        count(&events, "model/call"),
+        1,
+        "the failed turn must not advance the model"
+    );
+    assert_eq!(
+        count(&events, "stop/interrupt"),
+        0,
+        "no caller stop supplies the cancellation"
+    );
+    assert_eq!(
+        old.wait(None, 0, Arc::new(|| Box::pin(std::future::pending())))
+            .await,
+        Err(wait::WaitCallError::Reloading)
+    );
+    session.idle("main").await.unwrap();
+    harness
+        .run(&session, &[("wait", json!({"timeoutMs": 1}))])
+        .await;
+    let events = until(&session, "new generation accepts wait", |events| {
+        count(events, "turn/end") == 2
+    })
+    .await;
+    assert_eq!(text(&results(&events)[1]), "wait ended: timeout");
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn wait_service_reload_ends_native_and_face_calls_and_refuses_old_handles() {
+    let harness = Harness::new(platform(&[]).await, Hook::None).await;
+    let session = harness.session().await;
+    let ctx = harness.seen.ctx("main");
+    let old = session.service::<wait::Wait>("main").unwrap();
+    let mut call = Box::pin(old.wait(None, 60000, Arc::new(|| Box::pin(std::future::pending()))));
+    assert!(futures_util::poll!(call.as_mut()).is_pending());
+    let id = session
+        .branch_diagnostics("main")
+        .unwrap()
+        .plugins
+        .iter()
+        .find(|part| part.name == "WaitBranch")
+        .unwrap()
+        .id;
+    let (result, reload) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(call, ctx.view(id).unwrap().restart())
+    })
+    .await
+    .expect("native call and reload both finish");
+    assert_eq!(result, Err(wait::WaitCallError::Reloading));
+    reload.unwrap();
+    assert_eq!(
+        old.wait(None, 0, Arc::new(|| Box::pin(std::future::pending())))
+            .await,
+        Err(wait::WaitCallError::Reloading)
+    );
+
+    let current = session.service::<wait::Wait>("main").unwrap();
+    let mut dropped =
+        Box::pin(current.wait(None, 60000, Arc::new(|| Box::pin(std::future::pending()))));
+    assert!(futures_util::poll!(dropped.as_mut()).is_pending());
+    drop(dropped);
+
+    let instance = group_instance(&session.branch_diagnostics("main").unwrap(), "BranchScope");
+    let face = ctx
+        .get_at::<dyn HostDispatch>(&host_key("wait").instance(instance))
+        .unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let arguments = || {
+        let entered = entered.clone();
+        vec![
+            json!(null).into(),
+            json!(60000).into(),
+            BridgeValue::callback(move |_| {
+                entered.notify_one();
+                Ok(BridgeValue::future(std::future::pending()))
+            }),
+        ]
+    };
+    let mut call = Box::pin(settle(
+        face.invoke("wait", BridgeValue::List(arguments())).unwrap(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut call => panic!("wait ended before replacement: {result:?}"),
+            _ = entered.notified() => {},
+        }
+    })
+    .await
+    .expect("the face wait has entered its cancellation-aware call");
+    let duplicate = settle(face.invoke("wait", BridgeValue::List(arguments())).unwrap())
+        .await
+        .expect_err("the face preserves the occupied-slot error");
+    assert_eq!(duplicate.code(), Some("AlreadyWaiting"));
+
+    let id = session
+        .branch_diagnostics("main")
+        .unwrap()
+        .plugins
+        .iter()
+        .find(|part| part.name == "WaitBranch")
+        .unwrap()
+        .id;
+    let (result, reload) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(call, ctx.view(id).unwrap().restart())
+    })
+    .await
+    .expect("face call and reload both finish");
+    let error = result.expect_err("face reports generation termination");
+    assert_eq!(error.code(), Some("Reloading"));
+    assert!(error.to_string().contains(CAPABILITY_RELOADING));
+    reload.unwrap();
+    let error = face
+        .invoke("wait", BridgeValue::List(arguments()))
+        .expect_err("retired face cannot resolve its service generation");
+    assert_eq!(error.code(), Some("unavailable"));
+    let current = session.service::<wait::Wait>("main").unwrap();
+    assert!(matches!(
+        current
+            .wait(None, 0, Arc::new(|| Box::pin(std::future::pending())))
+            .await,
+        Ok(wait::WaitResult::Timeout { .. })
+    ));
+    session.close().await.unwrap();
+    harness.shutdown().await;
+}
+
 /// The instance a group's parts run in: the one its scope part runs in.
 fn group_instance(diagnostics: &RuntimeDiagnostics, scope: &str) -> InstanceId {
     let scope = diagnostics

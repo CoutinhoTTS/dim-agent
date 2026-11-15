@@ -28,7 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const WAIT_TOOL: &str = "wait";
 const DEFAULT_TIMEOUT_MS: u64 = 300_000;
@@ -75,10 +75,14 @@ pub enum WaitResult {
     },
 }
 
-/// Another `wait` is running on this branch.
+/// Why a wait call cannot complete on this service generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("wait is already running in this session.")]
-pub struct AlreadyWaiting;
+pub enum WaitCallError {
+    #[error("wait is already running in this session.")]
+    AlreadyWaiting,
+    #[error("capability reloading")]
+    Reloading,
+}
 
 #[derive(Default)]
 struct State {
@@ -91,6 +95,8 @@ struct State {
 pub struct Wait {
     state: Mutex<State>,
     arrived: Notify,
+    generation: CancellationToken,
+    calls: TaskTracker,
 }
 
 #[rutis::service]
@@ -101,13 +107,15 @@ impl Wait {
     /// The caller cancels the call with `cancelled`; the wait then ends as
     /// [`WaitResult::Interrupted`] and that answer stands. A caller that
     /// drops the native Rust future releases the single-wait slot. A bridge
-    /// caller must signal `cancelled` before abandoning its reply.
+    /// caller must signal `cancelled` before abandoning its reply. An ended
+    /// service generation refuses new calls and ends active calls with
+    /// [`WaitCallError::Reloading`].
     pub async fn wait(
         &self,
         task_id: Option<String>,
         timeout_ms: u64,
         cancelled: CancelledFn,
-    ) -> Result<WaitResult, AlreadyWaiting> {
+    ) -> Result<WaitResult, WaitCallError> {
         let cancel = CancellationToken::new();
         let _dropped = cancel.clone().drop_guard();
         call_until_cancelled(
@@ -188,8 +196,11 @@ impl Wait {
     }
 
     /// TS `takeMatchingInput`: any steer first, then a matching task.
-    fn take(&self, task_id: Option<&str>) -> Option<Arrival> {
+    fn take(&self, task_id: Option<&str>) -> Result<Option<Arrival>, WaitCallError> {
         let mut state = self.state.lock().unwrap();
+        if self.generation.is_cancelled() {
+            return Err(WaitCallError::Reloading);
+        }
         let index = state
             .pending
             .iter()
@@ -199,8 +210,8 @@ impl Wait {
                     Arrival::BackgroundTask(id) => task_id.is_none_or(|task_id| task_id == id),
                     Arrival::Steer => false,
                 })
-            })?;
-        state.pending.remove(index)
+            });
+        Ok(index.and_then(|index| state.pending.remove(index)))
     }
 
     /// Waits for the next matching arrival, the timeout or `cancel`.
@@ -209,14 +220,18 @@ impl Wait {
         task_id: Option<&str>,
         timeout: Duration,
         cancel: CancellationToken,
-    ) -> Result<WaitResult, AlreadyWaiting> {
-        {
+    ) -> Result<WaitResult, WaitCallError> {
+        let _call = {
             let mut state = self.state.lock().unwrap();
+            if self.generation.is_cancelled() {
+                return Err(WaitCallError::Reloading);
+            }
             if state.waiting {
-                return Err(AlreadyWaiting);
+                return Err(WaitCallError::AlreadyWaiting);
             }
             state.waiting = true;
-        }
+            self.calls.token()
+        };
         let _release = std::mem::DropGuard::new(&self.state, |state: &Mutex<State>| {
             state.lock().unwrap().waiting = false;
         });
@@ -233,7 +248,7 @@ impl Wait {
             let arrived = self.arrived.notified();
             tokio::pin!(arrived);
             arrived.as_mut().enable();
-            if let Some(arrival) = self.take(task_id) {
+            if let Some(arrival) = self.take(task_id)? {
                 return Ok(match arrival {
                     Arrival::Steer => WaitResult::UserSteer {
                         waited_ms: waited(),
@@ -244,13 +259,17 @@ impl Wait {
                     },
                 });
             }
-            tokio::select! {
-                _ = &mut arrived => {}
-                _ = &mut deadline => return Ok(WaitResult::Timeout { waited_ms: waited() }),
-                _ = cancel.cancelled() => {
-                    return Ok(WaitResult::Interrupted { waited_ms: waited() });
-                }
-            }
+            let result = tokio::select! {
+                _ = self.generation.cancelled() => return Err(WaitCallError::Reloading),
+                _ = &mut arrived => continue,
+                _ = &mut deadline => WaitResult::Timeout { waited_ms: waited() },
+                _ = cancel.cancelled() => WaitResult::Interrupted { waited_ms: waited() },
+            };
+            return if self.generation.is_cancelled() {
+                Err(WaitCallError::Reloading)
+            } else {
+                Ok(result)
+            };
         }
     }
 }
@@ -320,15 +339,21 @@ impl WaitTool {
                 AgentError::Reloading(_) => HostError::Cancelled(CAPABILITY_RELOADING.into()),
                 error => HostError::failed(error.to_string()),
             })?;
-        let Ok(result) = wait
+        let result = match wait
             .arrival(
                 task_id.as_deref(),
                 Duration::from_millis(timeout_ms),
                 cancel,
             )
             .await
-        else {
-            return Ok(ToolResult::error(AlreadyWaiting.to_string()));
+        {
+            Ok(result) => result,
+            Err(WaitCallError::AlreadyWaiting) => {
+                return Ok(ToolResult::error(WaitCallError::AlreadyWaiting.to_string()));
+            }
+            Err(WaitCallError::Reloading) => {
+                return Err(HostError::Cancelled(CAPABILITY_RELOADING.into()));
+            }
         };
         let content = match &result {
             WaitResult::Notification { task_ids, .. } => {
@@ -427,7 +452,19 @@ impl DynPlugin for WaitBranchPlugin {
             let wait = Arc::new(Wait {
                 state: Mutex::new(State::default()),
                 arrived: Notify::new(),
+                generation: ctx.cancellation_token(),
+                calls: TaskTracker::new(),
             });
+            let closing = wait.clone();
+            ctx.effect(move || async move {
+                {
+                    let _state = closing.state.lock().unwrap();
+                    closing.generation.cancel();
+                    closing.calls.close();
+                }
+                closing.calls.wait().await;
+                Ok(())
+            })?;
             let rebuild = wait.clone();
             let consumer = wait.clone();
             dispatcher

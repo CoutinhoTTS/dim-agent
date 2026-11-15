@@ -2432,6 +2432,18 @@
       ]
     },
     {
+      "id": "dim_app_server::agents::fork",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::agents",
+      "file": "crates/dim-app-server/src/agents/fork.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::agents::sessions",
       "crate": "dim_app_server",
       "parent": "dim_app_server::agents",
@@ -23831,7 +23843,6 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQueryScope::Branch",
-        "path TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
@@ -23887,19 +23898,7 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_types::events",
       "references": [
-        "path EventKind::BranchResume",
-        "path EventKind::BranchStart",
-        "path EventKind::ExecEnded",
-        "path EventKind::ExecStarted",
-        "path EventKind::InputApplied",
-        "path EventKind::InputConsumed",
-        "path EventKind::InputDeleted",
-        "path EventKind::InputMessage",
-        "path EventKind::StopInterrupt",
-        "path EventKind::TurnEnd",
-        "path EventKind::TurnStart",
-        "path dim_agent_types::AgentEvent",
-        "use dim_agent_types::EventKind"
+        "path dim_agent_types::AgentEvent"
       ]
     },
     {
@@ -23940,6 +23939,15 @@
       "references": [
         "mod configuration",
         "path configuration::AgentsSessionPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_app_server::agents::fork",
+      "references": [
+        "mod fork",
+        "path fork",
+        "path fork::validate_rest_point"
       ]
     },
     {
@@ -24145,6 +24153,78 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path crate::protocol::agent_unknown"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::fork",
+      "to": "dim_agent_capabilities::workspace_tools::background",
+      "references": [
+        "path unposted_filter",
+        "use dim_agent_capabilities::workspace_tools::background::unposted_filter"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::fork",
+      "to": "dim_agent_runtime::agent",
+      "references": [
+        "path Session",
+        "use dim_agent_runtime::Session"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::fork",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError::InvalidInput",
+        "path Result",
+        "use dim_agent_runtime::AgentError",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::fork",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope::Branch",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::fork",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryFilter",
+        "path QueryFilter::And",
+        "path QueryFilter::In",
+        "path QueryFilter::Or",
+        "path QueryFilter::Present",
+        "path QueryOperand::Field",
+        "path QueryOutput::Events",
+        "path QueryPage",
+        "path QueryPick",
+        "path QueryPick::First",
+        "path QueryPick::Last",
+        "path QuerySelect::Events",
+        "path QuerySpec",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryComparison",
+        "use dim_agent_runtime::QueryFilter",
+        "use dim_agent_runtime::QueryOperand",
+        "use dim_agent_runtime::QueryOutput",
+        "use dim_agent_runtime::QueryPage",
+        "use dim_agent_runtime::QueryPick",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QuerySpec",
+        "use dim_agent_runtime::TimelineQuery"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::fork",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind"
       ]
     },
     {
@@ -53497,18 +53577,6 @@
     {
       "module": "dim_agent_types::v1",
       "path": "S::Ok"
-    },
-    {
-      "module": "dim_app_server::agents",
-      "path": "ExecStatus::Cancelled"
-    },
-    {
-      "module": "dim_app_server::agents",
-      "path": "InputMode::Append"
-    },
-    {
-      "module": "dim_app_server::agents",
-      "path": "InterruptScope::Branch"
     },
     {
       "module": "dim_app_server::agents::sessions::tests::deferred_inputs",

@@ -13,7 +13,7 @@ use dim_agent_runtime::{
     TimelineReadScope, TimelineReadSegment,
 };
 pub use dim_agent_types::AgentProfile;
-use dim_agent_types::{EventKind, TimelinePosition};
+use dim_agent_types::TimelinePosition;
 use rutis::host::{
     BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
@@ -35,6 +35,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod configuration;
+mod fork;
 pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
 mod sessions;
@@ -468,35 +469,6 @@ fn history_page_query(branch: &str, from: u64, through: u64, limit: usize) -> Ti
             after: None,
         }),
     }
-}
-
-/// How many facts one page of a prefix read holds.
-const PREFIX_PAGE: u64 = 4096;
-
-/// Folds the facts of the session's `main` chain through `at`, in chain order,
-/// into `rest` one page at a time: the fork's rest-point check reads them as
-/// one history without the prefix being held.
-async fn chain_through(
-    session: &Session,
-    at: u64,
-    rest: &mut RestPoint,
-) -> dim_agent_runtime::Result<()> {
-    let mut query = history_page_query("main", 1, at, PREFIX_PAGE as usize);
-    query.scope = TimelineQueryScope::Chain;
-    query.from = None;
-    loop {
-        let reply = session.query("main", query.clone()).await?;
-        let QueryOutput::Events { events } = reply.result else {
-            unreachable!("event selection returns events")
-        };
-        let events: Vec<_> = events.into_iter().map(|row| row.event).collect();
-        rest.page(&events);
-        query.page.as_mut().unwrap().after = reply.next;
-        if query.page.as_ref().unwrap().after.is_none() {
-            break;
-        }
-    }
-    Ok(())
 }
 
 impl AgentIndex {
@@ -1801,21 +1773,16 @@ impl AgentIndex {
             ));
         }
         let checked = async {
-            let boundary =
-                dim_agent_capabilities::history::validate_context_boundary_in(session, "main", at)
-                    .await?;
-            let mut rest = RestPoint::default();
-            chain_through(session, at, &mut rest).await?;
-            Ok::<_, AgentError>((boundary, rest))
+            dim_agent_capabilities::history::validate_context_boundary_in(session, "main", at)
+                .await?
+                .map_err(AgentError::InvalidInput)?;
+            fork::validate_rest_point(session, at).await
         }
         .await;
         if session.is_closing() {
             return Err(AgentError::Closed(source.into()));
         }
-        let (boundary, rest) = checked?;
-        boundary
-            .and_then(|()| rest.check())
-            .map_err(AgentError::InvalidInput)?;
+        checked?;
         let version = self
             .version_of(source)
             .ok_or_else(|| AgentError::Closed(source.into()))?;
@@ -2097,103 +2064,6 @@ impl AgentIndex {
     /// Drops an Agent from the directory; see [`AgentDirectory::forget`].
     pub(crate) fn forget(&self, agent_id: &str) {
         self.directory.forget(agent_id);
-    }
-}
-
-/// Whether a fork whose `main` holds the prefix folded here starts no work
-/// when it loads
-/// ([S5c §6.2](../../../docs/design/appserver/session-deletion-and-fork.md#62-the-cut)).
-/// The reload rules that start work read these facts: Loop and InputQueue
-/// start a turn for an open turn's work or for a Queue or Steer input not
-/// yet consumed, unless it was applied before the last interrupt or
-/// InputQueue deleted it on a withdrawal;
-/// BackgroundExec fails a task it finds open, and a task that ended while
-/// its generation was not closing posts a wake input that belongs before
-/// the cut. This reads only their public facts;
-/// a capability whose reload rule comes to start work from other facts
-/// adds them here, so a fork keeps starting nothing.
-#[derive(Default)]
-struct RestPoint {
-    turn: bool,
-    interrupted_at: u64,
-    closing: bool,
-    /// Inputs not yet consumed, and the sequence each was applied at.
-    inputs: BTreeMap<String, Option<u64>>,
-    tasks: BTreeSet<String>,
-    wakes: BTreeSet<String>,
-}
-
-impl RestPoint {
-    /// Folds one page of the prefix.
-    fn page(&mut self, events: &[Arc<dim_agent_types::AgentEvent>]) {
-        for event in events {
-            self.event(event);
-        }
-    }
-    fn event(&mut self, event: &dim_agent_types::AgentEvent) {
-        use dim_agent_capabilities::workspace_tools::background::WAKE_RESULT_TAG;
-        use dim_agent_types::{ExecStatus, InputMode, InterruptScope};
-        match &event.kind {
-            EventKind::TurnStart(_) => self.turn = true,
-            EventKind::TurnEnd(_) => self.turn = false,
-            EventKind::BranchStart(_) | EventKind::BranchResume(_) => self.closing = false,
-            EventKind::StopInterrupt(data) => {
-                self.interrupted_at = event.sequence;
-                self.closing |= data.scope == InterruptScope::Branch;
-            }
-            EventKind::InputMessage(data) => {
-                if data.effective_mode() != InputMode::Append {
-                    self.inputs.insert(event.id.clone(), None);
-                }
-                if let Some(ended) = event
-                    .tags
-                    .iter()
-                    .flatten()
-                    .find_map(|tag| tag.strip_prefix(WAKE_RESULT_TAG))
-                {
-                    self.wakes.remove(ended);
-                }
-            }
-            EventKind::InputApplied(data) => {
-                if let Some(applied) = self.inputs.get_mut(data.input_id.as_str()) {
-                    *applied = Some(event.sequence);
-                }
-            }
-            EventKind::InputConsumed(data) => {
-                self.inputs.remove(data.input_id.as_str());
-            }
-            EventKind::InputDeleted(data) => {
-                self.inputs.remove(data.input_id.as_str());
-            }
-            EventKind::ExecStarted(data) => {
-                self.tasks.insert(data.task_id.clone());
-            }
-            EventKind::ExecEnded(data) => {
-                self.tasks.remove(data.task_id.as_str());
-                if data.status != ExecStatus::Cancelled && !self.closing {
-                    self.wakes.insert(event.id.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    fn check(&self) -> Result<(), String> {
-        let cause = if self.turn {
-            "a turn is open"
-        } else if self
-            .inputs
-            .values()
-            .any(|applied| applied.is_none_or(|sequence| sequence > self.interrupted_at))
-        {
-            "an input is waiting to be consumed"
-        } else if !self.tasks.is_empty() {
-            "a background task is running"
-        } else if !self.wakes.is_empty() {
-            "a background task has not woken the branch"
-        } else {
-            return Ok(());
-        };
-        Err(format!("the fork position is not a rest point: {cause}"))
     }
 }
 
