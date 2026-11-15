@@ -177,6 +177,29 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// or accepts (#807).
 const HANG_GUARD: Duration = Duration::from_secs(300);
 
+/// The process id `path` records, once the script that writes it has finished.
+/// A redirect creates the file before `echo` or `printf` writes into it, so a
+/// read that lands in between sees nothing; the writer ends its write with a
+/// newline, so only a whole, newline-terminated line counts. `patience` is the
+/// caller's own deadline, so moving a wait here never loosens it.
+fn recorded_pid(path: &std::path::Path, what: &str, patience: Duration) -> i32 {
+    let deadline = Instant::now() + patience;
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && let Some(line) = text.strip_suffix('\n')
+            && let Ok(pid) = line.parse()
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "waited for {what} in {}, which never held a whole pid",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// The test ended the CLI itself: the flow stops where it would answer a CLI
 /// that is gone. `Home::kill` sets that expectation before the signal; without
 /// it a closed connection fails the flow, so a CLI that exits on its own still
@@ -4002,19 +4025,7 @@ fn clipboard_cancellation_keeps_raw_terminal_input_responsive_and_reaps_the_read
     terminal.editor();
     terminal.write(b"kept\x16");
     terminal.until("Reading clipboard");
-    let deadline = Instant::now() + PATIENCE;
-    while !pid_file.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "Clipboard reader was not started"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    let pid = fs::read_to_string(pid_file)
-        .unwrap()
-        .trim()
-        .parse::<i32>()
-        .unwrap();
+    let pid = recorded_pid(&pid_file, "the clipboard reader's pid", PATIENCE);
     assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
     terminal.write(b"\n");
     terminal.until("Wait for clipboard insertion");
