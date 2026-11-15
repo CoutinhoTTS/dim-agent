@@ -11,8 +11,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "附有附件的訊息會留在佇列中；使用 /queue 對其執行 steer 或刪除"
         }
-        "/queue manage · Shift+← edit last · empty draft: {key} steer" => {
-            "/queue 管理 · Shift+← 編輯最後一則 · 草稿為空時按 {key} steer"
+        "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now" => {
+            "/queue · Shift+← 編輯最後一則 · 草稿為空時按 {key} steer · Ctrl+Enter 立即傳送"
         }
         "+{count} more · {hint}" => "還有 {count} 則 · {hint}",
         "steer or delete queued messages" => "對佇列訊息執行 steer 或刪除",
@@ -503,6 +503,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Empty draft: {keys} steer first queued" => "草稿為空時按 {keys} steer 第一則佇列訊息",
         "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Shift+← edit last queued" => {
             "Ctrl+O 或 Ctrl+P 指令 · Esc 中斷，佇列訊息回到輸入框 · Shift+← 編輯最後一則佇列訊息"
+        }
+        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
+            "Ctrl+Enter 中斷並立即傳送：草稿與所有暫存訊息合成一則送出"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 清除，按兩次離開 · 草稿為空時 Ctrl+D 離開"

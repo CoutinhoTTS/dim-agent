@@ -1463,11 +1463,11 @@ impl App {
             tool_detail: saved_tool_detail(&home),
             thinking_detail: saved_detail(&home, THINKING_DETAILS_KEY),
             default_send_mode: if crate::ui::config::read(&home, DEFAULT_SEND_MODE_KEY)
-                .is_some_and(|value| value == SubmitMode::Steer.as_str())
+                .is_some_and(|value| value == SubmitMode::Queue.as_str())
             {
-                SubmitMode::Steer
-            } else {
                 SubmitMode::Queue
+            } else {
+                SubmitMode::Steer
             },
             tool_choices: HashMap::new(),
             tail_groups: Vec::new(),
@@ -7850,7 +7850,8 @@ const QUEUE_ROWS: usize = 5;
 
 /// The queue strip's hint, and its form when messages are not shown. Every
 /// `/name` it can draw is a command in the table.
-const QUEUE_HINT: &str = "/queue manage · Shift+← edit last · empty draft: {key} steer";
+const QUEUE_HINT: &str =
+    "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now";
 const QUEUE_HINT_MORE: &str = "+{count} more · {hint}";
 
 /// The queue, drawn in a titled border above the composer: the next message
@@ -15637,6 +15638,127 @@ mod tests {
         }
     }
 
+    /// A steered message reaches the transcript the moment its input is
+    /// applied, while the run goes on: the operator already sees it inside
+    /// the running turn, so a steer submit needs no notice. A queued one
+    /// waits for the turn to end and only then enters.
+    #[test]
+    fn a_steered_message_shows_in_the_running_turn_without_a_notice() {
+        use crate::projection::Projection;
+        use serde_json::json;
+
+        let event = |value: serde_json::Value| -> crate::wire::Event {
+            serde_json::from_value(value).unwrap()
+        };
+        let mut projection = Projection::default();
+        projection.set_running(true);
+        projection.apply(
+            "main",
+            &event(json!({
+                "id": "steered", "sequence": 9, "create_at": 1000,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": [{"type": "text", "text": "steer this"}]}, "mode": "steer"},
+            })),
+        );
+        projection.apply(
+            "main",
+            &event(json!({
+                "id": "steer-ok", "sequence": 10, "create_at": 1000,
+                "type": "input", "name": "applied",
+                "data": {"input_id": "steered", "mode": "steer"},
+            })),
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(),
+            ["steer this"],
+            "a steered message is a transcript row while the turn runs"
+        );
+        assert!(rows[0].pending, "the model has not consumed it yet");
+
+        let mut drawn = Drawn::new((72, 20), Some(0), false);
+        show(&mut drawn, rows);
+        assert!(
+            drawn.transcript().contains("steer this"),
+            "the frame shows the steered message at once: {}",
+            drawn.transcript()
+        );
+
+        let mut queued = Projection::default();
+        queued.set_running(true);
+        queued.apply(
+            "main",
+            &event(json!({
+                "id": "held", "sequence": 11, "create_at": 1000,
+                "type": "input", "name": "message",
+                "data": {"user": {"content": [{"type": "text", "text": "hold this"}]}, "mode": "queue"},
+            })),
+        );
+        assert!(
+            queued.snapshot().rows.is_empty(),
+            "a queued message waits for the turn to end, so the notice tells the operator where it went"
+        );
+        assert!(queued.snapshot().queued[0].held);
+    }
+
+    /// Unset means steer; only a saved `queue` queues, and an unknown value
+    /// reads as steer, so a user who saved `queue` keeps it with no migration.
+    #[test]
+    fn the_default_send_mode_is_steer_unless_queue_was_saved() {
+        for (saved, expected) in [
+            (None, SubmitMode::Steer),
+            (Some("queue"), SubmitMode::Queue),
+            (Some("steer"), SubmitMode::Steer),
+            (Some("Queue"), SubmitMode::Steer),
+            (Some("unknown"), SubmitMode::Steer),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            if let Some(value) = saved {
+                assert_eq!(
+                    crate::ui::config::write(home.path(), DEFAULT_SEND_MODE_KEY, value.into()),
+                    None
+                );
+            }
+            let theme = test_theme();
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut app = App::new(
+                Box::new(Recorder(sent.clone())),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                "/work".into(),
+            );
+            assert_eq!(app.default_send_mode, expected, "saved {saved:?}");
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                projection_id: 7,
+                focus: "main".into(),
+                running: true,
+                main_running: true,
+                ..ViewSnapshot::default()
+            })));
+            typed(&mut app, "follow up");
+            press(&mut app, KeyCode::Enter);
+            assert_eq!(
+                describe(&sent.take()),
+                [format!("submit:{}:follow up", expected.as_str())],
+                "saved {saved:?}"
+            );
+
+            app.open_settings(Setting::DefaultSendMode);
+            let row = app
+                .frame((110, 40))
+                .live
+                .into_iter()
+                .find(|row| row.contains("Default send mode"))
+                .unwrap_or_else(|| panic!("no settings row: saved {saved:?}"));
+            assert!(
+                row.contains(expected.as_str()),
+                "the row shows the value in force, saved {saved:?}: {row}"
+            );
+        }
+    }
+
     #[test]
     fn default_send_mode_switches_draft_keys_and_survives_reopen() {
         let ctrl_s = InputEvent::Key(KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL));
@@ -15651,11 +15773,12 @@ mod tests {
             typed(&mut app, "me");
             assert!(sent.borrow().is_empty(), "Alt+Enter must insert a newline");
             press(&mut app, KeyCode::Enter);
-            typed(&mut app, "steer me");
+            typed(&mut app, "queue me");
             app.handle(ctrl_s.clone());
             assert_eq!(
                 describe(&sent.take()),
-                ["submit:queue:queue\nme", "submit:steer:steer me"]
+                ["submit:steer:queue\nme", "submit:queue:queue me"],
+                "unset means steer, and Ctrl+S sends the other mode"
             );
 
             app.open_settings(Setting::DefaultSendMode);
@@ -15665,30 +15788,27 @@ mod tests {
                 app.frame((110, 30))
                     .live
                     .join("\n")
-                    .contains("empty draft: Enter steer")
+                    .contains("empty draft: Ctrl+S steer"),
+                "a saved queue steers an empty draft with Ctrl+S"
             );
             app.run_command("keys", "");
             assert!(matches!(
                 app.reports.last(),
-                Some(Block::Status { text, .. }) if text.contains("Enter steer · Ctrl+S queue")
+                Some(Block::Status { text, .. }) if text.contains("Enter queue · Ctrl+S steer")
             ));
-            app.handle(ctrl_s.clone());
-            assert!(
-                sent.borrow().is_empty(),
-                "Ctrl+S needs a draft in steer mode"
-            );
             press(&mut app, KeyCode::Enter);
-            typed(&mut app, "steer by default");
+            typed(&mut app, "queue by default");
             press(&mut app, KeyCode::Enter);
-            typed(&mut app, "queue this one");
+            typed(&mut app, "steer this one");
             app.handle(ctrl_s.clone());
             assert_eq!(
                 describe(&sent.take()),
                 [
                     "steer:a",
-                    "submit:steer:steer by default",
-                    "submit:queue:queue this one"
-                ]
+                    "submit:queue:queue by default",
+                    "submit:steer:steer this one"
+                ],
+                "queue mode steers the oldest queued from an empty draft, queues a draft\n                 and steers the same draft back with Ctrl+S"
             );
 
             let theme = test_theme();
@@ -15707,7 +15827,8 @@ mod tests {
             press(&mut reopened, KeyCode::Enter);
             assert_eq!(
                 describe(&sent.take()),
-                ["submit:queue:idle", "submit:steer:running"]
+                ["submit:queue:idle", "submit:queue:running"],
+                "the saved queue applies to both an idle and a running draft"
             );
         }
     }
@@ -15762,10 +15883,7 @@ mod tests {
                         .unwrap();
                 }
                 app.tick();
-                app.handle(InputEvent::Key(KeyEvent::new(
-                    KeyCode::Char('s'),
-                    Modifiers::CTRL,
-                )));
+                press(&mut app, KeyCode::Enter);
                 if image {
                     assert!(matches!(
                         sent.borrow().as_slice(),
@@ -15849,16 +15967,55 @@ mod tests {
         );
     }
 
-    /// Enter on an empty draft steers the oldest queued message, as Ctrl+S does.
+    /// Enter on an empty draft steers the oldest queued message in either
+    /// mode; Ctrl+S only adds that in queue mode, where an empty draft has no
+    /// other meaning.
     #[test]
     fn enter_on_an_empty_draft_steers_like_ctrl_s() {
-        let (mut app, sent, _home) = session_with_queue(true, &[("a", "first"), ("b", "second")]);
-        press(&mut app, KeyCode::Enter);
-        let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
-            KeyCode::Char('s'),
-            Modifiers::CTRL,
-        )));
-        assert_eq!(describe(&sent.borrow()), ["steer:a", "steer:a"]);
+        let ctrl_s = || {
+            InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+                KeyCode::Char('s'),
+                Modifiers::CTRL,
+            ))
+        };
+        for saved in [None, Some("queue")] {
+            let (mut app, sent, home) =
+                session_with_queue(true, &[("a", "first"), ("b", "second")]);
+            if let Some(value) = saved {
+                assert_eq!(
+                    crate::ui::config::write(home.path(), DEFAULT_SEND_MODE_KEY, value.into()),
+                    None
+                );
+                let theme = test_theme();
+                let mut saved_app = App::new(
+                    Box::new(Recorder(sent.clone())),
+                    MarkdownRenderer::new(&theme),
+                    theme.palette,
+                    home.path().to_path_buf(),
+                    "/work".into(),
+                );
+                saved_app.apply(Update::Snapshot(Box::new(
+                    app.snapshot.take().expect("the run's snapshot"),
+                )));
+                app = saved_app;
+            }
+            assert_eq!(
+                app.default_send_mode,
+                saved.map_or(SubmitMode::Steer, |_| SubmitMode::Queue)
+            );
+            press(&mut app, KeyCode::Enter);
+            app.handle(ctrl_s());
+            let expected: &[&str] = if saved.is_some() {
+                &["steer:a", "steer:a"]
+            } else {
+                &["steer:a"]
+            };
+            assert_eq!(
+                describe(&sent.borrow()),
+                expected,
+                "saved {saved:?}: an empty draft steers the oldest queued message,\n                 and only queue mode gives Ctrl+S that same job"
+            );
+        }
     }
 
     /// Esc with no run in progress keeps the draft.

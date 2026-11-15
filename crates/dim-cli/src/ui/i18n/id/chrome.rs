@@ -13,8 +13,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Pesan dengan lampiran tetap dalam antrean; gunakan /queue untuk steer atau menghapusnya"
         }
-        "/queue manage · Shift+← edit last · empty draft: {key} steer" => {
-            "/queue kelola · Shift+← edit terakhir · draf kosong: {key} untuk steer"
+        "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now" => {
+            "/queue · Shift+← edit terakhir · draf kosong: {key} untuk steer · Ctrl+Enter kirim sekarang"
         }
         "+{count} more · {hint}" => "+{count} lagi · {hint}",
         "steer or delete queued messages" => "steer atau hapus pesan dalam antrean",
@@ -554,6 +554,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Shift+← edit last queued" => {
             "Ctrl+O/Ctrl+P perintah · Esc interupsi, pesan antrean kembali · Shift+← edit antrean terakhir"
+        }
+        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
+            "Ctrl+Enter hentikan dan kirim sekarang: draf dan semua pesan tertahan sebagai satu pesan"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C hapus, 2x untuk keluar · Ctrl+D keluar jika draf kosong"

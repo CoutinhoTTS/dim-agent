@@ -13,8 +13,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "Les messages avec pièces jointes restent en file ; utilisez /queue pour orienter ou les supprimer"
         }
-        "/queue manage · Shift+← edit last · empty draft: {key} steer" => {
-            "/queue gérer · Shift+← modifier le dernier · brouillon vide : {key} pour orienter"
+        "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now" => {
+            "/queue · Shift+← modifier le dernier · brouillon vide : {key} pour orienter · Ctrl+Enter envoie aussitôt"
         }
         "+{count} more · {hint}" => "+{count} de plus · {hint}",
         "steer or delete queued messages" => "orienter avec les messages en file ou les supprimer",
@@ -560,6 +560,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Shift+← edit last queued" => {
             "Ctrl+O ou Ctrl+P commandes · Esc interrompre, les messages en file reviennent · Shift+← modifier la dernière en file"
+        }
+        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
+            "Ctrl+Enter interrompt et envoie aussitôt : le brouillon et tous les messages retenus en un seul"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C effacer, deux fois pour quitter · Ctrl+D quitter si brouillon vide"

@@ -13,8 +13,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Messages with attachments stay queued; use /queue to steer or delete them" => {
             "첨부 파일이 있는 메시지는 대기열에 남습니다. /queue에서 steer하거나 삭제하세요"
         }
-        "/queue manage · Shift+← edit last · empty draft: {key} steer" => {
-            "/queue 관리 · Shift+← 마지막 편집 · 초안이 비어 있으면 {key}로 steer"
+        "/queue · Shift+← edit last · empty draft: {key} steer · Ctrl+Enter send now" => {
+            "/queue · Shift+← 마지막 편집 · 초안이 비어 있으면 {key}로 steer · Ctrl+Enter로 즉시 전송"
         }
         "+{count} more · {hint}" => "+{count}개 더 · {hint}",
         "steer or delete queued messages" => "대기열 메시지 steer 또는 삭제",
@@ -516,6 +516,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Ctrl+O or Ctrl+P commands · Esc interrupt, queued messages return · Shift+← edit last queued" => {
             "Ctrl+O/Ctrl+P 명령 · Esc 중단, 대기 메시지는 입력란으로 복귀 · Shift+← 마지막 대기 메시지 편집"
+        }
+        "Ctrl+Enter interrupt and send now: the draft and every held message, as one message" => {
+            "Ctrl+Enter로 중단 후 즉시 전송: 초안과 보류 중인 모든 메시지를 하나로 보냅니다"
         }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 지우기, 두 번 누르면 종료 · 빈 초안에서 Ctrl+D 종료"
