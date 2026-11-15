@@ -612,16 +612,8 @@ fn help_and_version_do_not_create_product_state() {
 #[test]
 fn a_build_from_source_reports_its_version_as_source() {
     let home = Home::new();
-    let output = home.command().arg("--version").output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let printed = String::from_utf8_lossy(&output.stdout)
-        .trim_end()
-        .to_owned();
-    let prefix = format!("dimcode {}-source", env!("CARGO_PKG_VERSION"));
+    let printed = printed_label(&home);
+    let prefix = format!("{}-source", env!("CARGO_PKG_VERSION"));
     assert!(
         printed == prefix
             || printed.strip_prefix(&prefix).is_some_and(|commit| {
@@ -632,6 +624,23 @@ fn a_build_from_source_reports_its_version_as_source() {
         "a build the release flow did not stamp reports the committed version marked -source, \
          optionally naming the commit it was built from: {printed}"
     );
+}
+
+/// The label this build prints, without the command name. A flow whose
+/// expected text names the build reads it from here, so the expectation
+/// follows the label the binary reports instead of assuming the mark alone.
+fn printed_label(home: &Home) -> String {
+    let output = home.command().arg("--version").output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .strip_prefix("dimcode ")
+        .expect("--version prints the command name and the build label")
+        .to_owned()
 }
 
 /// The command reports the version in its own package's manifest, so a flow can
@@ -8688,6 +8697,7 @@ fn web_off_clears_the_daemon_switch() {
 #[test]
 fn web_without_the_web_workspace_says_how_to_get_it() {
     let source = "Set DIMCODE_WEB_ASSETS to a frontend built from this source, or build the App Server with the embedded-web feature";
+    let label = printed_label(&Home::new());
     let cases = [
         (
             false,
@@ -8702,10 +8712,7 @@ fn web_without_the_web_workspace_says_how_to_get_it() {
         (
             false,
             "web_assets_incompatible",
-            format!(
-                "The installed Web workspace does not fit dimcode {}-source.\n{source}.\n",
-                env!("CARGO_PKG_VERSION")
-            ),
+            format!("The installed Web workspace does not fit dimcode {label}.\n{source}.\n"),
         ),
     ];
     for (installed, error, expected) in cases {
