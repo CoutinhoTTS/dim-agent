@@ -1832,6 +1832,15 @@ impl App {
         }
     }
 
+    /// Whether `key` is a send key that a settling send-now must refuse: plain
+    /// Enter (including Enter normalized from Ctrl+S or the alternate mode) and
+    /// Ctrl+S, whose `steer` branch sends the oldest held message. Every one of
+    /// these would act on the draft while the stop it asked for is still out.
+    fn settling_key_refused(&self, key: &KeyEvent) -> bool {
+        matches!(key.code, KeyCode::Enter) && key.mods == Modifiers::NONE
+            || key.code == KeyCode::Char('s') && key.mods.contains(Modifiers::CTRL)
+    }
+
     fn submits_in_alternate_mode(&self, key: &KeyEvent) -> bool {
         key.code == KeyCode::Char('s')
             && key.mods.contains(Modifiers::CTRL)
@@ -3168,12 +3177,6 @@ impl App {
         // asked for is still settling, neither key submits.
         let ctrl_enter = key.code == KeyCode::Enter && ctrl;
         let picker = self.composer.palette_open() || self.composer.mention_open();
-        // A stop still settling sends no plain Enter: the draft it will submit
-        // must not leave first. Ctrl+Enter re-arms that submit (see
-        // `send_now`), so it is never lost to a cancelled one.
-        if self.send_now.is_some() && key.code == KeyCode::Enter && !ctrl_enter {
-            return Outcome::Continue;
-        }
         if ctrl_enter && !picker {
             if self.shell.is_some()
                 && (self.composer.shell().is_some()
@@ -3213,6 +3216,16 @@ impl App {
             (key, SubmitMode::Queue)
         };
         let ctrl = key.mods.contains(Modifiers::CTRL);
+        // A stop this gesture asked for is still settling, so nothing may make
+        // the composer act on the draft: `Composer::submit` clears it before it
+        // reports the submit, and a refusal afterwards would lose the text and
+        // its attachments. Every key that ends in a submit or a steer is
+        // refused here, after the alternate-key normalization, and the draft is
+        // left as it is; the gesture's own Ctrl+Enter was taken above.
+        if self.send_now.is_some() && self.settling_key_refused(&key) {
+            self.set_notice(t("Send now is still stopping the run; the draft was kept"));
+            return Outcome::Continue;
+        }
         if self.suggestion.is_some()
             && self.composer.is_empty()
             && self.prompt.is_none()
@@ -3339,11 +3352,38 @@ impl App {
         Outcome::Continue
     }
 
+    /// Puts a submit the composer already cleared back into the draft, with
+    /// the blocks it carried. `Composer::restore` is the same path a withdrawn
+    /// input uses, so an image goes back as an image token, and a paste or a
+    /// file link goes back as its text.
+    fn restore_outcome(&mut self, outcome: ComposerOutcome) {
+        let content = match outcome {
+            ComposerOutcome::Submit(text) => {
+                vec![dim_agent_types::ContentBlock::Text { text }]
+            }
+            ComposerOutcome::SubmitDraft { parts, .. } => parts
+                .into_iter()
+                .map(|part| match part {
+                    DraftPart::Text(text) | DraftPart::Paste(text) => {
+                        dim_agent_types::ContentBlock::Text { text }
+                    }
+                    DraftPart::Block(block) => block,
+                })
+                .collect(),
+            _ => return,
+        };
+        self.composer
+            .restore(dim_agent_types::UserInput { content });
+    }
+
     /// What a composer outcome does, the same for Enter and for the
     /// invocation's first message.
     fn dispatch_composer(&mut self, outcome: ComposerOutcome, mode: SubmitMode) -> Outcome {
-        // A draft waits for the stop its Ctrl+Enter asked for: no submit may
-        // overtake it until that stop's reply arrives, whichever key asked.
+        // Every send key is refused before the composer acts (see
+        // `settling_key_refused`), so an outcome that already cleared the draft
+        // cannot arrive here while a gesture settles. If one ever does, the
+        // draft is put back rather than dropped: a refused submit must never
+        // cost the operator their text or attachments.
         if self.send_now.is_some()
             && self.line_draft.is_none()
             && matches!(
@@ -3351,6 +3391,12 @@ impl App {
                 ComposerOutcome::Submit(_) | ComposerOutcome::SubmitDraft { .. }
             )
         {
+            debug_assert!(
+                false,
+                "a send key reached the composer while a send-now was settling"
+            );
+            self.restore_outcome(outcome);
+            self.set_notice(t("Send now is still stopping the run; the draft was kept"));
             return Outcome::Continue;
         }
         match outcome {
@@ -16101,6 +16147,82 @@ mod tests {
             "the message is the text then the image, with no blank text: {}",
             describe(&sent_now).join(", ")
         );
+    }
+
+    /// Every send key is refused before the composer acts while a send-now
+    /// settles, so Ctrl+S cannot clear the draft and lose it. The draft keeps
+    /// its text and its image, and the stop's reply sends it once.
+    #[test]
+    fn a_send_key_keeps_the_draft_while_a_send_now_settles() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let ctrl_s = || InputEvent::Key(KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL));
+        for (mode, label) in [
+            (SubmitMode::Steer, "steer: Ctrl+S submits"),
+            (SubmitMode::Queue, "queue: Ctrl+S steers"),
+        ] {
+            let (mut app, sent, home) = session_with_queue(true, &[("a", "first")]);
+            app.default_send_mode = mode;
+            app.composer.set_accepts_images(true);
+            typed(&mut app, "and then");
+            let path = home.path().join("screen.png");
+            wide_png(&path, 32);
+            let image =
+                crate::ui::composer::read_planned(&app.composer.plan_files(&[path]).unwrap())
+                    .unwrap()
+                    .remove(0)
+                    .unwrap();
+            app.composer.attach_image(image).unwrap();
+            let before = app.composer.text().to_owned();
+
+            app.handle(ctrl_enter());
+            let during = sent.borrow().len();
+            app.handle(ctrl_s());
+            assert_eq!(
+                sent.borrow().len(),
+                during,
+                "{label}: Ctrl+S sends nothing while the stop settles: {}",
+                describe(&sent.borrow()).join(", ")
+            );
+            assert_eq!(app.composer.text(), before, "{label}: the text is kept");
+            assert_eq!(
+                app.composer.text(),
+                before,
+                "{label}: the image marker is still in the draft"
+            );
+            let notice = app.notice.as_ref().map(|(text, _)| text.as_str());
+            assert!(
+                notice.is_some_and(|text| text.contains("still stopping the run")),
+                "{label}: the refused key says why: {notice:?}"
+            );
+
+            app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+                content: vec![dim_agent_types::ContentBlock::Text {
+                    text: "first".into(),
+                }],
+            }));
+            app.apply(Update::Stopped { error: None });
+            let sent_now = sent.borrow();
+            let submitted = &sent_now[2..];
+            assert_eq!(
+                submitted.len(),
+                1,
+                "{label}: exactly one submit: {}",
+                describe(&sent_now).join(", ")
+            );
+            assert!(
+                matches!(
+                    submitted,
+                    [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                        if matches!(
+                            parts.as_slice(),
+                            [DraftPart::Text(all), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })]
+                                if all == "first\nand then "
+                        )
+                ),
+                "{label}: the recalled text, the draft and its image: {}",
+                describe(submitted).join(", ")
+            );
+        }
     }
 
     /// A recalled message keeps its own layout, an inline image included: the

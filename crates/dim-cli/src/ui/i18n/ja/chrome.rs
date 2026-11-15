@@ -542,6 +542,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "即時送信に失敗しました: {error}。下書きは残しました"
         }
         "Send now cancelled; the draft was kept" => "即時送信を取り消しました。下書きは残しました",
+        "Send now is still stopping the run; the draft was kept" => {
+            "送信即時はまだ実行を停止中です。下書きは保持されました"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "送信即時は実行を停止中です。下書きの送信後に貼り付けてください"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "送信即時は挿入を待ってから送信します"
+        }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C クリア、2 回で終了 · 空なら Ctrl+D で終了"
         }

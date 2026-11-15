@@ -580,6 +580,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now cancelled; the draft was kept" => {
             "Sofort senden abgebrochen; der Entwurf bleibt erhalten"
         }
+        "Send now is still stopping the run; the draft was kept" => {
+            "Sofort senden hält den Lauf noch an; der Entwurf bleibt erhalten"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "Sofort senden hält den Lauf an; füge wieder ein, wenn der Entwurf gesendet ist"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "Sofort senden wartet auf das Einfügen, bevor es sendet"
+        }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C leeren, zweimal beenden · Ctrl+D beendet bei leerem Entwurf"
         }

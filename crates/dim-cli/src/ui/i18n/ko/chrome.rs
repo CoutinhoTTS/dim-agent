@@ -526,6 +526,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now cancelled; the draft was kept" => {
             "즉시 전송이 취소되었습니다. 초안은 유지되었습니다"
         }
+        "Send now is still stopping the run; the draft was kept" => {
+            "즉시 전송이 아직 실행을 중지하는 중입니다. 초안은 유지되었습니다"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "즉시 전송이 실행을 중지하는 중입니다. 초안이 전송된 뒤에 붙여넣으세요"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "즉시 전송이 삽입을 기다린 뒤 전송합니다"
+        }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 지우기, 두 번 누르면 종료 · 빈 초안에서 Ctrl+D 종료"
         }

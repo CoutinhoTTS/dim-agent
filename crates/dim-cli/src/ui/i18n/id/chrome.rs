@@ -562,6 +562,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Kirim sekarang gagal: {error}; draf dipertahankan"
         }
         "Send now cancelled; the draft was kept" => "Kirim sekarang dibatalkan; draf dipertahankan",
+        "Send now is still stopping the run; the draft was kept" => {
+            "Kirim sekarang masih menghentikan proses; draf dipertahankan"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "Kirim sekarang sedang menghentikan proses; tempel lagi setelah draf terkirim"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "Kirim sekarang menunggu penyisipan sebelum mengirim"
+        }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C hapus, 2x untuk keluar · Ctrl+D keluar jika draf kosong"
         }

@@ -509,6 +509,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Send now failed: {error}; the draft was kept" => "立即傳送失敗：{error}；草稿已保留",
         "Send now cancelled; the draft was kept" => "已取消立即傳送；草稿保留",
+        "Send now is still stopping the run; the draft was kept" => {
+            "立即傳送仍在停止執行；草稿已保留"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "立即傳送正在停止執行；草稿送出後再貼上"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "立即傳送正在等待插入內容後再送出"
+        }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C 清除，按兩次離開 · 草稿為空時 Ctrl+D 離開"
         }

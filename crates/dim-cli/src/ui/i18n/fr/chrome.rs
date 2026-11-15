@@ -570,6 +570,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now cancelled; the draft was kept" => {
             "Envoi immédiat annulé ; le brouillon est conservé"
         }
+        "Send now is still stopping the run; the draft was kept" => {
+            "L'envoi immédiat arrête encore l'exécution ; le brouillon est conservé"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "L'envoi immédiat arrête l'exécution ; collez à nouveau quand le brouillon est envoyé"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "L'envoi immédiat attend l'insertion avant d'envoyer"
+        }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C effacer, deux fois pour quitter · Ctrl+D quitter si brouillon vide"
         }

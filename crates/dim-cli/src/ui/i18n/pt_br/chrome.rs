@@ -570,6 +570,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Enviar já falhou: {error}; o rascunho foi mantido"
         }
         "Send now cancelled; the draft was kept" => "Enviar já cancelado; o rascunho foi mantido",
+        "Send now is still stopping the run; the draft was kept" => {
+            "O envio imediato ainda está parando a execução; o rascunho foi mantido"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "O envio imediato está parando a execução; cole de novo quando o rascunho for enviado"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "O envio imediato espera a inserção antes de enviar"
+        }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C limpar, duas vezes para sair · Ctrl+D sair com rascunho vazio"
         }

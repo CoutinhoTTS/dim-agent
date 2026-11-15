@@ -580,6 +580,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Enviar ya falló: {error}; el borrador se conserva"
         }
         "Send now cancelled; the draft was kept" => "Enviar ya cancelado; el borrador se conserva",
+        "Send now is still stopping the run; the draft was kept" => {
+            "El envío inmediato aún está deteniendo la ejecución; el borrador se conserva"
+        }
+        "Send now is stopping the run; paste again when the draft is sent" => {
+            "El envío inmediato está deteniendo la ejecución; pega de nuevo cuando el borrador se haya enviado"
+        }
+        "Send now is waiting for the insertion before sending" => {
+            "El envío inmediato espera la inserción antes de enviar"
+        }
         "Ctrl+C clear, twice to exit · Ctrl+D exit on an empty draft" => {
             "Ctrl+C borrar, dos veces salir · Ctrl+D salir con borrador vacío"
         }

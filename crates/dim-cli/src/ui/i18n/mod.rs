@@ -120,6 +120,7 @@ mod tests {
                 "Ctrl+Enter interrupt and send now: the draft and every held message, as one message",
                 "Send now failed: {error}; the draft was kept",
                 "Send now cancelled; the draft was kept",
+                "Send now is still stopping the run; the draft was kept",
             ] {
                 let translated = table(locale, key);
                 assert!(translated.is_some(), "{code} lacks {key:?}");
