@@ -100,7 +100,7 @@ lines in content order, including image-only messages and messages restored from
 submitted image block has no filename. Tool results retain their existing text-only display.
 Editing, quoting, branching and forking reuse only the message's text; display markers are
 never inserted into those drafts. Shift+Left recalls only the newest held message, and only
-when it has a single text block. Esc interrupt instead restores held messages' operator text,
+when it has a single text block. Esc interrupt instead restores held user-queue messages' operator text,
 image blocks and stored paste/file links, excluding appended runtime context
 ([queue rules](cli-commands.md#queued-messages)).
 
