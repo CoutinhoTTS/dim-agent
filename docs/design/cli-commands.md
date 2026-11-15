@@ -314,8 +314,31 @@ in both modes: one task per row, not a horizontal list of labels.
 
 ### Queued messages
 
+Queue is the operator's message-management surface, not the branch's internal
+input queue. It includes only held inputs with user content and no source raw
+blocks. Automation inputs, including scheduled jobs, wakeups and loop rounds,
+remain internally pending but are absent from the strip, `/queue`, their counts
+and their empty-state decisions. User text is never parsed to classify its source;
+pasting a scheduler marker remains a user message. Hook and Skill context appended
+inside user content does not hide the user's message.
+
+This same selection governs every user-queue action: oldest-message steer,
+newest-message recall, panel steer/delete, and interrupt-time withdrawal and draft
+restoration. Hidden automatic inputs cannot be selected by these actions. An
+interrupt still stops the current turn, but does not withdraw hidden automatic
+inputs. Their execution, ordering and transcript lifecycle remain the input
+owners' responsibility. A request for an input outside the user queue does nothing.
+
+Live events and restored inventory use the same structural distinction. The
+inventory requires the negotiated [block-presence extension](input-state-read.md#block-presence-extension);
+an unsupported daemon is reported as needing an upgrade, not treated as an empty
+queue or assumed to hold only user messages. Restoring an input already present in
+the transcript window replaces its pending state by input identity, rather than
+adding a second queue entry. No second source list or history scan is maintained
+by the client.
+
 `/queue` requires an attached Session and opens only the shown line's held
-messages in both terminal modes, labelled `Held`. Applied messages remain in
+operator messages in both terminal modes, labelled `Held`. Applied messages remain in
 the transcript, not the queue panel or strip. Up/Down selects a row,
 Enter steers it and `x` deletes it through the existing withdrawal operation.
 Only held messages can change; `notHeld` is a notice, not a failed run. Esc
@@ -352,7 +375,7 @@ Steering always uses the owner's full held input.
 
 ### Queue strip
 
-The strip and `/queue` show only held messages from the existing unconsumed
+The strip and `/queue` show only held operator messages from the existing unconsumed
 input projection, oldest first; the strip count excludes applied messages.
 During a run, `Shift+Left` on an empty draft recalls the newest
 held message subject to the attachment rule above. The strip shows the shortcut
@@ -369,7 +392,18 @@ history outside the panel.
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-A queued message the strip does not show adds its count to the hint. The strip shows at most five messages and keeps the height it reached while the queue drains.
+A user-queue message beyond the strip's visible rows adds its count to the hint.
+The strip shows at most five messages and keeps the height it reached while the
+user queue drains. Hidden automation inputs reserve no rows and add no count.
+
+```text
+Internal pending: [scheduled delivery, user message, wakeup]
+┌─ Queue (1) ────────────────────────────────┐
+│ › Held · user message                     │
+└───────────────────────────────────────────┘
+Internal pending: [scheduled delivery, wakeup]
+                  (no Queue strip)
+```
 
 After a stop, an unread applied message remains in the transcript without a
 queue strip when nothing is held:

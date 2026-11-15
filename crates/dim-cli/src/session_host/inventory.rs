@@ -49,6 +49,13 @@ impl Worker {
             }
             "session.input.pending" => {
                 let page: Inputs = serde_json::from_value(value)?;
+                if page
+                    .inputs
+                    .iter()
+                    .any(|input| input.has_raw_blocks.is_none())
+                {
+                    return Err("Pending input read omitted requested block presence".into());
+                }
                 for input in page.inputs {
                     if let Some(projection) =
                         transcript_mut(&mut self.projection, &mut self.lines, branch)

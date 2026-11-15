@@ -863,6 +863,7 @@
       "file": "crates/dim-agent-capabilities/src/input_queue/pending.rs",
       "unexpandedMacros": [
         "json",
+        "matches",
         "tokio::select",
         "unreachable",
         "vec"

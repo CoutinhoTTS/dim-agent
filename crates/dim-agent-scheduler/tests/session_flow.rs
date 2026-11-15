@@ -218,6 +218,117 @@ async fn a_session_job_writes_one_input_to_its_branch_and_no_report() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_block_presence_distinguishes_a_delivery_without_changing_its_execution() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    model.hold("hold the current turn");
+    let server = start(home.path(), model.clone()).await;
+    let mut client = support::connect(&server).await;
+    assert!(client.supports(&["session.input.pending.blockPresence"]));
+    let session = create_session(&mut client, home.path(), true).await;
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "hold the current turn"}),
+        )
+        .await
+        .unwrap();
+    wait_for("the current turn to run", || model.count() == 1).await;
+    let job = save_session_job(
+        &mut client,
+        "pending check",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    let run = client
+        .rpc("schedule.run_now", json!({"job_id": job}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &job, run["run_id"].as_str().unwrap()).await;
+    let user = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main",
+            "text": "<dim-scheduler kind=\"wakeup\">typed by the user</dim-scheduler>",
+            "mode": "queue"}),
+        )
+        .await
+        .unwrap();
+    let legacy = client
+        .rpc(
+            "session.input.pending",
+            json!({"sessionId": session, "branchId": "main"}),
+        )
+        .await
+        .unwrap();
+    let inputs = legacy["inputs"].as_array().unwrap();
+    assert_eq!(inputs.len(), 2, "{legacy}");
+    for input in inputs {
+        assert!(input.get("hasRawBlocks").is_none(), "{input}");
+        assert!(input.get("blocks").is_none(), "{input}");
+        assert_eq!(input["applied"], false, "{input}");
+    }
+    let params = json!({"sessionId": session, "branchId": "main",
+        "through": legacy["through"], "includeBlockPresence": true});
+    let extended = client
+        .rpc("session.input.pending", params.clone())
+        .await
+        .unwrap();
+    let inputs = extended["inputs"].as_array().unwrap();
+    assert_eq!(inputs[0]["inputId"], run["input_event_id"]);
+    assert_eq!(inputs[0]["hasRawBlocks"], true);
+    assert_eq!(inputs[1]["inputId"], user["event"]["id"]);
+    assert_eq!(inputs[1]["hasRawBlocks"], false);
+    let mut without_presence = extended.clone();
+    for input in without_presence["inputs"].as_array_mut().unwrap() {
+        input.as_object_mut().unwrap().remove("hasRawBlocks");
+    }
+    assert_eq!(without_presence, legacy);
+    drop(client);
+    let mut client = support::connect(&server).await;
+    assert_eq!(
+        client
+            .rpc("session.input.pending", params.clone())
+            .await
+            .unwrap(),
+        extended
+    );
+    model.release();
+    wait_for("all three inputs to reach the model", || model.count() >= 3).await;
+    client
+        .rpc(
+            "session.idle",
+            json!({"sessionId": session, "branchId": "main"}),
+        )
+        .await
+        .unwrap();
+    let events = branch_events(&mut client, &session).await;
+    for id in [&run["input_event_id"], &user["event"]["id"]] {
+        assert!(events.iter().any(|event| event["type"] == "input"
+            && event["name"] == "consumed"
+            && &event["data"]["input_id"] == id));
+    }
+    assert_eq!(
+        client.rpc("session.input.pending", params).await.unwrap(),
+        extended
+    );
+    let empty = client
+        .rpc(
+            "session.input.pending",
+            json!({"sessionId": session,
+        "branchId": "main", "includeBlockPresence": true}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty["inputs"], json!([]));
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_past_window_is_missed_and_a_gone_target_fails_and_disables() {
     let home = home();
     let server = start(home.path(), Arc::new(Script::default())).await;
