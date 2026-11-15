@@ -416,10 +416,7 @@ printf 'Replacement launcher started\n'
         let switched = baseline && declared == Some(future) && !retry;
         assert_eq!(status.success(), switched && !second_failure, "{output}");
         if switched {
-            assert_eq!(
-                installed.recorded().last().unwrap(),
-                "dimcode-alpha@alpha"
-            );
+            assert_eq!(installed.recorded().last().unwrap(), "dimcode-alpha@alpha");
             assert_eq!(
                 output.matches("Checking dimcode-alpha").count(),
                 1,
