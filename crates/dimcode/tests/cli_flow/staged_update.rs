@@ -418,7 +418,7 @@ printf 'Replacement launcher started\n'
         if switched {
             assert_eq!(
                 installed.recorded().last().unwrap(),
-                &format!("dimcode-alpha@{version}")
+                "dimcode-alpha@alpha"
             );
             assert_eq!(
                 output.matches("Checking dimcode-alpha").count(),
