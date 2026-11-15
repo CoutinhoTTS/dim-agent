@@ -121,6 +121,8 @@ mod tests {
                 "Send now failed: {error}; the draft was kept",
                 "Send now cancelled; the draft was kept",
                 "Send now is still stopping the run; the draft was kept",
+                "Send now is stopping the run; paste again when the draft is sent",
+                "Send now is waiting for the insertion before sending",
             ] {
                 let translated = table(locale, key);
                 assert!(translated.is_some(), "{code} lacks {key:?}");

@@ -1719,6 +1719,21 @@ impl App {
         self.failure.is_none() && self.snapshot.as_ref().is_some_and(|s| s.running)
     }
 
+    /// Refuses to start a clipboard or image read while a send-now is settling,
+    /// with the notice that says why. A read started after the stop was asked
+    /// for cannot be ordered against the stop's reply, so the message a settled
+    /// stop sends must be exactly what the composer held when it settled.
+    /// Returns whether a read was refused.
+    fn insertion_refused(&mut self) -> bool {
+        if self.send_now.is_none() {
+            return false;
+        }
+        self.set_notice(t(
+            "Send now is stopping the run; paste again when the draft is sent",
+        ));
+        true
+    }
+
     /// A clipboard or image read that has not landed in the draft yet. Sending
     /// before it does would submit without the paste or attachment, and the
     /// read would then land in a new draft.
@@ -2197,6 +2212,18 @@ impl App {
                         "Send now failed: {error}; the draft was kept",
                         &[("error", &crate::sanitize::safe_line(&error))],
                     ));
+                    return;
+                }
+                // No read can start while the gesture is pending, so nothing
+                // is outstanding here. Should one ever be, the draft stays
+                // whole: the submit is dropped rather than sent without the
+                // paste, and the gesture ends so the key is not wedged.
+                debug_assert!(
+                    !self.insertion_pending(),
+                    "a read started while a send-now was settling"
+                );
+                if self.insertion_pending() {
+                    self.set_notice(t("Send now is waiting for the insertion before sending"));
                     return;
                 }
                 self.submit_send_now();
@@ -3518,6 +3545,9 @@ impl App {
     /// interface thread; their tokens go in at the cursor when the read
     /// returns, so the frame never waits for a decode.
     fn attach_paths(&mut self, paths: &[std::path::PathBuf]) {
+        if self.insertion_refused() {
+            return;
+        }
         if self.image_read.is_some() {
             self.set_notice(t(
                 "An image is still being inserted; paste again when it is in",
@@ -3565,6 +3595,9 @@ impl App {
     /// the terminal for its clipboard when the native one is out of reach.
     fn read_clipboard(&mut self) {
         if self.clipboard.is_some() {
+            return;
+        }
+        if self.insertion_refused() {
             return;
         }
         if self.image_read.is_some() {
@@ -16221,6 +16254,54 @@ mod tests {
                 ),
                 "{label}: the recalled text, the draft and its image: {}",
                 describe(submitted).join(", ")
+            );
+        }
+    }
+
+    /// A paste cannot start while a send-now settles: the submitted message is
+    /// exactly what the composer held when the stop settled.
+    #[test]
+    fn no_paste_starts_while_a_send_now_settles() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let ctrl_v = || InputEvent::Key(KeyEvent::new(KeyCode::Char('v'), Modifiers::CTRL));
+        for image in [false, true] {
+            let (mut app, sent, home) = session_with_queue(true, &[]);
+            app.composer.set_accepts_images(true);
+            typed(&mut app, "draft");
+            app.handle(ctrl_enter());
+            if image {
+                let path = home.path().join("late.png");
+                wide_png(&path, 32);
+                app.paste(path.to_string_lossy().into_owned());
+                assert!(
+                    app.image_read.is_none(),
+                    "an image read must not start during the gesture"
+                );
+            } else {
+                app.read_clipboard();
+                assert!(
+                    app.clipboard.is_none(),
+                    "a clipboard read must not start during the gesture"
+                );
+            }
+            let notice = app.notice.as_ref().map(|(text, _)| text.as_str());
+            assert!(
+                notice.is_some_and(|text| text.contains("paste again when the draft is sent")),
+                "the refused paste says why: {notice:?}"
+            );
+
+            app.apply(Update::Stopped { error: None });
+            assert_eq!(
+                describe(&sent.borrow()[1..]),
+                ["submit:queue:draft"],
+                "the submit carries the draft as it was"
+            );
+
+            // The gesture is over, so a paste works again.
+            app.handle(ctrl_v());
+            assert!(
+                app.clipboard.is_some(),
+                "Ctrl+V starts a read again once the draft is sent"
             );
         }
     }

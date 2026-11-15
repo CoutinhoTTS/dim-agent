@@ -315,11 +315,16 @@ line in the draft it shows `A shell command is already running` and sends
 nothing, and with an empty draft and nothing held it does nothing; while a
 clipboard or image read has not landed in the draft it asks for the wait and
 sends neither the withdrawals nor the stop. While the stop it asked for is
-still settling, `Enter` sends nothing, so one draft is never submitted twice;
-`Esc` there calls off only the submit and keeps the draft, because the stop it
-asked for has already gone. At most one stop is in flight: a `Ctrl+Enter`
-after that cancellation asks for no second stop and re-arms the submit
-instead, so the one reply still on its way decides the outcome.
+still settling, every send key waits and keeps the draft: `Enter`, `Ctrl+S`
+and the alternate-mode key send nothing and leave the text and its attachments
+as they are, so one draft is never submitted twice; `Esc` there calls off only
+the submit and keeps the draft, because the stop it asked for has already gone.
+At most one stop is in flight: a `Ctrl+Enter` after that cancellation asks for
+no second stop and re-arms the submit instead, so the one reply still on its
+way decides the outcome. A clipboard or image paste waits for the send to
+finish and says so, because a read started after the stop was asked for cannot
+be ordered against its reply; typed text joins the draft as usual, and so does
+a bracketed text paste, which inserts at once.
 
 A terminal without the kitty keyboard protocol or xterm modifyOtherKeys cannot
 tell `Ctrl+Enter` from `Enter`, so there it submits in the default mode and `Esc`

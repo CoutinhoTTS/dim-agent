@@ -6615,6 +6615,7 @@
       "parent": "dim_cli::ui",
       "file": "crates/dim-cli/src/ui/tui.rs",
       "unexpandedMacros": [
+        "debug_assert",
         "eprintln",
         "format",
         "matches",
@@ -47248,6 +47249,20 @@
     },
     {
       "from": "dim_cli::ui::tui",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::ContentBlock::Text"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path dim_agent_types::UserInput"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui",
       "to": "dim_agent_types::goal",
       "references": [
         "path crate::goal::Status::Active",
@@ -47454,6 +47469,9 @@
         "path DeleteOutcome::NothingRemoved",
         "path DeleteOutcome::Unsupported",
         "path DeleteReply",
+        "path DraftPart::Block",
+        "path DraftPart::Paste",
+        "path DraftPart::Text",
         "path ManagementAction",
         "path ManagementAction::Add",
         "path ManagementAction::List",
