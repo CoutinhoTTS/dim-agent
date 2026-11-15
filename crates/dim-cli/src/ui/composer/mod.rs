@@ -227,6 +227,61 @@ impl Composer {
         self.renumber();
     }
 
+    /// Inserts withdrawn operator content at byte `at`, in front of the draft
+    /// from there on, and returns the offset just past what it inserted. A
+    /// non-empty draft keeps its own line after it, so recalled messages keep
+    /// queue order ahead of the draft that was typed. Runtime blocks are left
+    /// out as [`Self::restore`] leaves them; images stay atomic.
+    pub fn restore_at(&mut self, at: usize, input: dim_agent_types::UserInput) -> usize {
+        self.shell = None;
+        let mut at = at.min(self.area.text().len());
+        let followed = at < self.area.text().len();
+        let mut previous_text = false;
+        for (index, block) in input.content.into_iter().enumerate() {
+            match block {
+                dim_agent_types::ContentBlock::Text { text } => {
+                    if dim_agent_types::markup::runtime_context(index, &text) {
+                        continue;
+                    }
+                    if previous_text {
+                        self.area.insert_str_at(at, "\n");
+                        at += 1;
+                    }
+                    self.area.insert_str_at(at, &text);
+                    at += text.len();
+                    previous_text = true;
+                }
+                block @ dim_agent_types::ContentBlock::Image { .. } => {
+                    previous_text = false;
+                    let buffer = "[Image]".to_owned();
+                    let id = self.area.replace_range_with_element(
+                        at..at,
+                        &buffer,
+                        TOKEN_KIND,
+                        Some(token_line(&buffer)),
+                    );
+                    at += buffer.len();
+                    self.tokens.push(Token {
+                        id,
+                        label: buffer.clone(),
+                        buffer,
+                        content: String::new(),
+                        block: Some(block),
+                        file: None,
+                        details: String::new(),
+                    });
+                }
+            }
+        }
+        if followed {
+            self.area.insert_str_at(at, "\n");
+            at += 1;
+        }
+        self.area.set_cursor(self.area.text().len());
+        self.renumber();
+        at
+    }
+
     /// Appends `text` to the draft as a Markdown quote and a blank line,
     /// keeping what is already there; the cursor goes to the end. The
     /// format is the one the Web composer writes (member-conversation

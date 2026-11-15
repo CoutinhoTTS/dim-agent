@@ -1418,6 +1418,9 @@ struct SendNow {
     /// Esc called off the submit. The stop still settles, and its reply
     /// releases the gesture without submitting anything.
     submit_cancelled: bool,
+    /// Where the next recalled message goes: past the ones already recalled,
+    /// so they keep queue order ahead of the draft that was typed.
+    at: usize,
 }
 
 /// A pasted group whose image paths a thread is reading; the tokens go in
@@ -1880,6 +1883,7 @@ impl App {
         }
         self.send_now = Some(SendNow {
             submit_cancelled: false,
+            at: 0,
         });
         self.recall_all_queued();
         self.host.send(Command::SubmitNow);
@@ -2156,7 +2160,12 @@ impl App {
         match update {
             Update::Withdrawn(input) => {
                 self.dismiss_suggestion();
-                self.composer.restore(input);
+                match &mut self.send_now {
+                    // Recalled messages keep queue order ahead of the draft
+                    // that was typed when Ctrl+Enter was pressed.
+                    Some(pending) => pending.at = self.composer.restore_at(pending.at, input),
+                    None => self.composer.restore(input),
+                }
             }
             Update::Stopped { error } => {
                 // A reply with no gesture waiting for it settles nothing.
@@ -16297,7 +16306,7 @@ mod tests {
 
     /// Ctrl+Enter is Esc then Enter as one key: the withdrawals go first, then
     /// one stop, and the combined draft is submitted only after the stop's
-    /// reply, oldest held message first.
+    /// reply, with the recalled messages ahead of the draft that was typed.
     #[test]
     fn ctrl_enter_withdraws_stops_and_submits_once_the_stop_settled() {
         let ctrl_enter = InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
@@ -16334,11 +16343,15 @@ mod tests {
                 }));
             }
             let expected = if parts {
-                "and then [Image]\nfirst\nsecond"
+                "first\nsecond\nand then [Image]"
             } else {
-                "and then\nfirst\nsecond"
+                "first\nsecond\nand then"
             };
-            assert_eq!(app.composer.text(), expected);
+            assert_eq!(
+                app.composer.text(),
+                expected,
+                "recalled messages keep queue order, then the draft that was typed"
+            );
             assert!(
                 sent.borrow()
                     .iter()
@@ -16368,17 +16381,17 @@ mod tests {
                     matches!(
                         submitted,
                         [Command::SubmitDraft(parts, SubmitMode::Queue)]
-                            if matches!(parts.first(), Some(DraftPart::Text(text)) if text.starts_with("and then"))
+                            if matches!(parts.first(), Some(DraftPart::Text(text)) if text == "first\nsecond\nand then ")
                                 && parts.iter().any(|part| matches!(part, DraftPart::Block(_)))
                     ),
-                    "the draft keeps its parts: {}",
+                    "the recalled messages come first and the draft keeps its parts: {}",
                     describe(submitted).join(", ")
                 );
             } else {
                 assert_eq!(
                     describe(submitted),
-                    ["submit:queue:and then\nfirst\nsecond"],
-                    "the oldest held message comes first"
+                    ["submit:queue:first\nsecond\nand then"],
+                    "recalled messages keep queue order ahead of the typed draft"
                 );
             }
             drop(sent_now);
@@ -16410,7 +16423,7 @@ mod tests {
                 .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
             "no submit follows a failed stop"
         );
-        assert_eq!(app.composer.text(), "and then\nfirst");
+        assert_eq!(app.composer.text(), "first\nand then");
         assert!(
             app.notices
                 .iter()
