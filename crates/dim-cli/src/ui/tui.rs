@@ -1847,12 +1847,13 @@ impl App {
         }
     }
 
-    /// Whether `key` is a send key that a settling send-now must refuse: plain
-    /// Enter (including Enter normalized from Ctrl+S or the alternate mode) and
-    /// Ctrl+S, whose `steer` branch sends the oldest held message. Every one of
-    /// these would act on the draft while the stop it asked for is still out.
-    fn settling_key_refused(&self, key: &KeyEvent) -> bool {
-        matches!(key.code, KeyCode::Enter) && key.mods == Modifiers::NONE
+    /// Whether `key` is a send key that a settling send-now must refuse: every
+    /// key the composer would submit a message with, whatever its modifiers and
+    /// whether the palette or the file picker is open, and Ctrl+S, whose `steer`
+    /// branch sends the oldest held message. Each of these would act on the
+    /// draft while the stop it asked for is still out.
+    fn settling_key_refused(&mut self, key: &KeyEvent) -> bool {
+        self.composer.submits(key)
             || key.code == KeyCode::Char('s') && key.mods.contains(Modifiers::CTRL)
     }
 
@@ -16256,6 +16257,226 @@ mod tests {
                 describe(submitted).join(", ")
             );
         }
+    }
+
+    /// The palette's Enter and the file picker's Enter decide by the same
+    /// helpers `handle_key` uses, so a pending send-now refuses every key the
+    /// composer would submit with, SUPER+Enter included: the modifier holds no
+    /// newline, so the editor submits. The draft keeps its text and its image,
+    /// nothing panics, and the stop's reply sends it once.
+    #[test]
+    fn a_modified_enter_keeps_the_draft_while_a_send_now_settles() {
+        let ctrl_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::CTRL));
+        let super_enter = || InputEvent::Key(KeyEvent::new(KeyCode::Enter, Modifiers::SUPER));
+        let (mut app, sent, home) = session_with_queue(true, &[("a", "first")]);
+        app.composer.set_accepts_images(true);
+        typed(&mut app, "and then");
+        let path = home.path().join("screen.png");
+        wide_png(&path, 32);
+        let image = crate::ui::composer::read_planned(&app.composer.plan_files(&[path]).unwrap())
+            .unwrap()
+            .remove(0)
+            .unwrap();
+        app.composer.attach_image(image).unwrap();
+        let before = app.composer.text().to_owned();
+
+        app.handle(ctrl_enter());
+        let during = describe(&sent.borrow());
+        app.handle(super_enter());
+        assert_eq!(
+            describe(&sent.borrow()),
+            during,
+            "SUPER+Enter sends nothing while the stop settles"
+        );
+        assert_eq!(app.composer.text(), before, "the text and image are kept");
+        let notice = app.notice.as_ref().map(|(text, _)| text.as_str());
+        assert!(
+            notice.is_some_and(|text| text.contains("still stopping the run")),
+            "the refused key says why: {notice:?}"
+        );
+
+        app.apply(Update::Withdrawn(dim_agent_types::UserInput {
+            content: vec![dim_agent_types::ContentBlock::Text {
+                text: "first".into(),
+            }],
+        }));
+        app.apply(Update::Stopped { error: None });
+        let sent_now = sent.borrow();
+        assert!(
+            matches!(
+                &sent_now[2..],
+                [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                    if matches!(
+                        parts.as_slice(),
+                        [DraftPart::Text(all), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })]
+                            if all == "first\nand then "
+                    )
+            ),
+            "one submit carries the recalled message, the text and its image: {}",
+            describe(&sent_now).join(", ")
+        );
+    }
+
+    /// The composer owns which keys act on the draft as a submit does, and the
+    /// send-now guard asks it instead of reading the key's modifiers itself.
+    /// The matrix pins the two together: over four composer states and every
+    /// Enter the interface routes to the composer, `submits` is true exactly
+    /// when `handle_key` takes the draft out of it, and a pending send-now
+    /// refuses exactly those keys and leaves the rest as they were.
+    #[test]
+    fn the_send_guard_refuses_exactly_the_keys_the_composer_submits_with() {
+        #[derive(Clone, Copy, Debug)]
+        enum State {
+            Draft,
+            Hidden,
+            Row,
+            Picker,
+        }
+
+        let states = [State::Draft, State::Hidden, State::Row, State::Picker];
+        let state = |state: State| {
+            let (mut app, sent, home) = session_with_queue(true, &[]);
+            match state {
+                State::Draft => typed(&mut app, "draft"),
+                State::Hidden => app.composer.set_draft("/fast"),
+                State::Row => app.composer.set_draft("/"),
+                State::Picker => app.composer.set_draft("look @/"),
+            }
+            (app, sent, home)
+        };
+        let modifiers = [
+            (Modifiers::SHIFT, "SHIFT"),
+            (Modifiers::ALT, "ALT"),
+            (Modifiers::CTRL, "CTRL"),
+            (Modifiers::SUPER, "SUPER"),
+        ];
+        let label = |mods: Modifiers| {
+            let held: Vec<&str> = modifiers
+                .iter()
+                .filter(|(bit, _)| mods.contains(*bit))
+                .map(|(_, name)| *name)
+                .collect();
+            if held.is_empty() {
+                "none".to_owned()
+            } else {
+                held.join("+")
+            }
+        };
+        let mut enters = Vec::new();
+        for bits in 0..16u8 {
+            let mods = Modifiers(bits);
+            // Plain Ctrl+Enter is the send-now gesture, which the interface
+            // takes before any key reaches the composer.
+            if mods == Modifiers::CTRL {
+                continue;
+            }
+            enters.push((
+                format!("Enter {}", label(mods)),
+                KeyEvent::new(KeyCode::Enter, mods),
+            ));
+        }
+        let ctrl_s = (
+            "Ctrl+S".to_owned(),
+            KeyEvent::new(KeyCode::Char('s'), Modifiers::CTRL),
+        );
+        let ctrl_j = (
+            "Ctrl+J".to_owned(),
+            KeyEvent::new(KeyCode::Char('j'), Modifiers::CTRL),
+        );
+        let mut checks = 0;
+        let per_state = enters.len()
+            + 2
+            + enters
+                .iter()
+                .filter(|(_, key)| !key.mods.contains(Modifiers::CTRL))
+                .count()
+            + 2;
+
+        for which in states {
+            let mut keys = enters.clone();
+            keys.push(ctrl_s.clone());
+            keys.push(ctrl_j.clone());
+            for (name, key) in &keys {
+                let (mut app, _sent, _home) = state(which);
+                let submits = app.composer.submits(key);
+                let acts = matches!(
+                    app.composer.handle_key(*key),
+                    ComposerOutcome::Submit(_)
+                        | ComposerOutcome::SubmitDraft { .. }
+                        | ComposerOutcome::Command { .. }
+                );
+                assert_eq!(
+                    submits,
+                    acts,
+                    "{which:?}: `submits` says {submits} for {name}, which {}",
+                    if acts {
+                        "takes the draft out of the composer"
+                    } else {
+                        "leaves it there"
+                    }
+                );
+                checks += 1;
+            }
+
+            // Every Enter holding Ctrl but the gesture itself is taken by the
+            // interface before the composer sees it or normalized to plain
+            // Enter, so the pending half covers only the keys the interface
+            // routes to the composer; Ctrl+S is a send key in its own right,
+            // refused whatever the draft holds.
+            let pending_keys: Vec<(String, KeyEvent)> = enters
+                .iter()
+                .filter(|(_, key)| !key.mods.contains(Modifiers::CTRL))
+                .cloned()
+                .chain(std::iter::once(ctrl_j.clone()))
+                .collect();
+            for (name, key) in pending_keys.iter().chain(std::iter::once(&ctrl_s)) {
+                let (mut fresh, _sent, _home) = state(which);
+                let submits = fresh.composer.submits(key);
+                fresh.composer.handle_key(*key);
+                let expected = fresh.composer.text().to_owned();
+
+                let (mut app, sent, _home) = state(State::Draft);
+                app.handle(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    Modifiers::CTRL,
+                )));
+                assert!(app.send_now.is_some(), "{which:?}: the gesture is pending");
+                match which {
+                    State::Draft => {}
+                    State::Hidden => app.composer.set_draft("/fast"),
+                    State::Row => app.composer.set_draft("/"),
+                    State::Picker => app.composer.set_draft("look @/"),
+                }
+                let during = describe(&sent.borrow());
+                let before = app.composer.text().to_owned();
+                let is_send_key = submits || key.code == KeyCode::Char('s');
+                app.handle(InputEvent::Key(*key));
+                checks += 1;
+                if is_send_key {
+                    assert_eq!(
+                        describe(&sent.borrow()),
+                        during,
+                        "{which:?}, {name}: a send key sends nothing while the stop settles"
+                    );
+                    assert_eq!(
+                        app.composer.text(),
+                        before,
+                        "{which:?}, {name}: a send key keeps the draft whole"
+                    );
+                } else {
+                    assert_eq!(
+                        app.composer.text(),
+                        expected,
+                        "{which:?}, {name}: a key that sends nothing still does its job"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            checks,
+            states.len() * per_state,
+            "the matrix covers every state and key"
+        );
     }
 
     /// A paste cannot start while a send-now settles: the submitted message is

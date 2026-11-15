@@ -84,6 +84,14 @@ impl Shell {
     }
 }
 
+/// An Enter that opens a new line in the draft rather than submitting it:
+/// `Shift+Enter` and `Alt+Enter`. Every other Enter goes on to submit, however
+/// else it is modified.
+fn newline_key(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Enter
+        && (key.mods.contains(Modifiers::SHIFT) || key.mods.contains(Modifiers::ALT))
+}
+
 /// What a key did.
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
@@ -437,9 +445,7 @@ impl Composer {
             }
         }
         match key.code {
-            KeyCode::Enter
-                if key.mods.contains(Modifiers::SHIFT) || key.mods.contains(Modifiers::ALT) =>
-            {
+            KeyCode::Enter if newline_key(&key) => {
                 self.insert_newline();
                 return Outcome::Handled;
             }
@@ -473,13 +479,7 @@ impl Composer {
 
     fn palette_key(&mut self, key: KeyEvent) -> Option<Outcome> {
         let query = self.command_query()?.to_owned();
-        if key.code == KeyCode::Enter
-            && crate::ui::commands::COMMANDS.iter().any(|command| {
-                command.slash
-                    && !command.listed(self.context)
-                    && (command.name == query || command.aliases.contains(&query.as_str()))
-            })
-        {
+        if key.code == KeyCode::Enter && self.exact_hidden(&query) {
             return Some(self.submit());
         }
         self.palette.set_query(&query);
@@ -505,26 +505,8 @@ impl Composer {
             }
             KeyCode::Enter => {
                 let row = rows.get(self.palette.current(&rows))?;
-                if !row.selectable() {
-                    return Some(Outcome::Handled);
-                }
-                match &row.kind {
-                    crate::ui::rows::Kind::Command(command)
-                        if command.requires_exact_name
-                            && query != command.name
-                            && !command.aliases.contains(&query.as_str()) =>
-                    {
-                        Some(self.complete_row(row))
-                    }
-                    crate::ui::rows::Kind::Command(command)
-                        if command.argument.is_some() || command.name == "goal" =>
-                    {
-                        let filled = format!("/{} ", command.name);
-                        self.clear();
-                        self.area.insert_str(&filled);
-                        Some(Outcome::Handled)
-                    }
-                    crate::ui::rows::Kind::Command(command) => {
+                match Self::row_command(row, &query) {
+                    Some(command) => {
                         let name = command.name.to_owned();
                         self.clear();
                         Some(Outcome::Command {
@@ -532,10 +514,7 @@ impl Composer {
                             args: String::new(),
                         })
                     }
-                    crate::ui::rows::Kind::Skill(_) => Some(self.complete_row(row)),
-                    crate::ui::rows::Kind::Heading | crate::ui::rows::Kind::Item => {
-                        Some(Outcome::Handled)
-                    }
+                    None => Some(self.complete_row(row)),
                 }
             }
             KeyCode::Tab => {
@@ -547,6 +526,35 @@ impl Composer {
             }
             _ => None,
         }
+    }
+
+    /// Whether the draft names a hidden command exactly, which Enter runs
+    /// without the menu listing it.
+    fn exact_hidden(&self, query: &str) -> bool {
+        crate::ui::commands::COMMANDS.iter().any(|command| {
+            command.slash
+                && !command.listed(self.context)
+                && (command.name == query || command.aliases.contains(&query))
+        })
+    }
+
+    /// The command a palette row's Enter runs, clearing the draft as the draft
+    /// it names would; `None` for the rows Enter fills into the draft instead.
+    fn row_command(
+        row: &crate::ui::rows::Row,
+        query: &str,
+    ) -> Option<&'static crate::ui::commands::Command> {
+        let crate::ui::rows::Kind::Command(command) = &row.kind else {
+            return None;
+        };
+        if command.requires_exact_name && query != command.name && !command.aliases.contains(&query)
+        {
+            return None;
+        }
+        if command.argument.is_some() || command.name == "goal" {
+            return None;
+        }
+        Some(command)
     }
 
     /// Fills the draft with the selected row: a command's name, its name and a
@@ -687,6 +695,47 @@ impl Composer {
             width,
             p,
         ))
+    }
+
+    /// Whether `handle_key` here ends in `submit()`. The palette's Enter does,
+    /// since the draft is then the command it runs: the command the draft names
+    /// exactly, the selected command row, or the draft itself when no row is
+    /// selected. The file picker's Enter does once no file matches; with a
+    /// match it inserts the file instead. Any other Enter submits unless it is
+    /// a newline.
+    /// Whether Enter here acts on the draft as a submit does: it sends the
+    /// draft, or runs the command the draft names, clearing the draft either
+    /// way. The palette decides by the same helpers `handle_key` uses: the
+    /// command the draft names exactly, then the selected row, then the draft
+    /// itself when no row is selected. The file picker's Enter fills the file
+    /// in while one matches, and otherwise submits the draft. Every other Enter
+    /// submits unless it opens a new line. The interface asks this before it
+    /// lets a key reach the composer, so a key that would cost the draft is the
+    /// one it refuses.
+    pub fn submits(&mut self, key: &KeyEvent) -> bool {
+        if key.code != KeyCode::Enter {
+            return false;
+        }
+        if self.palette_open() {
+            let query = self.command_query().unwrap_or_default().to_owned();
+            if self.exact_hidden(&query) {
+                return true;
+            }
+            self.palette.set_query(&query);
+            let rows = self.palette_rows();
+            return match rows.get(self.palette.current(&rows)) {
+                None => true,
+                Some(row) => Self::row_command(row, &query).is_some(),
+            };
+        }
+        if self.mention_open()
+            && key.mods.0 == 0
+            && let Some(trigger) = self.mention()
+            && !self.mention_candidates(&trigger.query).is_empty()
+        {
+            return false;
+        }
+        !newline_key(key)
     }
 
     /// What Enter makes of the draft; the invocation's first message
