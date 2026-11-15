@@ -368,8 +368,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "keluar",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter pilih + default · ←/→ upaya · Ctrl+X hapus simpanan · Esc hapus/tutup"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter pilih + default · ←/→ upaya · Ctrl+B/F kursor · Ctrl+X hapus simpanan · Esc hapus/tutup"
         }
         "Default for new sessions in {folder}: {model}" => {
             "Model default untuk sesi baru di {folder}: {model}"

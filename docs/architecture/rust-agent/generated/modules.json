@@ -43262,10 +43262,14 @@
       "references": [
         "path KeyCode",
         "path KeyCode::Char",
+        "path KeyCode::Delete",
         "path KeyCode::Down",
         "path KeyCode::Enter",
+        "path KeyCode::Left",
+        "path KeyCode::Right",
         "path KeyEvent",
         "path KeyEvent::new",
+        "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "use crate::ui::terminal::Modifiers"
       ]
