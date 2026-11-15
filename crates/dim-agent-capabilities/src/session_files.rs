@@ -203,13 +203,13 @@ pub async fn store_result(
                 crate::images::scale_image(std::io::Cursor::new(bytes))
             })
             .await
-            .map_err(|e| HostError::failed(e.to_string()))?
-            .map_err(|e| {
-                HostError::classified(
-                    HostErrorKind::InvalidRequest,
-                    format!("Invalid tool image: {e:?}"),
-                )
-            })?;
+            .map_err(|e| HostError::failed(e.to_string()))?;
+            let Ok(accepted) = accepted else {
+                *block = ContentBlock::Text {
+                    text: "[Image omitted: the image cannot be sent to this model.]".into(),
+                };
+                continue;
+            };
             let stored = files
                 .0
                 .put(

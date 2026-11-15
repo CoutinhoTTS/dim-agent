@@ -155,7 +155,7 @@ canonical references still present in effective context.
 The native-storage profile gates Aimux on SessionStore's
 [`sessionFiles` data face](../../../design/appserver/session-files.md#9-interface).
 Immediately before provider conversion it reads referenced images for the
-request metadata's Session, applies the shared image scaling rule and builds
+request metadata's Session and builds
 a request-local inline representation. The stored request remains unchanged.
 Missing owner/session identity or unavailable content fails execution; it never
 silently substitutes a placeholder for a readable-model request. Cancellation

@@ -124,6 +124,7 @@ fn placeholder(source: &ImageSource, vision: bool) -> Option<&'static str> {
 /// A URL source, undecodable data or a format adapters do not accept (A10).
 fn sendable(source: &ImageSource) -> bool {
     (source.source_type == ImageSourceType::File
+        && FORMATS.contains(&source.media_type.as_str())
         && source.file_id.as_ref().is_some_and(|id| !id.is_empty()))
         || source.source_type == ImageSourceType::Base64
             && FORMATS.contains(&source.media_type.as_str())

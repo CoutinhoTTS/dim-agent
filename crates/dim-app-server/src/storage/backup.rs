@@ -222,7 +222,7 @@ pub fn backup_store(database: PathBuf, destination: PathBuf) -> Result<()> {
             .into_string()
             .map_err(|_| error("Session file name is not UTF-8"))?;
         let target = staging.path().join("files").join(&id);
-        fs::create_dir_all(&target).map_err(error)?;
+        crate::create_private_directory(&target).map_err(error)?;
         let digest = copy(&entry.path(), &target.join(&name))?;
         files.push(FileEntry { id, name, digest });
     }
@@ -263,7 +263,7 @@ pub fn restore_store(archive: PathBuf, destination: PathBuf) -> Result<()> {
             ));
         }
         let target = file_root(&database).join(&entry.id);
-        fs::create_dir_all(&target).map_err(error)?;
+        crate::create_private_directory(&target).map_err(error)?;
         directory(&archive.join("files"))?;
         directory(&archive.join("files").join(&entry.id))?;
         let source = archive.join("files").join(&entry.id).join(&entry.name);

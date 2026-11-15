@@ -4303,6 +4303,11 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
                                 file_id: Some("persisted-image".into()), data: None, url: None,
                             } },
                             image("image/png", None, Some("https://example.test/a.png")),
+                            ContentBlock::Image { source: ImageSource {
+                                source_type: ImageSourceType::File,
+                                media_type: "image/svg+xml".into(),
+                                file_id: Some("persisted-svg".into()), data: None, url: None,
+                            } },
                             image("image/bmp", Some(png), None),
                             image("image/png", Some("not base64!"), None),
                         ],
@@ -4318,7 +4323,7 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         let unsendable = "[Image omitted: the image cannot be sent to this model.]";
         assert_eq!(
             sent_parts(requests.lock().unwrap().last().unwrap()),
-            ["look", "image:image/png", unsendable, unsendable, unsendable]
+            ["look", "image:image/png", unsendable, unsendable, unsendable, unsendable]
         );
 
         session
@@ -4331,7 +4336,7 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         assert_eq!(request.model_id, "text-only");
         let omitted = "[Image omitted: the current model does not accept images.]";
         let parts = sent_parts(&request);
-        assert_eq!(parts[..5], ["look", omitted, omitted, omitted, omitted]);
+        assert_eq!(parts[..6], ["look", omitted, omitted, omitted, omitted, omitted]);
         assert!(parts.contains(&"next".to_string()));
         let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("next"))));
@@ -4346,7 +4351,7 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         session.idle("main").await.unwrap();
         let restored = requests.lock().unwrap().last().unwrap().clone();
         assert_eq!(restored.model_id, "seeing-again");
-        assert_eq!(sent_parts(&restored)[1], "image:image/png");
+        assert_eq!(sent_parts(&restored)[..6], ["look", "image:image/png", unsendable, unsendable, unsendable, unsendable]);
         assert!(restored.messages.iter().any(|message| matches!(&message.content, MessageContent::Parts(parts) if parts.iter().any(|part| matches!(part, MessagePart::Image {source} if source.file_id.as_deref() == Some("persisted-image"))))));
         agent.close().await.unwrap();
     })

@@ -8043,6 +8043,21 @@ fn v41_store_with_example_rows(database: &Database) -> Connection {
 async fn a_v41_store_interrupted_mid_delete_upgrades_and_keeps_its_orphans() {
     let database = Database::new();
     let connection = v41_store_with_example_rows(&database);
+    let owners: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM session_file_owners WHERE session_id='s1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let files: i64 = connection
+        .query_row("SELECT count(*) FROM session_files", [], |row| row.get(0))
+        .unwrap();
+    let changed = connection.execute(
+        "UPDATE timeline_events SET body=json_set(body, '$.record.event.data.user.content', json(?1)) WHERE session_id='s1' AND kind='input/message'",
+        [r#"[{"type":"image","source":{"type":"base64","mediaType":"image/png","data":"aW1hZ2U="}}]"#],
+    ).unwrap();
+    assert!(changed > 0);
     // The first chunk committed; the event chunks did not.
     connection
         .execute_batch(
@@ -8085,6 +8100,23 @@ async fn a_v41_store_interrupted_mid_delete_upgrades_and_keeps_its_orphans() {
         })
         .unwrap();
     assert!(dangling >= events, "the orphans still dangle");
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM session_file_owners WHERE session_id='s1'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        owners
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM session_files", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        files
+    );
 }
 
 /// #1421: the same for an interrupted `copy_fork_rows`, which writes the

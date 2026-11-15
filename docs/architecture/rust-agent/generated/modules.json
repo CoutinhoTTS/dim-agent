@@ -1119,7 +1119,6 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/session_files.rs",
       "unexpandedMacros": [
-        "format",
         "matches"
       ]
     },
@@ -15790,6 +15789,7 @@
       "to": "dim_agent_types::content",
       "references": [
         "path ContentBlock::Image",
+        "path ContentBlock::Text",
         "path ImageSource",
         "path ImageSourceType::Base64",
         "path ImageSourceType::File",
@@ -32226,6 +32226,13 @@
     },
     {
       "from": "dim_app_server::storage::backup",
+      "to": "dim_app_server",
+      "references": [
+        "path crate::create_private_directory"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::backup",
       "to": "dim_app_server::storage::files",
       "references": [
         "path super::files::valid_name"
@@ -32822,6 +32829,13 @@
       "to": "dim_agent_types::tool",
       "references": [
         "path kind"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_app_server",
+      "references": [
+        "path crate::create_private_directory"
       ]
     },
     {

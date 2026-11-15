@@ -656,6 +656,19 @@ async fn model_materializes_user_and_tool_images_without_mutating_history() {
         .join("files")
         .join(&stored.file_id)
         .join("image.png");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for directory in [
+            archive.join("files"),
+            archive.join("files").join(&stored.file_id),
+        ] {
+            assert_eq!(
+                std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
     std::fs::write(&archived_image, b"corrupted").unwrap();
     assert!(
         dim_app_server::storage::restore_store(archive.clone(), restored_home.0.clone()).is_err()
@@ -666,6 +679,19 @@ async fn model_materializes_user_and_tool_images_without_mutating_history() {
     );
     std::fs::write(&archived_image, &bytes).unwrap();
     dim_app_server::storage::restore_store(archive, restored_home.0.clone()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for directory in [
+            restored_home.files(),
+            restored_home.files().join(&stored.file_id),
+        ] {
+            assert_eq!(
+                std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
     let restored = Store::mount(&restored_home, true).await;
     let request: Arc<ModelRequest> = serde_json::from_value(original).unwrap();
     let recovered = dim_agent_capabilities::session_files::materialize(
@@ -752,6 +778,16 @@ async fn native_upgrade_externalizes_retained_images_and_preserves_shared_owners
         );
     }
     assert_eq!(home.entries().len(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for directory in [home.files(), home.files().join(identity.unwrap())] {
+            assert_eq!(
+                std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+    }
     drop(connection);
     store.consumer.shutdown().await.unwrap();
     store.root.shutdown().await.unwrap();

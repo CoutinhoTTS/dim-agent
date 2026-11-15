@@ -24,7 +24,7 @@ pub(super) fn upgrade(connection: &Connection, database: &Path) -> Result<()> {
     let mut reader = codec::Reader::default();
     loop {
         let row = connection.query_row(
-            "SELECT rowid, session_id, body FROM timeline_events WHERE rowid > ?1 ORDER BY rowid LIMIT 1",
+            "SELECT e.rowid, e.session_id, e.body FROM timeline_events e JOIN agent_sessions s ON s.session_id=e.session_id WHERE e.rowid > ?1 ORDER BY e.rowid LIMIT 1",
             [cursor], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
         );
         let (id, session, body) = match row {
@@ -142,7 +142,7 @@ impl Importer<'_> {
                     None => {
                         let id = uuid::Uuid::new_v4().to_string();
                         let directory = self.directory.join(&id);
-                        std::fs::create_dir_all(&directory).map_err(error)?;
+                        crate::create_private_directory(&directory).map_err(error)?;
                         let mut file =
                             tempfile::NamedTempFile::new_in(&directory).map_err(error)?;
                         file.write_all(&bytes).map_err(error)?;
