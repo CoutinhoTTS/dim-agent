@@ -6,7 +6,7 @@
 
 ## 工具结果中的图像
 
-工具结果里的图像按请求的 `ModelProtocol` 决定落点，由转换器能否在工具结果内携带图像决定，不改变历史或存储的工具结果。标记与说明文字在 `src/request.rs` 中各定义一个常量；下表路径相对 `vendor/aimux/aimux-providers/src/`。
+工具结果里的图像按请求的 `ModelProtocol` 决定落点，由转换器能否在工具结果内携带图像决定，不改变历史或存储的工具结果。标记与说明文字在 `src/request.rs` 中各定义一个常量；下表路径相对 `aimux-providers` 包的 `src/`。
 
 | ModelProtocol | 形式 | 决定的转换器 |
 | --- | --- | --- |
@@ -71,4 +71,4 @@ cargo run --release --locked -p xtask -- measure --model-config crates/dim-agent
 
 ## 依赖与验证
 
-固定上游源码和必要补丁位于 [vendor/aimux](../../vendor/aimux/SOURCE.md)。`cargo test -p dim-agent-aimux` 同时运行请求映射、结果转换、真实 HTTP/SSE Agent 流程和上游补丁回归。
+协议实现来自 crates.io 的 `aimux-core`、`aimux-provider-utils`、`aimux-providers` 与 `aimux-stream`，在根 `Cargo.toml` 中按 `=0.6.1` 固定。`cargo test -p dim-agent-aimux` 同时运行请求映射、结果转换、真实 HTTP/SSE Agent 流程和上游契约回归。

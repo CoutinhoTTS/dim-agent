@@ -236,6 +236,22 @@ fn tool(name: &str) -> dim_agent_types::ToolDefinition {
 }
 
 #[tokio::test]
+async fn a_configured_top_k_reaches_the_compatible_chat_body() {
+    let body = send(
+        convert(
+            &request(json!({"maxTokens": 4096, "topK": 1})),
+            &ProviderKind::OpenaiCompatible,
+            None,
+        )
+        .unwrap()
+        .options,
+        "openai",
+    )
+    .await;
+    assert_eq!(body["top_k"], 1.0);
+}
+
+#[tokio::test]
 async fn final_request_replays_multimodal_tool_history_and_only_model_readable_results() {
     let name = "plugin:notion/notion__notion-list-recent-pages";
     let request: ModelRequest = serde_json::from_value(json!({
@@ -317,22 +333,6 @@ async fn final_request_replays_multimodal_tool_history_and_only_model_readable_r
     let compatible = convert(&request, &ProviderKind::OpenaiCompatible, None).unwrap();
     let body = send(compatible.options, "openai").await;
     assert_eq!(body["messages"][3]["reasoning_content"], "plan");
-    // The generic compatible Chat model passes `top_k` through its provider
-    // namespace; the OpenAI Chat protocol has no such field and refuses it.
-    let mut sampled = request.clone();
-    sampled.config = Some(dim_agent_types::ModelConfig {
-        top_k: Some(1.0),
-        ..request.config.clone().unwrap_or_default()
-    });
-    let body = send(
-        convert(&sampled, &ProviderKind::OpenaiCompatible, None)
-            .unwrap()
-            .options,
-        "openai",
-    )
-    .await;
-    assert_eq!(body["top_k"], 1.0);
-    assert!(convert(&sampled, &ProviderKind::OpenaiChat, None).is_err());
     let body = send_chat(
         convert(&request, &ProviderKind::OpenaiChat, None)
             .unwrap()

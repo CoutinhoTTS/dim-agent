@@ -141,6 +141,6 @@ Dim’s original source is licensed under [MIT](LICENSE). The distribution retai
 | Component | Use and attribution |
 | --- | --- |
 | rutis | Plugin loading, named services and cross-language bindings. [Dim’s rutis integration](docs/design/rutis-usage.md) |
-| Aimux | Vendored model protocol implementations, distributed under MIT. [Pinned source](vendor/aimux/SOURCE.md) · [Local patches](vendor/aimux/PATCHES.md) · [License](vendor/aimux/LICENSE) |
+| Aimux | Model protocol implementations, taken from crates.io as `aimux-core`, `aimux-provider-utils`, `aimux-providers` and `aimux-stream`, distributed under MIT. [Upstream](https://github.com/arcships/aimux) |
 | grok-build and Ratatui | The native terminal uses components from xAI’s grok-build, including its Ratatui-derived inline terminal. The distribution carries the Apache-2.0 license and upstream attributions under `licenses/grok-build/`. [Source and revision](vendor/grok-build/SOURCE.md) · [Notices](vendor/grok-build/NOTICE) |
-| Rust, Web and plugin dependencies | Native archives include `licenses/RUST-THIRD-PARTY-NOTICES.txt` and `licenses/aimux/`. The Web workspace ships `THIRD-PARTY-NOTICES.txt`, including the SIL Open Font License for Geist and Geist Mono. Bundled TypeScript plugins retain their npm license files. [Full inventory](NOTICE) |
+| Rust, Web and plugin dependencies | Native archives include `licenses/RUST-THIRD-PARTY-NOTICES.txt`, which covers the Rust dependency licenses, aimux among them. The Web workspace ships `THIRD-PARTY-NOTICES.txt`, including the SIL Open Font License for Geist and Geist Mono. Bundled TypeScript plugins retain their npm license files. [Full inventory](NOTICE) |

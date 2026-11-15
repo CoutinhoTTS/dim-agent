@@ -838,7 +838,8 @@ test('stages public native payload, packs it and rejects modified content', {ski
     assert.equal(spawnSync('tar',['-xOzf',archive,`${prefix}/licenses/RUST-THIRD-PARTY-NOTICES.txt`],{encoding:'utf8'}).stdout,
       'Rust dependency license fixture');
   }
-  assert.equal(spawnSync('tar',['-xOzf',npm,'package/licenses/aimux/LICENSE'],{encoding:'utf8'}).stdout,readFileSync(path.join(root,'vendor/aimux/LICENSE'),'utf8'));
+  assert.equal(spawnSync('tar',['-xOzf',npm,'package/licenses/aimux/LICENSE'],{encoding:'utf8'}).stdout,
+    readFileSync(path.join(root,'licenses/aimux/LICENSE'),'utf8'));
   for (const file of ['LICENSE','NOTICE','xai-ratatui-inline/NOTICE','xai-ratatui-textarea/NOTICE']) {
     const source=readFileSync(path.join(root,'vendor/grok-build',file),'utf8');
     for (const [archive,prefix] of [[native,`dimcode-${manifest.platform}`],[npm,'package']]) {

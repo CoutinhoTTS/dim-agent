@@ -189,10 +189,15 @@ Crates whose licenses cannot be identified or do not satisfy that policy fail;
 manual clarifications require evidence from the actual license files.
 [cargo-deny policy reference](https://embarkstudios.github.io/cargo-deny/checks/index.html).
 
-`vendor/aimux` is checked as ordinary path dependencies, together with its
-transitive dependencies. Its packages inherit MIT from the vendored workspace
-and retain `vendor/aimux/LICENSE`; there is no vendor exclusion or blanket
-advisory exception. Vendored terminal packages are included by the same rule.
+The aimux crates are registry dependencies, checked with their transitive
+dependencies; there is no vendor exclusion or blanket advisory exception. They
+publish no license file of their own, so `licenses/aimux/LICENSE` in this
+repository keeps the upstream text with its own copyright line, and staging
+copies it into the archives; the generated notices would otherwise fall back to
+the canonical MIT text and lose that line. The file is the one that shipped
+with the vendored copy and is not generated, so an aimux upgrade should confirm
+it against the new tag. Vendored terminal packages keep their own license files
+under `licenses/grok-build/` and are included by the same rule.
 
 The terminal stack's Ratatui 0.29 is the sole parent of `lru` 0.12.5. Its private
 layout cache only calls `new`, `resize` and `get_or_insert`; those paths do not
@@ -362,7 +367,7 @@ For a local, non-publishing dry run, create a temporary JSON receipt containing 
 
 ## Distribution notices
 
-The wrapper, native packages and Web package include the root `NOTICE`. Native archives and platform npm packages retain Rust dependency notices under `licenses/RUST-THIRD-PARTY-NOTICES.txt`, Aimux's MIT license under `licenses/aimux/` and the vendored terminal libraries' Apache-2.0 license and notices under `licenses/grok-build/`. The extra Swift syntax asset is excluded pending license verification. Default TypeScript plugins keep the license files supplied by their npm packages.
+The wrapper, native packages and Web package include the root `NOTICE`. Native archives and platform npm packages retain Rust dependency notices under `licenses/RUST-THIRD-PARTY-NOTICES.txt`, aimux's own MIT license under `licenses/aimux/LICENSE`, and the vendored terminal libraries' Apache-2.0 license and notices under `licenses/grok-build/`. The extra Swift syntax asset is excluded pending license verification. Default TypeScript plugins keep the license files supplied by their npm packages.
 
 Run `node scripts/rust-notices.mjs staging/rust-notices.txt` before staging native payloads and pass `--rust-notices staging/rust-notices.txt` to `stage-release.mjs`. CI and the local alpha publisher do this automatically. The generator uses pinned `cargo-about`, the locked workspace's full feature and target graph, and `scripts/release-licenses.toml`; it excludes dev-only dependencies. It preserves the generated license texts and supplements them with the crates' original license, copyright and notice files, including nested native dependencies. Generation errors stop packaging; staging refuses missing or empty Rust notices. This is distribution output, while `deny.toml` remains the license-policy gate.
 
