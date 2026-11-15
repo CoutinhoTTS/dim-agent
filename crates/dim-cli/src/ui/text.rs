@@ -170,34 +170,46 @@ impl Wrapped {
 }
 /// `wrap_cells` with each row's source bytes kept: a tab becomes the spaces to
 /// the next tab stop of its line, a CRLF or CR is one break, and every drawn
-/// character remembers where it came from.
+/// character remembers where it came from. Each of a tab's spaces is a cluster
+/// of its own, so it wraps like any other cell.
 pub fn wrap_with_source(text: &str, width: usize) -> Vec<Wrapped> {
     if width == 0 {
         return vec![Wrapped::default()];
     }
+    let mut expanded = String::with_capacity(text.len() + 8);
+    let mut source = Vec::with_capacity(text.len() + 8);
+    let mut column = 0;
+    for (at, cluster) in text.grapheme_indices(true) {
+        match cluster {
+            "\t" => {
+                let spaces = TAB_STOP - column % TAB_STOP;
+                expanded.extend(std::iter::repeat_n(' ', spaces));
+                source.extend(std::iter::repeat_n(at, spaces));
+                column += spaces;
+            }
+            "\n" | "\r\n" | "\r" => {
+                expanded.push('\n');
+                source.push(at);
+                column = 0;
+            }
+            _ => {
+                for (offset, ch) in cluster.char_indices() {
+                    expanded.push(ch);
+                    source.push(at + offset);
+                }
+                column += display_width(cluster);
+            }
+        }
+    }
     let mut rows = Vec::new();
     let mut row = Wrapped::default();
     let mut used = 0;
-    let mut column = 0;
-    for (at, cluster) in text.grapheme_indices(true) {
-        if matches!(cluster, "\r\n" | "\r" | "\n") {
+    let mut at = 0;
+    for cluster in expanded.graphemes(true) {
+        if cluster == "\n" {
             rows.push(std::mem::take(&mut row));
             used = 0;
-            column = 0;
-            continue;
-        }
-        if cluster == "\t" {
-            let spaces = TAB_STOP - column % TAB_STOP;
-            if !row.text.is_empty() && used + spaces > width {
-                rows.push(std::mem::take(&mut row));
-                used = 0;
-            }
-            for _ in 0..spaces {
-                row.text.push(' ');
-                row.source.push(at);
-            }
-            used += spaces;
-            column += spaces;
+            at += 1;
             continue;
         }
         let cell = display_width(cluster);
@@ -205,12 +217,12 @@ pub fn wrap_with_source(text: &str, width: usize) -> Vec<Wrapped> {
             rows.push(std::mem::take(&mut row));
             used = 0;
         }
-        for (offset, ch) in cluster.char_indices() {
+        for ch in cluster.chars() {
             row.text.push(ch);
-            row.source.push(at + offset);
+            row.source.push(source[at]);
+            at += 1;
         }
         used += cell;
-        column += cell;
     }
     rows.push(row);
     rows
@@ -265,5 +277,94 @@ mod tests {
             let _ = expand_tabs(text);
             let _ = display_width(text);
         }
+    }
+
+    /// The rows this wrap drew before it carried a tab's byte: an expanded
+    /// tab's spaces were ordinary cells and broke at the row edge.
+    fn wrap_cells_expanding_tabs_first(text: &str, width: usize) -> Vec<String> {
+        if width == 0 {
+            return vec![String::new()];
+        }
+        let normalized = expand_tabs(text).replace("\r\n", "\n").replace('\r', "\n");
+        let mut rows = Vec::new();
+        for line in normalized.split('\n') {
+            if line.is_empty() {
+                rows.push(String::new());
+                continue;
+            }
+            let mut row = String::new();
+            let mut row_width = 0;
+            for cluster in line.graphemes(true) {
+                let cell = display_width(cluster);
+                if !row.is_empty() && row_width + cell > width {
+                    rows.push(std::mem::take(&mut row));
+                    row_width = 0;
+                }
+                row.push_str(cluster);
+                row_width += cell;
+            }
+            rows.push(row);
+        }
+        rows
+    }
+
+    /// A tab's spaces break at the row edge like any other cells.
+    #[test]
+    fn wrap_cells_splits_a_tabs_spaces_at_the_row_edge() {
+        assert_eq!(wrap_cells("\tX", 2), vec!["  ", "  ", "X"]);
+        assert_eq!(wrap_cells("abcde\tX", 6), vec!["abcde ", "  X"]);
+        let corpus = [
+            "",
+            "a",
+            "\tX",
+            "\t",
+            "ab\tX",
+            "abc\tX",
+            "abcd\tX",
+            "abcde\tX",
+            "中\tx",
+            "\t\tX",
+            "a\t\tb",
+            "a\r\nb",
+            "a\rb",
+            "\ta\r\n\tb",
+            "a\r\tb",
+            "a\n\nb\n",
+            "\n",
+            "中文中文",
+            "中文中",
+            "a   b",
+            "   ",
+            "e\u{301}",
+            "e\u{301}\tX",
+            "\t/skill:commit now",
+        ];
+        for text in corpus {
+            for width in 0..=12 {
+                assert_eq!(
+                    wrap_cells(text, width),
+                    wrap_cells_expanding_tabs_first(text, width),
+                    "{text:?} at width {width}"
+                );
+            }
+        }
+    }
+
+    /// Every space a tab expands to reports that tab's byte, on the row it was
+    /// drawn on, past a row break too.
+    #[test]
+    fn a_tabs_spaces_report_its_byte_on_the_next_row() {
+        let drawn: Vec<(String, Vec<usize>)> = wrap_with_source("abcde\tX", 6)
+            .into_iter()
+            .map(|row| (row.text, row.source))
+            .collect();
+        assert_eq!(
+            drawn,
+            vec![
+                ("abcde ".to_owned(), vec![0, 1, 2, 3, 4, 5]),
+                ("  X".to_owned(), vec![5, 5, 6]),
+            ],
+            "one of the tab's three spaces stays on the first row"
+        );
     }
 }
