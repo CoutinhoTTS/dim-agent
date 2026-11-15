@@ -21,7 +21,7 @@ use dim_app_server::{
     model_catalog::{BundledCatalog, ModelEntry, ModelStatus, ProviderRole},
     provider::{
         ConnectionInput, CreateProvider, CredentialUpdate, LegacyRow, ModelPreferences,
-        ProviderError, ProviderModel, ProviderPlugin, ProviderService, StaticAuth,
+        ProviderCatalog, ProviderError, ProviderModel, ProviderPlugin, ProviderService, StaticAuth,
         StaticProviderRecord, StoredSelectionError, convert_legacy_provider, parse_static,
         stored_selection,
     },
@@ -9707,4 +9707,280 @@ async fn an_edited_limit_on_a_listed_id_survives_the_answer_and_a_refresh() {
     root.shutdown().await.unwrap();
     server.abort();
     std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The listing a gateway returns for one model it serves over three channels:
+/// the group it builds over them, then one row per channel, all named alike and
+/// each labelled with where it comes from.
+fn gateway_listing() -> Value {
+    let row = |id: &str, channel: &str| {
+        json!({
+            "id": id,
+            "display_name": "GLM-5.3",
+            "magpie_label": format!("GLM-5.3 · {channel}"),
+            "context_window": 200000,
+            "max_output_tokens": 128000,
+        })
+    };
+    json!({"data": [
+        row("auto/glm-5.3", "routing group"),
+        row("siliconflow/glm-5.3", "SiliconFlow"),
+        row("volcengine/glm-5.3", "Volcengine Ark"),
+        row("zhipu/glm-5.3", "Zhipu"),
+    ]})
+}
+
+const GATEWAY: &str = "00000000-0000-4000-8000-00000000d0d0";
+
+/// A custom provider over a store of the test's own, created with no rows of its
+/// own and pointed at a listing endpoint.
+struct Gateway {
+    root: Ctx,
+    provider: Arc<ProviderService>,
+    home: PathBuf,
+    server: tokio::task::JoinHandle<()>,
+    cancel: CancellationToken,
+}
+
+impl Gateway {
+    async fn serving(listing: Value) -> Self {
+        let (endpoint, server) = listing_server(listing).await;
+        let home = temp_home("provider-gateway-names");
+        let (root, provider) = provider_root(&home).await;
+        let mut create = input(
+            GATEWAY,
+            &format!("{endpoint}/v1"),
+            StaticAuth::Bearer,
+            Some("gateway-key"),
+            "gateway",
+            43,
+        );
+        create.models = Vec::new();
+        let cancel = CancellationToken::new();
+        provider.create(create, &cancel).await.unwrap();
+        Self {
+            root,
+            provider,
+            home,
+            server,
+            cancel,
+        }
+    }
+
+    async fn refreshed(&self) -> ProviderCatalog {
+        self.provider
+            .refresh_for(GATEWAY.into(), &self.cancel)
+            .await
+            .unwrap()
+    }
+
+    /// The names the catalog publishes, in the order it lists its rows.
+    fn names(catalog: &ProviderCatalog) -> Vec<&str> {
+        catalog
+            .models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect()
+    }
+
+    async fn close(self) {
+        self.root.shutdown().await.unwrap();
+        self.server.abort();
+        let _ = self.server.await;
+        std::fs::remove_dir_all(self.home).unwrap();
+    }
+}
+
+/// The four rows a gateway lists for one model it serves over three channels
+/// publish four names, so a client that reads only `name` shows one row for each
+/// channel and one for the group.
+#[tokio::test]
+async fn a_gateways_rows_reach_the_catalog_under_distinct_names() {
+    let gateway = Gateway::serving(gateway_listing()).await;
+    assert_eq!(
+        Gateway::names(&gateway.refreshed().await),
+        [
+            "GLM-5.3 · routing group",
+            "GLM-5.3 · SiliconFlow",
+            "GLM-5.3 · Volcengine Ark",
+            "GLM-5.3 · Zhipu",
+        ],
+        "the group row is told apart from the channels it spreads over"
+    );
+    gateway.close().await;
+}
+
+/// A listing whose rows already state distinct names reaches a client unchanged.
+#[tokio::test]
+async fn a_listing_without_duplicates_keeps_its_names() {
+    let gateway = Gateway::serving(json!({"data":[
+        {"id":"first","display_name":"First","context_window":200000,"max_output_tokens":128000},
+        {"id":"second","display_name":"Second","context_window":200000,"max_output_tokens":128000},
+    ]}))
+    .await;
+    assert_eq!(
+        Gateway::names(&gateway.refreshed().await),
+        ["First", "Second"],
+        "nothing collides, so no name is qualified"
+    );
+    gateway.close().await;
+}
+
+/// A row nothing can choose still decides the names beside it: the rule reads
+/// the provider's complete list, so disabling one row never renames another.
+#[tokio::test]
+async fn a_disabled_row_still_counts_as_a_duplicate() {
+    let gateway = Gateway::serving(gateway_listing()).await;
+    let catalog = gateway.refreshed().await;
+    let disabled = gateway
+        .provider
+        .set_enabled_models(
+            GATEWAY.into(),
+            catalog.version,
+            catalog
+                .models
+                .iter()
+                .filter(|model| model.id != "zhipu/glm-5.3")
+                .map(|model| model.id.clone())
+                .collect(),
+            &gateway.cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        disabled.disabled_model_ids,
+        ["zhipu/glm-5.3"],
+        "the write disables the row"
+    );
+    assert_eq!(
+        Gateway::names(&disabled),
+        Gateway::names(&catalog),
+        "a disabled row keeps its own name and changes no other"
+    );
+    gateway.close().await;
+}
+
+/// `provider.management` names its rows what `provider.catalog` names them, in
+/// `catalogName`, and keeps the name the provider or the user stated on the
+/// descriptor it edits.
+#[tokio::test]
+async fn a_management_row_carries_the_name_the_catalog_publishes() {
+    let gateway = Gateway::serving(gateway_listing()).await;
+    let catalog = gateway.refreshed().await;
+    let view = gateway
+        .provider
+        .management(Some(GATEWAY.into()), &gateway.cancel)
+        .await
+        .unwrap();
+    let view = serde_json::to_value(&view).unwrap();
+    let rows = view["providers"][0]["models"].as_array().unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["model"]["modelId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "auto/glm-5.3",
+            "siliconflow/glm-5.3",
+            "volcengine/glm-5.3",
+            "zhipu/glm-5.3",
+        ]
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["catalogName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        Gateway::names(&catalog),
+        "a client that picks from provider.management reads what the catalog reads"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| row["model"]["displayName"] == json!("GLM-5.3")),
+        "the editable name is the one the provider stated: {view}"
+    );
+    gateway.close().await;
+}
+
+/// A provider without duplicates carries no `catalogName`: an absent field is
+/// the display name already being the one to show.
+#[tokio::test]
+async fn a_management_row_without_a_duplicate_carries_no_catalog_name() {
+    let gateway = Gateway::serving(json!({"data":[
+        {"id":"first","display_name":"First","context_window":200000,"max_output_tokens":128000},
+        {"id":"second","display_name":"Second","context_window":200000,"max_output_tokens":128000},
+    ]}))
+    .await;
+    gateway.refreshed().await;
+    let view = gateway
+        .provider
+        .management(Some(GATEWAY.into()), &gateway.cancel)
+        .await
+        .unwrap();
+    let view = serde_json::to_value(&view).unwrap();
+    assert!(
+        view["providers"][0]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row.get("catalogName").is_none()),
+        "nothing collides, so no row states a name of its own: {view}"
+    );
+    gateway.close().await;
+}
+
+/// A rename through management stores the name alone. The suffix a collision
+/// would add is computed on read, so it never reaches the record.
+#[tokio::test]
+async fn a_rename_through_management_stores_no_suffix() {
+    let gateway = Gateway::serving(gateway_listing()).await;
+    let catalog = gateway.refreshed().await;
+    let renamed = gateway
+        .provider
+        .update_model_config(
+            GATEWAY.into(),
+            catalog.version,
+            "zhipu/glm-5.3".into(),
+            serde_json::from_value(json!({"displayName": "GLM-5.3 (Zhipu)"})).unwrap(),
+            &gateway.cancel,
+        )
+        .await
+        .unwrap();
+    let record: Value = serde_json::from_str(&stored_record_json(&gateway.home, GATEWAY)).unwrap();
+    let overrides = record["modelConfigOverrides"].as_array().unwrap();
+    let stored = overrides
+        .iter()
+        .find(|row| row["modelId"] == json!("zhipu/glm-5.3"))
+        .expect("the edit is stored as an override");
+    assert_eq!(
+        stored["displayName"],
+        json!("GLM-5.3 (Zhipu)"),
+        "the write stores the name as typed"
+    );
+    assert_eq!(
+        record["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(overrides)
+            .map(|row| row["displayName"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "GLM-5.3",
+            "GLM-5.3",
+            "GLM-5.3",
+            "GLM-5.3",
+            "GLM-5.3 (Zhipu)"
+        ],
+        "no computed name reaches the record"
+    );
+    assert_eq!(
+        served(&renamed.models, "zhipu/glm-5.3").name,
+        "GLM-5.3 (Zhipu)",
+        "a name the write made unique publishes as it stands"
+    );
+    assert_eq!(
+        served(&renamed.models, "auto/glm-5.3").name,
+        "GLM-5.3 · routing group",
+        "a rename does not reach the other rows"
+    );
+    gateway.close().await;
 }
