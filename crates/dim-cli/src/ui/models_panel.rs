@@ -7,9 +7,10 @@
 //! Select a model
 //! > Provider / model          ZDR  ‹ high ›  current
 //!   Other provider / model    low
+//!   Third provider / model    —
 //!   Edit models
 //!   Subagent models: Agent choice
-//! Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close
+//! Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 //!
 //! Subagent models
 //!   Agent choice (default)
@@ -27,7 +28,10 @@
 //! the model and writes it as the default the next Session in the launch
 //! workspace reads; a cycled effort is saved as its `reasoningEffort` and sent
 //! with the model's other saved preferences. A model with no advertised effort
-//! ignores the arrows. Typing in the filter keeps ←/→ for the cursor.
+//! ignores the arrows; one that advertises efforts draws `—` in the effort cell
+//! until one is chosen, saved or declared, bracketed while the row is focused.
+//! Filtering keeps ←/→ for effort; Ctrl+B/F moves the
+//! filter cursor.
 //!
 //! Choosing a policy writes only `collaboration.set_model_policy`; the leader's
 //! model and the provider default are untouched.
@@ -45,7 +49,8 @@ use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
 use dim_agent_types::ModelId;
 
-const HINT: &str = "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close";
+const HINT: &str =
+    "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close";
 const POLICY_HINT: &str = "Enter select · Esc back";
 const EDIT_MODELS: &str = "__edit_models__";
 const SUBAGENT_MODELS: &str = "__subagent_models__";
@@ -294,7 +299,6 @@ impl ModelsPanel {
         if self.view == View::Models
             && key.mods.0 == 0
             && matches!(key.code, KeyCode::Left | KeyCode::Right)
-            && self.list.filter_is_empty()
         {
             return self.cycle(key.code == KeyCode::Right);
         }
@@ -507,7 +511,7 @@ fn effort_detail(model: &ModelItem, chosen: Option<&str>, focused: bool, current
             None => "‹ — ›".to_owned(),
         }
     } else {
-        shown.unwrap_or("").to_owned()
+        shown.unwrap_or("—").to_owned()
     };
     let state = match (effort.is_empty(), current) {
         (true, true) => t("current").to_owned(),
@@ -867,6 +871,83 @@ mod tests {
         assert!(screen.contains("unidentified"), "{screen}");
     }
 
+    /// A row that offers efforts and has none chosen, saved or declared says
+    /// that a choice exists, where a row that offers none says nothing.
+    #[test]
+    fn an_unfocused_row_that_offers_efforts_and_has_none_selected_says_so() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, None),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains('—'), "{screen}");
+        assert!(!row.contains("low") && !row.contains("high"), "{screen}");
+        let plain = screen
+            .lines()
+            .find(|line| line.contains("plain"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(!plain.contains('—'), "{screen}");
+    }
+
+    /// Focused, the row brackets that placeholder the way it brackets an
+    /// effort it would send.
+    #[test]
+    fn a_focused_row_that_offers_efforts_and_has_none_selected_brackets_it() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, None),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        assert_eq!(panel.handle_key(key_of(KeyCode::Down)), Effect::None);
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains("‹ — ›"), "{screen}");
+    }
+
+    /// What the model would use takes the placeholder's place, so a declared
+    /// default reads as the effort it is.
+    #[test]
+    fn a_declared_default_effort_stands_in_for_the_placeholder() {
+        let mut panel = ModelsPanel::new();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![
+                item("plain", &[], None, None),
+                item("sonnet", &["low", "high"], None, Some("high")),
+            ],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        let screen = drawn(&panel);
+        let row = screen
+            .lines()
+            .find(|line| line.contains("sonnet"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(row.contains("high"), "{screen}");
+        assert!(!row.contains('—'), "{screen}");
+    }
+
     #[test]
     fn arrows_cycle_the_highlighted_models_effort_and_enter_adopts_it() {
         let mut panel = panel();
@@ -898,6 +979,7 @@ mod tests {
         let mut panel = panel();
         assert_eq!(panel.handle_key(key_of(KeyCode::Down)), Effect::None);
         assert!(!drawn(&panel).contains('‹'), "{}", drawn(&panel));
+        assert!(!drawn(&panel).contains('—'), "{}", drawn(&panel));
         assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
         assert!(matches!(
             panel.handle_key(key_of(KeyCode::Enter)),
@@ -910,12 +992,51 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_keeps_left_and_right_for_the_cursor() {
+    fn filtering_keeps_arrows_for_effort_and_control_keys_for_the_cursor() {
         let mut panel = panel();
-        panel.handle_key(key_of(KeyCode::Char('f')));
-        assert_eq!(panel.handle_key(key_of(KeyCode::Left)), Effect::None);
-        assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
-        assert!(drawn(&panel).contains("> f"));
+        let mut models = panel.models().to_vec();
+        models[0].efforts = vec!["low".into(), "medium".into(), "high".into()];
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models,
+            current: Some(("dim".into(), "flash".into())),
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        panel.paste("flsh");
+        panel.handle_key(KeyEvent::new(KeyCode::Char('b'), Modifiers::CTRL));
+        panel.handle_key(KeyEvent::new(KeyCode::Char('b'), Modifiers::CTRL));
+        panel.handle_key(key_of(KeyCode::Char('a')));
+        panel.handle_key(KeyEvent::new(KeyCode::Char('f'), Modifiers::CTRL));
+        let screen = drawn(&panel);
+        assert!(screen.contains("> flash"), "{screen}");
+        assert!(!screen.contains("plain"), "{screen}");
+        assert!(screen.contains("Ctrl+B/F"), "{screen}");
+        let cursor = panel.cursor(80).expect("the filter has a cursor");
+        for (arrow, effort) in [
+            (KeyCode::Right, "medium"),
+            (KeyCode::Left, "low"),
+            (KeyCode::Left, "high"),
+        ] {
+            assert_eq!(panel.handle_key(key_of(arrow)), Effect::None);
+            let screen = drawn(&panel);
+            assert!(screen.contains(&format!("‹ {effort} ›")), "{screen}");
+            assert!(screen.contains("> flash"), "{screen}");
+            assert_eq!(panel.cursor(80), Some(cursor));
+        }
+        panel.handle_key(key_of(KeyCode::Delete));
+        let screen = drawn(&panel);
+        assert!(screen.contains("> flas"), "{screen}");
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel {
+                ref provider_id,
+                ref model_id,
+                ref reasoning_effort,
+                ..
+            } if provider_id == "dim" && model_id == "flash"
+                && reasoning_effort.as_deref() == Some("high")
+        ));
     }
 
     /// Enter carries the row's drawn text to the confirmation, so the notice

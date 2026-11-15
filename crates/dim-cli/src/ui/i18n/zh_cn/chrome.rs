@@ -103,6 +103,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Delete failed" => "删除失败",
         "This daemon does not support deleting Sessions" => "此守护进程不支持删除会话",
         "Starting" => "启动中",
+        "agent result" => "子 agent 结果",
+        "Read-only: you can watch this agent or stop it." => "只读：可以查看这个 agent，或终止它。",
+        "Read-only: this agent has finished." => "只读：这个 agent 已结束。",
+        "Esc back · x stop agent · ↑↓ PgUp PgDn scroll · Home/End jump" => {
+            "Esc 返回 · x 终止 agent · ↑↓ PgUp PgDn 滚动 · Home/End 跳转"
+        }
+        "Esc back · ↑↓ PgUp PgDn scroll · Home/End jump" => {
+            "Esc 返回 · ↑↓ PgUp PgDn 滚动 · Home/End 跳转"
+        }
         "Delegation result" => "委派结果",
         "Enter details · x stop selected · Ctrl+X stop all · Esc close" => {
             "Enter 详情 · x 停止所选任务 · Ctrl+X 停止全部 · Esc 关闭"
@@ -373,8 +382,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓/Tab move · Enter select · Esc close" => "↑↓/Tab 切换 · Enter 选择 · Esc 关闭",
         "exit" => "退出应用",
 
-        "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 选择并设为默认 · ←/→ 推理强度 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
+        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
+            "Enter 选择并设为默认 · ←/→ 推理强度 · Ctrl+B/F 移动光标 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
         }
         "Default for new sessions in {folder}: {model}" => "新会话在 {folder} 的默认模型：{model}",
         "Default for new sessions: {model}" => "新会话的默认模型：{model}",

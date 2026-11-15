@@ -116,7 +116,7 @@ mod tests {
                 "Prompt suggestion",
                 "Prompt suggestion: {error}",
                 "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume.",
-                "Enter select + default · ←/→ effort · Ctrl+X clear saved · Esc clear/close",
+                "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close",
                 "Default for new sessions in {folder}: {model}",
                 "Default for new sessions: {model}",
                 "Hook context · {count} line",

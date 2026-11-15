@@ -1335,7 +1335,9 @@ projection. An already-issued old page settles before another is sent, while
 its rows and queued retries are discarded.
 
 The same collection keeps all unfinished work and the latest 50 terminal facts,
-ordered by the terminal event timestamp and then branch/start-event identity.
+selected by the terminal event timestamp and then branch/start-event identity.
+Rows follow the [task list's dispatch order](../../docs/design/background-task-list.md);
+finishing a task does not move its row.
 Only actual command ends, delivery failures and delegation results finish rows.
 The status strip counts unfinished work beside the run status rather than in its
 place, so a running turn does not hide what it left running. A task that ends in

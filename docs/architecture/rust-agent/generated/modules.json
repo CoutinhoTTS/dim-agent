@@ -734,7 +734,9 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/host.rs",
       "unexpandedMacros": [
-        "format"
+        "format",
+        "tokio::pin",
+        "tokio::select"
       ]
     },
     {
@@ -13345,6 +13347,14 @@
     },
     {
       "from": "dim_agent_capabilities::input_queue",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path TimelineIdentity",
+        "use dim_agent_runtime::TimelineIdentity"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_runtime::contracts",
       "references": [
         "path InputSnapshot",
@@ -14168,11 +14178,15 @@
       "from": "dim_agent_capabilities::permission",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path CancelledFn",
         "path HostError",
         "path HostError::Cancelled",
         "path HostFuture",
+        "path call_until_cancelled",
+        "use crate::host::CancelledFn",
         "use crate::host::HostError",
-        "use crate::host::HostFuture"
+        "use crate::host::HostFuture",
+        "use crate::host::call_until_cancelled"
       ]
     },
     {
@@ -17733,14 +17747,18 @@
       "from": "dim_agent_capabilities::wait",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path CancelledFn",
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path ToolExecutionContext",
+        "path call_until_cancelled",
+        "use crate::host::CancelledFn",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
-        "use crate::host::ToolExecutionContext"
+        "use crate::host::ToolExecutionContext",
+        "use crate::host::call_until_cancelled"
       ]
     },
     {
@@ -18031,7 +18049,9 @@
       "to": "dim_agent_capabilities::workspace_tools::pending",
       "references": [
         "mod pending",
-        "path pending::read"
+        "path pending::finished",
+        "path pending::read",
+        "use pending::call_positions"
       ]
     },
     {
@@ -19280,6 +19300,13 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools::pending",
+      "to": "dim_agent_runtime::memory_timeline_store::query",
+      "references": [
+        "path query"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::pending",
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQueryScope::Branch"
@@ -19291,6 +19318,8 @@
       "references": [
         "path QueryCursor",
         "path QueryFilter::And",
+        "path QueryFilter::In",
+        "path QueryOperand::Field",
         "path QueryOutput::Rows",
         "path QueryPage",
         "path QuerySelect::Fields",
@@ -19305,8 +19334,20 @@
       "from": "dim_agent_capabilities::workspace_tools::pending",
       "to": "dim_agent_types::activity",
       "references": [
+        "path FinishedExec",
         "path PendingExec",
+        "use dim_agent_types::FinishedExec",
         "use dim_agent_types::PendingExec"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools::pending",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ExecEndedData",
+        "path ExecStartedData",
+        "use dim_agent_types::ExecEndedData",
+        "use dim_agent_types::ExecStartedData"
       ]
     },
     {
@@ -22333,6 +22374,8 @@
       "references": [
         "path crate::CollaborationDelivery",
         "path crate::CollaborationRequestData",
+        "path crate::CollaborationResultData",
+        "path crate::ExecEndedData",
         "path crate::ToolUseData"
       ]
     },
@@ -25334,6 +25377,14 @@
     },
     {
       "from": "dim_app_server::collaboration::pending",
+      "to": "dim_agent_capabilities::workspace_tools::pending",
+      "references": [
+        "path call_positions",
+        "use dim_agent_capabilities::workspace_tools::call_positions"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::pending",
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQueryScope::Branch"
@@ -25346,6 +25397,7 @@
         "path QueryCursor",
         "path QueryFilter::And",
         "path QueryFilter::In",
+        "path QueryFilter::Or",
         "path QueryOperand::Field",
         "path QueryOutput::Rows",
         "path QueryPage",
@@ -25356,6 +25408,8 @@
         "path TimelineQuery",
         "use dim_agent_runtime::QueryComparison",
         "use dim_agent_runtime::QueryCursor",
+        "use dim_agent_runtime::QueryOrder",
+        "use dim_agent_runtime::QueryOrderKey",
         "use dim_agent_runtime::QueryPick"
       ]
     },
@@ -25363,6 +25417,7 @@
       "from": "dim_app_server::collaboration::pending",
       "to": "dim_agent_types::activity",
       "references": [
+        "path FinishedDelegation",
         "path PendingDelegation"
       ]
     },
@@ -25370,7 +25425,15 @@
       "from": "dim_app_server::collaboration::pending",
       "to": "dim_agent_types::events",
       "references": [
-        "path CollaborationDeliveredData"
+        "path CollaborationDeliveredData",
+        "path CollaborationResultData"
+      ]
+    },
+    {
+      "from": "dim_app_server::collaboration::pending",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path kind"
       ]
     },
     {
@@ -28792,6 +28855,7 @@
         "path ModelEntry",
         "path ModelSource::Custom",
         "path ProviderProjection",
+        "path ProviderRole",
         "path ProviderRole::Vendor",
         "path entry_kind"
       ]
@@ -31108,10 +31172,38 @@
     },
     {
       "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::approval",
+      "references": [
+        "path dim_agent_capabilities::approval::Approval"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path dim_agent_capabilities::host::ToolHost"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::input_queue",
+      "references": [
+        "path dim_agent_capabilities::input_queue::InputQueue"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
       "to": "dim_agent_capabilities::methods",
       "references": [
         "path SessionMethods",
         "use dim_agent_capabilities::methods::SessionMethods"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::permission",
+      "references": [
+        "path dim_agent_capabilities::permission::Permission"
       ]
     },
     {
@@ -31135,6 +31227,13 @@
       "references": [
         "path ToolRegistry",
         "use dim_agent_capabilities::tool_registry::ToolRegistry"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_typescript",
+      "to": "dim_agent_capabilities::wait",
+      "references": [
+        "path dim_agent_capabilities::wait::Wait"
       ]
     },
     {
@@ -35218,6 +35317,14 @@
     },
     {
       "from": "dim_cli::configure",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelPreferences",
+        "use dim_agent_types::ModelPreferences"
+      ]
+    },
+    {
+      "from": "dim_cli::configure",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -37985,6 +38092,8 @@
       "to": "dim_agent_types::activity",
       "references": [
         "path dim_agent_types::ActiveOutput",
+        "path dim_agent_types::FinishedDelegation",
+        "path dim_agent_types::FinishedExec",
         "path dim_agent_types::PendingExec"
       ]
     },
@@ -38047,7 +38156,9 @@
         "path UserInput",
         "path dim_agent_types::CollaborationDeliveredData",
         "path dim_agent_types::CollaborationRequestData",
+        "path dim_agent_types::CollaborationResultData",
         "path dim_agent_types::ContextCompactionData",
+        "path dim_agent_types::ExecEndedData",
         "path dim_agent_types::ExecStartedData",
         "path dim_agent_types::InputBlock",
         "path dim_agent_types::InputBlock::Raw",
@@ -38170,6 +38281,7 @@
         "path CompactionState::Running",
         "path CompactionState::Skipped",
         "path CompactionView",
+        "path Dispatch",
         "path FailureDetail",
         "path LineCut",
         "path LineState::CreationFailed",
@@ -38192,6 +38304,7 @@
         "path RowKind::Error",
         "path RowKind::HookContext",
         "path RowKind::HookFollowUp",
+        "path RowKind::MemberResult",
         "path RowKind::Shell",
         "path RowKind::Status",
         "path RowKind::StreamingAssistant",
@@ -38225,6 +38338,7 @@
         "use crate::model::view::CompactionPartSize",
         "use crate::model::view::CompactionState",
         "use crate::model::view::CompactionView",
+        "use crate::model::view::Dispatch",
         "use crate::model::view::FailureDetail",
         "use crate::model::view::LineCut",
         "use crate::model::view::LineState",
@@ -39069,9 +39183,11 @@
       "from": "dim_cli::session_host",
       "to": "dim_agent_types::model",
       "references": [
+        "path ModelPreferences",
         "path dim_agent_types::CatalogCapabilities",
         "path dim_agent_types::ModelPreferences",
-        "path dim_agent_types::ModelReasoning"
+        "path dim_agent_types::ModelReasoning",
+        "use dim_agent_types::ModelPreferences"
       ]
     },
     {
@@ -39138,7 +39254,11 @@
       "to": "dim_cli::configure",
       "references": [
         "path configure",
+        "path configure::NO_MODEL",
+        "path configure::Preference::Apply",
+        "path configure::Preference::List",
         "path configure::needs_session",
+        "path configure::preference",
         "path configure::run",
         "use crate::configure"
       ]
@@ -39834,10 +39954,14 @@
       "to": "dim_client::wire",
       "references": [
         "path Delegations",
+        "path FinishedDelegations",
+        "path FinishedTasks",
         "path Inputs",
         "path Questions",
         "path Tasks",
         "path crate::wire::TurnRead",
+        "use dim_client::wire::FinishedDelegations",
+        "use dim_client::wire::FinishedTasks",
         "use dim_client::wire::PendingDelegations",
         "use dim_client::wire::PendingInputs",
         "use dim_client::wire::PendingQuestions",
@@ -43193,10 +43317,14 @@
       "references": [
         "path KeyCode",
         "path KeyCode::Char",
+        "path KeyCode::Delete",
         "path KeyCode::Down",
         "path KeyCode::Enter",
+        "path KeyCode::Left",
+        "path KeyCode::Right",
         "path KeyEvent",
         "path KeyEvent::new",
+        "path Modifiers::CTRL",
         "path Modifiers::NONE",
         "use crate::ui::terminal::Modifiers"
       ]
@@ -46531,6 +46659,7 @@
         "path RowKind::Error",
         "path RowKind::HookContext",
         "path RowKind::HookFollowUp",
+        "path RowKind::MemberResult",
         "path RowKind::Other",
         "path RowKind::Shell",
         "path RowKind::Status",
@@ -46762,6 +46891,7 @@
       "to": "dim_cli::ui::render::panel",
       "references": [
         "path clip",
+        "path crate::ui::render::panel::strip_escapes",
         "path wrap",
         "use crate::ui::render::panel::clip",
         "use crate::ui::render::panel::wrap"
@@ -46833,6 +46963,7 @@
         "path Block::Hook",
         "path Block::Line",
         "path Block::LoadMore",
+        "path Block::MemberResult",
         "path Block::Note",
         "path Block::Shell",
         "path Block::Status",
@@ -47372,6 +47503,7 @@
         "path RowKind::AssistantMessage",
         "path RowKind::Compaction",
         "path RowKind::HookContext",
+        "path RowKind::MemberResult",
         "path RowKind::StreamingAssistant",
         "path RowKind::Thinking",
         "path RowKind::ToolCall",
@@ -48088,6 +48220,7 @@
         "path Block::Hook",
         "path Block::Line",
         "path Block::LoadMore",
+        "path Block::MemberResult",
         "path Block::Note",
         "path Block::Shell",
         "path Block::Status",
@@ -49137,6 +49270,8 @@
       "to": "dim_agent_types::activity",
       "references": [
         "path dim_agent_types::ActiveOutput",
+        "path dim_agent_types::FinishedDelegation",
+        "path dim_agent_types::FinishedExec",
         "path dim_agent_types::PendingDelegation",
         "path dim_agent_types::PendingExec"
       ]

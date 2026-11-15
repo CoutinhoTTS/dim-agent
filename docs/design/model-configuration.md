@@ -156,7 +156,11 @@ daemon rejects the new request form normally; the client does not retry with a
 guessed complete selection.
 
 `/effort VALUE`, alias `/reasoning VALUE`, sends `reasoningEffort` without a target.
-The `/models` picker cycles a model's advertised efforts with ←/→. Enter saves a
+The `/models` picker cycles a model's advertised efforts with ←/→, including while
+filtering. Ctrl+B/F moves the filter cursor without changing effort. It draws the
+effort the row would send: the cycled one, then the saved one, then the entry's
+declared default, and `—` when the row advertises efforts and has none of the
+three. A row advertising no effort draws no cell. Enter saves a
 cycled effort as that model's `reasoningEffort`, then adopts the model with its
 saved preferences — the server reads the value just saved, which is why the save
 completes before the adoption is sent. Enter also writes the default the next Session in the launch
@@ -566,6 +570,25 @@ adopted provider/model identity from public `context/configured` history/notific
 and show supported choices from the existing `provider.catalog` response, without
 mutation or a new query method. Bare `/agent` uses existing `agent.list` IDs, names
 and descriptions; selection uses an exact ID. Empty/unavailable choices are explicit.
+
+At Home there is no adopted model yet: the footer's preview is the model the first
+message's Session adopts, so the same commands act on it. Bare `/effort` and `/fast`
+list that model's advertised choices, and a value is held for the Session the first
+message creates instead of writing the shown one. The preview reported the model's
+saved reasoning effort, which the dialog marks current; a value chosen here replaces
+that member and leaves the other one alone. The first creation carries the held
+members as its `modelPreferences`, over the member `--effort` named, because the
+Home choice came after the launch flag. An inherited model (`/new` after a Session)
+keeps its `modelFromSession` creation, which states no preferences: a valued form
+there is refused with `The next Session inherits its model; run the command there.`,
+while the bare forms still list the shown model's choices. Nothing is saved as a
+default at Home: neither a choice nor the dialog writes provider preferences.
+The held value is dropped once the Session exists, and by a `/models` pick at Home,
+because it was chosen for the model that pick replaced. Until then it stays held: a
+second value for the same member replaces the first and keeps the other member, and
+a first message whose creation fails leaves it held, so the next message's creation
+carries it. A Home showing no model at all answers that there is nothing to configure
+and names `/login` and `/models`.
 
 In both native TUI modes, bare `/effort` (alias `/reasoning`) opens an inline
 single-choice dialog in place of the composer, using the AskUser prompt's border

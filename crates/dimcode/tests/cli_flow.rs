@@ -5184,6 +5184,9 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     terminal.write(b"/agent profile-id\n");
     terminal.until("Session tools unchanged.");
     terminal.until("\n> ");
+    terminal.write(b"/agent a b\n");
+    terminal.until("Error: Usage: /agent [VALUE]");
+    terminal.until("\n> ");
     terminal.write(b"after configuration\n");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
@@ -6371,14 +6374,14 @@ fn tui_agent_without_a_session_answers_the_no_session_notice_and_sends_nothing()
 }
 
 #[test]
-fn tui_effort_without_a_session_answers_the_no_session_notice_and_sends_nothing() {
+fn tui_valued_effort_at_home_without_a_model_says_what_to_do_and_sends_nothing() {
     let home = Home::new();
     let (quieted, quiet_done) = std::sync::mpsc::channel();
     let daemon = no_session_daemon(&home, quieted);
     let mut terminal = Terminal::launch_tui(home.command());
     terminal.until("Ask anything...");
     terminal.write(b"/effort high\r");
-    terminal.until("Sign in with /login");
+    terminal.until("No model to configure");
     quiet_done.recv_timeout(PATIENCE).unwrap();
     home.kill(&terminal);
     terminal.wait();
@@ -10425,14 +10428,15 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
     terminal.until("Cancelled");
     terminal.write(b"\x1b[27u/tasks\r");
     terminal.until("Survey the crates");
-    terminal.write(b"\r");
+    terminal.write(b"\x1b[B\r");
     terminal.until("Agent is starting; no member Session to stop yet");
     deliver.send(()).unwrap();
     terminal.until("Check the docs");
     terminal.write(b"x");
     terminal.until("agent cancelled: stopped by the user");
     terminal.write(b"\x1b[27ucontinue the leader\r");
-    terminal.until("agent result: Other agent completed normally.");
+    terminal.until("agent result · Check the docs · writer");
+    terminal.until("Other agent completed normally.");
     terminal.write(b"/tasks\r");
     terminal.until("Check the docs");
     home.kill(&terminal);
