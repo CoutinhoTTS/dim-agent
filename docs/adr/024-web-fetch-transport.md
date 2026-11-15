@@ -1,6 +1,6 @@
 # 024: Web 抓取层使用请求库，地址策略在请求之前执行
 
-Decision status: Accepted.
+Decision status: Proposed.
 
 ## Context
 
@@ -18,8 +18,8 @@ Decision status: Accepted.
 
 ### D2. `blockPrivateAddresses` 在请求之前运行
 
-开启时，Web 解析一次主机名、按封禁范围检查每个结果，并把第一个允许的地址固定给本次请求；
-关闭时不解析。它做且只做这件事：它是请求前的检查，不是连接层的保证。
+开启时，Web 在建立请求之前解析一次主机名、按封禁范围检查每个结果；没有代理时还会把第一个
+允许的地址固定给本次请求。关闭时不解析。它做且只做这件事：它是请求前的检查，不是连接层的保证。
 
 ### D3. 代理的目标形式按 scheme 区分
 
@@ -34,8 +34,9 @@ TLS 失败并入 `connect_failed`；代理拒绝隧道是 `connect_failed`；代
 
 ### D5. `proxyDns` 决定谁解析主机名
 
-`true`（默认）时主机名进入 `CONNECT` 行或 absolute-form 请求行，由代理解析；`false` 时 Web
-自己解析并固定它检查过的地址。没有任何代理时该开关不生效。
+代理收到的始终是主机名：`https` 进入 `CONNECT` 行，`http` 进入 absolute-form 请求行。
+`true`（默认）时这就是唯一的解析；`false` 时 Web 先解析并检查，再发出同一个主机名，因此有代理
+时代理解析，`proxyDns: false` 只增加一次请求前的检查。没有任何代理时该开关不生效。
 
 ## Consequences
 

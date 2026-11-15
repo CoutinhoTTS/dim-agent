@@ -652,9 +652,10 @@ pub async fn get(
         diagnostics,
     )?;
     let domain = matches!(url.host(), Some(url::Host::Domain(_)));
-    // A proxy that resolves hostname targets owns the lookup; the local answer
-    // would be a Fake-IP address the policy cannot judge.
-    let delegated = matches!(&config.proxy, Some((_, true))) && domain;
+    // A proxy resolves the target itself, so the local answer is not what the
+    // connection uses; with `proxyDns` the check is skipped entirely.
+    let proxied = config.proxy.is_some();
+    let delegated = proxied && matches!(&config.proxy, Some((_, true))) && domain;
     let mut pinned = None;
     if config.block_private_addresses && !delegated {
         let ips = tokio::select! {
@@ -664,7 +665,7 @@ pub async fn get(
             }
         };
         policy.check(&ips, domain)?;
-        if domain {
+        if domain && !proxied {
             let port = url.port_or_known_default().ok_or_else(|| {
                 WebError::new("invalid_input", "Expected an absolute HTTP or HTTPS URL.")
             })?;
@@ -685,12 +686,16 @@ fn client_for(
         .http1_only()
         .connect_timeout(CONNECT_TIMEOUT)
         .user_agent(format!("dim-web/{}", env!("CARGO_PKG_VERSION")));
-    if let Some((proxy, _)) = &config.proxy {
-        builder =
+    builder = match &config.proxy {
+        Some((proxy, _)) => {
             builder.proxy(reqwest::Proxy::all(proxy.as_str()).map_err(|_| {
                 WebError::new("connect_failed", "The configured proxy is unusable.")
-            })?);
-    }
+            })?)
+        }
+        // `reqwest` reads the environment on its own unless told not to, which
+        // would bypass the documented fallback order and the off switch.
+        None => builder.no_proxy(),
+    };
     if let Some(pinned) = pinned {
         builder = builder.resolve(host, pinned);
     }
@@ -1065,6 +1070,37 @@ mod tests {
         assert_eq!(err.code, "connect_failed", "{err}");
         handshake.await.unwrap();
         assert_eq!(test_dns::hits("fake-tls.test"), 0);
+    }
+
+    #[tokio::test]
+    async fn the_off_switch_stops_the_automatic_proxy() {
+        let (origin_listener, origin_addr, seen) = origin().await;
+        let origin_stop = CancellationToken::new();
+        let origin_task = serve_origin(origin_listener, seen, origin_stop.clone());
+        no_system_proxy();
+        unsafe {
+            for name in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"] {
+                std::env::set_var(name, "http://127.0.0.1:9");
+            }
+        }
+        let url = Url::parse(&format!("http://127.0.0.1:{}/direct", origin_addr.port())).unwrap();
+        let fetched = get(
+            &url,
+            &NetworkConfig::new(Vec::new(), false, None, false).unwrap(),
+            &CancellationToken::new(),
+            &mut Vec::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        unsafe {
+            for name in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"] {
+                std::env::remove_var(name);
+            }
+        }
+        assert_eq!(fetched.body, b"pinned");
+        origin_stop.cancel();
+        origin_task.await.unwrap();
     }
 
     #[tokio::test]

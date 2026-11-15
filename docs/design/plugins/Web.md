@@ -228,7 +228,7 @@ The initial source is the user file `web.json`, read at user scope, with no proj
 ## 7. Security
 
 - Admission: both tools declare `network`; every call passes Approval and Permission (read-only denies, workspace-write asks, FullAccess allows).
-- SSRF: the policy is explicit. With `blockPrivateAddresses` off (default) Web connects to whatever the host can route to, including a local proxy, a TUN device or a Fake-IP answer; with it on, Web resolves once, checks every answer and pins the first permitted address. User-only `proxyDns` leaves the hostname to the proxy (A.4). Cross-host redirects need a new call and a new admission (A10).
+- SSRF: the policy is explicit. With `blockPrivateAddresses` off (default) Web connects to whatever the host can route to, including a local proxy, a TUN device or a Fake-IP answer; with it on, Web resolves once and checks every answer before the request, and pins the first permitted address when it connects directly. A proxy resolves the target in both `proxyDns` modes (A.4). Cross-host redirects need a new call and a new admission (A10).
 - No ambient authority: `GET` only; no cookies, stored site credentials or client certificates; nothing from the Session except the URL the model wrote (A8).
 - API key: read with the document per call; never in definitions, results, `structuredContent`, diagnostics or errors.
 - Exfiltration through URLs is the inherent risk of the `network` category and is controlled by admission.
@@ -334,14 +334,14 @@ The title is independently limited to 500 Unicode scalar values in both result f
 
 | Rule | Content |
 | --- | --- |
-| Resolution | With `blockPrivateAddresses: true`, Web resolves the hostname once, checks every answer, and pins the first permitted address for the request. With it off, the client resolves on its own |
+| Resolution | With `blockPrivateAddresses: true`, Web resolves the hostname once and checks every answer before the request. Without a proxy it also pins the first permitted address; a proxy resolves the target itself, so there the check does not constrain the connection. With it off, nothing resolves |
 | Policy default | Off: `web_fetch` reaches whatever the host can route to, so a local proxy, a TUN device or a Fake-IP answer needs no exception. `blockPrivateAddresses: true` turns the policy below back on |
 | Blocked with `blockPrivateAddresses: true` | Loopback (`127.0.0.0/8`, `::1`), unspecified, RFC 1918, link-local (`169.254.0.0/16`, `fe80::/10`, including cloud metadata), CGNAT `100.64.0.0/10`, unique local `fc00::/7`, multicast, broadcast, reserved ranges including the benchmark range `198.18.0.0/15`, and the IPv4-mapped and IPv4-compatible IPv6 forms of these |
 | Literal IPs | Checked by the same rules when the policy is on; a literal IP is used as given |
 | Ports | Any port (A12) |
 | Exceptions | `allowPrivateHosts`: exact hostnames or CIDRs; empty by default. A user-only field: written through the client method `settings.update`, never by a Web write (S8b). Settings checks only that it is an array of strings; Web parses each entry at use, ignores one that is neither a hostname nor a CIDR and reports it as a diagnostic |
 | Proxy | The target is `proxy` when set, otherwise the session's own proxy: `HTTPS_PROXY`, `ALL_PROXY` or `HTTP_PROXY` from the environment, then the desktop setting (GNOME `org.gnome.system.proxy` in `manual` mode). `DIM_WEB_SYSTEM_PROXY=off` disables both fallbacks. An `https` target goes through `CONNECT <host>:<port>`; an `http` target is sent to the proxy in absolute form, so the proxy sees the full URL |
-| Proxy DNS | With `proxyDns: true` (default) the proxy resolves the target: the hostname is what appears in the `CONNECT` line or in the absolute-form request line. With `false`, Web resolves locally and pins the address it checked. A refused tunnel fails with `connect_failed` (A15); a proxy that answers the request itself is reported with its status. Without any proxy the flag has no effect |
+| Proxy DNS | A proxy always receives the hostname: `CONNECT <host>:<port>` for `https`, an absolute-form request line for `http`. With `proxyDns: true` (default) that is the only lookup; with `false`, Web resolves and checks first and then sends the same hostname. A refused tunnel fails with `connect_failed` (A15); a proxy that answers the request itself is reported with its status. Without any proxy the flag has no effect |
 | Proxy DNS trust | With `proxyDns`, the proxy alone resolves hostname targets, so a hostname may reach private or metadata addresses if the proxy permits it. Web still rejects `localhost` and `*.localhost` when the policy is on, unless explicitly allowed by hostname. CIDR exceptions apply only to addresses Web checks |
 
 Fake-IP DNS answers are ordinary addresses. With a proxy and `proxyDns: true` they never reach Web at all, because the proxy resolves; with the policy on and no proxy they are rejected like any other reserved range.
@@ -428,7 +428,7 @@ Flow tests through public interfaces: tool calls in a test Session, a local HTTP
 9. Restart settlement repeats no request.
 10. Non-interactive Session declares both tools.
 11. Diagnostics and results never contain the API key.
-12. Enabling proxy DNS through `settings.update` makes the next uncached fetch and direct search-adapter request resolve at the proxy: `CONNECT <hostname>:<port>` for `https`, an absolute-form request line for `http`, with no local target DNS even when the name has a Fake-IP answer or cannot resolve locally, and without a reload. The URL host remains the HTTP `Host` and the certificate/SNI identity. With no `allowPrivateHosts` exception, fetch a hostname that the fixture proxy resolves to a loopback test server and get its response. Disabling proxy DNS restores local resolution and pins the checked address. Proxy refusal and cancellation settle without a direct retry. These tests use a disposable home and a fixture proxy, never system DNS or proxy configuration.
+12. Enabling proxy DNS through `settings.update` makes the next uncached fetch and direct search-adapter request resolve at the proxy: `CONNECT <hostname>:<port>` for `https`, an absolute-form request line for `http`, with no local target DNS even when the name has a Fake-IP answer or cannot resolve locally, and without a reload. The URL host remains the HTTP `Host` and the certificate/SNI identity. With no `allowPrivateHosts` exception, fetch a hostname that the fixture proxy resolves to a loopback test server and get its response. Disabling proxy DNS restores the local check before the request; the proxy still resolves the target. Proxy refusal and cancellation settle without a direct retry. These tests use a disposable home and a fixture proxy, never system DNS or proxy configuration.
 
 ## Appendix E. Assumptions
 

@@ -228,7 +228,7 @@ Settings 将 `format: "uri"` 作为注解。Web 在构造 HTTP 请求时解析 `
 ## 7. 安全
 
 - 准入：两个工具都声明 `network`；每次调用都经过 Approval 与 Permission（read-only 拒绝，workspace-write 询问，FullAccess 允许）。
-- SSRF：它是一项显式开关。`blockPrivateAddresses` 关闭时（默认），Web 连接主机能路由到的任何地址，包括本机代理、TUN 与 Fake-IP 答案；开启后由 Web 解析名称并按封禁范围检查每个地址，只连接已检查的地址。仅限用户的 `proxyDns` 将主机名解析交给代理（A.4）。跨主机重定向需要一次新调用与新的准入（A10）。
+- SSRF：它是一项显式开关。`blockPrivateAddresses` 关闭时（默认），Web 连接主机能路由到的任何地址，包括本机代理、TUN 与 Fake-IP 答案；开启后在请求之前解析一次并按封禁范围检查每个地址，直连时还会固定第一个允许的地址。有代理时两种 `proxyDns` 模式都由代理解析目标（A.4）。跨主机重定向需要一次新调用与新的准入（A10）。
 - 无环境权限：仅 `GET`；不带 cookie、已存站点凭据或客户端证书；除模型写出的 URL 外不携带 Session 中的任何内容（A8）。
 - API 密钥：每次调用随文档读取；从不出现在声明、结果、`structuredContent`、诊断或错误中。
 - 经 URL 外泄是 `network` 类别的固有风险，由准入控制。
@@ -334,14 +334,14 @@ Characters: <start>-<end> of <total>
 
 | 规则 | 内容 |
 | --- | --- |
-| 解析 | `blockPrivateAddresses: true` 时，Web 解析一次主机名、检查每个解析结果，并把第一个允许的地址固定给本次请求。关闭时由客户端自行解析 |
+| 解析 | `blockPrivateAddresses: true` 时，Web 在请求之前解析一次主机名并检查每个解析结果。没有代理时还会把第一个允许的地址固定给本次请求；有代理时由代理解析目标，这项检查不约束实际连接。关闭时什么都不解析 |
 | 策略默认 | 关闭：`web_fetch` 能到达主机能路由的任何地址，本地代理、TUN 设备或 Fake-IP 答案都不需要例外。`blockPrivateAddresses: true` 才恢复下表的封禁 |
 | `blockPrivateAddresses: true` 时封禁 | 回环（`127.0.0.0/8`、`::1`）、未指定地址、RFC 1918、链路本地（`169.254.0.0/16`、`fe80::/10`，含云元数据）、CGNAT `100.64.0.0/10`、唯一本地 `fc00::/7`、组播、广播、包含基准测试段 `198.18.0.0/15` 的保留范围，以及这些地址的 IPv4 映射与 IPv4 兼容 IPv6 形式 |
 | 字面 IP | 仅在策略开启时按相同规则检查；字面 IP 按原样使用 |
 | 端口 | 任意端口（A12） |
 | 例外 | `allowPrivateHosts`：精确主机名或 CIDR；默认为空。这是仅限用户的字段：经客户端方法 `settings.update` 写入，从不由 Web 写入（S8b）。Settings 只检查它是字符串数组；Web 在使用时解析每一项，忽略既不是主机名也不是 CIDR 的项并作为诊断报告 |
 | 代理 | 依次选取：配置的 `proxy`；否则环境变量 `HTTPS_PROXY`、`ALL_PROXY`、`HTTP_PROXY` 中的会话代理；否则桌面设置（GNOME `org.gnome.system.proxy` 的 `manual` 模式）。`DIM_WEB_SYSTEM_PROXY=off` 可关闭后两级回退。`https` 目标用 `CONNECT <主机>:<端口>`，`http` 目标以 absolute-form 交给代理，因此代理能看到完整 URL |
-| 代理 DNS | `proxyDns: true`（默认）时由代理解析目标：主机名出现在 `CONNECT` 行或 absolute-form 请求行里。`false` 时 Web 在本机解析，并固定它检查过的地址。代理拒绝隧道时以 `connect_failed` 失败（A15）；代理直接作答时按其状态码报告。没有任何代理时该开关不起作用 |
+| 代理 DNS | 代理收到的始终是主机名：`https` 用 `CONNECT <主机>:<端口>`，`http` 用 absolute-form 请求行。`proxyDns: true`（默认）时这就是唯一的解析；`false` 时 Web 先解析并检查，再把同一个主机名发出去。代理拒绝隧道时以 `connect_failed` 失败（A15）；代理直接作答时按其状态码报告。没有任何代理时该开关不起作用 |
 | 代理 DNS 信任 | 启用 `proxyDns` 时由代理解析目标主机名，如果代理允许，主机名可能到达私网或元数据地址。策略开启时 Web 仍拒绝 `localhost` 和 `*.localhost`，除非按主机名显式放行。CIDR 例外只作用于 Web 检查的地址 |
 
 Fake-IP DNS 答案就是普通地址。经代理且 `proxyDns: true` 时它根本不会到达 Web，因为由代理解析；策略开启且无代理时，它和其他保留范围一样被拒绝。
@@ -428,7 +428,7 @@ Fake-IP DNS 答案就是普通地址。经代理且 `proxyDns: true` 时它根�
 9. 重启结算不重复任何请求。
 10. 非交互 Session 声明两个工具。
 11. 诊断与结果从不包含 API 密钥。
-12. 经 `settings.update` 启用代理 DNS 后，下一次未命中缓存的抓取与直接搜索适配器请求由代理解析：`https` 用 `CONNECT <主机名>:<端口>`，`http` 用 absolute-form 请求行，不查询本机目标 DNS，即使该名称返回 Fake-IP 或在本机无法解析，且无需重载。URL 主机仍为 HTTP `Host` 与证书/SNI 身份。在没有 `allowPrivateHosts` 例外的情况下，抓取测试代理能解析到回环测试服务器的主机名并返回其响应。关闭代理 DNS 后恢复本机解析并固定已检查的地址。代理拒绝与取消均结算，不直连重试。这些测试使用临时 home 与测试代理，不修改系统 DNS 或代理配置。
+12. 经 `settings.update` 启用代理 DNS 后，下一次未命中缓存的抓取与直接搜索适配器请求由代理解析：`https` 用 `CONNECT <主机名>:<端口>`，`http` 用 absolute-form 请求行，不查询本机目标 DNS，即使该名称返回 Fake-IP 或在本机无法解析，且无需重载。URL 主机仍为 HTTP `Host` 与证书/SNI 身份。在没有 `allowPrivateHosts` 例外的情况下，抓取测试代理能解析到回环测试服务器的主机名并返回其响应。关闭代理 DNS 后恢复请求前的本机检查；目标仍由代理解析。代理拒绝与取消均结算，不直连重试。这些测试使用临时 home 与测试代理，不修改系统 DNS 或代理配置。
 
 ## 附录 E. 假设
 
