@@ -1390,8 +1390,10 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/tool_executor.rs",
       "unexpandedMacros": [
+        "debug_assert_eq",
         "format",
         "matches",
+        "tokio::select",
         "tracing::info_span",
         "unreachable",
         "vec"
@@ -1406,6 +1408,16 @@
         "tokio::select",
         "unreachable",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::tool_executor::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::tool_executor",
+      "file": "crates/dim-agent-capabilities/src/tool_executor.rs",
+      "unexpandedMacros": [
+        "assert",
+        "assert_eq"
       ]
     },
     {
@@ -1431,6 +1443,7 @@
       "file": "crates/dim-agent-capabilities/src/tool_registry.rs",
       "unexpandedMacros": [
         "assert",
+        "assert_eq",
         "vec"
       ]
     },
@@ -1647,6 +1660,15 @@
         "tokio::select",
         "unreachable",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_agent_capabilities::workspace_tools::tests",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::workspace_tools",
+      "file": "crates/dim-agent-capabilities/src/workspace_tools/mod.rs",
+      "unexpandedMacros": [
+        "assert_eq"
       ]
     },
     {
@@ -3211,6 +3233,26 @@
       "unexpandedMacros": [
         "matches",
         "params"
+      ]
+    },
+    {
+      "id": "dim_app_server::provider::naming",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/naming.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_app_server::provider::naming::tests",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider::naming",
+      "file": "crates/dim-app-server/src/provider/naming.rs",
+      "unexpandedMacros": [
+        "assert_eq",
+        "json",
+        "vec"
       ]
     },
     {
@@ -11810,9 +11852,12 @@
       "from": "dim_agent_capabilities::execution_settings::prompt",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolRegistry",
+        "use crate::tool_registry::ToolConcurrency",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolHandler",
         "use crate::tool_registry::ToolRegistry"
@@ -12997,6 +13042,14 @@
       "references": [
         "path HistoryEntry",
         "use crate::history::HistoryEntry"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path crate::tool_registry::ToolConcurrency",
+        "path crate::tool_registry::ToolConcurrency::Exclusive"
       ]
     },
     {
@@ -15393,10 +15446,13 @@
       "from": "dim_agent_capabilities::recall",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolRegistry",
         "path definition",
+        "use crate::tool_registry::ToolConcurrency",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolHandler",
         "use crate::tool_registry::ToolRegistry",
@@ -16595,10 +16651,13 @@
       "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolRegistry",
         "path crate::tool_registry::definition",
+        "use crate::tool_registry::ToolConcurrency",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolHandler",
         "use crate::tool_registry::ToolRegistry"
@@ -17512,6 +17571,27 @@
     },
     {
       "from": "dim_agent_capabilities::tool_executor",
+      "to": "dim_agent_capabilities::tool_executor::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_executor",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolClaim",
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
+        "path ToolConcurrency::Exclusive",
+        "path ToolContribution",
+        "use crate::tool_registry::ToolClaim",
+        "use crate::tool_registry::ToolConcurrency",
+        "use crate::tool_registry::ToolContribution"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_executor",
       "to": "dim_agent_runtime::config",
       "references": [
         "path TimelineIdentity",
@@ -17717,6 +17797,23 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::tool_executor::tests",
+      "to": "dim_agent_capabilities::tool_executor",
+      "references": [
+        "path Settled",
+        "path Turn",
+        "path Turn::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_executor::tests",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Exclusive"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -17816,6 +17913,13 @@
     },
     {
       "from": "dim_agent_capabilities::tool_registry::tests",
+      "to": "dim_agent_types",
+      "references": [
+        "path JsonObject::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry::tests",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -17853,10 +17957,13 @@
       "from": "dim_agent_capabilities::wait",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolRegistry",
         "path definition",
+        "use crate::tool_registry::ToolConcurrency",
         "use crate::tool_registry::ToolContribution",
         "use crate::tool_registry::ToolHandler",
         "use crate::tool_registry::ToolRegistry",
@@ -18056,6 +18163,16 @@
     },
     {
       "from": "dim_agent_capabilities::workspace_tools",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
+        "path ToolConcurrency::Exclusive",
+        "use crate::tool_registry::ToolConcurrency"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools",
       "to": "dim_agent_capabilities::workspace_tools::background",
       "references": [
         "mod background",
@@ -18132,6 +18249,13 @@
         "path pending::finished",
         "path pending::read",
         "use pending::call_positions"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::workspace_tools",
+      "to": "dim_agent_capabilities::workspace_tools::tests",
+      "references": [
+        "mod tests"
       ]
     },
     {
@@ -19475,11 +19599,14 @@
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
         "path ToolClaim",
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolRegistry",
         "path definition",
         "use dim_agent_capabilities::tool_registry::ToolClaim",
+        "use dim_agent_capabilities::tool_registry::ToolConcurrency",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolRegistry",
@@ -28483,6 +28610,9 @@
       "from": "dim_app_server::mcp::session",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
+        "path ToolConcurrency::Exclusive",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolProvider",
@@ -28490,6 +28620,7 @@
         "path ToolRegistry",
         "path ToolSourceSet",
         "path tool_provider_changes",
+        "use dim_agent_capabilities::tool_registry::ToolConcurrency",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolProvider",
@@ -30088,6 +30219,14 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::naming",
+      "references": [
+        "mod naming",
+        "path naming::unique"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::new_api",
       "references": [
         "mod new_api"
@@ -30595,6 +30734,39 @@
       ]
     },
     {
+      "from": "dim_app_server::provider::naming",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path ModelEntry",
+        "path ModelMetadata",
+        "use crate::model_catalog::ModelEntry",
+        "use crate::model_catalog::ModelMetadata"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::naming",
+      "to": "dim_app_server::provider::naming::tests",
+      "references": [
+        "mod tests"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::naming::tests",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path ModelEntry",
+        "path ModelMetadata",
+        "path crate::model_catalog::ModelStatus::Unavailable"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::naming::tests",
+      "to": "dim_app_server::provider::naming",
+      "references": [
+        "path unique"
+      ]
+    },
+    {
       "from": "dim_app_server::provider::new_api",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -30974,6 +31146,13 @@
       "to": "dim_app_server::provider::models",
       "references": [
         "path models"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::provider::naming",
+      "references": [
+        "path naming::unique"
       ]
     },
     {
@@ -33965,9 +34144,12 @@
       "from": "dim_app_server::web",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
         "path ToolContribution",
         "path ToolHandler",
         "path ToolRegistry",
+        "use dim_agent_capabilities::tool_registry::ToolConcurrency",
         "use dim_agent_capabilities::tool_registry::ToolContribution",
         "use dim_agent_capabilities::tool_registry::ToolHandler",
         "use dim_agent_capabilities::tool_registry::ToolRegistry"

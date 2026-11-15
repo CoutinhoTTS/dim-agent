@@ -6,7 +6,7 @@ use crate::{
     },
     prompt_registry::{PromptRegistry, targets},
     prompt_sources::sha256_version,
-    tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
+    tool_registry::{ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
     BranchLifecycle, ConfigureControl, ConfigureUpdate, Names, PromptSourceTarget, SESSION_GROUP,
@@ -501,6 +501,10 @@ struct SkillTool {
     stopped: CancellationToken,
 }
 impl ToolHandler for SkillTool {
+    /// Loading a skill reads its document and changes nothing.
+    fn concurrency(&self, _: &ToolCall) -> ToolConcurrency {
+        ToolConcurrency::Concurrent
+    }
     fn execute(
         &self,
         call: ToolCall,

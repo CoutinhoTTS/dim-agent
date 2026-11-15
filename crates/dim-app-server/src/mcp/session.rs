@@ -7,8 +7,8 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::{
     host::{HostError, HostFuture, ToolExecutionContext},
     tool_registry::{
-        ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged, ToolRegistry,
-        ToolSourceSet, tool_provider_changes,
+        ToolConcurrency, ToolContribution, ToolHandler, ToolProvider, ToolProviderChanged,
+        ToolRegistry, ToolSourceSet, tool_provider_changes,
     },
 };
 use dim_agent_runtime::{
@@ -981,6 +981,7 @@ pub(super) fn contribution(
             server: id.to_owned(),
             connection,
             original: tool.name.clone(),
+            read_only: tool.read_only,
             stopped,
         }),
     })
@@ -990,9 +991,19 @@ struct McpToolHandler {
     server: String,
     connection: Arc<McpConnection>,
     original: String,
+    /// The server's own `annotations.readOnlyHint`. It is a hint, so it orders
+    /// this handler's calls and never relaxes the call's risk.
+    read_only: bool,
     stopped: CancellationToken,
 }
 impl ToolHandler for McpToolHandler {
+    fn concurrency(&self, _: &ToolCall) -> ToolConcurrency {
+        if self.read_only {
+            ToolConcurrency::Concurrent
+        } else {
+            ToolConcurrency::Exclusive
+        }
+    }
     fn execute(
         &self,
         call: ToolCall,
