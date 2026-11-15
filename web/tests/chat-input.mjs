@@ -9,6 +9,13 @@ import { nuxtUiTestPlugin } from "./helpers/nuxt-ui.mjs"
 
 globalThis.Document = class {}
 globalThis.ShadowRoot = class {}
+/** Every observer the components create, so a test can fire one by hand. */
+globalThis.chatInputObservers = []
+globalThis.ResizeObserver = class {
+  constructor(callback) { this.callback = callback; this.observed = [] }
+  observe(target) { this.observed.push(target); globalThis.chatInputObservers.push(this) }
+  disconnect() { this.observed = [] }
+}
 
 const components = /\/(ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt|TimelineUserMessage)\.vue$/
 registerHooks({
@@ -574,4 +581,29 @@ test("a user message draws each /skill: token as one chip", async (t) => {
   const chips = all(root).filter((element) => element.props.class === "skill-chip").map(text)
   assert.deepEqual(chips, ["/skill:commit"], "the token is one chip and the words around it are not")
   assert.ok(text(root).includes("please /skill:commit it"), "the chip keeps the typed text")
+})
+
+test("the chip layer follows the field's width when the field resizes", async (t) => {
+  const skills = [{ name: "commit", description: "Writes commit messages" }]
+  globalThis.chatInputObservers = []
+  const { root } = mount(t, "main", [], ComposerPanel, {}, { skills })
+  const typed = all(root).find((element) => element.type === "textarea")
+  typed.props.onFocus()
+  typed.props["onUpdate:modelValue"]("please /skill:commit it")
+  await flush()
+  const body = all(root).find((element) => element.props.class === "composer-highlight-body")
+  assert(body, "the chip layer draws the draft behind the field")
+  assert.equal(globalThis.chatInputObservers.length, 1, "the composer watches the field, so a resize that no input caused still moves the layer")
+  const observer = globalThis.chatInputObservers[0]
+  const watched = observer.observed[0]
+  assert.equal(watched.props.class, "composer-input", "it watches the field and nothing else")
+  watched.clientWidth = 240
+  observer.callback()
+  assert.equal(body.style.width, "240px", "a width the draft did not cause moves the layer")
+  watched.clientWidth = 180
+  observer.callback()
+  assert.equal(body.style.width, "180px", "every later width follows too")
+  watched.scrollTop = 12
+  watched.props.onScroll()
+  assert.equal(body.style.transform, "translateY(-12px)", "the scroll path still carries the offset")
 })

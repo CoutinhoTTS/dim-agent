@@ -87,6 +87,8 @@ const mentionDismissed = ref<string | undefined>()
 const candidates = ref<FileCandidate[]>([])
 const candidateActive = ref(0)
 let searchSeq = 0
+/** Keeps the chip layer on the field when the window or the panel changes its width. */
+let observer: ResizeObserver | undefined
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 const mentionKey = computed(() => mention.value === undefined ? undefined : `${mention.value.start}:${mention.value.query}`)
 const mentionOpen = computed(() => focused.value && props.searchFiles !== undefined && mention.value !== undefined && mentionKey.value !== mentionDismissed.value)
@@ -177,7 +179,10 @@ function readImage(file: File): { url: string; file: File } {
   return { url: URL.createObjectURL(file), file }
 }
 
-onUnmounted(() => images.value.forEach((image) => URL.revokeObjectURL(image.url)))
+onUnmounted(() => {
+  observer?.disconnect()
+  images.value.forEach((image) => URL.revokeObjectURL(image.url))
+})
 
 async function addImages(files: File[]): Promise<void> {
   for (const file of files) {
@@ -456,7 +461,14 @@ async function quote(message: string): Promise<void> {
   element?.setSelectionRange(text.value.length, text.value.length)
 }
 
-onMounted(() => field.value?.focus())
+onMounted(() => {
+  const element = field.value
+  element?.focus()
+  if (element !== undefined) {
+    observer = new ResizeObserver(() => followScroll())
+    observer.observe(element)
+  }
+})
 defineExpose({ focus: () => field.value?.focus(), quote })
 </script>
 
