@@ -2,6 +2,7 @@
 
 This index is navigation. Delivery status lives in issues, not here.
 
+- [已知 Capability 与 Timeline 事件表](architecture/rust-agent/capability-event-inventory.md)（中文）：候选部件与事件导航，含作用域、职责、事件 key 和已知读写路径
 - [CLI feature list](feature-list.md)
 - [Model preferences and Agent configuration](design/model-configuration.md)
 - [Model startup](design/model-startup.md): temporary model, effort and multi-protocol connections with branch/member/compaction inheritance
