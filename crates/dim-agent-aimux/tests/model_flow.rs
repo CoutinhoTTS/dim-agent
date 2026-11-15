@@ -298,10 +298,10 @@ async fn the_configured_profile_resolves_no_modality_connection() {
     let selectable = host.root().get::<SelectableModelsHost>().unwrap();
     assert!(
         selectable
-            .0
             .selectable_for_modality(CancellationToken::new())
             .await
             .unwrap()
+            .models
             .is_empty()
     );
     let modality = host.root().get::<ModalityConnectionHost>().unwrap();

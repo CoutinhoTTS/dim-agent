@@ -884,9 +884,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                 names,
             )?))
         })?);
-        dim_agent_runtime::names::register::<
-            dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost,
-        >(builder.catalog_mut(), None);
+        builder
+            .catalog_mut()
+            .register_shared(dim_agent_runtime::names::name_of::<
+                dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost,
+            >());
         dim_agent_runtime::names::register::<
             dim_agent_capabilities::prompt_sources::BasePromptSettingsHost,
         >(builder.catalog_mut(), None);
@@ -1330,7 +1332,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
 /// does nothing, so each installer applies them.
 pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     use dim_agent_capabilities::host::{
-        AuxiliaryModelHost, ModalityConnectionHost, ModelSelectionHost, SelectableModelsHost,
+        AuxiliaryModelHost, ModalityConnectionHost, SelectableModelsHost,
     };
     use dim_agent_runtime::{SESSION_GROUP, names::register};
     register::<ServerControl>(catalog, None);
@@ -1358,9 +1360,8 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<grok_oauth::GrokOAuthService>(catalog, None);
     register::<provider::ProviderSecretHost>(catalog, None);
     register::<provider::ProviderService>(catalog, None);
-    register::<ModelSelectionHost>(catalog, None);
     register::<AuxiliaryModelHost>(catalog, None);
-    register::<SelectableModelsHost>(catalog, None);
+    catalog.register_shared(dim_agent_runtime::names::name_of::<SelectableModelsHost>());
     register::<ModalityConnectionHost>(catalog, None);
     register::<mcp::McpService>(catalog, None);
     register::<mcp::McpAuth>(catalog, None);
@@ -1413,7 +1414,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("contextModelHost", "hot-path"),
         ("contextPreparation", "hot-path"),
         ("contextUsage", "hot-path"),
-        ("executionSettingsHost", "legacy-no-consumer"),
         ("faultReporter", "hot-path"),
         ("fileReads", "hot-path"),
         ("fileStorage", "object"),
@@ -1433,7 +1433,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("modalityConnectionHost", "legacy-no-consumer"),
         ("modelHost", "owner-api"),
         ("modelProvider", "hot-path"),
-        ("modelSelectionHost", "legacy-no-consumer"),
         ("openAICodexOAuthService", "secret"),
         ("pluginFileTransactions", "host-resource"),
         ("prepareContextHost", "hot-path"),
@@ -1441,11 +1440,9 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("prompt", "hot-path"),
         ("promptHost", "hot-path"),
         ("promptRegistry", "hot-path"),
-        ("promptSuggestionSettingsHost", "legacy-no-consumer"),
         ("providerConnectionResolver", "host-resource"),
         ("providerService", "secret"),
         ("publication", "host-resource"),
-        ("selectableModelsHost", "legacy-no-consumer"),
         ("serverControl", "control"),
         ("sessionFilesHost", "owner-api"),
         ("sessionLoader", "control"),
@@ -1463,7 +1460,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("toolBinding", "hot-path"),
         ("toolExecutor", "hot-path"),
         ("toolSourcesView", "owner-api"),
-        ("toolchainSourceHost", "legacy-no-consumer"),
         ("uiExtensions", "control"),
         ("uiHost", "control"),
     ] {

@@ -1177,3 +1177,60 @@ async fn node_workflow_files_enforces_project_and_original_row_package_authority
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_reads_the_five_host_ports_through_the_product_owners() {
+    use dim_agent_capabilities::{
+        execution_settings::ExecutionSettingsHost,
+        host::{ModelSelectionHost, ModelSelectionRequest, SelectableModelsHost},
+        prompt_suggestion::PromptSuggestionSettingsHost,
+        toolchain::ToolchainSourceHost,
+    };
+    let home = home();
+    let mut parts = session_typescript::fixture();
+    parts.rows = vec![json!({
+        "id":"host-port-reads",
+        "name":parts.anchor.parent().unwrap().join("fixtures/host-port-reads.ts"),
+        "provides":{}, "config":{}
+    })];
+    let (server, _, _) = session_typescript::start(config(&home, parts)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    let model = dim_agent_types::ModelId {
+        provider_id: "018ec73f-0000-7000-8000-000000000007".into(),
+        model_id: "fixture".into(),
+    };
+    let mut reply = files_available(&mut client, "hostports.read", json!({"model":model})).await;
+    let cancel = CancellationToken::new();
+    let models = server.service::<SelectableModelsHost>().unwrap();
+    let selection: dim_agent_types::ModelSelection =
+        serde_json::from_value(reply.as_object_mut().unwrap().remove("selection").unwrap())
+            .unwrap();
+    assert_eq!(
+        selection,
+        server
+            .service::<ModelSelectionHost>()
+            .unwrap()
+            .resolve(
+                ModelSelectionRequest::at(Some(model), None).unwrap(),
+                cancel.clone()
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        reply,
+        json!({
+            "execution": server.service::<ExecutionSettingsHost>().unwrap().read(cancel.clone()).await.unwrap(),
+            "toolchains": server.service::<ToolchainSourceHost>().unwrap().list().unwrap(),
+            "suggestions": server.service::<PromptSuggestionSettingsHost>().unwrap().read(cancel.clone()).await.unwrap(),
+            "models": models.selectable_models(cancel.clone()).await.unwrap(),
+            "modalities": models.selectable_for_modality(cancel).await.unwrap()
+        })
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
