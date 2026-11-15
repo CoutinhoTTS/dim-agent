@@ -282,7 +282,7 @@ Tab                 pick an earlier message      pick an earlier message
                     (fullscreen)                 (fullscreen)
 Shift+Left          —                            empty draft: recall the newest held
                                                  message only if one text block
-Esc                 keep the draft               interrupt; every held message
+Esc                 keep the draft               interrupt; every held user message
                                                  returns to the draft, oldest first
 Ctrl+S              —                            send draft in the other mode;
                                                  empty: steer oldest queued message
@@ -306,10 +306,10 @@ in both modes: one task per row, not a horizontal list of labels.
 - Taking a message back, and interrupting, withdraw the message through
   `session.input.withdraw`. Its content enters the draft only after the withdrawal
   is deleted. Shift+Left accepts only a single text block; interrupt restores
-  every held message, including its image blocks and stored paste/file links.
+  every held user-queue message, including its image blocks and stored paste/file links.
   A message that already left the queue is not put back or sent again.
 - Withdrawals of an interrupt are sent before the stop, so the run does not start the
-  next queued message.
+  next user-queue message.
 - `Ctrl+C` clears the draft. `Esc` never clears it.
 
 ### Queued messages
@@ -363,7 +363,7 @@ starts a run.
 Shift+Left only withdraws a message with one text block. Images and multi-block
 messages remain held with a notice directing the user to `/queue`; no partial
 text draft replaces their attachments. Esc interrupt instead withdraws all held
-messages before stopping, restoring their operator content to the draft, oldest
+user-queue messages before stopping, restoring their operator content to the draft, oldest
 first, so they cannot start a new run automatically. A text block after the first
 that opens one of the runtime's own markers is context a capability appended
 rather than the operator's words, by the same rule the title and the catalog

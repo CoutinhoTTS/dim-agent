@@ -295,6 +295,14 @@ async fn pending_block_presence_distinguishes_a_delivery_without_changing_its_ex
             .unwrap(),
         extended
     );
+    let stop = client
+        .rpc(
+            "session.stop",
+            json!({"sessionId": session, "branchId": "main"}),
+        )
+        .await
+        .unwrap();
+    let stop_sequence = stop["sequence"].as_u64().unwrap();
     model.release();
     wait_for("all three inputs to reach the model", || model.count() >= 3).await;
     client
@@ -308,6 +316,7 @@ async fn pending_block_presence_distinguishes_a_delivery_without_changing_its_ex
     for id in [&run["input_event_id"], &user["event"]["id"]] {
         assert!(events.iter().any(|event| event["type"] == "input"
             && event["name"] == "consumed"
+            && event["sequence"].as_u64().unwrap() > stop_sequence
             && &event["data"]["input_id"] == id));
     }
     assert_eq!(
