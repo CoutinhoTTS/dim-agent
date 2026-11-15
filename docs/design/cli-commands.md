@@ -1812,7 +1812,9 @@ current user and offer no group or other permissions). On Unix that mode is the
 note's protection, since the daemon writes it 0600; on Windows the client checks
 only the regular file, its size and the header, and the private home's inherited
 ACL is the boundary. It requires the
-`dimcode-startup-failure v1 pid=<child pid>` header, removes control characters
+`dimcode-startup-failure v1 pid=<child pid>` header, removes the trailing
+`store-newer found=<marker> supported=<format>` line when the note carries one,
+removes control characters
 other than newline and tab from the body, and returns it as the command's error
 followed by `Details: <native home>/daemon.log`. The storage gate writes the
 note on a diagnosed incompatibility and names the store, its marker, the
@@ -1826,7 +1828,7 @@ matching note the embedded server reports the existing
 the flag must name a standalone `dim-app-server` binary. The failed launch
 removes the note after reading; a successful connection removes any note. The
 CLI never prints `daemon.log`, never deletes, recreates, downgrades or rewrites
-the store, and exits 1.
+the store. A failed startup exits 1 unless it enters the recovery below.
 
 While a store format upgrade runs, the daemon writes the same note as a progress
 kind, `dimcode-startup-progress v1 pid=<pid>` with
@@ -1866,6 +1868,48 @@ quote expansion. Missing paths and unsupported formats print usage and return
 to the prompt without submitting input. `/exit` takes no arguments. Only these
 exact command names are intercepted; other text follows the normal input path.
 Subcommands do not create a plugin command registry.
+
+#### Update recovery for a newer store
+
+An interactive TUI launch can recover when its own embedded daemon identifies
+a newer store in the [startup note](appserver/native-storage-format.md#启动不兼容诊断).
+On macOS and Linux, a released npm global installation displays the store
+diagnostic and checks its channel once, honoring automatic-update settings and
+skipped versions. This runs before the TUI takes over and uses stderr, and only
+where stderr is a terminal, so a headless launch keeps the diagnostic and says
+nothing about an update it did not run. Other installations, external servers,
+noninteractive commands, and other startup failures use the normal error path.
+
+`DIMCODE_STARTUP_RETRY` is the loop guard: the recovered invocation sets it, so
+an environment that already carries the variable disables recovery and keeps the
+diagnostic rather than restarting in a loop.
+
+The CLI stages the newer version its current channel tag resolves to, as the
+[update command](#update-dialog) does, so npm resolves the version against the
+same registry configuration it installs from; `DIMCODE_NPM_REGISTRY` stays the
+selector for the availability check alone and need not name that registry. The
+existing update command owns the installation lock, legacy-consumer
+confirmation, progress, and cancellation. Before switching, the updater checks
+the staged host platform's release manifest for the version it actually staged
+and the store's format. A missing declaration or unsupported format stops
+recovery before replacing the live installation.
+
+After a verified switch, the CLI runs the installed launcher with the same
+arguments and working directory. The new invocation opens the same home and
+must complete normal daemon startup and handshake to enter the TUI. An
+environment marker prevents a second recovery in that invocation. Failed
+lookup, installation, or restart reports the cause. The storage gate still
+decides whether the daemon can open the store.
+
+```text
+$ dima
+Cannot open native store <home>/rust/dimcode.sqlite.
+  Store format: v46
+  Daemon format: v38
+  ...
+Checking dimcode-alpha on the alpha channel...
+Error: Startup update failed: 0.1.0-alpha.23 does not declare support for native store v46.
+```
 
 ### The `/resume` picker
 

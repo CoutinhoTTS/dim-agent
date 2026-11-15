@@ -3640,7 +3640,8 @@
         "matches",
         "tokio::pin",
         "tracing::error",
-        "vec"
+        "vec",
+        "write"
       ]
     },
     {
@@ -6728,6 +6729,7 @@
         "cfg",
         "crossterm::execute",
         "env",
+        "eprintln",
         "format",
         "tokio::pin",
         "tokio::select",
@@ -6755,7 +6757,10 @@
       "file": "crates/dim-cli/src/update/staged.rs",
       "unexpandedMacros": [
         "assert",
-        "assert_eq"
+        "assert_eq",
+        "format",
+        "json",
+        "vec"
       ]
     },
     {
@@ -34610,6 +34615,7 @@
         "mod client",
         "path client",
         "path client::DaemonNotice",
+        "path client::NewerStore",
         "path client::StoreUpgrade",
         "path client::connect_inner",
         "path client::stop",
@@ -34979,6 +34985,7 @@
       "references": [
         "mod update",
         "path update::hold_installation",
+        "path update::recover_startup",
         "path update::registry",
         "path update::run"
       ]
@@ -49304,6 +49311,14 @@
     },
     {
       "from": "dim_cli::update",
+      "to": "dim_cli::client",
+      "references": [
+        "path crate::client::NewerStore",
+        "path crate::client::STARTUP_RETRY"
+      ]
+    },
+    {
+      "from": "dim_cli::update",
       "to": "dim_cli::plugins",
       "references": [
         "path crate::plugins::Signals::listen"
@@ -49346,6 +49361,7 @@
         "path Install",
         "path run_manager",
         "path super::channel",
+        "path super::entry_point",
         "path super::newer",
         "use super::Install",
         "use super::run_manager"
@@ -49360,9 +49376,22 @@
     },
     {
       "from": "dim_cli::update::staged::tests",
+      "to": "dim_cli::update",
+      "references": [
+        "path Install",
+        "path Manager::Staged",
+        "path Recovery",
+        "use crate::update::Manager",
+        "use crate::update::Recovery"
+      ]
+    },
+    {
+      "from": "dim_cli::update::staged::tests",
       "to": "dim_cli::update::staged",
       "references": [
-        "path normalized_commands"
+        "path Command",
+        "path normalized_commands",
+        "path verify_recovery"
       ]
     },
     {
